@@ -2405,25 +2405,57 @@ pub fn fetch_local_team_body(
     }
 }
 
+/// Return the digest of the exact, successfully parsed workspace config that
+/// can authorize a widened mesh lane. A missing config is the valid empty
+/// snapshot; unreadable, unsafe, or invalid config fails closed.
+fn current_workspace_approval_config_digest(workspace_path: &std::path::Path) -> Option<String> {
+    let contents = match crate::config::read_workspace_config_contents(workspace_path) {
+        Ok(Some(contents)) => contents,
+        Ok(None) => {
+            let config_path = workspace_path.join(".ee").join("config.toml");
+            match std::fs::symlink_metadata(config_path) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    String::new()
+                }
+                Ok(_) | Err(_) => return None,
+            }
+        }
+        Err(_) => return None,
+    };
+    crate::config::ConfigFile::parse(&contents).ok()?;
+    Some(crate::mesh::lane_grant::approval_config_digest(
+        contents.as_bytes(),
+    ))
+}
+
 /// Remote BodyFetch is allowed only when the requester's durable grant
-/// explicitly allows the body lane. Missing or deny/quarantine stays
-/// metadata-only.
+/// explicitly allows the body lane under the exact current workspace config.
+/// Missing, stale, deny, or quarantine consent stays metadata-only.
 #[must_use]
 pub fn body_lane_allows_fetch(
     connection: &DbConnection,
     workspace_id: &str,
     peer_id: &str,
+    workspace_path: &std::path::Path,
 ) -> bool {
+    let current_config_digest = current_workspace_approval_config_digest(workspace_path);
     connection
         .get_mesh_lane_grant_state(workspace_id, peer_id)
         .ok()
         .flatten()
         .is_some_and(|grant| {
             grant.target_matches_current_peer
-                && matches!(
-                    grant.body_override,
-                    Some(crate::config::MeshLaneDecision::Allow)
-                )
+                && grant.target_adapter.peer_id == peer_id
+                && grant.workspace_id == workspace_id
+                && grant.effective_override_for(
+                    crate::config::MeshLane::Body,
+                    current_config_digest.as_deref(),
+                ) == Some(crate::config::MeshLaneDecision::Allow)
         })
 }
 
@@ -2939,7 +2971,8 @@ pub fn retry_pending_team_body_fetches(
         .map_err(|error| OriginStreamError::Db(error.to_string()))?
         .into_iter()
         .filter(|peer| {
-            peer.enabled && body_lane_allows_fetch(connection, workspace_id, &peer.peer_id)
+            peer.enabled
+                && body_lane_allows_fetch(connection, workspace_id, &peer.peer_id, workspace_path)
         })
         .map(|peer| peer.peer_id)
         .collect::<Vec<_>>();
@@ -3002,9 +3035,10 @@ pub fn plan_team_body_fetch_binding(
     })
 }
 
-fn bodies_consent_hash(team_id: &str, items: &[TeamBodyShareItem]) -> String {
+fn bodies_consent_hash(team_id: &str, representation: &str, items: &[TeamBodyShareItem]) -> String {
     let mut material = length_prefixed(TEAM_BODIES_CONSENT_DOMAIN.as_bytes());
     material.extend_from_slice(&length_prefixed(team_id.as_bytes()));
+    material.extend_from_slice(&length_prefixed(representation.as_bytes()));
     for item in items {
         material.extend_from_slice(&length_prefixed(item.memory_id.as_bytes()));
         material.extend_from_slice(&length_prefixed(item.revision_id.as_bytes()));
@@ -3081,24 +3115,29 @@ pub fn share_team_bodies_represented(
             cache_status,
         });
     }
-    let consent_hash = bodies_consent_hash(&team.team_id, &items);
+    let consent_hash = bodies_consent_hash(&team.team_id, representation, &items);
     if issue_token && confirm {
         return Err(OriginStreamError::Encode(
-            "issue a body-share token on preview, then confirm with --token".to_owned(),
+            "issue a body-share token on preview, then confirm with --token-stdin".to_owned(),
         ));
     }
-    if let Some(token) = approval_token {
-        if !confirm {
-            return Err(OriginStreamError::Encode(
-                "approval tokens are only consumed by --confirm".to_owned(),
-            ));
-        }
+    if confirm {
+        let token = approval_token.ok_or_else(|| {
+            OriginStreamError::Encode(
+                "publishing team bodies requires an authenticated body-share approval token"
+                    .to_owned(),
+            )
+        })?;
         let store_path = workspace_path.ok_or_else(|| {
             OriginStreamError::Encode(
                 "body-share token verify requires a workspace path".to_owned(),
             )
         })?;
         verify_body_share_token(store_path, workspace_id, &consent_hash, token)?;
+    } else if approval_token.is_some() {
+        return Err(OriginStreamError::Encode(
+            "approval tokens are only consumed by --confirm".to_owned(),
+        ));
     }
     if confirm {
         crate::mesh::key_store::require_mesh_credential_store_platform("publish team body cache")
@@ -3182,9 +3221,15 @@ pub fn share_team_bodies_represented(
             out.push(item);
             continue;
         };
-        if u64::try_from(memory.content.len()).unwrap_or(u64::MAX)
-            > crate::mesh::key_store::MAX_RECORD_BYTES
+        let current_size = u64::try_from(memory.content.len()).unwrap_or(u64::MAX);
+        if history_revision_id(&memory.id, &memory.updated_at) != item.revision_id
+            || current_size != item.size_bytes
         {
+            return Err(OriginStreamError::Encode(
+                "body preview is stale; obtain a fresh approval token".to_owned(),
+            ));
+        }
+        if current_size > crate::mesh::key_store::MAX_RECORD_BYTES {
             return Err(OriginStreamError::Encode(
                 "body exceeds the hardened cache record cap".to_owned(),
             ));
@@ -3417,7 +3462,7 @@ pub fn unshare_team_bodies(
         command: "team unshare bodies",
         team_id: team.team_id.clone(),
         confirmed: true,
-        consent_hash: bodies_consent_hash(&team.team_id, &items),
+        consent_hash: bodies_consent_hash(&team.team_id, "withdrawn", &items),
         candidate_count: items.len(),
         published_count: published,
         skipped_count: items
@@ -4584,27 +4629,26 @@ pub fn apply_identity_attest_frame(
     Ok(frame)
 }
 
-/// Reduce a compact ID token and bind the allowlisted claims to the local self member.
+/// Verify and reduce a compact ID token, then bind its allowlisted claims to
+/// the local self member.
 pub fn attest_local_id_token(
     connection: &DbConnection,
     token: &str,
     configured_groups: &[&str],
     checked_at: &str,
-    jwks: Option<&serde_json::Value>,
+    jwks: &serde_json::Value,
 ) -> Result<TeamIdpAttestReport, OriginStreamError> {
     if any_local_team_paused(connection)? {
         return Err(OriginStreamError::Encode(
             "team is paused; resume before attesting identity".to_owned(),
         ));
     }
-    if let Some(jwks) = jwks {
-        let verified = verify_compact_jwt_with_jwks(token, jwks);
-        if !verified.accepted() {
-            return Err(OriginStreamError::Encode(format!(
-                "id token signature {}",
-                verified.as_str()
-            )));
-        }
+    let verified = verify_compact_jwt_with_jwks(token, jwks);
+    if !verified.accepted() {
+        return Err(OriginStreamError::Encode(format!(
+            "id token signature {}",
+            verified.as_str()
+        )));
     }
     let claims = reduce_id_token_claims(token, configured_groups).map_err(|disposition| {
         OriginStreamError::Encode(format!("id token is {}", disposition.as_str()))
@@ -7298,6 +7342,66 @@ mod tests {
         connection
     }
 
+    fn signed_test_id_token(claims: &[u8]) -> (String, serde_json::Value) {
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[0x2a; 32]);
+        let public = signing.verifying_key();
+        let header =
+            crate::mesh::idp::encode_unpadded_base64url(br#"{"alg":"EdDSA","kid":"test-ed1"}"#);
+        let payload = crate::mesh::idp::encode_unpadded_base64url(claims);
+        let signing_input = format!("{header}.{payload}");
+        let signature = ed25519_dalek::Signer::sign(&signing, signing_input.as_bytes());
+        let token = format!(
+            "{signing_input}.{}",
+            crate::mesh::idp::encode_unpadded_base64url(&signature.to_bytes())
+        );
+        let jwks = serde_json::json!({
+            "keys": [{
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "kid": "test-ed1",
+                "use": "sig",
+                "alg": "EdDSA",
+                "x": crate::mesh::idp::encode_unpadded_base64url(public.as_bytes())
+            }]
+        });
+        (token, jwks)
+    }
+
+    fn issue_approval_and_share_team_bodies_for_test(
+        connection: &DbConnection,
+        workspace_id: &str,
+        produced_at: &str,
+        limit: usize,
+        workspace_path: &std::path::Path,
+        representation: &str,
+    ) -> Result<TeamBodyShareReport, OriginStreamError> {
+        let preview = share_team_bodies_represented(
+            connection,
+            workspace_id,
+            produced_at,
+            false,
+            limit,
+            Some(workspace_path),
+            true,
+            None,
+            representation,
+        )?;
+        let token = preview.approval_token.ok_or_else(|| {
+            OriginStreamError::Encode("test preview omitted its approval token".to_owned())
+        })?;
+        share_team_bodies_represented(
+            connection,
+            workspace_id,
+            produced_at,
+            true,
+            limit,
+            Some(workspace_path),
+            false,
+            Some(token.as_str()),
+            representation,
+        )
+    }
+
     #[test]
     fn create_local_team_appends_one_team_created_origin_event() {
         let connection = open_db();
@@ -8540,15 +8644,13 @@ mod tests {
                 },
             )
             .expect("remember");
-        share_team_bodies(
+        issue_approval_and_share_team_bodies_for_test(
             &connection,
             "wsp_persistfixture000000000001",
             "2026-08-13T22:00:00Z",
-            true,
             16,
-            Some(workspace.as_path()),
-            false,
-            None,
+            workspace.as_path(),
+            "exact",
         )
         .expect("share");
         let cache_key = team_body_cache_key("mem_teamjoinbody00000000000001");
@@ -8586,7 +8688,7 @@ mod tests {
             target_adapter: crate::db::MeshLaneGrantTargetAdapter::new(&peer_id, joiner_node),
             material_lane: crate::config::MeshLane::Body,
             expected_generation: 0,
-            approval_config_digest: Some(format!("blake3:{}", "a".repeat(64))),
+            approval_config_digest: Some(crate::mesh::lane_grant::approval_config_digest(b"")),
             updated_at: Some("2026-08-13T22:01:00Z".to_owned()),
         };
         connection
@@ -8595,7 +8697,8 @@ mod tests {
         assert!(body_lane_allows_fetch(
             &connection,
             "wsp_persistfixture000000000001",
-            &peer_id
+            &peer_id,
+            &workspace,
         ));
         let registrations = crate::mesh::responder_broker::plan_team_responder_registrations(
             &connection,
@@ -8909,15 +9012,13 @@ mod tests {
                 },
             )
             .expect("remember");
-        share_team_bodies(
+        issue_approval_and_share_team_bodies_for_test(
             &connection,
             "wsp_persistfixture000000000001",
             "2026-08-13T22:00:00Z",
-            true,
             16,
-            Some(workspace.as_path()),
-            false,
-            None,
+            workspace.as_path(),
+            "exact",
         )
         .expect("share");
         let cache_key = team_body_cache_key("mem_teamjoinungr00000000000001");
@@ -8950,7 +9051,8 @@ mod tests {
         assert!(!body_lane_allows_fetch(
             &connection,
             "wsp_persistfixture000000000001",
-            &peer_id
+            &peer_id,
+            &workspace,
         ));
         let registrations = crate::mesh::responder_broker::plan_team_responder_registrations(
             &connection,
@@ -10798,15 +10900,13 @@ mod tests {
                 },
             )
             .expect("remember");
-        share_team_bodies(
+        issue_approval_and_share_team_bodies_for_test(
             &producer,
             "wsp_persistfixture000000000001",
             "2026-08-13T15:00:00Z",
-            true,
             8,
-            Some(producer_dir.path()),
-            false,
-            None,
+            producer_dir.path(),
+            "exact",
         )
         .expect("publish");
         let rows = producer
@@ -11020,7 +11120,7 @@ mod tests {
             ),
             material_lane: crate::config::MeshLane::Body,
             expected_generation: 0,
-            approval_config_digest: Some(format!("blake3:{}", "b".repeat(64))),
+            approval_config_digest: Some(crate::mesh::lane_grant::approval_config_digest(b"")),
             updated_at: Some("2026-08-13T16:01:00Z".to_owned()),
         };
         receiver
@@ -12004,7 +12104,7 @@ mod tests {
         assert!(!preview.confirmed);
         let preview_json = serde_json::to_string(&preview).expect("json");
         assert!(!preview_json.contains("body bytes stay"));
-        let published = share_team_bodies(
+        let missing_approval = share_team_bodies(
             &connection,
             "wsp_persistfixture000000000001",
             "2026-08-13T14:01:00Z",
@@ -12014,18 +12114,40 @@ mod tests {
             false,
             None,
         )
+        .expect_err("confirm without bearer");
+        assert!(
+            missing_approval
+                .to_string()
+                .contains("authenticated body-share approval token")
+        );
+        assert!(
+            connection
+                .get_mesh_body_cache_metadata(
+                    "wsp_persistfixture000000000001",
+                    &team_body_cache_key("mem_teambodies0000000000000001"),
+                )
+                .expect("cache lookup")
+                .is_none(),
+            "missing approval must not publish cache metadata",
+        );
+        let published = issue_approval_and_share_team_bodies_for_test(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T14:01:00Z",
+            16,
+            workspace.path(),
+            "exact",
+        )
         .expect("publish");
         assert_eq!(published.published_count, 1);
         assert_eq!(published.items[0].cache_status, "available");
-        let again = share_team_bodies(
+        let again = issue_approval_and_share_team_bodies_for_test(
             &connection,
             "wsp_persistfixture000000000001",
             "2026-08-13T14:02:00Z",
-            true,
             16,
-            Some(workspace.path()),
-            false,
-            None,
+            workspace.path(),
+            "exact",
         )
         .expect("idempotent");
         assert_eq!(again.published_count, 0);
@@ -12162,6 +12284,22 @@ mod tests {
             !serde_json::to_string(&preview)
                 .expect("json")
                 .contains("token-bound body")
+        );
+        let representation_swap = share_team_bodies_represented(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T16:00:30Z",
+            true,
+            16,
+            Some(workspace.path()),
+            false,
+            Some(token.as_str()),
+            "already_redacted",
+        )
+        .expect_err("token must bind representation");
+        assert!(
+            representation_swap.to_string().contains("stale")
+                || representation_swap.to_string().contains("authentic")
         );
         let published = share_team_bodies(
             &connection,
@@ -12562,15 +12700,13 @@ mod tests {
                 },
             )
             .expect("remember");
-        let published = share_team_bodies(
+        let published = issue_approval_and_share_team_bodies_for_test(
             &connection,
             "wsp_persistfixture000000000001",
             "2026-08-13T20:00:00Z",
-            true,
             16,
-            Some(workspace.path()),
-            false,
-            None,
+            workspace.path(),
+            "exact",
         )
         .expect("exact");
         assert_eq!(published.published_count, 1);
@@ -12582,15 +12718,12 @@ mod tests {
         )
         .expect("fetch");
         assert_eq!(fetched.cache_status, "available");
-        let refused = share_team_bodies_represented(
+        let refused = issue_approval_and_share_team_bodies_for_test(
             &connection,
             "wsp_persistfixture000000000001",
             "2026-08-13T20:01:00Z",
-            true,
             16,
-            Some(workspace.path()),
-            false,
-            None,
+            workspace.path(),
             "already_redacted",
         )
         .expect_err("redact-over-exact");
@@ -12601,15 +12734,12 @@ mod tests {
             "2026-08-13T20:02:00Z",
         )
         .expect("unshare");
-        let redacted = share_team_bodies_represented(
+        let redacted = issue_approval_and_share_team_bodies_for_test(
             &connection,
             "wsp_persistfixture000000000001",
             "2026-08-13T20:03:00Z",
-            true,
             16,
-            Some(workspace.path()),
-            false,
-            None,
+            workspace.path(),
             "already_redacted",
         )
         .expect("already_redacted");
@@ -12619,17 +12749,19 @@ mod tests {
             &connection,
             "wsp_persistfixture000000000001",
             "peer_missing_body_grant",
+            workspace.path(),
         ));
     }
 
     #[test]
     fn body_lane_grant_then_revoke_gates_fetch() {
+        let workspace = tempfile::tempdir().expect("workspace");
         let connection = open_db();
         connection
             .insert_workspace(
                 "wsp_persistfixture000000000001",
                 &crate::db::CreateWorkspaceInput {
-                    path: "/tmp/ee-team-body-grant".to_owned(),
+                    path: workspace.path().display().to_string(),
                     name: Some("bodies-grant".to_owned()),
                 },
             )
@@ -12649,6 +12781,7 @@ mod tests {
             &connection,
             "wsp_persistfixture000000000001",
             "peer_bodygrant000000000001",
+            workspace.path(),
         ));
         let mutation = crate::db::MeshLaneGrantMutationInput {
             workspace_id: "wsp_persistfixture000000000001".to_owned(),
@@ -12659,7 +12792,7 @@ mod tests {
             ),
             material_lane: crate::config::MeshLane::Body,
             expected_generation: 0,
-            approval_config_digest: Some(format!("blake3:{}", "a".repeat(64))),
+            approval_config_digest: Some(crate::mesh::lane_grant::approval_config_digest(b"")),
             updated_at: Some("2026-08-13T21:00:00Z".to_owned()),
         };
         connection
@@ -12669,7 +12802,23 @@ mod tests {
             &connection,
             "wsp_persistfixture000000000001",
             "peer_bodygrant000000000001",
+            workspace.path(),
         ));
+        std::fs::create_dir_all(workspace.path().join(".ee")).expect("config directory");
+        std::fs::write(
+            workspace.path().join(".ee").join("config.toml"),
+            "[mesh]\nenabled = true\n",
+        )
+        .expect("changed config");
+        assert!(
+            !body_lane_allows_fetch(
+                &connection,
+                "wsp_persistfixture000000000001",
+                "peer_bodygrant000000000001",
+                workspace.path(),
+            ),
+            "a config change must invalidate a previously approved body allow"
+        );
         connection
             .revoke_mesh_lane_with_effect(
                 &crate::db::MeshLaneGrantMutationInput {
@@ -12684,6 +12833,7 @@ mod tests {
             &connection,
             "wsp_persistfixture000000000001",
             "peer_bodygrant000000000001",
+            workspace.path(),
         ));
     }
 
@@ -12730,15 +12880,13 @@ mod tests {
                 },
             )
             .expect("remember");
-        share_team_bodies(
+        issue_approval_and_share_team_bodies_for_test(
             &connection,
             "wsp_persistfixture000000000001",
             "2026-08-13T22:00:00Z",
-            true,
             16,
-            Some(workspace.path()),
-            false,
-            None,
+            workspace.path(),
+            "exact",
         )
         .expect("share");
         let key = team_body_cache_key("mem_teamsubst00000000000000001");
@@ -13347,16 +13495,11 @@ mod tests {
             "2026-08-13T00:00:00Z",
         )
         .expect("create");
-        let token = format!(
-            "{}.{}.{}",
-            crate::mesh::idp::encode_unpadded_base64url(br#"{"alg":"RS256","kid":"k1"}"#),
-            crate::mesh::idp::encode_unpadded_base64url(
-                br#"{"sub":"user-1","email":"alice@acme.com","groups":["eng","secret-admin"]}"#,
-            ),
-            crate::mesh::idp::encode_unpadded_base64url(b"sig"),
+        let (token, jwks) = signed_test_id_token(
+            br#"{"sub":"user-1","email":"alice@acme.com","groups":["eng","secret-admin"]}"#,
         );
         let report =
-            attest_local_id_token(&connection, &token, &["eng"], "2026-08-13T20:00:00Z", None)
+            attest_local_id_token(&connection, &token, &["eng"], "2026-08-13T20:00:00Z", &jwks)
                 .expect("attest");
         assert_eq!(report.email.as_deref(), Some("alice@acme.com"));
         assert_eq!(report.matched_groups, vec!["eng".to_owned()]);
@@ -13377,9 +13520,76 @@ mod tests {
                 && !event.payload_json.contains(&token)
         }));
         let replayed =
-            attest_local_id_token(&connection, &token, &["eng"], "2026-08-13T20:01:00Z", None)
+            attest_local_id_token(&connection, &token, &["eng"], "2026-08-13T20:01:00Z", &jwks)
                 .expect_err("replay");
         assert!(replayed.to_string().contains("already consumed"));
+    }
+
+    #[test]
+    fn attest_local_id_token_rejects_unsigned_or_unverified_before_mutation() {
+        let connection = open_db();
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let (valid_token, jwks) =
+            signed_test_id_token(br#"{"sub":"user-1","email":"alice@acme.com","groups":["eng"]}"#);
+        let mut parts = valid_token.split('.');
+        let header = parts.next().expect("header");
+        let payload = parts.next().expect("payload");
+        let unsigned_header =
+            crate::mesh::idp::encode_unpadded_base64url(br#"{"alg":"none","kid":"test-ed1"}"#);
+        let unsigned = format!("{unsigned_header}.{payload}.");
+        let unsigned_error = attest_local_id_token(
+            &connection,
+            &unsigned,
+            &["eng"],
+            "2026-08-13T20:00:00Z",
+            &jwks,
+        )
+        .expect_err("unsigned token");
+        assert!(unsigned_error.to_string().contains("id token signature"));
+
+        let forged = format!(
+            "{header}.{payload}.{}",
+            crate::mesh::idp::encode_unpadded_base64url(&[0x44; 64])
+        );
+
+        let error = attest_local_id_token(
+            &connection,
+            &forged,
+            &["eng"],
+            "2026-08-13T20:00:00Z",
+            &jwks,
+        )
+        .expect_err("forged signature");
+        assert!(error.to_string().contains("signature_invalid"));
+
+        let self_member = connection
+            .list_all_team_members()
+            .expect("members")
+            .into_iter()
+            .find(|member| member.is_self)
+            .expect("self member");
+        assert!(
+            connection
+                .get_team_member_identity(&self_member.member_id)
+                .expect("identity lookup")
+                .is_none(),
+            "signature rejection must precede identity persistence"
+        );
+        let events = connection
+            .list_all_mesh_origin_events(&self_member.team_id, 16)
+            .expect("events");
+        assert!(
+            events
+                .iter()
+                .all(|event| !event.payload_json.contains("identityAttested")),
+            "signature rejection must not append an identityAttested event"
+        );
     }
 
     #[test]

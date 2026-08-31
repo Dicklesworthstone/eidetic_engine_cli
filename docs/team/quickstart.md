@@ -50,7 +50,8 @@ ee team share bodies --confirm --token-stdin --workspace . --json
 # Already-redacted origin bytes are a distinct signed representation.
 # Switching an exact publication to already_redacted is refused; unshare first.
 ee team share bodies --representation already_redacted --workspace . --json
-ee team share bodies --confirm --representation already_redacted --workspace . --json
+ee team share bodies --issue-token --representation already_redacted --workspace . --json
+ee team share bodies --confirm --token-stdin --representation already_redacted --workspace . --json
 
 # Priya — fetch a published body through the authenticated session
 ee team fetch body --key "$CACHE_KEY" --workspace . --json

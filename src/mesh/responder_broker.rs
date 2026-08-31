@@ -63,7 +63,7 @@ use crate::mesh::peer::{MeshPeerRecord, MeshPeerState};
 use crate::mesh::transport_session::{
     AcceptedSessionConfig, AcceptedSourceAttestation, AuthenticatedTransportSession,
     FrameCapability, HandshakeObservations, ResolvedAcceptedRoute, ResponderExpectations,
-    SessionCapabilities, SessionChannelError, SessionChannelLimits, SessionMessage,
+    SessionBinding, SessionCapabilities, SessionChannelError, SessionChannelLimits, SessionMessage,
     UntrustedRouteSelectors, accept_authenticated_session_with_open_bytes,
 };
 
@@ -1163,6 +1163,28 @@ impl ResponderRouteRegistry {
             initiator_stable_id: selectors.initiator_stable_id.clone(),
             pair_key_generation: selectors.pair_key_generation,
         })
+    }
+
+    /// Resolve the one local route authenticated into an established session.
+    /// Pair-key generation is intentionally absent from [`SessionBinding`], so
+    /// multiple generations with the same authenticated identity tuple are
+    /// ambiguous and fail closed rather than selecting one arbitrarily.
+    fn resolve_authenticated_binding(
+        &self,
+        binding: &SessionBinding,
+    ) -> Option<&RegisteredResponderRoute> {
+        let mut matches = self.routes.values().filter(|route| {
+            let expected = &route.expectations;
+            expected.team_id == binding.team_id
+                && expected.tailnet_id == binding.tailnet_id
+                && expected.initiator_node_id == binding.initiator_node_id
+                && expected.responder_node_id == binding.responder_node_id
+                && expected.responder_workspace_id == binding.responder_workspace_id
+                && expected.initiator_stable_id == binding.initiator_stable_id
+                && expected.responder_stable_id == binding.responder_stable_id
+        });
+        let route = matches.next()?;
+        matches.next().is_none().then_some(route)
     }
 
     #[must_use]
@@ -3759,9 +3781,10 @@ async fn serve_authenticated_sync_round(
             .map_err(ResponderBrokerError::Session)?;
         serde_json::to_value(&processed).map_err(|_| ResponderBrokerError::TransportUnavailable)?
     } else if request.capability == FrameCapability::BodyFetch {
+        let authenticated_route = routes.resolve_authenticated_binding(session.binding());
         let processed = session
             .process_request(cx, &request, async {
-                load_body_fetch_response(routes, &request.payload)
+                load_body_fetch_response(authenticated_route, &request.payload)
             })
             .await
             .map_err(ResponderBrokerError::Session)?;
@@ -3920,7 +3943,7 @@ fn load_identity_attest_response(
 }
 
 fn load_body_fetch_response(
-    routes: &ResponderRouteRegistry,
+    authenticated_route: Option<&RegisteredResponderRoute>,
     payload: &serde_json::Value,
 ) -> BodyFetchResponse {
     let request = serde_json::from_value::<BodyFetchRequest>(payload.clone()).ok();
@@ -3942,7 +3965,7 @@ fn load_body_fetch_response(
             nonce_hex: None,
         };
     }
-    let Some(route) = routes.first_store_route() else {
+    let Some(route) = authenticated_route else {
         return BodyFetchResponse {
             schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
             body_cache_key: key.to_owned(),
@@ -3981,7 +4004,12 @@ fn load_body_fetch_response(
         &[workspace_path.as_path()],
     )
     .unwrap_or(requested_workspace_id);
-    if !crate::mesh::team::body_lane_allows_fetch(&connection, &workspace_id, &peer_id) {
+    if !crate::mesh::team::body_lane_allows_fetch(
+        &connection,
+        &workspace_id,
+        &peer_id,
+        &workspace_path,
+    ) {
         return BodyFetchResponse {
             schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
             body_cache_key: key.to_owned(),
@@ -4082,6 +4110,20 @@ mod tests {
             grant_generation: 1,
             capabilities: SessionCapabilities::base(),
             limits: SessionChannelLimits::default(),
+        }
+    }
+
+    fn authenticated_binding_for(route: &RegisteredResponderRoute) -> SessionBinding {
+        SessionBinding {
+            team_id: route.expectations.team_id.clone(),
+            tailnet_id: route.expectations.tailnet_id.clone(),
+            initiator_node_id: route.expectations.initiator_node_id.clone(),
+            responder_node_id: route.expectations.responder_node_id.clone(),
+            initiator_workspace_id: "workspace-initiator".to_owned(),
+            responder_workspace_id: route.expectations.responder_workspace_id.clone(),
+            initiator_stable_id: route.expectations.initiator_stable_id.clone(),
+            responder_stable_id: route.expectations.responder_stable_id.clone(),
+            session_id: "session-authenticated".to_owned(),
         }
     }
 
@@ -4222,6 +4264,30 @@ mod tests {
         assert_eq!(
             selected.expectations.initiator_stable_id,
             "stable-initiator-b"
+        );
+        let binding = authenticated_binding_for(selected);
+        let authenticated = registry
+            .resolve_authenticated_binding(&binding)
+            .expect("authenticated identity tuple must select its own durable route");
+        assert_eq!(
+            authenticated.peer_handle,
+            "peer_fedcba9876543210fedcba9876543210"
+        );
+    }
+
+    #[test]
+    fn authenticated_route_resolution_rejects_generation_ambiguity() {
+        let path = fixture_abs_path("ee-responder-broker-generation-ambiguity-unit");
+        let first = route(path.clone(), 41888);
+        let binding = authenticated_binding_for(&first);
+        let mut second = route(path, 41888);
+        second.expectations.pair_key_generation = 2;
+        let registry = ResponderRouteRegistry::new([first, second])
+            .expect("distinct pair-key generations are distinct registered routes");
+
+        assert!(
+            registry.resolve_authenticated_binding(&binding).is_none(),
+            "SessionBinding carries no pair-key generation, so ambiguity must fail closed"
         );
     }
 

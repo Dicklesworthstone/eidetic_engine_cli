@@ -2785,6 +2785,7 @@ async fn fetch_pending_team_bodies_after_sync(cx: &Cx, snapshot: &MeshForeground
                     &connection,
                     &snapshot.workspace_id,
                     &peer.peer_id,
+                    workspace_path,
                 ) || team_join_body_fetch_allowed(&record))
             {
                 continue;

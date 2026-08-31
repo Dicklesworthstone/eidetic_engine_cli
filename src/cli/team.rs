@@ -254,21 +254,26 @@ pub struct TeamRevokeArgs {
 
 /// Arguments for `ee team share bodies`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
+#[command(group(
+    clap::ArgGroup::new("body_approval_bearer")
+        .args(["token", "token_stdin"])
+        .multiple(false)
+))]
 pub struct TeamShareBodiesArgs {
-    /// Publish previewed bodies into the hardened local cache.
-    #[arg(long)]
+    /// Publish bearer-approved bodies into the hardened local cache.
+    #[arg(long, requires = "body_approval_bearer")]
     pub confirm: bool,
 
     /// Mint a sensitive `eeap1_` body-approval token on preview.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "confirm")]
     pub issue_token: bool,
 
     /// Consume a body-approval token on confirm.
-    #[arg(long)]
+    #[arg(long, requires = "confirm")]
     pub token: Option<String>,
 
     /// Read the body-approval token from stdin instead of `--token`.
-    #[arg(long)]
+    #[arg(long, requires = "confirm")]
     pub token_stdin: bool,
 
     /// Maximum memories to consider (1–256).
@@ -642,6 +647,12 @@ pub struct TeamIdpDeviceArgs {
 
 /// Arguments for `ee team idp attest`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
+#[command(group(
+    clap::ArgGroup::new("jwks_source")
+        .args(["jwks_json", "jwks_url"])
+        .required(true)
+        .multiple(false)
+))]
 pub struct TeamIdpAttestArgs {
     /// Compact ID token, or `-` to read stdin.
     #[arg(long)]
@@ -651,11 +662,13 @@ pub struct TeamIdpAttestArgs {
     #[arg(long = "group")]
     pub groups: Vec<String>,
 
-    /// Local JWKS JSON used to verify the ID token signature. Optional.
+    /// Local JWKS JSON used to verify the ID token signature. Exactly one
+    /// JWKS source is required.
     #[arg(long, value_name = "PATH")]
     pub jwks_json: Option<PathBuf>,
 
-    /// HTTPS JWKS URL fetched with constrained curl. Optional.
+    /// HTTPS JWKS URL fetched with constrained curl. Exactly one JWKS source
+    /// is required.
     #[arg(long, value_name = "URL")]
     pub jwks_url: Option<String>,
 
@@ -1309,12 +1322,13 @@ where
                 )
             } else {
                 format!(
-                    "Body preview: {} candidates ({} already cached)\n  team_id: {}\n  representation: {}\n  consent: {}\nNext:\n  ee team share bodies --confirm --representation {} --workspace .\n",
+                    "Body preview: {} candidates ({} already cached)\n  team_id: {}\n  representation: {}\n  consent: {}\nNext:\n  1. Request a bearer with ee team share bodies --issue-token --representation {} --workspace . --json\n  2. Review the same preview, then pipe its approvalToken to ee team share bodies --confirm --token-stdin --representation {} --workspace .\n",
                     report.candidate_count,
                     report.skipped_count,
                     report.team_id,
                     report.representation,
                     report.consent_hash,
+                    report.representation,
                     report.representation
                 )
             };
@@ -2391,7 +2405,10 @@ where
                 return write_domain_error(
                     &DomainError::Usage {
                         message: format!("Failed to read id token from stdin: {error}"),
-                        repair: Some("ee team idp attest --id-token - --workspace .".to_owned()),
+                        repair: Some(
+                            "ee team idp attest --id-token - --jwks-json <file> --workspace ."
+                                .to_owned(),
+                        ),
                     },
                     cli.wants_json(),
                     stdout,
@@ -2404,49 +2421,57 @@ where
     };
     let groups = args.groups.iter().map(String::as_str).collect::<Vec<_>>();
     let checked_at = chrono::Utc::now().to_rfc3339();
-    let mut jwks = match args.jwks_json.as_ref() {
-        Some(path) => match read_json_file(path) {
-            Ok(value) => Some(value),
+    let jwks = match (args.jwks_json.as_ref(), args.jwks_url.as_deref()) {
+        (Some(path), None) => match read_json_file(path) {
+            Ok(value) => value,
             Err(error) => {
                 return write_domain_error(&error, cli.wants_json(), stdout, stderr);
             }
         },
-        None => None,
-    };
-    if let Some(url) = args.jwks_url.as_deref() {
-        let ca = args
-            .ca_bundle
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned());
-        match crate::mesh::idp::fetch_jwks_document(
-            &args.curl.to_string_lossy(),
-            url,
-            ca.as_deref(),
-        ) {
-            Ok(value) => jwks = Some(value),
-            Err(error) => {
-                return write_domain_error(
-                    &DomainError::Usage {
-                        message: format!("Failed to fetch JWKS: {error}"),
-                        repair: Some(
-                            "ee team idp attest --jwks-url https://idp.example/jwks --ca-bundle <pem> --workspace ."
-                                .to_owned(),
-                        ),
-                    },
-                    cli.wants_json(),
-                    stdout,
-                    stderr,
-                );
+        (None, Some(url)) => {
+            let ca = args
+                .ca_bundle
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned());
+            match crate::mesh::idp::fetch_jwks_document(
+                &args.curl.to_string_lossy(),
+                url,
+                ca.as_deref(),
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    return write_domain_error(
+                        &DomainError::Usage {
+                            message: format!("Failed to fetch JWKS: {error}"),
+                            repair: Some(
+                                "ee team idp attest --jwks-url https://idp.example/jwks --ca-bundle <pem> --workspace ."
+                                    .to_owned(),
+                            ),
+                        },
+                        cli.wants_json(),
+                        stdout,
+                        stderr,
+                    );
+                }
             }
         }
-    }
-    match attest_local_id_token(
-        &connection,
-        token.trim(),
-        &groups,
-        &checked_at,
-        jwks.as_ref(),
-    ) {
+        _ => {
+            return write_domain_error(
+                &DomainError::Usage {
+                    message: "Exactly one of --jwks-json or --jwks-url is required to verify the ID-token signature."
+                        .to_owned(),
+                    repair: Some(
+                        "ee team idp attest --id-token - --jwks-json <file> --workspace ."
+                            .to_owned(),
+                    ),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+    match attest_local_id_token(&connection, token.trim(), &groups, &checked_at, &jwks) {
         Ok(report) => write_team_report(
             cli,
             &report,
@@ -2459,7 +2484,10 @@ where
         Err(error) => write_domain_error(
             &DomainError::Storage {
                 message: format!("Failed to attest identity: {error}"),
-                repair: Some("ee team idp attest --id-token <jwt> --workspace .".to_owned()),
+                repair: Some(
+                    "ee team idp attest --id-token <jwt> --jwks-json <file> --workspace ."
+                        .to_owned(),
+                ),
             },
             cli.wants_json(),
             stdout,
@@ -3369,11 +3397,82 @@ mod tests {
         CreateWorkspaceInput, DbConnection, InsertTeamMemberInput, UpsertMeshPeerInput,
     };
     use crate::mesh::team::create_local_team;
+    use clap::Parser as _;
 
     fn open_db() -> DbConnection {
         let connection = DbConnection::open_memory().expect("open");
         connection.migrate().expect("migrate");
         connection
+    }
+
+    #[test]
+    fn share_bodies_confirm_requires_exactly_one_approval_bearer_source() {
+        assert!(
+            TeamShareBodiesArgs::try_parse_from(["bodies", "--confirm"]).is_err(),
+            "confirmation without an approval bearer must fail during CLI parsing",
+        );
+        assert!(
+            TeamShareBodiesArgs::try_parse_from([
+                "bodies",
+                "--confirm",
+                "--token-stdin",
+                "--token",
+                "eeap1_test",
+            ])
+            .is_err(),
+            "ambiguous bearer sources must be rejected",
+        );
+        assert!(
+            TeamShareBodiesArgs::try_parse_from(["bodies", "--confirm", "--token-stdin",]).is_ok(),
+            "stdin is the supported bearer source for robot confirmation",
+        );
+        assert!(
+            TeamShareBodiesArgs::try_parse_from(["bodies", "--issue-token", "--confirm"]).is_err(),
+            "token issuance and confirmation must remain separate commands",
+        );
+    }
+
+    #[test]
+    fn team_idp_attest_requires_exactly_one_jwks_source() {
+        let missing = TeamIdpAttestArgs::try_parse_from([
+            "team-idp-attest",
+            "--id-token",
+            "header.claims.signature",
+        ])
+        .expect_err("missing JWKS source must be rejected");
+        assert_eq!(
+            missing.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        TeamIdpAttestArgs::try_parse_from([
+            "team-idp-attest",
+            "--id-token",
+            "header.claims.signature",
+            "--jwks-json",
+            "issuer.jwks.json",
+        ])
+        .expect("local JWKS source");
+        TeamIdpAttestArgs::try_parse_from([
+            "team-idp-attest",
+            "--id-token",
+            "header.claims.signature",
+            "--jwks-url",
+            "https://idp.example/jwks",
+        ])
+        .expect("remote JWKS source");
+
+        let conflicting = TeamIdpAttestArgs::try_parse_from([
+            "team-idp-attest",
+            "--id-token",
+            "header.claims.signature",
+            "--jwks-json",
+            "issuer.jwks.json",
+            "--jwks-url",
+            "https://idp.example/jwks",
+        ])
+        .expect_err("multiple JWKS sources must be rejected");
+        assert_eq!(conflicting.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

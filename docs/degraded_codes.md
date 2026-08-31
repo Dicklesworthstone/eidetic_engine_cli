@@ -9786,13 +9786,13 @@ ee audit timeline --workspace . --surface mesh --json
 **Setup.**
 
 ```bash
-attempt ee team share bodies --confirm on a host without the reviewed Unix secure-file adapter
+present a fresh authenticated body-share approval token on a host without the reviewed secure-file adapter
 ```
 
 **Invocation.**
 
 ```bash
-ee team share bodies --confirm --workspace .
+ee team share bodies --confirm --token-stdin --workspace .
 ```
 
 **Expected emission.** Message contains: `secure-file ... metadata-only`

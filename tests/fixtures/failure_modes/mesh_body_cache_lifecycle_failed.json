@@ -7,8 +7,8 @@
   "repair_present": true,
   "trigger": {
     "description": "Body-cache publication cannot prove the T2.1 secure-file contract, so no body bytes are written and retrieval stays metadata-only.",
-    "setup_commands": ["attempt ee team share bodies --confirm on a host without the reviewed Unix secure-file adapter"],
-    "invocation": "ee team share bodies --confirm --workspace ."
+    "setup_commands": ["present a fresh authenticated body-share approval token on a host without the reviewed secure-file adapter"],
+    "invocation": "ee team share bodies --confirm --token-stdin --workspace ."
   },
   "expected_emission": {
     "code": "mesh_body_cache_lifecycle_failed",
