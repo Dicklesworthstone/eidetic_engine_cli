@@ -39031,8 +39031,10 @@ fn context_json_cache_enabled(cli: &Cli, args: &ContextArgs, deprecated_alias: b
         && cli.format != OutputFormat::Binary
         && !deprecated_alias
         && !args.explain
+        && !args.explain_gaps
         && !args.explain_performance
         && !args.stream
+        && args.since.is_none()
         && args.mesh_mode == MeshCommandMode::Off
         && args.changed_symbols.is_empty()
         && !args.changed_symbols_from_git
@@ -84741,6 +84743,22 @@ mod tests {
                     &super::context_json_cache_enabled(&cli, args, false),
                     &true,
                     "canonical JSON pack surface remains cache eligible",
+                )?;
+
+                let mut explain_gaps = args.clone();
+                explain_gaps.explain_gaps = true;
+                ensure_equal(
+                    &super::context_json_cache_enabled(&cli, &explain_gaps, false),
+                    &false,
+                    "coverage-gap postprocessing requires the structured fresh pack",
+                )?;
+
+                let mut since = args.clone();
+                since.since = Some("blake3:prior-pack".to_owned());
+                ensure_equal(
+                    &super::context_json_cache_enabled(&cli, &since, false),
+                    &false,
+                    "context-delta postprocessing requires the structured fresh pack",
                 )
             }
             other => Err(format!("expected context command, got {other:?}")),

@@ -2714,6 +2714,7 @@ async fn run_context_pack_with_performance_inner(
             read_connection,
             &request,
             &effective_filters,
+            &runtime_profile,
             output_redaction_enabled,
             prepared_embed_backend,
             &mut degraded,
@@ -6392,15 +6393,107 @@ struct ContextPackL2HitCacheMetadata<'a> {
     source_mode: ContextPackL2SourceModeMetadata,
 }
 
+fn context_pack_l2_path_is_definitely_absent(path: &Path) -> bool {
+    matches!(
+        fs::symlink_metadata(path),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            )
+    )
+}
+
+fn context_pack_l2_bypass_reason(
+    options: &ContextPackOptions,
+    filters: &crate::models::QueryFilters,
+) -> Option<&'static str> {
+    if context_validity_reference_time(options, filters).is_none() {
+        return Some("implicit_validity_reference_time");
+    }
+    if options.coordination_snapshot_path.is_some() {
+        return Some("coordination_snapshot");
+    }
+    if options.task_lens.is_some() {
+        return Some("task_lens");
+    }
+    if options.require_fresh_sentinels {
+        return Some("fresh_sentinel_filter");
+    }
+    if options.no_lod {
+        return Some("lod_disabled");
+    }
+    if options.changed_symbols_from_git {
+        return Some("git_derived_changed_symbols");
+    }
+    if options.source_mode != SearchSourceMode::LexicalOnly {
+        return Some("runtime_search_backend_state");
+    }
+    if crate::core::memory_scope::current_agent_name().is_some() {
+        return Some("current_agent_identity");
+    }
+
+    context_pack_l2_mutable_state_bypass_reason(options)
+}
+
+fn context_pack_l2_mutable_state_bypass_reason(
+    options: &ContextPackOptions,
+) -> Option<&'static str> {
+    // These mutable files are consumed after the cache lookup. Absence is
+    // rechecked on every request, so a newly-created file forces a fresh run;
+    // any present, unreadable, or unsafe path bypasses replay entirely.
+    let workspace_config_path = options.workspace_path.join(".ee").join("config.toml");
+    if !context_pack_l2_path_is_definitely_absent(&workspace_config_path) {
+        return Some("workspace_config_state");
+    }
+    if !context_pack_l2_path_is_definitely_absent(&focus_state_path(&options.workspace_path)) {
+        return Some("focus_state");
+    }
+
+    // The current L2 index generation is based on directory metadata and can
+    // collide across same-second publications. Until the key uses the bounded
+    // manifest-content fingerprint, cache only the definitely-absent state.
+    let index_dir = options
+        .index_dir
+        .clone()
+        .unwrap_or_else(|| options.workspace_path.join(".ee").join("index"));
+    if !context_pack_l2_path_is_definitely_absent(&index_dir) {
+        return Some("index_state");
+    }
+
+    if matches!(
+        options.memory_scope,
+        MemoryScope::Swarm | MemoryScope::Workspace | MemoryScope::Global
+    ) {
+        let Ok(paths) = crate::core::global_store::default_global_store_paths_from_env() else {
+            return Some("global_store_path_unavailable");
+        };
+        if !context_pack_l2_path_is_definitely_absent(&paths.database_path) {
+            return Some("global_store_state");
+        }
+    }
+
+    None
+}
+
 fn context_pack_l2_prepare(
     options: &ContextPackOptions,
     connection: &DbConnection,
     request: &ContextRequest,
     filters: &crate::models::QueryFilters,
+    runtime_profile: &RuntimeProfileReport,
     output_redaction_enabled: bool,
     embed_backend: EmbedBackend,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<ContextPackL2Context> {
+    if let Some(reason) = context_pack_l2_bypass_reason(options, filters) {
+        tracing::debug!(
+            target: "ee::pack_l2",
+            event = "pack_l2_cache_bypassed",
+            reason,
+        );
+        return None;
+    }
     let workspace_id = context_pack_l2_workspace_id(connection, &options.workspace_path);
     let cache = match context_pack_l2_cache(&options.workspace_path, &workspace_id) {
         Ok(Some(cache)) => cache,
@@ -6462,6 +6555,7 @@ fn context_pack_l2_prepare(
         context_feature_flags_hash: context_pack_l2_feature_flags_hash(
             options,
             filters,
+            runtime_profile,
             output_redaction_enabled,
         ),
         personalization_generation,
@@ -6624,6 +6718,36 @@ fn context_pack_l2_store(
     search_report: &SearchReport,
     response: &mut ContextResponse,
 ) {
+    if let Some(reason) = context_pack_l2_mutable_state_bypass_reason(options) {
+        tracing::debug!(
+            target: "ee::pack_l2",
+            event = "pack_l2_cache_write_skipped",
+            reason,
+        );
+        return;
+    }
+    if let Some(code) = response
+        .data
+        .degraded
+        .iter()
+        .map(|entry| entry.code.as_str())
+        .find(|code| {
+            matches!(
+                *code,
+                "context_pack_persist_failed"
+                    | "pack_concurrent_limit_reached"
+                    | "pack_slot_lock_unavailable"
+            )
+        })
+    {
+        tracing::debug!(
+            target: "ee::pack_l2",
+            event = "pack_l2_cache_write_skipped",
+            reason = "transient_response_degradation",
+            degraded_code = code,
+        );
+        return;
+    }
     let source_mode_metadata = ContextPackL2SourceModeMetadata::from_search_report(search_report);
     let mut store_key_input = l2_context.key_input.clone();
     store_key_input.embed_backend = response.data.embed_backend;
@@ -6897,6 +7021,7 @@ fn context_pack_l2_index_generation(options: &ContextPackOptions) -> u64 {
 fn context_pack_l2_feature_flags_hash(
     options: &ContextPackOptions,
     filters: &crate::models::QueryFilters,
+    runtime_profile: &RuntimeProfileReport,
     output_redaction_enabled: bool,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
@@ -6906,6 +7031,16 @@ fn context_pack_l2_feature_flags_hash(
         output_redaction_enabled,
     );
     hash_labeled_bytes(&mut hasher, "speed", options.speed.as_str().as_bytes());
+    hash_labeled_bytes(
+        &mut hasher,
+        "runtime_profile",
+        runtime_profile.active_profile.as_str().as_bytes(),
+    );
+    hash_labeled_bytes(
+        &mut hasher,
+        "runtime_profile_source",
+        runtime_profile.source.as_bytes(),
+    );
     hash_labeled_bool(
         &mut hasher,
         "include_tombstoned",
@@ -12485,6 +12620,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use chrono::{DateTime, Utc};
     use proptest::prelude::*;
     use proptest::test_runner::Config as ProptestConfig;
 
@@ -13151,6 +13287,52 @@ mod tests {
             baseline_write: None,
             no_lod: false,
         }
+    }
+
+    #[test]
+    fn context_pack_l2_bypasses_unkeyed_selection_inputs() {
+        let mut options = context_options_with_coordination_snapshot(PathBuf::from("snapshot"));
+        let filters = crate::models::QueryFilters::default();
+
+        assert_eq!(
+            super::context_pack_l2_bypass_reason(&options, &filters),
+            Some("implicit_validity_reference_time")
+        );
+
+        options.as_of = Some(
+            DateTime::parse_from_rfc3339("2026-08-31T12:00:00Z")
+                .expect("fixed cache-safety timestamp should parse")
+                .with_timezone(&Utc),
+        );
+        assert_eq!(
+            super::context_pack_l2_bypass_reason(&options, &filters),
+            Some("coordination_snapshot")
+        );
+
+        options.coordination_snapshot_path = None;
+        options.task_lens = Some(super::ContextTaskLens {
+            id: "review".to_owned(),
+            version: 1,
+            lens_hash: "blake3:test-lens".to_owned(),
+        });
+        assert_eq!(
+            super::context_pack_l2_bypass_reason(&options, &filters),
+            Some("task_lens")
+        );
+
+        options.task_lens = None;
+        options.require_fresh_sentinels = true;
+        assert_eq!(
+            super::context_pack_l2_bypass_reason(&options, &filters),
+            Some("fresh_sentinel_filter")
+        );
+
+        options.require_fresh_sentinels = false;
+        options.no_lod = true;
+        assert_eq!(
+            super::context_pack_l2_bypass_reason(&options, &filters),
+            Some("lod_disabled")
+        );
     }
 
     #[test]
@@ -17137,7 +17319,7 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
-    fn context_pack_l2_hit_replays_fresh_json_byte_identically() -> Result<(), String> {
+    fn context_pack_l2_bypasses_unkeyed_workspace_state() -> Result<(), String> {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = tempdir.path().join("workspace");
         std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
@@ -17208,13 +17390,17 @@ pub fn unrelated_context() -> u64 {{
             candidate_pool: Some(10),
             max_results: None,
             include_tombstoned: false,
-            as_of: None,
+            as_of: Some(
+                DateTime::parse_from_rfc3339("2026-08-31T12:00:00Z")
+                    .map_err(|error| error.to_string())?
+                    .with_timezone(&Utc),
+            ),
             include_expired: false,
             include_future: false,
             include_stale: false,
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
-            memory_scope: MemoryScope::Swarm,
+            memory_scope: MemoryScope::Verified,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -17226,7 +17412,7 @@ pub fn unrelated_context() -> u64 {{
             require_fresh_sentinels: false,
             output_options: super::ContextPackOutputOptions::default()
                 .with_cache_json_response(true),
-            persist_pack: true,
+            persist_pack: false,
             baseline_write: None,
             no_lod: false,
         };
@@ -17238,120 +17424,15 @@ pub fn unrelated_context() -> u64 {{
             fresh.cached_json.is_none(),
             "first run should assemble fresh output"
         );
-        let workspace_cache_dir =
-            cache_root.join(super::pack_l2_workspace_component(&workspace_id));
-        let cache_entry_paths = std::fs::read_dir(&workspace_cache_dir)
-            .map_err(|error| error.to_string())?
-            .map(|entry| {
-                entry
-                    .map(|entry| entry.path())
-                    .map_err(|error| error.to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         assert!(
-            !cache_entry_paths.is_empty(),
-            "first run should publish at least one L2 cache entry"
+            !cache_root.exists(),
+            "a present workspace config and index must bypass L2 before creating its cache root"
         );
-        let cache_entry_json = cache_entry_paths
-            .iter()
-            .filter_map(|path| {
-                std::fs::read(path)
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            })
-            .find(|entry| {
-                entry.get("schema").and_then(serde_json::Value::as_str)
-                    == Some(crate::cache::pack_l2::PACK_L2_CACHE_ENTRY_SCHEMA_V2)
-            })
-            .ok_or_else(|| "first run should publish a compressed v2 L2 cache entry".to_owned())?;
-        assert_eq!(
-            cache_entry_json
-                .get("schema")
-                .and_then(serde_json::Value::as_str),
-            Some(crate::cache::pack_l2::PACK_L2_CACHE_ENTRY_SCHEMA_V2),
-            "context L2 store should use the compressed v2 entry schema"
-        );
-        assert!(
-            cache_entry_json
-                .pointer("/compression/compressedPayloadBase64")
-                .and_then(serde_json::Value::as_str)
-                .is_some(),
-            "compressed v2 entry should carry compressed payload bytes"
-        );
-        let cached_run = super::run_context_pack_with_performance(&options, PACK_COMMAND)
+        let second_run = super::run_context_pack_with_performance(&options, PACK_COMMAND)
             .map_err(|error| error.to_string())?;
-        assert_eq!(
-            cached_run
-                .performance
-                .pointer("/data/cache/status")
-                .and_then(serde_json::Value::as_str),
-            Some("hit"),
-            "second identical pack request must remain an L2 hit"
-        );
-        // The empty-index lexical-only fixture legitimately carries
-        // non-rerank degradations (index_missing from the missing-index
-        // search report). The pinned contracts are that no rerank advisory
-        // surfaces (LexicalOnly disables reranker resolution before any
-        // registry lookup) and that the L2 replay preserves the stored
-        // advisory snapshot verbatim. The once-ledger suppression contract
-        // for packs that DO carry an advisory is pinned by
-        // search::tests::cached_context_snapshot_uses_socket_settlement_and_shared_once_ledger.
-        let fresh_advisory = fresh_run.search_advisory_snapshot.cache_json();
-        let fresh_degraded = fresh_advisory
-            .get("degraded")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| "fresh advisory snapshot must carry a degraded array".to_owned())?;
         assert!(
-            fresh_degraded.iter().all(|entry| entry
-                .get("code")
-                .and_then(serde_json::Value::as_str)
-                != Some("rerank_model_unavailable")),
-            "lexical-only fresh pack must not surface rerank degradations"
-        );
-        assert_eq!(
-            cached_run.search_advisory_snapshot.cache_json(),
-            fresh_advisory,
-            "L2 replay must preserve the stored advisory snapshot"
-        );
-        let cached = cached_run.response;
-        assert!(
-            cached.cached_json.is_some(),
-            "second run should return the L2 cached JSON response"
-        );
-        let render_options = crate::output::ContextJsonRenderOptions::from(options.output_options);
-        let fresh_json =
-            crate::output::render_context_response_json_with_options(&fresh, render_options);
-        let cached_json =
-            crate::output::render_context_response_json_with_options(&cached, render_options);
-        for (label, rendered) in [("fresh", &fresh_json), ("cached", &cached_json)] {
-            let parsed = serde_json::from_str::<serde_json::Value>(rendered)
-                .map_err(|error| format!("parse {label} L2 response JSON: {error}"))?;
-            assert_eq!(
-                parsed.pointer("/degraded"),
-                parsed.pointer("/data/degraded"),
-                "{label} L2 response must mirror top-level and data degradations"
-            );
-            let degraded = parsed
-                .pointer("/data/degraded")
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| format!("{label} L2 response data.degraded must be an array"))?;
-            assert!(
-                degraded.iter().all(|entry| {
-                    entry.get("code").and_then(serde_json::Value::as_str) != Some("index_missing")
-                }),
-                "{label} default L2 response must filter non-affecting index_missing"
-            );
-            assert_eq!(
-                parsed
-                    .pointer("/data/pack/advisoryBanner/degradationCount")
-                    .and_then(serde_json::Value::as_u64),
-                Some(degraded.len() as u64),
-                "{label} L2 advisory banner must count the filtered degradation set"
-            );
-        }
-        assert_eq!(
-            fresh_json, cached_json,
-            "L2 hit must replay byte-identical JSON"
+            second_run.response.cached_json.is_none(),
+            "second run must reassemble instead of replaying a key that omits mutable workspace state"
         );
         Ok(())
     }
@@ -17466,13 +17547,17 @@ pub fn unrelated_context() -> u64 {{
             candidate_pool: Some(10),
             max_results: None,
             include_tombstoned: false,
-            as_of: None,
+            as_of: Some(
+                DateTime::parse_from_rfc3339("2026-08-31T12:00:00Z")
+                    .map_err(|error| error.to_string())?
+                    .with_timezone(&Utc),
+            ),
             include_expired: false,
             include_future: false,
             include_stale: false,
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
-            memory_scope: MemoryScope::Swarm,
+            memory_scope: MemoryScope::Verified,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
