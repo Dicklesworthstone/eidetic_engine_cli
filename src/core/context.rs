@@ -16992,7 +16992,7 @@ pub fn unrelated_context() -> u64 {{
         };
         let search_options = SearchOptions {
             workspace_path: workspace,
-            database_path: Some(database_path),
+            database_path: Some(database_path.clone()),
             index_dir: None,
             query: request.query.clone(),
             limit: 10,
