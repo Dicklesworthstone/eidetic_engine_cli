@@ -11747,8 +11747,13 @@ fn apply_tombstone_visibility_with_connection(
     connection: &DbConnection,
     mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
 ) -> Vec<SearchHit> {
+    // Tombstone, seal, validity-window, and drift sidecars belong only to
+    // memory rows. Session, evidence, rule, and artifact documents have typed
+    // non-memory IDs and their own admission rules; treating their absence
+    // from `memories` as an orphan made every such result unreachable.
     let hit_doc_ids: Vec<&str> = hits
         .iter()
+        .filter(|hit| hit.doc_id.starts_with("mem_"))
         .map(|hit| hit.doc_id.as_str())
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -11849,7 +11854,9 @@ fn apply_tombstone_visibility_with_connection(
 
         if let Some(memories) = batch_memories.as_ref() {
             for hit in hits {
-                if let Some(memory) = memories.get(&hit.doc_id) {
+                if !hit.doc_id.starts_with("mem_") {
+                    visible_hits.push(hit);
+                } else if let Some(memory) = memories.get(&hit.doc_id) {
                     if let Some(hit) = handle_loaded_memory(hit, memory) {
                         visible_hits.push(hit);
                     }
@@ -11866,6 +11873,10 @@ fn apply_tombstone_visibility_with_connection(
             }
         } else {
             for hit in hits {
+                if !hit.doc_id.starts_with("mem_") {
+                    visible_hits.push(hit);
+                    continue;
+                }
                 match connection.get_memory(&hit.doc_id) {
                     Ok(Some(memory)) => {
                         if let Some(preloaded) = preloaded_memories.as_deref_mut() {
@@ -15428,8 +15439,7 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_visibility_drops_local_orphans_and_keeps_preloaded_global_rows() -> TestResult
-    {
+    fn authoritative_memory_visibility_preserves_typed_non_memory_rows() -> TestResult {
         let workspace = unique_test_dir("orphan-index-visibility");
         std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
         let local = DbConnection::open_file(workspace.join("local.db"))
@@ -15510,14 +15520,18 @@ mod tests {
             vec![
                 hit("mem_local_orphan000000000001"),
                 hit("mem_global_authoritative000001"),
+                hit("sess_local_authoritative000001"),
+                hit("ev_local_authoritative00000001"),
             ],
             &mut degraded,
             Some(&local),
             Some(&mut preloaded),
         );
 
-        assert_eq!(visible.len(), 1);
+        assert_eq!(visible.len(), 3);
         assert_eq!(visible[0].doc_id, "mem_global_authoritative000001");
+        assert_eq!(visible[1].doc_id, "sess_local_authoritative000001");
+        assert_eq!(visible[2].doc_id, "ev_local_authoritative00000001");
         assert!(degraded.iter().any(|entry| {
             entry.code == "search_index_stale" && entry.message.contains("Filtered 1")
         }));
