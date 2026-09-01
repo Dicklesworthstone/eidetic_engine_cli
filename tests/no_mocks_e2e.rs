@@ -2638,6 +2638,10 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         ("CASS_IGNORE_SOURCES_CONFIG", OsString::from("1")),
         ("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", OsString::from("1")),
         ("CASS_INDEX_NO_PROGRESS_EVENTS", OsString::from("1")),
+        // This fixture proves the offline lexical/hash-fallback lifecycle. It
+        // must never depend on a worker's model cache or initiate a 506 MB
+        // first-use model download while publishing the imported documents.
+        ("EE_EMBED_DOWNLOAD", OsString::from("off")),
         ("NO_COLOR", OsString::from("1")),
         ("EE_CASS_BINARY", cass_binary.as_os_str().to_owned()),
         (
