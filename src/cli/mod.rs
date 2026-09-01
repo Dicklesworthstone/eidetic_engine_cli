@@ -53536,7 +53536,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
         "data": {
             "command": "why",
             "version": report.version,
-            "memoryId": report.memory_id,
+            "memoryId": report.entity.is_none().then_some(&report.memory_id),
             "found": report.found,
             "content": report.content,
             "storage": storage,
@@ -53556,6 +53556,21 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
         },
         "degraded": degraded,
     });
+    if let Some(entity) = &report.entity
+        && let Some(data) = json
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        data.insert(
+            "entity".to_owned(),
+            serde_json::json!({
+                "kind": &entity.kind,
+                "id": &entity.id,
+                "revision": &entity.revision,
+                "details": &entity.details,
+            }),
+        );
+    }
     if let Some(load_bearing) = load_bearing
         && let Some(data) = json
             .get_mut("data")
@@ -73197,6 +73212,37 @@ mod tests {
                 "why TOON preserves agent helpful count: expected 12, got {:?}",
                 actual["data"]["agentProfile"]["helpfulCount"]
             ),
+        )
+    }
+
+    #[test]
+    fn why_json_preserves_typed_entity_identity_without_synthetic_memory_id() -> TestResult {
+        let evidence_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x8502)).to_string();
+        let revision = super::blake3_text_hash_for_replay("why-evidence-revision");
+        let report = why_found_fixture().with_entity(crate::core::why::WhyEntityExplanation {
+            kind: "evidence_span".to_owned(),
+            id: evidence_id.clone(),
+            revision: Some(revision.clone()),
+            details: serde_json::json!({"admission": {"posture": "admitted"}}),
+        });
+        let value: serde_json::Value = serde_json::from_str(&super::format_why_json(&report))
+            .map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &value.pointer("/data/memoryId"),
+            &Some(&serde_json::Value::Null),
+            "typed why omits synthetic memory identity",
+        )?;
+        ensure_equal(
+            &value.pointer("/data/entity/id"),
+            &Some(&serde_json::json!(evidence_id)),
+            "typed why entity id",
+        )?;
+        ensure_equal(
+            &value.pointer("/data/entity/revision"),
+            &Some(&serde_json::json!(revision)),
+            "typed why entity revision",
         )
     }
 
