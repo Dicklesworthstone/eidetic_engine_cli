@@ -44540,6 +44540,21 @@ fn redact_public_projection_strings(value: &mut serde_json::Value, field: Option
                 Some("packId") => Some(crate::models::public_pack_id(text)),
                 Some("workspaceId") => Some(crate::models::public_workspace_id(text)),
                 Some("memoryId") => Some(crate::models::public_memory_id(text)),
+                Some("evidenceSpanId") if text.parse::<crate::models::EvidenceId>().is_ok() => {
+                    Some(text.clone())
+                }
+                Some("entityId")
+                    if text.parse::<crate::models::MemoryId>().is_ok()
+                        || text.parse::<crate::models::EvidenceId>().is_ok() =>
+                {
+                    Some(text.clone())
+                }
+                Some("entityRevision") if crate::db::is_canonical_blake3_hash(text) => {
+                    Some(text.clone())
+                }
+                Some("trustSubclass") if text == "imported_transcript_excerpt" => {
+                    Some(text.clone())
+                }
                 Some("familyAlias")
                     if text.len() == 36
                         && text.strip_prefix("afm_").is_some_and(|digest| {
@@ -92501,6 +92516,69 @@ demos:
         assert!(!markdown.contains(SECRET));
         assert!(!markdown.contains("\n# injected"));
         assert!(markdown.contains(&safe_bundle.bundle_hash()));
+    }
+
+    #[test]
+    fn public_pack_ledger_projection_preserves_verified_typed_evidence_identity() {
+        const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+        let evidence_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x8501)).to_string();
+        let entity_revision = super::blake3_text_hash_for_replay("evidence-revision");
+        let ledger = serde_json::json!({
+            "schema": "ee.pack_replay_ledger.v1",
+            "selectedItems": [
+                {
+                    "evidenceSpanId": &evidence_id,
+                    "entityKind": "evidence_span",
+                    "entityId": &evidence_id,
+                    "entityRevision": &entity_revision,
+                    "trustClass": "cass_evidence",
+                    "trustSubclass": "imported_transcript_excerpt"
+                },
+                {
+                    "evidenceSpanId": format!("ev_{SECRET}00000"),
+                    "entityKind": "evidence_span",
+                    "entityId": format!("ev_{SECRET}00000"),
+                    "entityRevision": format!("blake3:{SECRET}"),
+                    "trustClass": "cass_evidence",
+                    "trustSubclass": format!("subclass-{SECRET}")
+                }
+            ]
+        });
+
+        let public = super::public_pack_ledger_projection(&ledger);
+        assert_eq!(
+            public["selectedItems"][0]["evidenceSpanId"],
+            serde_json::json!(evidence_id)
+        );
+        assert_eq!(
+            public["selectedItems"][0]["entityId"],
+            public["selectedItems"][0]["evidenceSpanId"]
+        );
+        assert_eq!(
+            public["selectedItems"][0]["entityRevision"],
+            serde_json::json!(entity_revision)
+        );
+        assert_eq!(
+            public["selectedItems"][0]["trustSubclass"],
+            serde_json::json!("imported_transcript_excerpt")
+        );
+        assert!(
+            public["selectedItems"][1]["evidenceSpanId"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("[REDACTED:public_replay_text:"))
+        );
+        assert!(
+            public["selectedItems"][1]["entityRevision"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("[REDACTED:public_replay_text:"))
+        );
+        assert!(!public.to_string().contains(SECRET));
+        assert_eq!(
+            super::public_pack_ledger_projection(&public),
+            public,
+            "typed evidence projection is idempotent"
+        );
     }
 
     #[test]
