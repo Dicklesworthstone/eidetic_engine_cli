@@ -1,4 +1,4 @@
-# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revision 2026-08-24)**
+# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revision 2026-09-01)**
 
 > Track A: mesh / team-confederation acceptance reconciliation after the Unix
 > EE-to-EE campaign. Track B: core-product, durability, verification, and
@@ -74,6 +74,157 @@
 > still covers all 24 checklist rows. Its 23 records remain 20 open and 3 in
 > progress, and `.22` still graph-blocks on every mandatory child and reused
 > blocker. No duplicate plan or Bead was created.
+>
+> **2026-09-01 current-HEAD refresh.** The audit was repeated end to end at
+> `c716ae31ecdc2628fc80f609aa453222eddd6787` (`v0.14.4-26-gc716ae31`), source
+> package `0.14.4`, while the installed probe remains unattested release
+> `0.14.2`. A pinned committed-tree RCH `cargo check --locked --all-targets`
+> now reaches compilation and passes against the exact seven-repository
+> `franken-stack.lock` bundle. That materially supersedes the 2026-08-24
+> lock-mismatch refusal, but the proof remains degraded by unavailable local
+> build admission and a proof-broker source-state mismatch. Exact-HEAD pinned
+> `cargo clippy --locked --all-targets -- -D warnings` also passes; focused
+> behavioral tests, the complete manifest, and hosted CI remain separate gates.
+>
+> Current source also supersedes the old literal raw-BM25 saturation finding:
+> a complete pure-lexical result pool now uses Frankensearch's canonical
+> min-max normalization while retaining raw `lexicalScore`, and unit tests keep
+> distinct `9/5/2` BM25 values distinct. `.11` remains open for the public
+> query-relative/calibration contract and every downstream admission/quality
+> consumer, not for re-applying the obsolete clamp fix. Rule North-Star tests
+> now require the applied `RuleId` to be searchable by its own content and
+> verify post-mutation projection metadata. The no-mock CASS flow now requires
+> exact imported `SessionId` and `EvidenceId` search, but still stops before a
+> public pack/replay/why/outcome closure on that same evidence identity. The
+> exact focused test fails on the required RCH lane before import semantics:
+> its workspace is derived from the remote `CARGO_TARGET_DIR`, and CASS path
+> safety rejects a symlink component in that materialized path. This is a
+> non-hermetic verifier failure, not proof of an ordinary physical-path import
+> defect, but it prevents the test from serving as current readiness evidence.
+>
+> The proof surface is still materially weaker than the command inventory:
+> vision coverage reports 137/137 and zero gaps from dispatch/file mappings,
+> while bridge staleness still inspects Part II and recommends planning Part
+> III despite this active 23-node bridge. README also contradicts itself by
+> saying both that CASS excerpts require curation before packing and that a
+> live-admitted unlinked evidence span packs directly. Fresh installed-release
+> init/remember/search/pack/why succeeds, but search/pack/status report a stale
+> or missing index while `ee index status` reports ready with equal generations.
+> GitHub reports CI, macOS artifact, and release workflows as manually disabled;
+> public `v0.14.4` is 26 commits behind this source and has archives, checksums,
+> installers, and a manifest but no Sigstore or SLSA provenance asset.
+>
+> Four ambition passes (core agent outcome, operator recovery, integration and
+> release, and outcome-measured product ambition) plus five refinement passes
+> (deduplication, granularity, adversarial acceptance, dependency order, and
+> final scope/clarity) found no missing top-level work item. Existing children
+> `.5`, `.7`, `.9`, `.11`, `.16`, and `.17` received dated evidence comments;
+> no new Bead was created, no status was advanced, and the scoped graph still
+> has no cycle (20 open, 3 in progress, 0 closed).
+
+### Current execution ledger (2026-09-01)
+
+This is the bounded working checklist requested by the operator. It is not a
+second requirements source: §§9–15 and the Part III Beads remain authoritative.
+Its consumer is the implementation session, it gates claims made from this work,
+and it is retired into the dated evidence summary when every item is either
+proved or returned to its owning Bead with an exact blocker.
+
+#### A. Close the direct CASS evidence loop first (`.17`, ADR 0085)
+
+- [ ] Make `tests/no_mocks_e2e.rs` place workspaces under a canonical physical
+  target root so the required RCH materialization cannot trip its own symlink
+  safety policy before product behavior executes.
+- [ ] Add a focused harness regression proving a symlinked target-root alias is
+  resolved only at the trusted test-artifact boundary and descendants remain
+  ordinary physical paths.
+- [ ] Rerun the exact no-mock CASS import/search test on pinned current-HEAD RCH
+  and require exact `SessionId`, exact `EvidenceId`, ready index health, equal
+  generations, and clean retry publication.
+- [ ] Extend that same scenario—not a synthetic substitute—from exact evidence
+  search into `ee pack`, requiring selection under native `EvidenceId`,
+  `entityKind=evidence_span`, exact revision, `cass_evidence` trust, redacted
+  session/line provenance, and no synthetic `MemoryId`.
+- [ ] Query the persisted pack through repository APIs and prove the selected
+  evidence row, rank, section, revision, scores, explanation, trust, and
+  provenance round-trip through `pack_evidence_items`.
+- [ ] Replay the persisted pack and require integrity-verified typed evidence;
+  missing/malformed/hash-mismatched ledger paths must remain fail-closed.
+- [ ] Exercise typed `ee why` for the same `EvidenceId`, including storage,
+  retrieval, selection, screening, redaction, session, and line provenance.
+- [ ] Grade the evidence selection with `ee outcome --pack --item`; prove the
+  typed impression is recorded while immutable evidence and unrelated memory
+  Bayesian confidence do not mutate.
+- [ ] Add at least one tempting denied evidence control and prove it remains
+  absent from search admission, pack selection, persistence, replay, why, and
+  feedback without leaking raw path/content.
+- [ ] Correct README CASS wording only after the executable behavior is green;
+  one canonical explanation must distinguish direct safe evidence packing from
+  optional curation into a durable learned memory.
+
+#### B. Make index/status truth coherent (`.10`, `.16`)
+
+- [ ] Reproduce the installed `search/pack/status` degraded-vs-`index status`
+  ready contradiction against an exact current-source binary and retained
+  workspace; do not infer current behavior from the stale installed release.
+- [ ] Identify whether the mismatch is backend selection, index path,
+  generation read, capability projection, or stale diagnostic aggregation.
+- [ ] Add one current-source public-CLI regression asserting that the same
+  workspace snapshot cannot report mutually exclusive readiness postures.
+- [ ] Fix the narrow authority split and retain truthful degraded behavior for
+  genuinely missing, stale, corrupt, lexical-only, and semantic-only states.
+- [ ] Verify `search`, `pack`, `status`, `index status`, and `doctor` share the
+  same generation/backend evidence while preserving command-specific posture.
+
+#### C. Complete durable recovery inventory (`.13`, `.14`)
+
+- [ ] Enumerate every source-of-truth table by five-job owner and classify it as
+  export/restore required, derived/rebuildable, secret/rekeyed, or intentionally
+  ephemeral; reconcile the inventory against migrations rather than prose.
+- [ ] Add missing export/restore coverage for rules, CASS sessions/evidence,
+  packs and typed selected items, outcomes/impressions, curation lineage,
+  durable jobs, and any other required source-of-truth rows found by inventory.
+- [ ] Preserve IDs, revisions, foreign keys, audit ordering, redaction posture,
+  and pack-ledger integrity without exporting host-private or key material.
+- [ ] Prove evolved-store backup → verify → restore → migrate → rebuild → query
+  with manual memory, rule, evidence, pack, outcome, and curation records.
+- [ ] Add negative cases for partial archive, tampered hash, wrong workspace,
+  incompatible schema, missing side path, symlink traversal, and interrupted
+  restore; every failure must leave the destination recoverable.
+
+#### D. Restore mandated dependency boundaries (`.4`, `.15`, `.18`)
+
+- [ ] Replace pack-path local personalized PageRank with the required
+  FrankenNetworkX projection/API or obtain an explicit upstream capability;
+  preserve deterministic ordering and cancellation semantics.
+- [ ] Remove the public custom BM25 production surface once all real callers use
+  Frankensearch; retain only legitimate differential test code if still useful.
+- [ ] Locate and eliminate score-changing local fusion/RRF/token-overlap paths
+  that duplicate Frankensearch responsibility, with before/after adversarial
+  retrieval tests rather than name-only conformance.
+- [ ] Pin and expose one coherent dependency/version identity across manifest,
+  lock, runtime status, proof capsule, and release artifacts.
+
+#### E. Turn component success into a releasable product (`.1`–`.7`, `.19`)
+
+- [ ] Prove fresh-process serial determinism for stable envelopes, ordered IDs
+  and scores, omissions, typed entities, provenance, and pack hash.
+- [ ] Prove concurrent publication/read linearizability and bounded recovery
+  across process races, cancellation, stale generations, and backend fallback.
+- [ ] Finish score-calibration semantics for lexical, semantic, hybrid, reranked,
+  mixed-kind, singleton, and degenerate pools; downstream admission/ask/quality
+  must consume calibration identity or explicit unknown posture.
+- [ ] Make the canonical readiness manifest run the exact behavioral inventory
+  once, reject zero/ignored/filtered/duplicated/skipped required tests, and bind
+  all evidence to source, dependency bundle, toolchain, target, and binary hash.
+- [ ] Re-enable hosted CI only when it invokes that same manifest, then produce
+  one immutable current-SHA green candidate capsule.
+- [ ] Stage native release artifacts privately, verify install/smoke/rollback,
+  checksums, signatures, and SLSA/Sigstore provenance, and require explicit human
+  authorization before publication.
+- [ ] Replace historical performance prose with reproducible current-source raw
+  samples, host fingerprint, baseline identity, countermetrics, and enforced
+  regression budgets—or demote the claims until that evidence exists.
 
 ---
 
@@ -225,8 +376,10 @@ The decisive failures are at integration and proof boundaries:
    embedding backends, index availability, selected memories, and pack hashes.
 5. The named North Star and vision gates prove file/dispatch presence more
    readily than the exact public behavior they claim.
-6. Current RCH and hosted CI evidence is red, cancelled, killed, or pending;
-   no immutable current SHA has the required green readiness proof.
+6. Exact-HEAD pinned RCH check and strict Clippy now pass, but the proof has
+   admission/source-state degradations, focused and full behavioral manifests
+   remain incomplete, and hosted CI is manually disabled; no immutable current
+   SHA has the required complete green readiness proof.
 7. Release automation is tag-only, but its dependency/tool inputs are not yet
    hermetic and the latest release lacks the signed/provenance asset set the
    checked-in workflow claims to produce.
@@ -238,10 +391,12 @@ The decisive failures are at integration and proof boundaries:
    and a custom BM25 implementation remains publicly exported even though its
    current callers are tests. The Frankensearch dependency/version contract is
    also internally inconsistent (`0.3.2` dependency versus `0.3.0` report).
-10. Lexical BM25 is treated as unit-normalized and clamped, so distinct raw
-    scores above one all become public `relevanceScore: 1.0`; downstream floor,
-    pack-quality, and ask-confidence semantics can therefore call weak results
-    maximally relevant or "good".
+10. The former lexical raw-BM25 clamp is fixed in current source by normalizing
+    the complete pure-lexical pool and retaining raw `lexicalScore`. The public
+    score contract is still query-relative without a proved calibration identity,
+    and downstream floor, pack-quality, and ask-confidence semantics have not
+    been shown to interpret that value truthfully across degenerate or mixed
+    retrieval cases.
 11. Backup now accepts legitimate targetless audit rows, uses one read snapshot,
     and avoids creating authentication-key state during dry-run. Export still
     covers only workspace/memories/tags/links/audits, selected graph fields, and
@@ -267,10 +422,12 @@ product.**
 ## 7. Evidence snapshot and authority boundary
 
 Source base under the latest audit: `main` at
-`c355087fe23f809719a3b1d510fc3f735389a606`
-(`v0.14.2-98-gc355087f`). The tracked worktree was clean; pre-existing untracked
-tracker journals, `.ci/`, and a Cargo manifest backup were left untouched.
-Static claims below are source/contract findings, not a green-candidate proof.
+`c716ae31ecdc2628fc80f609aa453222eddd6787`
+(`v0.14.4-26-gc716ae31`). The committed source tree was audited independently
+from the installed binary. Pre-existing untracked tracker journals, `.ci/`, and
+a Cargo manifest backup were left untouched; this refresh changes only this
+plan and additive comments in the existing Part III Beads. Static claims below
+are source/contract findings, not a green-candidate proof.
 
 Operational probes used `/Users/jemanuel/.local/bin/ee` version `0.14.2`,
 SHA-256
@@ -278,7 +435,7 @@ SHA-256
 Its `ee version --json` reports `gitCommit: null`, `gitTag: null`, and
 `targetTriple: unknown`. Therefore the live runtime results are
 **released-binary evidence against the current workspace**, not proof that
-commit `c355087f` behaves identically. Source inspection contains a plausible
+commit `c716ae31` behaves identically. Source inspection contains a plausible
 matching race. Bead `.10` must reproduce or refute it with a source-attested
 candidate before `.2` changes the implementation.
 
@@ -319,9 +476,11 @@ candidate before `.2` changes the implementation.
   with three distinct hashes.
 - Current source still exposes a matching two-rename publication hole and
   process-local model admission; `.10` owns source-attested attribution.
-- A live installed-binary lexical query returned distinct BM25 scores roughly
-  `1.59..3.12`, all rendered as `relevanceScore: 1.0`. Current source and tests
-  explicitly implement that saturation.
+- Historical installed-binary probes rendered distinct raw BM25 values as
+  `relevanceScore: 1.0`; current source instead min-max normalizes one complete
+  pure-lexical pool through Frankensearch and retains raw `lexicalScore`.
+  Public downstream calibration, degenerate-pool semantics, and cross-query
+  non-comparability remain unproven under `.11` and `.12`.
 - The installed `0.14.2` backup dry-run failed on a nullable audit target, but
   current source fixes that failure and the dry-run key mutation. The remaining
   source defect is broader: the export inventory omits durable five-job state
@@ -332,7 +491,7 @@ candidate before `.2` changes the implementation.
   stale-binary, and tracker-process memories instead of the required runtime
   rules. A release-preparation pack likewise lacked the promised complete
   project release context.
-- `scripts/vision-coverage.sh --json` reports 134/134 implemented and zero
+- `scripts/vision-coverage.sh --json` reports 137/137 implemented and zero
   gaps, but its mapping is based mainly on registered surfaces/file presence;
   `bd-2mpct.1` already records this proof weakness.
 - The historical plan sweep labels North Star coverage verified by checking
@@ -346,15 +505,16 @@ candidate before `.2` changes the implementation.
   `src/search/bm25_simd.rs` residue contradicts the no-custom-BM25 boundary.
   Additional source audit found score-changing local fusion, global-store
   token-overlap retrieval, and locally recomputed diagnostic RRF.
-- The pinned current-SHA RCH check was refused before dispatch because the
-  materialized FrankenSQLite/fsqlite `0.3.9` contract disagrees with locked
-  `0.3.7`; current check, clippy, full tests, and exact North Stars therefore
-  have no source-attested verdict. `contract-drift-radar --strict` also fails
-  on stale Asupersync version documentation (`0.3.9` versus manifest `0.4.9`).
-- Hosted CI has no successful substantive current-main verdict. Exact-SHA run
-  `32759250334` was cancelled with zero jobs, and preceding main runs were also
-  concurrency-cancelled. Release v0.14.2 has native archives/checksums/installers
-  but no Sigstore bundle or SLSA provenance assets.
+- The pinned current-SHA RCH `cargo check --locked --all-targets` now passes the
+  exact committed tree and pinned Franken stack. Its proof is degraded by
+  unavailable local build admission and proof-broker source-state mismatch.
+  Strict `cargo clippy --locked --all-targets -- -D warnings` also passes; the
+  full suite, exact North Stars, and candidate capsule still require independent
+  verdicts. `contract-drift-radar --json` now passes.
+- Hosted CI has no successful substantive current-main verdict because all
+  three GitHub workflows are manually disabled. Release `v0.14.4` has native
+  archives/checksums/installers and a manifest, but no Sigstore bundle or SLSA
+  provenance assets, and it predates current `main` by 26 commits.
 
 ---
 
@@ -365,22 +525,22 @@ candidate before `.2` changes the implementation.
 | 1 | Local-first single CLI; core commands need no daemon | **WORKING** | Real direct CLI paths and source-backed storage exist. |
 | 2 | Franken-stack foundations; no forbidden substitute dependencies or core algorithms | **PARTIAL / WRONG-APPROACH** | Static dependency scan is clean, but local PPR/fusion/global token overlap/diagnostic RRF cross hard boundaries; custom BM25 is public; version identity drifts. `.4`, `.15`, `.18`. |
 | 3 | Manual memory → DB → search → pack → why | **PARTIAL** | The ordinary path and provenance exist. Released-binary probes are unreliable; source-attested attribution is `.10`, then `.2`/`.3`. |
-| 4 | CASS import makes permitted prior incident content searchable and safely packable | **PARTIAL / UNPROVEN** | Source has direct live-admitted `PackEvidenceItem` hydration and persistence. Import/job/index/replay/outcome public proof, generic typed identity, and README wording remain with `bd-3k1mg`, `bd-16imy`, ADR 0085, `.9`, `.17`. |
+| 4 | CASS import makes permitted prior incident content searchable and safely packable | **PARTIAL / UNPROVEN** | Source has direct live-admitted `PackEvidenceItem` hydration and persistence. The focused no-mock import/search test currently fails on RCH path-safety hermeticity before import; import/job/index/replay/outcome proof, generic typed identity, and README wording remain with `bd-3k1mg`, `bd-16imy`, ADR 0085, `.9`, `.17`. |
 | 5 | Hybrid BM25 + neural-local retrieval by default | **PARTIAL / UNPROVEN** | Released binary flips backend; current source has plausible causes but no source-attested oracle. Fresh-workspace fallback is `bd-fresh-workspace-hash-fallback-kvltg`; `.10`, `.2`, `.3` own attribution and convergence. |
 | 6 | Same declared snapshot gives byte-stable canonical JSON and pack hash | **UNPROVEN** | Released-binary semantics diverged. ADR 0087 is a `proposed` contract, not implementation; `.1`, `.10`, `.2`, `.3` own closure. |
-| 7 | Retrieval scores and pack quality mean what their names claim | **WRONG-APPROACH** | Current code passes raw lexical BM25 through a unit clamp, saturating scores above `1.0` before pack admission/quality. `.11`, `.12`. |
+| 7 | Retrieval scores and pack quality mean what their names claim | **PARTIAL / UNPROVEN** | Pure lexical pools now use Frankensearch min-max normalization and retain raw BM25, but the query-relative/calibration contract and every downstream admission/quality consumer remain unproven. `.11`, `.12`. |
 | 8 | Explainable packs with typed identity, provenance, freshness, trust, and score reasons | **PARTIAL** | Rendering is strong for admitted memories; rule/evidence v3 identity, calibration, and deterministic admission remain open. |
 | 9 | Learn loop turns repeated evidence into a rule used by later search/pack | **PARTIAL / UNPROVEN** | Rules are stored, indexed, and can hydrate content through a linked source `MemoryId`; native rule identity and the exact later-pack E2E remain open under `bd-3h6bz`, ADR 0085, and `.17`. |
 | 10 | Maintain loop links, decays, consolidates, validates, repairs, and converges | **PARTIAL / UNPROVEN** | Decay/machinery exist; public consolidate → apply → index → retrieve is `bd-1oep7`. |
 | 11 | Complete durable backup, verify, migration, restore, and rebuild | **PARTIAL / UNPROVEN** | Targetless audits, read-snapshot export, and non-mutating auth-key dry-run are fixed in source. Export/restore still omit core durable state and evolved-store proof. `.13`, `.14`. |
 | 12 | Graceful offline degradation remains useful and truthful | **PARTIAL** | Honest fallback/abstention exists; released binary may instead return no result/error, and uncalibrated quality is misleading. |
 | 13 | Stable machine envelopes and truthful repair exits | **PARTIAL** | `bd-34l8k`, `bd-3ak9b`, `bd-vv2dw`, `bd-aav4p`, `bd-5k6k7`; typed pack v3 is an intentional future break. |
-| 14 | Exact eight North Star public-CLI scenarios | **UNPROVEN** | `bd-2mpct`, `bd-2mpct.1`, and bridge `.17`; current runs are red/killed and prior oracles are permissive. |
+| 14 | Exact eight North Star public-CLI scenarios | **UNPROVEN** | `bd-2mpct`, `bd-2mpct.1`, and bridge `.17`; the focused CASS no-mock test fails before semantics on RCH path hermeticity, and prior oracles are permissive. |
 | 15 | Privacy/trust holds from ingest through index/model/pack/proof/backup/mesh | **PARTIAL / UNPROVEN** | ADR 0085 and source screening are strong; cross-source live admission, retained-generation, proof-sink, and recovery negatives remain. |
 | 16 | Graph insight and optional adapters are real or explicitly degraded | **PARTIAL** | Core graph/team surfaces are substantial; placeholder insights remain under `bd-2pos6`; stable claims must close or demote in `.9`. |
 | 17 | Multi-agent local writes preserve integrity and truthful freshness | **PARTIAL / UNPROVEN** | Strong tests exist; current full-suite proof is red and evidence/linkage/index generation gaps remain. |
 | 18 | Unix team-confederation and documented environment posture | **PARTIAL** | Unix/two-host/Windows/fake-IdP evidence exists; Part III two-human wording and README disagree. `.8`. |
-| 19 | Canonical readiness verification and green CI | **UNPROVEN** | Pinned verification refuses the current locked dependency mismatch before compilation; exact-SHA CI was cancelled with zero jobs after multiple cancelled runs. `.5`, `.17`, `.18`, `.19`. |
+| 19 | Canonical readiness verification and green CI | **PARTIAL / UNPROVEN** | Exact-HEAD pinned RCH check and strict Clippy pass with proof degradations, but the complete candidate manifest is absent and all hosted GitHub workflows are manually disabled. `.5`, `.17`, `.18`, `.19`. |
 | 20 | Reproducible performance and usable first-agent latency | **UNPROVEN** | README baseline/footer drift, no raw provenance, advisory budgets, and remote/local driver mismatch. `.6`. |
 | 21 | Hermetic multi-platform release/install chain | **PARTIAL / UNPROVEN** | Current release has archives/checksums/installers but no candidate checks/provenance set; tag-only workflow inputs remain non-hermetic. `.7`, `.18`, `.20`, `.21`. |
 | 22 | Canonical walking skeleton proves init → remember → search → pack → why | **PARTIAL / UNPROVEN** | Installed release completes the ordinary path, but the claimed basic E2E omits it and still asserts v1; no current-source proof exists. `.5`, `bd-2mpct`. |

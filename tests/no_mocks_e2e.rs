@@ -145,12 +145,89 @@ fn unique_log_dir(scenario_id: &str) -> Result<PathBuf, String> {
     let target_root = env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
-    let dir = target_root
+    unique_log_dir_at(scenario_id, &target_root, std::process::id(), now)
+}
+
+fn unique_log_dir_at(
+    scenario_id: &str,
+    target_root: &Path,
+    process_id: u32,
+    now: u128,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(target_root).map_err(|error| {
+        format!(
+            "failed to create no-mocks target root {}: {error}",
+            target_root.display()
+        )
+    })?;
+    let physical_target_root = target_root.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve no-mocks target root {} to a physical path: {error}",
+            target_root.display()
+        )
+    })?;
+    let dir = physical_target_root
         .join("ee-no-mocks-e2e-logs")
-        .join(format!("{scenario_id}-{}-{now}", std::process::id()));
+        .join(format!("{scenario_id}-{process_id}-{now}"));
     fs::create_dir_all(&dir)
         .map_err(|error| format!("failed to create log dir {}: {error}", dir.display()))?;
     Ok(dir)
+}
+
+#[cfg(unix)]
+#[test]
+fn no_mocks_log_dir_resolves_trusted_target_root_alias() -> TestResult {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let physical_target_root = temp.path().join("physical-target");
+    fs::create_dir(&physical_target_root).map_err(|error| error.to_string())?;
+    let target_alias = temp.path().join("target-alias");
+    symlink(&physical_target_root, &target_alias).map_err(|error| error.to_string())?;
+
+    let log_dir = unique_log_dir_at("symlink_target_root", &target_alias, 17, 23)?;
+    let expected_root = physical_target_root
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    ensure(
+        log_dir.starts_with(&expected_root),
+        format!(
+            "no-mocks log dir must use physical target root {}; got {}",
+            expected_root.display(),
+            log_dir.display()
+        ),
+    )?;
+    ensure(
+        !log_dir.starts_with(&target_alias),
+        "no-mocks log dir must not retain the target-root symlink alias",
+    )?;
+
+    let database_path = log_dir.join("workspace").join(".ee").join("ee.db");
+    let database_parent = database_path
+        .parent()
+        .ok_or_else(|| "test database path has no parent".to_owned())?;
+    fs::create_dir_all(database_parent).map_err(|error| error.to_string())?;
+    let mut current = PathBuf::new();
+    for component in database_path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => ensure(
+                !metadata.file_type().is_symlink(),
+                format!(
+                    "physical no-mocks workspace unexpectedly contains symlink component {}",
+                    current.display()
+                ),
+            )?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect no-mocks workspace component {}: {error}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn unix_ms_now() -> Result<u128, String> {
@@ -2774,6 +2851,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         })
         .map(|span| span.id.clone())
         .ok_or_else(|| "searchable imported evidence span is missing".to_owned())?;
+    let stored_workspace_id = workspaces[0].id.clone();
     let stored_session_id = sessions[0].id.clone();
     connection.close().map_err(|error| error.to_string())?;
 
@@ -2913,6 +2991,261 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         "immediate imported-evidence search must not report a stale index",
     )?;
 
+    let direct_evidence_query =
+        "x65f imported CASS evidence remains durable and searchable".to_owned();
+    let (_pack_event, pack_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "06_pack_imported_evidence_without_memory_projection",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "pack".to_owned(),
+                direct_evidence_query.clone(),
+                "--source-mode".to_owned(),
+                "lexical_only".to_owned(),
+                "--max-tokens".to_owned(),
+                "1200".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v2",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    let pack_items = json_array(&pack_json, "/data/pack/items", "CASS direct evidence pack")?;
+    let packed_evidence = pack_items
+        .iter()
+        .find(|item| {
+            item.get("evidenceSpanId").and_then(JsonValue::as_str)
+                == Some(searchable_evidence_id.as_str())
+        })
+        .ok_or_else(|| {
+            format!(
+                "pack did not select imported evidence {searchable_evidence_id}: {pack_items:?}"
+            )
+        })?;
+    ensure_equal(
+        &packed_evidence.get("entityKind"),
+        &Some(&json!("evidence_span")),
+        "CASS pack entity kind",
+    )?;
+    ensure_equal(
+        &packed_evidence.get("sessionId"),
+        &Some(&json!(stored_session_id.as_str())),
+        "CASS pack session identity",
+    )?;
+    ensure_equal(
+        &packed_evidence.get("selectedIn"),
+        &Some(&json!("direct_evidence")),
+        "CASS pack selection phase",
+    )?;
+    ensure_equal(
+        &packed_evidence.pointer("/trust/class"),
+        &Some(&json!("cass_evidence")),
+        "CASS pack trust class",
+    )?;
+    ensure_equal(
+        &packed_evidence.pointer("/trust/subclass"),
+        &Some(&json!("imported_transcript_excerpt")),
+        "CASS pack trust subclass",
+    )?;
+    ensure_equal(
+        &packed_evidence.pointer("/scores/utility"),
+        &Some(&json!(0.5)),
+        "CASS pack neutral utility",
+    )?;
+    ensure(
+        packed_evidence.get("memoryId").is_none(),
+        "direct imported evidence must not receive a synthetic memory identity",
+    )?;
+    let entity_revision = packed_evidence
+        .get("entityRevision")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| "CASS packed evidence omitted entityRevision".to_owned())?;
+    ensure(
+        entity_revision.starts_with("blake3:") && entity_revision.len() == 71,
+        format!("CASS packed evidence has non-canonical entityRevision {entity_revision:?}"),
+    )?;
+    ensure(
+        packed_evidence
+            .get("content")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|content| content.contains(direct_evidence_query.as_str())),
+        "CASS packed evidence must retain the imported transcript excerpt",
+    )?;
+    let packed_provenance = json_array(
+        packed_evidence,
+        "/provenance",
+        "CASS packed evidence provenance",
+    )?;
+    ensure(
+        packed_provenance.iter().any(|entry| {
+            entry
+                .get("uri")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|uri| {
+                    uri.starts_with(&format!("cass-session://{stored_session_id}#L"))
+                })
+        }),
+        format!("CASS packed evidence must expose session/line provenance: {packed_provenance:?}"),
+    )?;
+    ensure(
+        !pack_json
+            .pointer("/degraded")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.get("code").and_then(JsonValue::as_str)
+                        == Some("context_evidence_hit_unhydrated")
+                })
+            }),
+        "live-admitted CASS evidence pack must not report a hydration failure",
+    )?;
+    let direct_evidence_pack_hash =
+        string_at(&pack_json, "/data/pack/hash", "CASS direct evidence pack")?;
+    let packed_evidence_item_count = pack_items
+        .iter()
+        .filter(|item| item.get("entityKind").and_then(JsonValue::as_str) == Some("evidence_span"))
+        .count();
+
+    let pack_connection = DbConnection::open(DatabaseConfig::file(database_path.clone()))
+        .map_err(|error| format!("open database for CASS pack inspection: {error}"))?;
+    let persisted_pack_ids = pack_connection
+        .list_recent_pack_record_ids_for_workspace(&stored_workspace_id, 10)
+        .map_err(|error| format!("list CASS direct-evidence pack records: {error}"))?;
+    let direct_evidence_pack_id = persisted_pack_ids
+        .first()
+        .cloned()
+        .ok_or_else(|| "CASS direct-evidence pack was not persisted".to_owned())?;
+    let direct_evidence_pack_record = pack_connection
+        .get_pack_record(&direct_evidence_pack_id)
+        .map_err(|error| format!("load CASS direct-evidence pack record: {error}"))?
+        .ok_or_else(|| "CASS direct-evidence pack record disappeared".to_owned())?;
+    ensure_equal(
+        &direct_evidence_pack_record.query,
+        &direct_evidence_query,
+        "CASS direct-evidence persisted query",
+    )?;
+    ensure_equal(
+        &direct_evidence_pack_record.pack_hash,
+        &direct_evidence_pack_hash,
+        "CASS direct-evidence persisted pack hash",
+    )?;
+    let persisted_evidence_items = pack_connection
+        .get_pack_evidence_items(&direct_evidence_pack_id)
+        .map_err(|error| format!("load persisted CASS pack evidence: {error}"))?;
+    ensure_equal(
+        &persisted_evidence_items.len(),
+        &packed_evidence_item_count,
+        "CASS direct-evidence persisted item count",
+    )?;
+    let persisted_evidence = persisted_evidence_items
+        .iter()
+        .find(|item| item.evidence_id == searchable_evidence_id)
+        .ok_or_else(|| {
+            format!(
+                "persisted CASS pack omitted evidence {searchable_evidence_id}: {persisted_evidence_items:?}"
+            )
+        })?;
+    ensure_equal(
+        &persisted_evidence.evidence_id,
+        &searchable_evidence_id,
+        "CASS direct-evidence persisted identity",
+    )?;
+    ensure_equal(
+        &persisted_evidence.entity_revision.as_str(),
+        &entity_revision,
+        "CASS direct-evidence persisted revision",
+    )?;
+    ensure_equal(
+        &persisted_evidence.trust_class,
+        &"cass_evidence".to_owned(),
+        "CASS direct-evidence persisted trust class",
+    )?;
+    ensure_equal(
+        &persisted_evidence.trust_subclass,
+        &Some("imported_transcript_excerpt".to_owned()),
+        "CASS direct-evidence persisted trust subclass",
+    )?;
+    let parsed_direct_evidence_ledger = parse_stored_pack_ledger(&direct_evidence_pack_record);
+    ensure_equal(
+        &parsed_direct_evidence_ledger.status,
+        &ee::db::PackLedgerStatus::Available,
+        "CASS direct-evidence replay-ledger status",
+    )?;
+    let direct_evidence_ledger = parsed_direct_evidence_ledger
+        .available_ledger()
+        .ok_or_else(|| "CASS direct-evidence replay ledger is unavailable".to_owned())?;
+    let ledger_selected_items = json_array(
+        direct_evidence_ledger,
+        "/selectedItems",
+        "CASS direct-evidence replay ledger",
+    )?;
+    ensure(
+        ledger_selected_items.iter().any(|item| {
+            item.get("entityKind").and_then(JsonValue::as_str) == Some("evidence_span")
+                && item.get("entityId").and_then(JsonValue::as_str)
+                    == Some(searchable_evidence_id.as_str())
+                && item.get("evidenceSpanId").and_then(JsonValue::as_str)
+                    == Some(searchable_evidence_id.as_str())
+                && item.get("memoryId").is_none()
+        }),
+        format!(
+            "CASS replay ledger must preserve the typed evidence identity: {ledger_selected_items:?}"
+        ),
+    )?;
+    pack_connection.close().map_err(|error| error.to_string())?;
+
+    let (_replay_event, replay_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "07_replay_imported_evidence_pack",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "pack".to_owned(),
+                "replay".to_owned(),
+                direct_evidence_pack_id,
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.pack.replay.v2",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    ensure_equal(
+        &replay_json.pointer("/data/replay/status"),
+        &Some(&json!("available")),
+        "CASS direct-evidence replay status",
+    )?;
+    let replay_selected_items = json_array(
+        &replay_json,
+        "/data/replay/selectedItems",
+        "CASS direct-evidence public replay",
+    )?;
+    ensure(
+        replay_selected_items.iter().any(|item| {
+            item.get("entityKind").and_then(JsonValue::as_str) == Some("evidence_span")
+                && item.get("entityId").and_then(JsonValue::as_str)
+                    == Some(searchable_evidence_id.as_str())
+                && item.get("evidenceSpanId").and_then(JsonValue::as_str)
+                    == Some(searchable_evidence_id.as_str())
+                && item.get("memoryId").is_none()
+        }),
+        format!(
+            "public pack replay must preserve the typed evidence identity: {replay_selected_items:?}"
+        ),
+    )?;
+
     let failure_workspace = log_dir.join("publish-failure-workspace");
     fs::create_dir_all(&failure_workspace).map_err(|error| error.to_string())?;
     let failure_workspace_arg = failure_workspace.display().to_string();
@@ -2924,7 +3257,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &artifact_dir,
         &failure_workspace,
         StepSpec {
-            name: "06_init_publish_failure_workspace",
+            name: "08_init_publish_failure_workspace",
             args: vec![
                 "--workspace".to_owned(),
                 failure_workspace_arg.clone(),
@@ -2959,7 +3292,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &artifact_dir,
         &failure_workspace,
         StepSpec {
-            name: "07_import_commits_when_index_publish_fails",
+            name: "09_import_commits_when_index_publish_fails",
             args: vec![
                 "--workspace".to_owned(),
                 failure_workspace_arg.clone(),
@@ -3102,7 +3435,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &artifact_dir,
         &failure_workspace,
         StepSpec {
-            name: "08_reimport_retries_failed_index_publication",
+            name: "10_reimport_retries_failed_index_publication",
             args: vec![
                 "--workspace".to_owned(),
                 failure_workspace_arg.clone(),
@@ -3162,7 +3495,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &artifact_dir,
         &failure_workspace,
         StepSpec {
-            name: "09_reimport_reaches_ready_generation",
+            name: "11_reimport_reaches_ready_generation",
             args: vec![
                 "--workspace".to_owned(),
                 failure_workspace_arg.clone(),
@@ -3200,7 +3533,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &artifact_dir,
         &failure_workspace,
         StepSpec {
-            name: "10_reimport_session_id_is_exactly_searchable",
+            name: "12_reimport_session_id_is_exactly_searchable",
             args: vec![
                 "--workspace".to_owned(),
                 failure_workspace_arg.clone(),
@@ -3236,7 +3569,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &artifact_dir,
         &failure_workspace,
         StepSpec {
-            name: "11_reimport_evidence_id_is_exactly_searchable",
+            name: "13_reimport_evidence_id_is_exactly_searchable",
             args: vec![
                 "--workspace".to_owned(),
                 failure_workspace_arg,
