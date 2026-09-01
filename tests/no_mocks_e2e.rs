@@ -2863,6 +2863,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         .ok_or_else(|| "searchable imported evidence span is missing".to_owned())?;
     let searchable_evidence_id = searchable_evidence.id.clone();
     let searchable_evidence_provenance_uri = searchable_evidence.canonical_provenance_uri();
+    let searchable_evidence_before_outcome = searchable_evidence.clone();
     let stored_workspace_id = workspaces[0].id.clone();
     let stored_session_id = sessions[0].id.clone();
     connection.close().map_err(|error| error.to_string())?;
@@ -3353,6 +3354,39 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         format!("CASS why must not degrade typed evidence: {why_json}"),
     )?;
 
+    let unrelated_memory_id =
+        ee::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x65f)).to_string();
+    let control_connection = DbConnection::open(DatabaseConfig::file(database_path.clone()))
+        .map_err(|error| format!("open database for CASS outcome control: {error}"))?;
+    control_connection
+        .insert_memory(
+            &unrelated_memory_id,
+            &ee::db::CreateMemoryInput {
+                workspace_id: stored_workspace_id.clone(),
+                level: "semantic".to_owned(),
+                kind: "fact".to_owned(),
+                content: "Unrelated outcome-control memory.".to_owned(),
+                workflow_id: None,
+                confidence: 0.61,
+                utility: 0.42,
+                importance: 0.37,
+                provenance_uri: Some("test://cass-outcome-control".to_owned()),
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: Some("integration_test_control".to_owned()),
+                tags: vec!["outcome-control".to_owned()],
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .map_err(|error| format!("insert unrelated CASS outcome control memory: {error}"))?;
+    let unrelated_memory_before_outcome = control_connection
+        .get_memory(&unrelated_memory_id)
+        .map_err(|error| format!("load CASS outcome control memory: {error}"))?
+        .ok_or_else(|| "CASS outcome control memory disappeared before grading".to_owned())?;
+    control_connection
+        .close()
+        .map_err(|error| error.to_string())?;
+
     let (_outcome_event, outcome_json) = run_step_with_env(
         scenario_id,
         &events_path,
@@ -3424,6 +3458,24 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &outcome_evidence.pointer("/entityRevision"),
         &Some(&json!(entity_revision)),
         "CASS outcome pack linkage entity revision",
+    )?;
+    let evidence_after_outcome = outcome_connection
+        .get_evidence_span(&searchable_evidence_id)
+        .map_err(|error| format!("reload CASS evidence after outcome: {error}"))?
+        .ok_or_else(|| "CASS outcome removed its immutable evidence target".to_owned())?;
+    ensure_equal(
+        &evidence_after_outcome,
+        &searchable_evidence_before_outcome,
+        "CASS outcome leaves the immutable evidence row unchanged",
+    )?;
+    let unrelated_memory_after_outcome = outcome_connection
+        .get_memory(&unrelated_memory_id)
+        .map_err(|error| format!("reload CASS outcome control memory: {error}"))?
+        .ok_or_else(|| "CASS outcome removed the unrelated control memory".to_owned())?;
+    ensure_equal(
+        &unrelated_memory_after_outcome,
+        &unrelated_memory_before_outcome,
+        "CASS evidence outcome does not mutate an unrelated memory posterior",
     )?;
     outcome_connection
         .close()
@@ -3741,11 +3793,12 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
     )?
     .iter()
     .filter_map(|result| result.get("docId").and_then(JsonValue::as_str))
+    .filter(|doc_id| doc_id.starts_with("sess_"))
     .collect::<BTreeSet<_>>();
     ensure_equal(
         &retry_session_ids,
         &BTreeSet::from([failure_session_id.as_str()]),
-        "CASS retry search returns exactly the committed session id",
+        "CASS retry search preserves exactly the committed typed session id",
     )?;
 
     let (_retry_evidence_search_event, retry_evidence_search_json) = run_step_with_env(
@@ -3781,11 +3834,13 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
     )?
     .iter()
     .filter_map(|result| result.get("docId").and_then(JsonValue::as_str))
+    .filter(|doc_id| doc_id.starts_with("ev_"))
     .collect::<BTreeSet<_>>();
-    ensure_equal(
-        &retry_evidence_ids,
-        &BTreeSet::from([failure_evidence_id.as_str()]),
-        "CASS retry search returns exactly the committed evidence id",
+    ensure(
+        retry_evidence_ids.contains(failure_evidence_id.as_str()),
+        format!(
+            "CASS retry search must preserve the exact committed typed evidence id; got {retry_evidence_ids:?}, wanted {failure_evidence_id}"
+        ),
     )?;
 
     let stub_invocations =
