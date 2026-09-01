@@ -393,6 +393,24 @@ fn derived_asset_status(status_json: &Value, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn derived_asset<'a>(status_json: &'a Value, name: &str) -> Option<&'a Value> {
+    status_json
+        .pointer("/data/derivedAssets")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|asset| asset.get("name").and_then(Value::as_str) == Some(name))
+}
+
+fn doctor_check_severity<'a>(doctor_json: &'a Value, name: &str) -> Option<&'a str> {
+    doctor_json
+        .pointer("/data/checks")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|check| check.get("name").and_then(Value::as_str) == Some(name))
+        .and_then(|check| check.get("severity"))
+        .and_then(Value::as_str)
+}
+
 #[test]
 #[ignore = "spawned by the multiprocess source-snapshot regression"]
 fn multiprocess_snapshot_writer_helper() -> TestResult {
@@ -637,6 +655,148 @@ fn stale_index_search_degrades_to_lexical_fallback_and_recovers_after_rebuild() 
     ensure(
         degraded_codes(&recovered_search.json).is_empty(),
         "recovered search should not report stale-index degradation after rebuild",
+    )
+}
+
+#[test]
+fn ready_index_posture_is_coherent_across_public_cli_surfaces() -> TestResult {
+    let artifact_dir = unique_artifact_dir("ready-index-posture-coherence")?;
+    let workspace = artifact_dir.join("workspace");
+    fs::create_dir_all(&workspace)
+        .map_err(|error| format!("failed to create workspace: {error}"))?;
+
+    let init = run_ee_json(&workspace, ["init"], "coherence init")?;
+    assert_success(&init, "coherence init")?;
+    let memory_id = remember(
+        &workspace,
+        "coherentindex x65f public diagnostics share one ready generation authority",
+    )?;
+    let rebuild = run_ee_json(&workspace, ["index", "rebuild"], "coherence rebuild")?;
+    assert_success(&rebuild, "coherence rebuild")?;
+
+    // No writes occur after this point: every command observes the same durable
+    // workspace snapshot even though each public CLI invocation is a fresh
+    // process.
+    let index_status = run_ee_json(&workspace, ["index", "status"], "coherent index status")?;
+    assert_success(&index_status, "coherent index status")?;
+    ensure_equal(
+        &index_status.json.pointer("/data/health"),
+        &Some(&Value::String("ready".to_owned())),
+        "index status ready posture",
+    )?;
+    let database_generation = index_status
+        .json
+        .pointer("/data/dbGeneration")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("index status omitted dbGeneration: {}", index_status.stdout))?;
+    let index_generation = index_status
+        .json
+        .pointer("/data/indexGeneration")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            format!(
+                "index status omitted indexGeneration: {}",
+                index_status.stdout
+            )
+        })?;
+    ensure_equal(
+        &index_generation,
+        &database_generation,
+        "ready index status generation equality",
+    )?;
+
+    let status = run_ee_json(
+        &workspace,
+        ["--fields", "standard", "status"],
+        "coherent aggregate status",
+    )?;
+    assert_success(&status, "coherent aggregate status")?;
+    let search_asset = derived_asset(&status.json, "search_index")
+        .ok_or_else(|| format!("status omitted search_index asset: {}", status.stdout))?;
+    ensure_equal(
+        &search_asset.get("status"),
+        &Some(&Value::String("current".to_owned())),
+        "aggregate status ready posture",
+    )?;
+    ensure_equal(
+        &search_asset
+            .get("sourceHighWatermark")
+            .and_then(Value::as_u64),
+        &Some(database_generation),
+        "status source generation matches index status",
+    )?;
+    ensure_equal(
+        &search_asset
+            .get("assetHighWatermark")
+            .and_then(Value::as_u64),
+        &Some(index_generation),
+        "status asset generation matches index status",
+    )?;
+
+    let doctor = run_ee_json(&workspace, ["doctor", "--full"], "coherent doctor")?;
+    assert_success(&doctor, "coherent doctor")?;
+    ensure_equal(
+        &doctor_check_severity(&doctor.json, "search_index"),
+        &Some("ok"),
+        "doctor ready posture",
+    )?;
+
+    let search = run_ee_json(
+        &workspace,
+        [
+            "search",
+            "coherentindex x65f generation authority",
+            "--source-mode",
+            "lexical_only",
+            "--limit",
+            "10",
+        ],
+        "coherent search",
+    )?;
+    assert_success(&search, "coherent search")?;
+    ensure(
+        result_doc_ids(&search.json)?
+            .iter()
+            .any(|doc_id| doc_id == &memory_id),
+        format!("ready search omitted indexed memory: {}", search.stdout),
+    )?;
+    ensure(
+        !degraded_codes(&search.json)
+            .iter()
+            .any(|code| code == "search_index_stale" || code == "index_stale"),
+        format!(
+            "ready search contradicted index status with stale posture: {}",
+            search.stdout
+        ),
+    )?;
+
+    let pack = run_ee_json(
+        &workspace,
+        [
+            "pack",
+            "coherentindex x65f generation authority",
+            "--source-mode",
+            "lexical_only",
+            "--max-tokens",
+            "2048",
+        ],
+        "coherent pack",
+    )?;
+    assert_success(&pack, "coherent pack")?;
+    ensure(
+        pack_memory_ids(&pack.json)
+            .iter()
+            .any(|packed_id| packed_id == &memory_id),
+        format!("ready pack omitted indexed memory: {}", pack.stdout),
+    )?;
+    ensure(
+        !degraded_codes(&pack.json)
+            .iter()
+            .any(|code| code == "search_index_stale" || code == "index_stale"),
+        format!(
+            "ready pack contradicted index status with stale posture: {}",
+            pack.stdout
+        ),
     )
 }
 
