@@ -1802,7 +1802,7 @@ fn seed_inviter_team_and_invite(database_path: &Path, endpoint: &str) -> TestRes
         &connection,
         endpoint,
         CREATED_AT,
-        "2026-08-20T00:00:00Z",
+        "9999-12-31T23:59:59Z",
         Some(workspace_path),
     )
     .map_err(|error| format!("mint inviter invite: {error}"))?;
