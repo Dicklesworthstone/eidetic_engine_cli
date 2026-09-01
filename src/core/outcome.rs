@@ -337,6 +337,7 @@ impl CliOutcomeSummary {
 
 const ALLOWED_TARGET_TYPES: &[&str] = &[
     "memory",
+    "evidence",
     "procedure",
     "rule",
     "session",
@@ -2632,6 +2633,46 @@ fn resolve_target_workspace(
             })?;
         return Ok(TargetResolution {
             workspace_id: procedure.workspace_id,
+            verified: true,
+        });
+    }
+    if target_type == "evidence" {
+        let span = connection
+            .get_evidence_span(target_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query evidence target: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            })?
+            .ok_or_else(|| DomainError::NotFound {
+                resource: "evidence".to_owned(),
+                id: target_id.to_owned(),
+                repair: Some("ee search --help".to_owned()),
+            })?;
+        let session = connection
+            .get_session(&span.session_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query evidence provenance: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            })?
+            .ok_or_else(|| DomainError::NotFound {
+                resource: "evidence".to_owned(),
+                id: target_id.to_owned(),
+                repair: Some("ee import cass --help".to_owned()),
+            })?;
+        if !span.is_direct_pack_admitted_for_session(&span.workspace_id, &session) {
+            return Err(DomainError::PolicyDenied {
+                message: "Evidence target no longer has live pack admission.".to_owned(),
+                repair: Some("ee import status --json".to_owned()),
+            });
+        }
+        if workspace_id.is_some_and(|workspace_id| workspace_id != span.workspace_id) {
+            return Err(DomainError::PolicyDenied {
+                message: "Evidence target is not bound to the requested workspace.".to_owned(),
+                repair: Some("Use the workspace that owns the evidence span.".to_owned()),
+            });
+        }
+        return Ok(TargetResolution {
+            workspace_id: span.workspace_id,
             verified: true,
         });
     }

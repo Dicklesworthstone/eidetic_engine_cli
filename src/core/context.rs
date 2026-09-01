@@ -12147,13 +12147,7 @@ fn append_direct_evidence_pack_items(
                 .saturating_add(1),
         )
         .unwrap_or(u32::MAX);
-        let mut revision_hasher = blake3::Hasher::new();
-        revision_hasher.update(b"evidence_span");
-        revision_hasher.update(span.id.as_bytes());
-        revision_hasher.update(span.content_hash.as_bytes());
-        revision_hasher.update(&span.canonical_provenance_revision.to_le_bytes());
-        revision_hasher.update(&span.security_policy_epoch.to_le_bytes());
-        let entity_revision = format!("blake3:{}", revision_hasher.finalize().to_hex());
+        let entity_revision = span.pack_entity_revision();
         let why = format!(
             "matched '{}' via {} (relevance {:.4}, utility 0.5000); selected live-admitted imported evidence {}",
             request.query,

@@ -559,6 +559,12 @@ pub struct WhyReport {
     pub version: &'static str,
     /// Memory ID that was queried.
     pub memory_id: String,
+    /// Canonical typed identity for non-memory explanation targets.
+    ///
+    /// Memory reports retain the legacy `memory_id` surface. Typed entities
+    /// use this block so callers never have to reinterpret an evidence id as
+    /// a synthetic memory id.
+    pub entity: Option<WhyEntityExplanation>,
     /// Whether the memory was found.
     pub found: bool,
     /// Full memory body text when the memory was found. `None` when the memory
@@ -627,6 +633,15 @@ pub struct WhyReport {
     /// only for team-synced memories. `producedAt` is member-attested
     /// provenance, never ranking or authorization authority.
     pub elevation: Option<TeamElevationExplanation>,
+}
+
+/// Typed identity and source-specific details for an `ee why` target.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WhyEntityExplanation {
+    pub kind: String,
+    pub id: String,
+    pub revision: Option<String>,
+    pub details: JsonValue,
 }
 
 /// Structured elevation decision for a team-synced inbound memory.
@@ -731,6 +746,7 @@ impl WhyReport {
         Self {
             version: env!("CARGO_PKG_VERSION"),
             memory_id,
+            entity: None,
             found: true,
             content: None,
             storage: Some(storage),
@@ -811,12 +827,20 @@ impl WhyReport {
         self
     }
 
+    /// Attach the canonical identity for a non-memory explanation target.
+    #[must_use]
+    pub fn with_entity(mut self, entity: WhyEntityExplanation) -> Self {
+        self.entity = Some(entity);
+        self
+    }
+
     /// Create a report for a not-found memory.
     #[must_use]
     pub fn not_found(memory_id: String) -> Self {
         Self {
             version: env!("CARGO_PKG_VERSION"),
             memory_id,
+            entity: None,
             found: false,
             content: None,
             storage: None,
@@ -854,6 +878,7 @@ impl WhyReport {
         Self {
             version: env!("CARGO_PKG_VERSION"),
             memory_id,
+            entity: None,
             found: false,
             content: None,
             storage: None,
@@ -1253,10 +1278,177 @@ pub fn explain_memory_seeded(
     explain_memory(options)
 }
 
+fn explain_evidence_with_connection(
+    options: &WhyOptions<'_>,
+    conn: &DbConnection,
+    evidence_id: &str,
+) -> WhyReport {
+    let span = match conn.get_evidence_span(evidence_id) {
+        Ok(Some(span)) => span,
+        Ok(None) => return WhyReport::not_found(evidence_id.to_owned()),
+        Err(error) => {
+            return WhyReport::error(
+                evidence_id.to_owned(),
+                format!("Failed to query evidence span: {error}"),
+            );
+        }
+    };
+    let session = match conn.get_session(&span.session_id) {
+        Ok(Some(session)) => session,
+        Ok(None) => return WhyReport::not_found(evidence_id.to_owned()),
+        Err(error) => {
+            return WhyReport::error(
+                evidence_id.to_owned(),
+                format!("Failed to query evidence provenance: {error}"),
+            );
+        }
+    };
+    if !span.is_direct_pack_admitted_for_session(&span.workspace_id, &session) {
+        return WhyReport::not_found(evidence_id.to_owned());
+    }
+
+    let egress = crate::policy::redact_public_replay_text(&span.excerpt);
+    let redaction_classes =
+        serde_json::from_str::<Vec<String>>(&span.redaction_classes_json).unwrap_or_default();
+    let latest_pack_selection =
+        match latest_pack_selection(conn, &span.workspace_id, "evidence_span", evidence_id) {
+            Ok(selection) => selection,
+            Err(message) => {
+                return evidence_why_report(
+                    options,
+                    &span,
+                    &session,
+                    egress,
+                    redaction_classes,
+                    None,
+                )
+                .with_degradation(WhyDegradation {
+                    code: "why_pack_selection_unavailable",
+                    severity: "low",
+                    message,
+                    repair: Some("ee doctor --json".to_owned()),
+                });
+            }
+        };
+    evidence_why_report(
+        options,
+        &span,
+        &session,
+        egress,
+        redaction_classes,
+        latest_pack_selection,
+    )
+}
+
+fn evidence_why_report(
+    options: &WhyOptions<'_>,
+    span: &crate::db::StoredEvidenceSpan,
+    session: &crate::db::StoredSession,
+    egress: crate::policy::PublicReplayTextRedactionReport,
+    redaction_classes: Vec<String>,
+    latest_pack_selection: Option<PackSelectionExplanation>,
+) -> WhyReport {
+    let search_admitted = span.is_search_admitted_for_session(&span.workspace_id, session);
+    let pack_admitted = span.is_direct_pack_admitted_for_session(&span.workspace_id, session);
+    let selection_score = latest_pack_selection
+        .as_ref()
+        .map_or(0.0, |selection| selection.relevance);
+    let egress_reasons = egress
+        .redacted_reasons
+        .iter()
+        .map(|reason| (*reason).to_owned())
+        .collect::<Vec<_>>();
+    let entity = WhyEntityExplanation {
+        kind: "evidence_span".to_owned(),
+        id: span.id.clone(),
+        revision: Some(span.pack_entity_revision()),
+        details: serde_json::json!({
+            "workspaceId": &span.workspace_id,
+            "session": {
+                "id": &session.id,
+                "startLine": span.start_line,
+                "endLine": span.end_line,
+            },
+            "producer": {
+                "kind": &span.producer_kind,
+                "spanKind": &span.span_kind,
+                "role": &span.role,
+            },
+            "screening": {
+                "version": span.screening_version,
+                "instructionRisk": &span.instruction_risk,
+                "securityPolicyEpoch": span.security_policy_epoch,
+                "canonicalProvenanceRevision": span.canonical_provenance_revision,
+                "excerptHashVerified": true,
+            },
+            "redaction": {
+                "status": &span.secret_redaction_status,
+                "classes": redaction_classes,
+                "egressRedacted": egress.redacted,
+                "egressReasons": egress_reasons,
+            },
+            "admission": {
+                "posture": if pack_admitted { "admitted" } else { "denied" },
+                "search": search_admitted,
+                "pack": pack_admitted,
+            },
+        }),
+    };
+    WhyReport::found(
+        span.id.clone(),
+        StorageExplanation {
+            origin: "Imported CASS evidence span".to_owned(),
+            trust_class: "cass_evidence".to_owned(),
+            trust_subclass: Some("imported_transcript_excerpt".to_owned()),
+            provenance_uri: Some(span.canonical_provenance_uri()),
+            workflow_id: None,
+            created_at: span.created_at.clone(),
+            valid_from: session.started_at.clone(),
+            valid_to: session.ended_at.clone(),
+            validity_status: "not_applicable".to_owned(),
+            validity_window_kind: "session_line_range".to_owned(),
+        },
+        RetrievalExplanation {
+            confidence: 0.0,
+            utility: 0.5,
+            importance: 0.0,
+            tags: vec![
+                "typed_entity:evidence_span".to_owned(),
+                format!("producer:{}", span.producer_kind),
+                "search_admitted".to_owned(),
+                "pack_admitted".to_owned(),
+            ],
+            level: "evidence".to_owned(),
+            kind: "evidence_span".to_owned(),
+        },
+        SelectionExplanation {
+            selection_score,
+            above_confidence_threshold: latest_pack_selection
+                .as_ref()
+                .is_some_and(|selection| selection.relevance >= options.confidence_threshold),
+            is_active: pack_admitted,
+            score_breakdown: "typed evidence has no memory confidence posterior; selectionScore is the latest integrity-verified pack relevance when available"
+                .to_owned(),
+            latest_pack_selection,
+        },
+    )
+    .with_content(egress.content)
+    .with_entity(entity)
+    .with_lifecycle(LifecycleExplanation {
+        status: "admitted",
+        tombstoned_at: None,
+        tombstoned_reason: None,
+    })
+}
+
 pub fn explain_memory_with_connection(options: &WhyOptions<'_>, conn: &DbConnection) -> WhyReport {
     let started = Instant::now();
     let target = resolve_why_target(options.memory_id);
     let memory_id = target.document_id;
+
+    if target.result_source == Some(WhyResultDocumentSource::Evidence) {
+        return explain_evidence_with_connection(options, conn, memory_id);
+    }
 
     if let Some(source) = target.unsupported_result_source() {
         return WhyReport::unsupported_result_target(memory_id.to_string(), source, conn);
@@ -1414,57 +1606,57 @@ pub fn explain_memory_with_connection(options: &WhyOptions<'_>, conn: &DbConnect
     let counterfactual_influence =
         why_counterfactual_influence(memory_id, selection_score, why_influence_candidates(&links));
 
-    let latest_pack_selection = match latest_pack_selection(&conn, &memory.workspace_id, memory_id)
-    {
-        Ok(selection) => selection,
-        Err(message) => {
-            let report = build_report(
-                memory_id,
-                storage,
-                retrieval,
-                ReportSelectionInputs {
-                    is_active,
-                    selection_score,
-                    above_threshold,
-                    latest_pack_selection: None,
-                    lifecycle,
-                    contradictions,
-                    links,
-                    history,
-                    rationale_traces,
-                    verification_evidence: Vec::new(),
-                    coordination_fallback_evidence,
-                    attestation_manifest,
-                    graph_retrieval,
-                    load_bearing,
-                    degraded: evidence_degradations,
-                    agent_profile,
-                    dedup_link: find_embed_dedup_link(&conn, memory_id),
-                    seal: fetch_seal(&conn, &memory),
-                },
-            )
-            .with_content(memory.content.clone())
-            .with_provenance_health(provenance_health.clone())
-            .with_optional_team_provenance(crate::core::memory_scope::team_provenance_from_memory(
-                &memory,
-            ))
-            .with_optional_elevation(team_elevation_from_memory(&memory))
-            .with_counterfactual_influence(counterfactual_influence);
-            trace_why_math_surfaces(
-                &memory.workspace_id,
-                memory_id,
-                "response",
-                started,
-                &["why_pack_selection_unavailable"],
-            );
-            return report.with_degradation(WhyDegradation {
-                code: "why_pack_selection_unavailable",
-                severity: "low",
-                message,
-                repair: Some("ee doctor --json".to_string()),
-            });
-        }
-    };
+    let latest_pack_selection =
+        match latest_pack_selection(&conn, &memory.workspace_id, "memory", memory_id) {
+            Ok(selection) => selection,
+            Err(message) => {
+                let report = build_report(
+                    memory_id,
+                    storage,
+                    retrieval,
+                    ReportSelectionInputs {
+                        is_active,
+                        selection_score,
+                        above_threshold,
+                        latest_pack_selection: None,
+                        lifecycle,
+                        contradictions,
+                        links,
+                        history,
+                        rationale_traces,
+                        verification_evidence: Vec::new(),
+                        coordination_fallback_evidence,
+                        attestation_manifest,
+                        graph_retrieval,
+                        load_bearing,
+                        degraded: evidence_degradations,
+                        agent_profile,
+                        dedup_link: find_embed_dedup_link(&conn, memory_id),
+                        seal: fetch_seal(&conn, &memory),
+                    },
+                )
+                .with_content(memory.content.clone())
+                .with_provenance_health(provenance_health.clone())
+                .with_optional_team_provenance(
+                    crate::core::memory_scope::team_provenance_from_memory(&memory),
+                )
+                .with_optional_elevation(team_elevation_from_memory(&memory))
+                .with_counterfactual_influence(counterfactual_influence);
+                trace_why_math_surfaces(
+                    &memory.workspace_id,
+                    memory_id,
+                    "response",
+                    started,
+                    &["why_pack_selection_unavailable"],
+                );
+                return report.with_degradation(WhyDegradation {
+                    code: "why_pack_selection_unavailable",
+                    severity: "low",
+                    message,
+                    repair: Some("ee doctor --json".to_string()),
+                });
+            }
+        };
 
     let report = build_report(
         memory_id,
@@ -1878,6 +2070,7 @@ fn why_provenance_health_degradation(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WhyResultDocumentSource {
     Memory,
+    Evidence,
     Session,
     Artifact,
     CurationCandidate,
@@ -1888,6 +2081,8 @@ impl WhyResultDocumentSource {
     fn from_document_id(document_id: &str) -> Self {
         if document_id.starts_with("mem_") {
             Self::Memory
+        } else if document_id.starts_with("ev_") {
+            Self::Evidence
         } else if document_id.starts_with("sess_") {
             Self::Session
         } else if document_id.starts_with("art_") {
@@ -1902,6 +2097,7 @@ impl WhyResultDocumentSource {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Memory => "memory",
+            Self::Evidence => "evidence_span",
             Self::Session => "session",
             Self::Artifact => "artifact",
             Self::CurationCandidate => "curation_candidate",
@@ -1912,6 +2108,7 @@ impl WhyResultDocumentSource {
     const fn human_label(self) -> &'static str {
         match self {
             Self::Memory => "memory",
+            Self::Evidence => "CASS evidence span",
             Self::Session => "CASS session",
             Self::Artifact => "artifact",
             Self::CurationCandidate => "curation candidate",
@@ -1930,6 +2127,7 @@ impl WhyResultDocumentSource {
     const fn repair(self) -> &'static str {
         match self {
             Self::Memory => "ee why --help",
+            Self::Evidence => "ee why --help",
             Self::Session => "ee import sessions --json",
             Self::Artifact => "ee artifact show --help",
             Self::CurationCandidate => "ee curate show --help",
@@ -1947,14 +2145,16 @@ struct WhyTarget<'a> {
 impl WhyTarget<'_> {
     const fn unsupported_result_source(self) -> Option<WhyResultDocumentSource> {
         match self.result_source {
-            Some(WhyResultDocumentSource::Memory) | None => None,
+            Some(WhyResultDocumentSource::Memory | WhyResultDocumentSource::Evidence) | None => {
+                None
+            }
             Some(source) => Some(source),
         }
     }
 }
 
 fn resolve_why_target(target_id: &str) -> WhyTarget<'_> {
-    target_id
+    let resolved = target_id
         .strip_prefix("result:")
         .filter(|doc_id| !doc_id.trim().is_empty())
         .map_or(
@@ -1966,7 +2166,18 @@ fn resolve_why_target(target_id: &str) -> WhyTarget<'_> {
                 document_id,
                 result_source: Some(WhyResultDocumentSource::from_document_id(document_id)),
             },
-        )
+        );
+    if resolved.result_source.is_none()
+        && WhyResultDocumentSource::from_document_id(resolved.document_id)
+            == WhyResultDocumentSource::Evidence
+    {
+        WhyTarget {
+            document_id: resolved.document_id,
+            result_source: Some(WhyResultDocumentSource::Evidence),
+        }
+    } else {
+        resolved
+    }
 }
 
 #[cfg(test)]
@@ -2018,6 +2229,7 @@ fn unsupported_result_target_storage(
                 },
             )
         }
+        WhyResultDocumentSource::Evidence => generic_unsupported_storage(document_id, source),
         WhyResultDocumentSource::CurationCandidate | WhyResultDocumentSource::Unknown => {
             generic_unsupported_storage(document_id, source)
         }
@@ -2727,7 +2939,8 @@ fn agent_context_profile_agent_hash(agent_name: &str) -> String {
 fn latest_pack_selection(
     conn: &DbConnection,
     workspace_id: &str,
-    memory_id: &str,
+    entity_kind: &str,
+    entity_id: &str,
 ) -> Result<Option<PackSelectionExplanation>, String> {
     const RECORD_SCAN_LIMIT: u32 = 128;
     let pack_ids = conn
@@ -2758,7 +2971,14 @@ fn latest_pack_selection(
         let Some(item) = crate::db::pack_ledger_core_array(ledger, "selectedItems")
             .into_iter()
             .flatten()
-            .find(|item| item.get("memoryId").and_then(JsonValue::as_str) == Some(memory_id))
+            .find(|item| {
+                let typed_match = item.get("entityKind").and_then(JsonValue::as_str)
+                    == Some(entity_kind)
+                    && item.get("entityId").and_then(JsonValue::as_str) == Some(entity_id);
+                let legacy_memory_match = entity_kind == "memory"
+                    && item.get("memoryId").and_then(JsonValue::as_str) == Some(entity_id);
+                typed_match || legacy_memory_match
+            })
         else {
             continue;
         };

@@ -2854,14 +2854,15 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         }),
         "evidence spans must retain only hashed upstream references with admitted CASS posture",
     )?;
-    let searchable_evidence_id = spans
+    let searchable_evidence = spans
         .iter()
         .find(|span| {
             span.excerpt
                 .contains("x65f imported CASS evidence remains durable and searchable")
         })
-        .map(|span| span.id.clone())
         .ok_or_else(|| "searchable imported evidence span is missing".to_owned())?;
+    let searchable_evidence_id = searchable_evidence.id.clone();
+    let searchable_evidence_provenance_uri = searchable_evidence.canonical_provenance_uri();
     let stored_workspace_id = workspaces[0].id.clone();
     let stored_session_id = sessions[0].id.clone();
     connection.close().map_err(|error| error.to_string())?;
@@ -3079,10 +3080,15 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &Some(&json!("imported_transcript_excerpt")),
         "CASS pack trust subclass",
     )?;
-    ensure_equal(
-        &packed_evidence.pointer("/scores/utility"),
-        &Some(&json!(0.5)),
-        "CASS pack neutral utility",
+    ensure(
+        packed_evidence
+            .pointer("/scores/utility")
+            .and_then(JsonValue::as_f64)
+            == Some(0.5),
+        format!(
+            "CASS pack neutral utility must be numerically 0.5: {:?}",
+            packed_evidence.pointer("/scores/utility")
+        ),
     )?;
     ensure(
         packed_evidence.get("memoryId").is_none(),
@@ -3197,6 +3203,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &Some("imported_transcript_excerpt".to_owned()),
         "CASS direct-evidence persisted trust subclass",
     )?;
+    let persisted_evidence_rank = persisted_evidence.rank;
     let parsed_direct_evidence_ledger = parse_stored_pack_ledger(&direct_evidence_pack_record);
     ensure_equal(
         &parsed_direct_evidence_ledger.status,
@@ -3239,7 +3246,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
                 "--json".to_owned(),
                 "pack".to_owned(),
                 "replay".to_owned(),
-                direct_evidence_pack_id,
+                direct_evidence_pack_id.clone(),
             ],
             expected_exit_code: 0,
             expected_schema: "ee.pack.replay.v2",
@@ -3270,6 +3277,157 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
             "public pack replay must preserve the typed evidence identity: {replay_selected_items:?}"
         ),
     )?;
+
+    let (_why_event, why_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "07a_explain_imported_evidence",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "why".to_owned(),
+                searchable_evidence_id.clone(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v2",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    ensure_equal(
+        &why_json.pointer("/data/entity/kind"),
+        &Some(&json!("evidence_span")),
+        "CASS why typed entity kind",
+    )?;
+    ensure_equal(
+        &why_json.pointer("/data/entity/id"),
+        &Some(&json!(searchable_evidence_id.as_str())),
+        "CASS why typed entity id",
+    )?;
+    ensure_equal(
+        &why_json.pointer("/data/memoryId"),
+        &Some(&JsonValue::Null),
+        "CASS why must not synthesize a memory identity",
+    )?;
+    ensure_equal(
+        &why_json.pointer("/data/entity/revision"),
+        &Some(&json!(entity_revision)),
+        "CASS why typed entity revision",
+    )?;
+    ensure_equal(
+        &why_json.pointer("/data/entity/details/session/id"),
+        &Some(&json!(stored_session_id.as_str())),
+        "CASS why session provenance",
+    )?;
+    ensure_equal(
+        &why_json.pointer("/data/entity/details/admission/posture"),
+        &Some(&json!("admitted")),
+        "CASS why live admission posture",
+    )?;
+    ensure_equal(
+        &why_json.pointer("/data/storage/provenanceUri"),
+        &Some(&json!(searchable_evidence_provenance_uri)),
+        "CASS why canonical session-line provenance",
+    )?;
+    ensure_equal(
+        &why_json.pointer("/data/selection/latestPackSelection/rank"),
+        &Some(&json!(persisted_evidence_rank)),
+        "CASS why latest pack selection rank",
+    )?;
+    ensure(
+        why_json
+            .pointer("/data/content")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|content| content.contains(direct_evidence_query.as_str())),
+        "CASS why must return the redaction-safe evidence excerpt",
+    )?;
+    ensure(
+        why_json
+            .pointer("/degraded")
+            .and_then(JsonValue::as_array)
+            .is_some_and(Vec::is_empty),
+        format!("CASS why must not degrade typed evidence: {why_json}"),
+    )?;
+
+    let (_outcome_event, outcome_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "07b_grade_imported_evidence_pack_item",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "outcome".to_owned(),
+                "--pack".to_owned(),
+                direct_evidence_pack_id.clone(),
+                "--item".to_owned(),
+                persisted_evidence_rank.to_string(),
+                "--signal".to_owned(),
+                "helpful".to_owned(),
+                "--reason".to_owned(),
+                "Imported evidence directly supported the completed task.".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v2",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    ensure_equal(
+        &outcome_json.pointer("/data/target/type"),
+        &Some(&json!("evidence")),
+        "CASS outcome typed target",
+    )?;
+    ensure_equal(
+        &outcome_json.pointer("/data/target/id"),
+        &Some(&json!(searchable_evidence_id.as_str())),
+        "CASS outcome evidence identity",
+    )?;
+    ensure_equal(
+        &outcome_json.pointer("/data/target/verified"),
+        &Some(&json!(true)),
+        "CASS outcome live target verification",
+    )?;
+    ensure_equal(
+        &outcome_json.pointer("/data/confidence"),
+        &Some(&JsonValue::Null),
+        "CASS outcome must not mutate a memory posterior",
+    )?;
+    let outcome_connection = DbConnection::open(DatabaseConfig::file(database_path.clone()))
+        .map_err(|error| format!("open database for CASS outcome inspection: {error}"))?;
+    let evidence_feedback = outcome_connection
+        .list_feedback_events_for_target("evidence", &searchable_evidence_id)
+        .map_err(|error| format!("list CASS evidence outcome rows: {error}"))?;
+    ensure_equal(
+        &evidence_feedback.len(),
+        &1_usize,
+        "CASS evidence outcome row count",
+    )?;
+    let outcome_evidence = evidence_feedback[0]
+        .evidence_json
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<JsonValue>(value).ok())
+        .ok_or_else(|| "CASS evidence outcome omitted typed pack linkage".to_owned())?;
+    ensure_equal(
+        &outcome_evidence.pointer("/entityKind"),
+        &Some(&json!("evidence_span")),
+        "CASS outcome pack linkage entity kind",
+    )?;
+    ensure_equal(
+        &outcome_evidence.pointer("/entityRevision"),
+        &Some(&json!(entity_revision)),
+        "CASS outcome pack linkage entity revision",
+    )?;
+    outcome_connection
+        .close()
+        .map_err(|error| error.to_string())?;
 
     let failure_workspace = log_dir.join("publish-failure-workspace");
     fs::create_dir_all(&failure_workspace).map_err(|error| error.to_string())?;
@@ -3567,6 +3725,8 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
                 "CASS session codex".to_owned(),
                 "--source-mode".to_owned(),
                 "lexical_only".to_owned(),
+                "--relevance-floor".to_owned(),
+                "0.0".to_owned(),
             ],
             expected_exit_code: 0,
             expected_schema: "ee.response.v2",
@@ -3603,6 +3763,8 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
                 "x65f imported CASS evidence remains durable and searchable".to_owned(),
                 "--source-mode".to_owned(),
                 "lexical_only".to_owned(),
+                "--relevance-floor".to_owned(),
+                "0.0".to_owned(),
                 "--limit".to_owned(),
                 "10".to_owned(),
             ],

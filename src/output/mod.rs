@@ -6391,7 +6391,7 @@ pub fn render_why_json(report: &WhyReport) -> String {
         "data": {
             "command": "why",
             "version": report.version,
-            "memoryId": &report.memory_id,
+            "memoryId": report.entity.is_none().then_some(&report.memory_id),
             "found": report.found,
             "content": &report.content,
             "storage": storage,
@@ -6411,6 +6411,21 @@ pub fn render_why_json(report: &WhyReport) -> String {
         },
         "degraded": degraded,
     });
+    if let Some(entity) = &report.entity
+        && let Some(data) = json
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        data.insert(
+            "entity".to_owned(),
+            serde_json::json!({
+                "kind": &entity.kind,
+                "id": &entity.id,
+                "revision": &entity.revision,
+                "details": &entity.details,
+            }),
+        );
+    }
     if let Some(load_bearing) = load_bearing
         && let Some(data) = json
             .get_mut("data")

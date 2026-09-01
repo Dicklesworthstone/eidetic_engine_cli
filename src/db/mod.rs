@@ -12599,6 +12599,22 @@ pub struct StoredEvidenceSpan {
 }
 
 impl StoredEvidenceSpan {
+    /// Canonical revision bound into direct-evidence pack items and replay.
+    ///
+    /// Keep this calculation beside the authoritative row so pack assembly,
+    /// persistence validation, explanation, and feedback resolve exactly the
+    /// same immutable evidence revision.
+    #[must_use]
+    pub fn pack_entity_revision(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"evidence_span");
+        hasher.update(self.id.as_bytes());
+        hasher.update(self.content_hash.as_bytes());
+        hasher.update(&self.canonical_provenance_revision.to_le_bytes());
+        hasher.update(&self.security_policy_epoch.to_le_bytes());
+        format!("blake3:{}", hasher.finalize().to_hex())
+    }
+
     /// Public provenance never contains an upstream path or upstream identifier.
     ///
     /// Only positively identified CASS producers use the `cass-session` scheme.
@@ -29417,13 +29433,7 @@ impl DbConnection {
                     message: "pack evidence no longer has live pack admission".to_owned(),
                 });
             }
-            let mut revision_hasher = blake3::Hasher::new();
-            revision_hasher.update(b"evidence_span");
-            revision_hasher.update(span.id.as_bytes());
-            revision_hasher.update(span.content_hash.as_bytes());
-            revision_hasher.update(&span.canonical_provenance_revision.to_le_bytes());
-            revision_hasher.update(&span.security_policy_epoch.to_le_bytes());
-            let expected_revision = format!("blake3:{}", revision_hasher.finalize().to_hex());
+            let expected_revision = span.pack_entity_revision();
             if item.entity_revision != expected_revision {
                 return Err(DbError::MalformedRow {
                     operation: DbOperation::Execute,

@@ -10522,7 +10522,7 @@ pub struct OutcomeArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub stdin: bool,
 
-    /// Resolve the target memory from a persisted pack's replay ledger
+    /// Resolve the typed target from a persisted pack's replay ledger
     /// (use with --item; replaces TARGET_ID).
     #[arg(long, value_name = "PACK_ID", conflicts_with = "target_id")]
     pub pack: Option<String>,
@@ -10531,7 +10531,7 @@ pub struct OutcomeArgs {
     #[arg(long, value_name = "N", requires = "pack")]
     pub item: Option<u32>,
 
-    /// Target type: memory, rule, session, source, pack, or candidate.
+    /// Target type: memory, evidence, rule, session, source, pack, or candidate.
     #[arg(long, default_value = "memory")]
     pub target_type: String,
 
@@ -10688,8 +10688,8 @@ pub struct TrustReportArgs {
 /// Arguments for `ee why`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct WhyArgs {
-    /// Memory ID to explain.
-    #[arg(value_name = "MEMORY_ID")]
+    /// Memory ID or admitted evidence-span ID to explain.
+    #[arg(value_name = "ENTITY_ID")]
     pub memory_id: String,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
@@ -47821,6 +47821,14 @@ fn format_search_toon_with_mesh_in_process(
 
 const PACK_LEDGER_MISSING_CODE: &str = "pack_ledger_missing";
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedOutcomePackItemTarget {
+    target_type: String,
+    target_id: String,
+    workspace_id: String,
+    entity_revision: Option<String>,
+}
+
 /// bd-1pi9m.5: resolve `--pack <id> --item <n>` to the packed memory id
 /// through the persisted pack replay ledger, so an agent can grade item
 /// 3 of a pack it consumed without ever copying a memory id. Degrades
@@ -47830,7 +47838,7 @@ fn resolve_outcome_pack_item_target(
     args: &OutcomeArgs,
     pack_id: &str,
     item: u32,
-) -> Result<String, DomainError> {
+) -> Result<ResolvedOutcomePackItemTarget, DomainError> {
     if item == 0 {
         return Err(DomainError::Usage {
             message: "--item is 1-based; item 0 does not exist".to_owned(),
@@ -47944,19 +47952,112 @@ fn resolve_outcome_pack_item_target(
             repair: Some("ee doctor --json".to_owned()),
         }
     })?;
-    let memory_id = items
+    let selected_item = items
         .iter()
         .find(|candidate| {
             candidate.get("rank").and_then(serde_json::Value::as_u64) == Some(u64::from(item))
         })
-        .and_then(|candidate| candidate.get("memoryId"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
         .ok_or_else(|| DomainError::Usage {
             message: format!(
                 "pack {public_pack_id} has no item with rank {item} (ledger holds {} items)",
                 items.len()
             ),
+            repair: Some("Inspect the ledger with `ee pack replay <pack-id> --json`.".to_owned()),
+        })?;
+    if selected_item
+        .get("entityKind")
+        .and_then(serde_json::Value::as_str)
+        == Some("evidence_span")
+    {
+        let evidence_id = selected_item
+            .get("entityId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|entity_id| {
+                selected_item
+                    .get("evidenceSpanId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(*entity_id)
+            })
+            .ok_or_else(|| DomainError::Storage {
+                message: "Verified pack replay evidence has inconsistent evidence identity."
+                    .to_owned(),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        let entity_revision = selected_item
+            .get("entityRevision")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| DomainError::Storage {
+                message: "Verified pack replay evidence omitted the evidence revision.".to_owned(),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        let span = connection
+            .get_evidence_span(evidence_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to verify the packed evidence span: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?
+            .ok_or_else(|| DomainError::Storage {
+                message: "Verified pack replay evidence references a missing evidence span."
+                    .to_owned(),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        let session = connection
+            .get_session(&span.session_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to verify packed evidence provenance: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?
+            .ok_or_else(|| DomainError::Storage {
+                message: "Verified pack replay evidence references a missing session.".to_owned(),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        if span.workspace_id != expected_workspace_id
+            || !span.is_direct_pack_admitted_for_session(&expected_workspace_id, &session)
+        {
+            return Err(DomainError::PolicyDenied {
+                message: "Packed evidence no longer has live admission in this workspace."
+                    .to_owned(),
+                repair: Some("Inspect the evidence with `ee why <evidence-id> --json`.".to_owned()),
+            });
+        }
+        let current_revision = span.pack_entity_revision();
+        if current_revision != entity_revision {
+            return Err(DomainError::PolicyDenied {
+                message: "Packed evidence changed after the recorded pack selection.".to_owned(),
+                repair: Some("Build a fresh pack before recording outcome feedback.".to_owned()),
+            });
+        }
+        let persisted_items = connection
+            .get_pack_evidence_items(&record.id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to verify persisted pack evidence: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        if !persisted_items.iter().any(|persisted| {
+            persisted.rank == item
+                && persisted.evidence_id == evidence_id
+                && persisted.entity_revision == entity_revision
+        }) {
+            return Err(DomainError::Storage {
+                message: "Verified replay ledger does not match the persisted evidence item."
+                    .to_owned(),
+                repair: Some("ee doctor --json".to_owned()),
+            });
+        }
+        return Ok(ResolvedOutcomePackItemTarget {
+            target_type: "evidence".to_owned(),
+            target_id: evidence_id.to_owned(),
+            workspace_id: expected_workspace_id,
+            entity_revision: Some(entity_revision.to_owned()),
+        });
+    }
+
+    let memory_id = selected_item
+        .get("memoryId")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| DomainError::Storage {
+            message: "Verified pack replay evidence has an unsupported typed entity.".to_owned(),
             repair: Some("Inspect the ledger with `ee pack replay <pack-id> --json`.".to_owned()),
         })?;
     let memory = connection
@@ -47975,7 +48076,12 @@ fn resolve_outcome_pack_item_target(
             repair: Some("Inspect the database with `ee doctor --json`.".to_owned()),
         });
     }
-    Ok(memory_id)
+    Ok(ResolvedOutcomePackItemTarget {
+        target_type: "memory".to_owned(),
+        target_id: memory_id,
+        workspace_id: expected_workspace_id,
+        entity_revision: None,
+    })
 }
 
 /// bd-1pi9m.5: `ee outcome trace <memory-id>` — read-only feedback
@@ -48142,7 +48248,7 @@ where
     let resolved_pack_target = match (&args.pack, args.item) {
         (Some(pack_id), Some(item)) => {
             match resolve_outcome_pack_item_target(cli, args, pack_id, item) {
-                Ok(memory_id) => {
+                Ok(target) => {
                     // Persist the pack linkage on the event: the resolution
                     // otherwise collapses --pack/--item into a bare memory
                     // target, leaving the ADR-0070 dense label source
@@ -48154,11 +48260,18 @@ where
                                 "schema": "ee.outcome.pack_item_evidence.v1",
                                 "packId": pack_id,
                                 "itemRank": item,
+                                "entityKind": if target.target_type == "evidence" {
+                                    "evidence_span"
+                                } else {
+                                    "memory"
+                                },
+                                "entityId": &target.target_id,
+                                "entityRevision": &target.entity_revision,
                             })
                             .to_string(),
                         );
                     }
-                    Some(memory_id)
+                    Some(target)
                 }
                 Err(error) => {
                     return write_domain_error(&error, cli.wants_json(), stdout, stderr);
@@ -48171,7 +48284,11 @@ where
         }
         (None, _) => None,
     };
-    let Some(target_id) = resolved_pack_target.or_else(|| args.target_id.clone()) else {
+    let target_id = resolved_pack_target
+        .as_ref()
+        .map(|target| target.target_id.clone())
+        .or_else(|| args.target_id.clone());
+    let Some(target_id) = target_id else {
         let error = usage(
             "TARGET_ID (or --pack <id> --item <n>) is required unless --batch --stdin is given",
         );
@@ -48181,6 +48298,14 @@ where
         let error = usage("--signal is required unless --batch --stdin is given");
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     };
+    let target_type = resolved_pack_target.as_ref().map_or_else(
+        || args.target_type.clone(),
+        |target| target.target_type.clone(),
+    );
+    let workspace_id = resolved_pack_target
+        .as_ref()
+        .map(|target| target.workspace_id.clone())
+        .or_else(|| args.workspace_id.clone());
     let workspace_path = cli.resolve_workspace();
     let database_path = args
         .database
@@ -48188,9 +48313,9 @@ where
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     let options = OutcomeRecordOptions {
         database_path: &database_path,
-        target_type: args.target_type.clone(),
+        target_type,
         target_id,
-        workspace_id: args.workspace_id.clone(),
+        workspace_id,
         signal,
         weight: args.weight,
         source_type: args.source_type.clone(),
