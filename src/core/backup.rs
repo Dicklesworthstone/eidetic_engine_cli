@@ -66,11 +66,11 @@ impl BackupTablePolicy {
         }
     }
 
-    const fn schema_covered(self) -> bool {
+    fn schema_covered(self) -> bool {
         !matches!(self.coverage, "not_implemented" | "unclassified")
     }
 
-    const fn snapshot_covered(self) -> bool {
+    fn snapshot_covered(self) -> bool {
         self.schema_covered() && !matches!(self.coverage, "artifact_only_not_rehydrated")
     }
 }
