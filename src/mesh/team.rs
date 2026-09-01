@@ -7523,7 +7523,7 @@ mod tests {
         changed.approval_content_hash = Some(format!("blake3:{}", blake3::hash(b"BBBB").to_hex()));
 
         assert_ne!(
-            bodies_consent_hash("team_same", "exact", &[item.clone()]),
+            bodies_consent_hash("team_same", "exact", std::slice::from_ref(&item)),
             bodies_consent_hash("team_same", "exact", &[changed]),
             "same-sized body drift must invalidate its approval snapshot",
         );
