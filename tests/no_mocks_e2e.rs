@@ -2919,6 +2919,14 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
                 "CASS session codex".to_owned(),
                 "--source-mode".to_owned(),
                 "lexical_only".to_owned(),
+                "--limit".to_owned(),
+                "10".to_owned(),
+                // This assertion proves immediate publication and typed
+                // identity, not the default relevance calibration. Keep the
+                // imported session visible even if a future lexical scorer
+                // recalibration moves this synthetic fixture below 0.05.
+                "--relevance-floor".to_owned(),
+                "0.0".to_owned(),
             ],
             expected_exit_code: 0,
             expected_schema: "ee.response.v2",
@@ -2938,7 +2946,9 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
                 .and_then(JsonValue::as_str)
                 .is_some_and(|doc_id| doc_id.eq(stored_session_id.as_str()))
         }),
-        "search must retrieve the imported CASS session document",
+        format!(
+            "search must retrieve imported CASS session {stored_session_id}: {session_search_json}"
+        ),
     )?;
     ensure(
         !session_search_json
@@ -2969,6 +2979,8 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
                 "lexical_only".to_owned(),
                 "--limit".to_owned(),
                 "10".to_owned(),
+                "--relevance-floor".to_owned(),
+                "0.0".to_owned(),
             ],
             expected_exit_code: 0,
             expected_schema: "ee.response.v2",
@@ -2988,7 +3000,9 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
                 .and_then(JsonValue::as_str)
                 .is_some_and(|doc_id| doc_id == searchable_evidence_id.as_str())
         }),
-        "search must retrieve the exact imported CASS evidence document",
+        format!(
+            "search must retrieve exact imported CASS evidence {searchable_evidence_id}: {evidence_search_json}"
+        ),
     )?;
     ensure(
         !evidence_search_json
