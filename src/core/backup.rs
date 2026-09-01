@@ -5464,7 +5464,7 @@ mod tests {
             .ok_or_else(|| "backup fixture omitted workspace row".to_owned())?;
         connection
             .insert_session(
-                "sess_backup_uncovered_01",
+                "sess_01234567890123456789012345",
                 &CreateSessionInput {
                     workspace_id,
                     cass_session_id: "cass-backup-uncovered-01".to_owned(),
