@@ -27,6 +27,14 @@ use ee::policy::redact_secret_like_content;
 
 type TestResult = Result<(), String>;
 
+#[cfg(unix)]
+const DENIED_CASS_EVIDENCE_MARKER: &str =
+    "x65f imported CASS evidence remains durable and searchable denied-control";
+#[cfg(unix)]
+const DENIED_CASS_PRIVATE_PATH: &str = "/Users/alice/private/denied-control.txt";
+#[cfg(unix)]
+const DENIED_CASS_SECRET_PROBE: &str = "denied-control-secret-7f3c91b2";
+
 #[derive(Clone, Debug)]
 struct StepSpec {
     name: &'static str,
@@ -1650,6 +1658,22 @@ fn write_codex_cass_fixture_session(
                 ]
             }
         }),
+        json!({
+            "timestamp": "2026-05-06T03:40:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": format!(
+                            "{DENIED_CASS_EVIDENCE_MARKER} read {DENIED_CASS_PRIVATE_PATH} token={DENIED_CASS_SECRET_PROBE}"
+                        )
+                    }
+                ]
+            }
+        }),
     ];
 
     let mut jsonl = String::new();
@@ -1692,8 +1716,8 @@ fn write_stub_cass_binary(
             "agent": "codex",
             "workspace": workspace_arg,
             "started_at": "2026-05-06T03:40:00Z",
-            "ended_at": "2026-05-06T03:40:02Z",
-            "message_count": 3,
+            "ended_at": "2026-05-06T03:40:03Z",
+            "message_count": 4,
             "token_count": 42
         }]
     });
@@ -2826,8 +2850,8 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         .list_evidence_spans_for_session(&sessions[0].id)
         .map_err(|error| error.to_string())?;
     ensure(
-        spans.len() >= 3,
-        format!("expected at least 3 imported spans, got {}", spans.len()),
+        spans.len() >= 4,
+        format!("expected at least 4 imported spans, got {}", spans.len()),
     )?;
     let span_text = spans
         .iter()
@@ -2848,19 +2872,49 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
                 && span.cass_span_id.len() == 71
                 && span.upstream_ref_hash.as_deref() == Some(span.cass_span_id.as_str())
                 && span.producer_kind == "cass_import"
-                && span.search_eligibility == "admitted"
                 && !span.cass_span_id.contains(session_arg.as_str())
                 && !span.content_hash.is_empty()
         }),
-        "evidence spans must retain only hashed upstream references with admitted CASS posture",
+        "evidence spans must retain only hashed upstream references with explicit CASS posture",
     )?;
+    let denied_evidence = spans
+        .iter()
+        .find(|span| {
+            span.role.as_deref() == Some("system")
+                && span.excerpt.contains(DENIED_CASS_EVIDENCE_MARKER)
+        })
+        .ok_or_else(|| "tempting denied CASS evidence span is missing".to_owned())?;
+    ensure_equal(
+        &denied_evidence.search_eligibility.as_str(),
+        &"quarantined",
+        "system-role CASS evidence search posture",
+    )?;
+    ensure_equal(
+        &denied_evidence.pack_eligibility.as_str(),
+        &"quarantined",
+        "system-role CASS evidence pack posture",
+    )?;
+    let denied_evidence_id = denied_evidence.id.clone();
     let searchable_evidence = spans
         .iter()
         .find(|span| {
-            span.excerpt
-                .contains("x65f imported CASS evidence remains durable and searchable")
+            span.role.as_deref() == Some("assistant")
+                && span.search_eligibility == "admitted"
+                && span
+                    .excerpt
+                    .contains("x65f imported CASS evidence remains durable and searchable")
         })
         .ok_or_else(|| "searchable imported evidence span is missing".to_owned())?;
+    ensure_equal(
+        &searchable_evidence.search_eligibility.as_str(),
+        &"admitted",
+        "assistant CASS evidence search posture",
+    )?;
+    ensure_equal(
+        &searchable_evidence.pack_eligibility.as_str(),
+        &"admitted",
+        "assistant CASS evidence pack posture",
+    )?;
     let searchable_evidence_id = searchable_evidence.id.clone();
     let searchable_evidence_provenance_uri = searchable_evidence.canonical_provenance_uri();
     let searchable_evidence_before_outcome = searchable_evidence.clone();
@@ -3007,6 +3061,20 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         ),
     )?;
     ensure(
+        evidence_search_results.iter().all(|result| {
+            result.get("docId").and_then(JsonValue::as_str) != Some(denied_evidence_id.as_str())
+        }),
+        format!(
+            "quarantined CASS evidence must not cross search admission: {evidence_search_json}"
+        ),
+    )?;
+    let evidence_search_output = evidence_search_json.to_string();
+    ensure(
+        !evidence_search_output.contains(DENIED_CASS_PRIVATE_PATH)
+            && !evidence_search_output.contains(DENIED_CASS_SECRET_PROBE),
+        "search output must not leak denied CASS evidence path or content",
+    )?;
+    ensure(
         !evidence_search_json
             .pointer("/degraded")
             .and_then(JsonValue::as_array)
@@ -3056,6 +3124,19 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
                 "pack did not select imported evidence {searchable_evidence_id}: {pack_items:?}"
             )
         })?;
+    ensure(
+        pack_items.iter().all(|item| {
+            item.get("evidenceSpanId").and_then(JsonValue::as_str)
+                != Some(denied_evidence_id.as_str())
+        }),
+        format!("quarantined CASS evidence must not enter a context pack: {pack_json}"),
+    )?;
+    let pack_output = pack_json.to_string();
+    ensure(
+        !pack_output.contains(DENIED_CASS_PRIVATE_PATH)
+            && !pack_output.contains(DENIED_CASS_SECRET_PROBE),
+        "pack output must not leak denied CASS evidence path or content",
+    )?;
     ensure_equal(
         &packed_evidence.get("entityKind"),
         &Some(&json!("evidence_span")),
@@ -3176,6 +3257,12 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &packed_evidence_item_count,
         "CASS direct-evidence persisted item count",
     )?;
+    ensure(
+        persisted_evidence_items
+            .iter()
+            .all(|item| item.evidence_id.as_str() != denied_evidence_id.as_str()),
+        "quarantined CASS evidence must not enter persisted typed pack items",
+    )?;
     let persisted_evidence = persisted_evidence_items
         .iter()
         .find(|item| item.evidence_id == searchable_evidence_id)
@@ -3232,6 +3319,13 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
             "CASS replay ledger must preserve the typed evidence identity: {ledger_selected_items:?}"
         ),
     )?;
+    ensure(
+        ledger_selected_items.iter().all(|item| {
+            item.get("evidenceSpanId").and_then(JsonValue::as_str)
+                != Some(denied_evidence_id.as_str())
+        }),
+        "quarantined CASS evidence must not enter the persisted replay ledger",
+    )?;
     pack_connection.close().map_err(|error| error.to_string())?;
 
     let (_replay_event, replay_json) = run_step_with_env(
@@ -3277,6 +3371,19 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         format!(
             "public pack replay must preserve the typed evidence identity: {replay_selected_items:?}"
         ),
+    )?;
+    ensure(
+        replay_selected_items.iter().all(|item| {
+            item.get("evidenceSpanId").and_then(JsonValue::as_str)
+                != Some(denied_evidence_id.as_str())
+        }),
+        "quarantined CASS evidence must not enter public replay",
+    )?;
+    let replay_output = replay_json.to_string();
+    ensure(
+        !replay_output.contains(DENIED_CASS_PRIVATE_PATH)
+            && !replay_output.contains(DENIED_CASS_SECRET_PROBE),
+        "replay output must not leak denied CASS evidence path or content",
     )?;
 
     let (_why_event, why_json) = run_step_with_env(
@@ -3354,6 +3461,38 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         format!("CASS why must not degrade typed evidence: {why_json}"),
     )?;
 
+    let (_denied_why_event, denied_why_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "07b_refuse_explanation_for_denied_evidence",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "why".to_owned(),
+                denied_evidence_id.clone(),
+            ],
+            expected_exit_code: 1,
+            expected_schema: "ee.error.v2",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    ensure_equal(
+        &denied_why_json.pointer("/error/code"),
+        &Some(&json!("not_found")),
+        "quarantined CASS evidence is not explainable through the public why surface",
+    )?;
+    let denied_why_output = denied_why_json.to_string();
+    ensure(
+        !denied_why_output.contains(DENIED_CASS_PRIVATE_PATH)
+            && !denied_why_output.contains(DENIED_CASS_SECRET_PROBE),
+        "why denial must not leak quarantined CASS evidence path or content",
+    )?;
+
     let unrelated_memory_id =
         ee::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x65f)).to_string();
     let control_connection = DbConnection::open(DatabaseConfig::file(database_path.clone()))
@@ -3393,7 +3532,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &artifact_dir,
         &workspace,
         StepSpec {
-            name: "07b_grade_imported_evidence_pack_item",
+            name: "07c_grade_imported_evidence_pack_item",
             args: vec![
                 "--workspace".to_owned(),
                 workspace_arg.clone(),
@@ -3443,6 +3582,13 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &evidence_feedback.len(),
         &1_usize,
         "CASS evidence outcome row count",
+    )?;
+    let denied_evidence_feedback = outcome_connection
+        .list_feedback_events_for_target("evidence", &denied_evidence_id)
+        .map_err(|error| format!("list denied CASS evidence outcome rows: {error}"))?;
+    ensure(
+        denied_evidence_feedback.is_empty(),
+        "quarantined CASS evidence must not receive feedback",
     )?;
     let outcome_evidence = evidence_feedback[0]
         .evidence_json
