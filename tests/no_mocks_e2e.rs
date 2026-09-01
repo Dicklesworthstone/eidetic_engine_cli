@@ -2788,10 +2788,17 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
             >= 3,
         "CASS import must capture evidence spans from the fixture session",
     )?;
-    ensure_equal(
-        &import_json.pointer("/data/sessions/0/sourcePath"),
-        &Some(&json!(session_arg)),
-        "CASS import report source path",
+    let public_import_source_path = import_json
+        .pointer("/data/sessions/0/sourcePath")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| "CASS import report omitted its public source path".to_owned())?;
+    ensure(
+        public_import_source_path.contains("[REDACTED_PATH]")
+            && public_import_source_path.ends_with(".jsonl")
+            && !public_import_source_path.contains(session_arg.as_str()),
+        format!(
+            "CASS import report must redact its absolute source path: {public_import_source_path:?}"
+        ),
     )?;
 
     let connection = DbConnection::open(DatabaseConfig::file(database_path.clone()))
