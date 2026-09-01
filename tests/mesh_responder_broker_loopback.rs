@@ -24,8 +24,9 @@ use std::time::Duration;
 use asupersync::{CancelKind, Cx};
 use ee::config::MeshLane;
 use ee::db::{
-    CreateMeshOriginEventInput, CreateWorkspaceInput, DbConnection, MeshLaneGrantMutationInput,
-    MeshLaneGrantTargetAdapter, UpsertMeshBodyCacheMetadataInput, UpsertMeshPeerInput,
+    CreateMeshOriginEventInput, CreateWorkspaceInput, DbConnection, InsertTeamMemberInput,
+    MeshLaneGrantMutationInput, MeshLaneGrantTargetAdapter, UpsertMeshBodyCacheMetadataInput,
+    UpsertMeshPeerInput,
 };
 use ee::mesh::bootstrap_envelope::{
     BOOTSTRAP_DECLINE_SCHEMA_V1, BootstrapCapability, BootstrapDeclineV1, SyncRoundRequest,
@@ -1460,6 +1461,22 @@ fn production_broker_serves_authenticated_event_fetch_from_origin_store() -> Tes
 fn seed_loopback_body_cache(workspace_path: &Path, database_path: &Path) -> TestResult {
     let connection = DbConnection::open_file(database_path)
         .map_err(|error| format!("open loopback body db: {error}"))?;
+    let initiator_node_id = origin_capable_expectations().initiator_node_id;
+    connection
+        .apply_mesh_lane_grant_with_effect(
+            &MeshLaneGrantMutationInput {
+                workspace_id: LOOPBACK_RESPONDER_WORKSPACE_ID.to_owned(),
+                peer_id: PEER_HANDLE.to_owned(),
+                target_adapter: MeshLaneGrantTargetAdapter::new(PEER_HANDLE, initiator_node_id),
+                material_lane: MeshLane::Body,
+                expected_generation: 1,
+                approval_config_digest: Some(ee::mesh::lane_grant::approval_config_digest(b"")),
+                updated_at: Some(CREATED_AT.to_owned()),
+            },
+            |_| Ok::<(), String>(()),
+        )
+        .map_err(|error| format!("grant loopback body lane: {error}"))?;
+    let body = b"secret-body-payload";
     connection
         .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
             workspace_id: LOOPBACK_RESPONDER_WORKSPACE_ID.to_owned(),
@@ -1472,7 +1489,7 @@ fn seed_loopback_body_cache(workspace_path: &Path, database_path: &Path) -> Test
             preview_hash: None,
             size_bytes: Some(19),
             cache_status: "available".to_owned(),
-            local_body_hash: Some(format!("blake3:{}", "cd".repeat(32))),
+            local_body_hash: Some(format!("blake3:{}", blake3::hash(body).to_hex())),
             cached_at: Some(CREATED_AT.to_owned()),
             expires_at: None,
         })
@@ -1481,7 +1498,7 @@ fn seed_loopback_body_cache(workspace_path: &Path, database_path: &Path) -> Test
     let cache = SecureLocalDir::open_or_create(workspace_path, &cache_dir)
         .map_err(|error| format!("open loopback body cache dir: {error}"))?;
     cache
-        .write_replace("body_loopback1", b"secret-body-payload")
+        .write_replace("body_loopback1", body)
         .map_err(|error| format!("write loopback body: {error}"))?;
     Ok(())
 }
@@ -1512,12 +1529,9 @@ fn production_broker_serves_authenticated_body_fetch_from_local_cache() -> TestR
     let bind_address: SocketAddr = format!("127.0.0.1:{port}")
         .parse()
         .map_err(|error| format!("parse bind address: {error}"))?;
-    let registry = ResponderRouteRegistry::new([route_with_database(
-        workspace.path().to_path_buf(),
-        database_path,
-        port,
-    )])
-    .map_err(|error| error.to_string())?;
+    let mut registered = route_with_database(workspace.path().to_path_buf(), database_path, port);
+    registered.grant_generation = 2;
+    let registry = ResponderRouteRegistry::new([registered]).map_err(|error| error.to_string())?;
     let (address_tx, address_rx) = mpsc::sync_channel(1);
     let server = thread::spawn(move || {
         let result = run_runtime_with(Duration::from_secs(30), |cx| async move {
@@ -1586,7 +1600,7 @@ fn production_broker_serves_authenticated_body_fetch_from_local_cache() -> TestR
 }
 
 #[test]
-fn production_broker_applies_authenticated_identity_attest_without_bearer() -> TestResult {
+fn production_broker_refreshes_locally_verified_identity_without_bearer() -> TestResult {
     let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
     let store = MeshKeyStore::open_or_create(workspace.path())
         .map_err(|error| format!("preprovision key store: {error}"))?;
@@ -1614,13 +1628,35 @@ fn production_broker_applies_authenticated_identity_attest_without_bearer() -> T
             Some(workspace.path()),
         )
         .map_err(|error| format!("create attest team: {error}"))?;
-        let member = connection
+        let self_member = connection
             .list_all_team_members()
             .map_err(|error| format!("list attest members: {error}"))?
             .into_iter()
             .next()
             .ok_or_else(|| "attest team has no member".to_owned())?;
-        (member.team_id, member.member_id)
+        let member_id = format!("mbr_{}", "e".repeat(32));
+        connection
+            .insert_team_member(&InsertTeamMemberInput {
+                member_id: member_id.clone(),
+                team_id: self_member.team_id.clone(),
+                workspace_id: LOOPBACK_RESPONDER_WORKSPACE_ID.to_owned(),
+                display_name: "Alice".to_owned(),
+                state: "active".to_owned(),
+                is_self: false,
+                origin_node_id: origin_capable_expectations().initiator_node_id,
+                bound_via: "member_added_node".to_owned(),
+                joined_at: CREATED_AT.to_owned(),
+            })
+            .map_err(|error| format!("insert remote attest member: {error}"))?;
+        ee::mesh::team::record_member_tailnet_identity(
+            &connection,
+            &member_id,
+            "alice@acme.com",
+            Some("user-1"),
+            "2026-08-13T21:59:00Z",
+        )
+        .map_err(|error| format!("seed locally verified identity: {error}"))?;
+        (self_member.team_id, member_id)
     };
 
     let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
@@ -1629,12 +1665,10 @@ fn production_broker_applies_authenticated_identity_attest_without_bearer() -> T
     let bind_address: SocketAddr = format!("127.0.0.1:{port}")
         .parse()
         .map_err(|error| format!("parse bind address: {error}"))?;
-    let registry = ResponderRouteRegistry::new([route_with_database(
-        workspace.path().to_path_buf(),
-        database_path.clone(),
-        port,
-    )])
-    .map_err(|error| error.to_string())?;
+    let mut registered =
+        route_with_database(workspace.path().to_path_buf(), database_path.clone(), port);
+    registered.expectations.team_id.clone_from(&team_id);
+    let registry = ResponderRouteRegistry::new([registered]).map_err(|error| error.to_string())?;
     let (address_tx, address_rx) = mpsc::sync_channel(1);
     let server = thread::spawn(move || {
         let result = run_runtime_with(Duration::from_secs(30), |cx| async move {
@@ -1674,15 +1708,12 @@ fn production_broker_applies_authenticated_identity_attest_without_bearer() -> T
             .to_owned(),
         checked_at: "2026-08-13T22:00:00Z".to_owned(),
     };
+    let mut initiator = origin_capable_initiator_config();
+    initiator.binding.team_id.clone_from(&team_id);
     let client = run_runtime_with(Duration::from_secs(30), |cx| async move {
-        contact_authenticated_identity_attest(
-            &cx,
-            address,
-            origin_capable_initiator_config(),
-            &frame,
-        )
-        .await
-        .map_err(|error| format!("authenticated identity_attest client: {error}"))
+        contact_authenticated_identity_attest(&cx, address, initiator, &frame)
+            .await
+            .map_err(|error| format!("authenticated identity_attest client: {error}"))
     });
     let server = server
         .join()
