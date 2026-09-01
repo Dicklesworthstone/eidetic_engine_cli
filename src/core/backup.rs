@@ -50,6 +50,84 @@ const MANIFEST_FILE: &str = "manifest.json";
 const INIT_AND_MIGRATE_REPAIR_COMMAND: &str =
     "ee init --workspace . && ee migrate run --workspace . --json";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BackupTablePolicy {
+    owner: &'static str,
+    disposition: &'static str,
+    coverage: &'static str,
+}
+
+impl BackupTablePolicy {
+    const fn new(owner: &'static str, disposition: &'static str, coverage: &'static str) -> Self {
+        Self {
+            owner,
+            disposition,
+            coverage,
+        }
+    }
+
+    const fn schema_covered(self) -> bool {
+        !matches!(self.coverage, "not_implemented" | "unclassified")
+    }
+
+    const fn snapshot_covered(self) -> bool {
+        self.schema_covered() && !matches!(self.coverage, "artifact_only_not_rehydrated")
+    }
+}
+
+/// One migration-reconciled table entry in a backup's recovery inventory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackupRecoveryInventoryEntry {
+    pub table: String,
+    pub owner: String,
+    pub disposition: String,
+    pub coverage: String,
+    pub row_count: u64,
+    pub schema_covered: bool,
+    pub snapshot_covered: bool,
+}
+
+impl BackupRecoveryInventoryEntry {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "table": self.table,
+            "owner": self.owner,
+            "disposition": self.disposition,
+            "coverage": self.coverage,
+            "rowCount": self.row_count,
+            "schemaCovered": self.schema_covered,
+            "snapshotCovered": self.snapshot_covered,
+        })
+    }
+}
+
+/// Recovery coverage computed from the live migrated schema and exact row counts.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BackupRecoveryInventory {
+    pub entries: Vec<BackupRecoveryInventoryEntry>,
+    pub schema_coverage_complete: bool,
+    pub snapshot_coverage_complete: bool,
+    pub uncovered_required_table_count: u32,
+    pub uncovered_required_row_count: u64,
+    pub unclassified_table_count: u32,
+}
+
+impl BackupRecoveryInventory {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "schema": "ee.backup.recovery_inventory.v1",
+            "schemaCoverageComplete": self.schema_coverage_complete,
+            "snapshotCoverageComplete": self.snapshot_coverage_complete,
+            "uncoveredRequiredTableCount": self.uncovered_required_table_count,
+            "uncoveredRequiredRowCount": self.uncovered_required_row_count,
+            "unclassifiedTableCount": self.unclassified_table_count,
+            "tables": self.entries.iter().map(BackupRecoveryInventoryEntry::data_json).collect::<Vec<_>>(),
+        })
+    }
+}
+
 /// Options for one `ee backup create` operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackupCreateOptions {
@@ -175,6 +253,7 @@ pub struct BackupCreateReport {
     pub tag_count: u64,
     pub audit_count: u64,
     pub verification_status: String,
+    pub recovery_inventory: BackupRecoveryInventory,
     pub artifacts: Vec<BackupArtifactReport>,
     pub derived: Vec<BackupDerivedAssetReport>,
     pub degraded: Vec<BackupDegradation>,
@@ -211,6 +290,7 @@ impl BackupCreateReport {
                 "auditRecords": self.audit_count,
             },
             "verificationStatus": self.verification_status,
+            "recoveryInventory": self.recovery_inventory.data_json(),
             "artifacts": self.artifacts.iter().map(BackupArtifactReport::data_json).collect::<Vec<_>>(),
             "derived": self.derived.iter().map(BackupDerivedAssetReport::data_json).collect::<Vec<_>>(),
             "degraded": backup_degraded_data_json("backup_create", &self.degraded),
@@ -779,6 +859,269 @@ struct BackupDerivedPayload {
     bytes: Vec<u8>,
 }
 
+fn backup_table_policy(table: &str) -> BackupTablePolicy {
+    if legacy_migration_table(table) {
+        return BackupTablePolicy::new(
+            "maintain",
+            "intentionally_ephemeral",
+            "legacy_debris_not_replayed",
+        );
+    }
+
+    match table {
+        "workspaces" => {
+            BackupTablePolicy::new("maintain", "export_restore_required", "records_jsonl")
+        }
+        "memories" | "memory_tags" | "memory_links" => {
+            BackupTablePolicy::new("retrieve", "export_restore_required", "records_jsonl")
+        }
+        "attempt_families" | "attempt_family_members" => {
+            BackupTablePolicy::new("learn", "export_restore_required", "records_jsonl")
+        }
+        "audit_log" => {
+            BackupTablePolicy::new("maintain", "export_restore_required", "records_jsonl")
+        }
+
+        "graph_snapshots" | "graph_algorithm_witnesses" | "graph_algorithm_results" => {
+            BackupTablePolicy::new(
+                "retrieve",
+                "derived_rebuildable",
+                "derived_artifact_optional",
+            )
+        }
+        "memory_anchor_index"
+        | "primer_cache"
+        | "retrieval_affinity_accumulation"
+        | "retrieval_affinity_cursor"
+        | "workspace_generations" => {
+            BackupTablePolicy::new("retrieve", "derived_rebuildable", "rebuild_on_restore")
+        }
+        "model_registry" | "agent_installations" | "agent_history_sources" => {
+            BackupTablePolicy::new("maintain", "derived_rebuildable", "rediscover_on_restore")
+        }
+        "memory_anchors" | "memory_sentinel_results" => {
+            BackupTablePolicy::new("maintain", "derived_rebuildable", "rebuild_on_restore")
+        }
+
+        "ee_schema_migrations" | "curation_ttl_policies" => BackupTablePolicy::new(
+            "maintain",
+            "migration_metadata",
+            "recreated_by_current_binary",
+        ),
+        "ee_advisory_locks" | "ee_wal_holds" | "remember_idempotency_keys" => {
+            BackupTablePolicy::new(
+                "maintain",
+                "intentionally_ephemeral",
+                "intentionally_not_replayed",
+            )
+        }
+        "preflight_bypass_tokens" => {
+            BackupTablePolicy::new("maintain", "secret_rekeyed", "intentionally_not_replayed")
+        }
+
+        "mesh_peers"
+        | "mesh_peer_cursors"
+        | "mesh_import_ledger"
+        | "mesh_memory_mappings"
+        | "mesh_body_cache_metadata"
+        | "mesh_lane_grant_states"
+        | "mesh_origin_events"
+        | "mesh_origin_event_nonces"
+        | "mesh_origin_dispositions"
+        | "team_admission_peer_state"
+        | "team_history_projections"
+        | "team_idp_oidc"
+        | "team_idp_policy"
+        | "team_idp_token_replay"
+        | "team_invite_auth_floor"
+        | "team_join_attempts"
+        | "team_member_identity"
+        | "team_member_nodes"
+        | "team_member_signing_keys"
+        | "team_members"
+        | "team_pending_invites"
+        | "team_posture"
+        | "team_projects"
+        | "team_removal_acknowledgements" => {
+            BackupTablePolicy::new("maintain", "secret_rekeyed", "rekey_or_reenroll")
+        }
+
+        "task_episodes" => BackupTablePolicy::new(
+            "learn",
+            "export_restore_required",
+            "artifact_only_not_rehydrated",
+        ),
+
+        "agent_context_profiles"
+        | "agents"
+        | "artifact_links"
+        | "artifacts"
+        | "causal_evidence"
+        | "certificates"
+        | "debt_snapshots"
+        | "error_fingerprints"
+        | "error_repair_links"
+        | "journal_entries"
+        | "memory_seals"
+        | "memory_sentinel_specs"
+        | "rationale_trace_links"
+        | "rationale_traces"
+        | "rch_verify_runs"
+        | "recorder_events"
+        | "recorder_runs"
+        | "reflection_request_ledger"
+        | "search_index_jobs"
+        | "situation_records"
+        | "tripwire_check_events"
+        | "tripwires"
+        | "trust_quarantine" => {
+            BackupTablePolicy::new("maintain", "export_restore_required", "not_implemented")
+        }
+        "evidence_spans" | "import_ledger" | "sessions" => {
+            BackupTablePolicy::new("ingest", "export_restore_required", "not_implemented")
+        }
+        "pack_baselines"
+        | "pack_candidate_impressions"
+        | "pack_evidence_items"
+        | "pack_items"
+        | "pack_omissions"
+        | "pack_records" => {
+            BackupTablePolicy::new("pack", "export_restore_required", "not_implemented")
+        }
+        "curation_candidates"
+        | "feedback_events"
+        | "feedback_quarantine"
+        | "learning_observations"
+        | "outcome_evidence_rows"
+        | "plan_recipes"
+        | "procedural_rules"
+        | "procedure_events"
+        | "procedures"
+        | "rule_source_memories"
+        | "rule_tags" => {
+            BackupTablePolicy::new("learn", "export_restore_required", "not_implemented")
+        }
+        _ => BackupTablePolicy::new("maintain", "unclassified", "unclassified"),
+    }
+}
+
+fn legacy_migration_table(table: &str) -> bool {
+    let suffix_version = table.rsplit_once("_v").is_some_and(|(_, version)| {
+        !version.is_empty() && version.chars().all(|c| c.is_ascii_digit())
+    });
+    let prefix_version = table.strip_prefix('v').is_some_and(|rest| {
+        let digit_count = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+        digit_count > 0 && rest.as_bytes().get(digit_count) == Some(&b'_')
+    });
+    suffix_version || prefix_version
+}
+
+fn build_recovery_inventory(
+    connection: &DbConnection,
+) -> Result<BackupRecoveryInventory, DomainError> {
+    let tables = connection
+        .list_user_tables()
+        .map_err(|error| DomainError::Storage {
+            message: format!("failed to enumerate backup source tables: {error}"),
+            repair: Some("ee db check --workspace .".to_owned()),
+        })?;
+    let mut entries = Vec::with_capacity(tables.len());
+    for table in tables {
+        let raw_row_count =
+            connection
+                .count_table_rows(&table)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("failed to count backup source table {table:?}: {error}"),
+                    repair: Some("ee db check --workspace .".to_owned()),
+                })?;
+        let row_count = u64::try_from(raw_row_count).map_err(|_| DomainError::Storage {
+            message: format!("backup row count for {table:?} was negative"),
+            repair: Some("ee db check --workspace .".to_owned()),
+        })?;
+        let policy = backup_table_policy(&table);
+        entries.push(BackupRecoveryInventoryEntry {
+            table,
+            owner: policy.owner.to_owned(),
+            disposition: policy.disposition.to_owned(),
+            coverage: policy.coverage.to_owned(),
+            row_count,
+            schema_covered: policy.schema_covered(),
+            snapshot_covered: policy.snapshot_covered() || row_count == 0,
+        });
+    }
+
+    let uncovered_required_table_count = entries
+        .iter()
+        .filter(|entry| entry.disposition == "export_restore_required" && !entry.schema_covered)
+        .count();
+    let uncovered_required_row_count = entries
+        .iter()
+        .filter(|entry| entry.disposition == "export_restore_required" && !entry.snapshot_covered)
+        .map(|entry| entry.row_count)
+        .sum();
+    let unclassified_table_count = entries
+        .iter()
+        .filter(|entry| entry.disposition == "unclassified")
+        .count();
+
+    Ok(BackupRecoveryInventory {
+        schema_coverage_complete: uncovered_required_table_count == 0
+            && unclassified_table_count == 0,
+        snapshot_coverage_complete: entries.iter().all(|entry| entry.snapshot_covered),
+        uncovered_required_table_count: u32::try_from(uncovered_required_table_count)
+            .unwrap_or(u32::MAX),
+        uncovered_required_row_count,
+        unclassified_table_count: u32::try_from(unclassified_table_count).unwrap_or(u32::MAX),
+        entries,
+    })
+}
+
+fn recovery_inventory_degradations(inventory: &BackupRecoveryInventory) -> Vec<BackupDegradation> {
+    let mut degraded = Vec::new();
+    if inventory.unclassified_table_count > 0 {
+        degraded.push(BackupDegradation::with_severity(
+            "backup_table_inventory_unclassified",
+            "high",
+            format!(
+                "{} migrated table(s) have no backup disposition",
+                inventory.unclassified_table_count
+            ),
+            "classify every migrated table before treating this backup as complete",
+        ));
+    }
+    if inventory.uncovered_required_table_count > 0 {
+        degraded.push(BackupDegradation::warning(
+            "backup_schema_coverage_incomplete",
+            format!(
+                "{} export/restore-required table(s) are not implemented by the portable backup format",
+                inventory.uncovered_required_table_count
+            ),
+            "inspect recoveryInventory.tables and add typed export/restore coverage for every not_implemented table",
+        ));
+    }
+    if inventory.uncovered_required_row_count > 0 {
+        let nonempty_tables = inventory
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.disposition == "export_restore_required" && !entry.snapshot_covered
+            })
+            .map(|entry| format!("{}={}", entry.table, entry.row_count))
+            .collect::<Vec<_>>()
+            .join(", ");
+        degraded.push(BackupDegradation::with_severity(
+            "backup_source_rows_not_covered",
+            "high",
+            format!(
+                "{} source-of-truth row(s) are not recoverable from this backup: {nonempty_tables}",
+                inventory.uncovered_required_row_count
+            ),
+            "do not treat this artifact as a complete recovery point; implement the listed table exporters and recreate the backup",
+        ));
+    }
+    degraded
+}
+
 /// Create a verified backup directory with redacted JSONL records and a manifest.
 ///
 /// # Errors
@@ -805,6 +1148,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     })?;
     let workspace = load_workspace(&connection, &workspace_path)?;
     let export_data = load_export_data(&connection, workspace)?;
+    let recovery_inventory = build_recovery_inventory(&connection)?;
     let backup_id = BackupId::now().to_string();
     let backup_root = backup_root(options, &workspace_path);
     let backup_path = backup_root.join(&backup_id);
@@ -816,6 +1160,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         options.include_derived,
         options.include_graph_cache,
     );
+    degraded.extend(recovery_inventory_degradations(&recovery_inventory));
     degraded.extend(redaction_pattern_degradations(
         &export_data,
         options.redaction_level,
@@ -886,8 +1231,10 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         label: normalized_label(options.label.as_deref()),
         status: if options.dry_run {
             "dry_run".to_owned()
-        } else {
+        } else if recovery_inventory.snapshot_coverage_complete {
             "completed".to_owned()
+        } else {
+            "partial".to_owned()
         },
         dry_run: options.dry_run,
         workspace_path: workspace_path.to_string_lossy().into_owned(),
@@ -908,11 +1255,14 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         link_count: stats.link_count,
         tag_count: stats.tag_count,
         audit_count: stats.audit_count,
-        verification_status: if options.dry_run {
+        verification_status: if !recovery_inventory.snapshot_coverage_complete {
+            "incomplete_source_coverage".to_owned()
+        } else if options.dry_run {
             "not_checked".to_owned()
         } else {
             "verified".to_owned()
         },
+        recovery_inventory,
         artifacts: vec![planned_records_artifact],
         derived: derived_reports,
         degraded,
@@ -1616,7 +1966,10 @@ pub fn restore_backup_to_side_path(
         .issues
         .len()
         .saturating_add(verify.issues.len());
-    let restore_status = if import_report.status == "completed" && verify.issues.is_empty() {
+    let restore_status = if import_report.status == "completed"
+        && verify.issues.is_empty()
+        && restore_degraded.is_empty()
+    {
         "completed"
     } else {
         "degraded"
@@ -1701,7 +2054,15 @@ fn restore_manifest_degradations(manifest_bytes: &[u8]) -> Vec<BackupDegradation
     let Ok(manifest) = serde_json::from_slice::<JsonValue>(manifest_bytes) else {
         return Vec::new();
     };
-    let mut degraded = Vec::new();
+    let mut degraded = degradation_reports(&manifest)
+        .into_iter()
+        .filter(|entry| {
+            matches!(
+                entry.code.as_str(),
+                "backup_source_rows_not_covered" | "backup_table_inventory_unclassified"
+            )
+        })
+        .collect::<Vec<_>>();
     let backup_schema_version = manifest
         .pointer("/graphCache/schemaVersion")
         .and_then(JsonValue::as_u64)
@@ -2370,6 +2731,13 @@ fn inspect_manifest(
     });
     let workspace = manifest.get("workspace").unwrap_or(&JsonValue::Null);
     let verification = manifest.get("verification").unwrap_or(&JsonValue::Null);
+    let verification_status = json_string(verification, "status");
+    if verification_status.as_deref() == Some("incomplete_source_coverage") {
+        issues.push(BackupVerificationIssue::warning(
+            "backup_source_coverage_incomplete",
+            "backup integrity is verifiable, but the recovery inventory reports source-of-truth rows that are not represented in restore artifacts",
+        ));
+    }
     let artifacts = artifact_reports(manifest, &mut issues);
     let derived = derived_asset_reports(manifest, &mut issues);
     if !derived.is_empty() {
@@ -2410,7 +2778,7 @@ fn inspect_manifest(
         redaction_level: json_string(manifest, "redactionLevel"),
         export_scope: json_string(manifest, "exportScope"),
         counts: backup_counts(manifest.get("counts").unwrap_or(&JsonValue::Null)),
-        verification_status: json_string(verification, "status"),
+        verification_status,
         artifacts,
         derived,
         degraded: degradation_reports(manifest),
@@ -3314,6 +3682,7 @@ fn manifest_json(
             "tagRecords": report.tag_count,
             "auditRecords": report.audit_count,
         },
+        "recoveryInventory": report.recovery_inventory.data_json(),
         "artifacts": report.artifacts.iter().map(BackupArtifactReport::data_json).collect::<Vec<_>>(),
         "degraded": backup_degraded_data_json("backup_manifest", &report.degraded),
         "verification": {
@@ -4769,8 +5138,8 @@ mod tests {
     use crate::core::jsonl_import::import_jsonl_records;
     use crate::db::{
         CreateAuditInput, CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput,
-        CreateGraphSnapshotInput, CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput,
-        GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource,
+        CreateGraphSnapshotInput, CreateMemoryInput, CreateMemoryLinkInput, CreateSessionInput,
+        CreateWorkspaceInput, GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource,
     };
     use crate::models::{MemoryId, MemoryLinkId, WorkspaceId};
     use tempfile::TempDir;
@@ -5056,6 +5425,127 @@ mod tests {
             r#"{"schema":"ee.export.footer.v1","export_id":"exp-001","completed_at":"2026-04-30T00:01:00Z","total_records":4,"memory_count":1,"link_count":0,"tag_count":1,"audit_count":0,"checksum":null,"success":true,"error_message":null}"#,
         ]
         .join("\n")
+    }
+
+    #[test]
+    fn recovery_inventory_classifies_every_fresh_migrated_table() -> TestResult {
+        let (_tempdir, _workspace, database) = fixture().map_err(|error| error.message())?;
+        let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+
+        let inventory = build_recovery_inventory(&connection).map_err(|error| error.message())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let unclassified = inventory
+            .entries
+            .iter()
+            .filter(|entry| entry.disposition == "unclassified")
+            .map(|entry| entry.table.as_str())
+            .collect::<Vec<_>>();
+        ensure(
+            unclassified.is_empty(),
+            format!("fresh migrated tables missing backup disposition: {unclassified:?}"),
+        )?;
+        ensure_equal(
+            inventory.unclassified_table_count,
+            0,
+            "fresh schema unclassified table count",
+        )
+    }
+
+    #[test]
+    fn recovery_inventory_marks_nonempty_uncovered_source_rows_partial() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let workspace_id = connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?
+            .first()
+            .map(|stored| stored.id.clone())
+            .ok_or_else(|| "backup fixture omitted workspace row".to_owned())?;
+        connection
+            .insert_session(
+                "sess_backup_uncovered_01",
+                &CreateSessionInput {
+                    workspace_id,
+                    cass_session_id: "cass-backup-uncovered-01".to_owned(),
+                    source_path: Some("/Users/alice/private/session.jsonl".to_owned()),
+                    agent_name: Some("codex".to_owned()),
+                    model: Some("fixture".to_owned()),
+                    started_at: Some("2026-09-01T00:00:00Z".to_owned()),
+                    ended_at: Some("2026-09-01T00:01:00Z".to_owned()),
+                    message_count: 1,
+                    token_count: Some(8),
+                    content_hash: "blake3:fixture".to_owned(),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(workspace.join("inventory-backups")),
+            label: Some("inventory-gap".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure_equal(report.status.as_str(), "partial", "partial backup status")?;
+        ensure_equal(
+            report.verification_status.as_str(),
+            "incomplete_source_coverage",
+            "partial backup verification posture",
+        )?;
+        ensure(
+            !report.recovery_inventory.snapshot_coverage_complete,
+            "nonempty uncovered session row must make snapshot coverage incomplete",
+        )?;
+        let session = report
+            .recovery_inventory
+            .entries
+            .iter()
+            .find(|entry| entry.table == "sessions")
+            .ok_or_else(|| "recovery inventory omitted sessions".to_owned())?;
+        ensure_equal(session.row_count, 1, "uncovered session row count")?;
+        ensure_equal(
+            session.coverage.as_str(),
+            "not_implemented",
+            "session backup coverage",
+        )?;
+        ensure(
+            report.degraded.iter().any(|entry| {
+                entry.code == "backup_source_rows_not_covered"
+                    && entry.severity == "high"
+                    && entry.message.contains("sessions=1")
+            }),
+            format!(
+                "partial backup omitted high source-coverage degradation: {:?}",
+                report.degraded
+            ),
+        )?;
+
+        let manifest: JsonValue = serde_json::from_slice(
+            &fs::read(&report.manifest_path).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            manifest.pointer("/recoveryInventory/snapshotCoverageComplete"),
+            Some(&JsonValue::Bool(false)),
+            "manifest snapshot coverage posture",
+        )?;
+        let verify = verify_backup(&BackupVerifyOptions {
+            backup_path: PathBuf::from(report.backup_path),
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            verify.status.as_str(),
+            "degraded",
+            "partial backup integrity verification status",
+        )
     }
 
     #[test]

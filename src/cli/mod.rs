@@ -18459,6 +18459,7 @@ fn export_report_data(report: &BackupCreateReport) -> serde_json::Value {
             "backupId": report.backup_id,
         },
         "verificationStatus": report.verification_status,
+        "recoveryInventory": report.recovery_inventory.data_json(),
         "artifacts": report.artifacts.iter().map(|artifact| artifact.data_json()).collect::<Vec<_>>(),
         "degraded": aggregate_backup_export_degraded_json(&report.degraded),
     })
@@ -85837,6 +85838,7 @@ mod tests {
             tag_count: 0,
             audit_count: 0,
             verification_status: "not_checked".to_string(),
+            recovery_inventory: crate::core::backup::BackupRecoveryInventory::default(),
             artifacts: Vec::new(),
             derived: Vec::new(),
             degraded: vec![
