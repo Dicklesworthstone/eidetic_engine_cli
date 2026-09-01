@@ -14,6 +14,7 @@ use std::future::Future;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::num::NonZeroU64;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -593,6 +594,16 @@ fn durable_registration_rejects_cross_workspace_database_and_key_store_mixtures(
         .map_err(|error| format!("create workspace a state dir: {error}"))?;
     std::fs::create_dir(workspace_b.join(".ee"))
         .map_err(|error| format!("create workspace b state dir: {error}"))?;
+    std::fs::set_permissions(
+        workspace_a.join(".ee"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .map_err(|error| format!("secure workspace a state dir: {error}"))?;
+    std::fs::set_permissions(
+        workspace_b.join(".ee"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .map_err(|error| format!("secure workspace b state dir: {error}"))?;
     let database_a = workspace_a.join(".ee/ee.db");
     let database_b = workspace_b.join(".ee/ee.db");
     let connection_a = DbConnection::open_file(&database_a)
