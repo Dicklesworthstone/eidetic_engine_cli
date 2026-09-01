@@ -602,7 +602,7 @@ fn durable_registration_rejects_cross_workspace_database_and_key_store_mixtures(
         .map_err(|error| format!("migrate workspace a database: {error}"))?;
     connection_a
         .insert_workspace(
-            "wsp_cross_workspace_a",
+            "wsp_crossworkspacea00000000000",
             &CreateWorkspaceInput {
                 path: workspace_a.display().to_string(),
                 name: Some("workspace a".to_owned()),
@@ -616,7 +616,7 @@ fn durable_registration_rejects_cross_workspace_database_and_key_store_mixtures(
         .map_err(|error| format!("migrate workspace b database: {error}"))?;
     connection_b
         .insert_workspace(
-            "wsp_cross_workspace_b",
+            "wsp_crossworkspaceb00000000000",
             &CreateWorkspaceInput {
                 path: workspace_b.display().to_string(),
                 name: Some("workspace b".to_owned()),
@@ -647,7 +647,7 @@ fn durable_registration_rejects_cross_workspace_database_and_key_store_mixtures(
         let base = DurableResponderRegistration {
             workspace_path: workspace_a.clone(),
             database_path: database_a.clone(),
-            workspace_id: "wsp_cross_workspace_a".to_owned(),
+            workspace_id: "wsp_crossworkspacea00000000000".to_owned(),
             team_id: "team-cross-workspace".to_owned(),
             responder_node_id: "node-cross-workspace".to_owned(),
             peer_handle: PEER_HANDLE.to_owned(),
