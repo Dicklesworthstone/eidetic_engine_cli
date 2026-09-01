@@ -132,35 +132,50 @@ proved or returned to its owning Bead with an exact blocker.
 
 #### A. Close the direct CASS evidence loop first (`.17`, ADR 0085)
 
-- [ ] Make `tests/no_mocks_e2e.rs` place workspaces under a canonical physical
+- [x] Make `tests/no_mocks_e2e.rs` place workspaces under a canonical physical
   target root so the required RCH materialization cannot trip its own symlink
   safety policy before product behavior executes.
-- [ ] Add a focused harness regression proving a symlinked target-root alias is
+- [x] Add a focused harness regression proving a symlinked target-root alias is
   resolved only at the trusted test-artifact boundary and descendants remain
   ordinary physical paths.
-- [ ] Rerun the exact no-mock CASS import/search test on pinned current-HEAD RCH
+- [x] Rerun the exact no-mock CASS import/search test on pinned current-HEAD RCH
   and require exact `SessionId`, exact `EvidenceId`, ready index health, equal
   generations, and clean retry publication.
-- [ ] Extend that same scenario—not a synthetic substitute—from exact evidence
+- [x] Extend that same scenario—not a synthetic substitute—from exact evidence
   search into `ee pack`, requiring selection under native `EvidenceId`,
   `entityKind=evidence_span`, exact revision, `cass_evidence` trust, redacted
   session/line provenance, and no synthetic `MemoryId`.
-- [ ] Query the persisted pack through repository APIs and prove the selected
+- [x] Query the persisted pack through repository APIs and prove the selected
   evidence row, rank, section, revision, scores, explanation, trust, and
   provenance round-trip through `pack_evidence_items`.
-- [ ] Replay the persisted pack and require integrity-verified typed evidence;
+- [x] Replay the persisted pack and require integrity-verified typed evidence;
   missing/malformed/hash-mismatched ledger paths must remain fail-closed.
-- [ ] Exercise typed `ee why` for the same `EvidenceId`, including storage,
+- [x] Exercise typed `ee why` for the same `EvidenceId`, including storage,
   retrieval, selection, screening, redaction, session, and line provenance.
-- [ ] Grade the evidence selection with `ee outcome --pack --item`; prove the
+- [x] Grade the evidence selection with `ee outcome --pack --item`; prove the
   typed impression is recorded while immutable evidence and unrelated memory
   Bayesian confidence do not mutate.
-- [ ] Add at least one tempting denied evidence control and prove it remains
+- [x] Add at least one tempting denied evidence control and prove it remains
   absent from search admission, pack selection, persistence, replay, why, and
   feedback without leaking raw path/content.
-- [ ] Correct README CASS wording only after the executable behavior is green;
+- [x] Correct README CASS wording only after the executable behavior is green;
   one canonical explanation must distinguish direct safe evidence packing from
   optional curation into a durable learned memory.
+
+Closure evidence (2026-09-01): commits `bb20a989`, `daca312e`, `c1935d82`,
+`3f57b1b5`, `19d713d1`, `9f30f8df`, `f7daea02`, `0f74e46b`, `1e106539`, and
+`876df57c` connect and adversarially exercise the native `EvidenceId` lifecycle.
+The pinned current-HEAD RCH invocation
+`cargo test --test no_mocks_e2e no_mocks_import_cass_fixture_sessions_stores_spans_and_searches --locked -- --exact --nocapture`
+ran exactly one test and passed (`1 passed; 0 failed; 8 filtered out`) in
+231.22 seconds after compilation. The scenario proves real CASS import and
+retry, exact typed search, direct pack persistence, verified replay, typed
+`why`, evidence-target outcome recording without evidence or unrelated-memory
+mutation, and fail-closed exclusion of an admission-boundary denied control.
+`no_mocks_log_dir_resolves_trusted_target_root_alias` covers the test-artifact
+symlink boundary, and the README CASS section now states that live-admitted
+evidence is directly searchable/packable while curation is an optional,
+identity-changing promotion into durable learned memory.
 
 #### B. Make index/status truth coherent (`.10`, `.16`)
 
