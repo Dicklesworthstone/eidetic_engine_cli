@@ -707,6 +707,18 @@ pub(crate) fn search_hit_meets_relevance_floor(
 }
 
 impl SearchOptions {
+    fn validate(&self) -> Result<(), SearchError> {
+        if self
+            .relevance_floor
+            .is_some_and(|floor| !floor.is_finite() || !(0.0..=1.0).contains(&floor))
+        {
+            return Err(SearchError::InvalidOptions(
+                "relevance_floor must be a finite number from 0.0 to 1.0".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     fn resolve_database_path(&self) -> PathBuf {
         self.database_path
             .clone()
@@ -890,7 +902,7 @@ impl QueryAssistReport {
             "candidateCount": self.candidate_count,
             "droppedBelowFloor": self.dropped_below_floor,
             "relevanceFloor": optional_score_json(self.relevance_floor),
-            "reformulations": self.reformulations.iter().map(QueryAssistReformulation::data_json).collect::<Vec<_>>(),
+            "reformulations": self.reformulations.iter().map(|reformulation| reformulation.data_json(output_redaction_enabled)).collect::<Vec<_>>(),
             "didYouMean": self.did_you_mean.iter().map(|hit| query_assist_did_you_mean_json(hit, output_redaction_enabled)).collect::<Vec<_>>(),
             "captureTemplate": self.capture_template.data_json(),
         })
@@ -899,9 +911,14 @@ impl QueryAssistReport {
 
 impl QueryAssistReformulation {
     #[must_use]
-    fn data_json(&self) -> serde_json::Value {
+    fn data_json(&self, output_redaction_enabled: bool) -> serde_json::Value {
+        let query = if output_redaction_enabled {
+            crate::policy::redact_secret_like_content(&self.query).content
+        } else {
+            self.query.clone()
+        };
         serde_json::json!({
-            "query": &self.query,
+            "query": query,
             "strategy": self.strategy,
             "rationale": &self.rationale,
             "matchedDocId": &self.matched_doc_id,
@@ -2129,6 +2146,19 @@ impl SearchDegradation {
                 "{SEARCH_INDEX_STALE_WARNING_PREFIX}{generation_detail}{SEARCH_INDEX_STALE_WARNING_SUFFIX}"
             ),
             repair: Some("ee index rebuild --workspace .".to_string()),
+        }
+    }
+
+    #[must_use]
+    fn orphaned_index_rows_filtered(filtered: usize) -> Self {
+        Self {
+            code: "search_index_stale".to_owned(),
+            severity: "medium".to_owned(),
+            message: format!(
+                "Filtered {filtered} search index document{suffix} with no authoritative memory row; derived index metadata cannot authorize recall.",
+                suffix = if filtered == 1 { "" } else { "s" },
+            ),
+            repair: Some("ee index rebuild --workspace .".to_owned()),
         }
     }
 
@@ -5398,7 +5428,16 @@ fn query_assist_candidate_terms(hit: &SearchHit, query_terms: &BTreeSet<String>)
     let Some(content) = hit.metadata.as_ref().and_then(search_hit_content_text) else {
         return Vec::new();
     };
-    query_assist_terms(&content)
+    // Reformulations are executable follow-up queries, so never derive their
+    // terms from a credential value even when ordinary output redaction has
+    // been disabled. Remove the placeholders too: scanner names are policy
+    // metadata, not useful search terms.
+    let redaction = crate::policy::redact_secret_like_content(&content);
+    let mut safe_content = redaction.content;
+    for reason in redaction.redacted_reasons {
+        safe_content = safe_content.replace(&crate::policy::redaction_placeholder(reason), " ");
+    }
+    query_assist_terms(&safe_content)
         .into_iter()
         .filter(|term| !query_terms.contains(term))
         .take(QUERY_ASSIST_TERM_LIMIT)
@@ -6158,6 +6197,7 @@ fn round_metric_f64(score: f64) -> f64 {
 #[derive(Debug)]
 pub enum SearchError {
     Index(String),
+    InvalidOptions(String),
     NoIndex,
     Cancelled(asupersync::CancelReason),
     SourceModeUnavailable {
@@ -6171,6 +6211,7 @@ impl SearchError {
     pub fn repair_hint(&self) -> Option<&str> {
         match self {
             Self::Index(_) => Some("Check index directory and permissions"),
+            Self::InvalidOptions(_) => Some("Pass --relevance-floor between 0.0 and 1.0"),
             Self::NoIndex => Some("ee index rebuild --workspace ."),
             Self::Cancelled(_) => None,
             Self::SourceModeUnavailable { .. } => {
@@ -6184,6 +6225,7 @@ impl std::fmt::Display for SearchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Index(e) => write!(f, "Index error: {e}"),
+            Self::InvalidOptions(message) => write!(f, "Invalid search options: {message}"),
             Self::NoIndex => write!(f, "Search index not found"),
             Self::Cancelled(reason) => f.write_str(&crate::core::outcome::cancel_message(reason)),
             Self::SourceModeUnavailable { requested, reason } => write!(
@@ -7002,6 +7044,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     request_timeout: Duration,
 ) -> Result<SearchPerformanceRun, SearchError> {
     let total_start = Instant::now();
+    options.validate()?;
     search_checkpoint(cx)?;
     let determinism = Deterministic::from_seed(0);
     let mut audit_ids = SearchAuditIdSource::Ambient;
@@ -8183,6 +8226,14 @@ async fn run_search_inner_with_performance(
     mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
 ) -> Result<SearchPerformanceRun, SearchError> {
+    options.validate()?;
+    // Always keep an authoritative-memory map for this request. Global-store
+    // hits populate it from their source database even when the caller does
+    // not need preloaded rows returned; local index-only orphans do not.
+    let mut transient_preloaded_memories = BTreeMap::new();
+    if preloaded_memories.is_none() {
+        preloaded_memories = Some(&mut transient_preloaded_memories);
+    }
     search_checkpoint(cx)?;
     let start = Instant::now();
     let mut trace = SearchPerformanceTrace::default();
@@ -8782,6 +8833,7 @@ async fn run_diag_search_with_cx_and_embedder_policy(
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
     resolve_runtime_source_mode: bool,
 ) -> Result<SearchDiagnosticReport, SearchError> {
+    options.validate()?;
     search_checkpoint(cx)?;
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
@@ -11718,6 +11770,7 @@ fn apply_tombstone_visibility_with_connection(
     let mut stale_filtered = 0usize;
     let mut malformed_filtered = 0usize;
     let mut sealed_filtered = 0usize;
+    let mut orphaned_filtered = 0usize;
     let mut included = 0usize;
     let mut drift_hints = Vec::new();
     let mut seal_lookup_error = None;
@@ -11800,8 +11853,15 @@ fn apply_tombstone_visibility_with_connection(
                     if let Some(hit) = handle_loaded_memory(hit, memory) {
                         visible_hits.push(hit);
                     }
+                } else if let Some(memory) = preloaded_memories
+                    .as_deref()
+                    .and_then(|preloaded| preloaded.get(&hit.doc_id))
+                {
+                    if let Some(hit) = handle_loaded_memory(hit, memory) {
+                        visible_hits.push(hit);
+                    }
                 } else {
-                    visible_hits.push(hit);
+                    orphaned_filtered = orphaned_filtered.saturating_add(1);
                 }
             }
         } else {
@@ -11817,7 +11877,18 @@ fn apply_tombstone_visibility_with_connection(
                             visible_hits.push(hit);
                         }
                     }
-                    Ok(None) => visible_hits.push(hit),
+                    Ok(None) => {
+                        if let Some(memory) = preloaded_memories
+                            .as_deref()
+                            .and_then(|preloaded| preloaded.get(&hit.doc_id))
+                        {
+                            if let Some(hit) = handle_loaded_memory(hit, memory) {
+                                visible_hits.push(hit);
+                            }
+                        } else {
+                            orphaned_filtered = orphaned_filtered.saturating_add(1);
+                        }
+                    }
                     Err(error) => {
                         degraded.push(SearchDegradation::tombstone_visibility_unavailable(
                             &error.to_string(),
@@ -11840,7 +11911,8 @@ fn apply_tombstone_visibility_with_connection(
         .saturating_add(future_filtered)
         .saturating_add(stale_filtered)
         .saturating_add(malformed_filtered)
-        .saturating_add(sealed_filtered);
+        .saturating_add(sealed_filtered)
+        .saturating_add(orphaned_filtered);
     let validity_filtered = expired_filtered
         .saturating_add(future_filtered)
         .saturating_add(stale_filtered)
@@ -11860,6 +11932,7 @@ fn apply_tombstone_visibility_with_connection(
         stale_filtered_count = stale_filtered,
         malformed_filtered_count = malformed_filtered,
         sealed_filtered_count = sealed_filtered,
+        orphaned_filtered_count = orphaned_filtered,
         valid_count = visible_hits.len(),
         "visibility_filter"
     );
@@ -11879,6 +11952,11 @@ fn apply_tombstone_visibility_with_connection(
     if malformed_filtered > 0 {
         degraded.push(SearchDegradation::malformed_validity_filtered(
             malformed_filtered,
+        ));
+    }
+    if orphaned_filtered > 0 {
+        degraded.push(SearchDegradation::orphaned_index_rows_filtered(
+            orphaned_filtered,
         ));
     }
     if validity_filtered > 0 && validity_filtered.saturating_mul(2) >= total_before {
@@ -15346,6 +15424,103 @@ mod tests {
         assert_eq!(json["results"][0]["tombstoned"], true);
         assert!(json["results"][0]["tombstonedAt"].is_string());
         assert_eq!(json["results"][0]["metadata"]["tombstoned"], true);
+        Ok(())
+    }
+
+    #[test]
+    fn authoritative_visibility_drops_local_orphans_and_keeps_preloaded_global_rows() -> TestResult
+    {
+        let workspace = unique_test_dir("orphan-index-visibility");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let local = DbConnection::open_file(workspace.join("local.db"))
+            .map_err(|error| error.to_string())?;
+        local.migrate().map_err(|error| error.to_string())?;
+        let global = DbConnection::open_file(workspace.join("global.db"))
+            .map_err(|error| error.to_string())?;
+        global.migrate().map_err(|error| error.to_string())?;
+        global
+            .insert_workspace(
+                "wsp_global_authoritative000001",
+                &CreateWorkspaceInput {
+                    path: workspace.join("global").display().to_string(),
+                    name: Some("global authoritative".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        global
+            .insert_memory(
+                "mem_global_authoritative000001",
+                &CreateMemoryInput {
+                    workspace_id: "wsp_global_authoritative000001".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "authoritative global memory".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let global_memory = global
+            .get_memory("mem_global_authoritative000001")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "global memory missing".to_owned())?;
+        let mut preloaded = BTreeMap::from([(global_memory.id.clone(), global_memory)]);
+        let hit = |doc_id: &str| SearchHit {
+            doc_id: doc_id.to_owned(),
+            score: 0.9,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.9),
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        };
+        let options = SearchOptions {
+            workspace_path: workspace,
+            database_path: None,
+            index_dir: None,
+            query: "authoritative".to_owned(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        };
+        let mut degraded = Vec::new();
+        let visible = apply_tombstone_visibility_collecting(
+            &options,
+            vec![
+                hit("mem_local_orphan000000000001"),
+                hit("mem_global_authoritative000001"),
+            ],
+            &mut degraded,
+            Some(&local),
+            Some(&mut preloaded),
+        );
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].doc_id, "mem_global_authoritative000001");
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "search_index_stale" && entry.message.contains("Filtered 1")
+        }));
         Ok(())
     }
 
@@ -18818,6 +18993,23 @@ mod tests {
     }
 
     #[test]
+    fn search_options_reject_invalid_relevance_floors_before_retrieval() {
+        for floor in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
+            let mut options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+            options.relevance_floor = Some(floor);
+            assert!(matches!(
+                options.validate(),
+                Err(SearchError::InvalidOptions(_))
+            ));
+        }
+        for floor in [0.0, 1.0] {
+            let mut options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+            options.relevance_floor = Some(floor);
+            assert!(options.validate().is_ok());
+        }
+    }
+
+    #[test]
     fn normalized_relevance_score_rescales_rrf_and_tags_kind() {
         // bd-1et0v.11: a top hybrid hit scores at the RRF-fused magnitude
         // (~0.0328), which an agent misreads as "no match". The normalized
@@ -20791,6 +20983,72 @@ mod tests {
                 .is_some_and(|items| !items.is_empty()),
             "near-memory content terms should produce at least one reformulation"
         );
+    }
+
+    #[test]
+    fn query_assist_reformulations_never_derive_terms_from_secret_values() {
+        let secret_suffix = "a".repeat(36);
+        let mut secret = String::from("gh");
+        secret.push_str("p_");
+        secret.push_str(&secret_suffix);
+        let mut candidate = synthetic_hit("mem_semantic_secret", 0.02);
+        candidate.metadata = Some(serde_json::json!({
+            "content": format!(
+                "Deploy the release with {secret}, then verify the public artifact."
+            ),
+            "level": "procedural",
+            "kind": "rule",
+        }));
+
+        let assist = build_query_assist(
+            "artifact verification",
+            true,
+            0,
+            RelevanceFloorCounts::new(1, 0),
+            0.05,
+            None,
+            1,
+            &[candidate],
+        )
+        .expect("below-floor candidate should produce query assist");
+        let reformulation_queries = assist
+            .reformulations
+            .iter()
+            .map(|reformulation| reformulation.query.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            !reformulation_queries.contains(&secret)
+                && !reformulation_queries.contains(&secret_suffix),
+            "memory-derived reformulations must omit credential material even when ordinary output redaction is disabled: {reformulation_queries}"
+        );
+        assert!(
+            assist
+                .reformulations
+                .iter()
+                .any(|reformulation| reformulation.query.contains("release")),
+            "safe surrounding memory terms should remain useful"
+        );
+    }
+
+    #[test]
+    fn query_assist_reformulation_json_redacts_secret_like_queries_at_egress() {
+        let mut secret = String::from("gh");
+        secret.push_str("p_");
+        secret.push_str(&"b".repeat(36));
+        let reformulation = QueryAssistReformulation {
+            query: format!("release with {secret}"),
+            strategy: "nearest_memory_terms",
+            rationale: "test".to_owned(),
+            matched_doc_id: "mem_semantic_secret".to_owned(),
+            matched_memory_id: Some("mem_semantic_secret".to_owned()),
+        };
+
+        let redacted = reformulation.data_json(true).to_string();
+        assert!(!redacted.contains(&secret));
+        assert!(redacted.contains("[REDACTED:github_token]"));
+        assert!(reformulation.data_json(false).to_string().contains(&secret));
     }
 
     #[test]

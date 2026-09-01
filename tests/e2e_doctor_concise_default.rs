@@ -365,3 +365,74 @@ fn doctor_default_json_is_concise_and_full_json_keeps_diagnostics() -> TestResul
         }),
     )
 }
+
+#[test]
+fn doctor_read_only_modes_honor_environment_and_walk_up_workspace_resolution() -> TestResult {
+    let env_workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let unrelated_cwd = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let env_workspace_arg = env_workspace
+        .path()
+        .to_str()
+        .ok_or_else(|| "environment workspace path must be UTF-8".to_owned())?;
+    let env_output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["doctor", "--list-runs"])
+        .current_dir(unrelated_cwd.path())
+        .env("EE_NO_COLOR", "1")
+        .env("EE_WORKSPACE", env_workspace.path())
+        .env_remove("EE_WORKSPACE_REGISTRY")
+        .output()
+        .map_err(|error| format!("run doctor with EE_WORKSPACE: {error}"))?;
+    ensure(
+        env_output.status.success() && env_output.stderr.is_empty(),
+        "doctor list-runs succeeds through EE_WORKSPACE",
+        json!({
+            "stdout": preview(&env_output.stdout),
+            "stderr": preview(&env_output.stderr),
+        }),
+    )?;
+    let env_json = parse_json("doctor_env_workspace", &env_output)?;
+    ensure(
+        env_json["workspace"].as_str() == Some(env_workspace_arg),
+        "doctor list-runs selects EE_WORKSPACE ahead of cwd",
+        json!({
+            "expected": env_workspace_arg,
+            "actual": env_json.get("workspace"),
+        }),
+    )?;
+
+    let walk_up_workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    std::fs::create_dir(walk_up_workspace.path().join(".ee"))
+        .map_err(|error| format!("create walk-up marker: {error}"))?;
+    let nested = walk_up_workspace.path().join("nested").join("deeper");
+    std::fs::create_dir_all(&nested)
+        .map_err(|error| format!("create nested walk-up cwd: {error}"))?;
+    let walk_up_workspace_arg = walk_up_workspace
+        .path()
+        .to_str()
+        .ok_or_else(|| "walk-up workspace path must be UTF-8".to_owned())?;
+    let walk_up_output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["doctor", "--list-runs"])
+        .current_dir(&nested)
+        .env("EE_NO_COLOR", "1")
+        .env_remove("EE_WORKSPACE")
+        .env_remove("EE_WORKSPACE_REGISTRY")
+        .output()
+        .map_err(|error| format!("run doctor with walk-up workspace: {error}"))?;
+    ensure(
+        walk_up_output.status.success() && walk_up_output.stderr.is_empty(),
+        "doctor list-runs succeeds through walk-up discovery",
+        json!({
+            "stdout": preview(&walk_up_output.stdout),
+            "stderr": preview(&walk_up_output.stderr),
+        }),
+    )?;
+    let walk_up_json = parse_json("doctor_walk_up_workspace", &walk_up_output)?;
+    ensure(
+        walk_up_json["workspace"].as_str() == Some(walk_up_workspace_arg),
+        "doctor list-runs selects ancestor .ee workspace ahead of nested cwd",
+        json!({
+            "expected": walk_up_workspace_arg,
+            "actual": walk_up_json.get("workspace"),
+        }),
+    )
+}

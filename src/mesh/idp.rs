@@ -844,6 +844,7 @@ pub enum IdTokenClaimDisposition {
     IssuerMismatch,
     AudienceMismatch,
     Expired,
+    MissingExpiry,
     NotYetValid,
     MissingIssuer,
 }
@@ -856,6 +857,7 @@ impl IdTokenClaimDisposition {
             Self::IssuerMismatch => "issuer_mismatch",
             Self::AudienceMismatch => "audience_mismatch",
             Self::Expired => "expired",
+            Self::MissingExpiry => "missing_expiry",
             Self::NotYetValid => "not_yet_valid",
             Self::MissingIssuer => "missing_issuer",
         }
@@ -909,9 +911,10 @@ pub fn classify_id_token_claims(
     {
         return IdTokenClaimDisposition::NotYetValid;
     }
-    if let Some(exp) = claims.get("exp").and_then(Value::as_i64)
-        && now_unix >= exp
-    {
+    let Some(exp) = claims.get("exp").and_then(Value::as_i64) else {
+        return IdTokenClaimDisposition::MissingExpiry;
+    };
+    if now_unix >= exp {
         return IdTokenClaimDisposition::Expired;
     }
     IdTokenClaimDisposition::Accepted
@@ -1436,6 +1439,18 @@ mod tests {
         assert_eq!(
             classify_id_token_claims(&token, "https://idp.example", "ee-public", 40),
             IdTokenClaimDisposition::NotYetValid
+        );
+        let no_expiry = format!(
+            "{}.{}.{}",
+            encode_unpadded_base64url(br#"{"alg":"RS256","kid":"k1"}"#),
+            encode_unpadded_base64url(
+                br#"{"sub":"user-1","iss":"https://idp.example","aud":"ee-public"}"#,
+            ),
+            encode_unpadded_base64url(b"sig"),
+        );
+        assert_eq!(
+            classify_id_token_claims(&no_expiry, "https://idp.example", "ee-public", 100),
+            IdTokenClaimDisposition::MissingExpiry
         );
     }
 

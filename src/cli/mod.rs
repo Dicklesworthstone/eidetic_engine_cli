@@ -3148,7 +3148,7 @@ pub struct ContextArgs {
 
     /// Minimum score (0.0..=1.0) for a search hit before context packing.
     /// Defaults to 0.0 so context can inspect the full candidate pool.
-    #[arg(long, value_name = "FLOAT")]
+    #[arg(long, value_name = "FLOAT", value_parser = parse_relevance_floor_arg)]
     pub relevance_floor: Option<f32>,
 
     /// Trust lane to apply before packing memories: self, team, global, workspace, verified, or swarm.
@@ -4892,7 +4892,7 @@ pub struct DiagSearchArgs {
     pub index_dir: Option<PathBuf>,
 
     /// Minimum score (0.0..=1.0) for a hit to be included in final results.
-    #[arg(long, value_name = "FLOAT")]
+    #[arg(long, value_name = "FLOAT", value_parser = parse_relevance_floor_arg)]
     pub relevance_floor: Option<f32>,
 
     /// Trust lane to apply before returning memories: self, team, global, workspace, verified, or swarm.
@@ -9181,7 +9181,9 @@ pub struct DoctorArgs {
         long = "undo",
         value_name = "RUN_ID",
         value_parser = parse_doctor_run_id_arg,
-        conflicts_with_all = ["fix_plan", "franken_health", "capabilities", "robot_docs"],
+        conflicts_with_all = [
+            "fix_plan", "franken_health", "capabilities", "robot_docs", "quick", "only",
+        ],
     )]
     pub undo: Option<String>,
 
@@ -13335,10 +13337,13 @@ where
             DiagCommand::WriteSpool(args) => handle_diag_write_spool(&cli, args, stdout),
         },
         Some(Command::Doctor(ref args)) => {
+            // Doctor must honor the same flag -> EE_WORKSPACE -> walk-up -> cwd
+            // resolution contract as every other workspace-aware command. In
+            // particular, mutation and replay modes must never fall back to a
+            // nested cwd when the canonical workspace came from the environment
+            // or ancestor discovery.
+            let workspace = cli.resolve_workspace();
             if args.capabilities {
-                let workspace = cli.workspace.clone().unwrap_or_else(|| {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                });
                 let report = crate::core::doctor_runtime::CapabilitiesReport::build(
                     env!("CARGO_PKG_VERSION"),
                     workspace.as_path(),
@@ -13355,9 +13360,6 @@ where
                 return ProcessExitCode::Success;
             }
             if args.list_runs {
-                let workspace = cli.workspace.clone().unwrap_or_else(|| {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                });
                 let runs_root = workspace.join(".doctor").join("runs");
                 write_stdout(
                     stdout,
@@ -13366,9 +13368,6 @@ where
                 return ProcessExitCode::Success;
             }
             if let Some(days) = args.gc_plan {
-                let workspace = cli.workspace.clone().unwrap_or_else(|| {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                });
                 let runs_root = workspace.join(".doctor").join("runs");
                 write_stdout(
                     stdout,
@@ -13377,10 +13376,7 @@ where
                 return ProcessExitCode::Success;
             }
             if args.robot_triage {
-                let report = cli
-                    .workspace
-                    .as_deref()
-                    .map_or_else(DoctorReport::gather, DoctorReport::gather_for_workspace);
+                let report = DoctorReport::gather_for_workspace(&workspace);
                 write_stdout(stdout, &(doctor_robot_triage_json(&report) + "\n"));
                 return ProcessExitCode::Success;
             }
@@ -13395,9 +13391,6 @@ where
                     write_stdout(stdout, &(json.to_string() + "\n"));
                     return ProcessExitCode::Configuration;
                 }
-                let workspace = cli.workspace.clone().unwrap_or_else(|| {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                });
                 let baseline = args.diff[0].as_str();
                 let comparison = args.diff[1].as_str();
                 write_stdout(
@@ -13407,9 +13400,6 @@ where
                 return ProcessExitCode::Success;
             }
             if args.fix {
-                let workspace = cli.workspace.clone().unwrap_or_else(|| {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                });
                 let result = doctor_fix_json(&workspace);
                 let write_exit = write_stdout(stdout, &(result.json + "\n"));
                 return if write_exit == ProcessExitCode::Success {
@@ -13419,9 +13409,6 @@ where
                 };
             }
             if let Some(run_id) = args.undo.as_deref() {
-                let workspace = cli.workspace.clone().unwrap_or_else(|| {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                });
                 let run_dir = workspace.join(".doctor").join("runs").join(run_id);
                 let recovery_workspace = workspace
                     .canonicalize()
@@ -13558,10 +13545,7 @@ where
                     }
                 };
             }
-            let report = cli
-                .workspace
-                .as_deref()
-                .map_or_else(DoctorReport::gather, DoctorReport::gather_for_workspace);
+            let report = DoctorReport::gather_for_workspace(&workspace);
             let profile = if args.full && !cli.fields_explicit {
                 output::FieldProfile::Full
             } else {
@@ -21724,7 +21708,7 @@ fn doctor_robot_docs_json() -> String {
             "related_schemas": [
                 "ee.doctor.capabilities.v1",
                 "ee.doctor.run_state.v2",
-                "ee.doctor.action_line.v1"
+                crate::core::doctor_runtime::ACTION_LINE_SCHEMA_V1
             ]
         },
         "degraded": [],
@@ -23301,6 +23285,135 @@ where
     write_domain_error(&domain_error, wants_json, stdout, stderr)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IndexMaintenanceFailure {
+    Storage,
+    SearchIndex,
+}
+
+impl IndexMaintenanceFailure {
+    const fn exit_code(self) -> ProcessExitCode {
+        match self {
+            Self::Storage => ProcessExitCode::Storage,
+            Self::SearchIndex => ProcessExitCode::SearchIndex,
+        }
+    }
+}
+
+const fn index_rebuild_report_failure(
+    status: IndexRebuildStatus,
+) -> Option<IndexMaintenanceFailure> {
+    match status {
+        IndexRebuildStatus::DatabaseError => Some(IndexMaintenanceFailure::Storage),
+        IndexRebuildStatus::IndexError => Some(IndexMaintenanceFailure::SearchIndex),
+        IndexRebuildStatus::Success
+        | IndexRebuildStatus::DryRun
+        | IndexRebuildStatus::NoDocuments => None,
+    }
+}
+
+const fn index_reembed_report_failure(
+    status: crate::core::index::IndexReembedStatus,
+) -> Option<IndexMaintenanceFailure> {
+    match status {
+        crate::core::index::IndexReembedStatus::IndexError => {
+            Some(IndexMaintenanceFailure::SearchIndex)
+        }
+        crate::core::index::IndexReembedStatus::Success
+        | crate::core::index::IndexReembedStatus::DryRun
+        | crate::core::index::IndexReembedStatus::NoDocuments => None,
+    }
+}
+
+/// Render a flattened hard-failure report as the canonical error envelope.
+///
+/// Index rebuild/re-embed deliberately return some publication and database
+/// failures as `Ok(report)` so callers can retain complete diagnostic counts.
+/// Those reports are still command failures: preserve the full report under
+/// `error.details.report`, but never mislabel it as `ee.response.v2`.
+fn index_maintenance_failure_json(
+    failure: IndexMaintenanceFailure,
+    operation: &'static str,
+    workspace: &Path,
+    report: serde_json::Value,
+) -> String {
+    let workspace_arg = shell_quote_cli_arg(&workspace.display().to_string());
+    let retry_command = format!("ee --workspace {workspace_arg} index {operation} --json");
+    let errors = report
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    let message = errors.first().map_or_else(
+        || format!("Index {operation} failed."),
+        |error| format!("Index {operation} failed: {error}"),
+    );
+
+    let (domain_error, recovery) = match failure {
+        IndexMaintenanceFailure::Storage => {
+            let inspect_command = format!("ee --workspace {workspace_arg} doctor --json");
+            (
+                DomainError::Storage {
+                    message,
+                    repair: Some(inspect_command.clone()),
+                },
+                serde_json::json!([
+                    {
+                        "priority": 0,
+                        "kind": "doctor_storage_inspect",
+                        "rationale": "Inspect workspace storage health before retrying index maintenance.",
+                        "command": inspect_command,
+                    },
+                    {
+                        "priority": 1,
+                        "kind": "index_maintenance_retry",
+                        "rationale": "Retry the idempotent index operation after storage health is restored.",
+                        "command": retry_command,
+                    },
+                ]),
+            )
+        }
+        IndexMaintenanceFailure::SearchIndex => {
+            let inspect_command = format!("ee --workspace {workspace_arg} index status --json");
+            (
+                DomainError::SearchIndex {
+                    message,
+                    repair: Some(inspect_command.clone()),
+                },
+                serde_json::json!([
+                    {
+                        "priority": 0,
+                        "kind": "index_status_inspect",
+                        "rationale": "Inspect the retained index generation and publication state.",
+                        "command": inspect_command,
+                    },
+                    {
+                        "priority": 1,
+                        "kind": "index_maintenance_retry",
+                        "rationale": "Retry the idempotent index operation after resolving the reported index failure.",
+                        "command": retry_command,
+                    },
+                ]),
+            )
+        }
+    };
+
+    let rendered = output::error_response_json(&domain_error);
+    let Ok(mut envelope) = serde_json::from_str::<serde_json::Value>(&rendered) else {
+        return rendered;
+    };
+    if let Some(details) = envelope
+        .pointer_mut("/error/details")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        details.insert("report".to_owned(), report);
+        details.insert("recovery".to_owned(), recovery);
+    }
+    output::redact_mesh_approval_bearers(&envelope.to_string())
+}
+
 fn handle_index_rebuild<W, E>(
     cli: &Cli,
     args: &IndexRebuildArgs,
@@ -23330,13 +23443,7 @@ where
             // rebuild that rolled back, so an agent gating on `success` or `$?`
             // treated the previous generation as freshly rebuilt. Match
             // exhaustively so a new status has to make this decision too.
-            let failure_exit = match report.status {
-                IndexRebuildStatus::DatabaseError => Some(ProcessExitCode::Storage),
-                IndexRebuildStatus::IndexError => Some(ProcessExitCode::SearchIndex),
-                IndexRebuildStatus::Success
-                | IndexRebuildStatus::DryRun
-                | IndexRebuildStatus::NoDocuments => None,
-            };
+            let failure = index_rebuild_report_failure(report.status);
             let write_status = match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &report.human_summary())
@@ -23361,16 +23468,29 @@ where
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
                 | output::Renderer::Hook => {
-                    let json = serde_json::json!({
-                        "schema": crate::models::RESPONSE_SCHEMA_V2,
-                        "success": failure_exit.is_none(),
-                        "degraded": [],
-                        "data": report.data_json(),
-                    });
-                    write_stdout(stdout, &(json.to_string() + "\n"))
+                    let json = failure.map_or_else(
+                        || {
+                            serde_json::json!({
+                                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                                "success": true,
+                                "degraded": [],
+                                "data": report.data_json(),
+                            })
+                            .to_string()
+                        },
+                        |failure| {
+                            index_maintenance_failure_json(
+                                failure,
+                                "rebuild",
+                                &options.workspace_path,
+                                report.data_json(),
+                            )
+                        },
+                    );
+                    write_stdout(stdout, &(json + "\n"))
                 }
             };
-            match failure_exit {
+            match failure.map(IndexMaintenanceFailure::exit_code) {
                 // Never mask a stdout write failure with the report's status.
                 Some(code) if write_status == ProcessExitCode::Success => code,
                 _ => write_status,
@@ -23406,14 +23526,7 @@ where
             // Same flattening as `handle_index_rebuild`: `reembed_index` turns a
             // publish failure into `Ok(report)` with `status: IndexError` and
             // `job_status: "failed"`, which must not be reported as a clean run.
-            let failure_exit = match report.status {
-                crate::core::index::IndexReembedStatus::IndexError => {
-                    Some(ProcessExitCode::SearchIndex)
-                }
-                crate::core::index::IndexReembedStatus::Success
-                | crate::core::index::IndexReembedStatus::DryRun
-                | crate::core::index::IndexReembedStatus::NoDocuments => None,
-            };
+            let failure = index_reembed_report_failure(report.status);
             let write_status = match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &report.human_summary())
@@ -23440,16 +23553,29 @@ where
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
                 | output::Renderer::Hook => {
-                    let json = serde_json::json!({
-                        "schema": crate::models::RESPONSE_SCHEMA_V2,
-                        "success": failure_exit.is_none(),
-                        "degraded": [],
-                        "data": report.data_json(),
-                    });
-                    write_stdout(stdout, &(json.to_string() + "\n"))
+                    let json = failure.map_or_else(
+                        || {
+                            serde_json::json!({
+                                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                                "success": true,
+                                "degraded": [],
+                                "data": report.data_json(),
+                            })
+                            .to_string()
+                        },
+                        |failure| {
+                            index_maintenance_failure_json(
+                                failure,
+                                "reembed",
+                                &options.workspace_path,
+                                report.data_json(),
+                            )
+                        },
+                    );
+                    write_stdout(stdout, &(json + "\n"))
                 }
             };
-            match failure_exit {
+            match failure.map(IndexMaintenanceFailure::exit_code) {
                 // Never mask a stdout write failure with the report's status.
                 Some(code) if write_status == ProcessExitCode::Success => code,
                 _ => write_status,
@@ -38741,6 +38867,19 @@ fn parse_ppr_weight_arg(value: &str) -> Result<f32, String> {
     } else {
         Err(format!(
             "Invalid PPR weight '{value}'. Expected a finite number from 0.0 to 1.0."
+        ))
+    }
+}
+
+fn parse_relevance_floor_arg(value: &str) -> Result<f32, String> {
+    let floor = value
+        .parse::<f32>()
+        .map_err(|error| format!("Invalid relevance floor '{value}': {error}"))?;
+    if floor.is_finite() && (0.0..=1.0).contains(&floor) {
+        Ok(floor)
+    } else {
+        Err(format!(
+            "Invalid relevance floor '{value}'. Expected a finite number from 0.0 to 1.0."
         ))
     }
 }
@@ -77069,6 +77208,25 @@ mod tests {
     }
 
     #[test]
+    fn parser_rejects_doctor_undo_with_ignored_report_filters() {
+        for args in [
+            &["ee", "doctor", "--undo", "abc", "--quick"][..],
+            &["ee", "doctor", "--undo", "abc", "--only", "fm-test"][..],
+        ] {
+            let err = Cli::try_parse_from(args.iter().copied())
+                .expect_err("--undo must conflict with report-only filters");
+            let kind = err.kind();
+            assert!(
+                matches!(
+                    kind,
+                    clap::error::ErrorKind::ArgumentConflict | clap::error::ErrorKind::DisplayHelp
+                ),
+                "expected ArgumentConflict, got {kind:?}"
+            );
+        }
+    }
+
+    #[test]
     fn parser_accepts_learn_experiment_propose() -> TestResult {
         let parsed = Cli::try_parse_from([
             "ee",
@@ -84532,6 +84690,23 @@ mod tests {
     }
 
     #[test]
+    fn relevance_floor_arg_parser_rejects_non_finite_and_out_of_range_values() -> TestResult {
+        for raw in ["-0.1", "1.1", "NaN", "inf", "-inf"] {
+            ensure(
+                super::parse_relevance_floor_arg(raw).is_err(),
+                format!("relevance floor {raw} should be rejected"),
+            )?;
+        }
+        for raw in ["0", "0.5", "1"] {
+            ensure(
+                super::parse_relevance_floor_arg(raw).is_ok(),
+                format!("relevance floor {raw} should be accepted"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn mesh_command_mode_flags_parse_on_agent_facing_surfaces() -> TestResult {
         let pack_cache = Cli::try_parse_from(["ee", "pack", "test", "--mesh", "cache"])
             .map_err(|e| format!("failed to parse pack mesh mode: {:?}", e.kind()))?;
@@ -87259,6 +87434,97 @@ mod tests {
             "contention holder id",
         )?;
         ensure(stderr.is_empty(), "contention json stderr must be empty")
+    }
+
+    #[test]
+    fn flattened_index_failures_use_error_v2_with_report_and_recovery() -> TestResult {
+        let workspace = Path::new("/tmp/ee-index-failure-contract");
+        let cases = [
+            (
+                super::IndexMaintenanceFailure::Storage,
+                "rebuild",
+                "storage",
+                ProcessExitCode::Storage,
+            ),
+            (
+                super::IndexMaintenanceFailure::SearchIndex,
+                "reembed",
+                "search_index",
+                ProcessExitCode::SearchIndex,
+            ),
+        ];
+
+        for (failure, operation, expected_code, expected_exit) in cases {
+            let report = serde_json::json!({
+                "command": format!("index_{operation}"),
+                "status": "failed",
+                "errors": [format!("{operation} fixture failure")],
+            });
+            let raw = super::index_maintenance_failure_json(
+                failure,
+                operation,
+                workspace,
+                report.clone(),
+            );
+            let value: serde_json::Value =
+                serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+
+            ensure_equal(
+                &value["schema"],
+                &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+                "flattened failure error schema",
+            )?;
+            ensure_equal(
+                &value["error"]["code"],
+                &serde_json::json!(expected_code),
+                "flattened failure error code",
+            )?;
+            ensure_equal(
+                &value["error"]["details"]["report"],
+                &report,
+                "flattened failure preserves diagnostic report",
+            )?;
+            ensure(
+                value["error"]["details"]["recovery"]
+                    .as_array()
+                    .is_some_and(|actions| {
+                        actions.len() == 2
+                            && actions.iter().all(|action| {
+                                action["command"]
+                                    .as_str()
+                                    .is_some_and(|command| command.contains("--workspace"))
+                            })
+                    }),
+                "flattened failure includes two workspace-specific recovery actions",
+            )?;
+            ensure_equal(
+                &failure.exit_code(),
+                &expected_exit,
+                "flattened failure exit code",
+            )?;
+        }
+
+        ensure_equal(
+            &super::index_rebuild_report_failure(
+                crate::core::index::IndexRebuildStatus::DatabaseError,
+            ),
+            &Some(super::IndexMaintenanceFailure::Storage),
+            "database rebuild failure classification",
+        )?;
+        ensure_equal(
+            &super::index_rebuild_report_failure(
+                crate::core::index::IndexRebuildStatus::IndexError,
+            ),
+            &Some(super::IndexMaintenanceFailure::SearchIndex),
+            "index rebuild failure classification",
+        )?;
+        ensure_equal(
+            &super::index_reembed_report_failure(
+                crate::core::index::IndexReembedStatus::IndexError,
+            ),
+            &Some(super::IndexMaintenanceFailure::SearchIndex),
+            "reembed failure classification",
+        )
     }
 
     #[test]
@@ -91191,6 +91457,17 @@ demos:
                 .pointer("/data/surfaces")
                 .is_some_and(serde_json::Value::is_array),
             "inner data.surfaces must remain an array of surface entries",
+        )?;
+        ensure(
+            value
+                .pointer("/data/related_schemas")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|schemas| {
+                    schemas.iter().any(|schema| {
+                        schema.as_str() == Some(crate::core::doctor_runtime::ACTION_LINE_SCHEMA_V1)
+                    })
+                }),
+            "related schemas must use the runtime action-line schema constant",
         )
     }
 

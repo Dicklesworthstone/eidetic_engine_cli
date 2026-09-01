@@ -1,6 +1,6 @@
 //! Product-level `ee team` commands over mesh primitives.
 
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -14,10 +14,10 @@ use crate::mesh::team::{
     execute_team_idp_token_poll, execute_team_steward_once, fetch_local_team_body,
     inspect_team_health, inspect_team_port, join_team_with_code_on_store, leave_local_team,
     list_team_activity, list_team_projects, local_team_status, migrate_local_team_port,
-    mint_team_invite_with_store, plan_team_idp_device, reconcile_local_team_membership,
-    reconcile_local_team_projects, remove_team_member, require_tailnet_attested,
-    resume_pending_invite, revalidate_team_identities, revoke_team_invite,
-    revoke_team_invites_before_floor, rotate_local_signing_key,
+    mint_team_invite_with_store, pinned_team_jwks_uri, plan_team_idp_device,
+    reconcile_local_team_membership, reconcile_local_team_projects, remove_team_member,
+    require_tailnet_attested, resume_pending_invite, revalidate_team_identities,
+    revoke_team_invite, revoke_team_invites_before_floor, rotate_local_signing_key,
     serve_one_bootstrap_join_with_store, serve_one_invite_first_sync, set_local_team_paused,
     set_team_oidc_provider, share_team_bodies_represented, share_team_history, share_team_project,
     team_idp_status, unshare_team_bodies,
@@ -254,25 +254,17 @@ pub struct TeamRevokeArgs {
 
 /// Arguments for `ee team share bodies`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
-#[command(group(
-    clap::ArgGroup::new("body_approval_bearer")
-        .args(["token", "token_stdin"])
-        .multiple(false)
-))]
 pub struct TeamShareBodiesArgs {
     /// Publish bearer-approved bodies into the hardened local cache.
-    #[arg(long, requires = "body_approval_bearer")]
+    #[arg(long, requires = "token_stdin")]
     pub confirm: bool,
 
     /// Mint a sensitive `eeap1_` body-approval token on preview.
     #[arg(long, conflicts_with = "confirm")]
     pub issue_token: bool,
 
-    /// Consume a body-approval token on confirm.
-    #[arg(long, requires = "confirm")]
-    pub token: Option<String>,
-
-    /// Read the body-approval token from stdin instead of `--token`.
+    /// Read the body-approval token from bounded stdin. Bearers are never
+    /// accepted in process arguments, environment variables, or logs.
     #[arg(long, requires = "confirm")]
     pub token_stdin: bool,
 
@@ -647,38 +639,24 @@ pub struct TeamIdpDeviceArgs {
 
 /// Arguments for `ee team idp attest`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
-#[command(group(
-    clap::ArgGroup::new("jwks_source")
-        .args(["jwks_json", "jwks_url"])
-        .required(true)
-        .multiple(false)
-))]
 pub struct TeamIdpAttestArgs {
-    /// Compact ID token, or `-` to read stdin.
-    #[arg(long)]
+    /// Read the compact ID token from stdin. The only accepted value is `-`;
+    /// bearer material is never accepted in process arguments.
+    #[arg(long, value_name = "-", value_parser = parse_stdin_sentinel)]
     pub id_token: String,
 
     /// Configured group to match. Repeatable. Unlisted groups are dropped.
     #[arg(long = "group")]
     pub groups: Vec<String>,
 
-    /// Local JWKS JSON used to verify the ID token signature. Exactly one
-    /// JWKS source is required.
+    /// The exact discovery JSON pinned by `ee team idp set`. Its `jwks_uri`
+    /// is the only key source authorized for signature verification.
     #[arg(long, value_name = "PATH")]
-    pub jwks_json: Option<PathBuf>,
+    pub discovery_json: PathBuf,
 
-    /// HTTPS JWKS URL fetched with constrained curl. Exactly one JWKS source
-    /// is required.
-    #[arg(long, value_name = "URL")]
-    pub jwks_url: Option<String>,
-
-    /// Absolute CA bundle used to pin TLS for `--jwks-url`. Never `--insecure`.
+    /// Absolute CA bundle used to pin TLS for the discovery-bound JWKS URL.
     #[arg(long, value_name = "PATH")]
     pub ca_bundle: Option<PathBuf>,
-
-    /// Absolute curl binary. Defaults to /usr/bin/curl.
-    #[arg(long, value_name = "PATH", default_value = "/usr/bin/curl")]
-    pub curl: PathBuf,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -1298,7 +1276,6 @@ where
     } else {
         None
     };
-    let token = stdin_token.as_deref().or(args.token.as_deref());
     match share_team_bodies_represented(
         &connection,
         &workspace_id,
@@ -1307,7 +1284,7 @@ where
         args.limit,
         Some(&workspace_path),
         args.issue_token,
-        token,
+        stdin_token.as_deref(),
         &args.representation,
     ) {
         Ok(report) => {
@@ -2399,14 +2376,14 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let token = if args.id_token == "-" {
-        match read_invite_code_from_stdin() {
+        match read_bounded_id_token_from_stdin() {
             Ok(token) => token,
             Err(error) => {
                 return write_domain_error(
                     &DomainError::Usage {
                         message: format!("Failed to read id token from stdin: {error}"),
                         repair: Some(
-                            "ee team idp attest --id-token - --jwks-json <file> --workspace ."
+                            "ee team idp attest --id-token - --discovery-json <file> --workspace ."
                                 .to_owned(),
                         ),
                     },
@@ -2421,47 +2398,18 @@ where
     };
     let groups = args.groups.iter().map(String::as_str).collect::<Vec<_>>();
     let checked_at = chrono::Utc::now().to_rfc3339();
-    let jwks = match (args.jwks_json.as_ref(), args.jwks_url.as_deref()) {
-        (Some(path), None) => match read_json_file(path) {
-            Ok(value) => value,
-            Err(error) => {
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-            }
-        },
-        (None, Some(url)) => {
-            let ca = args
-                .ca_bundle
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned());
-            match crate::mesh::idp::fetch_jwks_document(
-                &args.curl.to_string_lossy(),
-                url,
-                ca.as_deref(),
-            ) {
-                Ok(value) => value,
-                Err(error) => {
-                    return write_domain_error(
-                        &DomainError::Usage {
-                            message: format!("Failed to fetch JWKS: {error}"),
-                            repair: Some(
-                                "ee team idp attest --jwks-url https://idp.example/jwks --ca-bundle <pem> --workspace ."
-                                    .to_owned(),
-                            ),
-                        },
-                        cli.wants_json(),
-                        stdout,
-                        stderr,
-                    );
-                }
-            }
-        }
-        _ => {
+    let discovery = match read_json_file(&args.discovery_json) {
+        Ok(value) => value,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let jwks_url = match pinned_team_jwks_uri(&connection, &discovery) {
+        Ok(url) => url,
+        Err(error) => {
             return write_domain_error(
-                &DomainError::Usage {
-                    message: "Exactly one of --jwks-json or --jwks-url is required to verify the ID-token signature."
-                        .to_owned(),
+                &DomainError::Storage {
+                    message: format!("Failed to authorize JWKS endpoint: {error}"),
                     repair: Some(
-                        "ee team idp attest --id-token - --jwks-json <file> --workspace ."
+                        "ee team idp set --issuer <https-url> --client-id <id> --discovery-json <file> --workspace ."
                             .to_owned(),
                     ),
                 },
@@ -2471,7 +2419,36 @@ where
             );
         }
     };
-    match attest_local_id_token(&connection, token.trim(), &groups, &checked_at, &jwks) {
+    let ca = args
+        .ca_bundle
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
+    let jwks =
+        match crate::mesh::idp::fetch_jwks_document("/usr/bin/curl", &jwks_url, ca.as_deref()) {
+            Ok(value) => value,
+            Err(error) => {
+                return write_domain_error(
+                    &DomainError::Usage {
+                        message: format!("Failed to fetch configured JWKS: {error}"),
+                        repair: Some(
+                            "verify the pinned discovery jwks_uri and --ca-bundle, then retry"
+                                .to_owned(),
+                        ),
+                    },
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
+        };
+    match attest_local_id_token(
+        &connection,
+        token.trim(),
+        &groups,
+        &checked_at,
+        &discovery,
+        &jwks,
+    ) {
         Ok(report) => write_team_report(
             cli,
             &report,
@@ -2485,7 +2462,7 @@ where
             &DomainError::Storage {
                 message: format!("Failed to attest identity: {error}"),
                 repair: Some(
-                    "ee team idp attest --id-token <jwt> --jwks-json <file> --workspace ."
+                    "ee team idp attest --id-token - --discovery-json <file> --workspace ."
                         .to_owned(),
                 ),
             },
@@ -3106,6 +3083,60 @@ fn read_invite_code_from_stdin() -> Result<String, String> {
     Ok(raw.trim().to_owned())
 }
 
+fn read_bounded_id_token_from_stdin() -> Result<String, String> {
+    const MAX_ID_TOKEN_INPUT_BYTES: usize = 64 * 1024;
+
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    #[cfg(unix)]
+    let _guard = if tty {
+        std::process::Command::new("stty")
+            .arg("-echo")
+            .status()
+            .map_err(|error| format!("disable stdin echo: {error}"))?;
+        Some(StdinEchoGuard)
+    } else {
+        None
+    };
+    let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
+    let mut bytes = Vec::with_capacity(4096);
+    loop {
+        let available = reader.fill_buf().map_err(|error| error.to_string())?;
+        if available.is_empty() {
+            break;
+        }
+        let consumed = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index.saturating_add(1));
+        if bytes.len().saturating_add(consumed) > MAX_ID_TOKEN_INPUT_BYTES {
+            return Err(format!(
+                "id token exceeds the {MAX_ID_TOKEN_INPUT_BYTES}-byte input limit"
+            ));
+        }
+        bytes.extend_from_slice(&available[..consumed]);
+        let found_newline = available.get(consumed.saturating_sub(1)) == Some(&b'\n');
+        reader.consume(consumed);
+        if found_newline {
+            break;
+        }
+    }
+    if tty {
+        let _ = writeln!(std::io::stderr());
+    }
+    String::from_utf8(bytes)
+        .map(|raw| raw.trim().to_owned())
+        .map_err(|_| "id token input must be UTF-8".to_owned())
+}
+
+fn parse_stdin_sentinel(value: &str) -> Result<String, String> {
+    if value == "-" {
+        Ok(value.to_owned())
+    } else {
+        Err("pass '-' and provide sensitive token material on stdin".to_owned())
+    }
+}
+
 fn open_team_store(
     cli: &Cli,
     database: Option<&std::path::Path>,
@@ -3405,21 +3436,15 @@ mod tests {
     }
 
     #[test]
-    fn share_bodies_confirm_requires_exactly_one_approval_bearer_source() {
+    fn share_bodies_confirm_requires_bounded_stdin_bearer() {
         assert!(
             TeamShareBodiesArgs::try_parse_from(["bodies", "--confirm"]).is_err(),
             "confirmation without an approval bearer must fail during CLI parsing",
         );
         assert!(
-            TeamShareBodiesArgs::try_parse_from([
-                "bodies",
-                "--confirm",
-                "--token-stdin",
-                "--token",
-                "eeap1_test",
-            ])
-            .is_err(),
-            "ambiguous bearer sources must be rejected",
+            TeamShareBodiesArgs::try_parse_from(["bodies", "--confirm", "--token", "eeap1_test",])
+                .is_err(),
+            "argv bearer material must be rejected",
         );
         assert!(
             TeamShareBodiesArgs::try_parse_from(["bodies", "--confirm", "--token-stdin",]).is_ok(),
@@ -3432,13 +3457,9 @@ mod tests {
     }
 
     #[test]
-    fn team_idp_attest_requires_exactly_one_jwks_source() {
-        let missing = TeamIdpAttestArgs::try_parse_from([
-            "team-idp-attest",
-            "--id-token",
-            "header.claims.signature",
-        ])
-        .expect_err("missing JWKS source must be rejected");
+    fn team_idp_attest_requires_pinned_discovery_and_rejects_caller_jwks() {
+        let missing = TeamIdpAttestArgs::try_parse_from(["team-idp-attest", "--id-token", "-"])
+            .expect_err("missing pinned discovery must be rejected");
         assert_eq!(
             missing.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
@@ -3447,31 +3468,33 @@ mod tests {
         TeamIdpAttestArgs::try_parse_from([
             "team-idp-attest",
             "--id-token",
-            "header.claims.signature",
-            "--jwks-json",
-            "issuer.jwks.json",
+            "-",
+            "--discovery-json",
+            "issuer.discovery.json",
         ])
-        .expect("local JWKS source");
-        TeamIdpAttestArgs::try_parse_from([
-            "team-idp-attest",
-            "--id-token",
-            "header.claims.signature",
-            "--jwks-url",
-            "https://idp.example/jwks",
-        ])
-        .expect("remote JWKS source");
+        .expect("pinned discovery source");
 
-        let conflicting = TeamIdpAttestArgs::try_parse_from([
+        let argv_token = TeamIdpAttestArgs::try_parse_from([
             "team-idp-attest",
             "--id-token",
             "header.claims.signature",
+            "--discovery-json",
+            "issuer.discovery.json",
+        ])
+        .expect_err("ID-token bearer in argv must be rejected");
+        assert_eq!(argv_token.kind(), clap::error::ErrorKind::ValueValidation);
+
+        let caller_jwks = TeamIdpAttestArgs::try_parse_from([
+            "team-idp-attest",
+            "--id-token",
+            "-",
+            "--discovery-json",
+            "issuer.discovery.json",
             "--jwks-json",
             "issuer.jwks.json",
-            "--jwks-url",
-            "https://idp.example/jwks",
         ])
-        .expect_err("multiple JWKS sources must be rejected");
-        assert_eq!(conflicting.kind(), clap::error::ErrorKind::ArgumentConflict);
+        .expect_err("caller-selected JWKS must be rejected");
+        assert_eq!(caller_jwks.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]

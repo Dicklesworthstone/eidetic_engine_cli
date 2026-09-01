@@ -310,6 +310,12 @@ impl std::fmt::Display for OriginStreamError {
 
 impl std::error::Error for OriginStreamError {}
 
+impl From<crate::db::DbError> for OriginStreamError {
+    fn from(error: crate::db::DbError) -> Self {
+        Self::Db(error.to_string())
+    }
+}
+
 /// Deterministic canonical JSON: objects sorted by key recursively, compact
 /// separators. The eventHash preimage and the signature preimage both use it.
 fn canonical_json_string(value: &serde_json::Value) -> Result<String, OriginStreamError> {
@@ -380,6 +386,24 @@ pub fn append_origin_event(
     signer: &dyn OriginSigner,
     request: &OriginAppendRequest<'_>,
 ) -> Result<AppendedOriginEvent, OriginStreamError> {
+    append_origin_event_with_transaction_mode(connection, signer, request, false)
+}
+
+/// Append an origin event inside a caller-owned write transaction.
+pub(crate) fn append_origin_event_in_current_transaction(
+    connection: &DbConnection,
+    signer: &dyn OriginSigner,
+    request: &OriginAppendRequest<'_>,
+) -> Result<AppendedOriginEvent, OriginStreamError> {
+    append_origin_event_with_transaction_mode(connection, signer, request, true)
+}
+
+fn append_origin_event_with_transaction_mode(
+    connection: &DbConnection,
+    signer: &dyn OriginSigner,
+    request: &OriginAppendRequest<'_>,
+    in_current_transaction: bool,
+) -> Result<AppendedOriginEvent, OriginStreamError> {
     let tip = connection
         .mesh_origin_tip(request.team_id, request.origin_node_id)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
@@ -431,14 +455,17 @@ pub fn append_origin_event(
         produced_at: request.produced_at.to_owned(),
         body_nonce_hex: request.body_nonce.map(hex_lower),
     };
-    connection
-        .append_mesh_origin_event(&input)
-        .map_err(|error| match error {
-            MeshOriginAppendError::ChainMismatch { .. } => {
-                OriginStreamError::ChainMismatch(error.to_string())
-            }
-            MeshOriginAppendError::Db(db_error) => OriginStreamError::Db(db_error.to_string()),
-        })?;
+    let persisted = if in_current_transaction {
+        connection.append_mesh_origin_event_in_current_transaction(&input)
+    } else {
+        connection.append_mesh_origin_event(&input)
+    };
+    persisted.map_err(|error| match error {
+        MeshOriginAppendError::ChainMismatch { .. } => {
+            OriginStreamError::ChainMismatch(error.to_string())
+        }
+        MeshOriginAppendError::Db(db_error) => OriginStreamError::Db(db_error.to_string()),
+    })?;
 
     Ok(AppendedOriginEvent {
         event_id,

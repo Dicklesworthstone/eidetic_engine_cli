@@ -121,7 +121,7 @@ static CONTEXT_PROXIMITY_TREE_CACHE: OnceLock<RwLock<Option<CachedContextProximi
     OnceLock::new();
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
-pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V5: &str = "ee.pack.l2_cache_key.v5";
+pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V6: &str = "ee.pack.l2_cache_key.v6";
 const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3: &str = "ee.pack.l2_context_response.v3";
 const CONTEXT_SEARCH_ADVISORY_SNAPSHOT_SCHEMA_V1: &str = "ee.context.search_advisory_snapshot.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
@@ -6426,6 +6426,16 @@ fn context_pack_l2_bypass_reason(
     if options.changed_symbols_from_git {
         return Some("git_derived_changed_symbols");
     }
+    if let Some(reason) = context_pack_l2_side_effect_bypass_reason(options) {
+        return Some(reason);
+    }
+    // There is no immutable store UUID in the current schema. Explicit paths
+    // can address divergent stores that intentionally share a workspace ID and
+    // generation, so a canonical path alone is not sufficient authorization
+    // to reuse cached content for them.
+    if options.database_path.is_some() {
+        return Some("explicit_database_path");
+    }
     if options.source_mode != SearchSourceMode::LexicalOnly {
         return Some("runtime_search_backend_state");
     }
@@ -6434,6 +6444,17 @@ fn context_pack_l2_bypass_reason(
     }
 
     context_pack_l2_mutable_state_bypass_reason(options)
+}
+
+fn context_pack_l2_side_effect_bypass_reason(options: &ContextPackOptions) -> Option<&'static str> {
+    // A cache hit returns before pack-record persistence, baseline ledger
+    // writes, and the per-invocation audit. Until those side effects can be
+    // replayed from a structured cache payload, write-bearing requests must
+    // always assemble normally.
+    if options.persist_pack {
+        return Some("pack_persistence");
+    }
+    options.baseline_write.as_ref().map(|_| "baseline_write")
 }
 
 fn context_pack_l2_mutable_state_bypass_reason(
@@ -6494,6 +6515,13 @@ fn context_pack_l2_prepare(
         );
         return None;
     }
+    let database_identity = match context_pack_l2_database_identity(options) {
+        Ok(identity) => identity,
+        Err(message) => {
+            push_pack_l2_unavailable(degraded, message);
+            return None;
+        }
+    };
     let workspace_id = context_pack_l2_workspace_id(connection, &options.workspace_path);
     let cache = match context_pack_l2_cache(&options.workspace_path, &workspace_id) {
         Ok(Some(cache)) => cache,
@@ -6540,6 +6568,7 @@ fn context_pack_l2_prepare(
     };
     let key_input = PackL2CacheKeyInput {
         workspace_id,
+        database_identity,
         database_generation,
         index_generation: context_pack_l2_index_generation(options),
         graph_generation,
@@ -6580,6 +6609,15 @@ fn context_pack_l2_try_hit(
     trace: &mut ContextPerformanceTrace,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<ContextPackPerformanceRun> {
+    if let Some(reason) = context_pack_l2_side_effect_bypass_reason(options) {
+        tracing::debug!(
+            target: "ee::pack_l2",
+            event = "pack_l2_cache_hit_bypassed",
+            command,
+            reason,
+        );
+        return None;
+    }
     let lookup_start = Instant::now();
     match l2_context.cache.get(&l2_context.key) {
         Ok(PackL2CacheLookup::Hit(hit)) => {
@@ -6878,6 +6916,44 @@ fn context_pack_l2_workspace_id(connection: &DbConnection, workspace_path: &Path
     let requested = crate::core::workspace::stable_workspace_id(workspace_path);
     crate::core::workspace::bound_workspace_id_or_hash(connection, &requested, &[workspace_path])
         .unwrap_or(requested)
+}
+
+fn context_pack_l2_database_identity(options: &ContextPackOptions) -> Result<Vec<u8>, String> {
+    let database_path = options.workspace_path.join(".ee").join("ee.db");
+    let canonical = database_path.canonicalize().map_err(|error| {
+        format!(
+            "L2 pack cache could not resolve the addressed database {}: {error}",
+            database_path.display()
+        )
+    })?;
+    let metadata = canonical.metadata().map_err(|error| {
+        format!(
+            "L2 pack cache could not inspect the addressed database {}: {error}",
+            canonical.display()
+        )
+    })?;
+    let mut identity = Vec::new();
+    let path_bytes = canonical.as_os_str().as_encoded_bytes();
+    identity.extend_from_slice(
+        &u64::try_from(path_bytes.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    identity.extend_from_slice(path_bytes);
+    identity.extend_from_slice(&metadata.len().to_le_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        identity.extend_from_slice(&metadata.dev().to_le_bytes());
+        identity.extend_from_slice(&metadata.ino().to_le_bytes());
+    }
+    for timestamp in [metadata.created().ok(), metadata.modified().ok()] {
+        let nanos = timestamp
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(u128::MAX, |duration| duration.as_nanos());
+        identity.extend_from_slice(&nanos.to_le_bytes());
+    }
+    Ok(identity)
 }
 
 fn pack_l2_workspace_component(workspace_id: &str) -> String {
@@ -7389,6 +7465,7 @@ fn blake3_u64(hasher: blake3::Hasher) -> u64 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PackL2CacheKeyInput {
     pub(crate) workspace_id: String,
+    pub(crate) database_identity: Vec<u8>,
     pub(crate) database_generation: u64,
     pub(crate) index_generation: u64,
     pub(crate) graph_generation: Option<u64>,
@@ -7410,9 +7487,10 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        PACK_L2_CACHE_KEY_SCHEMA_V5.as_bytes(),
+        PACK_L2_CACHE_KEY_SCHEMA_V6.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "workspace_id", input.workspace_id.as_bytes());
+    hash_labeled_bytes(&mut hasher, "database_identity", &input.database_identity);
     hash_labeled_u64(
         &mut hasher,
         "database_generation",
@@ -13336,6 +13414,100 @@ mod tests {
     }
 
     #[test]
+    fn context_pack_l2_bypasses_side_effects_and_explicit_databases() {
+        let mut options = context_options_with_coordination_snapshot(PathBuf::from("snapshot"));
+        let filters = crate::models::QueryFilters::default();
+        options.as_of = Some(
+            DateTime::parse_from_rfc3339("2026-08-31T12:00:00Z")
+                .expect("fixed cache-safety timestamp should parse")
+                .with_timezone(&Utc),
+        );
+        options.coordination_snapshot_path = None;
+        options.source_mode = crate::core::search::SearchSourceMode::LexicalOnly;
+        options.memory_scope = MemoryScope::SelfOnly;
+
+        assert_eq!(
+            super::context_pack_l2_bypass_reason(&options, &filters),
+            Some("pack_persistence"),
+            "a cache hit must never skip pack persistence or its per-call audit"
+        );
+
+        options.persist_pack = false;
+        options.baseline_write = Some(super::PackBaselineWrite {
+            agent_name: "cache-test-agent".to_owned(),
+            task_key: Some("cache-test-task".to_owned()),
+        });
+        assert_eq!(
+            super::context_pack_l2_bypass_reason(&options, &filters),
+            Some("baseline_write"),
+            "a cache hit must never skip a requested baseline ledger write"
+        );
+
+        options.baseline_write = None;
+        for database_path in ["store-a.db", "store-b.db"] {
+            options.database_path = Some(PathBuf::from(database_path));
+            assert_eq!(
+                super::context_pack_l2_bypass_reason(&options, &filters),
+                Some("explicit_database_path"),
+                "explicit divergent stores must not share L2 entries without an immutable store identity"
+            );
+        }
+    }
+
+    #[test]
+    fn context_pack_l2_database_identity_separates_divergent_default_stores() -> Result<(), String>
+    {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut identities = Vec::new();
+        for (workspace_name, store_contents) in
+            [("workspace-a", b"store-a"), ("workspace-b", b"store-b")]
+        {
+            let workspace = tempdir.path().join(workspace_name);
+            let ee_dir = workspace.join(".ee");
+            std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+            std::fs::write(ee_dir.join("ee.db"), store_contents)
+                .map_err(|error| error.to_string())?;
+            let mut options = context_options_with_coordination_snapshot(PathBuf::from("snapshot"));
+            options.workspace_path = workspace;
+            options.database_path = None;
+            identities.push(super::context_pack_l2_database_identity(&options)?);
+        }
+
+        assert_ne!(
+            identities[0], identities[1],
+            "divergent default stores must contribute distinct addressed identities"
+        );
+
+        let replacement_workspace = tempdir.path().join("replacement-workspace");
+        let replacement_ee_dir = replacement_workspace.join(".ee");
+        std::fs::create_dir_all(&replacement_ee_dir).map_err(|error| error.to_string())?;
+        let replacement_database = replacement_ee_dir.join("ee.db");
+        std::fs::write(&replacement_database, b"store-before-replacement")
+            .map_err(|error| error.to_string())?;
+        let mut replacement_options =
+            context_options_with_coordination_snapshot(PathBuf::from("snapshot"));
+        replacement_options.workspace_path = replacement_workspace;
+        replacement_options.database_path = None;
+        let before = super::context_pack_l2_database_identity(&replacement_options)?;
+        std::fs::rename(
+            &replacement_database,
+            replacement_ee_dir.join("ee.db.previous"),
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::write(
+            &replacement_database,
+            b"store-after-replacement-with-new-identity",
+        )
+        .map_err(|error| error.to_string())?;
+        let after = super::context_pack_l2_database_identity(&replacement_options)?;
+        assert_ne!(
+            before, after,
+            "replacing a database at the same path must invalidate prior L2 entries"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn coordination_snapshot_rejects_non_regular_path() -> Result<(), String> {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let snapshot_path = tempdir.path().join("coordination-snapshot.json");
@@ -16840,6 +17012,7 @@ pub fn unrelated_context() -> u64 {{
         };
         let key_input = super::PackL2CacheKeyInput {
             workspace_id: "wsp_l2_reranker_refresh".to_owned(),
+            database_identity: database_path.as_os_str().as_encoded_bytes().to_vec(),
             database_generation: 1,
             index_generation: 1,
             graph_generation: None,
@@ -16930,6 +17103,41 @@ pub fn unrelated_context() -> u64 {{
                 .any(|entry| entry.code == "rerank_model_unavailable")
         );
         assert!(degraded.is_empty());
+
+        for (label, side_effect_options) in [
+            ("pack persistence", {
+                let mut side_effect_options = options.clone();
+                side_effect_options.persist_pack = true;
+                side_effect_options
+            }),
+            ("baseline write", {
+                let mut side_effect_options = options.clone();
+                side_effect_options.baseline_write = Some(super::PackBaselineWrite {
+                    agent_name: "cache-test-agent".to_owned(),
+                    task_key: Some("cache-test-task".to_owned()),
+                });
+                side_effect_options
+            }),
+        ] {
+            let mut bypass_trace = super::ContextPerformanceTrace::default();
+            let mut bypass_degraded = Vec::new();
+            assert!(
+                super::context_pack_l2_try_hit(
+                    &l2_context,
+                    PACK_COMMAND,
+                    &side_effect_options,
+                    &search_options,
+                    &connection,
+                    &request,
+                    std::time::Instant::now(),
+                    &mut bypass_trace,
+                    &mut bypass_degraded,
+                )
+                .is_none(),
+                "an L2 hit must not bypass requested {label} side effects"
+            );
+            assert!(bypass_degraded.is_empty());
+        }
         Ok(())
     }
 
@@ -17378,7 +17586,7 @@ pub fn unrelated_context() -> u64 {{
 
         let options = super::ContextPackOptions {
             workspace_path: workspace.clone(),
-            database_path: Some(db_path),
+            database_path: None,
             index_dir: Some(empty_index_dir),
             query: "format before release".to_owned(),
             speed: crate::search::SpeedMode::Default,
@@ -17475,6 +17683,12 @@ pub fn unrelated_context() -> u64 {{
         };
         let key_input = super::PackL2CacheKeyInput {
             workspace_id: "wsp_l2_source_mode_fallback".to_owned(),
+            database_identity: tempdir
+                .path()
+                .join("source-mode-fallback.db")
+                .as_os_str()
+                .as_encoded_bytes()
+                .to_vec(),
             database_generation: 1,
             index_generation: 1,
             graph_generation: None,
@@ -17567,6 +17781,12 @@ pub fn unrelated_context() -> u64 {{
         };
         let key_input = super::PackL2CacheKeyInput {
             workspace_id: "wsp_l2_backend_transition".to_owned(),
+            database_identity: tempdir
+                .path()
+                .join("backend-transition.db")
+                .as_os_str()
+                .as_encoded_bytes()
+                .to_vec(),
             database_generation: 1,
             index_generation: 1,
             graph_generation: None,
@@ -20207,6 +20427,7 @@ pub fn unrelated_context() -> u64 {{
         .map_err(|error| error.to_string())?;
         let base = PackL2CacheKeyInput {
             workspace_id: "wsp_test_001".to_string(),
+            database_identity: b"/tmp/ee-store-a.db".to_vec(),
             database_generation: 10,
             index_generation: 20,
             graph_generation: Some(30),
@@ -20327,6 +20548,11 @@ pub fn unrelated_context() -> u64 {{
             ("database generation", {
                 let mut changed = base.clone();
                 changed.database_generation = 11;
+                changed
+            }),
+            ("database identity", {
+                let mut changed = base.clone();
+                changed.database_identity = b"/tmp/ee-store-b.db".to_vec();
                 changed
             }),
             ("index generation", {

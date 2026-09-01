@@ -41,9 +41,9 @@ use crate::mesh::idp::{
 use crate::mesh::origin_stream::{
     Ed25519OriginSigner, InboundOriginEvent, IngestDisposition, ManifestEventPayload,
     MemoryEventOperation, MemoryEventPayload, OriginAppendRequest, OriginEventPayload,
-    OriginSignatureVerifier, OriginSigner, OriginStreamError, append_origin_event, body_commitment,
-    inbound_from_stored, ingest_origin_event, parse_stored_payload,
-    verify_ed25519_origin_signature,
+    OriginSignatureVerifier, OriginSigner, OriginStreamError, append_origin_event,
+    append_origin_event_in_current_transaction, body_commitment, inbound_from_stored,
+    ingest_origin_event, parse_stored_payload, verify_ed25519_origin_signature,
 };
 
 pub const TEAM_CREATE_SCHEMA_V1: &str = "ee.team.create.v1";
@@ -402,6 +402,11 @@ pub struct TeamBodyShareItem {
     pub revision_id: String,
     pub size_bytes: u64,
     pub cache_status: String,
+    /// Private approval material. The digest binds a grant to the exact body
+    /// bytes without exposing either the bytes or a dictionary-friendly hash
+    /// in the preview response.
+    #[serde(skip)]
+    pub(crate) approval_content_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -3044,6 +3049,12 @@ fn bodies_consent_hash(team_id: &str, representation: &str, items: &[TeamBodySha
         material.extend_from_slice(&length_prefixed(item.revision_id.as_bytes()));
         material.extend_from_slice(&length_prefixed(item.cache_status.as_bytes()));
         material.extend_from_slice(&item.size_bytes.to_le_bytes());
+        material.extend_from_slice(&length_prefixed(
+            item.approval_content_hash
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes(),
+        ));
     }
     format!("blake3:{}", blake3::hash(&material).to_hex())
 }
@@ -3113,6 +3124,10 @@ pub fn share_team_bodies_represented(
             revision_id,
             size_bytes: u64::try_from(memory.content.len()).unwrap_or(u64::MAX),
             cache_status,
+            approval_content_hash: Some(format!(
+                "blake3:{}",
+                blake3::hash(memory.content.as_bytes()).to_hex()
+            )),
         };
         candidates.push((memory, item));
     }
@@ -3421,9 +3436,11 @@ pub fn unshare_team_bodies(
                 revision_id,
                 size_bytes: existing.size_bytes.unwrap_or(0),
                 cache_status: existing.cache_status,
+                approval_content_hash: existing.local_body_hash,
             });
             continue;
         }
+        let approval_content_hash = existing.local_body_hash.clone();
         let mut meta = UpsertMeshBodyCacheMetadataInput {
             workspace_id: workspace_id.to_owned(),
             body_cache_key: key,
@@ -3452,6 +3469,7 @@ pub fn unshare_team_bodies(
             revision_id,
             size_bytes: existing.size_bytes.unwrap_or(0),
             cache_status: "evicted".to_owned(),
+            approval_content_hash,
         });
     }
     Ok(TeamBodyShareReport {
@@ -4569,9 +4587,11 @@ pub fn require_tailnet_attested(
 }
 
 /// Apply a token-free identity-attest frame from an authenticated peer.
-pub fn apply_identity_attest_frame(
+pub(crate) fn apply_identity_attest_frame(
     connection: &DbConnection,
     payload: &serde_json::Value,
+    authenticated_team_id: &str,
+    authenticated_origin_node_id: &str,
 ) -> Result<IdentityAttestFrameV1, OriginStreamError> {
     if json_carries_bearer_fields(payload) {
         return Err(OriginStreamError::Encode(
@@ -4602,37 +4622,126 @@ pub fn apply_identity_attest_frame(
             "identity_attest member is not on the named team".to_owned(),
         ));
     }
-    let consumed = connection
-        .insert_team_idp_token_replay(
-            &frame.token_hash,
-            &frame.team_id,
-            &frame.member_id,
-            &frame.checked_at,
-        )
-        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
-    if !consumed {
+    if frame.team_id != authenticated_team_id
+        || member.origin_node_id != authenticated_origin_node_id
+    {
         return Err(OriginStreamError::Encode(
-            "id token hash was already consumed".to_owned(),
+            "identity_attest member is not the authenticated session peer".to_owned(),
+        ));
+    }
+    let checked_at = chrono::DateTime::parse_from_rfc3339(&frame.checked_at).map_err(|_| {
+        OriginStreamError::Encode("identity_attest checkedAt is invalid".to_owned())
+    })?;
+    if checked_at.timestamp() > chrono::Utc::now().timestamp().saturating_add(300) {
+        return Err(OriginStreamError::Encode(
+            "identity_attest checkedAt is unreasonably far in the future".to_owned(),
         ));
     }
     let login = frame.email.clone().unwrap_or_else(|| frame.subject.clone());
-    record_member_tailnet_identity(
-        connection,
-        &frame.member_id,
-        &login,
-        Some(&frame.subject),
-        &frame.checked_at,
-    )?;
+    let existing = connection
+        .get_team_member_identity(&frame.member_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .ok_or_else(|| {
+            OriginStreamError::Encode(
+                "identity_attest cannot establish an identity without local verification"
+                    .to_owned(),
+            )
+        })?;
+    if existing.state != "attested"
+        || existing.login != login
+        || existing.user_id.as_deref() != Some(frame.subject.as_str())
+    {
+        return Err(OriginStreamError::Encode(
+            "identity_attest claims do not match the locally verified identity".to_owned(),
+        ));
+    }
+    connection.with_transaction_error(|| {
+        let consumed = connection
+            .insert_team_idp_token_replay(
+                &frame.token_hash,
+                &frame.team_id,
+                &frame.member_id,
+                &frame.checked_at,
+            )
+            .map_err(OriginStreamError::from)?;
+        if !consumed {
+            return Err(OriginStreamError::Encode(
+                "id token hash was already consumed".to_owned(),
+            ));
+        }
+        record_member_tailnet_identity(
+            connection,
+            &frame.member_id,
+            &login,
+            Some(&frame.subject),
+            &frame.checked_at,
+        )?;
+        Ok(())
+    })?;
     Ok(frame)
+}
+
+fn validate_pinned_oidc_discovery(
+    connection: &DbConnection,
+    team_id: &str,
+    discovery: &serde_json::Value,
+) -> Result<(String, String, String), OriginStreamError> {
+    let oidc = connection
+        .get_team_idp_oidc(team_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .ok_or_else(|| {
+            OriginStreamError::Encode(
+                "team idp attest requires a configured OIDC provider".to_owned(),
+            )
+        })?;
+    let canonical = serde_json::to_vec(discovery)
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    let supplied_hash = format!("blake3:{}", blake3::hash(&canonical).to_hex());
+    if supplied_hash != oidc.discovery_hash {
+        return Err(OriginStreamError::Encode(
+            "OIDC discovery document does not match the configured provider pin".to_owned(),
+        ));
+    }
+    let discovery_issuer = discovery
+        .get("issuer")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| OriginStreamError::Encode("OIDC discovery issuer is missing".to_owned()))?;
+    if discovery_issuer != oidc.issuer {
+        return Err(OriginStreamError::Encode(
+            "OIDC discovery issuer does not match the configured provider".to_owned(),
+        ));
+    }
+    let jwks_uri = discovery_https_endpoint(discovery, "jwks_uri").ok_or_else(|| {
+        OriginStreamError::Encode("OIDC discovery jwks_uri must be https".to_owned())
+    })?;
+    Ok((oidc.issuer, oidc.client_id, jwks_uri))
+}
+
+/// Resolve the only JWKS endpoint authorized by the configured discovery pin.
+pub(crate) fn pinned_team_jwks_uri(
+    connection: &DbConnection,
+    discovery: &serde_json::Value,
+) -> Result<String, OriginStreamError> {
+    let self_member = connection
+        .list_all_team_members()
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .into_iter()
+        .find(|member| member.is_self && member.state == "active")
+        .ok_or_else(|| OriginStreamError::Encode("no active self member".to_owned()))?;
+    validate_pinned_oidc_discovery(connection, &self_member.team_id, discovery)
+        .map(|(_, _, jwks_uri)| jwks_uri)
 }
 
 /// Verify and reduce a compact ID token, then bind its allowlisted claims to
 /// the local self member.
-pub fn attest_local_id_token(
+pub(crate) fn attest_local_id_token(
     connection: &DbConnection,
     token: &str,
     configured_groups: &[&str],
     checked_at: &str,
+    discovery: &serde_json::Value,
     jwks: &serde_json::Value,
 ) -> Result<TeamIdpAttestReport, OriginStreamError> {
     if any_local_team_paused(connection)? {
@@ -4640,6 +4749,14 @@ pub fn attest_local_id_token(
             "team is paused; resume before attesting identity".to_owned(),
         ));
     }
+    let self_member = connection
+        .list_all_team_members()
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .into_iter()
+        .find(|member| member.is_self && member.state == "active")
+        .ok_or_else(|| OriginStreamError::Encode("no active self member".to_owned()))?;
+    let (issuer, client_id, _) =
+        validate_pinned_oidc_discovery(connection, &self_member.team_id, discovery)?;
     let verified = verify_compact_jwt_with_jwks(token, jwks);
     if !verified.accepted() {
         return Err(OriginStreamError::Encode(format!(
@@ -4650,52 +4767,21 @@ pub fn attest_local_id_token(
     let claims = reduce_id_token_claims(token, configured_groups).map_err(|disposition| {
         OriginStreamError::Encode(format!("id token is {}", disposition.as_str()))
     })?;
-    let self_member = connection
-        .list_all_team_members()
-        .map_err(|error| OriginStreamError::Db(error.to_string()))?
-        .into_iter()
-        .find(|member| member.is_self && member.state == "active")
-        .ok_or_else(|| OriginStreamError::Encode("no active self member".to_owned()))?;
-    if let Some(oidc) = connection
-        .get_team_idp_oidc(&self_member.team_id)
-        .map_err(|error| OriginStreamError::Db(error.to_string()))?
-    {
-        let now = chrono::DateTime::parse_from_rfc3339(checked_at)
-            .map(|value| value.timestamp())
-            .unwrap_or_else(|_| chrono::Utc::now().timestamp());
-        let disposition = classify_id_token_claims(token, &oidc.issuer, &oidc.client_id, now);
-        if !disposition.accepted() {
-            return Err(OriginStreamError::Encode(format!(
-                "id token claims {}",
-                disposition.as_str()
-            )));
-        }
+    let now = chrono::DateTime::parse_from_rfc3339(checked_at)
+        .map_err(|_| OriginStreamError::Encode("identity checked_at must be RFC 3339".to_owned()))?
+        .timestamp();
+    let disposition = classify_id_token_claims(token, &issuer, &client_id, now);
+    if !disposition.accepted() {
+        return Err(OriginStreamError::Encode(format!(
+            "id token claims {}",
+            disposition.as_str()
+        )));
     }
     let login = claims
         .email
         .clone()
         .unwrap_or_else(|| claims.subject.clone());
     let token_hash = format!("blake3:{}", blake3::hash(token.as_bytes()).to_hex());
-    let consumed = connection
-        .insert_team_idp_token_replay(
-            &token_hash,
-            &self_member.team_id,
-            &self_member.member_id,
-            checked_at,
-        )
-        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
-    if !consumed {
-        return Err(OriginStreamError::Encode(
-            "id token hash was already consumed".to_owned(),
-        ));
-    }
-    record_member_tailnet_identity(
-        connection,
-        &self_member.member_id,
-        &login,
-        Some(&claims.subject),
-        checked_at,
-    )?;
     let seed = blake3::hash(format!("{}:attest:{token_hash}", self_member.team_id).as_bytes());
     let hex = seed.to_hex();
     let payload = OriginEventPayload::Manifest(ManifestEventPayload {
@@ -4703,25 +4789,48 @@ pub fn attest_local_id_token(
         document_id: format!("tdoc_{}", &hex.as_str()[..24]),
         predecessor_revision_id: None,
         document_payload: serde_json::json!({
-            "subject": claims.subject,
-            "email": claims.email,
-            "matchedGroups": claims.matched_groups,
-            "tokenHash": token_hash,
+            "subject": claims.subject.clone(),
+            "email": claims.email.clone(),
+            "matchedGroups": claims.matched_groups.clone(),
+            "tokenHash": token_hash.clone(),
         }),
     });
     let mac = LocalOriginSigner::for_workspace(&self_member.workspace_id);
-    append_origin_event(
-        connection,
-        &mac,
-        &OriginAppendRequest {
-            team_id: &self_member.team_id,
-            origin_node_id: &self_member.origin_node_id,
-            payload,
-            required_features: Vec::new(),
-            produced_at: checked_at,
-            body_nonce: None,
-        },
-    )?;
+    connection.with_transaction_error(|| {
+        let consumed = connection
+            .insert_team_idp_token_replay(
+                &token_hash,
+                &self_member.team_id,
+                &self_member.member_id,
+                checked_at,
+            )
+            .map_err(OriginStreamError::from)?;
+        if !consumed {
+            return Err(OriginStreamError::Encode(
+                "id token hash was already consumed".to_owned(),
+            ));
+        }
+        record_member_tailnet_identity(
+            connection,
+            &self_member.member_id,
+            &login,
+            Some(&claims.subject),
+            checked_at,
+        )?;
+        append_origin_event_in_current_transaction(
+            connection,
+            &mac,
+            &OriginAppendRequest {
+                team_id: &self_member.team_id,
+                origin_node_id: &self_member.origin_node_id,
+                payload,
+                required_features: Vec::new(),
+                produced_at: checked_at,
+                body_nonce: None,
+            },
+        )?;
+        Ok(())
+    })?;
     Ok(TeamIdpAttestReport {
         schema: TEAM_IDP_ATTEST_SCHEMA_V1,
         command: "team idp attest",
@@ -4887,6 +4996,20 @@ pub fn set_team_oidc_provider(
             "OIDC issuer must be https and client_id must be non-empty".to_owned(),
         ));
     }
+    let discovery_issuer = discovery
+        .get("issuer")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| OriginStreamError::Encode("OIDC discovery issuer is missing".to_owned()))?;
+    if discovery_issuer != issuer {
+        return Err(OriginStreamError::Encode(
+            "OIDC discovery issuer must match the configured issuer".to_owned(),
+        ));
+    }
+    discovery_https_endpoint(discovery, "jwks_uri").ok_or_else(|| {
+        OriginStreamError::Encode("OIDC discovery jwks_uri must be https".to_owned())
+    })?;
     match classify_oidc_provider(discovery) {
         IdpProviderCapability::SecretlessPublic => {}
         other => {
@@ -7362,6 +7485,52 @@ mod tests {
             }]
         });
         (token, jwks)
+    }
+
+    fn test_oidc_discovery() -> serde_json::Value {
+        serde_json::json!({
+            "issuer": "https://idp.example",
+            "jwks_uri": "https://idp.example/jwks",
+            "token_endpoint": "https://idp.example/token",
+            "device_authorization_endpoint": "https://idp.example/device",
+            "token_endpoint_auth_methods_supported": ["none"]
+        })
+    }
+
+    fn configure_test_oidc(connection: &DbConnection) -> serde_json::Value {
+        let discovery = test_oidc_discovery();
+        set_team_oidc_provider(
+            connection,
+            "https://idp.example",
+            "ee-public",
+            &discovery,
+            "2026-08-13T19:00:00Z",
+        )
+        .expect("configure test OIDC provider");
+        discovery
+    }
+
+    #[test]
+    fn body_consent_hash_binds_exact_content_without_serializing_its_digest() {
+        let item = TeamBodyShareItem {
+            memory_id: "mem_same".to_owned(),
+            revision_id: "rev_same".to_owned(),
+            size_bytes: 4,
+            cache_status: "metadata_only".to_owned(),
+            approval_content_hash: Some(format!("blake3:{}", blake3::hash(b"AAAA").to_hex())),
+        };
+        let mut changed = item.clone();
+        changed.approval_content_hash = Some(format!("blake3:{}", blake3::hash(b"BBBB").to_hex()));
+
+        assert_ne!(
+            bodies_consent_hash("team_same", "exact", &[item.clone()]),
+            bodies_consent_hash("team_same", "exact", &[changed]),
+            "same-sized body drift must invalidate its approval snapshot",
+        );
+        let json = serde_json::to_string(&item).expect("serialize preview item");
+        assert!(!json.contains("approvalContentHash"));
+        assert!(!json.contains("approval_content_hash"));
+        assert!(!json.contains("AAAA"));
     }
 
     fn issue_approval_and_share_team_bodies_for_test(
@@ -13413,11 +13582,7 @@ mod tests {
             &connection,
             "https://idp.example",
             "ee-public",
-            &serde_json::json!({
-                "token_endpoint": "https://idp.example/token",
-                "device_authorization_endpoint": "https://idp.example/device",
-                "token_endpoint_auth_methods_supported": ["none"]
-            }),
+            &test_oidc_discovery(),
             "2026-08-13T19:00:00Z",
         )
         .expect("set");
@@ -13431,6 +13596,8 @@ mod tests {
             "https://idp.example",
             "ee-public",
             &serde_json::json!({
+                "issuer": "https://idp.example",
+                "jwks_uri": "https://idp.example/jwks",
                 "token_endpoint": "https://idp.example/token",
                 "device_authorization_endpoint": "https://idp.example/device",
                 "token_endpoint_auth_methods_supported": ["client_secret_basic"]
@@ -13492,12 +13659,19 @@ mod tests {
             "2026-08-13T00:00:00Z",
         )
         .expect("create");
+        let discovery = configure_test_oidc(&connection);
         let (token, jwks) = signed_test_id_token(
-            br#"{"sub":"user-1","email":"alice@acme.com","groups":["eng","secret-admin"]}"#,
+            br#"{"sub":"user-1","iss":"https://idp.example","aud":"ee-public","exp":1800000000,"email":"alice@acme.com","groups":["eng","secret-admin"]}"#,
         );
-        let report =
-            attest_local_id_token(&connection, &token, &["eng"], "2026-08-13T20:00:00Z", &jwks)
-                .expect("attest");
+        let report = attest_local_id_token(
+            &connection,
+            &token,
+            &["eng"],
+            "2026-08-13T20:00:00Z",
+            &discovery,
+            &jwks,
+        )
+        .expect("attest");
         assert_eq!(report.email.as_deref(), Some("alice@acme.com"));
         assert_eq!(report.matched_groups, vec!["eng".to_owned()]);
         let json = serde_json::to_string(&report).expect("json");
@@ -13516,9 +13690,15 @@ mod tests {
                 && event.payload_json.contains("alice@acme.com")
                 && !event.payload_json.contains(&token)
         }));
-        let replayed =
-            attest_local_id_token(&connection, &token, &["eng"], "2026-08-13T20:01:00Z", &jwks)
-                .expect_err("replay");
+        let replayed = attest_local_id_token(
+            &connection,
+            &token,
+            &["eng"],
+            "2026-08-13T20:01:00Z",
+            &discovery,
+            &jwks,
+        )
+        .expect_err("replay");
         assert!(replayed.to_string().contains("already consumed"));
     }
 
@@ -13532,8 +13712,10 @@ mod tests {
             "2026-08-13T00:00:00Z",
         )
         .expect("create");
-        let (valid_token, jwks) =
-            signed_test_id_token(br#"{"sub":"user-1","email":"alice@acme.com","groups":["eng"]}"#);
+        let discovery = configure_test_oidc(&connection);
+        let (valid_token, jwks) = signed_test_id_token(
+            br#"{"sub":"user-1","iss":"https://idp.example","aud":"ee-public","exp":1800000000,"email":"alice@acme.com","groups":["eng"]}"#,
+        );
         let mut parts = valid_token.split('.');
         let header = parts.next().expect("header");
         let payload = parts.next().expect("payload");
@@ -13545,6 +13727,7 @@ mod tests {
             &unsigned,
             &["eng"],
             "2026-08-13T20:00:00Z",
+            &discovery,
             &jwks,
         )
         .expect_err("unsigned token");
@@ -13560,6 +13743,7 @@ mod tests {
             &forged,
             &["eng"],
             "2026-08-13T20:00:00Z",
+            &discovery,
             &jwks,
         )
         .expect_err("forged signature");
@@ -13590,7 +13774,69 @@ mod tests {
     }
 
     #[test]
-    fn apply_identity_attest_frame_rejects_bearer_and_accepts_hash_only() {
+    fn attest_local_id_token_rolls_back_replay_and_identity_when_event_append_fails() {
+        let connection = open_db();
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let discovery = configure_test_oidc(&connection);
+        let (token, jwks) = signed_test_id_token(
+            br#"{"sub":"user-rollback","iss":"https://idp.example","aud":"ee-public","exp":1800000000,"email":"rollback@acme.com"}"#,
+        );
+        connection
+            .execute_raw(
+                "CREATE TRIGGER reject_identity_attested BEFORE INSERT ON mesh_origin_events WHEN NEW.payload_json LIKE '%identityAttested%' BEGIN SELECT RAISE(ABORT, 'forced identity event failure'); END",
+            )
+            .expect("install fault trigger");
+        let failure = attest_local_id_token(
+            &connection,
+            &token,
+            &[],
+            "2026-08-13T20:00:00Z",
+            &discovery,
+            &jwks,
+        )
+        .expect_err("event append must fail");
+        assert!(
+            failure
+                .to_string()
+                .contains("forced identity event failure")
+        );
+        let self_member = connection
+            .list_all_team_members()
+            .expect("members")
+            .into_iter()
+            .find(|member| member.is_self)
+            .expect("self member");
+        assert!(
+            connection
+                .get_team_member_identity(&self_member.member_id)
+                .expect("identity after rollback")
+                .is_none(),
+            "identity mutation must roll back with provenance append",
+        );
+
+        connection
+            .execute_raw("DROP TRIGGER reject_identity_attested")
+            .expect("remove fault trigger");
+        let retry = attest_local_id_token(
+            &connection,
+            &token,
+            &[],
+            "2026-08-13T20:00:01Z",
+            &discovery,
+            &jwks,
+        )
+        .expect("the replay row must also have rolled back");
+        assert_eq!(retry.subject, "user-rollback");
+    }
+
+    #[test]
+    fn apply_identity_attest_frame_requires_session_and_local_identity_binding() {
         let connection = open_db();
         let created = create_local_team(
             &connection,
@@ -13615,8 +13861,22 @@ mod tests {
             "checkedAt": "2026-08-13T21:00:00Z",
             "idToken": "eyJhbGciOiJSUzI1NiJ9.e30.c2ln"
         });
-        let err = apply_identity_attest_frame(&connection, &forbidden).expect_err("bearer");
+        let err = apply_identity_attest_frame(
+            &connection,
+            &forbidden,
+            &member.team_id,
+            &member.origin_node_id,
+        )
+        .expect_err("bearer");
         assert!(err.to_string().contains("bearer"));
+        record_member_tailnet_identity(
+            &connection,
+            &member.member_id,
+            "alice@acme.com",
+            Some("user-1"),
+            "2026-08-13T20:59:00Z",
+        )
+        .expect("locally verified identity");
         let ok = apply_identity_attest_frame(
             &connection,
             &serde_json::json!({
@@ -13629,9 +13889,22 @@ mod tests {
                 "tokenHash": "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "checkedAt": "2026-08-13T21:00:00Z"
             }),
+            &member.team_id,
+            &member.origin_node_id,
         )
         .expect("apply");
         assert_eq!(ok.subject, "user-1");
-        let _ = created;
+        let wrong_peer = apply_identity_attest_frame(
+            &connection,
+            &serde_json::to_value(ok).expect("frame"),
+            &created.team.team_id,
+            "node_different_authenticated_peer",
+        )
+        .expect_err("peer binding");
+        assert!(
+            wrong_peer
+                .to_string()
+                .contains("authenticated session peer")
+        );
     }
 }

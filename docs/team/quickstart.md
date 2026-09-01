@@ -88,8 +88,12 @@ device-code is the secretless-public-client arm.
 ee team idp require --tailnet-attested --workspace . --json
 ee team idp status --workspace . --json
 ee team idp device --execute --ca-bundle "$PINNED_CA" --workspace . --json
-ee team idp attest --id-token - --jwks-url "$JWKS" --ca-bundle "$PINNED_CA" --workspace . --json
+ee team idp attest --id-token - --discovery-json "$DISCOVERY" --ca-bundle "$PINNED_CA" --workspace . --json
 ```
+
+`idp attest` verifies that discovery document against the hash recorded by
+`idp set`, then fetches keys only from its HTTPS `jwks_uri`. Caller-supplied
+JWKS documents and arbitrary key URLs are rejected.
 
 ## Operations
 

@@ -3672,7 +3672,10 @@ async fn answer_sync_round(
     let Some(request) = parse_sync_round_request(&bytes) else {
         return Ok(());
     };
-    let response = load_sync_round_response(routes, request.range_start_seq, request.max_events);
+    let Some(route) = routes.first_store_route() else {
+        return Ok(());
+    };
+    let response = load_sync_round_response(route, request.range_start_seq, request.max_events);
     let reply =
         serde_json::to_vec(&response).map_err(|_| ResponderBrokerError::TransportUnavailable)?;
     write_asupersync_framed(cx, stream, io_timeout, &reply).await
@@ -3734,12 +3737,23 @@ fn admit_authenticated_capability(
     Ok(decision)
 }
 
+fn authenticated_session_route(
+    routes: &ResponderRouteRegistry,
+    binding: &SessionBinding,
+) -> Result<RegisteredResponderRoute, ResponderBrokerError> {
+    routes
+        .resolve_authenticated_binding(binding)
+        .cloned()
+        .ok_or(ResponderBrokerError::RouteUnavailable)
+}
+
 async fn serve_authenticated_sync_round(
     cx: &Cx,
     session: &mut AuthenticatedTransportSession,
     routes: &ResponderRouteRegistry,
     admission: &Arc<Mutex<AdmissionState>>,
 ) -> Result<(), ResponderBrokerError> {
+    let authenticated_route = authenticated_session_route(routes, session.binding())?;
     let request = loop {
         let Some(request) = session
             .receive_request(cx)
@@ -3775,16 +3789,15 @@ async fn serve_authenticated_sync_round(
     ) {
         let processed = session
             .process_request(cx, &request, async {
-                load_identity_attest_response(routes, &request.payload)
+                load_identity_attest_response(&authenticated_route, &request.payload)
             })
             .await
             .map_err(ResponderBrokerError::Session)?;
         serde_json::to_value(&processed).map_err(|_| ResponderBrokerError::TransportUnavailable)?
     } else if request.capability == FrameCapability::BodyFetch {
-        let authenticated_route = routes.resolve_authenticated_binding(session.binding());
         let processed = session
             .process_request(cx, &request, async {
-                load_body_fetch_response(authenticated_route, &request.payload)
+                load_body_fetch_response(&authenticated_route, &request.payload)
             })
             .await
             .map_err(ResponderBrokerError::Session)?;
@@ -3797,7 +3810,7 @@ async fn serve_authenticated_sync_round(
             .unwrap_or((0, 512));
         let processed = session
             .process_request(cx, &request, async {
-                load_sync_round_response(routes, range_start_seq, max_events)
+                load_sync_round_response(&authenticated_route, range_start_seq, max_events)
             })
             .await
             .map_err(ResponderBrokerError::Session)?;
@@ -3820,17 +3833,14 @@ async fn serve_authenticated_sync_round(
     {
         crate::mesh::admission::release_authenticated_admission(peer);
     }
-    persist_authenticated_admission_snapshot(routes, admission);
+    persist_authenticated_admission_snapshot(&authenticated_route, admission);
     result
 }
 
 fn persist_authenticated_admission_snapshot(
-    routes: &ResponderRouteRegistry,
+    route: &RegisteredResponderRoute,
     admission: &Arc<Mutex<AdmissionState>>,
 ) {
-    let Some(route) = routes.first_store_route() else {
-        return;
-    };
     let Some(database_path) = route.database_path.clone() else {
         return;
     };
@@ -3859,24 +3869,15 @@ fn persist_authenticated_admission_snapshot(
 }
 
 fn load_sync_round_response(
-    routes: &ResponderRouteRegistry,
+    route: &RegisteredResponderRoute,
     range_start_seq: u64,
     max_events: u32,
 ) -> SyncRoundResponse {
-    let route = routes.first_store_route();
-    let workspace_id = route
-        .map(|route| route.expectations.responder_workspace_id.clone())
-        .unwrap_or_default();
-    let (team_id, origin_node_id) = route
-        .map(|route| {
-            (
-                route.expectations.team_id.clone(),
-                route.expectations.responder_node_id.clone(),
-            )
-        })
-        .unwrap_or_default();
+    let workspace_id = route.expectations.responder_workspace_id.clone();
+    let team_id = route.expectations.team_id.clone();
+    let origin_node_id = route.expectations.responder_node_id.clone();
     let mut events = Vec::new();
-    if let Some(database_path) = route.and_then(|route| route.database_path.clone())
+    if let Some(database_path) = route.database_path.clone()
         && let Ok(connection) = DbConnection::open_file_read_only(database_path)
     {
         let limit = max_events.clamp(1, 512);
@@ -3916,7 +3917,7 @@ fn load_sync_round_response(
 }
 
 fn load_identity_attest_response(
-    routes: &ResponderRouteRegistry,
+    route: &RegisteredResponderRoute,
     payload: &serde_json::Value,
 ) -> crate::mesh::idp::IdentityAttestFrameV1 {
     let rejected = crate::mesh::idp::IdentityAttestFrameV1 {
@@ -3930,20 +3931,23 @@ fn load_identity_attest_response(
             .to_owned(),
         checked_at: String::new(),
     };
-    let Some(database_path) = routes
-        .first_store_route()
-        .and_then(|route| route.database_path.clone())
-    else {
+    let Some(database_path) = route.database_path.clone() else {
         return rejected;
     };
     let Ok(connection) = DbConnection::open_file(database_path) else {
         return rejected;
     };
-    crate::mesh::team::apply_identity_attest_frame(&connection, payload).unwrap_or(rejected)
+    crate::mesh::team::apply_identity_attest_frame(
+        &connection,
+        payload,
+        &route.expectations.team_id,
+        &route.expectations.initiator_node_id,
+    )
+    .unwrap_or(rejected)
 }
 
 fn load_body_fetch_response(
-    authenticated_route: Option<&RegisteredResponderRoute>,
+    route: &RegisteredResponderRoute,
     payload: &serde_json::Value,
 ) -> BodyFetchResponse {
     let request = serde_json::from_value::<BodyFetchRequest>(payload.clone()).ok();
@@ -3965,16 +3969,6 @@ fn load_body_fetch_response(
             nonce_hex: None,
         };
     }
-    let Some(route) = authenticated_route else {
-        return BodyFetchResponse {
-            schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
-            body_cache_key: key.to_owned(),
-            cache_status: "metadata_only".to_owned(),
-            size_bytes: 0,
-            body_hex: None,
-            nonce_hex: None,
-        };
-    };
     let requested_workspace_id = route.expectations.responder_workspace_id.clone();
     let workspace_path = route.workspace_path.clone();
     let peer_id = route.peer_handle.clone();
@@ -4288,6 +4282,167 @@ mod tests {
         assert!(
             registry.resolve_authenticated_binding(&binding).is_none(),
             "SessionBinding carries no pair-key generation, so ambiguity must fail closed"
+        );
+        assert!(matches!(
+            authenticated_session_route(&registry, &binding),
+            Err(ResponderBrokerError::RouteUnavailable)
+        ));
+    }
+
+    #[test]
+    fn authenticated_route_b_reads_only_route_b_origin_events() {
+        let workspace_a = tempfile::tempdir().expect("workspace a");
+        let workspace_b = tempfile::tempdir().expect("workspace b");
+        let database_a = workspace_a.path().join("a.db");
+        let database_b = workspace_b.path().join("b.db");
+        let connection_a = DbConnection::open_file(&database_a).expect("open database a");
+        connection_a.migrate().expect("migrate database a");
+        connection_a
+            .append_mesh_origin_event(&crate::db::CreateMeshOriginEventInput {
+                event_id: "mesh_oevt_route_a_000000000001".to_owned(),
+                team_id: "team-a".to_owned(),
+                origin_node_id: "node-responder-a".to_owned(),
+                signing_key_generation: 1,
+                seq: 0,
+                prev_event_hash: None,
+                event_hash:
+                    "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
+                signature: "sig-a".to_owned(),
+                payload_schema: "ee.mesh.memory_event.v1".to_owned(),
+                payload_json: r#"{"route":"a"}"#.to_owned(),
+                required_features_json: "[]".to_owned(),
+                produced_at: "2026-09-01T00:00:00Z".to_owned(),
+                body_nonce_hex: None,
+            })
+            .expect("append route a event");
+        let connection_b = DbConnection::open_file(&database_b).expect("open database b");
+        connection_b.migrate().expect("migrate database b");
+        connection_b
+            .append_mesh_origin_event(&crate::db::CreateMeshOriginEventInput {
+                event_id: "mesh_oevt_route_b_000000000001".to_owned(),
+                team_id: "team-b".to_owned(),
+                origin_node_id: "node-responder-b".to_owned(),
+                signing_key_generation: 1,
+                seq: 0,
+                prev_event_hash: None,
+                event_hash:
+                    "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_owned(),
+                signature: "sig-b".to_owned(),
+                payload_schema: "ee.mesh.memory_event.v1".to_owned(),
+                payload_json: r#"{"route":"b"}"#.to_owned(),
+                required_features_json: "[]".to_owned(),
+                produced_at: "2026-09-01T00:00:01Z".to_owned(),
+                body_nonce_hex: None,
+            })
+            .expect("append route b event");
+
+        let mut route_a = route(workspace_a.path().to_path_buf(), 41888);
+        route_a.database_path = Some(database_a);
+        route_a.expectations.responder_node_id = "node-responder-a".to_owned();
+        route_a.expectations.responder_workspace_id = "workspace-a".to_owned();
+        let mut route_b = route(workspace_b.path().to_path_buf(), 41888);
+        route_b.database_path = Some(database_b);
+        route_b.expectations.team_id = "team-b".to_owned();
+        route_b.expectations.responder_node_id = "node-responder-b".to_owned();
+        route_b.expectations.responder_workspace_id = "workspace-b".to_owned();
+        let binding_b = authenticated_binding_for(&route_b);
+        let registry =
+            ResponderRouteRegistry::new([route_a, route_b]).expect("valid multi-route registry");
+        let authenticated_route =
+            authenticated_session_route(&registry, &binding_b).expect("authenticate route b");
+
+        let response = load_sync_round_response(&authenticated_route, 0, 16);
+        assert_eq!(response.events.len(), 1);
+        assert_eq!(response.events[0].origin_workspace_id, "workspace-b");
+        assert_eq!(
+            response.events[0].event_hash,
+            "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        assert!(response.events.iter().all(|event| {
+            event.event_hash
+                != "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }));
+    }
+
+    #[test]
+    fn authenticated_route_b_cannot_apply_identity_attest_to_route_a() {
+        let workspace_a = tempfile::tempdir().expect("workspace a");
+        let workspace_b = tempfile::tempdir().expect("workspace b");
+        let database_a = workspace_a.path().join("a.db");
+        let database_b = workspace_b.path().join("b.db");
+        let connection_a = DbConnection::open_file(&database_a).expect("open database a");
+        connection_a.migrate().expect("migrate database a");
+        connection_a
+            .insert_workspace(
+                "workspace-a",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace_a.path().display().to_string(),
+                    name: Some("workspace a".to_owned()),
+                },
+            )
+            .expect("insert workspace a");
+        let created = crate::mesh::team::create_local_team(
+            &connection_a,
+            "workspace-a",
+            "Route A",
+            "2026-09-01T00:00:00Z",
+        )
+        .expect("create route a team");
+        let member_a = connection_a
+            .list_all_team_members()
+            .expect("list route a members")
+            .into_iter()
+            .next()
+            .expect("route a member");
+        assert!(
+            connection_a
+                .get_team_member_identity(&member_a.member_id)
+                .expect("load route a identity before attest")
+                .is_none()
+        );
+        let connection_b = DbConnection::open_file(&database_b).expect("open database b");
+        connection_b.migrate().expect("migrate database b");
+
+        let mut route_a = route(workspace_a.path().to_path_buf(), 41888);
+        route_a.database_path = Some(database_a);
+        route_a.expectations.team_id = created.team.team_id.clone();
+        route_a.expectations.responder_node_id = created.team.origin_node_id;
+        route_a.expectations.responder_workspace_id = "workspace-a".to_owned();
+        let mut route_b = route(workspace_b.path().to_path_buf(), 41888);
+        route_b.database_path = Some(database_b);
+        route_b.expectations.team_id = "zzzz-team-b".to_owned();
+        route_b.expectations.responder_node_id = "node-responder-b".to_owned();
+        route_b.expectations.responder_workspace_id = "workspace-b".to_owned();
+        let binding_b = authenticated_binding_for(&route_b);
+        let registry =
+            ResponderRouteRegistry::new([route_a, route_b]).expect("valid multi-route registry");
+        let authenticated_route =
+            authenticated_session_route(&registry, &binding_b).expect("authenticate route b");
+        let frame = crate::mesh::idp::IdentityAttestFrameV1 {
+            schema: crate::mesh::idp::IDENTITY_ATTEST_FRAME_SCHEMA_V1.to_owned(),
+            team_id: member_a.team_id.clone(),
+            member_id: member_a.member_id.clone(),
+            subject: "route-a-subject".to_owned(),
+            email: Some("route-a@example.com".to_owned()),
+            matched_groups: vec!["eng".to_owned()],
+            token_hash: "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                .to_owned(),
+            checked_at: "2026-09-01T00:00:01Z".to_owned(),
+        };
+
+        let response = load_identity_attest_response(
+            &authenticated_route,
+            &serde_json::to_value(frame).expect("serialize attest frame"),
+        );
+        assert_eq!(response.subject, "rejected");
+        assert!(
+            connection_a
+                .get_team_member_identity(&member_a.member_id)
+                .expect("load route a identity after attest")
+                .is_none(),
+            "a session authenticated for route B must not mutate route A"
         );
     }
 

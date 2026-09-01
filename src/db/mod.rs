@@ -16658,28 +16658,37 @@ impl DbConnection {
         &self,
         input: &CreateMeshOriginEventInput,
     ) -> std::result::Result<(), MeshOriginAppendError> {
-        self.with_transaction_error(|| {
-            let tip = self.mesh_origin_tip_row(&input.team_id, &input.origin_node_id)?;
-            let chain_ok = match &tip {
-                None => input.seq == 0 && input.prev_event_hash.is_none(),
-                Some((tip_seq, tip_hash)) => {
-                    input.seq == tip_seq.saturating_add(1)
-                        && input.prev_event_hash.as_deref() == Some(tip_hash.as_str())
-                }
-            };
-            if !chain_ok {
-                let (expected_seq, expected_prev) = match tip {
-                    None => (0, None),
-                    Some((tip_seq, tip_hash)) => (tip_seq.saturating_add(1), Some(tip_hash)),
-                };
-                return Err(MeshOriginAppendError::ChainMismatch {
-                    expected_seq,
-                    expected_prev_event_hash: expected_prev,
-                    got_seq: input.seq,
-                    got_prev_event_hash: input.prev_event_hash.clone(),
-                });
+        self.with_transaction_error(|| self.append_mesh_origin_event_in_current_transaction(input))
+    }
+
+    /// Append one origin event while the caller holds the write transaction.
+    /// This is the composition seam for mutations that must atomically couple
+    /// their domain rows to the provenance event.
+    pub(crate) fn append_mesh_origin_event_in_current_transaction(
+        &self,
+        input: &CreateMeshOriginEventInput,
+    ) -> std::result::Result<(), MeshOriginAppendError> {
+        let tip = self.mesh_origin_tip_row(&input.team_id, &input.origin_node_id)?;
+        let chain_ok = match &tip {
+            None => input.seq == 0 && input.prev_event_hash.is_none(),
+            Some((tip_seq, tip_hash)) => {
+                input.seq == tip_seq.saturating_add(1)
+                    && input.prev_event_hash.as_deref() == Some(tip_hash.as_str())
             }
-            self.execute_for(
+        };
+        if !chain_ok {
+            let (expected_seq, expected_prev) = match tip {
+                None => (0, None),
+                Some((tip_seq, tip_hash)) => (tip_seq.saturating_add(1), Some(tip_hash)),
+            };
+            return Err(MeshOriginAppendError::ChainMismatch {
+                expected_seq,
+                expected_prev_event_hash: expected_prev,
+                got_seq: input.seq,
+                got_prev_event_hash: input.prev_event_hash.clone(),
+            });
+        }
+        self.execute_for(
                 DbOperation::Execute,
                 "INSERT INTO mesh_origin_events (event_id, team_id, origin_node_id, signing_key_generation, seq, prev_event_hash, event_hash, signature, payload_schema, payload_json, required_features_json, produced_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 &[
@@ -16696,21 +16705,20 @@ impl DbConnection {
                     Value::Text(input.required_features_json.clone()),
                     Value::Text(input.produced_at.clone()),
                 ],
+        )
+        .map_err(MeshOriginAppendError::Db)?;
+        if let Some(nonce_hex) = &input.body_nonce_hex {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO mesh_origin_event_nonces (event_id, nonce_hex) VALUES (?1, ?2)",
+                &[
+                    Value::Text(input.event_id.clone()),
+                    Value::Text(nonce_hex.clone()),
+                ],
             )
             .map_err(MeshOriginAppendError::Db)?;
-            if let Some(nonce_hex) = &input.body_nonce_hex {
-                self.execute_for(
-                    DbOperation::Execute,
-                    "INSERT INTO mesh_origin_event_nonces (event_id, nonce_hex) VALUES (?1, ?2)",
-                    &[
-                        Value::Text(input.event_id.clone()),
-                        Value::Text(nonce_hex.clone()),
-                    ],
-                )
-                .map_err(MeshOriginAppendError::Db)?;
-            }
-            Ok(())
-        })
+        }
+        Ok(())
     }
 
     fn mesh_origin_tip_row(

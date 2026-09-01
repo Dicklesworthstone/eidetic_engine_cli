@@ -142,7 +142,7 @@ fn doctor_robot_docs_json_route_is_agent_readable_response_envelope() -> TestRes
     for schema in [
         "ee.doctor.capabilities.v1",
         "ee.doctor.run_state.v2",
-        "ee.doctor.action_line.v1",
+        "ee.doctor.action.v1",
     ] {
         ensure(
             related_schemas
