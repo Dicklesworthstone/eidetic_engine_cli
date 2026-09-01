@@ -10141,6 +10141,127 @@ DROP TABLE team_join_attempts_v110;
     "blake3:v120_team_join_attempt_first_sync_phase_2026_08_26",
 );
 
+/// V121: Admit typed CASS evidence as a durable outcome-feedback target.
+///
+/// Evidence remains immutable; feedback rows describe observed usefulness of
+/// the evidence selected into a pack. Rebuild both feedback tables together so
+/// positive events and quarantined harmful events share the same target
+/// vocabulary without weakening either ledger's existing constraints.
+pub const V121_EVIDENCE_FEEDBACK_TARGETS: Migration = Migration::new(
+    121,
+    "evidence_feedback_targets",
+    r#"
+ALTER TABLE feedback_quarantine RENAME TO feedback_quarantine_v120;
+DROP INDEX IF EXISTS idx_feedback_quarantine_workspace;
+DROP INDEX IF EXISTS idx_feedback_quarantine_source;
+DROP INDEX IF EXISTS idx_feedback_quarantine_target;
+DROP INDEX IF EXISTS idx_feedback_quarantine_status;
+
+ALTER TABLE feedback_events RENAME TO feedback_events_v120;
+DROP INDEX IF EXISTS idx_feedback_events_workspace;
+DROP INDEX IF EXISTS idx_feedback_events_target;
+DROP INDEX IF EXISTS idx_feedback_events_signal;
+DROP INDEX IF EXISTS idx_feedback_events_source;
+DROP INDEX IF EXISTS idx_feedback_events_session;
+DROP INDEX IF EXISTS idx_feedback_events_created;
+DROP INDEX IF EXISTS idx_feedback_events_applied;
+
+CREATE TABLE feedback_events (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'fb_*' AND length(id) = 29),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    target_type TEXT NOT NULL CHECK (target_type IN (
+        'memory', 'rule', 'session', 'source', 'pack', 'candidate', 'procedure',
+        'evidence'
+    )),
+    target_id TEXT NOT NULL CHECK (length(trim(target_id)) > 0),
+    signal TEXT NOT NULL CHECK (signal IN (
+        'positive', 'negative', 'neutral', 'contradiction', 'confirmation',
+        'harmful', 'helpful', 'stale', 'inaccurate', 'outdated'
+    )),
+    weight REAL NOT NULL DEFAULT 1.0 CHECK (weight >= 0.0 AND weight <= 10.0),
+    source_type TEXT NOT NULL CHECK (source_type IN (
+        'human_explicit', 'agent_inference', 'automated_check', 'outcome_observed',
+        'contradiction_detected', 'usage_pattern', 'decay_trigger'
+    )),
+    source_id TEXT CHECK (source_id IS NULL OR length(trim(source_id)) > 0),
+    reason TEXT CHECK (reason IS NULL OR length(trim(reason)) > 0),
+    evidence_json TEXT CHECK (evidence_json IS NULL OR json_valid(evidence_json)),
+    session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+    applied_at TEXT CHECK (applied_at IS NULL OR length(trim(applied_at)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0)
+);
+
+INSERT INTO feedback_events (
+    id, workspace_id, target_type, target_id, signal, weight, source_type,
+    source_id, reason, evidence_json, session_id, applied_at, created_at
+)
+SELECT
+    id, workspace_id, target_type, target_id, signal, weight, source_type,
+    source_id, reason, evidence_json, session_id, applied_at, created_at
+FROM feedback_events_v120;
+
+CREATE INDEX idx_feedback_events_workspace ON feedback_events(workspace_id);
+CREATE INDEX idx_feedback_events_target ON feedback_events(target_type, target_id);
+CREATE INDEX idx_feedback_events_signal ON feedback_events(signal);
+CREATE INDEX idx_feedback_events_source ON feedback_events(source_type);
+CREATE INDEX idx_feedback_events_session ON feedback_events(session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX idx_feedback_events_created ON feedback_events(created_at);
+CREATE INDEX idx_feedback_events_applied ON feedback_events(applied_at) WHERE applied_at IS NOT NULL;
+
+CREATE TABLE feedback_quarantine (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'fq_*' AND length(id) = 29),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL CHECK (length(trim(source_id)) > 0),
+    target_type TEXT NOT NULL CHECK (target_type IN (
+        'memory', 'rule', 'session', 'source', 'pack', 'candidate', 'procedure',
+        'evidence'
+    )),
+    target_id TEXT NOT NULL CHECK (length(trim(target_id)) > 0),
+    signal TEXT NOT NULL CHECK (signal IN (
+        'negative', 'contradiction', 'harmful', 'inaccurate'
+    )),
+    proposed_event_id TEXT CHECK (proposed_event_id IS NULL OR proposed_event_id GLOB 'fb_*'),
+    recorded_at TEXT NOT NULL CHECK (length(trim(recorded_at)) > 0),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    raw_event_hash TEXT NOT NULL CHECK (raw_event_hash GLOB 'blake3:*'),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'released', 'rejected')),
+    reviewed_at TEXT CHECK (reviewed_at IS NULL OR length(trim(reviewed_at)) > 0),
+    reviewed_by TEXT CHECK (reviewed_by IS NULL OR length(trim(reviewed_by)) > 0),
+    released_feedback_event_id TEXT REFERENCES feedback_events(id) ON DELETE SET NULL,
+    source_type TEXT NOT NULL DEFAULT 'outcome_observed' CHECK (source_type IN (
+        'human_explicit', 'agent_inference', 'automated_check', 'outcome_observed',
+        'contradiction_detected', 'usage_pattern', 'decay_trigger'
+    )),
+    weight REAL NOT NULL DEFAULT 1.0 CHECK (weight >= 0.0 AND weight <= 10.0),
+    event_reason TEXT CHECK (event_reason IS NULL OR length(trim(event_reason)) > 0),
+    evidence_json TEXT CHECK (evidence_json IS NULL OR json_valid(evidence_json)),
+    session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL
+);
+
+INSERT INTO feedback_quarantine (
+    id, workspace_id, source_id, target_type, target_id, signal,
+    proposed_event_id, recorded_at, reason, raw_event_hash, status, reviewed_at,
+    reviewed_by, released_feedback_event_id, source_type, weight, event_reason,
+    evidence_json, session_id
+)
+SELECT
+    id, workspace_id, source_id, target_type, target_id, signal,
+    proposed_event_id, recorded_at, reason, raw_event_hash, status, reviewed_at,
+    reviewed_by, released_feedback_event_id, source_type, weight, event_reason,
+    evidence_json, session_id
+FROM feedback_quarantine_v120;
+
+CREATE INDEX idx_feedback_quarantine_workspace ON feedback_quarantine(workspace_id);
+CREATE INDEX idx_feedback_quarantine_source ON feedback_quarantine(workspace_id, source_id, recorded_at);
+CREATE INDEX idx_feedback_quarantine_target ON feedback_quarantine(target_type, target_id);
+CREATE INDEX idx_feedback_quarantine_status ON feedback_quarantine(status, recorded_at);
+
+DROP TABLE feedback_quarantine_v120;
+DROP TABLE feedback_events_v120;
+"#,
+    "blake3:v121_evidence_feedback_targets_2026_09_01",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -10263,6 +10384,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V118_TEAM_ADMISSION_PEERS,
     V119_CURATION_GENERATION_TRIGGER_REPAIR,
     V120_TEAM_JOIN_ATTEMPT_FIRST_SYNC_PHASE,
+    V121_EVIDENCE_FEEDBACK_TARGETS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -10317,6 +10439,7 @@ fn migration_requires_foreign_key_relaxation(migration: &Migration) -> bool {
         V096_MEMORY_SENTINEL_POLARITY.version(),
         V102_RETRIEVAL_AFFINITY_PROJECTION.version(),
         V103_SUGGEST_LINK_CANDIDATE_TYPES.version(),
+        V121_EVIDENCE_FEEDBACK_TARGETS.version(),
     ]
     .contains(&migration.version())
 }
@@ -10376,7 +10499,8 @@ impl DbConnection {
                 || migration.version == V091_CURATION_PEER_HUMAN_ATTESTED_TRUST.version
                 || migration.version == V092_PROCEDURAL_RULE_PEER_HUMAN_ATTESTED_TRUST.version
                 || migration.version == V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST.version
-                || migration.version == V096_MEMORY_SENTINEL_POLARITY.version;
+                || migration.version == V096_MEMORY_SENTINEL_POLARITY.version
+                || migration.version == V121_EVIDENCE_FEEDBACK_TARGETS.version;
             let outcome =
                 if rebuilds_existing_table && matches!(&self.location, DatabaseLocation::File(_)) {
                     self.apply_file_schema_rebuild_migration(migration, &now)?
@@ -42201,6 +42325,162 @@ mod tests {
             &second.skipped().to_vec(),
             &migration_versions(),
             "second run skips all migrations",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn v121_preserves_feedback_and_admits_evidence_targets() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 120)?;
+        setup_workspace(&connection)?;
+        let workspace_id = "wsp_01234567890123456789012345";
+
+        let legacy_event_id = "fb_12100000000000000000000000";
+        connection.insert_feedback_event(
+            legacy_event_id,
+            &super::CreateFeedbackEventInput {
+                workspace_id: workspace_id.to_owned(),
+                target_type: "procedure".to_owned(),
+                target_id: "proc_v121_legacy".to_owned(),
+                signal: "helpful".to_owned(),
+                weight: 1.5,
+                source_type: "outcome_observed".to_owned(),
+                source_id: Some("pack:v121-upgrade".to_owned()),
+                reason: Some("preserve the pre-migration event".to_owned()),
+                evidence_json: Some(r#"{"schema":"test.feedback.v1"}"#.to_owned()),
+                session_id: None,
+            },
+        )?;
+        let legacy_quarantine_id = "fq_12100000000000000000000000";
+        connection.insert_feedback_quarantine(
+            legacy_quarantine_id,
+            &super::CreateFeedbackQuarantineInput {
+                workspace_id: workspace_id.to_owned(),
+                source_id: "pack:v121-upgrade".to_owned(),
+                target_type: "procedure".to_owned(),
+                target_id: "proc_v121_legacy".to_owned(),
+                signal: "harmful".to_owned(),
+                weight: 2.0,
+                source_type: "outcome_observed".to_owned(),
+                proposed_event_id: Some("fb_12100000000000000000000001".to_owned()),
+                recorded_at: "2026-09-01T00:00:00Z".to_owned(),
+                reason: "preserve the pre-migration quarantine row".to_owned(),
+                event_reason: Some("upgrade fixture".to_owned()),
+                evidence_json: Some(r#"{"schema":"test.quarantine.v1"}"#.to_owned()),
+                session_id: None,
+                raw_event_hash: "blake3:v121-legacy-quarantine".to_owned(),
+            },
+        )?;
+
+        let outcome = connection.apply_foreign_key_relaxed_migration(
+            &super::V121_EVIDENCE_FEEDBACK_TARGETS,
+            "2026-09-01T00:00:01Z",
+        )?;
+        ensure_equal(
+            &outcome,
+            &super::ApplyOutcome::Applied,
+            "V121 migration applies",
+        )?;
+
+        let preserved_event = connection
+            .get_feedback_event(legacy_event_id)?
+            .ok_or_else(|| TestFailure::new("V121 dropped a pre-migration feedback event"))?;
+        ensure_equal(
+            &preserved_event.target_type.as_str(),
+            &"procedure",
+            "V121 preserves event target type",
+        )?;
+        ensure_equal(
+            &preserved_event.evidence_json.as_deref(),
+            &Some(r#"{"schema":"test.feedback.v1"}"#),
+            "V121 preserves event evidence",
+        )?;
+        let preserved_quarantine = connection
+            .get_feedback_quarantine(legacy_quarantine_id)?
+            .ok_or_else(|| TestFailure::new("V121 dropped a pre-migration quarantine row"))?;
+        ensure_equal(
+            &preserved_quarantine.target_type.as_str(),
+            &"procedure",
+            "V121 preserves quarantine target type",
+        )?;
+        ensure_equal(
+            &preserved_quarantine.raw_event_hash.as_str(),
+            &"blake3:v121-legacy-quarantine",
+            "V121 preserves quarantine evidence hash",
+        )?;
+
+        let evidence_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x121)).to_string();
+        let evidence_event_id = "fb_12100000000000000000000002";
+        connection.insert_feedback_event(
+            evidence_event_id,
+            &super::CreateFeedbackEventInput {
+                workspace_id: workspace_id.to_owned(),
+                target_type: "evidence".to_owned(),
+                target_id: evidence_id.clone(),
+                signal: "helpful".to_owned(),
+                weight: 1.0,
+                source_type: "outcome_observed".to_owned(),
+                source_id: Some("pack:v121-evidence".to_owned()),
+                reason: Some("typed CASS evidence helped".to_owned()),
+                evidence_json: Some(r#"{"entityKind":"evidence"}"#.to_owned()),
+                session_id: None,
+            },
+        )?;
+        let stored_evidence_event = connection
+            .get_feedback_event(evidence_event_id)?
+            .ok_or_else(|| TestFailure::new("V121 rejected an evidence feedback event"))?;
+        ensure_equal(
+            &stored_evidence_event.target_id,
+            &evidence_id,
+            "evidence feedback event retains typed identity",
+        )?;
+
+        let evidence_quarantine_id = "fq_12100000000000000000000002";
+        connection.insert_feedback_quarantine(
+            evidence_quarantine_id,
+            &super::CreateFeedbackQuarantineInput {
+                workspace_id: workspace_id.to_owned(),
+                source_id: "pack:v121-evidence".to_owned(),
+                target_type: "evidence".to_owned(),
+                target_id: evidence_id.clone(),
+                signal: "harmful".to_owned(),
+                weight: 1.0,
+                source_type: "outcome_observed".to_owned(),
+                proposed_event_id: Some("fb_12100000000000000000000003".to_owned()),
+                recorded_at: "2026-09-01T00:00:02Z".to_owned(),
+                reason: "typed CASS evidence was harmful".to_owned(),
+                event_reason: Some("typed evidence quarantine fixture".to_owned()),
+                evidence_json: Some(r#"{"entityKind":"evidence"}"#.to_owned()),
+                session_id: None,
+                raw_event_hash: "blake3:v121-evidence-quarantine".to_owned(),
+            },
+        )?;
+        let stored_evidence_quarantine = connection
+            .get_feedback_quarantine(evidence_quarantine_id)?
+            .ok_or_else(|| TestFailure::new("V121 rejected an evidence quarantine row"))?;
+        ensure_equal(
+            &stored_evidence_quarantine.target_id,
+            &evidence_id,
+            "evidence quarantine row retains typed identity",
+        )?;
+
+        ensure(
+            connection.check_foreign_keys()?.passed,
+            "V121 leaves all foreign keys valid",
+        )?;
+        ensure_equal(
+            &connection.foreign_key_enforcement_state()?,
+            &1,
+            "V121 restores foreign-key enforcement",
+        )?;
+        ensure(
+            !table_exists(&connection, "feedback_events_v120")?
+                && !table_exists(&connection, "feedback_quarantine_v120")?,
+            "V121 removes its retired table copies",
         )?;
 
         connection.close()?;
