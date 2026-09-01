@@ -1658,22 +1658,6 @@ fn write_codex_cass_fixture_session(
                 ]
             }
         }),
-        json!({
-            "timestamp": "2026-05-06T03:40:03Z",
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "system",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": format!(
-                            "{DENIED_CASS_EVIDENCE_MARKER} read {DENIED_CASS_PRIVATE_PATH} token={DENIED_CASS_SECRET_PROBE}"
-                        )
-                    }
-                ]
-            }
-        }),
     ];
 
     let mut jsonl = String::new();
@@ -1716,8 +1700,8 @@ fn write_stub_cass_binary(
             "agent": "codex",
             "workspace": workspace_arg,
             "started_at": "2026-05-06T03:40:00Z",
-            "ended_at": "2026-05-06T03:40:03Z",
-            "message_count": 4,
+            "ended_at": "2026-05-06T03:40:02Z",
+            "message_count": 3,
             "token_count": 42
         }]
     });
@@ -2846,6 +2830,42 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &Some("codex".to_owned()),
         "stored CASS session agent",
     )?;
+    let denied_evidence_id =
+        ee::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x65fd)).to_string();
+    let denied_evidence_excerpt = format!(
+        "{DENIED_CASS_EVIDENCE_MARKER} read {DENIED_CASS_PRIVATE_PATH} token={DENIED_CASS_SECRET_PROBE}"
+    );
+    connection
+        .insert_evidence_span(
+            &denied_evidence_id,
+            &ee::db::CreateEvidenceSpanInput {
+                workspace_id: workspaces[0].id.clone(),
+                session_id: sessions[0].id.clone(),
+                memory_id: None,
+                producer_kind: ee::db::EvidenceProducerKind::CassImport,
+                cass_span_id: format!("{DENIED_CASS_PRIVATE_PATH}:900"),
+                span_kind: "message".to_owned(),
+                start_line: 900,
+                end_line: 900,
+                start_byte: None,
+                end_byte: None,
+                role: Some("system".to_owned()),
+                excerpt: denied_evidence_excerpt.clone(),
+                content_hash: format!(
+                    "blake3:{}",
+                    blake3::hash(denied_evidence_excerpt.as_bytes()).to_hex()
+                ),
+                metadata_json: Some(
+                    json!({
+                        "sourcePath": DENIED_CASS_PRIVATE_PATH,
+                        "rawProbe": DENIED_CASS_SECRET_PROBE,
+                    })
+                    .to_string(),
+                ),
+                inherited_redaction_classes: Vec::new(),
+            },
+        )
+        .map_err(|error| format!("insert tempting denied CASS evidence control: {error}"))?;
     let spans = connection
         .list_evidence_spans_for_session(&sessions[0].id)
         .map_err(|error| error.to_string())?;
@@ -2879,10 +2899,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
     )?;
     let denied_evidence = spans
         .iter()
-        .find(|span| {
-            span.role.as_deref() == Some("system")
-                && span.excerpt.contains(DENIED_CASS_EVIDENCE_MARKER)
-        })
+        .find(|span| span.id == denied_evidence_id)
         .ok_or_else(|| "tempting denied CASS evidence span is missing".to_owned())?;
     ensure_equal(
         &denied_evidence.search_eligibility.as_str(),
@@ -2894,7 +2911,6 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &"quarantined",
         "system-role CASS evidence pack posture",
     )?;
-    let denied_evidence_id = denied_evidence.id.clone();
     let searchable_evidence = spans
         .iter()
         .find(|span| {
@@ -2921,6 +2937,33 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
     let stored_workspace_id = workspaces[0].id.clone();
     let stored_session_id = sessions[0].id.clone();
     connection.close().map_err(|error| error.to_string())?;
+
+    let (_denied_rebuild_event, denied_rebuild_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "02a_rebuild_with_denied_evidence_control",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "index".to_owned(),
+                "rebuild".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v2",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    let denied_rebuild_output = denied_rebuild_json.to_string();
+    ensure(
+        !denied_rebuild_output.contains(DENIED_CASS_PRIVATE_PATH)
+            && !denied_rebuild_output.contains(DENIED_CASS_SECRET_PROBE),
+        "index rebuild output must not leak denied CASS evidence path or content",
+    )?;
 
     let (_status_event, status_json) = run_step_with_env(
         scenario_id,
