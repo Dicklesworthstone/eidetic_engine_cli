@@ -2914,7 +2914,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
     let searchable_evidence = spans
         .iter()
         .find(|span| {
-            span.role.as_deref() == Some("assistant")
+            span.id != denied_evidence_id
                 && span.search_eligibility == "admitted"
                 && span
                     .excerpt
