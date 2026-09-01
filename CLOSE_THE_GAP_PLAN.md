@@ -179,17 +179,34 @@ identity-changing promotion into durable learned memory.
 
 #### B. Make index/status truth coherent (`.10`, `.16`)
 
-- [ ] Reproduce the installed `search/pack/status` degraded-vs-`index status`
+- [x] Reproduce the installed `search/pack/status` degraded-vs-`index status`
   ready contradiction against an exact current-source binary and retained
   workspace; do not infer current behavior from the stale installed release.
-- [ ] Identify whether the mismatch is backend selection, index path,
+- [x] Identify whether the mismatch is backend selection, index path,
   generation read, capability projection, or stale diagnostic aggregation.
-- [ ] Add one current-source public-CLI regression asserting that the same
+- [x] Add one current-source public-CLI regression asserting that the same
   workspace snapshot cannot report mutually exclusive readiness postures.
-- [ ] Fix the narrow authority split and retain truthful degraded behavior for
+- [x] Fix the narrow authority split and retain truthful degraded behavior for
   genuinely missing, stale, corrupt, lexical-only, and semantic-only states.
-- [ ] Verify `search`, `pack`, `status`, `index status`, and `doctor` share the
+- [x] Verify `search`, `pack`, `status`, `index status`, and `doctor` share the
   same generation/backend evidence while preserving command-specific posture.
+
+Closure evidence (2026-09-01): the contradictory installed probe resolves to
+`/Users/jemanuel/.local/bin/ee`, an unattested `0.14.2` binary, while current
+source is package `0.14.4` at `1898c975`. Current source has no remaining
+authority split to patch: `index status` and `doctor` call `get_index_status`,
+aggregate `status` reuses that classifier inside its pinned snapshot, and
+`search`/`pack` consume the same snapshot-aware health report. Commit
+`1898c975` adds the public-CLI regression
+`ready_index_posture_is_coherent_across_public_cli_surfaces`. Its exact pinned
+RCH invocation ran one test and passed (`1 passed; 0 failed; 5 filtered out`)
+in 332.62 seconds, proving exact source/asset watermark equality plus coherent
+ready posture and recall across all five surfaces in fresh processes. Existing
+no-mock stale/corrupt recovery cases and the `IndexHealth` mapping continue to
+preserve missing, stale, corrupt, lexical-only, and semantic-degraded truth.
+The appropriate fix was therefore to retire a stale-release diagnosis and pin
+the current shared authority with executable coverage, not introduce another
+status layer.
 
 #### C. Complete durable recovery inventory (`.13`, `.14`)
 
