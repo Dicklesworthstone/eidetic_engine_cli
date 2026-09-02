@@ -1,13 +1,13 @@
 # ee.franken-stack.lock.v1
 #
 # Full commit IDs are mandatory. This set pins the sibling revisions that
-# ee's Cargo.lock closes over. Refreshed 2026-08-25 after the 0.14.3 dependency
-# update: Asupersync 0.4.9, FrankenSQLite 0.3.11, Frankensearch 0.4.0,
-# FrankenNetworkX 0.2.0, agent detection 0.2.2, SQLModel 0.4.1, and Tru 0.2.4.
+# ee's Cargo.lock closes over. Refreshed 2026-09-02 after the locked dependency
+# update: Asupersync 0.4.9, FrankenSQLite 0.3.15, Frankensearch 0.4.2,
+# FrankenNetworkX 0.2.0, agent detection 0.2.2, SQLModel 0.4.2, and Tru 0.2.4.
 asupersync	86988e38b4659f385d289b00bef09d86f5ebf0ef
 franken_agent_detection	f0ca145d2577becd9ca1355c0e3318f6decd4c82
 franken_networkx	4cbb18f785d99f0bf2df1911a1b2c03ccda51635
-frankensearch	75479c624caf94c4a18311a96ff2f2813cbf8189
-frankensqlite	8281cf285433b1746d9c29a598152e58cc205bd8
-sqlmodel_rust	24cd12e3c19311e6a45373e4ddd9c87e5ffc04cd
+frankensearch	e9d1525b7e02dc200b680791608b1eb467b51f12
+frankensqlite	067d50163da7844cef51439945a1a9fba6e03589
+sqlmodel_rust	3d79be0b28efedbc1068c5414106860ca878f898
 toon_rust	ab5c29b372ba6d39baf0f3071d7247ca3c72bc9c
