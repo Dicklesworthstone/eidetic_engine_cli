@@ -8408,10 +8408,24 @@ mod tests {
             .get_task_episode(task_episode_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "restored database omitted task episode".to_owned())?;
+        let restored_workspace_id = restored_connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "restored database omitted workspace".to_owned())?
+            .id;
+        ensure_equal(
+            restored_episode.workspace_id.as_deref(),
+            Some(restored_workspace_id.as_str()),
+            "task episode workspace foreign key remaps to side path",
+        )?;
+        let mut expected_episode = source_episode;
+        expected_episode.workspace_id = Some(restored_workspace_id);
         ensure_equal(
             restored_episode,
-            source_episode,
-            "task episode exact round trip",
+            expected_episode,
+            "task episode round trip outside intentional workspace remap",
         )
     }
 
