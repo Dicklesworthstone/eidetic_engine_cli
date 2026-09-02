@@ -2,14 +2,17 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.global_promotion.report.v1.json",
   "title": "ee.global_promotion.report.v1",
-  "description": "Execution report for ee memory promote-global: the policy plan plus what actually happened (dry-run plans set executed=false; an exact-content global twin reports alreadyPromoted=true and merges instead of inserting a sibling).",
+  "description": "Execution report for ee memory promote-global: the policy plan, durable source mutation, and derived-index reconciliation posture (dry-run plans set executed=false; an exact-content global twin reports alreadyPromoted=true and merges instead of inserting a sibling).",
   "type": "object",
   "required": [
     "schema",
     "plan",
     "executed",
     "globalMemoryId",
-    "alreadyPromoted"
+    "alreadyPromoted",
+    "indexJobId",
+    "indexStatus",
+    "indexError"
   ],
   "additionalProperties": false,
   "properties": {
@@ -30,6 +33,19 @@
     "alreadyPromoted": {
       "type": "boolean",
       "description": "True when an exact-content global twin already existed (idempotent re-promotion)."
+    },
+    "indexJobId": {
+      "type": ["string", "null"],
+      "description": "Derived-index job queued for a newly inserted global row; null for refusal, dry-run, or idempotent merge."
+    },
+    "indexStatus": {
+      "type": "string",
+      "enum": ["indexed", "queued", "failed", "not_applicable"],
+      "description": "Truthful derived-index posture after the durable promotion decision."
+    },
+    "indexError": {
+      "type": ["string", "null"],
+      "description": "Derived-index reconciliation error when the source row committed but immediate recall did not converge."
     }
   }
 }

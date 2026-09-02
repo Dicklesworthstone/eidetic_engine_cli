@@ -87,6 +87,9 @@ const CASES: &[SchemaCase] = &[
             "executed",
             "globalMemoryId",
             "alreadyPromoted",
+            "indexJobId",
+            "indexStatus",
+            "indexError",
         ],
     },
     SchemaCase {
@@ -100,6 +103,9 @@ const CASES: &[SchemaCase] = &[
             "tombstoned",
             "originWorkspaceId",
             "originMemoryId",
+            "indexJobId",
+            "indexStatus",
+            "indexError",
         ],
     },
     SchemaCase {

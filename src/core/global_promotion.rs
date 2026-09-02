@@ -324,6 +324,14 @@ pub struct PromotionReport {
     /// promotion is a no-op re-promotion (idempotence == merge for the
     /// exact-match case).
     pub already_promoted: bool,
+    /// Derived-index job queued for a newly inserted global row.
+    pub index_job_id: Option<String>,
+    /// Honest derived-index posture: `indexed`, `queued`, `failed`, or
+    /// `not_applicable` for refusal, dry-run, and idempotent merge paths.
+    pub index_status: String,
+    /// Derived-index error detail when immediate reconciliation did not
+    /// converge. The durable global memory remains committed.
+    pub index_error: Option<String>,
 }
 
 impl PromotionReport {
@@ -335,6 +343,9 @@ impl PromotionReport {
             "executed": self.executed,
             "globalMemoryId": self.global_memory_id,
             "alreadyPromoted": self.already_promoted,
+            "indexJobId": self.index_job_id,
+            "indexStatus": self.index_status,
+            "indexError": self.index_error,
         })
     }
 }
@@ -398,18 +409,22 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
             executed: false,
             global_memory_id: existing_twin.map(|twin| twin.id),
             already_promoted: false,
+            index_job_id: None,
+            index_status: "not_applicable".to_owned(),
+            index_error: None,
             plan,
         });
     }
 
-    let (global_memory_id, already_promoted) = match &plan.verdict {
+    let (global_memory_id, already_promoted, index_job_id) = match &plan.verdict {
         PromotionVerdict::Allow {
             action: PromotionAction::MergeInto { global_memory_id },
-        } => (global_memory_id.clone(), true),
+        } => (global_memory_id.clone(), true, None),
         PromotionVerdict::Allow {
             action: PromotionAction::Insert,
         } => {
             let new_id = crate::models::MemoryId::now().to_string();
+            let index_job_id = promotion_index_job_id();
             let mut tags = vec!["scope:global".to_owned()];
             tags.push(format!("origin:{}", memory.workspace_id));
             global_connection
@@ -438,7 +453,7 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
                 .map_err(|error| format!("insert global memory: {error}"))?;
             global_connection
                 .insert_search_index_job(
-                    &promotion_index_job_id(),
+                    &index_job_id,
                     &CreateSearchIndexJobInput {
                         workspace_id: global_workspace_id.clone(),
                         job_type: SearchIndexJobType::SingleDocument,
@@ -448,7 +463,7 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
                     },
                 )
                 .map_err(|error| format!("queue global index job: {error}"))?;
-            (new_id, false)
+            (new_id, false, Some(index_job_id))
         }
         PromotionVerdict::Refuse { .. } => unreachable!("allowed() checked above"),
     };
@@ -475,7 +490,7 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
         .insert_audit(&generate_audit_id(), &workspace_audit)
         .map_err(|error| format!("workspace audit: {error}"))?;
     let global_audit = CreateAuditInput {
-        workspace_id: Some(global_workspace_id),
+        workspace_id: Some(global_workspace_id.clone()),
         actor: options.actor.map(str::to_owned),
         action: plan.audit_action.to_owned(),
         target_type: Some("memory".to_owned()),
@@ -485,6 +500,27 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
     global_connection
         .insert_audit(&generate_audit_id(), &global_audit)
         .map_err(|error| format!("global audit: {error}"))?;
+    let (index_status, index_error) = index_job_id.as_ref().map_or_else(
+        || ("not_applicable".to_owned(), None),
+        |index_job_id| {
+            let report = super::memory::reconcile_committed_memory_index_job(
+                &global_connection,
+                &global_workspace_id,
+                index_job_id,
+                &options.global_paths.index_dir,
+            );
+            let provisional_status = super::memory::remember_index_status(&report);
+            let status = super::memory::authoritative_remember_index_status(
+                &global_workspace_id,
+                &options.global_paths.root,
+                &options.global_paths.database_path,
+                &options.global_paths.index_dir,
+                std::slice::from_ref(index_job_id),
+                &provisional_status,
+            );
+            (status, report.error)
+        },
+    );
     let _ = global_connection.close();
     let _ = workspace_connection.close();
 
@@ -493,6 +529,9 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
         executed: true,
         global_memory_id: Some(global_memory_id),
         already_promoted,
+        index_job_id,
+        index_status,
+        index_error,
     })
 }
 
@@ -515,6 +554,9 @@ pub struct DemotionReport {
     /// Origin parsed back from the global row's promotion provenance, when
     /// the row was created by `promote_global`.
     pub origin: Option<(String, String)>,
+    pub index_job_id: Option<String>,
+    pub index_status: String,
+    pub index_error: Option<String>,
 }
 
 impl DemotionReport {
@@ -527,6 +569,9 @@ impl DemotionReport {
             "tombstoned": self.tombstoned,
             "originWorkspaceId": self.origin.as_ref().map(|(workspace, _)| workspace.clone()),
             "originMemoryId": self.origin.as_ref().map(|(_, memory)| memory.clone()),
+            "indexJobId": self.index_job_id,
+            "indexStatus": self.index_status,
+            "indexError": self.index_error,
         })
     }
 }
@@ -567,12 +612,28 @@ pub fn demote_global(options: &DemoteGlobalOptions<'_>) -> Result<DemotionReport
             executed: false,
             tombstoned: false,
             origin,
+            index_job_id: None,
+            index_status: "not_applicable".to_owned(),
+            index_error: None,
         });
     }
 
     let tombstoned = global_connection
         .tombstone_memory(&row.id)
         .map_err(|error| format!("tombstone global memory: {error}"))?;
+    let index_job_id = promotion_index_job_id();
+    global_connection
+        .insert_search_index_job(
+            &index_job_id,
+            &CreateSearchIndexJobInput {
+                workspace_id: global_workspace_id.clone(),
+                job_type: SearchIndexJobType::SingleDocument,
+                document_source: Some("memory".to_owned()),
+                document_id: Some(row.id.clone()),
+                documents_total: 1,
+            },
+        )
+        .map_err(|error| format!("queue global demotion index job: {error}"))?;
     let details = json!({
         "schema": GLOBAL_DEMOTION_REPORT_SCHEMA_V1,
         "globalMemoryId": row.id,
@@ -584,7 +645,7 @@ pub fn demote_global(options: &DemoteGlobalOptions<'_>) -> Result<DemotionReport
         .insert_audit(
             &generate_audit_id(),
             &CreateAuditInput {
-                workspace_id: Some(global_workspace_id),
+                workspace_id: Some(global_workspace_id.clone()),
                 actor: options.actor.map(str::to_owned),
                 action: "memory.demote_global".to_owned(),
                 target_type: Some("memory".to_owned()),
@@ -609,6 +670,22 @@ pub fn demote_global(options: &DemoteGlobalOptions<'_>) -> Result<DemotionReport
             let _ = workspace_connection.close();
         }
     }
+    let index_report = super::memory::reconcile_committed_memory_index_job(
+        &global_connection,
+        &global_workspace_id,
+        &index_job_id,
+        &options.global_paths.index_dir,
+    );
+    let provisional_index_status = super::memory::remember_index_status(&index_report);
+    let index_status = super::memory::authoritative_remember_index_status(
+        &global_workspace_id,
+        &options.global_paths.root,
+        &options.global_paths.database_path,
+        &options.global_paths.index_dir,
+        std::slice::from_ref(&index_job_id),
+        &provisional_index_status,
+    );
+    let index_error = index_report.error;
     let _ = global_connection.close();
 
     Ok(DemotionReport {
@@ -616,6 +693,9 @@ pub fn demote_global(options: &DemoteGlobalOptions<'_>) -> Result<DemotionReport
         executed: true,
         tombstoned,
         origin,
+        index_job_id: Some(index_job_id),
+        index_status,
+        index_error,
     })
 }
 
@@ -1029,6 +1109,9 @@ mod tests {
         let report = promote_global(&options).expect("promotion");
         assert!(report.executed);
         assert!(!report.already_promoted);
+        assert!(report.index_job_id.is_some());
+        assert_eq!(report.index_status, "indexed");
+        assert!(report.index_error.is_none());
         let global_id = report.global_memory_id.clone().expect("global id");
 
         // The global row exists, carries origin provenance and trust.
@@ -1050,6 +1133,8 @@ mod tests {
         let again = promote_global(&options).expect("re-promotion");
         assert!(again.already_promoted);
         assert_eq!(again.global_memory_id.as_deref(), Some(global_id.as_str()));
+        assert!(again.index_job_id.is_none());
+        assert_eq!(again.index_status, "not_applicable");
 
         // Demotion tombstones the global row and parses origin back.
         let demotion = demote_global(&DemoteGlobalOptions {
@@ -1061,6 +1146,9 @@ mod tests {
         })
         .expect("demotion");
         assert!(demotion.executed && demotion.tombstoned);
+        assert!(demotion.index_job_id.is_some());
+        assert_eq!(demotion.index_status, "indexed");
+        assert!(demotion.index_error.is_none());
         assert_eq!(
             demotion.origin,
             Some((

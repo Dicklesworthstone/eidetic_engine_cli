@@ -38085,11 +38085,12 @@ where
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
     let human = format!(
-        "Global promotion\n  Memory: {}\n  Executed: {}\n  Global memory: {}\n  Already promoted: {}\n",
+        "Global promotion\n  Memory: {}\n  Executed: {}\n  Global memory: {}\n  Already promoted: {}\n  Index status: {}\n",
         args.memory_id,
         report.executed,
         report.global_memory_id.as_deref().unwrap_or("-"),
         report.already_promoted,
+        report.index_status,
     );
     render_global_lane_report(
         cli,
@@ -38151,12 +38152,13 @@ where
             (workspace.as_str(), memory.as_str())
         });
     let human = format!(
-        "Global demotion\n  Global memory: {}\n  Executed: {}\n  Tombstoned: {}\n  Origin workspace: {}\n  Origin memory: {}\n",
+        "Global demotion\n  Global memory: {}\n  Executed: {}\n  Tombstoned: {}\n  Origin workspace: {}\n  Origin memory: {}\n  Index status: {}\n",
         report.global_memory_id,
         report.executed,
         report.tombstoned,
         origin_workspace,
         origin_memory,
+        report.index_status,
     );
     render_global_lane_report(
         cli,

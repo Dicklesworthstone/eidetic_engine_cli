@@ -273,8 +273,10 @@ fn search_content_preview(content: &str, max_chars: usize) -> String {
 static SEARCH_INDEX_STATUS_CACHE: OnceLock<Mutex<HashMap<IndexStatusCacheKey, CachedIndexStatus>>> =
     OnceLock::new();
 #[cfg(feature = "lexical-bm25")]
-static PROCESS_LEXICAL_SEARCHER_CACHE: OnceLock<Mutex<Option<CachedLexicalSearcher>>> =
+static PROCESS_LEXICAL_SEARCHER_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedLexicalSearcher>>> =
     OnceLock::new();
+#[cfg(feature = "lexical-bm25")]
+const PROCESS_LEXICAL_SEARCHER_CACHE_CAPACITY: usize = 8;
 #[cfg(feature = "lexical-bm25")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LexicalSearcherCacheKey {
@@ -2732,6 +2734,18 @@ impl SearchDegradation {
                     "No repair needed.".to_string()
                 }
             }),
+        }
+    }
+
+    #[must_use]
+    fn global_index_unavailable(reason: &str) -> Self {
+        Self {
+            code: "global_index_unavailable".to_owned(),
+            severity: "medium".to_owned(),
+            message: format!(
+                "Global memory recall could not use its Frankensearch index: {reason}. Workspace search results remain available, but global recall may be incomplete."
+            ),
+            repair: Some("ee doctor --json".to_owned()),
         }
     }
 
@@ -8394,12 +8408,15 @@ async fn run_search_inner_with_performance(
             // result set). Keep the highest-relevance occurrence and discard
             // the rest. Stable ordering is preserved (first occurrence's
             // position wins among ties).
-            let global_hits = global_store_lexical_hits(
+            let global_hits = global_store_frankensearch_hits(
+                cx,
                 options,
                 effective_limit,
                 &mut degraded,
                 preloaded_memories.as_deref_mut(),
-            );
+                &mut trace,
+            )
+            .await;
             if !global_hits.is_empty() {
                 raw_hits.extend(global_hits);
                 sort_search_hits_by_score_order(&mut raw_hits);
@@ -10504,17 +10521,18 @@ pub(crate) fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
     }
 }
 
-fn global_store_lexical_hits(
+async fn global_store_frankensearch_hits(
+    cx: &asupersync::Cx,
     options: &SearchOptions,
     effective_limit: u32,
     degraded: &mut Vec<SearchDegradation>,
     preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
+    trace: &mut SearchPerformanceTrace,
 ) -> Vec<SearchHit> {
     if !global_store_participates_in_scope(options.memory_scope) {
         return Vec::new();
     }
-    let query_terms = search_lexical_terms(&options.query);
-    if query_terms.is_empty() {
+    if options.query.trim().is_empty() {
         return Vec::new();
     }
     let paths = match super::global_store::default_global_store_paths_from_env() {
@@ -10547,40 +10565,109 @@ fn global_store_lexical_hits(
         }
         return Vec::new();
     }
-    let memories =
-        match super::global_store::read_global_store_memories(&paths, options.include_tombstoned) {
-            Ok(memories) => memories,
-            Err(error) => {
-                degraded.push(SearchDegradation::scope_metadata_unavailable(&format!(
-                    "global store read failed: {error}"
-                )));
-                return Vec::new();
-            }
-        };
+    let memories = match super::global_store::read_global_store_memories(&paths, true) {
+        Ok(memories) => memories,
+        Err(error) => {
+            degraded.push(SearchDegradation::scope_metadata_unavailable(&format!(
+                "global store read failed: {error}"
+            )));
+            return Vec::new();
+        }
+    };
     if memories.is_empty() {
         return Vec::new();
     }
 
-    let reference_time = options.as_of.unwrap_or_else(Utc::now);
-    let mut scored = Vec::new();
-    let mut preloaded_memories = preloaded_memories;
-    for memory in memories {
-        if memory.tombstoned_at.is_some() && !options.include_tombstoned {
-            continue;
+    let global_options = SearchOptions {
+        workspace_path: paths.root.clone(),
+        database_path: Some(paths.database_path.clone()),
+        index_dir: Some(paths.index_dir.clone()),
+        query: options.query.clone(),
+        limit: effective_limit,
+        speed: options.speed,
+        explain: options.explain,
+        as_of: options.as_of,
+        include_tombstoned: options.include_tombstoned,
+        include_expired: options.include_expired,
+        include_future: options.include_future,
+        include_stale: options.include_stale,
+        relevance_floor: options.relevance_floor,
+        dedup_mode: SearchDedupMode::DocId,
+        source_mode: SearchSourceMode::LexicalOnly,
+        strict_source_mode: false,
+        memory_scope: MemoryScope::Global,
+        strict_scope: options.strict_scope,
+    };
+    reconcile_search_index_before_read_with_cx(cx, &global_options).await;
+    let index_status = match cached_index_status_for_search(&global_options, &paths.index_dir, None)
+    {
+        Ok(status) => status,
+        Err(error) => {
+            degraded.push(SearchDegradation::global_index_unavailable(&format!(
+                "index status probe failed: {error}"
+            )));
+            return Vec::new();
         }
-        if !matches!(
-            memory_validity_visibility(
-                memory.valid_from.as_deref(),
-                memory.valid_to.as_deref(),
-                reference_time,
-                options.include_expired,
-                options.include_future,
+    };
+    if index_status.health != IndexHealth::Ready {
+        let reason = match index_status.health {
+            IndexHealth::Stale => format!(
+                "index is stale (database generation {:?}, index generation {:?})",
+                index_status.db_generation, index_status.index_generation
             ),
-            MemoryValidityVisibility::Visible
-        ) {
-            continue;
+            IndexHealth::Missing => "index is missing".to_owned(),
+            IndexHealth::Corrupt => index_status.last_check_error.map_or_else(
+                || "index failed integrity checks".to_owned(),
+                |error| format!("index failed integrity checks: {error}"),
+            ),
+            IndexHealth::Ready => unreachable!("non-ready global index branch"),
+        };
+        degraded.push(SearchDegradation::global_index_unavailable(&reason));
+        return Vec::new();
+    }
+
+    let global_search_start = Instant::now();
+    let mut global_trace = SearchPerformanceTrace::default();
+    let search_result = search_sync_with_performance(
+        cx,
+        &paths.index_dir,
+        &options.query,
+        usize::try_from(effective_limit).unwrap_or(usize::MAX),
+        global_options.two_tier_config_for_limit(effective_limit),
+        options.explain,
+        SearchSourceMode::LexicalOnly,
+        Deterministic::from_seed(0).shared_child("search.global.lexical"),
+        SearchRerankRuntime::disabled(),
+        SearchFusionWeights::default(),
+        None,
+        &mut global_trace,
+    )
+    .await;
+    trace.record_elapsed("search::globalRetrieve", global_search_start);
+    let (raw_hits, errors) = match search_result {
+        Ok(result) => result,
+        Err(error) => {
+            degraded.push(SearchDegradation::global_index_unavailable(
+                &error.to_string(),
+            ));
+            return Vec::new();
         }
-        let Some(score) = search_lexical_memory_score(&memory, &query_terms) else {
+    };
+    if !errors.is_empty() {
+        degraded.push(SearchDegradation::global_index_unavailable(
+            &errors.join("; "),
+        ));
+    }
+
+    let reference_time = options.as_of.unwrap_or_else(Utc::now);
+    let memories_by_id = memories
+        .into_iter()
+        .map(|memory| (memory.id.clone(), memory))
+        .collect::<BTreeMap<_, _>>();
+    let mut admitted = Vec::new();
+    let mut preloaded_memories = preloaded_memories;
+    for mut hit in raw_hits {
+        let Some(memory) = memories_by_id.get(&hit.doc_id) else {
             continue;
         };
         if let Some(preloaded) = preloaded_memories.as_deref_mut() {
@@ -10588,56 +10675,10 @@ fn global_store_lexical_hits(
                 .entry(memory.id.clone())
                 .or_insert_with(|| memory.clone());
         }
-        scored.push((memory, score));
+        hit.metadata = Some(global_store_search_metadata(memory, reference_time));
+        admitted.push(hit);
     }
-
-    scored.sort_by(|(left_memory, left_score), (right_memory, right_score)| {
-        right_score
-            .total_cmp(left_score)
-            .then_with(|| left_memory.workspace_id.cmp(&right_memory.workspace_id))
-            .then_with(|| left_memory.id.cmp(&right_memory.id))
-    });
-
-    scored
-        .into_iter()
-        .take(usize::try_from(effective_limit).unwrap_or(usize::MAX))
-        .map(|(memory, score)| {
-            let mut hit = SearchHit {
-                doc_id: memory.id.clone(),
-                score,
-                source: ScoreSource::Lexical,
-                fast_score: None,
-                quality_score: None,
-                lexical_score: Some(score),
-                rerank_score: None,
-                metadata: Some(global_store_search_metadata(&memory, reference_time)),
-                explanation: None,
-            };
-            if options.explain {
-                hit.explanation = Some(global_store_lexical_explanation(&hit));
-            }
-            hit
-        })
-        .collect()
-}
-
-fn global_store_lexical_explanation(hit: &SearchHit) -> ScoreExplanation {
-    let score = hit.lexical_score.unwrap_or(hit.score);
-    ScoreExplanation {
-        summary: format!(
-            "Relevance {:.4} from score {:.4} ({}) via bounded global lexical term coverage ({score:.2}).",
-            hit.relevance_score(),
-            hit.score,
-            hit.score_kind(),
-        ),
-        factors: vec![ScoreFactor::new(
-            "lexical",
-            score,
-            "query-term coverage in the admitted global memory",
-            "lexical_score",
-            "score = matched_query_terms / query_terms",
-        )],
-    }
+    admitted
 }
 
 fn global_store_participates_in_scope(scope: MemoryScope) -> bool {
@@ -10645,27 +10686,6 @@ fn global_store_participates_in_scope(scope: MemoryScope) -> bool {
         scope,
         MemoryScope::Swarm | MemoryScope::Workspace | MemoryScope::Global
     )
-}
-
-fn search_lexical_terms(text: &str) -> BTreeSet<String> {
-    text.split(|ch: char| !ch.is_alphanumeric())
-        .map(str::trim)
-        .filter(|term| term.len() >= 2)
-        .map(str::to_ascii_lowercase)
-        .collect()
-}
-
-fn search_lexical_memory_score(
-    memory: &StoredMemory,
-    query_terms: &BTreeSet<String>,
-) -> Option<f32> {
-    let haystack =
-        format!("{} {} {}", memory.level, memory.kind, memory.content).to_ascii_lowercase();
-    let matched = query_terms
-        .iter()
-        .filter(|term| haystack.contains(term.as_str()))
-        .count();
-    (matched > 0).then_some(matched as f32 / query_terms.len() as f32)
 }
 
 fn global_store_search_metadata(
@@ -12604,11 +12624,11 @@ fn open_lexical_searcher(index_dir: &Path) -> Result<Option<Arc<dyn LexicalRead>
         index_dir: index_dir.to_path_buf(),
         index_manifest_version: index_manifest_version_for_plan_cache(index_dir),
     };
-    let cache = PROCESS_LEXICAL_SEARCHER_CACHE.get_or_init(|| Mutex::new(None));
+    let cache = PROCESS_LEXICAL_SEARCHER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let Ok(mut cached) = cache.lock() else {
         return open_lexical_searcher_uncached(&lexical_dir).map(Some);
     };
-    if let Some(entry) = cached.as_ref()
+    if let Some(entry) = cached.get(index_dir)
         && entry.key == key
     {
         tracing::debug!(
@@ -12624,7 +12644,10 @@ fn open_lexical_searcher(index_dir: &Path) -> Result<Option<Arc<dyn LexicalRead>
     // Index publication swaps the complete generation atomically. Drop the
     // cached handle before opening the replacement so Tantivy's writer lock
     // remains attached only to the published generation being served.
-    cached.take();
+    cached.remove(index_dir);
+    if cached.len() >= PROCESS_LEXICAL_SEARCHER_CACHE_CAPACITY {
+        cached.clear();
+    }
     let searcher = open_lexical_searcher_uncached(&lexical_dir)?;
     tracing::debug!(
         target: "ee::search::index_cache",
@@ -12633,10 +12656,13 @@ fn open_lexical_searcher(index_dir: &Path) -> Result<Option<Arc<dyn LexicalRead>
         cache_decision = "miss",
         "opened and cached process-scoped lexical searcher"
     );
-    *cached = Some(CachedLexicalSearcher {
-        key,
-        searcher: Arc::clone(&searcher),
-    });
+    cached.insert(
+        index_dir.to_path_buf(),
+        CachedLexicalSearcher {
+            key,
+            searcher: Arc::clone(&searcher),
+        },
+    );
     Ok(Some(searcher))
 }
 

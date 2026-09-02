@@ -2027,7 +2027,7 @@ pub fn create_workflow(
     })
 }
 
-fn remember_index_status(report: &IndexProcessingJobReport) -> String {
+pub(crate) fn remember_index_status(report: &IndexProcessingJobReport) -> String {
     match report.outcome.as_str() {
         "completed" | "completed_no_documents" => "indexed".to_owned(),
         "skipped" => "queued".to_owned(),
@@ -2040,7 +2040,7 @@ fn remember_index_status(report: &IndexProcessingJobReport) -> String {
 /// source/index generation pair. A drain report is only provisional: another
 /// publisher may have claimed a peer job, and remember-time side effects may
 /// advance the database generation after this writer's own job completed.
-fn authoritative_remember_index_status(
+pub(crate) fn authoritative_remember_index_status(
     workspace_id: &str,
     workspace_path: &Path,
     database_path: &Path,

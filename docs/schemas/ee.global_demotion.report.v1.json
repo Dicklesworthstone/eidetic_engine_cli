@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.global_demotion.report.v1.json",
   "title": "ee.global_demotion.report.v1",
-  "description": "Execution report for ee memory demote-global: withdrawing (tombstoning) a promoted user-global memory without touching the origin workspace row. Origin fields parse back from the ee-mem:// promotion provenance when present.",
+  "description": "Execution report for ee memory demote-global: withdrawing (tombstoning) a promoted user-global memory without touching the origin workspace row, then reconciling the derived global index. Origin fields parse back from the ee-mem:// promotion provenance when present.",
   "type": "object",
   "required": [
     "schema",
@@ -10,7 +10,10 @@
     "executed",
     "tombstoned",
     "originWorkspaceId",
-    "originMemoryId"
+    "originMemoryId",
+    "indexJobId",
+    "indexStatus",
+    "indexError"
   ],
   "additionalProperties": false,
   "properties": {
@@ -33,6 +36,19 @@
     },
     "originMemoryId": {
       "type": ["string", "null"]
+    },
+    "indexJobId": {
+      "type": ["string", "null"],
+      "description": "Derived-index job queued for an applied demotion; null for dry-run."
+    },
+    "indexStatus": {
+      "type": "string",
+      "enum": ["indexed", "queued", "failed", "not_applicable"],
+      "description": "Truthful derived-index posture after the durable demotion decision."
+    },
+    "indexError": {
+      "type": ["string", "null"],
+      "description": "Derived-index reconciliation error when the tombstone committed but immediate index convergence did not complete."
     }
   }
 }

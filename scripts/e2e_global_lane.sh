@@ -178,9 +178,14 @@ run_ee remember "Global house rule: never git reset --hard in shared trees." \
     --global --level procedural --kind rule --json
 GLOBAL_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
 if [[ "${LAST_EXIT}" -eq 0 && -n "${GLOBAL_ID}" ]]; then
-    event remember_global_rule pass
+    if jq -e '.data.indexStatus == "indexed" and (.data.indexJobId | type == "string")' \
+        "${LAST_STDOUT}" >/dev/null 2>&1; then
+        event remember_global_rule_indexed pass
+    else
+        event remember_global_rule_indexed fail "global write did not report an indexed derived asset: $(head -c 250 "${LAST_STDOUT}")"
+    fi
 else
-    event remember_global_rule fail "exit ${LAST_EXIT}; id=${GLOBAL_ID}"
+    event remember_global_rule_indexed fail "exit ${LAST_EXIT}; id=${GLOBAL_ID}"
 fi
 
 run_ee search "never git reset hard shared trees" --workspace "${WS_B}" --json
@@ -189,6 +194,18 @@ if jq -e '[.data.results[]? | select((.metadata.storeLane // .storeLane // "") =
     event global_row_surfaces_in_other_workspace pass
 else
     event global_row_surfaces_in_other_workspace fail "no storeLane=global hit in ws_b: $(head -c 250 "${LAST_STDOUT}")"
+fi
+
+# The retired implementation matched arbitrary substrings in the complete
+# memory body (`sha` matched `shared`) and called the ratio a lexical score.
+# Frankensearch's tokenized lexical tier must not admit that distractor.
+run_ee search "sha" --workspace "${WS_B}" --relevance-floor 0 --json
+if jq -e --arg id "${GLOBAL_ID}" \
+    '[.data.results[]? | select(.docId == $id)] | length == 0' \
+    "${LAST_STDOUT}" >/dev/null 2>&1; then
+    event global_lane_rejects_substring_only_distractor pass
+else
+    event global_lane_rejects_substring_only_distractor fail "global retrieval still admitted substring-only overlap: $(head -c 250 "${LAST_STDOUT}")"
 fi
 
 # --- isolation: participate=false sees nothing, honestly ----------------
@@ -209,8 +226,13 @@ fi
 
 # --- demote-global tombstones and stops surfacing -----------------------
 run_ee memory demote-global "${GLOBAL_ID}" --workspace "${WS_A}" --json
-[[ "${LAST_EXIT}" -eq 0 ]] && event demote_global_succeeds pass \
-    || event demote_global_succeeds fail "exit ${LAST_EXIT}: $(head -c 200 "${LAST_STDOUT}")"
+if [[ "${LAST_EXIT}" -eq 0 ]] \
+    && jq -e '.data.report.indexStatus == "indexed" and (.data.report.indexJobId | type == "string")' \
+        "${LAST_STDOUT}" >/dev/null 2>&1; then
+    event demote_global_succeeds_and_reindexes pass
+else
+    event demote_global_succeeds_and_reindexes fail "exit ${LAST_EXIT}: $(head -c 250 "${LAST_STDOUT}")"
+fi
 
 run_ee search "never git reset hard shared trees" --workspace "${WS_B}" --json
 if jq -e '[.data.results[]? | select((.metadata.storeLane // .storeLane // "") == "global")] | length == 0' \

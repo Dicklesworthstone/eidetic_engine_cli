@@ -2290,10 +2290,8 @@ mod tests {
             format!("global scope tag missing from item: {global_item:?}"),
         )?;
         ensure(
-            global_item
-                .why
-                .contains("bounded global lexical term coverage")
-                && !global_item.why.contains("BM25"),
+            global_item.why.contains("lexical match")
+                && !global_item.why.contains("query-term coverage"),
             format!("global explanation misidentified its scorer: {global_item:?}"),
         )?;
         ensure(

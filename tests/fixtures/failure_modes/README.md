@@ -33,6 +33,7 @@ in the same commit, keeping the catalog complete by construction.
 | `evidence_live_admission_filtered` | search, diag search | warning | bd-4frzq (P0) |
 | `index_missing` | search, context | medium | bd-17c65.2.1 (B1) |
 | `index_corrupt` | search, context | high | bd-17c65.2.1 (B1) |
+| `global_index_unavailable` | search, pack | medium | bd-reality-core-convergence-1azkt.4 |
 | `tombstoned_in_results` | search | low | bd-17c65.2.8 (B8) |
 | `tombstoned_filtered` | search | low | bd-17c65.2.8 (B8) |
 | `expired_filtered` | search | low | bd-17c65.2.8 (B8) |

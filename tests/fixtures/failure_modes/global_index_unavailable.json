@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "global_index_unavailable",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.4"
+  },
+  "surfaces": [
+    "search",
+    "pack"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The user-global store contains memories, but its derived Frankensearch index is missing, stale, corrupt, or cannot be opened. Workspace retrieval remains available while global recall is explicitly marked incomplete.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee remember --global --level procedural --kind rule 'Global index fixture.' --json",
+      "mv \"$XDG_DATA_HOME/ee/global/indexes\" \"$XDG_DATA_HOME/ee/global/indexes.fixture-backup\""
+    ],
+    "invocation": "ee search 'Global index fixture' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "global_index_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "Global memory recall",
+      "Frankensearch index",
+      "global recall may be incomplete"
+    ],
+    "repair_contains": "ee doctor",
+    "repair_string": "ee doctor --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}
