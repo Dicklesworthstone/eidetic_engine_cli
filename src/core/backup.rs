@@ -5781,7 +5781,7 @@ mod tests {
             .id;
         connection
             .insert_task_episode(
-                "episode_inventory_fixture",
+                "ep_823456789012345678901234567",
                 &CreateTaskEpisodeInput {
                     workspace_id: Some(workspace_id),
                     session_id: None,
@@ -8298,7 +8298,7 @@ mod tests {
             .next()
             .ok_or_else(|| "missing source workspace".to_owned())?
             .id;
-        let task_episode_id = "episode_restore_database_fixture";
+        let task_episode_id = "ep_923456789012345678901234567";
         source_connection
             .insert_task_episode(
                 task_episode_id,
