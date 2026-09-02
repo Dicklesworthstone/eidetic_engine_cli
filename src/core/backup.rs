@@ -8304,7 +8304,7 @@ mod tests {
                 task_episode_id,
                 &CreateTaskEpisodeInput {
                     workspace_id: Some(source_workspace_id),
-                    session_id: Some("session_restore_fixture".to_owned()),
+                    session_id: Some("sess_restore_fixture".to_owned()),
                     task_input: "Restore the durable task episode".to_owned(),
                     retrieved_memory_ids: vec![MemoryId::from_uuid(Uuid::from_u128(2)).to_string()],
                     context_pack_id: Some("pack_restore_fixture".to_owned()),
