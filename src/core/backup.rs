@@ -24,9 +24,10 @@ use crate::db::shard::{
 };
 use crate::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
-    CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType, MeshStorageStatus,
-    StoredAuditEntry, StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness, StoredGraphSnapshot,
-    StoredMemory, StoredMemoryLink, StoredTaskEpisode, audit_actions,
+    CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType,
+    MeshStorageStatus, StoredAuditEntry, StoredEpisodeAction, StoredGraphAlgorithmResult,
+    StoredGraphAlgorithmWitness, StoredGraphSnapshot, StoredMemory, StoredMemoryLink,
+    StoredTaskEpisode, audit_actions,
 };
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
@@ -71,7 +72,7 @@ impl BackupTablePolicy {
     }
 
     fn snapshot_covered(self) -> bool {
-        self.schema_covered() && !matches!(self.coverage, "artifact_only_not_rehydrated")
+        self.schema_covered() && !matches!(self.coverage, "derived_artifact_restore")
     }
 }
 
@@ -556,6 +557,7 @@ pub struct BackupRestoreReport {
     pub restore_graph_cache: bool,
     pub imported_memory_count: u32,
     pub skipped_duplicate_count: u32,
+    pub restored_task_episode_count: u32,
     pub restored_graph_cache_count: u32,
     pub restored_derived: Vec<BackupRestoredDerivedAssetReport>,
     pub issue_count: u32,
@@ -584,6 +586,7 @@ impl BackupRestoreReport {
             "counts": {
                 "memoriesImported": self.imported_memory_count,
                 "memoriesSkippedDuplicate": self.skipped_duplicate_count,
+                "taskEpisodesRestored": self.restored_task_episode_count,
                 "graphCacheRowsRestored": self.restored_graph_cache_count,
                 "issues": self.issue_count,
             },
@@ -597,13 +600,14 @@ impl BackupRestoreReport {
     pub fn human_summary(&self) -> String {
         let prefix = if self.dry_run { "DRY RUN: " } else { "" };
         format!(
-            "{prefix}backup restore {status}: {backup_id}\n  side path: {side_path}\n  restored db: {database}\n  imported memories: {imported} (duplicates: {duplicates})\n",
+            "{prefix}backup restore {status}: {backup_id}\n  side path: {side_path}\n  restored db: {database}\n  imported memories: {imported} (duplicates: {duplicates})\n  restored task episodes: {episodes}\n",
             status = self.status,
             backup_id = self.backup_id,
             side_path = self.side_path,
             database = self.restored_database_path,
             imported = self.imported_memory_count,
             duplicates = self.skipped_duplicate_count,
+            episodes = self.restored_task_episode_count,
         )
     }
 
@@ -949,7 +953,7 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
         "task_episodes" => BackupTablePolicy::new(
             "learn",
             "export_restore_required",
-            "artifact_only_not_rehydrated",
+            "derived_artifact_restore",
         ),
 
         "agent_context_profiles"
@@ -1122,6 +1126,47 @@ fn recovery_inventory_degradations(inventory: &BackupRecoveryInventory) -> Vec<B
     degraded
 }
 
+fn reconcile_derived_recovery_inventory(
+    inventory: &mut BackupRecoveryInventory,
+    include_derived: bool,
+    derived: &[BackupDerivedAssetReport],
+) {
+    let captured_task_episode_count = derived
+        .iter()
+        .filter(|asset| {
+            asset.kind == "lab_episode" && asset.path.starts_with("derived/lab/episodes/")
+        })
+        .count() as u64;
+
+    if let Some(entry) = inventory
+        .entries
+        .iter_mut()
+        .find(|entry| entry.table == "task_episodes")
+    {
+        entry.snapshot_covered = entry.row_count == 0
+            || (include_derived && captured_task_episode_count == entry.row_count);
+    }
+
+    inventory.uncovered_required_table_count = u32::try_from(
+        inventory
+            .entries
+            .iter()
+            .filter(|entry| entry.disposition == "export_restore_required" && !entry.schema_covered)
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    inventory.uncovered_required_row_count = inventory
+        .entries
+        .iter()
+        .filter(|entry| entry.disposition == "export_restore_required" && !entry.snapshot_covered)
+        .map(|entry| entry.row_count)
+        .sum();
+    inventory.schema_coverage_complete =
+        inventory.uncovered_required_table_count == 0 && inventory.unclassified_table_count == 0;
+    inventory.snapshot_coverage_complete =
+        inventory.entries.iter().all(|entry| entry.snapshot_covered);
+}
+
 /// Create a verified backup directory with redacted JSONL records and a manifest.
 ///
 /// # Errors
@@ -1147,7 +1192,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         repair: Some(INIT_AND_MIGRATE_REPAIR_COMMAND.to_owned()),
     })?;
     let workspace = load_workspace(&connection, &workspace_path)?;
-    let (export_data, recovery_inventory) = load_backup_snapshot(&connection, workspace)?;
+    let (export_data, mut recovery_inventory) = load_backup_snapshot(&connection, workspace)?;
     let backup_id = BackupId::now().to_string();
     let backup_root = backup_root(options, &workspace_path);
     let backup_path = backup_root.join(&backup_id);
@@ -1159,7 +1204,6 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         options.include_derived,
         options.include_graph_cache,
     );
-    degraded.extend(recovery_inventory_degradations(&recovery_inventory));
     degraded.extend(redaction_pattern_degradations(
         &export_data,
         options.redaction_level,
@@ -1186,6 +1230,12 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         .iter()
         .map(|payload| payload.report.clone())
         .collect::<Vec<_>>();
+    reconcile_derived_recovery_inventory(
+        &mut recovery_inventory,
+        options.include_derived,
+        &derived_reports,
+    );
+    degraded.extend(recovery_inventory_degradations(&recovery_inventory));
     let mesh = backup_mesh_summary(
         &connection,
         &export_data.workspace.workspace_id,
@@ -1898,6 +1948,7 @@ pub fn restore_backup_to_side_path(
             restore_graph_cache: options.restore_graph_cache,
             imported_memory_count: 0,
             skipped_duplicate_count: 0,
+            restored_task_episode_count: 0,
             restored_graph_cache_count: 0,
             restored_derived: Vec::new(),
             issue_count: u32::try_from(verify.issues.len()).unwrap_or(u32::MAX),
@@ -1956,6 +2007,8 @@ pub fn restore_backup_to_side_path(
             "inspect the copied records.jsonl and retry with a fresh --side-path".to_owned(),
         ),
     })?;
+    let restored_task_episode_count =
+        restore_task_episode_assets(&restored_database_path, &restored_derived)?;
     let graph_cache_restored_count = if options.restore_graph_cache {
         restore_graph_cache_assets(&restored_database_path, &restored_derived)?
     } else {
@@ -1990,6 +2043,7 @@ pub fn restore_backup_to_side_path(
         restore_graph_cache: options.restore_graph_cache,
         imported_memory_count: import_report.memories_imported,
         skipped_duplicate_count: import_report.memories_skipped_duplicate,
+        restored_task_episode_count,
         restored_graph_cache_count: graph_cache_restored_count,
         restored_derived,
         issue_count: u32::try_from(restore_issue_count).unwrap_or(u32::MAX),
@@ -2307,6 +2361,146 @@ fn copy_derived_artifacts_to_restore(
     Ok(restored)
 }
 
+fn restore_task_episode_assets(
+    restored_database_path: &Path,
+    restored_derived: &[BackupRestoredDerivedAssetReport],
+) -> Result<u32, DomainError> {
+    let episode_assets = restored_derived
+        .iter()
+        .filter(|asset| {
+            asset.kind == "lab_episode" && asset.path.starts_with("derived/lab/episodes/")
+        })
+        .collect::<Vec<_>>();
+    if episode_assets.is_empty() {
+        return Ok(0);
+    }
+
+    let connection = DbConnection::open(DatabaseConfig::file(restored_database_path.to_path_buf()))
+        .map_err(|error| DomainError::Import {
+            message: format!(
+                "failed opening restored database '{}' for task-episode restore: {error}",
+                restored_database_path.display()
+            ),
+            repair: Some("retry restore with a fresh --side-path".to_owned()),
+        })?;
+    connection.migrate().map_err(|error| DomainError::Import {
+        message: format!(
+            "failed preparing restored database '{}' for task-episode restore: {error}",
+            restored_database_path.display()
+        ),
+        repair: Some("retry restore with a fresh --side-path".to_owned()),
+    })?;
+    let workspaces = connection
+        .list_workspaces()
+        .map_err(|error| DomainError::Import {
+            message: format!(
+                "failed reading restored workspaces for task-episode restore: {error}"
+            ),
+            repair: Some("retry restore with a fresh --side-path".to_owned()),
+        })?;
+
+    let mut restored_count = 0u32;
+    for asset in episode_assets {
+        let value = read_restored_derived_json(asset)?;
+        if value.get("schema").and_then(JsonValue::as_str)
+            != Some("ee.backup.derived.lab_episode.v1")
+        {
+            return Err(DomainError::Import {
+                message: format!(
+                    "restored task-episode asset '{}' has an unsupported schema",
+                    asset.path
+                ),
+                repair: Some(
+                    "recreate the backup with ee backup create --include-derived".to_owned(),
+                ),
+            });
+        }
+        let episode = required_object(&value, "episode")?;
+        let id = required_json_str(episode, "id")?;
+        let source_workspace_id = episode.get("workspaceId").and_then(JsonValue::as_str);
+        let workspace_id = restored_task_episode_workspace_id(&workspaces, source_workspace_id)?;
+        let retrieved_memory_ids = serde_json::from_value::<Vec<String>>(
+            episode
+                .get("retrievedMemoryIds")
+                .cloned()
+                .ok_or_else(|| missing_derived_field("retrievedMemoryIds"))?,
+        )
+        .map_err(|error| malformed_derived_field("retrievedMemoryIds", error))?;
+        let actions = serde_json::from_value::<Vec<StoredEpisodeAction>>(
+            episode
+                .get("actions")
+                .cloned()
+                .ok_or_else(|| missing_derived_field("actions"))?,
+        )
+        .map_err(|error| malformed_derived_field("actions", error))?;
+        let input = CreateTaskEpisodeInput {
+            workspace_id,
+            session_id: json_string(episode, "sessionId"),
+            task_input: required_json_str(episode, "taskInput")?.to_owned(),
+            retrieved_memory_ids,
+            context_pack_id: json_string(episode, "contextPackId"),
+            actions,
+            outcome: required_json_str(episode, "outcome")?.to_owned(),
+            outcome_details: json_string(episode, "outcomeDetails"),
+            started_at: required_json_str(episode, "startedAt")?.to_owned(),
+            ended_at: json_string(episode, "endedAt"),
+            duration_ms: episode.get("durationMs").and_then(JsonValue::as_u64),
+            agent: json_string(episode, "agent"),
+            episode_hash: json_string(episode, "episodeHash"),
+        };
+        connection
+            .insert_task_episode_with_created_at(
+                id,
+                &input,
+                required_json_str(episode, "createdAt")?,
+            )
+            .map_err(|error| DomainError::Import {
+                message: format!("failed restoring task episode '{id}': {error}"),
+                repair: Some("restore to a fresh --side-path and retry".to_owned()),
+            })?;
+        restored_count = restored_count.saturating_add(1);
+    }
+    Ok(restored_count)
+}
+
+fn restored_task_episode_workspace_id(
+    workspaces: &[crate::db::StoredWorkspace],
+    source_workspace_id: Option<&str>,
+) -> Result<Option<String>, DomainError> {
+    let Some(source_workspace_id) = source_workspace_id else {
+        return Ok(None);
+    };
+    if let Some(workspace) = workspaces
+        .iter()
+        .find(|workspace| workspace.id == source_workspace_id)
+    {
+        return Ok(Some(workspace.id.clone()));
+    }
+    if let [workspace] = workspaces {
+        return Ok(Some(workspace.id.clone()));
+    }
+    Err(DomainError::Import {
+        message: format!(
+            "task episode references workspace '{source_workspace_id}', but the restored database has no unambiguous matching workspace"
+        ),
+        repair: Some("restore to a fresh --side-path and inspect records.jsonl".to_owned()),
+    })
+}
+
+fn missing_derived_field(field: &str) -> DomainError {
+    DomainError::Import {
+        message: format!("backup derived task episode is missing field '{field}'"),
+        repair: Some("recreate the backup with ee backup create --include-derived".to_owned()),
+    }
+}
+
+fn malformed_derived_field(field: &str, error: serde_json::Error) -> DomainError {
+    DomainError::Import {
+        message: format!("backup derived task episode field '{field}' is malformed: {error}"),
+        repair: Some("recreate the backup with ee backup create --include-derived".to_owned()),
+    }
+}
+
 fn restore_graph_cache_assets(
     restored_database_path: &Path,
     restored_derived: &[BackupRestoredDerivedAssetReport],
@@ -2470,14 +2664,14 @@ fn read_restored_derived_json(
 ) -> Result<JsonValue, DomainError> {
     let bytes = fs::read(&asset.restore_path).map_err(|error| DomainError::Import {
         message: format!(
-            "failed reading restored derived graph asset '{}': {error}",
+            "failed reading restored derived asset '{}': {error}",
             asset.restore_path
         ),
         repair: Some("run ee backup verify <id-or-path> --json and retry restore".to_owned()),
     })?;
     serde_json::from_slice(&bytes).map_err(|error| DomainError::Import {
         message: format!(
-            "restored derived graph asset '{}' is not valid JSON: {error}",
+            "restored derived asset '{}' is not valid JSON: {error}",
             asset.restore_path
         ),
         repair: Some("recreate the backup with ee backup create --include-derived".to_owned()),
@@ -3028,6 +3222,7 @@ fn load_workspace(
         })
 }
 
+#[cfg(test)]
 fn load_export_data(
     connection: &DbConnection,
     workspace: crate::db::StoredWorkspace,
@@ -4359,7 +4554,7 @@ fn collect_task_episode_payloads(
     degraded: &mut Vec<BackupDegradation>,
     payloads: &mut Vec<BackupDerivedPayload>,
 ) {
-    let episodes = match connection.list_task_episodes(Some(workspace_id), None, 256) {
+    let episodes = match connection.list_task_episodes(Some(workspace_id), None, u32::MAX) {
         Ok(episodes) => episodes,
         Err(error) => {
             degraded.push(BackupDegradation::warning(
@@ -5570,6 +5765,110 @@ mod tests {
             verify.status.as_str(),
             "degraded",
             "partial backup integrity verification status",
+        )
+    }
+
+    #[test]
+    fn task_episode_coverage_requires_complete_derived_capture() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let workspace_id = connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "missing fixture workspace".to_owned())?
+            .id;
+        connection
+            .insert_task_episode(
+                "episode_inventory_fixture",
+                &CreateTaskEpisodeInput {
+                    workspace_id: Some(workspace_id),
+                    session_id: None,
+                    task_input: "Prove task episode backup coverage".to_owned(),
+                    retrieved_memory_ids: Vec::new(),
+                    context_pack_id: None,
+                    actions: Vec::new(),
+                    outcome: "success".to_owned(),
+                    outcome_details: None,
+                    started_at: "2026-09-01T00:00:00Z".to_owned(),
+                    ended_at: None,
+                    duration_ms: None,
+                    agent: Some("codex".to_owned()),
+                    episode_hash: Some("blake3:inventory-fixture".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let portable_only = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            output_dir: Some(workspace.join("portable-only-backups")),
+            label: Some("without-derived-episodes".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let portable_episode_inventory = portable_only
+            .recovery_inventory
+            .entries
+            .iter()
+            .find(|entry| entry.table == "task_episodes")
+            .ok_or_else(|| "recovery inventory omitted task_episodes".to_owned())?;
+        ensure_equal(
+            portable_episode_inventory.coverage.as_str(),
+            "derived_artifact_restore",
+            "task episode recovery mechanism",
+        )?;
+        ensure(
+            !portable_episode_inventory.snapshot_covered,
+            "task episode row must remain uncovered when derived capture is disabled",
+        )?;
+        ensure_equal(
+            portable_only.status.as_str(),
+            "partial",
+            "portable-only task episode backup status",
+        )?;
+
+        let with_derived = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(workspace.join("derived-episode-backups")),
+            label: Some("with-derived-episodes".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: true,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let derived_episode_inventory = with_derived
+            .recovery_inventory
+            .entries
+            .iter()
+            .find(|entry| entry.table == "task_episodes")
+            .ok_or_else(|| "recovery inventory omitted task_episodes".to_owned())?;
+        ensure(
+            derived_episode_inventory.snapshot_covered,
+            "complete task episode artifact capture must satisfy snapshot coverage",
+        )?;
+        ensure_equal(
+            with_derived
+                .derived
+                .iter()
+                .filter(|asset| {
+                    asset.kind == "lab_episode" && asset.path.starts_with("derived/lab/episodes/")
+                })
+                .count(),
+            1,
+            "captured task episode artifact count",
+        )?;
+        ensure_equal(
+            with_derived.status.as_str(),
+            "completed",
+            "derived task episode backup status",
         )
     }
 
@@ -7990,6 +8289,48 @@ mod tests {
     #[test]
     fn restore_backup_to_side_path_materializes_derived_assets() -> TestResult {
         let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let source_connection =
+            DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let source_workspace_id = source_connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "missing source workspace".to_owned())?
+            .id;
+        let task_episode_id = "episode_restore_database_fixture";
+        source_connection
+            .insert_task_episode(
+                task_episode_id,
+                &CreateTaskEpisodeInput {
+                    workspace_id: Some(source_workspace_id),
+                    session_id: Some("session_restore_fixture".to_owned()),
+                    task_input: "Restore the durable task episode".to_owned(),
+                    retrieved_memory_ids: vec![MemoryId::from_uuid(Uuid::from_u128(2)).to_string()],
+                    context_pack_id: Some("pack_restore_fixture".to_owned()),
+                    actions: vec![StoredEpisodeAction {
+                        action_type: "verify".to_owned(),
+                        target_id: Some("backup".to_owned()),
+                        details: Some("round trip".to_owned()),
+                        timestamp: "2026-09-01T00:00:01Z".to_owned(),
+                    }],
+                    outcome: "success".to_owned(),
+                    outcome_details: Some("episode survived".to_owned()),
+                    started_at: "2026-09-01T00:00:00Z".to_owned(),
+                    ended_at: Some("2026-09-01T00:00:02Z".to_owned()),
+                    duration_ms: Some(2_000),
+                    agent: Some("codex".to_owned()),
+                    episode_hash: Some("blake3:episode-restore-fixture".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let source_episode = source_connection
+            .get_task_episode(task_episode_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "source task episode was not stored".to_owned())?;
+        source_connection
+            .close()
+            .map_err(|error| error.to_string())?;
         let episode_dir = workspace
             .join(WORKSPACE_MARKER)
             .join("lab")
@@ -8025,6 +8366,11 @@ mod tests {
         .map_err(|error| error.message())?;
 
         ensure_equal(restored.status.as_str(), "completed", "restore status")?;
+        ensure_equal(
+            restored.restored_task_episode_count,
+            1,
+            "restored task episode count",
+        )?;
         ensure(
             restored
                 .restored_derived
@@ -8053,6 +8399,19 @@ mod tests {
                 .join("ep_restore.json")
                 .is_file(),
             "restore side path includes frozen lab episode file",
+        )?;
+
+        let restored_connection =
+            DbConnection::open_file(Path::new(&restored.restored_database_path))
+                .map_err(|error| error.to_string())?;
+        let restored_episode = restored_connection
+            .get_task_episode(task_episode_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "restored database omitted task episode".to_owned())?;
+        ensure_equal(
+            restored_episode,
+            source_episode,
+            "task episode exact round trip",
         )
     }
 

@@ -33288,6 +33288,20 @@ impl DbConnection {
     /// Insert a new task episode.
     pub fn insert_task_episode(&self, id: &str, input: &CreateTaskEpisodeInput) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        self.insert_task_episode_with_created_at(id, input, &now)
+    }
+
+    /// Insert a task episode while preserving its original creation timestamp.
+    ///
+    /// This is restricted to crate-internal recovery paths. Normal callers
+    /// should use [`Self::insert_task_episode`] so new rows receive the current
+    /// timestamp.
+    pub(crate) fn insert_task_episode_with_created_at(
+        &self,
+        id: &str,
+        input: &CreateTaskEpisodeInput,
+        created_at: &str,
+    ) -> Result<()> {
         let memory_ids_json =
             serde_json::to_string(&input.retrieved_memory_ids).unwrap_or_else(|_| "[]".to_string());
         let actions_json =
@@ -33343,7 +33357,7 @@ impl DbConnection {
                     .as_ref()
                     .map(|s| Value::Text(s.clone()))
                     .unwrap_or(Value::Null),
-                Value::Text(now),
+                Value::Text(created_at.to_owned()),
             ],
         )?;
         Ok(())
