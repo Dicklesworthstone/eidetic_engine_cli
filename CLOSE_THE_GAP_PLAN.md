@@ -252,10 +252,14 @@ only marks `task_episodes` covered when derived capture is enabled and the
 captured artifact count exactly matches the same-snapshot table count; otherwise
 the backup remains honestly `partial`. The restore envelope now reports
 `counts.taskEpisodesRestored`. Formatting and static diff checks pass. The exact
-round-trip and inventory tests are committed, but their first pinned RCH attempt
-did not reach Cargo: failed FrankenNetworkX materialization exhausted the local
-volume while building the pinned source bundle. This progress therefore does
-not close the broader recovery rows or claim a green runtime proof yet.
+round-trip and inventory tests are committed. The first pinned RCH attempt did
+not reach Cargo because failed FrankenNetworkX materialization exhausted the
+local volume. A later exact run reached the round-trip test and exposed invalid
+episode IDs in the new fixtures before any restore assertion; commit `b9cdefbd`
+corrects both IDs to the database's canonical 30-character `ep_` form. The
+post-fix rerun again failed before the test when local source/proof staging hit
+`ENOSPC`. This progress therefore does not close the broader recovery rows or
+claim a green runtime proof yet.
 
 #### D. Restore mandated dependency boundaries (`.4`, `.15`, `.18`)
 
@@ -274,6 +278,11 @@ not close the broader recovery rows or claim a green runtime proof yet.
   duplicate Frankensearch responsibility; retain only the documented
   index-failure lexical fallback, policy enforcement, pack-owned hints, and the
   separately tracked PPR violation.
+- [x] Disable production pack PPR score influence while the pinned
+  FrankenNetworkX release lacks deterministic personalization: preserve textual
+  ranking, retain non-PPR Pack DNA signals, emit one typed
+  `graph_ppr_upstream_unavailable` degradation, and catalog the code. Focused
+  runtime verification is still blocked by local source-staging disk pressure.
 - [ ] Pin and expose one coherent dependency/version identity across manifest,
   lock, runtime status, proof capsule, and release artifacts.
   - [x] Align the Frankensearch index-manifest/runtime constant with the
@@ -328,6 +337,23 @@ monotonicity tests and has no production consumer; its module documentation now
 says so rather than implying live wiring. This closes the duplicate-search
 classification row, not the independent local PPR row or the broader score-
 calibration work.
+
+Pack-PPR boundary progress (2026-09-02): the pinned FrankenNetworkX Rust API
+supports ordinary weighted PageRank but does not expose personalization; its
+Python adapter explicitly rejects `personalization`, `nstart`, and custom
+dangling vectors. Commit `26a7c4b8` wires the production pack rerank path to the
+already-defined honest fallback instead of ee's local ACL-push reference
+implementation. A nonzero requested weight with the PPR feature enabled now
+preserves textual selection, emits exactly one medium-severity
+`graph_ppr_upstream_unavailable`, creates no PPR score explanation/cache/witness,
+and leaves non-PPR Pack DNA active; zero weight remains a silent no-op. The new
+failure fixture is indexed in the generated degraded-code catalog. Rustfmt,
+fixture JSON validation, generated-doc regeneration/check, and static diff
+checks pass. The focused committed-source RCH test has not run because the
+post-backup rerun exhausted local source/proof staging first. Direct
+link-suggestion and exported/reference PPR paths still require upstream
+delegation or explicit degradation, so the broader `.4` stack-boundary row
+remains open even though `.15`'s production pack influence is implemented.
 
 Dependency-identity progress evidence (2026-09-01): the search runtime had
 continued writing Frankensearch `0.3.0` into new index manifests after the
@@ -529,12 +555,13 @@ The decisive failures are at integration and proof boundaries:
 8. README performance numbers are historical and not reproducibly tied to the
    current baseline file, raw samples, host fingerprint, or a release-blocking
    gate.
-9. Pack ranking still uses a hand-written PPR implementation instead of
-   FrankenNetworkX. The former public custom-BM25 residue is now test-only;
-   global-store recall and weighted fusion/diagnostic RRF now delegate to
-   Frankensearch. The remaining local score-changing paths still require a
-   complete call-site classification, and release/proof dependency identity is
-   not yet attested end to end.
+9. Production pack ranking now explicitly degrades requested PPR influence
+   instead of invoking the local ACL-push implementation while FrankenNetworkX
+   lacks personalization. Direct link-suggestion and exported/reference PPR
+   paths still use local code. The former public custom-BM25 residue is
+   test-only; global-store recall and weighted fusion/diagnostic RRF delegate to
+   Frankensearch. Release/proof dependency identity is not yet attested end to
+   end.
 10. The former lexical raw-BM25 clamp is fixed in current source by normalizing
     the complete pure-lexical pool and retaining raw `lexicalScore`. The public
     score contract is still query-relative without a proved calibration identity,
@@ -666,7 +693,7 @@ candidate before `.2` changes the implementation.
 | # | Controlling promise | Status | Evidence / gap owner |
 | ---: | --- | --- | --- |
 | 1 | Local-first single CLI; core commands need no daemon | **WORKING** | Real direct CLI paths and source-backed storage exist. |
-| 2 | Franken-stack foundations; no forbidden substitute dependencies or core algorithms | **PARTIAL / WRONG-APPROACH** | Static dependency scan is clean; custom BM25 is test-only and global recall plus weighted fusion/diagnostics now use Frankensearch. Local PPR, any still-unclassified score-changing paths, and release/proof identity remain open. `.4`, `.15`, `.18`. |
+| 2 | Franken-stack foundations; no forbidden substitute dependencies or core algorithms | **PARTIAL / WRONG-APPROACH** | Static dependency scan is clean; custom BM25 is test-only and global recall plus weighted fusion/diagnostics use Frankensearch. Production pack PPR now degrades explicitly, but direct/exported local PPR and release/proof identity remain open. `.4`, `.18`; `.15` awaits focused runtime proof. |
 | 3 | Manual memory → DB → search → pack → why | **PARTIAL** | The ordinary path and provenance exist. Released-binary probes are unreliable; source-attested attribution is `.10`, then `.2`/`.3`. |
 | 4 | CASS import makes permitted prior incident content searchable and safely packable | **WORKING** | Exact pinned no-mock proof now covers canonical-path import/retry, exact typed search, direct evidence pack persistence, verified replay, typed why, outcome recording, and fail-closed denied evidence; §A records the commits and invocation. |
 | 5 | Hybrid BM25 + neural-local retrieval by default | **PARTIAL / UNPROVEN** | Released binary flips backend; current source has plausible causes but no source-attested oracle. Fresh-workspace fallback is `bd-fresh-workspace-hash-fallback-kvltg`; `.10`, `.2`, `.3` own attribution and convergence. |
