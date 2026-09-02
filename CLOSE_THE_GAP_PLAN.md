@@ -210,7 +210,7 @@ status layer.
 
 #### C. Complete durable recovery inventory (`.13`, `.14`)
 
-- [ ] Enumerate every source-of-truth table by five-job owner and classify it as
+- [x] Enumerate every source-of-truth table by five-job owner and classify it as
   export/restore required, derived/rebuildable, secret/rekeyed, or intentionally
   ephemeral; reconcile the inventory against migrations rather than prose.
 - [ ] Add missing export/restore coverage for rules, CASS sessions/evidence,
@@ -223,6 +223,24 @@ status layer.
 - [ ] Add negative cases for partial archive, tampered hash, wrong workspace,
   incompatible schema, missing side path, symlink traversal, and interrupted
   restore; every failure must leave the destination recoverable.
+
+Inventory closure evidence (2026-09-01): commits `7448e76f`, `17668658`,
+`c9b6faff`, and `3ca07dc5` add a live migrated-table recovery inventory to
+backup create/export/manifest/verify/restore. Every table has an explicit
+five-job owner, disposition, coverage posture, and snapshot row count; unknown
+migration drift is high severity, absent typed schema coverage is explicit,
+and any nonempty required-but-uncovered table makes the artifact `partial`
+with `incomplete_source_coverage`. Exported rows and inventory counts are read
+inside the same database snapshot, so the claim cannot race the archive it
+describes. Commit `4fc459d1` documents the integrity-versus-coverage boundary
+and adds the three required failure-mode fixtures. The exact pinned current-
+source RCH invocation
+`cargo test --lib recovery_inventory --locked -- --nocapture` passed both
+tests (`2 passed; 0 failed; 9,294 filtered out`) in 373.54 seconds after
+compilation. This closes inventory and false-completeness detection only;
+typed CASS, pack, outcome, curation, durable-job, and other required restore
+coverage—and lossless identity/ledger proof—remain open in the four unchecked
+rows above.
 
 #### D. Restore mandated dependency boundaries (`.4`, `.15`, `.18`)
 
