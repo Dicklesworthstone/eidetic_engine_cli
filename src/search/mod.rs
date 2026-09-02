@@ -10,7 +10,10 @@ use crate::models::{
 };
 
 pub mod bloom_prefilter;
-pub mod bm25_simd;
+// Differential-only reference implementation. Production lexical retrieval is
+// owned by Frankensearch; do not expose a second BM25 scorer from ee.
+#[cfg(test)]
+mod bm25_simd;
 pub mod hot_path;
 pub mod lexical_ram_tier;
 pub mod plan_cache;
