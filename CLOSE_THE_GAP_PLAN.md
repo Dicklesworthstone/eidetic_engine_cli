@@ -254,6 +254,17 @@ rows above.
   retrieval tests rather than name-only conformance.
 - [ ] Pin and expose one coherent dependency/version identity across manifest,
   lock, runtime status, proof capsule, and release artifacts.
+  - [x] Align the Frankensearch index-manifest/runtime constant with the
+    `0.4.0` dependency and retain the existing executable manifest-parity
+    contract.
+  - [x] Align linked franken-stack versions and default feature posture across
+    `Cargo.toml`, `Cargo.lock`, runtime dependency diagnostics, the canonical
+    dependency-matrix golden, its Markdown contract, and the install audit's
+    crates.io resolution inventory. Lock-backed runtime parity and
+    golden-to-runtime parity tests now fail on renewed drift.
+  - [ ] Refresh the older command-output dependency/doctor goldens from a
+    current source-built binary, bind the proof capsule to the same matrix
+    revision, and carry that identity through staged release artifacts.
 
 BM25 boundary closure evidence (2026-09-01): repository-wide call-site search
 found no caller of `search::bm25_simd`; production lexical indexing and
@@ -266,6 +277,25 @@ pinned current-source RCH invocation
 all seven tests (`7 passed; 0 failed; 9,289 filtered out`). This does not close
 the neighboring PPR, global-store substring retrieval, configured local fusion
 adjustment, diagnostic RRF, or dependency-identity rows.
+
+Dependency-identity progress evidence (2026-09-01): the search runtime had
+continued writing Frankensearch `0.3.0` into new index manifests after the
+workspace advanced to `0.4.0`; `ee doctor --franken-health` also called graph
+feature-gated despite `graph` being default-on and reported obsolete versions
+for every linked franken-stack family. Commits `a51ae376`, `1b918bef`,
+`5e3edeb9`, and `c8ea16b2` align and guard these surfaces. The runtime matrix
+now reports the locked versions (`asupersync 0.4.9`, FrankenSQLite `0.3.11`,
+SQLModel `0.4.1`,
+Frankensearch `0.4.0`, FrankenNetworkX `0.2.0`, Tru `0.2.4`, and agent detection
+`0.2.2`) and treats the graph family as ready in the default profile. The
+remaining identity row stays open because historical command-output goldens,
+the current proof capsule, and release artifacts have not yet been regenerated
+and attested together. The exact focused RCH Frankensearch contract attempt did
+not execute: source sync to worker `hz3` timed out after 30 seconds and the
+required remote lane correctly refused local fallback. A concurrent exact-HEAD
+all-target check reached `eidetic-engine` compilation but the remote SSH command
+timed out at 900 seconds; neither infrastructure result is claimed as a green
+test.
 
 #### E. Turn component success into a releasable product (`.1`–`.7`, `.19`)
 
