@@ -216,6 +216,19 @@ status layer.
 - [ ] Add missing export/restore coverage for rules, CASS sessions/evidence,
   packs and typed selected items, outcomes/impressions, curation lineage,
   durable jobs, and any other required source-of-truth rows found by inventory.
+  - [ ] Add recovery-only exact insert paths for CASS sessions and evidence;
+    restore the new workspace binding while preserving IDs, hashes, admission
+    posture, revisions, timestamps, and memory/session foreign keys.
+  - [ ] Capture CASS sessions/evidence in bounded aggregate artifacts rather
+    than one filesystem entry per span, and prove artifact row counts match the
+    same-snapshot inventory before claiming either table covered.
+  - [ ] Omit host-private session source paths from portable artifacts while
+    retaining safe upstream identity and explicit restore semantics.
+  - [ ] Restore sessions before evidence after memory import, report both row
+    counts, and fail closed on malformed schema, ambiguous workspace mapping,
+    missing session/memory references, or duplicate identities.
+  - [ ] Round-trip one admitted and one denied evidence row and prove restore
+    preserves both exact stored posture and live fail-closed admission behavior.
 - [ ] Preserve IDs, revisions, foreign keys, audit ordering, redaction posture,
   and pack-ledger integrity without exporting host-private or key material.
 - [ ] Prove evolved-store backup → verify → restore → migrate → rebuild → query
@@ -242,7 +255,7 @@ typed CASS, pack, outcome, curation, durable-job, and other required restore
 coverage—and lossless identity/ledger proof—remain open in the four unchecked
 rows above.
 
-Task-episode recovery progress (2026-09-02): commit `248aaf87` closes one
+Task-episode recovery closure (2026-09-02): commit `248aaf87` closes one
 previously stranded durable row family. Backup collection now enumerates the
 complete workspace episode table rather than truncating at 256 rows, verified
 derived episode artifacts are rehydrated into the isolated side-path database,
@@ -251,15 +264,21 @@ outcome data, hashes, and the original `created_at`. The recovery inventory
 only marks `task_episodes` covered when derived capture is enabled and the
 captured artifact count exactly matches the same-snapshot table count; otherwise
 the backup remains honestly `partial`. The restore envelope now reports
-`counts.taskEpisodesRestored`. Formatting and static diff checks pass. The exact
-round-trip and inventory tests are committed. The first pinned RCH attempt did
-not reach Cargo because failed FrankenNetworkX materialization exhausted the
-local volume. A later exact run reached the round-trip test and exposed invalid
-episode IDs in the new fixtures before any restore assertion; commit `b9cdefbd`
-corrects both IDs to the database's canonical 30-character `ep_` form. The
-post-fix rerun again failed before the test when local source/proof staging hit
-`ENOSPC`. This progress therefore does not close the broader recovery rows or
-claim a green runtime proof yet.
+`counts.taskEpisodesRestored`. Commits `b9cdefbd` and `c421df6b` correct the
+fixtures to the database's canonical episode/session ID contracts;
+`f53db53d` makes the system test use physical output and side paths without
+weakening the production symlink guard. To separate restore logic from the
+expensive whole-backup path, `b8f79f6f` adds a focused production-path
+serializer/rehydrator round trip. Its exact pinned RCH invocation passed one
+test in 185.92 seconds. The original full
+`restore_backup_to_side_path_materializes_derived_assets` test then passed on
+the same exact commit in 193.47 seconds after compilation, proving backup
+creation, verification, isolated import, derived copy, task-episode restore,
+workspace remap, and exact preservation of every other episode field. The
+verifier used an external committed-tree/tmp cache after local proof staging
+had twice hit `ENOSPC`; one cold attempt timed out during final-crate
+compilation, while the subsequent exact runs completed remotely. This closes
+task-episode recovery only; the broader four recovery rows remain open.
 
 #### D. Restore mandated dependency boundaries (`.4`, `.15`, `.18`)
 
