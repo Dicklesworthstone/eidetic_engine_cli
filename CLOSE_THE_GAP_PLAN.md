@@ -247,13 +247,25 @@ rows above.
 - [ ] Replace pack-path local personalized PageRank with the required
   FrankenNetworkX projection/API or obtain an explicit upstream capability;
   preserve deterministic ordering and cancellation semantics.
-- [ ] Remove the public custom BM25 production surface once all real callers use
+- [x] Remove the public custom BM25 production surface once all real callers use
   Frankensearch; retain only legitimate differential test code if still useful.
 - [ ] Locate and eliminate score-changing local fusion/RRF/token-overlap paths
   that duplicate Frankensearch responsibility, with before/after adversarial
   retrieval tests rather than name-only conformance.
 - [ ] Pin and expose one coherent dependency/version identity across manifest,
   lock, runtime status, proof capsule, and release artifacts.
+
+BM25 boundary closure evidence (2026-09-01): repository-wide call-site search
+found no caller of `search::bm25_simd`; production lexical indexing and
+retrieval already use Frankensearch. Commit `58fcb914` therefore makes the
+fixed-point scorer a private `#[cfg(test)]` differential module instead of a
+public production API, retaining its useful scalar/chunked parity and numeric
+edge-case coverage without shipping a second BM25 implementation. The exact
+pinned current-source RCH invocation
+`cargo test --lib search::bm25_simd::tests:: --locked -- --nocapture` passed
+all seven tests (`7 passed; 0 failed; 9,289 filtered out`). This does not close
+the neighboring PPR, global-store substring retrieval, configured local fusion
+adjustment, diagnostic RRF, or dependency-identity rows.
 
 #### E. Turn component success into a releasable product (`.1`–`.7`, `.19`)
 
@@ -436,11 +448,12 @@ The decisive failures are at integration and proof boundaries:
 8. README performance numbers are historical and not reproducibly tied to the
    current baseline file, raw samples, host fingerprint, or a release-blocking
    gate.
-9. Two hard architecture boundaries have production or public residue: pack
-   ranking uses a hand-written PPR implementation instead of FrankenNetworkX,
-   and a custom BM25 implementation remains publicly exported even though its
-   current callers are tests. The Frankensearch dependency/version contract is
-   also internally inconsistent (`0.3.2` dependency versus `0.3.0` report).
+9. Pack ranking still uses a hand-written PPR implementation instead of
+   FrankenNetworkX. The former public custom-BM25 residue is now test-only, but
+   global-store substring retrieval, local fusion adjustment, and diagnostic
+   RRF still cross the Frankensearch boundary. The Frankensearch
+   dependency/version contract is also internally inconsistent (`0.4.0`
+   manifest/lock versus a stale `0.3.0` verification fixture).
 10. The former lexical raw-BM25 clamp is fixed in current source by normalizing
     the complete pure-lexical pool and retaining raw `lexicalScore`. The public
     score contract is still query-relative without a proved calibration identity,
@@ -551,10 +564,10 @@ candidate before `.2` changes the implementation.
   its actual scenarios omit init/remember/search/pack/why and still assert the
   end-of-life `ee.response.v1` schema.
 - Pack candidate relevance is changed by the local `src/graph/ppr.rs`
-  algorithm rather than the mandated FrankenNetworkX graph layer; the public
-  `src/search/bm25_simd.rs` residue contradicts the no-custom-BM25 boundary.
-  Additional source audit found score-changing local fusion, global-store
-  token-overlap retrieval, and locally recomputed diagnostic RRF.
+  algorithm rather than the mandated FrankenNetworkX graph layer. The former
+  public `src/search/bm25_simd.rs` surface is now test-only. Score-changing
+  local fusion, global-store token-overlap retrieval, and locally recomputed
+  diagnostic RRF remain open.
 - The pinned current-SHA RCH `cargo check --locked --all-targets` now passes the
   exact committed tree and pinned Franken stack. Its proof is degraded by
   unavailable local build admission and proof-broker source-state mismatch.
@@ -573,9 +586,9 @@ candidate before `.2` changes the implementation.
 | # | Controlling promise | Status | Evidence / gap owner |
 | ---: | --- | --- | --- |
 | 1 | Local-first single CLI; core commands need no daemon | **WORKING** | Real direct CLI paths and source-backed storage exist. |
-| 2 | Franken-stack foundations; no forbidden substitute dependencies or core algorithms | **PARTIAL / WRONG-APPROACH** | Static dependency scan is clean, but local PPR/fusion/global token overlap/diagnostic RRF cross hard boundaries; custom BM25 is public; version identity drifts. `.4`, `.15`, `.18`. |
+| 2 | Franken-stack foundations; no forbidden substitute dependencies or core algorithms | **PARTIAL / WRONG-APPROACH** | Static dependency scan is clean and custom BM25 is test-only, but local PPR/fusion/global token overlap/diagnostic RRF cross hard boundaries and version identity drifts. `.4`, `.15`, `.18`. |
 | 3 | Manual memory → DB → search → pack → why | **PARTIAL** | The ordinary path and provenance exist. Released-binary probes are unreliable; source-attested attribution is `.10`, then `.2`/`.3`. |
-| 4 | CASS import makes permitted prior incident content searchable and safely packable | **PARTIAL / UNPROVEN** | Source has direct live-admitted `PackEvidenceItem` hydration and persistence. The focused no-mock import/search test currently fails on RCH path-safety hermeticity before import; import/job/index/replay/outcome proof, generic typed identity, and README wording remain with `bd-3k1mg`, `bd-16imy`, ADR 0085, `.9`, `.17`. |
+| 4 | CASS import makes permitted prior incident content searchable and safely packable | **WORKING** | Exact pinned no-mock proof now covers canonical-path import/retry, exact typed search, direct evidence pack persistence, verified replay, typed why, outcome recording, and fail-closed denied evidence; §A records the commits and invocation. |
 | 5 | Hybrid BM25 + neural-local retrieval by default | **PARTIAL / UNPROVEN** | Released binary flips backend; current source has plausible causes but no source-attested oracle. Fresh-workspace fallback is `bd-fresh-workspace-hash-fallback-kvltg`; `.10`, `.2`, `.3` own attribution and convergence. |
 | 6 | Same declared snapshot gives byte-stable canonical JSON and pack hash | **UNPROVEN** | Released-binary semantics diverged. ADR 0087 is a `proposed` contract, not implementation; `.1`, `.10`, `.2`, `.3` own closure. |
 | 7 | Retrieval scores and pack quality mean what their names claim | **PARTIAL / UNPROVEN** | Pure lexical pools now use Frankensearch min-max normalization and retain raw BM25, but the query-relative/calibration contract and every downstream admission/quality consumer remain unproven. `.11`, `.12`. |
