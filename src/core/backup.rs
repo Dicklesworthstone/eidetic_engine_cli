@@ -908,17 +908,20 @@ impl BackupCassSessionRecord {
                 || hash_bytes(session.cass_session_id.as_bytes()),
                 str::to_owned,
             );
-        let source_metadata_hash = restored_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("sourceMetadataHash"))
-            .and_then(JsonValue::as_str)
-            .map(str::to_owned)
-            .or_else(|| {
+        let source_metadata_hash = restored_metadata.as_ref().map_or_else(
+            || {
                 session
                     .metadata_json
                     .as_deref()
                     .map(|metadata| hash_bytes(metadata.as_bytes()))
-            });
+            },
+            |metadata| {
+                metadata
+                    .get("sourceMetadataHash")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_owned)
+            },
+        );
         Self {
             id: session.id.clone(),
             workspace_id: session.workspace_id.clone(),
@@ -5924,6 +5927,72 @@ mod tests {
         }
     }
 
+    fn backup_cass_session_fixture(id: &str, workspace_id: &str) -> BackupCassSessionRecord {
+        BackupCassSessionRecord {
+            id: id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            source_locator_hash: hash_bytes(b"cass://portable-session"),
+            source_metadata_hash: None,
+            agent_name: Some("codex".to_owned()),
+            model: Some("gpt-5".to_owned()),
+            started_at: Some("2026-09-01T00:00:00Z".to_owned()),
+            ended_at: Some("2026-09-01T00:01:00Z".to_owned()),
+            message_count: 2,
+            token_count: Some(64),
+            content_hash: hash_bytes(b"portable CASS session"),
+            imported_at: "2026-09-01T00:02:00Z".to_owned(),
+            updated_at: "2026-09-01T00:03:00Z".to_owned(),
+        }
+    }
+
+    fn backup_cass_evidence_fixture(
+        id: &str,
+        workspace_id: &str,
+        session_id: &str,
+    ) -> BackupCassEvidenceRecord {
+        let excerpt = "Portable CASS recovery evidence";
+        BackupCassEvidenceRecord {
+            id: id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            session_id: session_id.to_owned(),
+            memory_id: None,
+            cass_span_id: "cass://portable-session:1".to_owned(),
+            span_kind: "message".to_owned(),
+            start_line: 1,
+            end_line: 2,
+            start_byte: Some(0),
+            end_byte: Some(32),
+            role: Some("assistant".to_owned()),
+            excerpt: excerpt.to_owned(),
+            content_hash: hash_bytes(excerpt.as_bytes()),
+            metadata_json: Some(r#"{"source":"cass"}"#.to_owned()),
+            producer_kind: "cass_import".to_owned(),
+            screening_version: 1,
+            secret_redaction_status: "clean".to_owned(),
+            redaction_classes_json: "[]".to_owned(),
+            instruction_risk: "none".to_owned(),
+            search_eligibility: "eligible".to_owned(),
+            pack_eligibility: "eligible".to_owned(),
+            canonical_provenance_revision: 1,
+            canonical_excerpt_hash: Some(hash_bytes(excerpt.as_bytes())),
+            security_policy_epoch: 1,
+            upstream_ref_hash: Some(hash_bytes(b"cass://portable-session:1")),
+            created_at: "2026-09-01T00:02:00Z".to_owned(),
+            updated_at: "2026-09-01T00:03:00Z".to_owned(),
+        }
+    }
+
+    fn restored_cass_asset(path: &Path, kind: &str) -> BackupRestoredDerivedAssetReport {
+        BackupRestoredDerivedAssetReport {
+            path: path
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+            kind: kind.to_owned(),
+            restore_path: path.to_string_lossy().into_owned(),
+            lab_episode_path: None,
+        }
+    }
+
     fn fixture() -> Result<(TempDir, PathBuf, PathBuf), DomainError> {
         let tempdir = tempfile::tempdir().map_err(|error| DomainError::Storage {
             message: error.to_string(),
@@ -6450,6 +6519,90 @@ mod tests {
             inventory.uncovered_required_row_count,
             0,
             "complete CASS aggregate uncovered row count",
+        )
+    }
+
+    #[test]
+    fn portable_cass_session_rebackup_preserves_absent_source_metadata() -> TestResult {
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(3)).to_string();
+        let record = backup_cass_session_fixture(
+            &SessionId::from_uuid(Uuid::from_u128(4)).to_string(),
+            &workspace_id,
+        );
+        let restored = record.clone().into_restored(workspace_id);
+
+        ensure_equal(
+            BackupCassSessionRecord::from_stored(&restored),
+            record,
+            "portable CASS session remains stable across a second backup",
+        )
+    }
+
+    #[test]
+    fn cass_recovery_rolls_back_sessions_when_evidence_reference_is_missing() -> TestResult {
+        let (tempdir, _workspace, database) = fixture().map_err(|error| error.message())?;
+        let source_workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(3)).to_string();
+        let session_id = SessionId::from_uuid(Uuid::from_u128(4)).to_string();
+        let missing_session_id = SessionId::from_uuid(Uuid::from_u128(5)).to_string();
+        let evidence_id = EvidenceId::from_uuid(Uuid::from_u128(6)).to_string();
+        let session_path = tempdir.path().join("sessions-0000.json");
+        let evidence_path = tempdir.path().join("evidence-spans-0000.json");
+        let session_chunk = BackupCassSessionChunk {
+            schema: "ee.backup.derived.cass_sessions.v1".to_owned(),
+            captured_at: "2026-09-02T00:00:00Z".to_owned(),
+            chunk_index: 0,
+            source_locator_policy: "omitted_host_local".to_owned(),
+            sessions: vec![backup_cass_session_fixture(
+                &session_id,
+                &source_workspace_id,
+            )],
+        };
+        let evidence_chunk = BackupCassEvidenceChunk {
+            schema: "ee.backup.derived.cass_evidence_spans.v1".to_owned(),
+            captured_at: "2026-09-02T00:00:00Z".to_owned(),
+            chunk_index: 0,
+            evidence_spans: vec![backup_cass_evidence_fixture(
+                &evidence_id,
+                &source_workspace_id,
+                &missing_session_id,
+            )],
+        };
+        fs::write(
+            &session_path,
+            serialized_payload_bytes(&session_chunk).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            &evidence_path,
+            serialized_payload_bytes(&evidence_chunk).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let assets = vec![
+            restored_cass_asset(&session_path, "cass_sessions"),
+            restored_cass_asset(&evidence_path, "cass_evidence_spans"),
+        ];
+
+        let error = restore_cass_assets(&database, &assets)
+            .expect_err("dangling evidence reference must fail CASS recovery");
+        ensure(
+            error.to_string().contains("session does not exist"),
+            format!("unexpected dangling-reference error: {error}"),
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        ensure_equal(
+            connection
+                .get_session(&session_id)
+                .map_err(|error| error.to_string())?,
+            None,
+            "failed CASS transaction rolls back its inserted session",
+        )?;
+        ensure_equal(
+            connection
+                .get_evidence_span(&evidence_id)
+                .map_err(|error| error.to_string())?,
+            None,
+            "failed CASS transaction leaves no evidence row",
         )
     }
 
