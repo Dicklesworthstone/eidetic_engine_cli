@@ -67,7 +67,7 @@ use super::verify_ledger::RchVerifyLedgerStatusReport;
 pub const DEPENDENCY_DIAGNOSTICS_SCHEMA_V1: &str = "ee.diag.dependencies.v1";
 pub const FRANKEN_HEALTH_SCHEMA_V1: &str = "ee.doctor.franken_health.v1";
 pub const INTEGRITY_DIAGNOSTICS_SCHEMA_V1: &str = "ee.diag.integrity.v1";
-pub const DEPENDENCY_MATRIX_REVISION: u32 = 1;
+pub const DEPENDENCY_MATRIX_REVISION: u32 = 3;
 pub const DEPENDENCY_MATRIX_SOURCE_BEAD: &str = "eidetic_engine_cli-ilcq";
 pub const DEPENDENCY_MATRIX_SOURCE_PLAN_ITEM: &str = "EE-307";
 pub const DEPENDENCY_MATRIX_DEFAULT_FEATURE_PROFILE: &str = "default";
@@ -3653,7 +3653,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "registry",
-            version: "0.3.3",
+            version: "0.4.9",
             path: "/dp/asupersync/asupersync",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -3679,7 +3679,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
             "runtime.async_boundary",
         ],
         diagnostic_command: "ee status --json",
-        release_pin_decision: "Registry version 0.3.3 is accepted; /dp/asupersync remains the local source reference for API checks.",
+        release_pin_decision: "Registry version 0.4.9 is accepted; /dp/asupersync remains the local source reference for API checks.",
     },
     DependencyContractEntry {
         name: "frankensqlite",
@@ -3689,12 +3689,12 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_patch",
-            version: "0.1.2",
+            version: "0.3.11",
             path: "/data/projects/frankensqlite",
         },
         default_feature_profile: DependencyFeatureProfile {
-            default_features: true,
-            features: &["json", "fts5"],
+            default_features: false,
+            features: &["json"],
         },
         optional_feature_profiles: &[DependencyOptionalFeatureProfile {
             name: "extended-sqlite-extensions",
@@ -3717,7 +3717,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_dependency",
-            version: "0.2.2",
+            version: "0.4.1",
             path: "/data/projects/sqlmodel_rust",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -3745,7 +3745,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_dependency",
-            version: "0.3.0",
+            version: "0.4.0",
             path: "/data/projects/frankensearch",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -3755,7 +3755,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
                 "storage",
                 "model2vec",
                 "download",
-                "lexical",
+                "lexical-tantivy",
                 "fts5",
                 "rerank",
             ],
@@ -3777,25 +3777,25 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         name: "franken_networkx",
         kind: "rust_crate_family",
         owning_surface: "ee-graph",
-        status: "optional_feature_gated",
-        enabled_by_default: false,
+        status: "accepted_default",
+        enabled_by_default: true,
         source: DependencySource {
             kind: "path_dependency",
-            version: "0.1.0",
+            version: "0.2.0",
             path: "/data/projects/franken_networkx",
         },
         default_feature_profile: DependencyFeatureProfile {
             default_features: false,
-            features: &[],
-        },
-        optional_feature_profiles: &[DependencyOptionalFeatureProfile {
-            name: "graph",
             features: &[
                 "fnx-runtime/asupersync-integration",
                 "fnx-classes",
                 "fnx-algorithms",
             ],
-            status: "accepted_optional",
+        },
+        optional_feature_profiles: &[DependencyOptionalFeatureProfile {
+            name: "differential-networkx",
+            features: &["differential-networkx"],
+            status: "test_only",
         }],
         blocked_features: &[DependencyBlockedFeature {
             name: "ftui-integration",
@@ -3845,7 +3845,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_dependency",
-            version: "0.2.2",
+            version: "0.2.4",
             path: "/data/projects/toon_rust",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -3901,7 +3901,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_dependency",
-            version: "0.1.3",
+            version: "0.2.2",
             path: "/data/projects/franken_agent_detection",
         },
         default_feature_profile: DependencyFeatureProfile {
