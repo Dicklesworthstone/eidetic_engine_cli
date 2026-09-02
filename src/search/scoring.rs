@@ -1,10 +1,11 @@
-//! Deterministic ee-owned retrieval multipliers.
+//! Reference model for deterministic ee-owned retrieval multipliers.
 //!
 //! Frankensearch owns candidate retrieval and fused base scores. This module
-//! only applies the project-specific, explainable multipliers from the ee
-//! retrieval contract: freshness, confidence, utility, maturity, harmful
-//! feedback, scope, graph centrality, redundancy, opt-in anchor matches, and
-//! opt-in bead affinity.
+//! defines the historical multiplier contract used by monotonicity tests, but
+//! its composite scorer has no production consumer. Live search passes fusion
+//! weights to Frankensearch; EE-specific trust policy and pack-selection hints
+//! are applied at their owning boundaries. Do not present this reference model
+//! as evidence that live ranking consumes these fields.
 
 use std::collections::BTreeSet;
 

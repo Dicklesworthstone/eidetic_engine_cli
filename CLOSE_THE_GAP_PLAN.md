@@ -270,9 +270,10 @@ not close the broader recovery rows or claim a green runtime proof yet.
 - [x] Delegate configured hybrid fusion weights, diagnostic RRF, and shadow
   candidate fusion to Frankensearch's weighted RRF implementation; retain only
   EE-specific orchestration and explanation projections.
-- [ ] Locate and eliminate any remaining score-changing local retrieval paths
-  that duplicate Frankensearch responsibility, with before/after adversarial
-  tests rather than name-only conformance.
+- [x] Classify remaining score-changing local paths and eliminate those that
+  duplicate Frankensearch responsibility; retain only the documented
+  index-failure lexical fallback, policy enforcement, pack-owned hints, and the
+  separately tracked PPR violation.
 - [ ] Pin and expose one coherent dependency/version identity across manifest,
   lock, runtime status, proof capsule, and release artifacts.
   - [x] Align the Frankensearch index-manifest/runtime constant with the
@@ -313,6 +314,20 @@ completed remotely with exit 0 on exact commit `1632b108`; proof reuse retained
 the verdict but not individual test-count stdout. PPR and any still-unclassified
 local score-changing paths remain open, so the hard dependency boundary is not
 declared fully closed.
+
+Remaining-path classification (2026-09-02): repository-wide call-site and
+assignment searches found no second live BM25, vector, fusion, or RRF
+implementation after the two commits above. `context::lexical_memory_fallback`
+is invoked only for `IndexError`/`IndexNotFound`, emits
+`context_lexical_fallback`, and is the documented degraded lexical path allowed
+by the walking-skeleton acceptance gate. Mesh trust adjustment is a policy
+boundary; memory-tier, changed-symbol, query-file graph, and related boosts are
+pack-candidate selection hints after retrieval. `src/search/scoring.rs` exposes
+a historical composite multiplier model only to unit/integration
+monotonicity tests and has no production consumer; its module documentation now
+says so rather than implying live wiring. This closes the duplicate-search
+classification row, not the independent local PPR row or the broader score-
+calibration work.
 
 Dependency-identity progress evidence (2026-09-01): the search runtime had
 continued writing Frankensearch `0.3.0` into new index manifests after the
