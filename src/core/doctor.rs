@@ -3975,6 +3975,41 @@ mod tests {
         }
     }
 
+    fn cargo_lock_package_version(package_name: &str) -> Result<String, String> {
+        let mut current_name: Option<&str> = None;
+        let mut current_version: Option<&str> = None;
+
+        for line in include_str!("../../Cargo.lock")
+            .lines()
+            .chain(std::iter::once("[[package]]"))
+        {
+            if line == "[[package]]" {
+                if current_name == Some(package_name) {
+                    return current_version.map(ToOwned::to_owned).ok_or_else(|| {
+                        format!("Cargo.lock package `{package_name}` has no version")
+                    });
+                }
+                current_name = None;
+                current_version = None;
+                continue;
+            }
+
+            if let Some(value) = line
+                .strip_prefix("name = \"")
+                .and_then(|value| value.strip_suffix('"'))
+            {
+                current_name = Some(value);
+            } else if let Some(value) = line
+                .strip_prefix("version = \"")
+                .and_then(|value| value.strip_suffix('"'))
+            {
+                current_version = Some(value);
+            }
+        }
+
+        Err(format!("Cargo.lock does not contain package `{package_name}`"))
+    }
+
     fn install_report_with_shadowed_path() -> InstallCheckReport {
         InstallCheckReport {
             command: "install check".to_owned(),
@@ -5630,7 +5665,7 @@ mod tests {
         )?;
         ensure(
             report.summary.accepted_default_count,
-            6,
+            7,
             "accepted default count",
         )?;
         ensure(
@@ -5674,6 +5709,40 @@ mod tests {
     }
 
     #[test]
+    fn linked_dependency_diagnostic_versions_match_cargo_lock() -> TestResult {
+        let report = DependencyDiagnosticsReport::gather();
+
+        for (entry_name, package_name) in [
+            ("asupersync", "asupersync"),
+            ("frankensqlite", "fsqlite"),
+            ("frankensqlite", "fsqlite-core"),
+            ("frankensqlite", "fsqlite-error"),
+            ("sqlmodel_rust", "sqlmodel-core"),
+            ("sqlmodel_rust", "sqlmodel-frankensqlite"),
+            ("frankensearch", "frankensearch"),
+            ("franken_networkx", "fnx-runtime"),
+            ("franken_networkx", "fnx-classes"),
+            ("franken_networkx", "fnx-algorithms"),
+            ("toon_rust", "tru"),
+            ("franken_agent_detection", "franken-agent-detection"),
+        ] {
+            let entry = report
+                .entries
+                .iter()
+                .find(|entry| entry.name == entry_name)
+                .ok_or_else(|| format!("dependency row `{entry_name}` missing"))?;
+            let locked_version = cargo_lock_package_version(package_name)?;
+            ensure(
+                entry.source.version,
+                locked_version.as_str(),
+                &format!("{entry_name} diagnostic version matches locked `{package_name}`"),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn default_dependency_rows_have_no_forbidden_hits() -> TestResult {
         let report = DependencyDiagnosticsReport::gather();
 
@@ -5707,7 +5776,7 @@ mod tests {
             "storage",
             "model2vec",
             "download",
-            "lexical",
+            "lexical-tantivy",
             "fts5",
             "rerank",
         ] {
@@ -5742,7 +5811,7 @@ mod tests {
     }
 
     #[test]
-    fn franken_health_report_tracks_default_and_feature_gated_stack() -> TestResult {
+    fn franken_health_report_tracks_default_stack() -> TestResult {
         let report = FrankenHealthReport::gather();
 
         ensure(report.schema, FRANKEN_HEALTH_SCHEMA_V1, "franken schema")?;
@@ -5752,8 +5821,8 @@ mod tests {
             6,
             "franken dependency count",
         )?;
-        ensure(report.summary.ready_count, 5, "ready count")?;
-        ensure(report.summary.feature_gated_count, 1, "feature gated count")?;
+        ensure(report.summary.ready_count, 6, "ready count")?;
+        ensure(report.summary.feature_gated_count, 0, "feature gated count")?;
         ensure(report.summary.not_linked_count, 0, "not linked count")?;
         ensure(
             report.summary.forbidden_default_hit_count,
@@ -5766,7 +5835,7 @@ mod tests {
             .iter()
             .find(|dependency| dependency.name == "franken_networkx")
             .ok_or_else(|| "franken_networkx health row missing".to_string())?;
-        ensure(graph.readiness, "feature_gated", "graph readiness")
+        ensure(graph.readiness, "ready", "graph readiness")
     }
 
     // ========================================================================
