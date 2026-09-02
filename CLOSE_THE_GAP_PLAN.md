@@ -242,6 +242,21 @@ typed CASS, pack, outcome, curation, durable-job, and other required restore
 coverage—and lossless identity/ledger proof—remain open in the four unchecked
 rows above.
 
+Task-episode recovery progress (2026-09-02): commit `248aaf87` closes one
+previously stranded durable row family. Backup collection now enumerates the
+complete workspace episode table rather than truncating at 256 rows, verified
+derived episode artifacts are rehydrated into the isolated side-path database,
+and restore preserves episode IDs, workspace binding, references, actions,
+outcome data, hashes, and the original `created_at`. The recovery inventory
+only marks `task_episodes` covered when derived capture is enabled and the
+captured artifact count exactly matches the same-snapshot table count; otherwise
+the backup remains honestly `partial`. The restore envelope now reports
+`counts.taskEpisodesRestored`. Formatting and static diff checks pass. The exact
+round-trip and inventory tests are committed, but their first pinned RCH attempt
+did not reach Cargo: failed FrankenNetworkX materialization exhausted the local
+volume while building the pinned source bundle. This progress therefore does
+not close the broader recovery rows or claim a green runtime proof yet.
+
 #### D. Restore mandated dependency boundaries (`.4`, `.15`, `.18`)
 
 - [ ] Replace pack-path local personalized PageRank with the required
@@ -249,9 +264,15 @@ rows above.
   preserve deterministic ordering and cancellation semantics.
 - [x] Remove the public custom BM25 production surface once all real callers use
   Frankensearch; retain only legitimate differential test code if still useful.
-- [ ] Locate and eliminate score-changing local fusion/RRF/token-overlap paths
+- [x] Replace global-store token-overlap/substr ranking with a rebuildable
+  Frankensearch lexical index, including immediate promotion/demotion lifecycle
+  updates and positive/negative behavior coverage.
+- [x] Delegate configured hybrid fusion weights, diagnostic RRF, and shadow
+  candidate fusion to Frankensearch's weighted RRF implementation; retain only
+  EE-specific orchestration and explanation projections.
+- [ ] Locate and eliminate any remaining score-changing local retrieval paths
   that duplicate Frankensearch responsibility, with before/after adversarial
-  retrieval tests rather than name-only conformance.
+  tests rather than name-only conformance.
 - [ ] Pin and expose one coherent dependency/version identity across manifest,
   lock, runtime status, proof capsule, and release artifacts.
   - [x] Align the Frankensearch index-manifest/runtime constant with the
@@ -275,8 +296,23 @@ edge-case coverage without shipping a second BM25 implementation. The exact
 pinned current-source RCH invocation
 `cargo test --lib search::bm25_simd::tests:: --locked -- --nocapture` passed
 all seven tests (`7 passed; 0 failed; 9,289 filtered out`). This does not close
-the neighboring PPR, global-store substring retrieval, configured local fusion
-adjustment, diagnostic RRF, or dependency-identity rows.
+the neighboring PPR, remaining local retrieval-boundary, or
+dependency-identity rows.
+
+Frankensearch boundary progress (2026-09-02): commit `95f89c95` replaces the
+user-global substring/token-overlap scorer with a dedicated Frankensearch
+lexical index and wires promotion plus demotion into its write lifecycle. The
+exact committed-HEAD promotion test passed through pinned RCH proof reuse, and
+the global promotion schema contract executed two tests successfully. Commit
+`1632b108` then removes EE's configured post-retrieval score multiplier, local
+diagnostic RRF formula, and shadow-tuner RRF reconstruction. Live hybrid search
+passes normalized lexical/semantic weights into
+`TwoTierSearcher::with_rrf_weights`; diagnostics and shadow evaluation call
+upstream `frankensearch::rrf_fuse`. The pinned `cargo test --lib fusion` proof
+completed remotely with exit 0 on exact commit `1632b108`; proof reuse retained
+the verdict but not individual test-count stdout. PPR and any still-unclassified
+local score-changing paths remain open, so the hard dependency boundary is not
+declared fully closed.
 
 Dependency-identity progress evidence (2026-09-01): the search runtime had
 continued writing Frankensearch `0.3.0` into new index manifests after the
@@ -479,11 +515,11 @@ The decisive failures are at integration and proof boundaries:
    current baseline file, raw samples, host fingerprint, or a release-blocking
    gate.
 9. Pack ranking still uses a hand-written PPR implementation instead of
-   FrankenNetworkX. The former public custom-BM25 residue is now test-only, but
-   global-store substring retrieval, local fusion adjustment, and diagnostic
-   RRF still cross the Frankensearch boundary. The Frankensearch
-   dependency/version contract is also internally inconsistent (`0.4.0`
-   manifest/lock versus a stale `0.3.0` verification fixture).
+   FrankenNetworkX. The former public custom-BM25 residue is now test-only;
+   global-store recall and weighted fusion/diagnostic RRF now delegate to
+   Frankensearch. The remaining local score-changing paths still require a
+   complete call-site classification, and release/proof dependency identity is
+   not yet attested end to end.
 10. The former lexical raw-BM25 clamp is fixed in current source by normalizing
     the complete pure-lexical pool and retaining raw `lexicalScore`. The public
     score contract is still query-relative without a proved calibration identity,
@@ -491,11 +527,10 @@ The decisive failures are at integration and proof boundaries:
     been shown to interpret that value truthfully across degenerate or mixed
     retrieval cases.
 11. Backup now accepts legitimate targetless audit rows, uses one read snapshot,
-    and avoids creating authentication-key state during dry-run. Export still
-    covers only workspace/memories/tags/links/audits, selected graph fields, and
-    attempt-family data; rules, CASS sessions/evidence, outcomes, packs,
-    curation lineage, and durable jobs are not round-tripped. The documented
-    recovery surface therefore remains materially incomplete.
+    avoids creating authentication-key state during dry-run, and has a complete
+    typed capture/restore path for task episodes. Export still omits rules, CASS
+    sessions/evidence, outcomes, packs, curation lineage, and durable jobs. The
+    documented recovery surface therefore remains materially incomplete.
 12. CASS pack admission now implements the evidence-specific core of ADR 0085:
     a positively admitted safe evidence span is first-class and unsafe or
     unclassified spans fail closed. The general typed-entity contract, native
@@ -595,9 +630,9 @@ candidate before `.2` changes the implementation.
   end-of-life `ee.response.v1` schema.
 - Pack candidate relevance is changed by the local `src/graph/ppr.rs`
   algorithm rather than the mandated FrankenNetworkX graph layer. The former
-  public `src/search/bm25_simd.rs` surface is now test-only. Score-changing
-  local fusion, global-store token-overlap retrieval, and locally recomputed
-  diagnostic RRF remain open.
+  public `src/search/bm25_simd.rs` surface is now test-only; global-store recall
+  and weighted fusion/diagnostic RRF now use Frankensearch. Remaining local
+  score-changing paths still require exhaustive classification.
 - The pinned current-SHA RCH `cargo check --locked --all-targets` now passes the
   exact committed tree and pinned Franken stack. Its proof is degraded by
   unavailable local build admission and proof-broker source-state mismatch.
@@ -616,7 +651,7 @@ candidate before `.2` changes the implementation.
 | # | Controlling promise | Status | Evidence / gap owner |
 | ---: | --- | --- | --- |
 | 1 | Local-first single CLI; core commands need no daemon | **WORKING** | Real direct CLI paths and source-backed storage exist. |
-| 2 | Franken-stack foundations; no forbidden substitute dependencies or core algorithms | **PARTIAL / WRONG-APPROACH** | Static dependency scan is clean and custom BM25 is test-only, but local PPR/fusion/global token overlap/diagnostic RRF cross hard boundaries and version identity drifts. `.4`, `.15`, `.18`. |
+| 2 | Franken-stack foundations; no forbidden substitute dependencies or core algorithms | **PARTIAL / WRONG-APPROACH** | Static dependency scan is clean; custom BM25 is test-only and global recall plus weighted fusion/diagnostics now use Frankensearch. Local PPR, any still-unclassified score-changing paths, and release/proof identity remain open. `.4`, `.15`, `.18`. |
 | 3 | Manual memory → DB → search → pack → why | **PARTIAL** | The ordinary path and provenance exist. Released-binary probes are unreliable; source-attested attribution is `.10`, then `.2`/`.3`. |
 | 4 | CASS import makes permitted prior incident content searchable and safely packable | **WORKING** | Exact pinned no-mock proof now covers canonical-path import/retry, exact typed search, direct evidence pack persistence, verified replay, typed why, outcome recording, and fail-closed denied evidence; §A records the commits and invocation. |
 | 5 | Hybrid BM25 + neural-local retrieval by default | **PARTIAL / UNPROVEN** | Released binary flips backend; current source has plausible causes but no source-attested oracle. Fresh-workspace fallback is `bd-fresh-workspace-hash-fallback-kvltg`; `.10`, `.2`, `.3` own attribution and convergence. |
@@ -625,7 +660,7 @@ candidate before `.2` changes the implementation.
 | 8 | Explainable packs with typed identity, provenance, freshness, trust, and score reasons | **PARTIAL** | Rendering is strong for admitted memories; rule/evidence v3 identity, calibration, and deterministic admission remain open. |
 | 9 | Learn loop turns repeated evidence into a rule used by later search/pack | **PARTIAL / UNPROVEN** | Rules are stored, indexed, and can hydrate content through a linked source `MemoryId`; native rule identity and the exact later-pack E2E remain open under `bd-3h6bz`, ADR 0085, and `.17`. |
 | 10 | Maintain loop links, decays, consolidates, validates, repairs, and converges | **PARTIAL / UNPROVEN** | Decay/machinery exist; public consolidate → apply → index → retrieve is `bd-1oep7`. |
-| 11 | Complete durable backup, verify, migration, restore, and rebuild | **PARTIAL / UNPROVEN** | Targetless audits, read-snapshot export, and non-mutating auth-key dry-run are fixed in source. Export/restore still omit core durable state and evolved-store proof. `.13`, `.14`. |
+| 11 | Complete durable backup, verify, migration, restore, and rebuild | **PARTIAL / UNPROVEN** | Targetless audits, read-snapshot export, non-mutating auth-key dry-run, and typed task-episode capture/restore are fixed in source. Other core durable state and evolved-store proof remain open. `.13`, `.14`. |
 | 12 | Graceful offline degradation remains useful and truthful | **PARTIAL** | Honest fallback/abstention exists; released binary may instead return no result/error, and uncalibrated quality is misleading. |
 | 13 | Stable machine envelopes and truthful repair exits | **PARTIAL** | `bd-34l8k`, `bd-3ak9b`, `bd-vv2dw`, `bd-aav4p`, `bd-5k6k7`; typed pack v3 is an intentional future break. |
 | 14 | Exact eight North Star public-CLI scenarios | **UNPROVEN** | `bd-2mpct`, `bd-2mpct.1`, and bridge `.17`; the focused CASS no-mock test fails before semantics on RCH path hermeticity, and prior oracles are permissive. |
@@ -676,7 +711,7 @@ The end-to-end reality check filed one self-contained bridge epic,
 | `bd-reality-core-convergence-1azkt.1` | P0 | Determinism promise lacks a complete snapshot/numeric/serialization domain | Freeze canonical product payload versus telemetry/state-creation; version snapshot identity and pack hashing. |
 | `bd-reality-core-convergence-1azkt.2` | P0 | Plausible reader-visible index hole and cross-process model race | Immutable content-addressed generations, atomic DB pointer, reader leases, publisher fences, bounded model admission, zero-mutation read-only. |
 | `bd-reality-core-convergence-1azkt.3` | P1 | Equality-only tests miss invalid concurrent histories | Post-fix no-mock linearizability, crash, privacy, cache, platform, and resource matrix. |
-| `bd-reality-core-convergence-1azkt.4` | P0 | Local PPR/fusion/global overlap/diagnostic RRF and version drift violate hard stack boundary | Exhaustive call-site classification; only Frankensearch/FrankenNetworkX changes retrieval/metrics. |
+| `bd-reality-core-convergence-1azkt.4` | P0 | Local PPR, still-unclassified score-changing paths, and incomplete release/proof identity violate the hard stack boundary | Exhaustive call-site classification; only Frankensearch/FrankenNetworkX changes retrieval/metrics. |
 | `bd-reality-core-convergence-1azkt.5` | P0 | No single executable manifest/pinned composite RCH/proof-capsule contract | Build the verifier now; final green truth belongs to `.19`, avoiding a dependency deadlock. |
 | `bd-reality-core-convergence-1azkt.6` | P1 | Public latency/SLO claims lack reproducible correct-output evidence | RCH-built attested candidate, local M3 black-box driver, raw samples/correctness, explicit reproduce-or-remove decision. |
 | `bd-reality-core-convergence-1azkt.7` | P1 | Release staging is non-hermetic and publication currently precedes native installer proof | Private draft/local staging only; locked signed/provenance-complete assets and native smoke before human publish. |
