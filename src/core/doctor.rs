@@ -4007,7 +4007,9 @@ mod tests {
             }
         }
 
-        Err(format!("Cargo.lock does not contain package `{package_name}`"))
+        Err(format!(
+            "Cargo.lock does not contain package `{package_name}`"
+        ))
     }
 
     fn install_report_with_shadowed_path() -> InstallCheckReport {

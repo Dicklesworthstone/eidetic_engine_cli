@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use ee::cli::Cli;
+use ee::core::doctor::{DEPENDENCY_CONTRACT_ENTRIES, DEPENDENCY_MATRIX_REVISION};
 use serde_json::{Map, Value};
 
 type TestResult = Result<(), String>;
@@ -78,6 +79,13 @@ fn boolean(object: &Map<String, Value>, key: &str) -> Result<bool, String> {
         .get(key)
         .and_then(Value::as_bool)
         .ok_or_else(|| format!("`{key}` must be a boolean"))
+}
+
+fn unsigned(object: &Map<String, Value>, key: &str) -> Result<u64, String> {
+    object
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("`{key}` must be an unsigned integer"))
 }
 
 fn strings(object: &Map<String, Value>, key: &str) -> Result<Vec<String>, String> {
@@ -199,6 +207,80 @@ fn dependency_contract_matrix_golden_has_required_shape() -> TestResult {
 }
 
 #[test]
+fn dependency_contract_matrix_golden_matches_runtime_contract() -> TestResult {
+    let matrix = load_matrix()?;
+    let root = object(&matrix, "matrix root")?;
+
+    ensure(
+        unsigned(root, "matrix_revision")? == u64::from(DEPENDENCY_MATRIX_REVISION),
+        "golden matrix revision must match the runtime diagnostic revision",
+    )?;
+    ensure(
+        array(root, "entries")?.len() == DEPENDENCY_CONTRACT_ENTRIES.len(),
+        "golden and runtime dependency matrices must have the same row count",
+    )?;
+
+    for runtime_entry in DEPENDENCY_CONTRACT_ENTRIES {
+        let golden_entry = find_entry(&matrix, runtime_entry.name)?;
+        let golden_source = object(
+            golden_entry
+                .get("source")
+                .ok_or_else(|| format!("{}.source is required", runtime_entry.name))?,
+            &format!("{}.source", runtime_entry.name),
+        )?;
+        let golden_profile = object(
+            golden_entry.get("default_feature_profile").ok_or_else(|| {
+                format!("{}.default_feature_profile is required", runtime_entry.name)
+            })?,
+            &format!("{}.default_feature_profile", runtime_entry.name),
+        )?;
+
+        ensure(
+            string(golden_entry, "status")? == runtime_entry.status,
+            format!("{} status drifted from runtime", runtime_entry.name),
+        )?;
+        ensure(
+            boolean(golden_entry, "enabled_by_default")? == runtime_entry.enabled_by_default,
+            format!(
+                "{} enabled-by-default posture drifted from runtime",
+                runtime_entry.name
+            ),
+        )?;
+        ensure(
+            string(golden_source, "kind")? == runtime_entry.source.kind,
+            format!("{} source kind drifted from runtime", runtime_entry.name),
+        )?;
+        ensure(
+            string(golden_source, "version")? == runtime_entry.source.version,
+            format!("{} source version drifted from runtime", runtime_entry.name),
+        )?;
+        ensure(
+            boolean(golden_profile, "default_features")?
+                == runtime_entry.default_feature_profile.default_features,
+            format!(
+                "{} default-feature posture drifted from runtime",
+                runtime_entry.name
+            ),
+        )?;
+        ensure(
+            strings(golden_profile, "features")?
+                == runtime_entry
+                    .default_feature_profile
+                    .features
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+            format!(
+                "{} default feature list drifted from runtime",
+                runtime_entry.name
+            ),
+        )?;
+    }
+
+    Ok(())
+}
+
+#[test]
 fn franken_mermaid_adapter_is_repository_and_audit_gated() -> TestResult {
     let matrix = load_matrix()?;
     let entry = find_entry(&matrix, "franken_mermaid")?;
@@ -309,7 +391,7 @@ fn frankensearch_default_profile_matches_enabled_download_contract() -> TestResu
         "storage",
         "model2vec",
         "download",
-        "lexical",
+        "lexical-tantivy",
         "fts5",
         "rerank",
     ] {

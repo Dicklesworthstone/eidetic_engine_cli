@@ -1,6 +1,6 @@
 {
   "schema": "ee.dependency_contract_matrix.v1",
-  "matrix_revision": 2,
+  "matrix_revision": 3,
   "source_bead": "eidetic_engine_cli-ilcq",
   "source_plan_item": "EE-307",
   "default_feature_profile": "default",
@@ -28,7 +28,7 @@
       "enabled_by_default": true,
       "source": {
         "kind": "registry",
-        "version": "0.3.3",
+        "version": "0.4.9",
         "path": "/dp/asupersync/asupersync"
       },
       "default_feature_profile": {
@@ -64,7 +64,7 @@
         "runtime.async_boundary"
       ],
       "diagnostic_command": "ee status --json",
-      "release_pin_decision": "Registry version 0.3.3 is accepted; /dp/asupersync remains the local source reference for API checks."
+      "release_pin_decision": "Registry version 0.4.9 is accepted; /dp/asupersync remains the local source reference for API checks."
     },
     {
       "name": "frankensqlite",
@@ -74,14 +74,13 @@
       "enabled_by_default": true,
       "source": {
         "kind": "path_patch",
-        "version": "0.1.2",
+        "version": "0.3.11",
         "path": "/data/projects/frankensqlite"
       },
       "default_feature_profile": {
-        "default_features": true,
+        "default_features": false,
         "features": [
-          "json",
-          "fts5"
+          "json"
         ]
       },
       "optional_feature_profiles": [
@@ -115,7 +114,7 @@
       "enabled_by_default": true,
       "source": {
         "kind": "path_dependency",
-        "version": "0.2.2",
+        "version": "0.4.1",
         "path": "/data/projects/sqlmodel_rust"
       },
       "default_feature_profile": {
@@ -153,7 +152,7 @@
       "enabled_by_default": true,
       "source": {
         "kind": "path_dependency",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "path": "/data/projects/frankensearch"
       },
       "default_feature_profile": {
@@ -163,7 +162,7 @@
           "storage",
           "model2vec",
           "download",
-          "lexical",
+          "lexical-tantivy",
           "fts5",
           "rerank"
         ]
@@ -197,26 +196,28 @@
       "name": "franken_networkx",
       "kind": "rust_crate_family",
       "owning_surface": "ee-graph",
-      "status": "optional_feature_gated",
-      "enabled_by_default": false,
+      "status": "accepted_default",
+      "enabled_by_default": true,
       "source": {
         "kind": "path_dependency",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "path": "/data/projects/franken_networkx"
       },
       "default_feature_profile": {
         "default_features": false,
-        "features": []
+        "features": [
+          "fnx-runtime/asupersync-integration",
+          "fnx-classes",
+          "fnx-algorithms"
+        ]
       },
       "optional_feature_profiles": [
         {
-          "name": "graph",
+          "name": "differential-networkx",
           "features": [
-            "fnx-runtime/asupersync-integration",
-            "fnx-classes",
-            "fnx-algorithms"
+            "differential-networkx"
           ],
-          "status": "accepted_optional"
+          "status": "test_only"
         }
       ],
       "blocked_features": [
@@ -280,7 +281,7 @@
       "enabled_by_default": true,
       "source": {
         "kind": "path_dependency",
-        "version": "0.2.2",
+        "version": "0.2.4",
         "path": "/data/projects/toon_rust"
       },
       "default_feature_profile": {
@@ -353,7 +354,7 @@
       "enabled_by_default": true,
       "source": {
         "kind": "path_dependency",
-        "version": "0.1.3",
+        "version": "0.2.2",
         "path": "/data/projects/franken_agent_detection"
       },
       "default_feature_profile": {
