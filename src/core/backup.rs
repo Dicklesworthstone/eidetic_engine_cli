@@ -5873,6 +5873,73 @@ mod tests {
     }
 
     #[test]
+    fn task_episode_derived_asset_round_trips_into_restored_database() -> TestResult {
+        let (tempdir, _workspace, database) = fixture().map_err(|error| error.message())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let restored_workspace_id = connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "missing restored workspace".to_owned())?
+            .id;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let source_episode = StoredTaskEpisode {
+            id: "ep_723456789012345678901234567".to_owned(),
+            workspace_id: Some(WorkspaceId::from_uuid(Uuid::from_u128(3)).to_string()),
+            session_id: Some("sess_derived_restore_fixture".to_owned()),
+            task_input: "Restore one task episode derived asset".to_owned(),
+            retrieved_memory_ids: vec![MemoryId::from_uuid(Uuid::from_u128(2)).to_string()],
+            context_pack_id: Some("pack_derived_restore_fixture".to_owned()),
+            actions: vec![StoredEpisodeAction {
+                action_type: "verify".to_owned(),
+                target_id: Some("task_episode".to_owned()),
+                details: Some("focused derived-asset round trip".to_owned()),
+                timestamp: "2026-09-01T00:00:01Z".to_owned(),
+            }],
+            outcome: "success".to_owned(),
+            outcome_details: Some("episode survived".to_owned()),
+            started_at: "2026-09-01T00:00:00Z".to_owned(),
+            ended_at: Some("2026-09-01T00:00:02Z".to_owned()),
+            duration_ms: Some(2_000),
+            agent: Some("codex".to_owned()),
+            episode_hash: Some("blake3:focused-episode-restore-fixture".to_owned()),
+            created_at: "2026-09-01T00:00:03Z".to_owned(),
+        };
+        let restore_path = tempdir.path().join("task-episode-derived.json");
+        fs::write(
+            &restore_path,
+            json_payload_bytes(&task_episode_json(&source_episode, "2026-09-02T00:00:00Z"))
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let restored_derived = [BackupRestoredDerivedAssetReport {
+            path: format!("derived/lab/episodes/{}.json", source_episode.id),
+            kind: "lab_episode".to_owned(),
+            restore_path: restore_path.to_string_lossy().into_owned(),
+            lab_episode_path: None,
+        }];
+
+        let restored_count = restore_task_episode_assets(&database, &restored_derived)
+            .map_err(|error| error.message())?;
+        ensure_equal(restored_count, 1, "restored task episode count")?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let restored_episode = connection
+            .get_task_episode(&source_episode.id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "restored database omitted task episode".to_owned())?;
+        let mut expected_episode = source_episode;
+        expected_episode.workspace_id = Some(restored_workspace_id);
+        ensure_equal(
+            restored_episode,
+            expected_episode,
+            "focused task episode derived-asset round trip",
+        )
+    }
+
+    #[test]
     fn backup_report_degraded_entries_are_aggregated() -> TestResult {
         let report = BackupListReport {
             schema: BACKUP_LIST_SCHEMA_V1,
