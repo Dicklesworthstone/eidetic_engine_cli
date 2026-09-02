@@ -8767,108 +8767,124 @@ fn apply_personalized_pagerank_rerank(
         return PersonalizedPageRankRerankMetrics::default();
     }
 
-    let seed_weights = seed_map
-        .iter()
-        .map(|(memory_id, weight)| (memory_id.to_string(), *weight))
-        .collect::<BTreeMap<_, _>>();
-    let policy = crate::graph::ppr::PersonalizedPageRankPolicy::default();
-    let ppr_params = crate::graph::ppr::personalized_pagerank_cache_params(policy, &seed_weights);
-    let cache_spec = crate::graph::algorithms::AlgorithmResultCacheSpec {
-        conn: connection,
-        workspace_id: &snapshot.workspace_id,
-        snapshot_id: &snapshot.id,
-        snapshot_content_hash: &snapshot.content_hash,
-        algorithm: "personalized_pagerank",
-        params: &ppr_params,
-        ttl_seconds: 300,
-    };
-    let ppr_start = Instant::now();
-    let cache_run = match crate::graph::ppr::compute_personalized_pagerank_result_cached_with_graph(
-        &cache_spec,
-        &seed_weights,
-        policy,
-        || {
-            crate::graph::build_memory_graph(
-                connection,
-                &crate::graph::ProjectionOptions::default(),
-            )
-            .map(|projection| projection.graph)
-        },
-    ) {
-        Ok(result) => result,
-        Err(error) => {
-            push_degradation(
-                degraded,
-                "context_graph_snapshot_unavailable",
-                ContextResponseSeverity::Low,
-                format!(
-                    "Personalized PageRank rerank skipped because PPR computation failed: {error}"
-                ),
-                Some("ee graph centrality-refresh".to_string()),
-            );
-            return PersonalizedPageRankRerankMetrics::default();
-        }
-    };
-    let elapsed_ms = u64::try_from(ppr_start.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let result = cache_run.result;
-    if !cache_run.cache_hit {
-        match crate::graph::ppr::emit_personalized_pagerank_witness(
-            &crate::graph::ppr::PersonalizedPageRankWitnessSpec {
-                conn: connection,
-                workspace_id: &snapshot.workspace_id,
-                snapshot_id: &snapshot.id,
-                snapshot_version: u64::from(snapshot.snapshot_version),
-                params: &ppr_params,
-                elapsed_ms,
-            },
-            &result,
-        ) {
-            Ok(()) => {}
-            Err(error) => {
-                tracing::debug!(
-                    algorithm = "personalized_pagerank",
-                    snapshot_id = %snapshot.id,
-                    error = %error,
-                    "context PPR witness emission failed"
-                );
+    // The pinned FrankenNetworkX release does not expose deterministic
+    // personalized PageRank. Production pack assembly must therefore preserve
+    // the textual ranking and report the missing graph sub-capability instead
+    // of executing ee's local reference implementation. Unit tests below keep
+    // exercising that reference implementation until the upstream API lands.
+    #[cfg(not(test))]
+    {
+        push_graph_ppr_upstream_unavailable_degradation(degraded);
+        return PersonalizedPageRankRerankMetrics::default();
+    }
+
+    #[cfg(test)]
+    {
+        let seed_weights = seed_map
+            .iter()
+            .map(|(memory_id, weight)| (memory_id.to_string(), *weight))
+            .collect::<BTreeMap<_, _>>();
+        let policy = crate::graph::ppr::PersonalizedPageRankPolicy::default();
+        let ppr_params =
+            crate::graph::ppr::personalized_pagerank_cache_params(policy, &seed_weights);
+        let cache_spec = crate::graph::algorithms::AlgorithmResultCacheSpec {
+            conn: connection,
+            workspace_id: &snapshot.workspace_id,
+            snapshot_id: &snapshot.id,
+            snapshot_content_hash: &snapshot.content_hash,
+            algorithm: "personalized_pagerank",
+            params: &ppr_params,
+            ttl_seconds: 300,
+        };
+        let ppr_start = Instant::now();
+        let cache_run =
+            match crate::graph::ppr::compute_personalized_pagerank_result_cached_with_graph(
+                &cache_spec,
+                &seed_weights,
+                policy,
+                || {
+                    crate::graph::build_memory_graph(
+                        connection,
+                        &crate::graph::ProjectionOptions::default(),
+                    )
+                    .map(|projection| projection.graph)
+                },
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    push_degradation(
+                        degraded,
+                        "context_graph_snapshot_unavailable",
+                        ContextResponseSeverity::Low,
+                        format!(
+                            "Personalized PageRank rerank skipped because PPR computation failed: {error}"
+                        ),
+                        Some("ee graph centrality-refresh".to_string()),
+                    );
+                    return PersonalizedPageRankRerankMetrics::default();
+                }
+            };
+        let elapsed_ms = u64::try_from(ppr_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let result = cache_run.result;
+        if !cache_run.cache_hit {
+            match crate::graph::ppr::emit_personalized_pagerank_witness(
+                &crate::graph::ppr::PersonalizedPageRankWitnessSpec {
+                    conn: connection,
+                    workspace_id: &snapshot.workspace_id,
+                    snapshot_id: &snapshot.id,
+                    snapshot_version: u64::from(snapshot.snapshot_version),
+                    params: &ppr_params,
+                    elapsed_ms,
+                },
+                &result,
+            ) {
+                Ok(()) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        algorithm = "personalized_pagerank",
+                        snapshot_id = %snapshot.id,
+                        error = %error,
+                        "context PPR witness emission failed"
+                    );
+                }
             }
         }
-    }
-    let scores = result
-        .scores
-        .iter()
-        .filter_map(|score| {
-            MemoryId::from_str(&score.node)
-                .ok()
-                .map(|memory_id| (memory_id, score.score))
-        })
-        .collect::<HashMap<_, _>>();
+        let scores = result
+            .scores
+            .iter()
+            .filter_map(|score| {
+                MemoryId::from_str(&score.node)
+                    .ok()
+                    .map(|memory_id| (memory_id, score.score))
+            })
+            .collect::<HashMap<_, _>>();
 
-    let mut reranked_candidates = 0_usize;
-    for candidate in candidates {
-        let base = candidate.relevance.into_inner();
-        let raw_ppr = scores.get(&candidate.memory_id).copied().unwrap_or(0.0);
-        let ppr_score = if raw_ppr.is_nan() {
-            0.0
-        } else {
-            raw_ppr.clamp(0.0, 1.0) as f32
-        };
-        let blended = (ppr_weight * ppr_score) + ((1.0 - ppr_weight) * base);
-        let Some(score) = unit_score(blended) else {
-            continue;
-        };
-        candidate.relevance = score;
-        candidate.score_breakdown =
-            Some(PackScoreBreakdown::ppr(base, ppr_score, score.into_inner()));
-        candidate.why = format!(
-            "{} Personalized PageRank rerank blended base={base:.4}, ppr={ppr_score:.4}, weight={:.2}, snapshot={}.",
-            candidate.why, ppr_weight, snapshot.id
-        );
-        reranked_candidates = reranked_candidates.saturating_add(1);
-    }
+        let mut reranked_candidates = 0_usize;
+        for candidate in candidates {
+            let base = candidate.relevance.into_inner();
+            let raw_ppr = scores.get(&candidate.memory_id).copied().unwrap_or(0.0);
+            let ppr_score = if raw_ppr.is_nan() {
+                0.0
+            } else {
+                raw_ppr.clamp(0.0, 1.0) as f32
+            };
+            let blended = (ppr_weight * ppr_score) + ((1.0 - ppr_weight) * base);
+            let Some(score) = unit_score(blended) else {
+                continue;
+            };
+            candidate.relevance = score;
+            candidate.score_breakdown =
+                Some(PackScoreBreakdown::ppr(base, ppr_score, score.into_inner()));
+            candidate.why = format!(
+                "{} Personalized PageRank rerank blended base={base:.4}, ppr={ppr_score:.4}, weight={:.2}, snapshot={}.",
+                candidate.why, ppr_weight, snapshot.id
+            );
+            reranked_candidates = reranked_candidates.saturating_add(1);
+        }
 
-    PersonalizedPageRankRerankMetrics {
-        reranked_candidates,
+        PersonalizedPageRankRerankMetrics {
+            reranked_candidates,
+        }
     }
 }
 

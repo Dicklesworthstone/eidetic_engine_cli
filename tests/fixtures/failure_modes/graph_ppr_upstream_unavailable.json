@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_ppr_upstream_unavailable",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.15",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "pack",
+    "context"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Pack PPR influence is requested while the pinned FrankenNetworkX release lacks deterministic personalized PageRank.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee config set graph.feature.ppr.enabled true"
+    ],
+    "invocation": "ee pack 'graph-aware retrieval' --workspace . --ppr-weight 1 --json"
+  },
+  "expected_emission": {
+    "code": "graph_ppr_upstream_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "Personalized PageRank pack influence",
+      "FrankenNetworkX",
+      "textual ranking"
+    ],
+    "repair_contains": "--ppr-weight 0",
+    "repair_string": "Use --ppr-weight 0 and rely on textual ranking until a pinned FrankenNetworkX personalized PageRank API is available."
+  }
+}

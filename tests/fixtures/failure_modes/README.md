@@ -287,6 +287,7 @@ in the same commit, keeping the catalog complete by construction.
 | `graph_witness_unparseable_recorded_at` | maintenance graph-witnesses-prune | medium | bd-bife.25 |
 | `graph_ppr_snapshot_stale` | context | medium | bd-bife.6 |
 | `graph_ppr_empty_seed_set` | context | low | bd-bife.6 |
+| `graph_ppr_upstream_unavailable` | pack, context | medium | bd-reality-core-convergence-1azkt.15 (G) |
 | `graph_pack_dna_no_dominator` | context | low | bd-bife.6 |
 | `graph_pack_dna_timeout` | context | low | bd-1prrl.8.4 |
 | `graph_causal_no_evidence` | why | low | bd-bife.6 |
