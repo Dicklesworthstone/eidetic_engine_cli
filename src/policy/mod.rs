@@ -2918,6 +2918,7 @@ fn contains_public_replay_high_entropy(input: &str) -> bool {
             || (candidate.len() >= 32
                 && !all_hex
                 && !looks_like_public_locator_or_identifier(candidate)
+                && !looks_like_word_shaped_identifier(candidate)
                 && looks_like_high_entropy_secret(candidate))
         {
             return true;
@@ -3117,11 +3118,87 @@ fn entropy_candidate_segment_contains_redaction(
     input[segment_start..segment_end].contains("[REDACTED:")
 }
 
+/// Standalone detection (no secret keyword nearby) must look like random
+/// material, not merely "long with three character classes". Random base64 /
+/// base62 runs of 64+ bytes measure at least ~4.9 bits per byte; dictionary
+/// words, dated snake_case filenames, URL paths, and CamelCase identifiers of
+/// the same length sit around 4.0-4.6 (GH#33).
+const STANDALONE_HIGH_ENTROPY_MIN_BITS_PER_BYTE: f64 = 4.7;
+
+/// Floor for any high-entropy candidate, including keyword-adjacent ones.
+/// Random base64 material of 32+ bytes measures above 4.1 bits per byte, so
+/// this only rejects repetitive filler that still spans twelve unique bytes.
+const HIGH_ENTROPY_MIN_BITS_PER_BYTE: f64 = 3.0;
+
+/// Hex has at most 4.0 bits per byte; random 32-hex runs measure above 3.1.
+const HIGH_ENTROPY_HEX_MIN_BITS_PER_BYTE: f64 = 2.8;
+
 fn looks_like_standalone_high_entropy_secret(candidate: &str) -> bool {
     let trimmed = candidate.trim_matches('=');
     trimmed.len() >= STANDALONE_HIGH_ENTROPY_MIN_LEN
         && !trimmed.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && shannon_entropy_bits_per_byte(trimmed) >= STANDALONE_HIGH_ENTROPY_MIN_BITS_PER_BYTE
+        && !looks_like_word_shaped_identifier(trimmed)
         && !looks_like_public_locator_or_identifier(trimmed)
+}
+
+/// Per-byte Shannon entropy of the candidate, in bits.
+fn shannon_entropy_bits_per_byte(input: &str) -> f64 {
+    let bytes = input.as_bytes();
+    if bytes.is_empty() {
+        return 0.0;
+    }
+    let mut counts = [0_u32; 256];
+    for &byte in bytes {
+        counts[usize::from(byte)] = counts[usize::from(byte)].saturating_add(1);
+    }
+    let total = f64::from(u32::try_from(bytes.len()).unwrap_or(u32::MAX));
+    counts
+        .iter()
+        .filter(|&&count| count > 0)
+        .map(|&count| {
+            let probability = f64::from(count) / total;
+            -probability * probability.log2()
+        })
+        .sum()
+}
+
+/// Separator-joined identifiers made of word-shaped segments: snake_case and
+/// kebab-case filenames, dotted names, URL and file path segments. Every
+/// segment must read as a word, a number, or a short single-case
+/// alphanumeric tag (`128M`, `sha256`, `v2`); mixed interior case or base64
+/// symbols inside a segment disqualify the whole candidate.
+fn looks_like_word_shaped_identifier(candidate: &str) -> bool {
+    const MAX_ALPHANUMERIC_TAG_LEN: usize = 16;
+    let trimmed = candidate.trim_matches(|ch| matches!(ch, '_' | '-' | '.' | '/'));
+    let has_separator = trimmed
+        .bytes()
+        .any(|byte| matches!(byte, b'_' | b'-' | b'.' | b'/'));
+    if !has_separator {
+        return false;
+    }
+    trimmed
+        .split(|ch| matches!(ch, '_' | '-' | '.' | '/'))
+        .all(|segment| {
+            if segment.is_empty() {
+                return true;
+            }
+            let bytes = segment.as_bytes();
+            if !bytes.iter().all(u8::is_ascii_alphanumeric) {
+                return false;
+            }
+            let has_digit = bytes.iter().any(u8::is_ascii_digit);
+            let has_lower = bytes.iter().any(u8::is_ascii_lowercase);
+            let has_upper = bytes.iter().any(u8::is_ascii_uppercase);
+            if !has_digit {
+                // Pure letters: lowercase, UPPERCASE, or Capitalized.
+                let capitalized =
+                    bytes[0].is_ascii_uppercase() && bytes[1..].iter().all(u8::is_ascii_lowercase);
+                return !(has_lower && has_upper) || capitalized;
+            }
+            // Digits with letters: short single-case tags only.
+            bytes.len() <= MAX_ALPHANUMERIC_TAG_LEN && !(has_lower && has_upper)
+        })
 }
 
 fn looks_like_public_locator_or_identifier(candidate: &str) -> bool {
@@ -3202,11 +3279,14 @@ fn looks_like_high_entropy_secret(candidate: &str) -> bool {
     }
 
     let unique_count = unique_ascii_byte_count(trimmed);
+    let entropy = shannon_entropy_bits_per_byte(trimmed);
     if trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return unique_count >= 8;
+        return unique_count >= 8 && entropy >= HIGH_ENTROPY_HEX_MIN_BITS_PER_BYTE;
     }
 
-    unique_count >= 12 && entropy_candidate_class_count(trimmed) >= 3
+    unique_count >= 12
+        && entropy_candidate_class_count(trimmed) >= 3
+        && entropy >= HIGH_ENTROPY_MIN_BITS_PER_BYTE
 }
 
 fn unique_ascii_byte_count(input: &str) -> usize {
@@ -5141,6 +5221,175 @@ mod tests {
 
         assert!(!report.redacted);
         assert!(report.content.contains(&short_secret));
+    }
+
+    /// GH#33 table: real-shaped fake credentials must be caught; long
+    /// snake_case filenames, URLs, paths, and prose must persist untouched.
+    /// Every fake key below is synthetic and non-functional.
+    #[test]
+    fn secret_classifier_table_true_positives_and_reporter_false_positives() {
+        struct Case {
+            label: &'static str,
+            input: &'static str,
+            expected_reason: Option<&'static str>,
+        }
+        let cases = [
+            // --- true positives: standalone random material, no keyword ---
+            Case {
+                label: "standalone 64-char base64 with slashes and plus",
+                input: "The value is b4m5OUaHRhDRl/YfHjEvK3fcPZCN2VKnNSoxtz/adf4vSqqbWld+XtxFcvPaUT5E for processing.",
+                expected_reason: Some("high_entropy_secret"),
+            },
+            Case {
+                label: "standalone 64-char base62",
+                input: "Copied ujOeHwdFcAefAZhnM6Jy8c1rihtYlKNxHddmQAtKCsXRpJG2Tr8hzUjEcPVJ2tRK from the console.",
+                expected_reason: Some("high_entropy_secret"),
+            },
+            Case {
+                label: "standalone 88-char base64 with padding",
+                input: "blob y1YkVd5J6hohRmw/cM3zkl8oWOVW7x3Fi9kiyJL/WkOSG9Qg47BvxKrDEVAaZSqlf7FtzqShI4dz85LgiT03vcqm== end",
+                expected_reason: Some("high_entropy_secret"),
+            },
+            // --- true positives: keyword-adjacent shorter material ---
+            Case {
+                label: "36-char base62 next to a secret keyword",
+                input: "webhook secret: JC06DPdRO9YrxPbCkhdVipy2eBI2Y1rzw27j",
+                expected_reason: Some("high_entropy_secret"),
+            },
+            Case {
+                label: "48-char hex next to an account key keyword",
+                input: "Azure account key 3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e",
+                expected_reason: Some("high_entropy_secret"),
+            },
+            // --- true positives: known prefixes stay keyword/prefix driven ---
+            Case {
+                label: "AWS access key id",
+                input: "Use AKIAIOSFODNN7EXAMPLE for the bucket.",
+                expected_reason: Some("aws_access_key"),
+            },
+            Case {
+                label: "GitHub personal access token",
+                input: "Set ghp_16C7e42F292c6912E7710c838347Ae178B4a in CI.",
+                expected_reason: Some("github_token"),
+            },
+            Case {
+                label: "OpenAI style key",
+                input: "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ is the key.",
+                expected_reason: Some("openai_api_key"),
+            },
+            Case {
+                label: "PEM private key block",
+                input: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\n-----END PRIVATE KEY-----",
+                expected_reason: Some("pem_block"),
+            },
+            // --- reporter false positives (GH#33) ---
+            Case {
+                label: "dated snake_case filename stem in prose",
+                input: "The audit plan is tracked in project_ci_graph_debt_audit_should_not_exist_optimized_2026_08_31.md and reviewed weekly by the graph team before every debt-reduction sprint kickoff meeting",
+                expected_reason: None,
+            },
+            Case {
+                label: "https URL with long word-shaped path",
+                input: "Model artifacts come from https://huggingface.co/minishlab/potion-multilingual-128M/resolve/main/model_safetensors_release_bundle and are verified at install time",
+                expected_reason: None,
+            },
+            Case {
+                label: "file URI with the same stem",
+                input: "file:///tmp/notes/project_ci_graph_debt_audit_should_not_exist_optimized_2026_08_31.md",
+                expected_reason: None,
+            },
+            Case {
+                label: "kebab-case release name",
+                input: "See release-notes-for-the-quarterly-platform-migration-2026-08-31-final-draft for details.",
+                expected_reason: None,
+            },
+            Case {
+                label: "relative source path",
+                input: "Edit src/core/search/lexical_ram_tier_pinning_and_snapshot_reconcile_helpers.rs first.",
+                expected_reason: None,
+            },
+            Case {
+                label: "CamelCase identifier",
+                input: "Rename ProjectCiGraphDebtAuditShouldNotExistOptimizedReportGenerator2026 before merge.",
+                expected_reason: None,
+            },
+            Case {
+                label: "SCREAMING_CASE identifier",
+                input: "Build artifact CLOSE_THE_GAP_PLAN_RELEASE_NOTES_FIXTURE_PUBLIC_IDENTIFIER_2026_ALPHA_BRAVO.",
+                expected_reason: None,
+            },
+            Case {
+                label: "repetitive filler with many classes but low entropy",
+                input: "marker aaaaaaaaaaaabbbbbbbbbbbbccccccccccccddddddddddddeeeeeeeeeeeeffffffffffffAAAAAAAAAAAABBBBBBBBBBBBCCCCCCCCCCCC111111111111222222222222------------ done",
+                expected_reason: None,
+            },
+            Case {
+                label: "sha256 digest without secret context",
+                input: "Artifact digest 3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a stored.",
+                expected_reason: None,
+            },
+        ];
+
+        for case in &cases {
+            let report = redact_secret_like_content(case.input);
+            let detected = detect_secret_like_matches(case.input);
+            match case.expected_reason {
+                Some(reason) => {
+                    assert!(
+                        report.redacted_reasons.contains(&reason),
+                        "{}: expected reason {reason}, got {:?}",
+                        case.label,
+                        report.redacted_reasons
+                    );
+                    assert!(
+                        detected.iter().any(|matched| matched.pattern_id == reason),
+                        "{}: detect path must report {reason}, got {:?}",
+                        case.label,
+                        detected
+                            .iter()
+                            .map(|matched| matched.pattern_id)
+                            .collect::<Vec<_>>()
+                    );
+                }
+                None => {
+                    assert!(
+                        !report.redacted,
+                        "{}: must not redact, reasons {:?}, content {}",
+                        case.label, report.redacted_reasons, report.content
+                    );
+                    assert_eq!(report.content, case.input, "{}", case.label);
+                    assert!(
+                        detected.is_empty(),
+                        "{}: detect path must be empty, got {:?}",
+                        case.label,
+                        detected
+                            .iter()
+                            .map(|matched| matched.pattern_id)
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shannon_entropy_separates_random_material_from_identifiers() {
+        let random = "ujOeHwdFcAefAZhnM6Jy8c1rihtYlKNxHddmQAtKCsXRpJG2Tr8hzUjEcPVJ2tRK";
+        let identifier = "project_ci_graph_debt_audit_should_not_exist_optimized_2026_08_31";
+        assert!(shannon_entropy_bits_per_byte(random) >= STANDALONE_HIGH_ENTROPY_MIN_BITS_PER_BYTE);
+        assert!(
+            shannon_entropy_bits_per_byte(identifier) < STANDALONE_HIGH_ENTROPY_MIN_BITS_PER_BYTE
+        );
+        assert!(shannon_entropy_bits_per_byte("") < f64::EPSILON);
+        assert!(shannon_entropy_bits_per_byte("aaaaaaaa") < f64::EPSILON);
+        assert!(looks_like_word_shaped_identifier(identifier));
+        assert!(looks_like_word_shaped_identifier(
+            "huggingface.co/minishlab/potion-multilingual-128M/resolve/main/model_safetensors_release_bundle"
+        ));
+        assert!(!looks_like_word_shaped_identifier(random));
+        assert!(!looks_like_word_shaped_identifier(
+            "b4m5OUaHRhDRl/YfHjEvK3fcPZCN2VKnNSoxtz/adf4vSqqbWld+XtxFcvPaUT5E"
+        ));
     }
 
     #[test]

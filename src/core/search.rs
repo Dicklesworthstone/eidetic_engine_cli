@@ -13041,6 +13041,139 @@ mod tests {
         assert_eq!(SearchStatus::IndexError.as_str(), "index_error");
     }
 
+    /// GH#32: hybrid search builds the model-lifecycle report while holding
+    /// a pinned read snapshot. The probe must read the real index metadata on
+    /// that connection and never stamp `embed_model_unavailable` with a
+    /// fabricated "does not record a vector dimension" reason.
+    #[test]
+    fn lifecycle_search_degradation_under_pinned_read_snapshot_is_not_fabricated() -> TestResult {
+        let root = unique_test_dir("lifecycle-snapshot");
+        let workspace = root.join("workspace");
+        let dot_ee = workspace.join(".ee");
+        std::fs::create_dir_all(&dot_ee).map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database_path = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+
+        let connection = DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+        let workspace_id = "wsp_lifecycle_snapshot_000000000";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("lifecycle-snapshot".to_owned()),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .insert_model_registry_entry(
+                "mdl_lifecycle_snapshot_000000000",
+                &crate::db::CreateModelRegistryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    provider: crate::models::model_registry::ModelProvider::Hash,
+                    model_name: "hash-128".to_owned(),
+                    purpose: crate::models::model_registry::ModelPurpose::Embedding,
+                    dimension: Some(128),
+                    distance_metric: Some(
+                        crate::models::model_registry::ModelDistanceMetric::Cosine,
+                    ),
+                    status: crate::models::model_registry::ModelRegistryStatus::Available,
+                    version: Some("v1".to_owned()),
+                    source_uri: None,
+                    content_hash: None,
+                    metadata_json: None,
+                    last_checked_at: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        std::fs::write(
+            index_dir.join("meta.json"),
+            serde_json::json!({
+                "schema": crate::core::index::INDEX_METADATA_SCHEMA_V2,
+                "sourceGeneration": 0,
+                "corpusRevision": crate::core::index::expected_index_corpus_revision().as_str(),
+                "evidenceSecurityPolicyEpoch": crate::db::EVIDENCE_SECURITY_POLICY_EPOCH,
+                "documentCount": 0,
+                "documentCounts": {
+                    "memories": 0,
+                    "sessions": 0,
+                    "artifacts": 0,
+                    "rules": 0,
+                    "evidence": 0
+                },
+                "tierDocumentCounts": {
+                    "fast": 0,
+                    "quality": null,
+                    "lexical": cfg!(feature = "lexical-bm25").then_some(0)
+                },
+                "lastRebuildAt": "2026-01-01T00:00:00Z",
+                "storedDimension": 128,
+                "storedDistanceMetric": "cosine",
+                "storedVectorDtype": "f32"
+            })
+            .to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+
+        let options = SearchOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database_path.clone()),
+            index_dir: Some(index_dir.clone()),
+            query: "lifecycle probe".to_string(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        };
+
+        // Same shape as the search hot path: the lifecycle probe runs on a
+        // connection that already holds the read snapshot.
+        connection
+            .begin_read_snapshot()
+            .map_err(|e| format!("begin read snapshot: {e}"))?;
+        let mut degraded = Vec::new();
+        push_model_lifecycle_search_degradation(&options, Some(&connection), &mut degraded);
+        connection
+            .commit_read_snapshot()
+            .map_err(|e| format!("commit read snapshot: {e}"))?;
+
+        ensure(
+            !degraded
+                .iter()
+                .any(|degradation| degradation.code == "embed_model_unavailable"),
+            format!("pinned-snapshot probe must not stamp embed_model_unavailable: {degraded:?}"),
+        )?;
+        ensure(
+            !degraded.iter().any(|degradation| {
+                degradation
+                    .message
+                    .contains("does not record a vector dimension")
+            }),
+            format!("pinned-snapshot probe must not fabricate a missing dimension: {degraded:?}"),
+        )?;
+        ensure(
+            !degraded
+                .iter()
+                .any(|degradation| degradation.code == "model_lifecycle_unknown"),
+            format!("a healthy store must not report an unprobed lifecycle: {degraded:?}"),
+        )
+    }
+
     #[test]
     fn search_source_mode_as_str_is_stable() {
         assert_eq!(SearchSourceMode::LexicalOnly.as_str(), "lexical_only");

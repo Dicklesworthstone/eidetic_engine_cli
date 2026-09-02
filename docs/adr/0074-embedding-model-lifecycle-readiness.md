@@ -93,7 +93,8 @@ index rows:
   metadata;
 - `compatible`: the final boolean, or `null` when evidence is incomplete;
 - `rule`: one of `exact_dimension_metric_dtype`, `lexical_no_dimension`,
-  `unsupported_feature`, or `unknown`;
+  `unsupported_feature`, `not_probed` (the index-status probe itself failed,
+  so no compatibility evidence was read), or `unknown`;
 - `mismatchReason` and `repair`: bounded machine-readable repair context.
 
 The v1 rule is deliberately strict: semantic readiness requires matching

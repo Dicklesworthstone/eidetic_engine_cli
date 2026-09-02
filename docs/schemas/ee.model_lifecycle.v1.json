@@ -211,6 +211,7 @@
             "exact_dimension_metric_dtype",
             "lexical_no_dimension",
             "unsupported_feature",
+            "not_probed",
             "unknown"
           ]
         },

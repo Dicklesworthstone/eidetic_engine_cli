@@ -1,0 +1,35 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "model_lifecycle_unknown",
+  "introduced_by": {
+    "bead": "gh-32",
+    "epic_letter": "F4"
+  },
+  "surfaces": [
+    "search",
+    "context",
+    "recall",
+    "model status"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "The model-lifecycle readiness probe could not read semantic index status (for example the index directory is unreadable, or the in-query status probe failed), so no dimension-compatibility evidence exists. Readiness is reported as unknown (not probed) rather than as an unavailable model, because no index rebuild or re-embed can repair a probe failure and the active embedding backend still served the request.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Cargo workspace uses Rust nightly.' --workspace . --level semantic --kind fact --json",
+      "# make .ee/index unreadable so the index-status probe fails (e.g. replace the directory with a regular file)"
+    ],
+    "invocation": "ee search 'cargo workspace' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "model_lifecycle_unknown",
+    "severity": "warning",
+    "message_contains": [
+      "could not probe",
+      "not probed"
+    ],
+    "repair_contains": "ee model status --workspace . --json",
+    "repair_string": "ee model status --workspace . --json"
+  }
+}

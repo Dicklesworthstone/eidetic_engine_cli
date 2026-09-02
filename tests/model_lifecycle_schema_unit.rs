@@ -213,6 +213,7 @@ fn dimension_compatibility_fields_and_rules_are_pinned() -> TestResult {
         "exact_dimension_metric_dtype",
         "lexical_no_dimension",
         "unsupported_feature",
+        "not_probed",
         "unknown",
     ]
     .into_iter()

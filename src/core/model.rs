@@ -19,8 +19,8 @@ use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_d
 use crate::core::index::{
     DEFAULT_INDEX_SUBDIR, EMBEDDING_DOWNLOAD_TIMEOUT, EmbeddingPosture, IndexHealth,
     IndexStatusOptions, POTION_MODEL_NAME, current_embedding_posture, default_embedder_model_root,
-    ensure_loaded_embedding_registry_record, get_index_status_with_connection,
-    potion_model_destination_dir,
+    ensure_loaded_embedding_registry_record, get_index_status_in_current_snapshot,
+    get_index_status_with_connection, potion_model_destination_dir,
 };
 // Test-only: constructed by the inline `#[cfg(test)]` suites below.
 #[cfg(test)]
@@ -509,6 +509,20 @@ impl ModelLifecycleSemanticReadiness {
                 )
             });
 
+        if self.dimension_compatibility.rule == "not_probed" {
+            // GH#32: a failed probe is not evidence of an unavailable model.
+            // Say so, and point at the standalone probe instead of a rebuild
+            // loop that cannot change the outcome.
+            return Some(ModelLifecycleDegradation {
+                code: "model_lifecycle_unknown",
+                severity: "warning",
+                message: format!(
+                    "Model lifecycle could not probe {surface} semantic readiness: {reason}. Semantic readiness is unknown (not probed), not unavailable; the active embedding backend still served this request."
+                ),
+                repair: Some(MODEL_LIFECYCLE_NOT_PROBED_REPAIR.to_string()),
+            });
+        }
+
         if self.dimension_compatibility.compatible == Some(false)
             || self.state == "dimension_mismatch"
         {
@@ -989,23 +1003,37 @@ fn lifecycle_degraded_data_json(
     out
 }
 
+/// `caller_holds_snapshot` must be true when `connection` belongs to a caller
+/// that already owns the active read transaction (search, pack, and recall
+/// run inside a pinned read snapshot). The standalone status probe opens its
+/// own bounded read snapshot for evidence admission, which is a nested
+/// `BEGIN` on such a connection; that probe fails, and GH#32 showed the
+/// failure being silently turned into a fabricated "does not record a vector
+/// dimension" verdict on every hybrid query.
 fn build_model_lifecycle_report(
     workspace_path: &Path,
     database_path: &Path,
     connection: &DbConnection,
+    caller_holds_snapshot: bool,
     entries: &[StoredModelRegistryEntry],
     selected_embedding_entry: Option<&StoredModelRegistryEntry>,
 ) -> ModelLifecycleReport {
     let generated_at = Utc::now().to_rfc3339();
     let fingerprint = workspace_fingerprint(workspace_path);
-    let index_status = get_index_status_with_connection(
-        &IndexStatusOptions {
-            workspace_path: workspace_path.to_path_buf(),
-            database_path: Some(database_path.to_path_buf()),
-            index_dir: None,
-        },
-        Some(connection),
-    );
+    let status_options = IndexStatusOptions {
+        workspace_path: workspace_path.to_path_buf(),
+        database_path: Some(database_path.to_path_buf()),
+        index_dir: None,
+    };
+    let index_status = if caller_holds_snapshot {
+        get_index_status_in_current_snapshot(&status_options, connection)
+    } else {
+        get_index_status_with_connection(&status_options, Some(connection))
+    };
+    // A failed probe yields no index evidence at all. Carry the real cause
+    // forward so compatibility is reported as "not probed" rather than as
+    // metadata that lacks a dimension (GH#32).
+    let index_probe_error = index_status.as_ref().err().map(ToString::to_string);
     let mut index_metadata = index_status
         .as_ref()
         .ok()
@@ -1057,6 +1085,7 @@ fn build_model_lifecycle_report(
                 workspace_path,
                 &generated_at,
                 &index_metadata,
+                index_probe_error.as_deref(),
                 selected_entry_id == Some(entry.id.as_str()),
             )
         })
@@ -1069,6 +1098,7 @@ fn build_model_lifecycle_report(
         workspace_path,
         database_path,
         index_status.as_ref().ok(),
+        index_probe_error.as_deref(),
         &index_metadata,
         selected_embedding_entry,
         index_degraded,
@@ -1112,6 +1142,7 @@ fn model_lifecycle_row(
     workspace_path: &Path,
     generated_at: &str,
     index_metadata: &ModelLifecycleIndexMetadata,
+    index_probe_error: Option<&str>,
     selected: bool,
 ) -> ModelLifecycleModelRow {
     // GH#26: `metadata_json` is purpose-specific. Embedding rows carry an
@@ -1173,8 +1204,13 @@ fn model_lifecycle_row(
     let asset = inspect_model_lifecycle_asset(entry, workspace_path);
     degraded.extend(asset.degraded.clone());
 
-    let dimension_compatibility =
-        model_dimension_compatibility(entry, metadata.as_ref(), index_metadata, selected);
+    let dimension_compatibility = model_dimension_compatibility(
+        entry,
+        metadata.as_ref(),
+        index_metadata,
+        index_probe_error,
+        selected,
+    );
     if dimension_compatibility.compatible == Some(false) {
         degraded.push(ModelLifecycleDegradation::new(
             "model_dimension_mismatch",
@@ -1511,6 +1547,7 @@ fn model_dimension_compatibility(
     entry: &StoredModelRegistryEntry,
     metadata: Option<&EmbeddingMetadataRecord>,
     index_metadata: &ModelLifecycleIndexMetadata,
+    index_probe_error: Option<&str>,
     selected: bool,
 ) -> ModelLifecycleDimensionCompatibility {
     if entry.purpose != ModelPurpose::Embedding {
@@ -1556,6 +1593,15 @@ fn model_dimension_compatibility(
             },
             repair: None,
         };
+    }
+
+    if let Some(error) = index_probe_error {
+        return not_probed_dimension_compatibility(
+            actual_dimension,
+            distance_metric,
+            vector_dtype,
+            error,
+        );
     }
 
     if let (Some(actual), Some(index)) = (actual_dimension, index_dimension)
@@ -1649,12 +1695,14 @@ fn model_lifecycle_index_row(
     workspace_path: &Path,
     database_path: &Path,
     index_status: Option<&crate::core::index::IndexStatusReport>,
+    index_probe_error: Option<&str>,
     metadata: &ModelLifecycleIndexMetadata,
     selected_embedding_entry: Option<&StoredModelRegistryEntry>,
     mut degraded: Vec<ModelLifecycleDegradation>,
 ) -> ModelLifecycleIndexRow {
     let selected_dimension = selected_embedding_entry.and_then(|entry| entry.dimension);
-    let dimension_compatibility = index_dimension_compatibility(selected_embedding_entry, metadata);
+    let dimension_compatibility =
+        index_dimension_compatibility(selected_embedding_entry, metadata, index_probe_error);
     if dimension_compatibility.compatible == Some(false) {
         degraded.push(ModelLifecycleDegradation::new(
             "model_dimension_mismatch",
@@ -1709,9 +1757,52 @@ fn model_lifecycle_index_row(
     }
 }
 
+/// Compatibility verdict when the index-status probe itself failed: no index
+/// evidence was read, so the answer is "not probed", never "incompatible" or
+/// "metadata lacks a dimension" (GH#32).
+fn not_probed_dimension_compatibility(
+    actual_dimension: Option<u32>,
+    distance_metric: Option<String>,
+    vector_dtype: Option<String>,
+    error: &str,
+) -> ModelLifecycleDimensionCompatibility {
+    ModelLifecycleDimensionCompatibility {
+        expected_dimension: actual_dimension,
+        actual_dimension,
+        index_dimension: None,
+        distance_metric,
+        vector_dtype,
+        compatible: None,
+        rule: "not_probed",
+        mismatch_reason: Some(format!(
+            "semantic index status could not be probed: {}",
+            bounded_probe_error(error)
+        )),
+        repair: Some(MODEL_LIFECYCLE_NOT_PROBED_REPAIR.to_string()),
+    }
+}
+
+const MODEL_LIFECYCLE_NOT_PROBED_REPAIR: &str = "ee model status --workspace . --json";
+
+/// `mismatchReason` is schema-bounded to 256 bytes; keep room for the prefix.
+const MODEL_LIFECYCLE_PROBE_ERROR_MAX_BYTES: usize = 160;
+
+fn bounded_probe_error(error: &str) -> String {
+    let error = error.trim();
+    if error.len() <= MODEL_LIFECYCLE_PROBE_ERROR_MAX_BYTES {
+        return error.to_string();
+    }
+    let mut end = MODEL_LIFECYCLE_PROBE_ERROR_MAX_BYTES;
+    while end > 0 && !error.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &error[..end])
+}
+
 fn index_dimension_compatibility(
     selected_embedding_entry: Option<&StoredModelRegistryEntry>,
     metadata: &ModelLifecycleIndexMetadata,
+    index_probe_error: Option<&str>,
 ) -> ModelLifecycleDimensionCompatibility {
     let Some(entry) = selected_embedding_entry else {
         return lexical_dimension_compatibility(
@@ -1726,6 +1817,14 @@ fn index_dimension_compatibility(
         .map(|metric| metric.as_str().to_string())
         .or_else(|| metadata.stored_distance_metric.clone());
     let vector_dtype = metadata.stored_vector_dtype.clone();
+    if let Some(error) = index_probe_error {
+        return not_probed_dimension_compatibility(
+            actual_dimension,
+            distance_metric,
+            vector_dtype,
+            error,
+        );
+    }
     if let (Some(actual), Some(index)) = (actual_dimension, index_dimension)
         && actual != index
     {
@@ -1842,6 +1941,31 @@ fn semantic_readiness_from_lifecycle(
         return ModelLifecycleSemanticReadiness {
             state: "lexical_fallback",
             mode: "lexical_fallback",
+            selected_model_id: Some(selected.id.clone()),
+            selected_index_id: Some(MODEL_LIFECYCLE_INDEX_ID.to_string()),
+            dimension_compatibility: index_row.dimension_compatibility.clone(),
+            degraded,
+        };
+    }
+    if index_row.dimension_compatibility.rule == "not_probed" {
+        // GH#32: the index-status probe failed, so no compatibility evidence
+        // exists. Readiness is unknown; it is not lexical-only, and no index
+        // rebuild can repair a probe failure.
+        let reason = index_row
+            .dimension_compatibility
+            .mismatch_reason
+            .clone()
+            .unwrap_or_else(|| "semantic index status could not be probed".to_string());
+        let mut degraded = vec![ModelLifecycleDegradation::new(
+            "model_lifecycle_unknown",
+            "warning",
+            format!("Semantic readiness is unknown (not probed), not unavailable: {reason}."),
+            Some(MODEL_LIFECYCLE_NOT_PROBED_REPAIR),
+        )];
+        degraded.extend(index_row.degraded.clone());
+        return ModelLifecycleSemanticReadiness {
+            state: "unknown",
+            mode: "unknown",
             selected_model_id: Some(selected.id.clone()),
             selected_index_id: Some(MODEL_LIFECYCLE_INDEX_ID.to_string()),
             dimension_compatibility: index_row.dimension_compatibility.clone(),
@@ -2370,6 +2494,7 @@ pub fn build_model_lifecycle_report_for_workspace(
         resolved_database_path(&workspace_path, database_path)?
     };
 
+    let caller_holds_snapshot = connection.is_some();
     let owned_connection;
     let connection = match connection {
         Some(connection) => connection,
@@ -2399,10 +2524,13 @@ pub fn build_model_lifecycle_report_for_workspace(
         .iter()
         .find(|entry| entry_is_available_embedding(entry));
 
+    // A caller-supplied connection owns its transaction state; the probe must
+    // never open a nested read snapshot on it (GH#32).
     Ok(build_model_lifecycle_report(
         &workspace_path,
         &database_path,
         connection,
+        caller_holds_snapshot,
         &entries,
         selected_embedding_entry,
     ))
@@ -2513,6 +2641,7 @@ pub fn build_model_status_report(
         &workspace_path,
         &database_path,
         &connection,
+        false,
         &entries,
         selected_embedding_entry.as_ref(),
     );
@@ -4664,6 +4793,184 @@ mod tests {
         ensure(
             degradation.repair.as_deref() == Some("ee index reembed --workspace ."),
             "dimension mismatch repair",
+        )
+    }
+
+    /// GH#32: search and pack build the lifecycle report while holding a
+    /// pinned read snapshot. The in-query probe must read the same index
+    /// metadata a standalone `ee model status` reads, never a fabricated
+    /// "does not record a vector dimension" reason from a probe that failed
+    /// on a nested transaction.
+    #[test]
+    fn lifecycle_report_inside_pinned_read_snapshot_matches_standalone_probe() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+        insert_registry_entry_with_dimension(
+            &database_path,
+            &workspace_id,
+            "mdl_01HQ3K5Z000000000000000032",
+            ModelProvider::Hash,
+            "hash-128",
+            ModelRegistryStatus::Available,
+            128,
+        )?;
+        write_index_metadata(&workspace_path, 0)?;
+
+        let standalone =
+            build_model_lifecycle_report_for_workspace(&workspace_path, Some(&database_path), None)
+                .map_err(|error| format!("standalone lifecycle report: {error:?}"))?;
+
+        let connection = DbConnection::open_file(&database_path)
+            .map_err(|error| format!("open snapshot connection: {error}"))?;
+        connection
+            .begin_read_snapshot()
+            .map_err(|error| format!("begin read snapshot: {error}"))?;
+        let in_snapshot = build_model_lifecycle_report_for_workspace(
+            &workspace_path,
+            Some(&database_path),
+            Some(&connection),
+        )
+        .map_err(|error| format!("in-snapshot lifecycle report: {error:?}"))?;
+        connection
+            .commit_read_snapshot()
+            .map_err(|error| format!("commit read snapshot: {error}"))?;
+
+        let standalone_row = standalone.indexes.first().ok_or("standalone index row")?;
+        let snapshot_row = in_snapshot.indexes.first().ok_or("in-snapshot index row")?;
+        ensure(
+            snapshot_row.stored_dimension == Some(128),
+            format!(
+                "in-snapshot probe must read storedDimension from meta.json: {:?}",
+                snapshot_row.stored_dimension
+            ),
+        )?;
+        ensure(
+            snapshot_row.dimension_compatibility == standalone_row.dimension_compatibility,
+            format!(
+                "in-snapshot compatibility {:?} must match standalone {:?}",
+                snapshot_row.dimension_compatibility, standalone_row.dimension_compatibility
+            ),
+        )?;
+        ensure(
+            snapshot_row.state == standalone_row.state,
+            format!(
+                "in-snapshot index state `{}` must match standalone `{}`",
+                snapshot_row.state, standalone_row.state
+            ),
+        )?;
+        ensure(
+            in_snapshot.semantic_readiness.state == standalone.semantic_readiness.state,
+            format!(
+                "in-snapshot readiness `{}` must match standalone `{}`",
+                in_snapshot.semantic_readiness.state, standalone.semantic_readiness.state
+            ),
+        )?;
+        let surface = in_snapshot.semantic_surface_degradation("search");
+        ensure(
+            surface
+                .as_ref()
+                .is_none_or(|degradation| degradation.code != "embed_model_unavailable"),
+            format!(
+                "in-snapshot search surface must not stamp embed_model_unavailable: {surface:?}"
+            ),
+        )?;
+        ensure(
+            !in_snapshot.degraded.iter().any(|degradation| {
+                degradation
+                    .message
+                    .contains("does not record a vector dimension")
+            }),
+            format!(
+                "in-snapshot report must not fabricate a missing-dimension reason: {:?}",
+                in_snapshot.degraded
+            ),
+        )
+    }
+
+    /// GH#32: when the index-status probe itself fails, the lifecycle report
+    /// must say the readiness is unknown (not probed) and name the real
+    /// cause, instead of claiming the semantic index is unavailable with a
+    /// repair plan that cannot help.
+    #[test]
+    fn lifecycle_probe_failure_reports_unknown_not_unavailable() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+        insert_registry_entry_with_dimension(
+            &database_path,
+            &workspace_id,
+            "mdl_01HQ3K5Z000000000000000033",
+            ModelProvider::Hash,
+            "hash-128",
+            ModelRegistryStatus::Available,
+            128,
+        )?;
+        // A regular file where the index directory belongs makes the status
+        // probe fail at directory inspection, before any metadata is read.
+        fs::write(workspace_path.join(".ee").join("index"), b"not a directory")
+            .map_err(|error| format!("write index placeholder: {error}"))?;
+
+        let report =
+            build_model_lifecycle_report_for_workspace(&workspace_path, Some(&database_path), None)
+                .map_err(|error| format!("lifecycle report: {error:?}"))?;
+
+        ensure(
+            report.semantic_readiness.state == "unknown",
+            format!(
+                "probe failure must leave readiness unknown: {}",
+                report.semantic_readiness.state
+            ),
+        )?;
+        let compatibility = &report.semantic_readiness.dimension_compatibility;
+        ensure(
+            compatibility.rule == "not_probed" && compatibility.compatible.is_none(),
+            format!("probe failure must be reported as not probed: {compatibility:?}"),
+        )?;
+        ensure(
+            compatibility
+                .mismatch_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("could not be probed")),
+            format!("probe failure reason must name the probe: {compatibility:?}"),
+        )?;
+        ensure(
+            !report.degraded.iter().any(|degradation| {
+                degradation
+                    .message
+                    .contains("does not record a vector dimension")
+            }),
+            format!(
+                "probe failure must not fabricate a missing-dimension reason: {:?}",
+                report.degraded
+            ),
+        )?;
+        ensure(
+            report
+                .degraded
+                .iter()
+                .any(|degradation| degradation.code == "search_index_degraded"),
+            "probe failure must surface the real index-status error",
+        )?;
+
+        let surface = report
+            .semantic_surface_degradation("search")
+            .ok_or("probe failure must still surface a lifecycle degradation")?;
+        ensure(
+            surface.code == "model_lifecycle_unknown",
+            format!("surface code must be unknown, not unavailable: {surface:?}"),
+        )?;
+        ensure(
+            surface.severity == "warning",
+            format!("not-probed surface severity: {surface:?}"),
+        )?;
+        ensure(
+            surface.message.contains("could not be probed")
+                && surface.message.contains("not probed")
+                && !surface.message.contains("lexical-only"),
+            format!("surface message must describe the probe failure: {surface:?}"),
+        )?;
+        ensure(
+            surface.repair.as_deref() == Some("ee model status --workspace . --json"),
+            format!("not-probed repair must point at the standalone probe: {surface:?}"),
         )
     }
 
