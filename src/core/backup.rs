@@ -8342,7 +8342,10 @@ mod tests {
         )
         .map_err(|error| error.to_string())?;
 
-        let out = workspace.join("backups");
+        let out = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            .join("backups");
         let created = create_backup(&BackupCreateOptions {
             workspace_path: workspace.clone(),
             database_path: Some(database),
@@ -8354,7 +8357,11 @@ mod tests {
             dry_run: false,
         })
         .map_err(|error| error.message())?;
-        let side_path = tempdir.path().join("restore-derived-side-path");
+        let side_path = tempdir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            .join("restore-derived-side-path");
 
         let restored = restore_backup_to_side_path(&BackupRestoreOptions {
             workspace_path: workspace,
