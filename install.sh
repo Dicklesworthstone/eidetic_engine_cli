@@ -437,6 +437,66 @@ ee_curl() {
   done
 }
 
+# Reduce a GitHub `/releases` JSON response (stdin) to one line per release
+# record, newest-first as GitHub orders them:
+#
+#   <tag_name> <draft> <prerelease> <has_asset>
+#
+# where <has_asset> is 1 when an asset named exactly $1 is attached to that
+# release and 0 otherwise (always 0 when $1 is empty). Records with no
+# tag_name are dropped. Pure awk, single pass, no per-record subprocesses,
+# so a moderately sized (sub-MB) response costs one scan regardless of
+# whether GitHub pretty-prints it (it does) or sends it compact (GH#31).
+#
+# Splitting on the literal `"tag_name"` key is safe: assets and uploader
+# objects carry no such key, and any occurrence inside a release body is
+# JSON-escaped as \"tag_name\", which does not match the unescaped key.
+#
+# The newlines are stripped up front so awk sees one record and never
+# rebuilds a growing buffer per line (quadratic on BSD awk: ~3s for the
+# 13k-line pretty-printed response vs ~0.2s joined).
+ee_release_records() {
+  LC_ALL=C tr -d '\n\r' | LC_ALL=C awk -v asset="$1" '
+    function field(s, re,    m) {
+      if (match(s, re) == 0) return ""
+      m = substr(s, RSTART, RLENGTH)
+      sub(/^[^:]*:[ \t]*"/, "", m)
+      sub(/"$/, "", m)
+      return m
+    }
+    function word(s, re,    m) {
+      if (match(s, re) == 0) return ""
+      m = substr(s, RSTART, RLENGTH)
+      sub(/^[^:]*:[ \t]*/, "", m)
+      return m
+    }
+    { buf = buf $0 }
+    END {
+      key = "\"tag_name\""
+      start = index(buf, key)
+      if (start == 0) exit 0
+      buf = substr(buf, start)
+      while (buf != "") {
+        nxt = index(substr(buf, 2), key)
+        if (nxt == 0) {
+          rec = buf
+          buf = ""
+        } else {
+          rec = substr(buf, 1, nxt)
+          buf = substr(buf, nxt + 1)
+        }
+        tag = field(rec, "\"tag_name\"[ \t]*:[ \t]*\"[^\"]*\"")
+        if (tag == "") continue
+        draft = word(rec, "\"draft\"[ \t]*:[ \t]*[a-z]+")
+        pre = word(rec, "\"prerelease\"[ \t]*:[ \t]*[a-z]+")
+        has = 0
+        if (asset != "" && (index(rec, "\"name\": \"" asset "\"") > 0 || index(rec, "\"name\":\"" asset "\"") > 0)) has = 1
+        print tag, (draft == "" ? "false" : draft), (pre == "" ? "false" : pre), has
+      }
+    }
+  '
+}
+
 # ───────────────────────────────────────────────────────────────────────────
 # Usage
 # ───────────────────────────────────────────────────────────────────────────
@@ -796,37 +856,36 @@ resolve_version() {
     # message.
     local records_seen=0
     if [ -n "$releases_json" ]; then
-      local record="" rel_tag="" rel_draft="" rel_prerelease=""
-      # `|| [ -n "$record" ]` matters: the final chunk from the sed split
-      # below has no trailing newline, and plain `read` returns nonzero for
-      # an unterminated final line -- silently dropping it from the loop
-      # (and with it, the newest matching release) without this guard.
-      while IFS= read -r record || [ -n "$record" ]; do
-        [ -n "$record" ] || continue
-        rel_tag=$(printf '%s' "$record" \
-          | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 \
-          | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/') || rel_tag=""
+      local records="" rel_tag="" rel_draft="" rel_prerelease="" rel_has_asset=""
+      # One awk pass turns the whole response into at most one short line
+      # per release (see ee_release_records). The previous shape -- split
+      # the raw JSON on "tag_name" with sed and run a grep|head|sed
+      # pipeline per chunk inside a while/read loop -- assumed a compact
+      # single-line body, but api.github.com pretty-prints: every line of a
+      # ~800 KB response became its own "record", each one forked several
+      # processes, and the installer sat for minutes in what looked like a
+      # hang (GH#31). Doing the parse in one process bounds this to the
+      # cost of scanning the response once.
+      records=$(printf '%s\n' "$releases_json" | ee_release_records "$tarball_name") || records=""
+      # `|| [ -n "$rel_tag" ]` keeps an unterminated final line in play:
+      # plain `read` returns nonzero for it and would silently drop the
+      # last record.
+      while read -r rel_tag rel_draft rel_prerelease rel_has_asset || [ -n "$rel_tag" ]; do
         [ -n "$rel_tag" ] || continue
         records_seen=$((records_seen + 1))
-        rel_draft=$(printf '%s' "$record" \
-          | grep -o '"draft"[[:space:]]*:[[:space:]]*[a-z]*' | head -1 \
-          | sed -E 's/.*:[[:space:]]*//') || rel_draft=""
-        rel_prerelease=$(printf '%s' "$record" \
-          | grep -o '"prerelease"[[:space:]]*:[[:space:]]*[a-z]*' | head -1 \
-          | sed -E 's/.*:[[:space:]]*//') || rel_prerelease=""
         [ "$rel_draft" = "true" ] && continue
         [ "$rel_prerelease" = "true" ] && continue
-        if printf '%s' "$record" | grep -qF "\"name\": \"${tarball_name}\"" \
-          || printf '%s' "$record" | grep -qF "\"name\":\"${tarball_name}\""; then
-          if [ -n "$latest_tag" ] && [ "$rel_tag" != "$latest_tag" ]; then
-            warn "Latest release $latest_tag does not include ${tarball_name}."
-            warn "Falling back to $rel_tag, the newest stable release that does."
-            warn "This is an upstream release-matrix gap, not a problem with your machine."
-          fi
-          tag="$rel_tag"
-          break
+        [ "$rel_has_asset" = "1" ] || continue
+        if [ -n "$latest_tag" ] && [ "$rel_tag" != "$latest_tag" ]; then
+          warn "Latest release $latest_tag does not include ${tarball_name}."
+          warn "Falling back to $rel_tag, the newest stable release that does."
+          warn "This is an upstream release-matrix gap, not a problem with your machine."
         fi
-      done < <(printf '%s' "$releases_json" | sed 's/"tag_name"/\n&/g')
+        tag="$rel_tag"
+        break
+      done <<EOF
+$records
+EOF
     fi
 
     if [ -z "$tag" ]; then

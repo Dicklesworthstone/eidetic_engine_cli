@@ -1024,7 +1024,7 @@ fn build_model_lifecycle_report(
         && let Ok(status) = index_status.as_ref()
         && let Some((dimension, embedder_id)) =
             crate::core::index::read_fast_vector_index_fingerprint(&status.index_dir)
-        && selected.model_name == embedder_id
+        && same_embedder_identity(&selected.model_name, &embedder_id)
     {
         index_metadata.stored_dimension = Some(dimension);
         if index_metadata.stored_model_id.is_none() {
@@ -1333,6 +1333,16 @@ fn inspect_model_lifecycle_asset(
         }
     };
 
+    // Model2Vec's canonical local asset is a verified *directory* of pinned
+    // artifacts — the same directory `fetch_bundled_embedding_model` writes
+    // and the runtime loads — not one regular file. Judge it by the pinned
+    // frankensearch manifest verification the runtime itself applies, so the
+    // lifecycle observer can never call a model `model_asset_corrupt` while
+    // search/pack are executing `neural_local` against it (GH#30).
+    if metadata.file_type().is_dir() && is_model2vec_embedding_entry(entry) {
+        return inspect_model2vec_lifecycle_dir(entry, &source_path, content_hash, degraded);
+    }
+
     if !metadata.file_type().is_file() {
         degraded.push(ModelLifecycleDegradation::new(
             "model_asset_corrupt",
@@ -1405,6 +1415,79 @@ fn inspect_model_lifecycle_asset(
             }
         }
     }
+}
+
+/// Whether a registry row is the Model2Vec embedding model whose local asset
+/// is a directory of pinned artifacts rather than a single file.
+fn is_model2vec_embedding_entry(entry: &StoredModelRegistryEntry) -> bool {
+    entry.provider == ModelProvider::Model2Vec && entry.purpose == ModelPurpose::Embedding
+}
+
+/// Inspect a Model2Vec model directory with the same pinned-manifest check the
+/// runtime uses before it will load the directory (`verify_dir_cached` against
+/// the potion manifest). Frankensearch owns the artifact set and per-file
+/// digests; the lifecycle observer only reports whether that verification
+/// passes, and does not invent a directory hash of its own (GH#30).
+fn inspect_model2vec_lifecycle_dir(
+    entry: &StoredModelRegistryEntry,
+    source_path: &Path,
+    content_hash: Option<String>,
+    mut degraded: Vec<ModelLifecycleDegradation>,
+) -> ModelLifecycleAssetInspection {
+    let model_dir = fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+    if !crate::core::index::verified_potion_model_dir(&model_dir) {
+        degraded.push(ModelLifecycleDegradation::new(
+            "model_asset_corrupt",
+            "high",
+            format!(
+                "Model2Vec model directory for registry row {} failed pinned manifest verification.",
+                entry.id
+            ),
+            Some("ee model fetch embedding-default --workspace ."),
+        ));
+        return ModelLifecycleAssetInspection {
+            state: "corrupt",
+            content_hash,
+            asset_hash: None,
+            degraded,
+            provenance_complete: false,
+        };
+    }
+
+    // The registry `content_hash` for this row is the runtime's embedder
+    // fingerprint (see `active_embedder_content_hash`), not a digest of one
+    // file, so there is no single asset hash to surface for a directory.
+    let corrupt = degraded
+        .iter()
+        .any(|degradation| degradation.code == "model_asset_corrupt");
+    ModelLifecycleAssetInspection {
+        state: if corrupt { "corrupt" } else { "available" },
+        provenance_complete: content_hash.is_some(),
+        content_hash,
+        asset_hash: None,
+        degraded,
+    }
+}
+
+/// Whether two embedder ids name the same model.
+///
+/// Tolerates the provider-prefixed spelling of an id
+/// (`model2vec/potion-multilingual-128M` vs `potion-multilingual-128M`) and
+/// ASCII case differences. The comparison still keys on the final path
+/// segment, so a hash-fallback id can never match a semantic model id and a
+/// fallback-built index cannot masquerade as semantic-compatible (GH#30).
+fn same_embedder_identity(left: &str, right: &str) -> bool {
+    fn last_segment(value: &str) -> String {
+        value
+            .trim()
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    }
+    let left = last_segment(left);
+    !left.is_empty() && left == last_segment(right)
 }
 
 fn model_lifecycle_state(
@@ -5068,5 +5151,175 @@ mod tests {
         let list_json = list.data_json();
         ensure(list_json["schema"] == MODEL_LIST_SCHEMA_V1, "list schema")?;
         ensure(list_json["entries"].is_array(), "entries is array")
+    }
+
+    // ── GH#30: Model2Vec directory assets in the lifecycle observer ───────
+
+    fn lifecycle_entry(
+        provider: ModelProvider,
+        purpose: ModelPurpose,
+        source_uri: &Path,
+    ) -> StoredModelRegistryEntry {
+        StoredModelRegistryEntry {
+            id: "mdl_01HQ3K5Z0000000000000000GH30".to_owned(),
+            workspace_id: "wsp_gh30".to_owned(),
+            provider,
+            model_name: BUNDLED_EMBEDDING_MODEL_ID.to_owned(),
+            purpose,
+            dimension: Some(256),
+            distance_metric: Some(ModelDistanceMetric::Cosine),
+            status: ModelRegistryStatus::Available,
+            version: None,
+            source_uri: Some(source_uri.to_string_lossy().into_owned()),
+            content_hash: None,
+            metadata_json: None,
+            created_at: "2026-08-27T00:00:00Z".to_owned(),
+            updated_at: "2026-08-27T00:00:00Z".to_owned(),
+            last_checked_at: None,
+        }
+    }
+
+    #[test]
+    fn model2vec_directory_asset_is_judged_by_manifest_verification_not_file_shape() -> TestResult {
+        let tmp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let model_dir = tmp.path().join(POTION_MODEL_NAME);
+        fs::create_dir_all(&model_dir).map_err(|error| error.to_string())?;
+        // A directory that is missing the pinned artifacts must fail the same
+        // manifest verification the runtime applies — and say so, rather than
+        // being rejected for merely not being a regular file.
+        let entry = lifecycle_entry(
+            ModelProvider::Model2Vec,
+            ModelPurpose::Embedding,
+            &model_dir,
+        );
+        let inspection = inspect_model_lifecycle_asset(&entry, tmp.path());
+        ensure(
+            inspection.state == "corrupt",
+            "unverified directory is corrupt",
+        )?;
+        ensure(
+            inspection
+                .degraded
+                .iter()
+                .any(|degradation| degradation.message.contains("pinned manifest verification")),
+            format!(
+                "expected a manifest-verification degradation, got {:?}",
+                inspection.degraded
+            ),
+        )?;
+        ensure(
+            !inspection
+                .degraded
+                .iter()
+                .any(|degradation| degradation.message.contains("not a regular file")),
+            "a Model2Vec directory must not be rejected for its shape",
+        )?;
+        ensure(
+            inspection.degraded.iter().all(|degradation| {
+                degradation.repair.as_deref()
+                    == Some("ee model fetch embedding-default --workspace .")
+            }),
+            "repair must point at re-fetching the bundled model",
+        )
+    }
+
+    #[test]
+    fn non_model2vec_directory_asset_is_still_rejected_as_not_a_regular_file() -> TestResult {
+        let tmp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let asset_dir = tmp.path().join("rerank-model");
+        fs::create_dir_all(&asset_dir).map_err(|error| error.to_string())?;
+        for (provider, purpose) in [
+            (ModelProvider::External, ModelPurpose::Reranker),
+            (ModelProvider::Model2Vec, ModelPurpose::Reranker),
+            (ModelProvider::FastEmbed, ModelPurpose::Embedding),
+        ] {
+            let entry = lifecycle_entry(provider, purpose, &asset_dir);
+            let inspection = inspect_model_lifecycle_asset(&entry, tmp.path());
+            ensure(inspection.state == "corrupt", "directory asset is corrupt")?;
+            ensure(
+                inspection
+                    .degraded
+                    .iter()
+                    .any(|degradation| degradation.message.contains("not a regular file")),
+                format!("{provider:?}/{purpose:?} must keep the regular-file rule"),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The positive half of GH#30 needs the real pinned artifacts, so it runs
+    /// only where the bundled model has already been fetched; elsewhere it
+    /// records why it did not run instead of failing.
+    #[test]
+    fn model2vec_verified_directory_reports_available() -> TestResult {
+        let model_dir = potion_model_destination_dir(&default_embedder_model_root());
+        if !crate::core::index::verified_potion_model_dir(&model_dir) {
+            eprintln!(
+                "skipping: no verified Model2Vec directory at {}",
+                model_dir.display()
+            );
+            return Ok(());
+        }
+        let mut entry = lifecycle_entry(
+            ModelProvider::Model2Vec,
+            ModelPurpose::Embedding,
+            &model_dir,
+        );
+        entry.content_hash = Some(format!("blake3:{}", "0".repeat(64)));
+        let inspection = inspect_model_lifecycle_asset(&entry, model_dir.as_path());
+        ensure(
+            inspection.state == "available",
+            format!(
+                "verified directory must be available, got {:?}",
+                inspection.degraded
+            ),
+        )?;
+        ensure(
+            inspection.degraded.is_empty(),
+            "no degradations for a verified directory",
+        )?;
+        ensure(
+            inspection.asset_hash.is_none(),
+            "no single-file digest for a directory",
+        )?;
+        ensure(
+            inspection.provenance_complete,
+            "content_hash present => provenance complete",
+        )
+    }
+
+    #[test]
+    fn same_embedder_identity_tolerates_provider_prefix_and_case() -> TestResult {
+        ensure(
+            same_embedder_identity("potion-multilingual-128M", "potion-multilingual-128M"),
+            "exact match",
+        )?;
+        ensure(
+            same_embedder_identity(
+                "model2vec/potion-multilingual-128M",
+                "potion-multilingual-128M",
+            ),
+            "provider-prefixed spelling",
+        )?;
+        ensure(
+            same_embedder_identity(
+                "potion-multilingual-128M",
+                "minishlab/potion-multilingual-128m",
+            ),
+            "repo-prefixed spelling with case difference",
+        )?;
+        ensure(
+            !same_embedder_identity("potion-multilingual-128M", "hash"),
+            "hash fallback never matches a semantic model",
+        )?;
+        ensure(
+            !same_embedder_identity("potion-multilingual-128M", "potion-multilingual-256M"),
+            "different model sizes differ",
+        )?;
+        ensure(!same_embedder_identity("", ""), "empty ids never match")?;
+        ensure(
+            !same_embedder_identity("model2vec/", "model2vec/"),
+            "prefix-only ids never match",
+        )
     }
 }

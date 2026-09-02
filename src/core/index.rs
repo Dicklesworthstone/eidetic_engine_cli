@@ -5830,7 +5830,10 @@ fn workspace_embedder_stack_with_default(
     Ok(default())
 }
 
-fn verified_potion_model_dir(model_dir: &Path) -> bool {
+/// Whether `model_dir` passes the pinned potion manifest verification the
+/// runtime requires before loading it. Shared with the lifecycle observer so
+/// both judge a Model2Vec directory by the same rule (GH#30).
+pub(crate) fn verified_potion_model_dir(model_dir: &Path) -> bool {
     verify_dir_cached(&ModelManifest::potion_128m(), model_dir).is_ok()
 }
 
