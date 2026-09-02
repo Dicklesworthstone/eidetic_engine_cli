@@ -2,7 +2,8 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "global_index_unavailable",
   "introduced_by": {
-    "bead": "bd-reality-core-convergence-1azkt.4"
+    "bead": "bd-reality-core-convergence-1azkt.4",
+    "epic_letter": "D"
   },
   "surfaces": [
     "search",

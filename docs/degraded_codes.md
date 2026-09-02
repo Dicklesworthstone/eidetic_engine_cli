@@ -2952,7 +2952,7 @@ ee context 'HTTPS callbacks' --workspace . --json
 
 **Surfaces:** conflict resolve
 
-**Introduced by:** bd-3a1op.4
+**Introduced by:** bd-3a1op.4 (epic ADR0066)
 
 **Trigger.** ee conflict resolve named a memory pair that is not on the CURRENT conflict surface: workspace state moved (a side was expired, re-scoped, or the signal dissolved) between the agent inspecting the conflict and attempting resolution. The command refuses the mutation and returns the focused live surface for re-orientation instead of resolving against stale state.
 
@@ -3079,7 +3079,7 @@ ee context 'sparse consensus subject' --workspace . --json
 
 **Surfaces:** pack, context
 
-**Introduced by:** bd-sealed-preregistration-memory-b67be
+**Introduced by:** bd-sealed-preregistration-memory-b67be (epic SEALED)
 
 **Trigger.** A sealed, not-yet-revealed memory (written with ee remember --seal) matches the pack query; only the deterministic placeholder is stored, so the candidate is excluded from the pack rather than spending budget on withheld content.
 
@@ -5762,7 +5762,7 @@ ee swarm brief --workspace . --json
 
 **Surfaces:** search, pack
 
-**Introduced by:** bd-reality-core-convergence-1azkt.4
+**Introduced by:** bd-reality-core-convergence-1azkt.4 (epic D)
 
 **Trigger.** The user-global store contains memories, but its derived Frankensearch index is missing, stale, corrupt, or cannot be opened. Workspace retrieval remains available while global recall is explicitly marked incomplete.
 
@@ -5794,7 +5794,7 @@ ee search 'Global index fixture' --workspace . --json
 
 **Surfaces:** pack
 
-**Introduced by:** bd-1bfwa.3
+**Introduced by:** bd-1bfwa.3 (epic ADR0069)
 
 **Trigger.** Pack assembly found a workspace memory and a global-lane memory contradicting each other on the same subject. Neither side is silently dropped: both stay in the candidate pool with globalLane markers and the contradiction is deferred to the operator.
 
@@ -5826,7 +5826,7 @@ ee pack "formatting rules" --workspace . --json
 
 **Surfaces:** search, pack, primer
 
-**Introduced by:** bd-1bfwa.3
+**Introduced by:** bd-1bfwa.3 (epic ADR0069)
 
 **Trigger.** A retrieval surface ran with the global memory lane excluded — no global store exists yet, the workspace has participate=false, or [memory] include_global=false. The lane's absence is reported honestly instead of silently returning workspace-only results.
 
@@ -5856,7 +5856,7 @@ ee search "anything" --workspace . --json
 
 **Surfaces:** memory
 
-**Introduced by:** bd-1bfwa.2
+**Introduced by:** bd-1bfwa.2 (epic ADR0069)
 
 **Trigger.** A workspace memory containing secret-like content (allowed workspace-locally via --allow-secret-mention) is promoted toward the user-global lane; promotion re-screens at the workspace boundary and refuses rather than silently redacting.
 
@@ -5983,7 +5983,7 @@ ee curate dry-run --workspace . --json
 
 **Surfaces:** graph diff
 
-**Introduced by:** bd-3a1op.5
+**Introduced by:** bd-3a1op.5 (epic ADR0066)
 
 **Trigger.** ee graph diff needs two persisted snapshots of the requested family, but the requested from/to ids (or the --since resolution, or the latest-two default) could not be satisfied — fewer than two non-invalid snapshots exist for the family. The command reports the shortfall honestly instead of recomputing a synthetic side.
 
@@ -9746,7 +9746,7 @@ Build a tier-aware prewarm report with tier_generation lower than the current pr
 
 **Surfaces:** mesh sync
 
-**Introduced by:** bd-tc-epic-qzk7o.2.5
+**Introduced by:** bd-tc-epic-qzk7o.2.5 (epic TC)
 
 **Trigger.** ee mesh sync ran with mesh enabled and at least one ACTIVE peer enrolled — an anti-entropy round was warranted — but no peer transport path exists to carry it (the real transport lands with team-confed T2.4), so no round ran. Reported at the anti-entropy level alongside the CLI-level mesh_sync_once_network_deferred so agents can distinguish 'nothing to sync' from 'peers are waiting and the transport is the gap'.
 
@@ -13712,7 +13712,7 @@ ee search 'release verification' --workspace . --json
 
 **Surfaces:** resume
 
-**Introduced by:** bd-resume-verb-v0f57
+**Introduced by:** bd-resume-verb-v0f57 (epic RESUME)
 
 **Trigger.** ee resume ran against a store with zero live episodic memories: there is no session end-state to resume from. The command reports that honestly (and scans for nearby populated stores, reusing the orient discovery) instead of returning an empty report that reads like a fresh project.
 
@@ -13742,7 +13742,7 @@ ee resume --workspace . --json
 
 **Surfaces:** steward run retrieval_affinity_refresh, graph suggest-links
 
-**Introduced by:** bd-3a1op.2
+**Introduced by:** bd-3a1op.2 (epic ADR0066)
 
 **Trigger.** The retrieval-affinity projection has no accumulated evidence yet (fresh workspace, or all weights decayed below threshold). Consumers proceed honestly without the affinity signal instead of fabricating one: the steward refresh reports status=cold and suggest-links zero-weights the signal.
 
@@ -15725,7 +15725,7 @@ ee subscribe poll --cursor 999999 --workspace . --json
 
 **Surfaces:** graph suggest-links
 
-**Introduced by:** bd-3a1op.3
+**Introduced by:** bd-3a1op.3 (epic ADR0066)
 
 **Trigger.** ee graph suggest-links ran against a workspace whose link/tag/affinity evidence yields zero bounded candidate pairs (too few nodes or edges for any predictor to score). The command reports the empty result honestly instead of relaxing the candidate bound.
 
@@ -16252,7 +16252,7 @@ ee focus suggest --task-frame tf_unknown_id --workspace . --json
 
 **Surfaces:** pack
 
-**Introduced by:** bd-tc-epic-qzk7o
+**Introduced by:** bd-tc-epic-qzk7o (epic TC)
 
 **Trigger.** Pack assembly found a local workspace memory and a teammate memory contradicting each other on the same subject. Neither side is silently dropped or resolved by rank: both stay in the candidate pool with teamLane and peerConflict markers.
 
@@ -16284,7 +16284,7 @@ ee pack "rebase policy" --workspace . --memory-scope team --json
 
 **Surfaces:** pack
 
-**Introduced by:** bd-tc-epic-qzk7o
+**Introduced by:** bd-tc-epic-qzk7o (epic TC)
 
 **Trigger.** Pack assembly saw a teammate row whose body is sealed or missing. The peer-conflict detector refuses to treat that as agreement and emits an unassessed posture instead of a false no-conflict.
 

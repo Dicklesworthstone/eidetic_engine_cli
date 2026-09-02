@@ -2,7 +2,8 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "resume_no_session_evidence",
   "introduced_by": {
-    "bead": "bd-resume-verb-v0f57"
+    "bead": "bd-resume-verb-v0f57",
+    "epic_letter": "RESUME"
   },
   "surfaces": [
     "resume"

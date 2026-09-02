@@ -1,7 +1,10 @@
 {
   "schema": "ee.failure_mode_fixture.v1",
   "code": "context_candidate_sealed",
-  "introduced_by": { "bead": "bd-sealed-preregistration-memory-b67be" },
+  "introduced_by": {
+    "bead": "bd-sealed-preregistration-memory-b67be",
+    "epic_letter": "SEALED"
+  },
   "surfaces": ["pack", "context"],
   "severity": "info",
   "repair_present": true,

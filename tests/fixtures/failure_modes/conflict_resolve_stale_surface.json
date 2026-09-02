@@ -2,7 +2,8 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "conflict_resolve_stale_surface",
   "introduced_by": {
-    "bead": "bd-3a1op.4"
+    "bead": "bd-3a1op.4",
+    "epic_letter": "ADR0066"
   },
   "surfaces": [
     "conflict resolve"

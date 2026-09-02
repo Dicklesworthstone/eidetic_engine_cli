@@ -2,7 +2,8 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "retrieval_affinity_cold",
   "introduced_by": {
-    "bead": "bd-3a1op.2"
+    "bead": "bd-3a1op.2",
+    "epic_letter": "ADR0066"
   },
   "surfaces": [
     "steward run retrieval_affinity_refresh",

@@ -2,7 +2,8 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "team_lane_conflict_deferred",
   "introduced_by": {
-    "bead": "bd-tc-epic-qzk7o"
+    "bead": "bd-tc-epic-qzk7o",
+    "epic_letter": "TC"
   },
   "surfaces": [
     "pack"

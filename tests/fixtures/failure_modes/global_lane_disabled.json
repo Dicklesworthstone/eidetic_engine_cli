@@ -2,7 +2,8 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "global_lane_disabled",
   "introduced_by": {
-    "bead": "bd-1bfwa.3"
+    "bead": "bd-1bfwa.3",
+    "epic_letter": "ADR0069"
   },
   "surfaces": [
     "search",

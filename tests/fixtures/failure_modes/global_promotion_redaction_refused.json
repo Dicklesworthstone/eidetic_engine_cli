@@ -1,7 +1,10 @@
 {
   "schema": "ee.failure_mode_fixture.v1",
   "code": "global_promotion_redaction_refused",
-  "introduced_by": { "bead": "bd-1bfwa.2" },
+  "introduced_by": {
+    "bead": "bd-1bfwa.2",
+    "epic_letter": "ADR0069"
+  },
   "surfaces": ["memory"],
   "severity": "medium",
   "repair_present": true,

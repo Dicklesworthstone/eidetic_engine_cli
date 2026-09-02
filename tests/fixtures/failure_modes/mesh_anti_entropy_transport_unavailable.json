@@ -2,7 +2,8 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "mesh_anti_entropy_transport_unavailable",
   "introduced_by": {
-    "bead": "bd-tc-epic-qzk7o.2.5"
+    "bead": "bd-tc-epic-qzk7o.2.5",
+    "epic_letter": "TC"
   },
   "surfaces": [
     "mesh sync"
