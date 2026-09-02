@@ -624,14 +624,30 @@ impl SearchFusionWeights {
             graph: unit_weight_or(config.graph_weight, defaults.graph),
         }
     }
-}
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct SearchFusionAdjustment {
-    pub(crate) multiplier: f32,
-    lexical_component: f32,
-    semantic_component: f32,
-    graph_component: f32,
+    /// Convert EE's three-arm unit weights into Frankensearch's native
+    /// lexical/semantic RRF weights without changing the neutral score scale.
+    ///
+    /// Graph retrieval is not attached to the current searcher, so the two
+    /// available arms are renormalized to Frankensearch's neutral `1 + 1`
+    /// total. A graph-only configuration therefore degrades to neutral hybrid
+    /// retrieval instead of erasing recall. Frankensearch treats zero tier
+    /// weights as invalid/neutral, so an explicitly disabled available arm is
+    /// represented by the smallest stable positive multiplier.
+    pub(crate) fn upstream_rrf_weights(self) -> (f64, f64) {
+        let lexical = f64::from(self.lexical.max(0.0));
+        let semantic = f64::from(self.semantic.max(0.0));
+        let available_sum = lexical + semantic;
+        if !available_sum.is_finite() || available_sum <= f64::EPSILON {
+            return (1.0, 1.0);
+        }
+
+        let scale = 2.0 / available_sum;
+        (
+            (lexical * scale).max(f64::EPSILON),
+            (semantic * scale).max(f64::EPSILON),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -9992,6 +10008,7 @@ async fn diag_search_sync(
             &semantic_result.results,
             config.rrf_k,
             limit,
+            fusion_weights,
         );
         let fusion = FusionDiagnostics {
             elapsed_ms: fusion_start.elapsed().as_secs_f64() * 1000.0,
@@ -10011,7 +10028,6 @@ async fn diag_search_sync(
                             results,
                             explain,
                             FrankensearchFinalScoreScale::Native,
-                            fusion_weights,
                         )
                     })
                     .map_err(|error| {
@@ -10022,8 +10038,13 @@ async fn diag_search_sync(
         } else {
             match fast_embedder.as_ref() {
                 Some(fast_embedder) => {
-                    let searcher =
+                    let mut searcher =
                         TwoTierSearcher::new(Arc::clone(&index), Arc::clone(fast_embedder), config);
+                    if source_mode == SearchSourceMode::Hybrid {
+                        let (lexical_weight, semantic_weight) =
+                            fusion_weights.upstream_rrf_weights();
+                        searcher = searcher.with_rrf_weights(lexical_weight, semantic_weight);
+                    }
                     let searcher = if source_mode == SearchSourceMode::Hybrid {
                         if let Some(lexical) = lexical {
                             searcher.with_lexical(lexical)
@@ -10039,12 +10060,7 @@ async fn diag_search_sync(
                         .map(|(results, metrics)| {
                             let final_score_scale =
                                 two_tier_final_score_scale(source_mode, &results, &metrics);
-                            search_hits_from_scored_results(
-                                results,
-                                explain,
-                                final_score_scale,
-                                fusion_weights,
-                            )
+                            search_hits_from_scored_results(results, explain, final_score_scale)
                         })
                         .map_err(|error| {
                             map_frankensearch_error(&cx, "Diagnostic search failed", error)
@@ -10144,63 +10160,68 @@ fn build_fusion_diagnostics(
     semantic: &[SearchArmHit],
     rrf_k: f64,
     limit: usize,
+    fusion_weights: SearchFusionWeights,
 ) -> FusionDiagnostics {
-    // Diagnostic-only: final result ordering is produced by
-    // Frankensearch's TwoTierSearcher below. This table explains how
-    // the pre-fusion arms overlap without feeding ranking decisions.
-    let mut by_doc: BTreeMap<String, FusionContribution> = BTreeMap::new();
-
-    for hit in lexical {
-        let contribution = rank_contribution(rrf_k, hit.rank);
-        by_doc
-            .entry(hit.doc_id.clone())
-            .and_modify(|entry| {
-                entry.lexical_rank = Some(hit.rank);
-                entry.lexical_contribution = Some(contribution);
-                entry.fused_score += contribution;
-            })
-            .or_insert_with(|| FusionContribution {
-                doc_id: hit.doc_id.clone(),
-                lexical_rank: Some(hit.rank),
-                lexical_contribution: Some(contribution),
-                semantic_rank: None,
-                semantic_contribution: None,
-                fused_score: contribution,
-            });
-    }
-
-    for hit in semantic {
-        let contribution = rank_contribution(rrf_k, hit.rank);
-        by_doc
-            .entry(hit.doc_id.clone())
-            .and_modify(|entry| {
-                entry.semantic_rank = Some(hit.rank);
-                entry.semantic_contribution = Some(contribution);
-                entry.fused_score += contribution;
-            })
-            .or_insert_with(|| FusionContribution {
-                doc_id: hit.doc_id.clone(),
-                lexical_rank: None,
-                lexical_contribution: None,
-                semantic_rank: Some(hit.rank),
-                semantic_contribution: Some(contribution),
-                fused_score: contribution,
-            });
-    }
-
-    let mut per_doc_contribution: Vec<_> = by_doc.into_values().collect();
-    per_doc_contribution.sort_by(|left, right| {
-        right
-            .fused_score
-            .total_cmp(&left.fused_score)
-            .then_with(|| {
-                let left_both = left.lexical_rank.is_some() && left.semantic_rank.is_some();
-                let right_both = right.lexical_rank.is_some() && right.semantic_rank.is_some();
-                right_both.cmp(&left_both)
-            })
-            .then_with(|| left.doc_id.cmp(&right.doc_id))
-    });
-    per_doc_contribution.truncate(limit);
+    // Diagnostic-only: final result ordering is produced by the same
+    // Frankensearch TwoTierSearcher below. Use Frankensearch's public fusion
+    // primitive here as well so this explanation cannot drift into a second
+    // local RRF implementation.
+    let lexical_results = lexical
+        .iter()
+        .map(|hit| crate::search::ScoredResult {
+            doc_id: hit.doc_id.clone().into(),
+            score: hit.raw_score,
+            source: crate::search::ScoreSource::Lexical,
+            index: None,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(hit.raw_score),
+            rerank_score: None,
+            explanation: None,
+            metadata: None,
+        })
+        .collect::<Vec<_>>();
+    let semantic_results = semantic
+        .iter()
+        .enumerate()
+        .map(|(index, hit)| frankensearch::core::types::VectorHit {
+            index: u32::try_from(index).unwrap_or(u32::MAX),
+            score: hit.raw_score,
+            doc_id: hit.doc_id.clone().into(),
+        })
+        .collect::<Vec<_>>();
+    let (lexical_weight, semantic_weight) = fusion_weights.upstream_rrf_weights();
+    let config = frankensearch::RrfConfig {
+        k: rrf_k,
+        lexical_weight,
+        semantic_weight,
+        ..frankensearch::RrfConfig::default()
+    };
+    let fused = frankensearch::rrf_fuse(&lexical_results, &semantic_results, limit, 0, &config);
+    let lexical_contributions =
+        frankensearch::rrf_fuse(&lexical_results, &[], lexical_results.len(), 0, &config)
+            .into_iter()
+            .map(|hit| (hit.doc_id.to_string(), hit.rrf_score))
+            .collect::<BTreeMap<_, _>>();
+    let semantic_contributions =
+        frankensearch::rrf_fuse(&[], &semantic_results, semantic_results.len(), 0, &config)
+            .into_iter()
+            .map(|hit| (hit.doc_id.to_string(), hit.rrf_score))
+            .collect::<BTreeMap<_, _>>();
+    let per_doc_contribution = fused
+        .into_iter()
+        .map(|hit| {
+            let doc_id = hit.doc_id.to_string();
+            FusionContribution {
+                lexical_rank: hit.lexical_rank.map(|rank| rank + 1),
+                lexical_contribution: lexical_contributions.get(&doc_id).copied(),
+                semantic_rank: hit.semantic_rank.map(|rank| rank + 1),
+                semantic_contribution: semantic_contributions.get(&doc_id).copied(),
+                fused_score: hit.rrf_score,
+                doc_id,
+            }
+        })
+        .collect();
 
     FusionDiagnostics {
         algorithm: "reciprocal_rank_fusion",
@@ -10208,12 +10229,6 @@ fn build_fusion_diagnostics(
         per_doc_contribution,
         elapsed_ms: 0.0,
     }
-}
-
-fn rank_contribution(rrf_k: f64, one_based_rank: usize) -> f64 {
-    let rank = one_based_rank.saturating_sub(1);
-    let rank_u32 = u32::try_from(rank).unwrap_or(u32::MAX);
-    1.0 / (rrf_k + f64::from(rank_u32) + 1.0)
 }
 
 fn score_source_from_frankensearch(source: crate::search::ScoreSource) -> ScoreSource {
@@ -10237,128 +10252,6 @@ pub(crate) fn resolved_search_fusion_weights(workspace_path: &Path) -> SearchFus
     crate::core::config_surface::merged_workspace_config(workspace_path)
         .map(|config| SearchFusionWeights::from_config(&config.values.search))
         .unwrap_or_default()
-}
-
-fn non_negative_component_score(score: Option<f32>) -> f32 {
-    score
-        .filter(|score| score.is_finite())
-        .map_or(0.0, |score| score.max(0.0))
-}
-
-fn semantic_component_score(hit: &SearchHit) -> f32 {
-    non_negative_component_score(hit.quality_score.or(hit.fast_score))
-}
-
-fn weighted_component_mix(
-    weights: SearchFusionWeights,
-    lexical_component: f32,
-    semantic_component: f32,
-    graph_component: f32,
-) -> f32 {
-    (weights.lexical * lexical_component)
-        + (weights.semantic * semantic_component)
-        + (weights.graph * graph_component)
-}
-
-fn weighted_available_component_mix(
-    weights: SearchFusionWeights,
-    lexical_component: f32,
-    semantic_component: f32,
-    graph_component: f32,
-) -> f32 {
-    if graph_component > 0.0 {
-        return weighted_component_mix(
-            weights,
-            lexical_component,
-            semantic_component,
-            graph_component,
-        );
-    }
-
-    let wired_weight_sum = weights.lexical + weights.semantic;
-    if !wired_weight_sum.is_finite() || wired_weight_sum <= f32::EPSILON {
-        return weighted_available_component_mix(
-            SearchFusionWeights::default(),
-            lexical_component,
-            semantic_component,
-            graph_component,
-        );
-    }
-    let total_weight = weights.lexical + weights.semantic + weights.graph;
-    let scale = if total_weight.is_finite() && total_weight > wired_weight_sum {
-        total_weight / wired_weight_sum
-    } else {
-        1.0
-    };
-    (weights.lexical * scale * lexical_component) + (weights.semantic * scale * semantic_component)
-}
-
-pub(crate) fn configured_fusion_adjustment(
-    hit: &SearchHit,
-    score_is_rrf_fused: bool,
-    weights: SearchFusionWeights,
-) -> Option<SearchFusionAdjustment> {
-    if !score_is_rrf_fused || hit.source == ScoreSource::Reranked || !hit.score.is_finite() {
-        return None;
-    }
-
-    let lexical_component = non_negative_component_score(hit.lexical_score);
-    let semantic_component = semantic_component_score(hit);
-    let graph_component = 0.0;
-    if lexical_component == 0.0 && semantic_component == 0.0 && graph_component == 0.0 {
-        return None;
-    }
-
-    let default_weights = SearchFusionWeights::default();
-    let default_mix = weighted_available_component_mix(
-        default_weights,
-        lexical_component,
-        semantic_component,
-        graph_component,
-    );
-    if !default_mix.is_finite() || default_mix <= f32::EPSILON {
-        return None;
-    }
-
-    let configured_mix = weighted_available_component_mix(
-        weights,
-        lexical_component,
-        semantic_component,
-        graph_component,
-    );
-    if !configured_mix.is_finite() {
-        return None;
-    }
-    let multiplier = (configured_mix / default_mix).max(0.0);
-    if !multiplier.is_finite() {
-        return None;
-    }
-
-    Some(SearchFusionAdjustment {
-        multiplier,
-        lexical_component,
-        semantic_component,
-        graph_component,
-    })
-}
-
-fn append_configured_fusion_weight_factor(
-    explanation: &mut ScoreExplanation,
-    weights: SearchFusionWeights,
-    adjustment: SearchFusionAdjustment,
-) {
-    let base = explanation.summary.trim_end_matches('.');
-    explanation.summary = format!(
-        "{base}. Configured fusion weights adjusted score by {:.4}x (lexical={:.2}, semantic={:.2}, graph={:.2}).",
-        adjustment.multiplier, weights.lexical, weights.semantic, weights.graph
-    );
-    explanation.factors.push(ScoreFactor::new(
-        "configured_fusion_weight",
-        adjustment.multiplier,
-        "workspace search.lexical_weight/search.semantic_weight/search.graph_weight multiplier",
-        "search.lexical_weight/search.semantic_weight/search.graph_weight",
-        "adjusted_score = raw_fusion_score * (configured_available_component_mix / default_available_component_mix)",
-    ));
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -10398,7 +10291,6 @@ fn search_hit_from_scored_result(
     result: crate::search::ScoredResult,
     explain: bool,
     final_score_scale: FrankensearchFinalScoreScale,
-    fusion_weights: SearchFusionWeights,
 ) -> SearchHit {
     let upstream_source = score_source_from_frankensearch(result.source);
     // Frankensearch reports which arm(s) contributed to a hit in `source`.
@@ -10442,20 +10334,8 @@ fn search_hit_from_scored_result(
         metadata: result.metadata.map(|m| (*m).clone()),
         explanation: None,
     };
-    let fusion_adjustment = configured_fusion_adjustment(
-        &hit,
-        final_score_scale == FrankensearchFinalScoreScale::RrfFused,
-        fusion_weights,
-    );
-    if let Some(adjustment) = fusion_adjustment {
-        hit.score = (hit.score * adjustment.multiplier).max(0.0);
-    }
     if explain {
-        let mut explanation = ScoreExplanation::generate(&hit);
-        if let Some(adjustment) = fusion_adjustment {
-            append_configured_fusion_weight_factor(&mut explanation, fusion_weights, adjustment);
-        }
-        hit.explanation = Some(explanation);
+        hit.explanation = Some(ScoreExplanation::generate(&hit));
     }
     hit
 }
@@ -10472,13 +10352,10 @@ fn search_hits_from_scored_results(
     results: Vec<crate::search::ScoredResult>,
     explain: bool,
     final_score_scale: FrankensearchFinalScoreScale,
-    fusion_weights: SearchFusionWeights,
 ) -> Vec<SearchHit> {
     let mut hits = results
         .into_iter()
-        .map(|result| {
-            search_hit_from_scored_result(result, explain, final_score_scale, fusion_weights)
-        })
+        .map(|result| search_hit_from_scored_result(result, explain, final_score_scale))
         .collect::<Vec<_>>();
 
     if final_score_scale == FrankensearchFinalScoreScale::Native
@@ -11316,7 +11193,6 @@ async fn search_sync_with_performance(
                         results,
                         explain,
                         FrankensearchFinalScoreScale::Native,
-                        fusion_weights,
                     );
                     canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                     sort_search_hits_by_score_order(&mut hits);
@@ -11369,6 +11245,10 @@ async fn search_sync_with_performance(
         );
         let searcher_build_start = Instant::now();
         let mut searcher = TwoTierSearcher::new(index, fast_embedder, config);
+        if source_mode == SearchSourceMode::Hybrid {
+            let (lexical_weight, semantic_weight) = fusion_weights.upstream_rrf_weights();
+            searcher = searcher.with_rrf_weights(lexical_weight, semantic_weight);
+        }
         push_search_performance_timing(
             &async_timings,
             "searchSync::searcherBuild",
@@ -11487,12 +11367,7 @@ async fn search_sync_with_performance(
                         reranked_count,
                     );
                 }
-                let mut hits = search_hits_from_scored_results(
-                    results,
-                    explain,
-                    final_score_scale,
-                    fusion_weights,
-                );
+                let mut hits = search_hits_from_scored_results(results, explain, final_score_scale);
                 canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                 sort_search_hits_by_score_order(&mut hits);
                 Ok((hits, Vec::new()))
@@ -17412,7 +17287,13 @@ mod tests {
             },
         ];
 
-        let fusion = build_fusion_diagnostics(&lexical, &semantic, 60.0, 10);
+        let fusion = build_fusion_diagnostics(
+            &lexical,
+            &semantic,
+            60.0,
+            10,
+            SearchFusionWeights::default(),
+        );
         let mem_a = fusion
             .per_doc_contribution
             .iter()
@@ -17423,6 +17304,42 @@ mod tests {
         assert_eq!(mem_a.semantic_rank, Some(2));
         let expected = (1.0 / 61.0) + (1.0 / 62.0);
         assert!((mem_a.fused_score - expected).abs() < 0.000_001);
+        Ok(())
+    }
+
+    #[test]
+    fn diag_search_fusion_uses_upstream_configured_weights() -> TestResult {
+        let lexical = [SearchArmHit {
+            doc_id: "mem-lexical".to_string(),
+            raw_score: 8.0,
+            rank: 1,
+        }];
+        let semantic = [SearchArmHit {
+            doc_id: "mem-semantic".to_string(),
+            raw_score: 0.8,
+            rank: 1,
+        }];
+        let fusion = build_fusion_diagnostics(
+            &lexical,
+            &semantic,
+            60.0,
+            10,
+            SearchFusionWeights {
+                lexical: 1.0,
+                semantic: 0.0,
+                graph: 0.0,
+            },
+        );
+
+        assert_eq!(fusion.per_doc_contribution[0].doc_id, "mem-lexical");
+        assert!(
+            fusion.per_doc_contribution[0].fused_score > fusion.per_doc_contribution[1].fused_score,
+            "Frankensearch weighted RRF must prefer the configured lexical arm"
+        );
+        assert_eq!(
+            fusion.per_doc_contribution[0].lexical_contribution,
+            Some(fusion.per_doc_contribution[0].fused_score)
+        );
         Ok(())
     }
 
@@ -19105,12 +19022,8 @@ mod tests {
                 metadata: None,
             })
             .collect();
-        let hits = search_hits_from_scored_results(
-            results,
-            true,
-            FrankensearchFinalScoreScale::Native,
-            SearchFusionWeights::default(),
-        );
+        let hits =
+            search_hits_from_scored_results(results, true, FrankensearchFinalScoreScale::Native);
 
         assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].score, 1.0);
@@ -19149,12 +19062,8 @@ mod tests {
                 metadata: None,
             })
             .collect();
-        let hits = search_hits_from_scored_results(
-            results,
-            false,
-            FrankensearchFinalScoreScale::Native,
-            SearchFusionWeights::default(),
-        );
+        let hits =
+            search_hits_from_scored_results(results, false, FrankensearchFinalScoreScale::Native);
 
         assert!(hits.iter().all(|hit| (hit.score - 0.5).abs() < 1e-6));
         assert!(hits.iter().all(|hit| hit.lexical_score == Some(4.25)));
@@ -19178,7 +19087,6 @@ mod tests {
             }],
             false,
             FrankensearchFinalScoreScale::RrfFused,
-            SearchFusionWeights::default(),
         );
 
         assert_eq!(hits[0].source, ScoreSource::Hybrid);
@@ -19212,12 +19120,7 @@ mod tests {
             std::slice::from_ref(&result),
             &metrics,
         );
-        let hits = search_hits_from_scored_results(
-            vec![result],
-            false,
-            scale,
-            SearchFusionWeights::default(),
-        );
+        let hits = search_hits_from_scored_results(vec![result], false, scale);
 
         assert_eq!(scale, FrankensearchFinalScoreScale::Native);
         assert_eq!(hits[0].source, ScoreSource::Lexical);
@@ -19279,7 +19182,6 @@ mod tests {
             },
             true,
             FrankensearchFinalScoreScale::RrfFused,
-            SearchFusionWeights::default(),
         );
 
         assert_eq!(hit.source, ScoreSource::Reranked);
@@ -19300,10 +19202,18 @@ mod tests {
     }
 
     #[test]
-    fn configured_fusion_weights_do_not_rescale_reranker_score() {
-        // Fusion weights apply to the candidate-retrieval score, not the
-        // cross-encoder's final score. With these components the old path
-        // would multiply 0.80 by 2x and report a fictitious 1.60 score.
+    fn configured_fusion_weights_are_normalized_for_upstream_rrf() {
+        let (lexical_weight, semantic_weight) = SearchFusionWeights {
+            lexical: 1.0,
+            semantic: 0.0,
+            graph: 0.0,
+        }
+        .upstream_rrf_weights();
+        assert!((lexical_weight - 2.0).abs() < f64::EPSILON);
+        assert_eq!(semantic_weight, f64::EPSILON);
+
+        // Fusion weights are now consumed by Frankensearch before the result
+        // reaches this adapter, so the adapter cannot rescale a reranker score.
         let rerank_score = 0.80;
         let hit = search_hit_from_scored_result(
             crate::search::ScoredResult {
@@ -19320,11 +19230,6 @@ mod tests {
             },
             true,
             FrankensearchFinalScoreScale::RrfFused,
-            SearchFusionWeights {
-                lexical: 1.0,
-                semantic: 0.0,
-                graph: 0.0,
-            },
         );
 
         assert!((hit.score - rerank_score).abs() < f32::EPSILON);
@@ -19342,6 +19247,14 @@ mod tests {
 
     #[test]
     fn graph_only_config_does_not_zero_hybrid_recall_bd_d67os_19() {
+        let (lexical_weight, semantic_weight) = SearchFusionWeights {
+            lexical: 0.0,
+            semantic: 0.0,
+            graph: 1.0,
+        }
+        .upstream_rrf_weights();
+        assert_eq!((lexical_weight, semantic_weight), (1.0, 1.0));
+
         let hit = search_hit_from_scored_result(
             crate::search::ScoredResult {
                 doc_id: "mem_graph_weight_recall".into(),
@@ -19357,11 +19270,6 @@ mod tests {
             },
             true,
             FrankensearchFinalScoreScale::RrfFused,
-            SearchFusionWeights {
-                lexical: 0.0,
-                semantic: 0.0,
-                graph: 1.0,
-            },
         );
 
         assert!(
@@ -19372,13 +19280,12 @@ mod tests {
         let explanation = hit
             .explanation
             .as_ref()
-            .expect("explain=true should preserve configured-weight explanation");
+            .expect("explain=true should preserve the upstream score explanation");
         assert!(
             explanation
                 .factors
                 .iter()
-                .any(|factor| factor.name == "configured_fusion_weight"
-                    && (factor.value - 1.0).abs() < 1e-6)
+                .all(|factor| factor.name != "configured_fusion_weight")
         );
     }
 
@@ -20681,7 +20588,6 @@ mod tests {
             top_candidate,
             true,
             FrankensearchFinalScoreScale::RrfFused,
-            SearchFusionWeights::default(),
         );
         assert_eq!(top_hit.source, ScoreSource::Reranked);
         assert!((top_hit.score - 1.0).abs() < f32::EPSILON);

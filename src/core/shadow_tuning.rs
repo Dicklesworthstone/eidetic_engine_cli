@@ -41,9 +41,8 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::core::search::{
     SearchDedupMode, SearchFusionWeights, SearchHit, SearchOptions, SearchSourceMode,
-    configured_fusion_adjustment, resolved_search_fusion_weights,
-    run_search_with_read_connection_seeded_with_cx, search_hit_meets_relevance_floor,
-    sort_search_hits_by_score_order,
+    resolved_search_fusion_weights, run_search_with_read_connection_seeded_with_cx,
+    search_hit_meets_relevance_floor, sort_search_hits_by_score_order,
 };
 use crate::db::{DbConnection, StoredAuditEntry, StoredFeedbackEvent, audit_actions};
 use crate::models::MemoryScope;
@@ -548,13 +547,13 @@ fn label_set_hash(triples: &[LabeledTriple]) -> String {
 // `SearchScoringConfig` as the tunable, but that struct has no production
 // consumer — live ranking moves through `SearchFusionWeights`
 // (`search.lexical_weight` / `search.semantic_weight` / `search.graph_weight`),
-// applied per hit by `configured_fusion_adjustment`. The evaluator therefore
-// tunes fusion weights, and the ADR's recency-tau axis is dropped: live search
-// has no recency knob, and sweeping a parameter ranking ignores would report
-// fake capability. The graph axis is kept but its sensitivity is degenerate
-// today (`graph_component` is hardcoded 0.0 in the live adjustment; the weight
-// only moves scores through renormalization) — consumers of the evaluation
-// must read `graph_axis_degenerate` honestly.
+// passed directly to Frankensearch's weighted RRF surface. The evaluator
+// therefore tunes those same upstream fusion weights, and the ADR's
+// recency-tau axis is dropped: live search has no recency knob, and sweeping a
+// parameter ranking ignores would report fake capability. The graph axis is
+// kept but its sensitivity is degenerate today because no graph retrieval arm
+// is attached to the live searcher; consumers of the evaluation must read
+// `graph_axis_degenerate` honestly.
 //
 // Mechanism: single-replay offline re-fusion. Each distinct labeled query is
 // replayed ONCE against the current index (read-only, seeded, floor disabled,
@@ -641,9 +640,8 @@ impl TuningWeights {
 #[derive(Debug, Clone)]
 pub struct QueryReplay {
     pub query: String,
-    /// Hits with `score` restored to the raw fusion score (the workspace's
-    /// own fusion adjustment divided back out), so candidate re-fusion starts
-    /// from the same basis the live pipeline does.
+    /// Bounded final-pool hits retaining the lexical/semantic arm scores that
+    /// Frankensearch exposes for native weighted-RRF replay.
     pub hits: Vec<SearchHit>,
 }
 
@@ -651,9 +649,8 @@ pub struct QueryReplay {
 #[derive(Debug, Clone)]
 pub struct ReplayCollection {
     pub replays: Vec<QueryReplay>,
-    /// Hits dropped because the workspace fusion multiplier was zero and the
-    /// raw score could not be recovered (requires a degenerate zero-weight
-    /// workspace config; counted, never guessed).
+    /// Retained for the stable report contract. Native upstream RRF replay no
+    /// longer needs to divide out a local multiplier, so this is always zero.
     pub unrecoverable_hits: usize,
 }
 
@@ -675,10 +672,8 @@ pub async fn collect_query_replays_with_cx(
     queries: &BTreeSet<String>,
     as_of: DateTime<Utc>,
 ) -> Result<ReplayCollection, ShadowTuningError> {
-    let workspace_weights = resolved_search_fusion_weights(workspace_path);
     let determinism = Deterministic::from_seed(0);
     let mut replays = Vec::with_capacity(queries.len());
-    let mut unrecoverable_hits = 0_usize;
 
     for query in queries {
         shadow_checkpoint(cx)?;
@@ -710,31 +705,15 @@ pub async fn collect_query_replays_with_cx(
         )
         .await
         .map_err(|error| storage_error("replay search failed", &error))?;
-        let mut hits = Vec::with_capacity(report.results.len());
-        for mut hit in report.results {
-            // The live pipeline multiplied the raw fusion score by the
-            // workspace adjustment; divide it back out so candidate
-            // re-fusion starts from the raw basis. The multiplier depends
-            // only on the hit's arm components, which are unchanged.
-            if let Some(adjustment) = configured_fusion_adjustment(&hit, true, workspace_weights) {
-                if adjustment.multiplier > f32::EPSILON {
-                    hit.score /= adjustment.multiplier;
-                } else {
-                    unrecoverable_hits += 1;
-                    continue;
-                }
-            }
-            hits.push(hit);
-        }
         replays.push(QueryReplay {
             query: query.clone(),
-            hits,
+            hits: report.results,
         });
     }
 
     Ok(ReplayCollection {
         replays,
-        unrecoverable_hits,
+        unrecoverable_hits: 0,
     })
 }
 
@@ -796,20 +775,99 @@ fn group_label_gains(labels: &[LabeledTriple]) -> GroupedLabels {
     }
 }
 
-/// Re-fuse one replayed pool with a candidate vector using the production
-/// adjustment, floor, and ordering, and return 1-based ranks by memory id.
+/// Re-fuse one replayed pool through Frankensearch's weighted RRF primitive,
+/// apply the production relevance floor, and return 1-based ranks by memory.
+#[allow(clippy::cast_possible_truncation)]
 fn ranked_pool(hits: &[SearchHit], weights: SearchFusionWeights) -> BTreeMap<String, usize> {
-    let mut pool: Vec<SearchHit> = hits.to_vec();
-    for hit in &mut pool {
-        if let Some(adjustment) = configured_fusion_adjustment(hit, true, weights) {
-            hit.score = (hit.score * adjustment.multiplier).max(0.0);
-        }
-    }
-    pool.retain(|hit| search_hit_meets_relevance_floor(hit, None));
-    sort_search_hits_by_score_order(&mut pool);
-    pool.into_iter()
+    let mut reranked = hits
+        .iter()
+        .filter(|hit| hit.source == crate::core::search::ScoreSource::Reranked)
+        .cloned()
+        .collect::<Vec<_>>();
+    reranked.retain(|hit| search_hit_meets_relevance_floor(hit, None));
+    sort_search_hits_by_score_order(&mut reranked);
+
+    let mut lexical = hits
+        .iter()
+        .filter(|hit| hit.source != crate::core::search::ScoreSource::Reranked)
+        .filter_map(|hit| {
+            hit.lexical_score
+                .filter(|score| score.is_finite())
+                .map(|score| crate::search::ScoredResult {
+                    doc_id: hit.doc_id.clone().into(),
+                    score,
+                    source: crate::search::ScoreSource::Lexical,
+                    index: None,
+                    fast_score: None,
+                    quality_score: None,
+                    lexical_score: Some(score),
+                    rerank_score: None,
+                    explanation: None,
+                    metadata: None,
+                })
+        })
+        .collect::<Vec<_>>();
+    lexical.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.doc_id.cmp(&right.doc_id))
+    });
+
+    let mut semantic = hits
+        .iter()
+        .filter(|hit| hit.source != crate::core::search::ScoreSource::Reranked)
+        .filter_map(|hit| {
+            hit.quality_score
+                .or(hit.fast_score)
+                .filter(|score| score.is_finite())
+                .map(|score| (hit.doc_id.clone(), score))
+        })
+        .collect::<Vec<_>>();
+    semantic.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let semantic = semantic
+        .into_iter()
         .enumerate()
-        .map(|(index, hit)| (hit.doc_id, index + 1))
+        .map(
+            |(index, (doc_id, score))| frankensearch::core::types::VectorHit {
+                index: u32::try_from(index).unwrap_or(u32::MAX),
+                score,
+                doc_id: doc_id.into(),
+            },
+        )
+        .collect::<Vec<_>>();
+
+    let (lexical_weight, semantic_weight) = weights.upstream_rrf_weights();
+    let config = frankensearch::RrfConfig {
+        lexical_weight,
+        semantic_weight,
+        ..frankensearch::RrfConfig::default()
+    };
+    let by_id = hits
+        .iter()
+        .map(|hit| (hit.doc_id.as_str(), hit))
+        .collect::<BTreeMap<_, _>>();
+    let fused_ids = frankensearch::rrf_fuse(&lexical, &semantic, hits.len(), 0, &config)
+        .into_iter()
+        .filter_map(|fused| {
+            let doc_id = fused.doc_id.to_string();
+            let mut hit = (*by_id.get(doc_id.as_str())?).clone();
+            hit.score = fused.rrf_score as f32;
+            hit.source = crate::core::search::ScoreSource::Hybrid;
+            search_hit_meets_relevance_floor(&hit, None).then_some(hit.doc_id)
+        })
+        .collect::<Vec<_>>();
+    reranked
+        .into_iter()
+        .map(|hit| hit.doc_id)
+        .chain(fused_ids)
+        .enumerate()
+        .map(|(index, doc_id)| (doc_id, index + 1))
         .collect()
 }
 
@@ -881,9 +939,8 @@ pub struct TuningEvaluation {
     pub queries_without_gain: usize,
     pub labels_unmapped_signal: usize,
     pub labels_total: usize,
-    /// The graph fusion axis currently only moves scores through
-    /// renormalization (`graph_component` is 0.0 in the live adjustment), so
-    /// its deltas must not be read as real graph-signal tuning.
+    /// No graph retrieval arm is attached to the live searcher, so graph-axis
+    /// deltas must not be read as real graph-signal tuning.
     pub graph_axis_degenerate: bool,
     /// `blake3:<hex>` over the full evaluation (candidates + scores).
     pub evaluation_hash: String,
@@ -2311,16 +2368,13 @@ mod tests {
 
     #[test]
     fn evaluator_hand_computed_metric_and_rank_flip_winner() -> TestResult {
-        // mem-a is lexical-only (raw 0.0255), mem-b semantic-only (raw
-        // 0.020). Flipping their order needs mult(b)/mult(a) > 0.0255/0.020
-        // = 1.275. Hand-derived ratios per single-axis grid candidate:
-        // lexical -0.10 → 1.0125/0.7875 ≈ 1.2857 (flips); semantic +0.10 →
-        // 1.21/0.99 ≈ 1.2222 (does not); all smaller offsets are weaker, and
-        // the graph axis rescales both arms identically (degenerate — never
-        // flips). The single helpful label on mem-b therefore makes
-        // lexical -0.10 the unique strict winner: incumbent = 1/log2(3),
-        // winner = 1/log2(2) = 1.0, and descent cannot beat a perfect score
-        // so the sweep stops after one non-improving round.
+        // mem-a is lexical-only and mem-b semantic-only. Neutral upstream RRF
+        // ties their rank contributions, so Frankensearch's lexical tiebreak
+        // puts mem-a first. The first grid vector (`lexical -0.10`) normalizes
+        // to lexical=0.875, semantic=1.125 and flips the order. The single
+        // helpful label on mem-b therefore makes that first strict improver
+        // the deterministic winner: incumbent = 1/log2(3), winner =
+        // 1/log2(2) = 1.0. Descent cannot beat a perfect score.
         let replays = [QueryReplay {
             query: "q1".to_owned(),
             hits: vec![
