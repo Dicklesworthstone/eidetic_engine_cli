@@ -1004,6 +1004,9 @@ the closed daemon hot-mode surface.
 |------|----------|------|
 | `action_override_not_actionable` | low | (TBD) |
 | `advisory_memory` | info | (TBD) — advisory-memory presence marker |
+| `backup_schema_coverage_incomplete` | warning | bd-reality-core-convergence-1azkt.13 — required table family has no portable typed coverage |
+| `backup_source_rows_not_covered` | high | bd-reality-core-convergence-1azkt.13 — the exported snapshot contains non-empty required rows that restore cannot rehydrate |
+| `backup_table_inventory_unclassified` | high | bd-reality-core-convergence-1azkt.13 — a migrated table has no explicit recovery disposition |
 | `degraded_context` | info | bd-17c65.5.2 (E2) — retired tombstone for legacy meta-signal; context emits concrete degraded[] entries instead |
 | `dry_run_recommended` | info | (TBD) |
 | `fixture_tier_mismatch` | low | (TBD) |

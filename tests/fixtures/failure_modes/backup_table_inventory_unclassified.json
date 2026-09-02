@@ -1,0 +1,55 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "backup_table_inventory_unclassified",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.13",
+    "epic_letter": "C"
+  },
+  "surfaces": [
+    "backup create",
+    "export",
+    "backup restore"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "The live migrated database contains a user table with no explicit recovery disposition. The backup cannot prove that the table is portable, rebuildable, rekeyed, or intentionally ephemeral.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee backup create --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "backup_table_inventory_unclassified",
+    "severity": "high",
+    "message_contains": [
+      "migrated table(s)",
+      "no backup disposition"
+    ],
+    "repair_contains": "classify every migrated table",
+    "repair_string": "classify every migrated table before treating this backup as complete",
+    "repair_safety": [
+      {
+        "appliesTo": "classify every migrated table before treating this backup as complete",
+        "command": null,
+        "riskClass": "unavailable_or_manual_only",
+        "preflightCommand": null,
+        "requiresHumanApproval": true,
+        "mutatesExternalState": false,
+        "mutatesTrackerState": false,
+        "privacyClass": "no_command",
+        "nextAction": "manual_only",
+        "ruleId": "repair_safety:unavailable_or_manual_only",
+        "source": "repair_action_safety",
+        "reasonCode": "manual_only_repair",
+        "evidence": [
+          "recovery_kind_none"
+        ],
+        "preconditions": [
+          "backup_schema_review_required"
+        ],
+        "manualStep": "Classify the newly migrated table and add recovery coverage before relying on the backup."
+      }
+    ]
+  }
+}

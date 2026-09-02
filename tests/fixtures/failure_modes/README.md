@@ -41,6 +41,9 @@ in the same commit, keeping the catalog complete by construction.
 | `malformed_validity_filtered` | search | medium | bd-17c65.10.6 (J6) |
 | `validity_filtered_significant_recall_drop` | search, context | info | bd-17c65.10.6 (J6) |
 | `output_redaction_disabled` | search, context | info | bd-17c65.2.9 (B10) |
+| `backup_table_inventory_unclassified` | backup create, export, backup restore | high | bd-reality-core-convergence-1azkt.13 (C) |
+| `backup_schema_coverage_incomplete` | backup create, export | warning | bd-reality-core-convergence-1azkt.13 (C) |
+| `backup_source_rows_not_covered` | backup create, export, backup restore | high | bd-reality-core-convergence-1azkt.13 (C) |
 | `redaction_level_invalid` | export, handoff create, context, support bundle | low | bd-17c65.11.6 (K6) |
 | `redaction_pattern_matched` | export, handoff create, context, support bundle | medium | bd-17c65.11.6 (K6) |
 | `redaction_round_trip_marker_preserved` | import jsonl | info | bd-17c65.11.6 (K6) |

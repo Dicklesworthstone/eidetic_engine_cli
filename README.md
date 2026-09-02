@@ -1446,8 +1446,8 @@ base retrieval signal dominant.
 | Command | Purpose |
 |---|---|
 | `ee export [--output-dir <dir>] [--redaction standard]` | Export redacted JSONL records as a portable side-path artifact |
-| `ee backup create [--label <name>] [--include-graph-cache[=bool]]` | Create a verified backup with manifest; graph-cache derived assets are included by default |
-| `ee backup list` / `verify <id>` / `inspect <id>` | Audit existing backups |
+| `ee backup create [--label <name>] [--include-graph-cache[=bool]]` | Create a hashed portable backup and report exact migrated-table recovery coverage; graph-cache derived assets are included by default |
+| `ee backup list` / `verify <id>` / `inspect <id>` | Audit artifact integrity and the manifest `recoveryInventory` |
 | `ee backup restore <backup-id> --side-path <path>` | Restore into an isolated side path |
 
 ### Diagnostics, eval, ops
@@ -2216,9 +2216,8 @@ a raw Tailscale node key.
 ## Backup & Restore
 
 ```bash
-# Verified backup, including graph snapshots, witnesses, and result-cache rows
-ee backup create --label pre-refactor
-✓ backup bk_01HQ4… (32 MB) verified
+# Create a hashed backup, including graph snapshots, witnesses, and result-cache rows
+ee backup create --label pre-refactor --json
 
 # Portable redacted JSONL export
 ee export --output-dir ./ee-export --redaction standard --json
@@ -2233,14 +2232,24 @@ ee backup inspect bk_01HQ4… --json
 ee backup restore bk_01HQ4… --side-path ~/ee-restored/
 ```
 
-Backups include the durable DB/JSONL source of truth, the curation audit log,
-and a `manifest.json` with content hashes. By default, `ee backup create` also
-includes graph-cache derived assets: graph snapshots, graph algorithm
-witnesses, and graph algorithm result-cache rows. Use
-`--include-graph-cache=false` for a source-only backup, and use
-`ee backup restore --skip-graph-cache` when restore should leave that cache cold
-and re-warm it on first use. Missing index manifests are reported as degraded.
-Verification re-hashes everything included on disk.
+The portable record stream currently preserves the workspace, memories, tags,
+memory links, attempt-family lineage, and audit rows. It does **not** yet claim
+lossless recovery of every durable table. Each create/export response and
+`manifest.json` includes `recoveryInventory`, reconciled against the live
+migrated schema with an exact row count and disposition for every table. If a
+required table has non-empty rows that are not represented in restore
+artifacts, creation returns `status: "partial"`, verification posture is
+`incomplete_source_coverage`, and `degraded[]` names the affected tables. Do
+not treat that artifact as a complete recovery point.
+
+By default, `ee backup create` also includes graph-cache derived assets: graph
+snapshots, graph algorithm witnesses, and graph algorithm result-cache rows.
+Use `--include-graph-cache=false` when those rebuildable assets are unnecessary,
+and use `ee backup restore --skip-graph-cache` when restore should leave that
+cache cold and re-warm it on first use. Missing index manifests are reported as
+degraded. `ee backup verify` re-hashes everything included on disk; a clean hash
+verdict proves artifact integrity, while `recoveryInventory` separately states
+source coverage.
 
 ---
 
@@ -2517,7 +2526,8 @@ remains a recorded post-v1 follow-up.
 **How big does the database get?**
 On a typical multi-project developer machine, expect 50-500 MB after a year.
 Cold/warm/hot tiering keeps the hot path small. `ee backup create` produces
-portable, verified record archives.
+portable, hashed record archives; inspect `recoveryInventory` before relying on
+one as a complete recovery point.
 
 **What happens if my index gets corrupted?**
 `ee index rebuild` reproduces it from the DB. Indexes are derived assets, so
