@@ -1480,7 +1480,6 @@ fn same_embedder_identity(left: &str, right: &str) -> bool {
     fn last_segment(value: &str) -> String {
         value
             .trim()
-            .trim_end_matches('/')
             .rsplit('/')
             .next()
             .unwrap_or_default()
