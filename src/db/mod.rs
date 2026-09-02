@@ -12366,6 +12366,58 @@ impl DbConnection {
         Ok(())
     }
 
+    /// Restore one portable CASS session while preserving its durable fields.
+    ///
+    /// Portable backups intentionally omit host-local source paths. Keeping
+    /// this path crate-private prevents ordinary ingest callers from bypassing
+    /// fresh timestamps or the canonical CASS import boundary.
+    pub(crate) fn insert_session_for_recovery(&self, session: &StoredSession) -> Result<()> {
+        if session.source_path.is_some() {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "portable CASS session recovery cannot restore a host-local source path"
+                    .to_owned(),
+            });
+        }
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO sessions (id, workspace_id, cass_session_id, source_path, agent_name, model, started_at, ended_at, message_count, token_count, content_hash, metadata_json, imported_at, updated_at) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            &[
+                Value::Text(session.id.clone()),
+                Value::Text(session.workspace_id.clone()),
+                Value::Text(session.cass_session_id.clone()),
+                session
+                    .agent_name
+                    .as_ref()
+                    .map_or(Value::Null, |agent| Value::Text(agent.clone())),
+                session
+                    .model
+                    .as_ref()
+                    .map_or(Value::Null, |model| Value::Text(model.clone())),
+                session
+                    .started_at
+                    .as_ref()
+                    .map_or(Value::Null, |started| Value::Text(started.clone())),
+                session
+                    .ended_at
+                    .as_ref()
+                    .map_or(Value::Null, |ended| Value::Text(ended.clone())),
+                Value::BigInt(i64::from(session.message_count)),
+                session
+                    .token_count
+                    .map_or(Value::Null, |count| Value::BigInt(i64::from(count))),
+                Value::Text(session.content_hash.clone()),
+                session
+                    .metadata_json
+                    .as_ref()
+                    .map_or(Value::Null, |metadata| Value::Text(metadata.clone())),
+                Value::Text(session.imported_at.clone()),
+                Value::Text(session.updated_at.clone()),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Get a CASS session by its internal ee session ID.
     pub fn get_session(&self, id: &str) -> Result<Option<StoredSession>> {
         let rows = self.query_for(
@@ -13418,6 +13470,82 @@ impl DbConnection {
             ],
         )?;
 
+        Ok(())
+    }
+
+    /// Restore one already-screened evidence row exactly as captured.
+    ///
+    /// The source session and optional memory must already exist in the same
+    /// restored workspace. Live retrieval revalidates the preserved security
+    /// epoch and hashes, so stale or denied evidence remains fail-closed.
+    pub(crate) fn insert_evidence_span_for_recovery(
+        &self,
+        span: &StoredEvidenceSpan,
+    ) -> Result<()> {
+        let session = self
+            .get_session(&span.session_id)?
+            .ok_or_else(|| malformed_evidence_input("restored evidence session does not exist"))?;
+        if session.workspace_id != span.workspace_id {
+            return Err(malformed_evidence_input(
+                "restored evidence session belongs to a different workspace",
+            ));
+        }
+        if let Some(memory_id) = span.memory_id.as_deref() {
+            let memory = self.get_memory(memory_id)?.ok_or_else(|| {
+                malformed_evidence_input("restored evidence memory does not exist")
+            })?;
+            if memory.workspace_id != span.workspace_id {
+                return Err(malformed_evidence_input(
+                    "restored evidence memory belongs to a different workspace",
+                ));
+            }
+        }
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO evidence_spans (id, workspace_id, session_id, memory_id, cass_span_id, span_kind, start_line, end_line, start_byte, end_byte, role, excerpt, content_hash, metadata_json, producer_kind, screening_version, secret_redaction_status, redaction_classes_json, instruction_risk, search_eligibility, pack_eligibility, canonical_provenance_revision, canonical_excerpt_hash, security_policy_epoch, upstream_ref_hash, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+            &[
+                Value::Text(span.id.clone()),
+                Value::Text(span.workspace_id.clone()),
+                Value::Text(span.session_id.clone()),
+                span.memory_id
+                    .as_ref()
+                    .map_or(Value::Null, |memory| Value::Text(memory.clone())),
+                Value::Text(span.cass_span_id.clone()),
+                Value::Text(span.span_kind.clone()),
+                Value::BigInt(i64::from(span.start_line)),
+                Value::BigInt(i64::from(span.end_line)),
+                span.start_byte
+                    .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
+                span.end_byte
+                    .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
+                span.role
+                    .as_ref()
+                    .map_or(Value::Null, |role| Value::Text(role.clone())),
+                Value::Text(span.excerpt.clone()),
+                Value::Text(span.content_hash.clone()),
+                span.metadata_json
+                    .as_ref()
+                    .map_or(Value::Null, |metadata| Value::Text(metadata.clone())),
+                Value::Text(span.producer_kind.clone()),
+                Value::BigInt(i64::from(span.screening_version)),
+                Value::Text(span.secret_redaction_status.clone()),
+                Value::Text(span.redaction_classes_json.clone()),
+                Value::Text(span.instruction_risk.clone()),
+                Value::Text(span.search_eligibility.clone()),
+                Value::Text(span.pack_eligibility.clone()),
+                Value::BigInt(i64::from(span.canonical_provenance_revision)),
+                span.canonical_excerpt_hash
+                    .as_ref()
+                    .map_or(Value::Null, |hash| Value::Text(hash.clone())),
+                Value::BigInt(i64::from(span.security_policy_epoch)),
+                span.upstream_ref_hash
+                    .as_ref()
+                    .map_or(Value::Null, |hash| Value::Text(hash.clone())),
+                Value::Text(span.created_at.clone()),
+                Value::Text(span.updated_at.clone()),
+            ],
+        )?;
         Ok(())
     }
 
