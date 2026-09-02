@@ -1147,8 +1147,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         repair: Some(INIT_AND_MIGRATE_REPAIR_COMMAND.to_owned()),
     })?;
     let workspace = load_workspace(&connection, &workspace_path)?;
-    let export_data = load_export_data(&connection, workspace)?;
-    let recovery_inventory = build_recovery_inventory(&connection)?;
+    let (export_data, recovery_inventory) = load_backup_snapshot(&connection, workspace)?;
     let backup_id = BackupId::now().to_string();
     let backup_root = backup_root(options, &workspace_path);
     let backup_path = backup_root.join(&backup_id);
@@ -3033,13 +3032,33 @@ fn load_export_data(
     connection: &DbConnection,
     workspace: crate::db::StoredWorkspace,
 ) -> Result<BackupExportData, DomainError> {
+    with_backup_read_snapshot(connection, || {
+        load_export_data_in_current_snapshot(connection, workspace)
+    })
+}
+
+fn load_backup_snapshot(
+    connection: &DbConnection,
+    workspace: crate::db::StoredWorkspace,
+) -> Result<(BackupExportData, BackupRecoveryInventory), DomainError> {
+    with_backup_read_snapshot(connection, || {
+        let export_data = load_export_data_in_current_snapshot(connection, workspace)?;
+        let recovery_inventory = build_recovery_inventory(connection)?;
+        Ok((export_data, recovery_inventory))
+    })
+}
+
+fn with_backup_read_snapshot<T>(
+    connection: &DbConnection,
+    load: impl FnOnce() -> Result<T, DomainError>,
+) -> Result<T, DomainError> {
     connection
         .begin_read_snapshot()
         .map_err(|error| DomainError::Storage {
             message: error.to_string(),
             repair: Some("ee db check --workspace .".to_owned()),
         })?;
-    let result = load_export_data_in_current_snapshot(connection, workspace);
+    let result = load();
     match result {
         Ok(data) => {
             connection
@@ -5455,6 +5474,12 @@ mod tests {
     #[test]
     fn recovery_inventory_marks_nonempty_uncovered_source_rows_partial() -> TestResult {
         let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| format!("canonicalize backup fixture workspace: {error}"))?;
+        let database = database
+            .canonicalize()
+            .map_err(|error| format!("canonicalize backup fixture database: {error}"))?;
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         let workspace_id = connection
             .list_workspaces()
