@@ -848,18 +848,31 @@ Plan-targeted version milestones:
 | `0.5.0` | Steward + optional daemon |
 | `0.6.0` | Export, backup, MCP adapter |
 
-### 4. Push And Trigger Release
+### 4. Push And Cut The Release
 
 ```bash
 git push origin main
 ```
 
-The release workflow should detect a version change in `Cargo.toml`, tag, build cross-platform binaries, sign with Sigstore, and upload to GitHub Releases. Expected assets per release:
+Pushing `main` does **not** release anything. `.github/workflows/release.yml`
+is tag-only (`on: push: tags: v*`) and refuses a tag whose version differs
+from `Cargo.toml`; as of 2026-09-02 that workflow, `ci.yml`, and the macOS
+artifact workflow are all manually disabled on GitHub. Releases are cut by
+hand with `dsr` / the local cross-compile flow (see
+`docs/` release notes and the `dsr` skill), then uploaded. Expected assets per
+release:
 
 - `ee-{target}.tar.xz`
 - `ee-{target}.tar.xz.sha256`
-- `ee-{target}.tar.xz.sigstore.json`
+- `SHA256SUMS`, `ee-v{version}-manifest.json`
 - `install.sh`, `install.ps1`
+- `ee-{target}.tar.xz.sigstore.json` **only when the Actions signing job
+  runs**; hand-cut releases such as `v0.14.4` publish `signed: false` in the
+  manifest and carry no Sigstore or SLSA asset
+
+Homebrew (`Dicklesworthstone/homebrew-tap`) is updated by the disabled
+`update-homebrew` job, so a hand-cut release must also bump the formula by
+hand. The `eidetic-engine` crate is not yet published to crates.io.
 
 ### 5. Verify
 

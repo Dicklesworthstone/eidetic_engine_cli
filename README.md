@@ -60,9 +60,10 @@ ee pack "prepare release for this project" --workspace . --max-tokens 4000 --for
 The command returns a Markdown pack of matching durable memories, such as
 project release rules, verification commands, branch traps, and high-severity
 warnings. Each item carries an evidence pointer and a score breakdown. Imported
-`cass` excerpts become searchable after the import report's indexing action;
-they reach the memory-centric pack only after curation links an excerpt to a
-distilled memory.
+`cass` excerpts become searchable after the import report's indexing action
+and can enter a pack directly as typed `evidence_span` items when they pass
+live admission; curation is the optional step that promotes an excerpt into a
+durable learned memory (see [CASS Integration](#cass-integration)).
 
 ### What You Get
 
@@ -324,8 +325,8 @@ Hard constraints. CI fails if any of them break.
 | Method | Status | Evidence |
 |---|---|---|
 | GitHub release installer | available | [latest release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest) |
-| Homebrew tap | available beginning with v0.14.3 | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
-| crates.io | available beginning with v0.14.3; package `eidetic-engine`; binary `ee` | [`eidetic-engine`](https://crates.io/crates/eidetic-engine) |
+| Homebrew tap | available; the formula is refreshed by hand and currently serves v0.14.2, so it can lag the GitHub release | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
+| crates.io | not published yet (`cargo install eidetic-engine` returns "could not find"; checked 2026-09-02) | tracked in `PUBLISH_CHECKLIST.md` |
 | Source build | available now | this README |
 
 ### Release installer
@@ -417,11 +418,11 @@ brew install Dicklesworthstone/tap/ee
 
 ### Cargo
 
-Requires the nightly Rust toolchain pinned by this project.
-
-```bash
-cargo install eidetic-engine
-```
+The `eidetic-engine` package is not on crates.io yet; the franken-stack
+dependencies it needs are still path/git pinned (see
+`PUBLISH_CHECKLIST.md`). Until that lands, use the release installer,
+Homebrew, or the source build below. `cargo install eidetic-engine` will
+fail with "could not find".
 
 ### From source
 
@@ -1655,7 +1656,7 @@ Feature flags:
 | `graph` | active | Default-on graph analytics surface |
 | `differential-networkx` | active test gate | Heavy Python NetworkX differential suite |
 | `mcp` | active optional adapter | Stdio adapter module; default builds keep manifest discovery |
-| `serve` | reserved | Future localhost HTTP/SSE adapter |
+| `serve` | reserved no-op | The loopback-only `ee serve` adapter is always compiled; this flag gates nothing today |
 | `science-analytics` | reserved | Future analytics subsystem; current CLI reports degraded/unavailable posture |
 
 See [`docs/feature_flag_registry.md`](docs/feature_flag_registry.md) for the
@@ -2261,6 +2262,14 @@ memories, 8k imported CASS sessions, and about 120k indexed documents. CI and
 release tooling should only update these rows with artifacts from the same
 hardware class.
 
+**These rows are historical (last synced 2026-05-13) and are not currently
+reproduced by release tooling.** A 2026-09-02 probe of the public `v0.14.4`
+binary on an M4 laptop measured roughly 2 s wall for `ee search`, `ee pack`,
+and `ee status` on a 9-memory workspace, because every process re-verifies
+and fully loads the Model2Vec model before answering. Treat the table as a
+target until `bd-reality-core-convergence-1azkt.6` regenerates it from
+attested raw samples.
+
 <!-- perf:begin hardware-class=mac-m3-pro baseline=benches/baselines/perf_v0_2.json -->
 | Operation | Hardware class | p50 | p99 |
 |---|---|---:|---:|
@@ -2486,9 +2495,8 @@ Boundaries to know:
 | Retention model | Forgetting and decay are product features. Export JSONL into git when you need sealed long-term records. |
 | Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
-| Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) and crates.io (`eidetic-engine`) are supported beginning with v0.14.3. Sigstore/provenance verification is enforced when published or explicitly required; asset coverage can vary by release. |
-| Mesh | Unix live EE-to-EE is shipped (`TcpMeshForegroundSyncTransport`). Two-human Tailscale soak, Windows-host DACL/crash soak, and production IdP vendor soak remain environment remainders. FrankenSQLite remains the local source of truth. |
-| Reserved adapters | `science-analytics` reports a capability gap until its adapter matures. The loopback-only `serve` adapter is implemented. |
+| Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) exists but is refreshed by hand (formula at v0.14.2 as of 2026-09-02). crates.io publication is still pending. Releases are currently cut outside GitHub Actions; `v0.14.4` ships checksums and a manifest but no Sigstore bundle or SLSA provenance, so `--require-provenance` fails against it by design. |
+| Reserved adapters | `science-analytics` reports a capability gap until its adapter matures. The loopback-only `serve` adapter is compiled into every build; the `serve` Cargo feature flag is a reserved no-op. |
 | Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |
 
 ---

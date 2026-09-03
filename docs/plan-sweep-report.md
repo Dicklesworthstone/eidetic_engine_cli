@@ -4,6 +4,14 @@
 **Bead:** eidetic_engine_cli-5rmx  
 **Plan document:** COMPREHENSIVE_PLAN.md (3652 lines)
 
+> **Snapshot notice (added 2026-09-02).** This report is a point-in-time sweep
+> from 2026-05-06 and has not been regenerated. Several verdicts below are
+> superseded: §16 (review/curation) and §17 (procedural rules) are no longer
+> stubbed (the Learn → Retrieve → Pack loop shipped in 0.13.0), §23 hooks and
+> §24 MCP have real installers/adapters, and the migration count, response
+> schema version, and line counts have all moved. The current reality-check
+> ledger is `CLOSE_THE_GAP_PLAN.md`.
+
 ## Summary
 
 | Status | Count | Percentage |

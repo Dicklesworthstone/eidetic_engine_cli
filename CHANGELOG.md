@@ -26,9 +26,11 @@ Release surface (as of 2026-08-29):
 - `v0.14.3` is an annotated tag without a corresponding GitHub Release.
 - `Cargo.toml` carries `version = "0.14.4"` for this cut; prior tags remain
   unchanged.
-- Distribution paths: verified GitHub release installers,
-  `brew install Dicklesworthstone/tap/ee`, and
-  `cargo install eidetic-engine`.
+- Distribution paths: verified GitHub release installers and
+  `brew install Dicklesworthstone/tap/ee` (the formula is bumped by hand and
+  served v0.14.2 as of 2026-09-02). `cargo install eidetic-engine` is **not**
+  available yet: the crate has never been published to crates.io, despite
+  earlier wording in this file that said otherwise.
 
 ### Version timeline (tags and GitHub Releases)
 
@@ -122,9 +124,11 @@ contract hardening, and the first crates.io-ready package layout.
 - **The Rust packages are ready for leaf-first crates.io publication.** The
   internal attribute macro ships as `ee-determinism`; the public package remains
   `eidetic-engine` with the `ee` binary and a bounded source package.
-- **Homebrew and crates.io join the verified release-installer path.** Release
-  v0.14.3 is distributed through `Dicklesworthstone/tap/ee` and the
-  `eidetic-engine` crate in addition to the six-platform GitHub artifacts.
+- **Homebrew joins the verified release-installer path.** The
+  `Dicklesworthstone/tap/ee` formula exists alongside the six-platform GitHub
+  artifacts. (Correction, 2026-09-02: this entry originally also claimed the
+  `eidetic-engine` crate was distributed from crates.io. It was not; the crate
+  has never been published, and the formula is bumped by hand.)
 
 ### Changed
 

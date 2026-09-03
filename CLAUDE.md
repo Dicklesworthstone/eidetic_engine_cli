@@ -44,7 +44,7 @@ tests/
 ├── golden/              # Surface contract snapshots (*.snap)
 ├── snapshots/           # JSON contract snapshots (insta)
 ├── fixtures/            # Test fixtures (eval scenarios, etc.)
-│   └── golden/          # Command/schema golden artifacts (143 files)
+│   └── golden/          # Command/schema golden artifacts (316 files)
 └── *.rs                 # Integration and E2E tests
 ```
 
@@ -66,7 +66,7 @@ tests/
 **Golden snaps** document surface contracts across three locations:
 - `tests/golden/*.snap` — command output and schema contracts
 - `tests/snapshots/*.snap` — JSON contract snapshots (context, search, why, status, doctor)
-- `tests/fixtures/golden/**/*.golden` — command/schema golden artifacts (143 files)
+- `tests/fixtures/golden/**/*.golden` — command/schema golden artifacts (316 files)
 
 The closure-lint script requires these for implements-surface beads.
 
