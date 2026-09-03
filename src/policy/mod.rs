@@ -5255,6 +5255,9 @@ mod tests {
     /// Every fake key below is synthetic and non-functional.
     #[test]
     fn secret_classifier_table_true_positives_and_reporter_false_positives() {
+        // Added in 971c72b2 without an import into the test module (E0425).
+        use super::detect_secret_like_matches;
+
         struct Case {
             label: &'static str,
             input: &'static str,
@@ -5410,7 +5413,10 @@ mod tests {
         // module's `use super::{..}` list, which left every `--all-targets`
         // build of main red (E0425). Import them here, next to their only
         // test caller, so the fix cannot drift away from the test again.
-        use super::{looks_like_word_shaped_identifier, shannon_entropy_bits_per_byte};
+        use super::{
+            STANDALONE_HIGH_ENTROPY_MIN_BITS_PER_BYTE, looks_like_word_shaped_identifier,
+            shannon_entropy_bits_per_byte,
+        };
 
         let random = "ujOeHwdFcAefAZhnM6Jy8c1rihtYlKNxHddmQAtKCsXRpJG2Tr8hzUjEcPVJ2tRK";
         let identifier = "project_ci_graph_debt_audit_should_not_exist_optimized_2026_08_31";
