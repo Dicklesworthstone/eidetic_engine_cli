@@ -222,7 +222,9 @@ landed, with the verdict that backs each claim:
 | `.28` hosted-CI reds | 2 of 4 | Yanked `bisync` gone via vergen-gix 10.0.3 / gix 0.87.1 (every `bisync` release is yanked, so no in-place bump existed); the `rustix::fs::flock` helper and its two scenarios are `cfg(unix)`. Windows handoff smoke and the 90-minute shard cap remain. |
 | `.29` docs factual errors | **closed** | crates.io, Homebrew, Sigstore, `serve`, the perf table, the duplicate Mesh row, AGENTS release process, plan headers. Contract-drift radar clean. |
 | `.30` `ee ask` abstains on a direct hit | code landed + proven | Root cause was **not** the semantic arm (ask marks it degraded unconditionally): the lexical arm was pure Jaccard, which counts a span's answer terms against it. Now the mean of question coverage and Jaccard, with interrogatives as stopwords. `cargo test --locked --lib -- core::ask::tests` passed on the pinned lane. |
-| `.31` mislabelled degraded codes | not started | Exact sites and fix recorded on the bead. |
+| `.31` mislabelled degraded codes | implemented, partly verified | `graph_skyline_disabled` (info) replaces the build-time `graph_feature_disabled` for the `[graph.feature.skyline] enabled=false` config case; `global_lane_migration_required` (info) replaces `scope_metadata_unavailable` when the optional user-global lane is skipped pending its own migration. Both ship a fixture, a taxonomy row, and a regenerated catalog doc. `failure_mode_fixtures_validate_catalog` ok and `degraded_codes_doc_coverage` 7 passed / 0 failed (including byte-identical doc generation). The status golden and insta snapshot edits are **not** execution-verified: the `golden` target timed out compiling and three snapshot reruns died in `bd-glivu` sync failures. |
+| `.33` eval gate harness red since June | filed | `eval_run_happy_path` fails on a fixture-count drift (expects 9, there are 10 since `49fdd720`) and on `fx.async_migration.v1` evaluating zero queries. This is the harness behind "failing evaluations block releases", and it blocked using the public eval surface as the CLI-level proof for `.30`. |
+| `.34` status skyline unit tests red | filed | Two `core::status::tests` skyline tests fail at HEAD; one expects a disabled degradation that never fires for a bare workspace, the other expects one Louvain community and gets zero. Attributed to pre-existing state by an invariance argument over the `.31` diff, since a baseline run at the parent commit returned `proof_broker_refused`. |
 | `.32` tracker hygiene | **closed** | 3 dependency-complete epics closed; 11 shipped ScarletMill beads closed with commit evidence (self-verified, scripts not re-executed); 16 pane-orphaned beads returned to open/unassigned; the parked P0 unblocked. |
 
 Two born-red defects were found by the verification lane itself and fixed in
@@ -231,6 +233,23 @@ passing: commit `971c72b2` had added `shannon_entropy_bits_per_byte`,
 and `detect_secret_like_matches` plus tests that call them, without importing
 them into the test module, so **every `--all-targets` build of `main` was red
 with E0425** — including the one this bridge's `.5`/`.19` want to make green.
+
+Two more red gates were found the same way and filed rather than fixed (`.33`,
+`.34`). Taken together with the E0425s, the pattern matters more than any one
+defect: **three independent gates this bridge depends on were failing before
+this session touched anything**, one of them since June, and each surfaced only
+because a change was pushed through the verification lane rather than reasoned
+about. Any earlier statement that `main` was green was measuring a tree that
+could not compile its own tests.
+
+A structural limit was also confirmed: the frankensearch sibling's unit tests
+cannot be executed from this Mac at all. `cargo test -p frankensearch-lexical`
+fails with `package ... cannot be tested because it requires dev-dependencies
+and is not a member of the workspace`, ee consumes it as a path dependency, the
+sibling sits outside RCH's canonical root, and its six hosted workflows are
+`disabled_manually`. Sibling changes can therefore be compiled and proven only
+through an ee-level test; their own `#[test]`s stay unrun until that CI is
+re-enabled or someone runs the suite on Linux.
 
 Verdicts on the pinned RCH lane at the exact committed tree: `cargo check
 --locked --all-targets` **passed** (`remote_pass`, exit 0), `cargo test
