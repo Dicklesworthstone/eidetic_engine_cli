@@ -206,6 +206,38 @@
 > signed `0.14.5` cut from the pinned RCH lane over the verifier-first
 > critical path, rather than opening a competing plan.
 
+### Execution pass 2026-09-03 (`bd-reality-core-convergence-1azkt.23`–`.32`)
+
+Ten children were filed from the 2026-09-02 addendum's unowned list and wired
+into the existing epic; no competing plan or epic was created. What actually
+landed, with the verdict that backs each claim:
+
+| Bead | State | Evidence |
+| --- | --- | --- |
+| `.23` lexical arm lost under concurrent reads | code landed | Root cause: `TantivyIndex::open` builds an `IndexWriter` and takes Tantivy's exclusive `.tantivy-writer.lock`, so a second read-only process failed the open and `resolve_source_mode_with_tiers` degraded Hybrid to SemanticOnly. Frankensearch `715a29b3` adds `open_read_only` (writer is `Option`, typed `InvalidConfig` on writes, unit test opens read-only while a writer holds the lock); ee uses it and pins the commit. Public-CLI E2E `tests/concurrent_search_lexical_arm_e2e.rs` added. |
+| `.24` per-search DB reopen | code landed, latency unproven | The bound-workspace-id open that only labelled a trace event is now behind `tracing::enabled!`. Acceptance asks for a fresh sample against a source-built binary, which this Mac cannot produce. |
+| `.25` Model2Vec re-hash per process | code landed, tests unrun | Frankensearch `715a29b3` reuses the `.verified` receipt in `ModelArtifactManifestV1::verify_dir_cached`; three unit tests added. They are **UNRUN**: the sibling is a symlink outside RCH's canonical root and frankensearch's hosted CI is disabled. |
+| `.26` posture path loads the model | not started | Implementation plan recorded on the bead (verified-not-loaded state on the existing lazy embedder). |
+| `.27` ship 0.14.5 | blocked | Waits on `.23`/`.28` and the `.20` human authorization. |
+| `.28` hosted-CI reds | 2 of 4 | Yanked `bisync` gone via vergen-gix 10.0.3 / gix 0.87.1 (every `bisync` release is yanked, so no in-place bump existed); the `rustix::fs::flock` helper and its two scenarios are `cfg(unix)`. Windows handoff smoke and the 90-minute shard cap remain. |
+| `.29` docs factual errors | **closed** | crates.io, Homebrew, Sigstore, `serve`, the perf table, the duplicate Mesh row, AGENTS release process, plan headers. Contract-drift radar clean. |
+| `.30` `ee ask` abstains on a direct hit | code landed + proven | Root cause was **not** the semantic arm (ask marks it degraded unconditionally): the lexical arm was pure Jaccard, which counts a span's answer terms against it. Now the mean of question coverage and Jaccard, with interrogatives as stopwords. `cargo test --locked --lib -- core::ask::tests` passed on the pinned lane. |
+| `.31` mislabelled degraded codes | not started | Exact sites and fix recorded on the bead. |
+| `.32` tracker hygiene | **closed** | 3 dependency-complete epics closed; 11 shipped ScarletMill beads closed with commit evidence (self-verified, scripts not re-executed); 16 pane-orphaned beads returned to open/unassigned; the parked P0 unblocked. |
+
+Two born-red defects were found by the verification lane itself and fixed in
+passing: commit `971c72b2` had added `shannon_entropy_bits_per_byte`,
+`looks_like_word_shaped_identifier`, `STANDALONE_HIGH_ENTROPY_MIN_BITS_PER_BYTE`,
+and `detect_secret_like_matches` plus tests that call them, without importing
+them into the test module, so **every `--all-targets` build of `main` was red
+with E0425** — including the one this bridge's `.5`/`.19` want to make green.
+
+Verdicts on the pinned RCH lane at the exact committed tree: `cargo check
+--locked --all-targets` **passed** (`remote_pass`, exit 0) and `cargo test
+--locked --lib -- core::ask::tests` **passed**. The concurrent-search E2E first
+hit `bd-glivu` (30 s `sync_to_remote` timeout on a cold pinned-tree upload),
+which is an environment failure, not a test result.
+
 ### Current execution ledger (2026-09-01)
 
 This is the bounded working checklist requested by the operator. It is not a
