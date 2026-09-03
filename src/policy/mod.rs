@@ -5406,6 +5406,12 @@ mod tests {
 
     #[test]
     fn shannon_entropy_separates_random_material_from_identifiers() {
+        // These two helpers were added in 971c72b2 without joining the test
+        // module's `use super::{..}` list, which left every `--all-targets`
+        // build of main red (E0425). Import them here, next to their only
+        // test caller, so the fix cannot drift away from the test again.
+        use super::{looks_like_word_shaped_identifier, shannon_entropy_bits_per_byte};
+
         let random = "ujOeHwdFcAefAZhnM6Jy8c1rihtYlKNxHddmQAtKCsXRpJG2Tr8hzUjEcPVJ2tRK";
         let identifier = "project_ci_graph_debt_audit_should_not_exist_optimized_2026_08_31";
         assert!(shannon_entropy_bits_per_byte(random) >= STANDALONE_HIGH_ENTROPY_MIN_BITS_PER_BYTE);
