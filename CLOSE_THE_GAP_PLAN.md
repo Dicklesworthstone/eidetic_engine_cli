@@ -121,6 +121,90 @@
 > `.5`, `.7`, `.9`, `.11`, `.16`, and `.17` received dated evidence comments;
 > no new Bead was created, no status was advanced, and the scoped graph still
 > has no cycle (20 open, 3 in progress, 0 closed).
+>
+> **2026-09-02 fourth-pass reality check (shipped-binary focus).** Repeated
+> end to end at `a4289680` (`v0.14.4-77-ga4289680`), this time probing the
+> **public `v0.14.4` release archive** (`ee-aarch64-apple-darwin.tar.xz`,
+> `ee version --json` reports `gitCommit: null`) in a fresh isolated
+> workspace, alongside the installed `0.14.2`. New or sharpened findings:
+>
+> - **Shipped search truth is wrong.** With the pinned Model2Vec model
+>   present and `ee model status` reporting `neural_local`, 9/9 vectors
+>   embedded, every `search`/`similar`/`recall` call emits high-severity
+>   `embed_model_unavailable` ("semantic index metadata does not record a
+>   vector dimension") even immediately after `ee index rebuild`; `ee orient`
+>   reports `embed_backend: hash_fallback` while `ee search` reports
+>   `neural_local`; `ee status` reports `search_index_degraded` +
+>   `search_unavailable` + `graph_feature_disabled` (a skyline *config* flag,
+>   on a build whose graph feature is on) while `ee index status` reports
+>   `ready` with equal generations. §B's fix (`1898c975`) is on `main` only;
+>   the release users install predates it by 77 commits.
+> - **Concurrency non-determinism reproduced on `0.14.4`, not just `0.14.2`.**
+>   Eight identical concurrent searches split 5 `cosine_similarity` +
+>   `source_mode_fallback` (lexical arm unavailable) vs 3 `rrf_fused`, with
+>   different result ordering; six concurrent read-only packs produced two
+>   distinct hashes; four packs alongside one `remember` produced three hashes
+>   plus `search_index_stale`. Serial runs are byte-stable (10/10 searches,
+>   6/6 packs). On installed `0.14.2`, 5/8 concurrent searches return zero
+>   results and 2/8 error `search_index`. Owners remain `.10`, `.2`, `.3`.
+> - **`ee ask` abstains on a direct hit.** "Which command must run before
+>   every release tag?" against a store containing "Run cargo fmt --check
+>   before every release tag." returns `abstained: true`, 0 citations,
+>   `ask_semantic_degraded`. This is an `.11`/`.12` usefulness failure, not
+>   calibration theater.
+> - **Latency is 20–50× the README table on a 9-memory store.** `search`,
+>   `pack`, `status`, `capabilities`, `index status` each cost ~1.6–2.5 s
+>   wall; `why` 0.35 s, `memory list` 0.27 s, `db status` 0.22 s. The fixed
+>   cost sits on the index/model-lifecycle path (unchanged with
+>   `EE_EMBED_MODEL_DIR=/nonexistent`), not DB open. `.6` must reproduce or
+>   remove the table; nobody owns the root cause.
+> - **Distribution claims are false or stale.** crates.io has no
+>   `eidetic-engine` crate (HTTP 404) although README and CHANGELOG say it is
+>   available since `0.14.3`; Homebrew serves `0.14.2`; the `v0.14.4` manifest
+>   says `signed: false` for every asset (no Sigstore/SLSA); `ee version`
+>   cannot attest a commit. All three GitHub workflows are `disabled_manually`
+>   (CI since 2026-08-27; 105 commits since have no hosted verdict). The last
+>   CI run that executed had 8 failing jobs, of which four are still code-side
+>   at HEAD: yanked `bisync 0.3.0` in `Cargo.lock` (cargo-deny), unconditional
+>   `rustix::fs::flock` in `tests/memory_drift_no_mock_e2e.rs:1353` (Windows
+>   compile), the Windows `handoff create` envelope smoke, and `lib-core` /
+>   `targets` shards exceeding the 90-minute runner cap. No full-suite tally
+>   newer than 2026-08-09 (106 reds, `bd-1eeyw`) exists anywhere.
+> - **Local reproducibility is gone on this Mac.** Every sibling checkout is
+>   ahead of `franken-stack.lock` (asupersync sibling `0.4.10` vs `=0.4.9`),
+>   so a `--locked` local build cannot resolve; the pinned RCH lane is the only
+>   compile path (12/13 workers healthy).
+> - **Tracker inertia.** 2 closes in the last 7 days after an 85-close week
+>   on 2026-08-17; 31/44 `in_progress` beads untouched for >14 days; 118 `bv`
+>   stale alerts; `bd-reality-core-convergence-1azkt` is 0/22 closed with
+>   `.5`, `.10`, `.18` sitting unclaimed in `br ready`. Three THEME epics
+>   (`bd-185zb`, `bd-29xee`, `bd-2yg7d`) have every dependency closed and can
+>   close now. `bd-provenance-redaction-local-reads-xisfl` (P0) is parked
+>   `status=blocked` with zero blockers.
+> - **Static gates are green and prove presence, not behavior.** Closure lint
+>   0 violations, verification drift 0, contract-drift radar 0, vision
+>   coverage 138/138 (dispatch/file mapping). `bridge-staleness` still
+>   recommends "planning Part III" against this active Part III.
+> - **Docs still contradict code and each other.** README carries two
+>   different Mesh limitation rows, calls `serve` both "reserved" and
+>   "implemented", and dates its perf table to 2026-05-13.
+>   `COMPREHENSIVE_PLAN.md` still says "design plan, pre-implementation",
+>   `version = "0.1.0"`, `ee.response.v1`, workspace crates, and `cargo deny`.
+>   `docs/plan-sweep-report.md` (2026-05-06) still labels §16/§17 stubbed.
+>   AGENTS.md describes a version-bump-triggered release workflow; the real
+>   workflow is tag-only and disabled, and releases are hand-cut.
+>
+> Items with no owning Bead after this pass: release the `1898c975` index
+> truth fix to users; the crates.io/Homebrew claim correction; the four
+> concrete CI reds; the `ask` direct-hit abstention; the ~1.5 s fixed
+> per-command cost; the `graph_feature_disabled` config/feature misnomer;
+> `scope_metadata_unavailable` silently degrading every search when the
+> user-global store needs migration; the `COMPREHENSIVE_PLAN.md` /
+> `plan-sweep-report.md` refresh; and the stale `in_progress` sweep. The
+> existing epic still covers every §8 row; these are execution and
+> sequencing gaps, so the recommended steering is to front-load one green,
+> signed `0.14.5` cut from the pinned RCH lane over the verifier-first
+> critical path, rather than opening a competing plan.
 
 ### Current execution ledger (2026-09-01)
 
