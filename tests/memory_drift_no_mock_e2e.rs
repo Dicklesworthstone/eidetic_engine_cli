@@ -1339,6 +1339,9 @@ fn memory_drift_no_mock_replay_surfaces_changed_source_without_mutation() -> Tes
 // | RO-MUST-3 | Claim-gate collection does not resurrect the obsolete lock degradation | claim-gate test |
 // ===========================================================================
 
+// Only the cfg(unix) held-lock scenarios below consume these; without the
+// gate they become dead code on Windows, where `-D warnings` fails the build.
+#[cfg(unix)]
 const LOCK_CONTENTION_CODE: &str = "memory_drift_lock_contention";
 
 /// Unix only: `rustix::fs` (and the advisory `flock` this harness holds) does
@@ -1403,6 +1406,7 @@ fn ee_state_fingerprint(workspace: &Path) -> Result<BTreeMap<String, String>, St
 /// Run ee tolerating nonzero stderr diagnostics: swarm surfaces may write
 /// human progress to stderr while still emitting one stable JSON envelope on
 /// stdout. Exit code must still be zero.
+#[cfg(unix)]
 fn run_ee_swarm(
     workspace: &Path,
     artifact_dir: &Path,
@@ -1438,6 +1442,7 @@ fn run_ee_swarm(
     })
 }
 
+#[cfg(unix)]
 fn degraded_entry_with_code<'a>(value: &'a Value, code: &str) -> Option<&'a Value> {
     value
         .get("degraded")
