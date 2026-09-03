@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "global_lane_migration_required",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.31",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "search"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "The optional user-global memory lane was skipped because its store was written by a different schema version and needs a migration. Workspace results are fully scope-verified and unaffected, so this is info severity on the read path. Previously this surfaced as scope_metadata_unavailable at medium severity, which made every search in such a workspace look like its own scope verification had failed.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'global rule' --global --json",
+      "# leave the user-global store at an older schema than the running binary"
+    ],
+    "invocation": "ee search 'rule' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "global_lane_migration_required",
+    "severity": "info",
+    "message_contains": [
+      "user-global memory lane",
+      "needs a schema migration"
+    ],
+    "repair_contains": "ee migrate run --global"
+  }
+}

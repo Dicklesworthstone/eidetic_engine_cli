@@ -4387,9 +4387,15 @@ fn push_status_skyline_feature_disabled_degradation(
     if enabled != Some(false) {
         return;
     }
+    // Not `graph_feature_disabled`: that code means the binary was built
+    // without the `graph` feature and is classified `build_time`. This is a
+    // per-workspace config choice on a graph-enabled build, so it gets its own
+    // response-time code at info severity. Reporting the build-time code here
+    // told operators to rebuild ee when the real answer is one config key
+    // (bd-reality-core-convergence-1azkt.31).
     degradations.push(DegradationReport {
-        code: "graph_feature_disabled",
-        severity: "medium",
+        code: "graph_skyline_disabled",
+        severity: "info",
         message: "Knowledge skyline status is disabled by graph.feature.skyline.enabled.",
         repair: "ee config set graph.feature.skyline.enabled true",
     });
@@ -7317,7 +7323,7 @@ mod tests {
         ensure(report.skyline.len(), 1, "report skyline row count")?;
         ensure(
             report.degraded.iter().all(|degradation| {
-                degradation.code != "graph_feature_disabled"
+                degradation.code != "graph_skyline_disabled"
                     || !degradation.message.contains("Knowledge skyline status")
             }),
             true,
@@ -7333,11 +7339,11 @@ mod tests {
             .degradations
             .iter()
             .find(|degradation| {
-                degradation.code == "graph_feature_disabled"
+                degradation.code == "graph_skyline_disabled"
                     && degradation.message.contains("Knowledge skyline status")
             })
             .ok_or_else(|| "status skyline should emit disabled degradation".to_string())?;
-        ensure(disabled.severity, "medium", "disabled skyline severity")?;
+        ensure(disabled.severity, "info", "disabled skyline severity")?;
         ensure(
             disabled.repair,
             "ee config set graph.feature.skyline.enabled true",
@@ -7355,7 +7361,7 @@ mod tests {
         let enabled_report = StatusReport::gather_for_workspace(temp.path());
         ensure(
             enabled_report.degradations.iter().all(|degradation| {
-                degradation.code != "graph_feature_disabled"
+                degradation.code != "graph_skyline_disabled"
                     || !degradation.message.contains("Knowledge skyline status")
             }),
             true,

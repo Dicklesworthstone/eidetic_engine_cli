@@ -136,7 +136,7 @@ expression: status
       ],
       "thisOperation": {
         "degradationsApplied": [
-          "graph_feature_disabled"
+          "graph_skyline_disabled"
         ],
         "status": "ok",
         "subsystemsSkipped": [
@@ -328,11 +328,11 @@ expression: status
   },
   "degraded": [
     {
-      "code": "graph_feature_disabled",
+      "code": "graph_skyline_disabled",
       "message": "Knowledge skyline status is disabled by graph.feature.skyline.enabled.",
       "repair": "ee config set graph.feature.skyline.enabled true",
       "repairKind": "actionable",
-      "severity": "medium",
+      "severity": "info",
       "sources": [
         "status"
       ]

@@ -340,7 +340,7 @@ when the applied candidate, audit row, and derived memory agree, `curate apply`
 returns the existing applied result. Missing, duplicate, or mismatched replay
 evidence is classified under the `create_derived_replay_*` conflict codes above.
 
-#### Search and pack quality (79)
+#### Search and pack quality (80)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|
 | `adaptive_backoff_applied` | low | bd-16pwc.2 (SRR5) |
@@ -399,6 +399,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `recent_hours_window_clamped` | warning | bd-1idcb (G) |
 | `scope_agent_unavailable` | warning | bd-17c65.10.6 (J6) |
 | `scope_excluded_evidence` | low | bd-17c65.10.6 (J6) |
+| `global_lane_migration_required` | info | bd-reality-core-convergence-1azkt.31 — the optional user-global lane was skipped pending its own migration; workspace results stay scope-verified |
 | `scope_metadata_unavailable` | medium | bd-17c65.10.6 (J6) |
 | `scope_strict_excluded_evidence` | medium | bd-17c65.10.6 (J6) |
 | `source_mode_fallback` | warning | bd-17c65.2.6 (B6) |
@@ -676,10 +677,11 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `write_hot_path_cancelled_before_commit` | medium | bd-2lsxf.2.4 (SRR3) |
 | `write_hot_path_fsync_failure` | high | bd-2lsxf.2.4 (SRR3) |
 
-#### Other (6)
+#### Other (7)
 | Code | Severity | Bead |
 |------|----------|------|
 | `graph_feature_disabled` | medium | bd-17c65.5.3 (E3) — different from build-time `graph_unavailable`; this is a per-call disable |
+| `graph_skyline_disabled` | info | bd-reality-core-convergence-1azkt.31 — config-time: `[graph.feature.skyline] enabled = false` on a graph-enabled build; do not confuse with the build-time codes above |
 | `insights_section_unavailable` | info | bd-113r0, retired by bd-2pos6.4 — historical registered `ee insights` metadata-only builder code |
 | `singleflight_follower_timeout` | medium | bd-gni47.3 (SF3) |
 | `singleflight_leader_failed` | medium | bd-gni47.3 (SF3) |

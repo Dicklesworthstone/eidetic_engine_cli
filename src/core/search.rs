@@ -2723,6 +2723,27 @@ impl SearchDegradation {
         }
     }
 
+    /// The optional user-global lane was skipped because its store needs a
+    /// schema migration.
+    ///
+    /// This is deliberately *not* `scope_metadata_unavailable`: the workspace
+    /// results were fully scope-verified, and only an optional extra lane was
+    /// skipped. Reporting it at medium severity as a scope-verification
+    /// failure made every search in a workspace with an older global store
+    /// look like the answer could not be trusted
+    /// (bd-reality-core-convergence-1azkt.31).
+    #[must_use]
+    fn global_lane_migration_required(error: &str) -> Self {
+        Self {
+            code: "global_lane_migration_required".to_string(),
+            severity: "info".to_string(),
+            message: format!(
+                "Skipped the read-only user-global memory lane because its store needs a schema migration: {error}. Workspace results are unaffected."
+            ),
+            repair: Some("ee migrate run --global --json".to_string()),
+        }
+    }
+
     #[must_use]
     fn global_memory_disabled(reason: super::global_store::GlobalInclusionReason) -> Self {
         Self {
@@ -10452,9 +10473,16 @@ async fn global_store_frankensearch_hits(
     let memories = match super::global_store::read_global_store_memories(&paths, true) {
         Ok(memories) => memories,
         Err(error) => {
-            degraded.push(SearchDegradation::scope_metadata_unavailable(&format!(
-                "global store read failed: {error}"
-            )));
+            // A global store that merely needs migration is an optional lane
+            // being skipped, not a failure to verify the scope of the results
+            // this search is about to return.
+            if error.contains("needs migration") {
+                degraded.push(SearchDegradation::global_lane_migration_required(&error));
+            } else {
+                degraded.push(SearchDegradation::scope_metadata_unavailable(&format!(
+                    "global store read failed: {error}"
+                )));
+            }
             return Vec::new();
         }
     };

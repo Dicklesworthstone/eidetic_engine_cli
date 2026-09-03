@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_skyline_disabled",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.31",
+    "epic_letter": "E"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "The knowledge-skyline section is turned off for this workspace by the graph.feature.skyline.enabled config key. The binary's graph feature is enabled; only this optional section is off, so the code is response_time and info severity. Previously this emitted the build-time code graph_feature_disabled, which told operators to rebuild ee when one config key was the real answer.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee config set graph.feature.skyline.enabled false --workspace ."
+    ],
+    "invocation": "ee status --workspace . --fields full --json"
+  },
+  "expected_emission": {
+    "code": "graph_skyline_disabled",
+    "severity": "info",
+    "message_contains": [
+      "Knowledge skyline status is disabled",
+      "graph.feature.skyline.enabled"
+    ],
+    "repair_contains": "ee config set graph.feature.skyline.enabled true"
+  }
+}
