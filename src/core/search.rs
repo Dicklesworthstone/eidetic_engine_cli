@@ -13060,7 +13060,7 @@ mod tests {
 
         let connection = DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
         connection.migrate().map_err(|e| e.to_string())?;
-        let workspace_id = "wsp_lifecycle_snapshot_000000000";
+        let workspace_id = "wsp_lifecycle_snapshot_0000000";
         connection
             .insert_workspace(
                 workspace_id,
@@ -13072,7 +13072,7 @@ mod tests {
             .map_err(|e| e.to_string())?;
         connection
             .insert_model_registry_entry(
-                "mdl_lifecycle_snapshot_000000000",
+                "mdl_lifecycle_snapshot_0000000",
                 &crate::db::CreateModelRegistryInput {
                     workspace_id: workspace_id.to_owned(),
                     provider: crate::models::model_registry::ModelProvider::Hash,
@@ -13146,6 +13146,23 @@ mod tests {
         connection
             .begin_read_snapshot()
             .map_err(|e| format!("begin read snapshot: {e}"))?;
+        // Guard against a vacuous pass: the report must build on the pinned
+        // connection and read the real stored dimension.
+        let report = crate::core::model::build_model_lifecycle_report_for_workspace(
+            &workspace,
+            Some(&database_path),
+            Some(&connection),
+        )
+        .map_err(|error| format!("lifecycle report under pinned snapshot: {error:?}"))?;
+        let index_row = report.indexes.first().ok_or("lifecycle index row")?;
+        ensure(
+            index_row.stored_dimension == Some(128)
+                && index_row.dimension_compatibility.compatible == Some(true),
+            format!(
+                "pinned-snapshot probe must read the stored dimension: {:?}",
+                index_row.dimension_compatibility
+            ),
+        )?;
         let mut degraded = Vec::new();
         push_model_lifecycle_search_degradation(&options, Some(&connection), &mut degraded);
         connection

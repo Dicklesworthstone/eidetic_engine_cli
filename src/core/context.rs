@@ -104,13 +104,18 @@ use crate::pack::{
     PackAttemptFamilyMembershipSnapshot, PackAttemptFamilyMultiplicitySnapshot, PackCandidate,
     PackCandidateInput, PackCoordinationSnapshot, PackDraft, PackDraftItem, PackEvidenceItem,
     PackFreshnessAnchorFacet, PackFreshnessFacet, PackItemLifecycle, PackOmission,
-    PackOmissionReason, PackProvenance, PackRejectionStage, PackResourceProfile,
-    PackScoreBreakdown, PackSection, PackTrustSignal, TokenBudget, WhyNotSelectedInput,
-    WhyNotSelectedReport, assemble_draft_with_profile_and_options_seeded,
+    PackOmissionReason, PackProvenance, PackRejectionStage, PackResourceProfile, PackSection,
+    PackTrustSignal, TokenBudget, WhyNotSelectedInput, WhyNotSelectedReport,
+    assemble_draft_with_profile_and_options_seeded,
     budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
     estimate_tokens_default, explain_why_not_selected, pack_item_provenance_json,
     redact_pack_provenance_text,
 };
+// The production PPR rerank is cfg(test)-only until the pinned FrankenNetworkX
+// release exposes deterministic personalized PageRank; the breakdown type is
+// only constructed on that path.
+#[cfg(test)]
+use crate::pack::PackScoreBreakdown;
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::search::RuleIndexProjection;
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;

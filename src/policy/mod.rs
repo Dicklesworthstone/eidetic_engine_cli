@@ -3137,9 +3137,37 @@ fn looks_like_standalone_high_entropy_secret(candidate: &str) -> bool {
     let trimmed = candidate.trim_matches('=');
     trimmed.len() >= STANDALONE_HIGH_ENTROPY_MIN_LEN
         && !trimmed.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && shannon_entropy_bits_per_byte(trimmed) >= STANDALONE_HIGH_ENTROPY_MIN_BITS_PER_BYTE
         && !looks_like_word_shaped_identifier(trimmed)
         && !looks_like_public_locator_or_identifier(trimmed)
+        && (shannon_entropy_bits_per_byte(trimmed) >= STANDALONE_HIGH_ENTROPY_MIN_BITS_PER_BYTE
+            || looks_like_prefixed_hex_blob(trimmed))
+}
+
+/// A long hex run fused to a short prefix (`mesh_evt_<64 hex>`, `tok-<48
+/// hex>`). Hex caps out at 4 bits per byte, so the entropy gate cannot see
+/// it; a bare digest stays exempt (`all hex` above), but prefixed hex blobs
+/// keep the pre-GH#33 standalone treatment.
+fn looks_like_prefixed_hex_blob(candidate: &str) -> bool {
+    const MIN_HEX_RUN: usize = 32;
+    let mut longest: Option<(usize, usize)> = None;
+    let mut run_start = None;
+    for (index, byte) in candidate.bytes().enumerate() {
+        if byte.is_ascii_hexdigit() {
+            let start = *run_start.get_or_insert(index);
+            let len = index + 1 - start;
+            if longest.is_none_or(|(_, best)| len > best) {
+                longest = Some((start, len));
+            }
+        } else {
+            run_start = None;
+        }
+    }
+    let Some((start, len)) = longest else {
+        return false;
+    };
+    len >= MIN_HEX_RUN
+        && len.saturating_mul(4) >= candidate.len().saturating_mul(3)
+        && unique_ascii_byte_count(&candidate[start..start + len]) >= 8
 }
 
 /// Per-byte Shannon entropy of the candidate, in bits.
@@ -3170,35 +3198,32 @@ fn shannon_entropy_bits_per_byte(input: &str) -> f64 {
 /// symbols inside a segment disqualify the whole candidate.
 fn looks_like_word_shaped_identifier(candidate: &str) -> bool {
     const MAX_ALPHANUMERIC_TAG_LEN: usize = 16;
-    let trimmed = candidate.trim_matches(|ch| matches!(ch, '_' | '-' | '.' | '/'));
-    let has_separator = trimmed
-        .bytes()
-        .any(|byte| matches!(byte, b'_' | b'-' | b'.' | b'/'));
+    const SEPARATORS: [char; 4] = ['_', '-', '.', '/'];
+    let trimmed = candidate.trim_matches(SEPARATORS);
+    let has_separator = trimmed.contains(SEPARATORS);
     if !has_separator {
         return false;
     }
-    trimmed
-        .split(|ch| matches!(ch, '_' | '-' | '.' | '/'))
-        .all(|segment| {
-            if segment.is_empty() {
-                return true;
-            }
-            let bytes = segment.as_bytes();
-            if !bytes.iter().all(u8::is_ascii_alphanumeric) {
-                return false;
-            }
-            let has_digit = bytes.iter().any(u8::is_ascii_digit);
-            let has_lower = bytes.iter().any(u8::is_ascii_lowercase);
-            let has_upper = bytes.iter().any(u8::is_ascii_uppercase);
-            if !has_digit {
-                // Pure letters: lowercase, UPPERCASE, or Capitalized.
-                let capitalized =
-                    bytes[0].is_ascii_uppercase() && bytes[1..].iter().all(u8::is_ascii_lowercase);
-                return !(has_lower && has_upper) || capitalized;
-            }
-            // Digits with letters: short single-case tags only.
-            bytes.len() <= MAX_ALPHANUMERIC_TAG_LEN && !(has_lower && has_upper)
-        })
+    trimmed.split(SEPARATORS).all(|segment| {
+        if segment.is_empty() {
+            return true;
+        }
+        let bytes = segment.as_bytes();
+        if !bytes.iter().all(u8::is_ascii_alphanumeric) {
+            return false;
+        }
+        let has_digit = bytes.iter().any(u8::is_ascii_digit);
+        let has_lower = bytes.iter().any(u8::is_ascii_lowercase);
+        let has_upper = bytes.iter().any(u8::is_ascii_uppercase);
+        if !has_digit {
+            // Pure letters: lowercase, UPPERCASE, or Capitalized.
+            let capitalized =
+                bytes[0].is_ascii_uppercase() && bytes[1..].iter().all(u8::is_ascii_lowercase);
+            return !(has_lower && has_upper) || capitalized;
+        }
+        // Digits with letters: short single-case tags only.
+        bytes.len() <= MAX_ALPHANUMERIC_TAG_LEN && !(has_lower && has_upper)
+    })
 }
 
 fn looks_like_public_locator_or_identifier(candidate: &str) -> bool {
@@ -3517,13 +3542,15 @@ mod tests {
         INSTRUCTION_LIKE_SCORE_THRESHOLD, InstructionRisk, InstructionSignalKind,
         MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES, MESH_EXPORT_SECRET_SCAN_SCHEMA_V2,
         MESH_SECRET_EXPORT_DENIED_CODE, MeshExportSecretScanReport, MeshExportSecretScanSubject,
-        SHARE_PREVIEW_SCHEMA_V2, SecretFindingRandom, SecretFindingRandomError,
-        SharePreviewCandidate, SharePreviewInput, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE,
-        build_share_preview, decorate_export_secret_findings, detect_instruction_like_content,
-        redact_public_replay_field, redact_public_replay_text, redact_secret_like_content,
-        redaction_placeholder, scan_mesh_export_subjects, screen_external_text_for_ingestion,
-        subsystem_name, validate_trust_promotion_evidence, workspace_secret_risk_evidence,
-        workspace_secret_risk_overrides_safe_classification,
+        SHARE_PREVIEW_SCHEMA_V2, STANDALONE_HIGH_ENTROPY_MIN_BITS_PER_BYTE, SecretFindingRandom,
+        SecretFindingRandomError, SharePreviewCandidate, SharePreviewInput,
+        TRUST_PROMOTION_EVIDENCE_REJECTED_CODE, build_share_preview,
+        decorate_export_secret_findings, detect_instruction_like_content,
+        detect_secret_like_matches, looks_like_word_shaped_identifier, redact_public_replay_field,
+        redact_public_replay_text, redact_secret_like_content, redaction_placeholder,
+        scan_mesh_export_subjects, screen_external_text_for_ingestion,
+        shannon_entropy_bits_per_byte, subsystem_name, validate_trust_promotion_evidence,
+        workspace_secret_risk_evidence, workspace_secret_risk_overrides_safe_classification,
     };
 
     #[test]
@@ -5253,7 +5280,12 @@ mod tests {
             // --- true positives: keyword-adjacent shorter material ---
             Case {
                 label: "36-char base62 next to a secret keyword",
-                input: "webhook secret: JC06DPdRO9YrxPbCkhdVipy2eBI2Y1rzw27j",
+                input: "Rotate the auth token JC06DPdRO9YrxPbCkhdVipy2eBI2Y1rzw27j before Friday.",
+                expected_reason: Some("high_entropy_secret"),
+            },
+            Case {
+                label: "prefixed 64-hex blob keeps standalone treatment",
+                input: "claim mesh_evt_ac0af31de1c5c8b08d69329d01cd8112d0e2c96e20884e03e6725b327be422c9 recorded",
                 expected_reason: Some("high_entropy_secret"),
             },
             Case {
@@ -5320,7 +5352,7 @@ mod tests {
             },
             Case {
                 label: "repetitive filler with many classes but low entropy",
-                input: "marker aaaaaaaaaaaabbbbbbbbbbbbccccccccccccddddddddddddeeeeeeeeeeeeffffffffffffAAAAAAAAAAAABBBBBBBBBBBBCCCCCCCCCCCC111111111111222222222222------------ done",
+                input: "marker gggggggggggghhhhhhhhhhhhiiiiiiiiiiiijjjjjjjjjjjjkkkkkkkkkkkkllllllllllllGGGGGGGGGGGGHHHHHHHHHHHHIIIIIIIIIIII111111111111222222222222------------ done",
                 expected_reason: None,
             },
             Case {
