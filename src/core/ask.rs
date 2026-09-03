@@ -370,6 +370,10 @@ const STOPWORDS: &[&str] = &[
     "of", "in", "for", "on", "with", "at", "by", "from", "as", "or", "and", "but", "not", "it",
     "its", "this", "that", "these", "those", "so", "if", "then", "than", "also", "up", "into",
     "about", "such", "only", "each",
+    // Interrogatives and question modals carry no answer content: a span
+    // that answers "which command must run ..." never contains "which" or
+    // "must", so scoring them as required terms only diluted every match.
+    "what", "which", "who", "whom", "whose", "when", "where", "why", "how", "must", "need",
 ];
 
 /// Tokenize text for ask scoring: lowercase, split on non-alphanumeric,
@@ -418,10 +422,33 @@ fn jaccard_similarity(a: &[String], b: &[String]) -> f32 {
     }
 }
 
+/// Fraction of the question's terms that the span contains.
+///
+/// This is the half of `lexical_overlap` that Jaccard cannot express: an
+/// answer-bearing span necessarily carries terms the question does not
+/// ("Run cargo fmt --check before every release tag." answers "which command
+/// runs before every release tag?"), and Jaccard counted every one of those
+/// answer terms *against* the span. Coverage rewards the span for containing
+/// the question; the Jaccard half still rewards precision so a long span that
+/// merely mentions the question's common words does not outrank a tight one.
+fn question_coverage(question_terms: &[String], span_terms: &[String]) -> f32 {
+    if question_terms.is_empty() {
+        return 0.0;
+    }
+    let span: BTreeSet<&str> = span_terms.iter().map(String::as_str).collect();
+    let covered = question_terms
+        .iter()
+        .filter(|term| span.contains(term.as_str()))
+        .count();
+    covered as f32 / question_terms.len() as f32
+}
+
 /// Score one span against the question.
 ///
 /// Semantic (embedding) similarity is not yet available — the w2 weight is
-/// re-normalized into w1 (semantic_degraded mode, ADR §5).
+/// re-normalized into w1 (semantic_degraded mode, ADR §5). The lexical
+/// overlap is the mean of question coverage and Jaccard similarity (ADR §2,
+/// 2026-09-03 amendment).
 pub fn score_span(
     question_terms: &[String],
     span_text: &str,
@@ -429,7 +456,8 @@ pub fn score_span(
     trust_class: &str,
 ) -> f32 {
     let span_terms = tokenize_for_ask(span_text);
-    let lexical = jaccard_similarity(question_terms, &span_terms);
+    let lexical = 0.5 * question_coverage(question_terms, &span_terms)
+        + 0.5 * jaccard_similarity(question_terms, &span_terms);
     let tilt = trust_tilt(trust_class);
 
     // Semantic unavailable: w1+w2=0.80 absorbed into lexical, w3=0.20 stays (ADR §5).
@@ -1328,10 +1356,58 @@ mod tests {
     }
 
     #[test]
+    fn tokenize_drops_interrogatives_and_question_modals() {
+        let tokens = tokenize_for_ask("Which command must run before every release tag?");
+        for dropped in ["which", "must"] {
+            assert!(!tokens.contains(&dropped.to_owned()), "{dropped} kept");
+        }
+        for kept in ["command", "run", "before", "every", "release", "tag"] {
+            assert!(tokens.contains(&kept.to_owned()), "{kept} dropped");
+        }
+    }
+
+    #[test]
     fn score_span_returns_zero_for_unrelated() {
         let q_terms = tokenize_for_ask("what is the database port");
         let score = score_span(&q_terms, "The sky is blue today.", 0.9, "human_explicit");
         assert!(score < 0.3, "unrelated span should score low: {score}");
+    }
+
+    /// bd-reality-core-convergence-1azkt.30: a span that contains the whole
+    /// question plus the answer must clear the default abstention gate.
+    /// Under pure Jaccard this exact case scored 0.53 and abstained because
+    /// the answer terms (cargo, fmt, check) were counted against the span.
+    #[test]
+    fn score_span_does_not_penalize_an_answer_bearing_span() {
+        let q_terms = tokenize_for_ask("Which command must run before every release tag?");
+        let score = score_span(
+            &q_terms,
+            "Run cargo fmt --check before every release tag.",
+            0.85,
+            "human_explicit",
+        );
+        assert!(
+            score >= ASK_MIN_CONFIDENCE_DEFAULT,
+            "answer-bearing span must clear the abstention gate: {score}"
+        );
+    }
+
+    /// Planted negative for the same change: sharing only the corpus-wide
+    /// project name and one incidental term must still abstain, so coverage
+    /// cannot be gamed by memories that merely mention common words.
+    #[test]
+    fn score_span_keeps_common_term_overlap_below_the_gate() {
+        let q_terms = tokenize_for_ask("Who approved the lunar invoice for Project Zephyr?");
+        let score = score_span(
+            &q_terms,
+            "The billing sandbox fixture uses invoice identifiers that are unrelated to Project Zephyr approval flows.",
+            0.9,
+            "human_explicit",
+        );
+        assert!(
+            score < ASK_MIN_CONFIDENCE_DEFAULT,
+            "common-term overlap must stay below the abstention gate: {score}"
+        );
     }
 
     #[test]

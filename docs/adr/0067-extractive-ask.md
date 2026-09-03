@@ -44,6 +44,16 @@ span_score = w1·lexical_overlap(question, span)
 
 - `lexical_overlap`: normalized content-term overlap (stopword-light,
   deterministic normalization shared with the gap-mining pipeline).
+  **Amendment 2026-09-03 (`bd-reality-core-convergence-1azkt.30`):** the
+  overlap is the mean of *question coverage* (fraction of question terms the
+  span contains) and Jaccard similarity, and interrogatives plus question
+  modals (`what`, `which`, `who`, `how`, `must`, `need`, …) are stopwords.
+  Pure Jaccard counted every answer term in a span against it, so "Run cargo
+  fmt --check before every release tag." scored 0.53 for "Which command must
+  run before every release tag?" and abstained under the 0.55 gate. Coverage
+  alone was rejected: it let a memory that shares only the corpus-wide
+  project name and one incidental term clear the gate on the
+  `ask_unanswerable_abstention` fixture. The blend keeps that case abstaining.
 - `embedding_sim`: cosine via the frankensearch embedder; when only the
   hash-embedder fallback is available the response carries
   `ask_semantic_degraded` (info) and w2 mass shifts to w1 (documented
