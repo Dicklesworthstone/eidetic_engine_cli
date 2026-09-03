@@ -214,7 +214,7 @@ landed, with the verdict that backs each claim:
 
 | Bead | State | Evidence |
 | --- | --- | --- |
-| `.23` lexical arm lost under concurrent reads | code landed | Root cause: `TantivyIndex::open` builds an `IndexWriter` and takes Tantivy's exclusive `.tantivy-writer.lock`, so a second read-only process failed the open and `resolve_source_mode_with_tiers` degraded Hybrid to SemanticOnly. Frankensearch `715a29b3` adds `open_read_only` (writer is `Option`, typed `InvalidConfig` on writes, unit test opens read-only while a writer holds the lock); ee uses it and pins the commit. Public-CLI E2E `tests/concurrent_search_lexical_arm_e2e.rs` added. |
+| `.23` lexical arm lost under concurrent reads | **closed, proven** | Root cause: `TantivyIndex::open` builds an `IndexWriter` and takes Tantivy's exclusive `.tantivy-writer.lock`, so a second read-only process failed the open and `resolve_source_mode_with_tiers` degraded Hybrid to SemanticOnly. Frankensearch `715a29b3` adds `open_read_only` (writer is `Option`, typed `InvalidConfig` on writes); ee uses it and pins the commit. `cargo test --locked --test concurrent_search_lexical_arm_e2e` at `551f62da` → `remote_pass`, `1 passed; 0 failed`, 114.99 s: 8 simultaneous searches and 6 simultaneous read-only packs all agree on mode, order, and hash with no lexical-loss degradation. The frankensearch-side unit test remains UNRUN (no lane for that sibling). |
 | `.24` per-search DB reopen | code landed, latency unproven | The bound-workspace-id open that only labelled a trace event is now behind `tracing::enabled!`. Acceptance asks for a fresh sample against a source-built binary, which this Mac cannot produce. |
 | `.25` Model2Vec re-hash per process | code landed, tests unrun | Frankensearch `715a29b3` reuses the `.verified` receipt in `ModelArtifactManifestV1::verify_dir_cached`; three unit tests added. They are **UNRUN**: the sibling is a symlink outside RCH's canonical root and frankensearch's hosted CI is disabled. |
 | `.26` posture path loads the model | not started | Implementation plan recorded on the bead (verified-not-loaded state on the existing lazy embedder). |
@@ -233,10 +233,17 @@ them into the test module, so **every `--all-targets` build of `main` was red
 with E0425** — including the one this bridge's `.5`/`.19` want to make green.
 
 Verdicts on the pinned RCH lane at the exact committed tree: `cargo check
---locked --all-targets` **passed** (`remote_pass`, exit 0) and `cargo test
---locked --lib -- core::ask::tests` **passed**. The concurrent-search E2E first
-hit `bd-glivu` (30 s `sync_to_remote` timeout on a cold pinned-tree upload),
-which is an environment failure, not a test result.
+--locked --all-targets` **passed** (`remote_pass`, exit 0), `cargo test
+--locked --lib -- core::ask::tests` **passed**, and `cargo test --locked --test
+concurrent_search_lexical_arm_e2e` **passed** (`1 passed; 0 failed`, 114.99 s).
+
+That last one took four attempts, all three failures environmental and none a
+test result: twice `bd-glivu` (30 s `sync_to_remote` timeout against a cold
+pinned-bundle transfer read off the ExFAT USB drive, on two different workers)
+and once `rch_verify_franken_stack_materialization_failed` because a peer had
+left an untracked build artifact in the frankensqlite sibling. Exporting the
+pinned tree to internal disk with `RCH_VERIFY_COMMITTED_TREE_BASE` cleared it.
+That env var is the practical workaround for `bd-glivu` on this Mac.
 
 ### Current execution ledger (2026-09-01)
 
