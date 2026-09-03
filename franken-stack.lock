@@ -4,10 +4,12 @@
 # ee's Cargo.lock closes over. Refreshed 2026-09-02 after the locked dependency
 # update: Asupersync 0.4.9, FrankenSQLite 0.3.15, Frankensearch 0.4.2,
 # FrankenNetworkX 0.2.0, agent detection 0.2.2, SQLModel 0.4.2, and Tru 0.2.4.
+# Frankensearch advanced 2026-09-03 to 715a29b3 (lock-free read-only Tantivy
+# open, receipt-backed Model2Vec verification); crate versions unchanged.
 asupersync	86988e38b4659f385d289b00bef09d86f5ebf0ef
 franken_agent_detection	f0ca145d2577becd9ca1355c0e3318f6decd4c82
 franken_networkx	4cbb18f785d99f0bf2df1911a1b2c03ccda51635
-frankensearch	e9d1525b7e02dc200b680791608b1eb467b51f12
+frankensearch	715a29b39d248653e773ab53b90bb98636694cfb
 frankensqlite	067d50163da7844cef51439945a1a9fba6e03589
 sqlmodel_rust	3d79be0b28efedbc1068c5414106860ca878f898
 toon_rust	ab5c29b372ba6d39baf0f3071d7247ca3c72bc9c

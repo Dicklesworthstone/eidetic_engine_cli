@@ -9160,11 +9160,18 @@ fn pin_lexical_ram_tier_for_search(
     let started = Instant::now();
     let config = lexical_ram_tier_config_for_search(workspace_path);
     let result = pin_lexical_index_files(&index_dir.join("lexical"), &config);
-    trace_lexical_ram_tier(
-        &crate::core::workspace::bound_workspace_id_from_path(workspace_path),
-        &result,
-        started.elapsed().as_secs_f64() * 1000.0,
-    );
+    // `bound_workspace_id_from_path` opens a fresh read-only FrankenSQLite
+    // connection (a fixed ~250-500ms cost on this host) purely to label the
+    // trace event below. Resolve it only when that event can be observed so
+    // the search hot path does not pay a second database open for a span
+    // field nobody reads.
+    if tracing::enabled!(target: "ee::search::lexical_ram_tier", tracing::Level::INFO) {
+        trace_lexical_ram_tier(
+            &crate::core::workspace::bound_workspace_id_from_path(workspace_path),
+            &result,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     result
 }
 
@@ -12517,8 +12524,9 @@ fn open_lexical_searcher(index_dir: &Path) -> Result<Option<Arc<dyn LexicalRead>
     }
 
     // Index publication swaps the complete generation atomically. Drop the
-    // cached handle before opening the replacement so Tantivy's writer lock
-    // remains attached only to the published generation being served.
+    // cached handle before opening the replacement so the process serves only
+    // the published generation. Read-only handles hold no Tantivy writer
+    // lock, so the swap never contends with the publisher.
     cached.remove(index_dir);
     if cached.len() >= PROCESS_LEXICAL_SEARCHER_CACHE_CAPACITY {
         cached.clear();
@@ -12543,7 +12551,13 @@ fn open_lexical_searcher(index_dir: &Path) -> Result<Option<Arc<dyn LexicalRead>
 
 #[cfg(feature = "lexical-bm25")]
 fn open_lexical_searcher_uncached(lexical_dir: &Path) -> Result<Arc<dyn LexicalRead>, String> {
-    TantivyIndex::open(lexical_dir)
+    // Search only reads the published generation. `TantivyIndex::open` would
+    // also construct an `IndexWriter`, which takes Tantivy's exclusive
+    // `.tantivy-writer.lock`; a second concurrent `ee search` process then
+    // failed this open, lost the lexical arm, and silently fell back to
+    // semantic-only ranking (`source_mode_fallback`). The read-only open holds
+    // no writer, no writer lock, and no indexing thread pool.
+    TantivyIndex::open_read_only(lexical_dir)
         .map(|lexical| Arc::new(lexical) as Arc<dyn LexicalRead>)
         .map_err(|error| {
             format!(

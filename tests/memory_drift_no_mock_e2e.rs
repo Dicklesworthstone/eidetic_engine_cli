@@ -1341,6 +1341,12 @@ fn memory_drift_no_mock_replay_surfaces_changed_source_without_mutation() -> Tes
 
 const LOCK_CONTENTION_CODE: &str = "memory_drift_lock_contention";
 
+/// Unix only: `rustix::fs` (and the advisory `flock` this harness holds) does
+/// not exist on Windows, and an unconditional reference here stopped the whole
+/// test crate from compiling on `x86_64-pc-windows-msvc`. The two held-lock
+/// scenarios below are gated the same way; Windows has no equivalent lock to
+/// hold, so they are skipped there rather than faked.
+#[cfg(unix)]
 fn hold_workspace_write_lock(workspace: &Path) -> Result<fs::File, String> {
     let lock_path = workspace.join(".ee").join("ee.write.lock");
     let lock_file = OpenOptions::new()
@@ -1361,6 +1367,7 @@ fn hold_workspace_write_lock(workspace: &Path) -> Result<fs::File, String> {
 /// Hash every regular file under `.ee` except the advisory lock file itself
 /// (whose open/flock state the test legitimately manipulates). Sorted map so
 /// two fingerprints compare deterministically.
+#[cfg(unix)]
 fn ee_state_fingerprint(workspace: &Path) -> Result<BTreeMap<String, String>, String> {
     fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, String>) -> Result<(), String> {
         let entries =
@@ -1440,6 +1447,7 @@ fn degraded_entry_with_code<'a>(value: &'a Value, code: &str) -> Option<&'a Valu
         .find(|entry| entry.get("code").and_then(Value::as_str) == Some(code))
 }
 
+#[cfg(unix)]
 #[test]
 fn memory_drift_true_read_only_collection_ignores_writer_flock_without_mutation() -> TestResult {
     let log_dir = unique_log_dir()?;
@@ -1626,6 +1634,7 @@ fn memory_drift_true_read_only_collection_ignores_writer_flock_without_mutation(
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn memory_drift_claim_gate_read_collection_ignores_writer_flock() -> TestResult {
     let log_dir = unique_log_dir()?;
