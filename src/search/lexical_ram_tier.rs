@@ -310,7 +310,14 @@ pub fn trace_lexical_ram_tier(
         .as_ref()
         .map(CorpusRevision::as_str)
         .unwrap_or("unknown");
+    // The target is pinned explicitly rather than inherited from
+    // `module_path!()`: `core::search` guards this call with
+    // `tracing::enabled!(target: "ee::search::lexical_ram_tier", ...)` to avoid
+    // resolving the bound workspace id (a fresh database open) when nobody is
+    // listening. If the target were implicit, moving this function would
+    // silently stop the event from ever being emitted.
     tracing::info!(
+        target: "ee::search::lexical_ram_tier",
         surface = "lexical_ram_tier",
         workspace_id,
         index_path = %index_path,

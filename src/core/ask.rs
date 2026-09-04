@@ -424,6 +424,10 @@ fn jaccard_similarity(a: &[String], b: &[String]) -> f32 {
 
 /// Fraction of the question's terms that the span contains.
 ///
+/// `question_terms` must be the sorted, deduplicated output of
+/// [`tokenize_for_ask`]: the denominator is its length, so a caller passing
+/// repeated terms would silently weight those terms twice.
+///
 /// This is the half of `lexical_overlap` that Jaccard cannot express: an
 /// answer-bearing span necessarily carries terms the question does not
 /// ("Run cargo fmt --check before every release tag." answers "which command

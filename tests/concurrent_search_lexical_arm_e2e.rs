@@ -192,7 +192,15 @@ fn concurrent_searches_keep_the_lexical_arm_and_agree_on_order() -> TestResult {
             serde_json::to_string(&baseline).unwrap_or_default()
         ));
     }
+    // Guard against a vacuous pass: if this field is ever renamed, every
+    // process would report `null`, every comparison below would trivially
+    // agree, and the test would go green while proving nothing.
     let baseline_mode = baseline["data"]["metrics"]["sourceModeApplied"].clone();
+    if !baseline_mode.is_string() {
+        return Err(format!(
+            "serial baseline carried no data.metrics.sourceModeApplied string; the assertions below would be vacuous: {baseline_mode}"
+        ));
+    }
     let baseline_codes = degraded_codes(&baseline);
     for code in LEXICAL_LOSS_CODES {
         if baseline_codes.contains(code) {
