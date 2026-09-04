@@ -264,6 +264,50 @@ left an untracked build artifact in the frankensqlite sibling. Exporting the
 pinned tree to internal disk with `RCH_VERIFY_COMMITTED_TREE_BASE` cleared it.
 That env var is the practical workaround for `bd-glivu` on this Mac.
 
+### Fresh-eyes review of the 2026-09-03 pass
+
+Re-reading everything this pass wrote found twelve defects, several of them
+introduced by the pass itself and invisible to every lane it had run:
+
+- **Three compile breaks behind `bench-internals`** in frankensearch. Making
+  the Tantivy writer optional broke two `let Self { .. }` patterns that list
+  every field with no `..`, left `benchmark_join_writer` typed to a
+  non-optional writer, and left the rearm path reconstructing `Self` without
+  the new field. `cargo check --all-targets` in ee builds dependencies as
+  libraries only, so **no verification in this bridge compiles those paths**.
+- **A Windows dead-code hazard** in ee: `cfg(unix)`-gating the flock tests
+  orphaned three helpers used only by them, which `-D warnings` would fail —
+  the same platform whose compile error the pass had just fixed.
+- **An invalid repair command**: the new `global_lane_migration_required`
+  pointed at `ee migrate run --global`, a flag that does not exist. That is
+  precisely the defect class the change set out to remove.
+- **A wrong assertion in a new test**: a drifted download manifest correctly
+  falls through to the full hash pass and *succeeds* on correct bytes; the
+  no-borrow property is only observable while the file is unreadable.
+- **A root-unsafe test**: `chmod 000` is a no-op for root, so the receipt test
+  would have proved nothing in a typical CI container.
+- **A vacuous-pass hole** in the concurrency E2E, which compared a field
+  across processes without checking it existed.
+- Plus a trace target that could silently drift from its guard, an
+  undocumented precondition on the new scorer, two imprecise README claims
+  (the perf probe ran on an Apple M4 host, *not* the `mac-m3-pro` class the
+  table was measured on), a fragile message-literal coupling now bound by a
+  constant and a test, and **eleven stale section counts** in
+  `docs/degraded_code_taxonomy.md` that were wrong before this pass touched
+  them, one by 26 rows.
+
+Verification at the reviewed tree: `cargo check --locked --all-targets`,
+`core::global_store::tests` (20 passed), `concurrent_search_lexical_arm_e2e`
+(1 passed, 196 s), and `degraded_codes_doc_coverage` (7 passed) all
+`remote_pass`. The frankensearch bench paths remain **unverified by
+execution** — nothing on this Mac can compile them — so they are fixed by
+inspection only.
+
+The transferable lesson is narrow and worth keeping: *a green
+`--all-targets` check in ee says nothing about a sibling's feature-gated or
+test-only code, and cfg-gating a test silently changes what compiles on the
+platform you were trying to fix.*
+
 ### Current execution ledger (2026-09-01)
 
 This is the bounded working checklist requested by the operator. It is not a
