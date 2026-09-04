@@ -3542,15 +3542,15 @@ mod tests {
         INSTRUCTION_LIKE_SCORE_THRESHOLD, InstructionRisk, InstructionSignalKind,
         MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES, MESH_EXPORT_SECRET_SCAN_SCHEMA_V2,
         MESH_SECRET_EXPORT_DENIED_CODE, MeshExportSecretScanReport, MeshExportSecretScanSubject,
-        SHARE_PREVIEW_SCHEMA_V2, STANDALONE_HIGH_ENTROPY_MIN_BITS_PER_BYTE, SecretFindingRandom,
-        SecretFindingRandomError, SharePreviewCandidate, SharePreviewInput,
+        SHARE_PREVIEW_SCHEMA_V2, SecretFindingRandom, SecretFindingRandomError,
+        SharePreviewCandidate, SharePreviewInput,
         TRUST_PROMOTION_EVIDENCE_REJECTED_CODE, build_share_preview,
         decorate_export_secret_findings, detect_instruction_like_content,
-        detect_secret_like_matches, looks_like_word_shaped_identifier, redact_public_replay_field,
-        redact_public_replay_text, redact_secret_like_content, redaction_placeholder,
+        redact_public_replay_field, redact_public_replay_text, redact_secret_like_content,
+        redaction_placeholder,
         scan_mesh_export_subjects, screen_external_text_for_ingestion,
-        shannon_entropy_bits_per_byte, subsystem_name, validate_trust_promotion_evidence,
-        workspace_secret_risk_evidence, workspace_secret_risk_overrides_safe_classification,
+        subsystem_name, validate_trust_promotion_evidence, workspace_secret_risk_evidence,
+        workspace_secret_risk_overrides_safe_classification,
     };
 
     #[test]
