@@ -340,7 +340,7 @@ when the applied candidate, audit row, and derived memory agree, `curate apply`
 returns the existing applied result. Missing, duplicate, or mismatched replay
 evidence is classified under the `create_derived_replay_*` conflict codes above.
 
-#### Search and pack quality (80)
+#### Search and pack quality (112)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|
 | `adaptive_backoff_applied` | low | bd-16pwc.2 (SRR5) |
@@ -474,7 +474,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 |------|----------|------|
 | `qos_registry_unavailable` | medium | bd-1zb7k.20.2 |
 
-#### Storage and runtime state (25)
+#### Storage and runtime state (33)
 | Code | Severity | Bead |
 |------|----------|------|
 | `db_migration_pending` | medium | bd-3usjw.1 (db inspect) |
@@ -518,7 +518,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `policy_secret_detected_with_offsets` | medium | bd-17c65.3.4 (C4) |
 | `policy_tag_rejected_with_details` | low | bd-17c65.3.4 (C4) |
 
-#### Learn / curate (17)
+#### Learn / curate (18)
 | Code | Severity | Bead |
 |------|----------|------|
 | `auto_propose_deferred_to_maintenance` | info | bd-17c65.7.3 (G3) |
@@ -588,7 +588,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `harmful_burst_quarantine` | warning | bd-3qs2i.3.1 (F3) |
 | `sprt_quarantine` | warning | bd-3qs2i.3.1 (F3) |
 
-#### Why / pack inspection and proof verification (6)
+#### Why / pack inspection and proof verification (7)
 | Code | Severity | Bead |
 |------|----------|------|
 | `graph_memory_not_in_snapshot` | low | bd-17c65.10.6 (J6) |
@@ -622,7 +622,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `usage_conflicting_presets` | low | bd-17c65.4.5 (D5) |
 | `usage_unknown_field` | low | bd-17c65.4.5 (D5) |
 
-#### Curate validation gates (6)
+#### Curate validation gates (7)
 | Code | Severity | Bead |
 |------|----------|------|
 | `candidate_too_generic` | medium | bd-17c65.7.4 (G4 — curate validation) |
@@ -713,7 +713,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 |------|----------|------|
 | `unsupported_protocol_version` | medium | bd-97rgf.5 (SRR6.27) |
 
-#### Mesh discovery, policy, and body fetch (7)
+#### Mesh discovery, policy, and body fetch (21)
 | Code | Severity | Bead |
 |------|----------|------|
 | `discovery_policy_no_ee_mesh_tag` | info | bd-36bbk.1.7 |
@@ -738,7 +738,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `mesh_cached_body_hash_mismatch` | high | bd-nw0v3.3 (SRR6.16) |
 | `mesh_secret_export_denied` | high | (TBD) |
 
-#### Mesh foreground sync (9)
+#### Mesh foreground sync (12)
 | Code | Severity | Bead |
 |------|----------|------|
 | `mesh_disabled` | info | bd-2wngl (SRR6.8) |
@@ -786,7 +786,7 @@ documented unauthenticated-artifact posture, and import refuses native
 through `ee.error.v2`; they never turn authentication loss into a degraded
 success artifact or lane grant. All three codes are `response_time`.
 
-#### Causal lab (13)
+#### Causal lab (22)
 | Code | Severity | Bead |
 |------|----------|------|
 | `causal_chain_id_required` | low | bd-17c65.14.3 (N3) |
@@ -812,7 +812,7 @@ success artifact or lane grant. All three codes are `response_time`.
 | `no_sources` | info | bd-17c65.14.3 (N3) |
 | `proper_randomization` | info | bd-17c65.14.3 (N3) |
 
-#### Drift / metric analysis (6)
+#### Drift / metric analysis (7)
 | Code | Severity | Bead |
 |------|----------|------|
 | `drift_analysis_unavailable` | medium | (TBD) |
@@ -985,7 +985,7 @@ the closed daemon hot-mode surface.
 | `workspace_hygiene_secret_scan_skipped` | medium | bd-1eq3l.11 |
 | `beads_jsonl_partial_write_transient` | low | (TBD) |
 
-#### Model registry / science (7)
+#### Model registry / science (8)
 | Code | Severity | Bead |
 |------|----------|------|
 | `model_registry_empty` | low | bd-17c65.10.6 (J6) |
@@ -1003,7 +1003,7 @@ the closed daemon hot-mode surface.
 | `clustering_no_candidates` | info | bd-17c65.7.5 (G5) |
 | `clustering_no_embeddings` | info | bd-17c65.7.5 (G5) |
 
-#### Miscellaneous (16)
+#### Miscellaneous (42)
 | Code | Severity | Bead |
 |------|----------|------|
 | `action_override_not_actionable` | low | (TBD) |
