@@ -5858,7 +5858,7 @@ ee search "anything" --workspace . --json
 
 **Introduced by:** bd-reality-core-convergence-1azkt.31 (epic J)
 
-**Trigger.** The optional user-global memory lane was skipped because its store was written by a different schema version and needs a migration. Workspace results are fully scope-verified and unaffected, so this is info severity on the read path. Previously this surfaced as scope_metadata_unavailable at medium severity, which made every search in such a workspace look like its own scope verification had failed.
+**Trigger.** The optional user-global memory lane was skipped because its store was written by a different schema version and needs a migration. Workspace results are fully scope-verified and unaffected, so this is info severity on the read path. Previously this surfaced as scope_metadata_unavailable at medium severity, which made every search in such a workspace look like its own scope verification had failed. The repair addresses the global store database directly because `ee migrate run` has no --global switch.
 
 **Setup.**
 
@@ -5876,7 +5876,7 @@ ee search 'rule' --workspace . --json
 
 **Expected emission.** Message contains: `user-global memory lane ... needs a schema migration`
 
-**Repair hint.** `ee migrate run --global`
+**Repair hint.** `ee migrate run --database`
 
 **Fixture.** [`tests/fixtures/failure_modes/global_lane_migration_required.json`](../tests/fixtures/failure_modes/global_lane_migration_required.json)
 

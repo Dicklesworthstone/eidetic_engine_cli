@@ -2733,14 +2733,20 @@ impl SearchDegradation {
     /// look like the answer could not be trusted
     /// (bd-reality-core-convergence-1azkt.31).
     #[must_use]
-    fn global_lane_migration_required(error: &str) -> Self {
+    fn global_lane_migration_required(database_path: &Path) -> Self {
         Self {
             code: "global_lane_migration_required".to_string(),
             severity: "info".to_string(),
-            message: format!(
-                "Skipped the read-only user-global memory lane because its store needs a schema migration: {error}. Workspace results are unaffected."
-            ),
-            repair: Some("ee migrate run --global --json".to_string()),
+            message:
+                "Skipped the read-only user-global memory lane because its store needs a schema migration. Workspace results are unaffected."
+                    .to_string(),
+            // `ee migrate run` has no `--global` switch; the global store is
+            // migrated by addressing its database directly (the same thing any
+            // global write does implicitly).
+            repair: Some(format!(
+                "ee migrate run --database {}",
+                database_path.display()
+            )),
         }
     }
 
@@ -10477,7 +10483,9 @@ async fn global_store_frankensearch_hits(
             // being skipped, not a failure to verify the scope of the results
             // this search is about to return.
             if error.contains("needs migration") {
-                degraded.push(SearchDegradation::global_lane_migration_required(&error));
+                degraded.push(SearchDegradation::global_lane_migration_required(
+                    &paths.database_path,
+                ));
             } else {
                 degraded.push(SearchDegradation::scope_metadata_unavailable(&format!(
                     "global store read failed: {error}"

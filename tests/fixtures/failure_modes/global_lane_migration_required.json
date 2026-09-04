@@ -11,7 +11,7 @@
   "severity": "info",
   "repair_present": true,
   "trigger": {
-    "description": "The optional user-global memory lane was skipped because its store was written by a different schema version and needs a migration. Workspace results are fully scope-verified and unaffected, so this is info severity on the read path. Previously this surfaced as scope_metadata_unavailable at medium severity, which made every search in such a workspace look like its own scope verification had failed.",
+    "description": "The optional user-global memory lane was skipped because its store was written by a different schema version and needs a migration. Workspace results are fully scope-verified and unaffected, so this is info severity on the read path. Previously this surfaced as scope_metadata_unavailable at medium severity, which made every search in such a workspace look like its own scope verification had failed. The repair addresses the global store database directly because `ee migrate run` has no --global switch.",
     "setup_commands": [
       "ee init --workspace .",
       "ee remember 'global rule' --global --json",
@@ -26,6 +26,6 @@
       "user-global memory lane",
       "needs a schema migration"
     ],
-    "repair_contains": "ee migrate run --global"
+    "repair_contains": "ee migrate run --database"
   }
 }
