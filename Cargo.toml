@@ -116,7 +116,7 @@ clap_complete = { version = "4.6.1" }
 fnx-algorithms = { version = "0.2.0", path = "../franken_networkx/crates/fnx-algorithms" }
 fnx-classes = { version = "0.2.0", path = "../franken_networkx/crates/fnx-classes" }
 fnx-runtime = { version = "0.2.0", path = "../franken_networkx/crates/fnx-runtime", default-features = false, features = ["asupersync-integration"] }
-frankensearch = { version = "0.4.2", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "storage", "model2vec", "download", "rerank", "native"] }
+frankensearch = { version = "0.4.2", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "storage", "model2vec", "download", "rerank"] }
 # EE's schema uses json_valid() in unconditional CHECK constraints. SQLModel
 # intentionally disables FrankenSQLite's default extension set, so unify the
 # JSON feature explicitly instead of depending on a transitive default.
