@@ -13,9 +13,11 @@ and the public `lib.rs` of each crate as of 2026-04-29. If a crate version,
 feature flag, or exported type below differs from the upstream repository at
 the time of EE-001 implementation, the upstream wins.
 
-The Asupersync inventory and accepted profile were refreshed on 2026-08-24
-against the registry `0.4.9` sources selected by `Cargo.toml`. The local
-`/dp/asupersync` checkout may be newer than that release pin.
+The dependency identity snapshot was refreshed on 2026-09-03 against the
+versions selected by `Cargo.toml` and `Cargo.lock`: Asupersync `0.4.10`,
+FrankenSQLite `0.3.16`, SQLModel `0.4.2`, Frankensearch `0.4.2`, and
+FrankenNetworkX `0.2.0`. Local `/dp` checkouts may be newer than the revisions
+recorded in `franken-stack.lock`.
 
 ## How To Read This
 
@@ -42,16 +44,16 @@ workspace root; individual crates may declare their own.
 
 | Crate | Version | Location | Notes |
 | --- | --- | --- | --- |
-| `asupersync` | 0.4.9 | `/dp/asupersync/asupersync` (root) | Public API: `Cx`, `Scope`, `LabRuntime`, `LabConfig` (re-exported from `asupersync-core`). |
+| `asupersync` | 0.4.10 | `/dp/asupersync` (root) | Public API: `Cx`, `Scope`, `LabRuntime`, `LabConfig`. |
 | `asupersync-macros` | 0.4.9 | `/dp/asupersync/asupersync-macros` | Proc-macros for `scope!`, `spawn!`, `join!`, `race!`. |
 | `asupersync-tokio-compat` | (see crate `Cargo.toml`) | `/dp/asupersync/asupersync-tokio-compat` | Quarantine adapter. **Not for `ee` core** — pulls `tokio`. |
 
 **Upstream default features (root `asupersync` crate):**
-`["proc-macros", "nightly-outcome-try"]` as of `0.4.9`. `test-internals` is an explicit
+`["proc-macros", "nightly-outcome-try"]` as of `0.4.10`. `test-internals` is an explicit
 non-default feature.
 
 **EE accepted profile:**
-`asupersync = { version = "=0.4.9", default-features = false, features = ["tracing-integration"] }`.
+`asupersync = { version = "=0.4.10", default-features = false, features = ["tracing-integration"] }`.
 This matches `Cargo.toml`, the dependency contract matrix, and the doctor
 franken-health golden. Do not enable upstream defaults in `ee` unless a future
 ADR updates the dependency contract.
@@ -75,7 +77,7 @@ ADR updates the dependency contract.
 - `petgraph`, `hyper`, `axum`, `reqwest`: not pulled in by default.
 
 **EE wiring guidance (research only):**
-- For EE-001, the accepted profile is the no-default `=0.4.9` registry pin plus
+- For EE-001, the accepted profile is the no-default `=0.4.10` registry pin plus
   `tracing-integration`.
 - `deterministic-mode` and `test-internals` are explicit test-only or
   diagnostics-only choices; they are not part of the default `ee` release
@@ -89,18 +91,18 @@ Workspace edition: 2024. Workspace `rust-version`: 1.85.
 
 | Crate | Version | Location |
 | --- | --- | --- |
-| `fsqlite` | 0.1.2 | `/dp/frankensqlite` (root) |
-| `fsqlite-core` | 0.1.2 | `/dp/frankensqlite/crates/fsqlite-core` |
-| `fsqlite-types` | 0.1.2 | `/dp/frankensqlite/crates/fsqlite-types` |
-| `fsqlite-error` | 0.1.2 | `/dp/frankensqlite/crates/fsqlite-error` |
-| `fsqlite-ext-fts5` | 0.1.2 | `/dp/frankensqlite/crates/fsqlite-ext-fts5` |
-| `fsqlite-ext-json` | 0.1.2 | `/dp/frankensqlite/crates/fsqlite-ext-json` |
-| `fsqlite-ext-icu` | 0.1.2 | `/dp/frankensqlite/crates/fsqlite-ext-icu` |
-| `fsqlite-ext-misc` | 0.1.2 | `/dp/frankensqlite/crates/fsqlite-ext-misc` |
-| `fsqlite-ext-rtree` | 0.1.2 | `/dp/frankensqlite/crates/fsqlite-ext-rtree` |
-| `fsqlite-ext-session` | 0.1.2 | `/dp/frankensqlite/crates/fsqlite-ext-session` |
-| `fsqlite-func` | 0.1.2 | `/dp/frankensqlite/crates/fsqlite-func` |
-| `fsqlite-harness` | 0.1.2 | `/dp/frankensqlite/crates/fsqlite-harness` |
+| `fsqlite` | 0.3.16 | `/dp/frankensqlite/crates/fsqlite` |
+| `fsqlite-core` | 0.3.16 | `/dp/frankensqlite/crates/fsqlite-core` |
+| `fsqlite-types` | 0.3.16 | `/dp/frankensqlite/crates/fsqlite-types` |
+| `fsqlite-error` | 0.3.16 | `/dp/frankensqlite/crates/fsqlite-error` |
+| `fsqlite-ext-fts5` | 0.3.16 | `/dp/frankensqlite/crates/fsqlite-ext-fts5` |
+| `fsqlite-ext-json` | 0.3.16 | `/dp/frankensqlite/crates/fsqlite-ext-json` |
+| `fsqlite-ext-icu` | 0.3.16 | `/dp/frankensqlite/crates/fsqlite-ext-icu` |
+| `fsqlite-ext-misc` | 0.3.16 | `/dp/frankensqlite/crates/fsqlite-ext-misc` |
+| `fsqlite-ext-rtree` | 0.3.16 | `/dp/frankensqlite/crates/fsqlite-ext-rtree` |
+| `fsqlite-ext-session` | 0.3.16 | `/dp/frankensqlite/crates/fsqlite-ext-session` |
+| `fsqlite-func` | 0.3.16 | `/dp/frankensqlite/crates/fsqlite-func` |
+| `fsqlite-harness` | 0.3.16 | `/dp/frankensqlite/crates/fsqlite-harness` |
 
 **`fsqlite` default features:**
 `["native", "linux-asupersync-uring", "json", "fts5", "rtree"]`.
@@ -131,21 +133,21 @@ includes `Cx`, `ObjectId`, `PayloadHash`, `Region`, `SymbolRecord`,
 ### 3. sqlmodel_rust (`/dp/sqlmodel_rust`)
 
 Workspace edition: 2024. Workspace `rust-version`: 1.85. Workspace
-`version`: 0.2.2 (used as the default for member crates).
+`version`: 0.4.2 (used as the default for member crates).
 
 | Crate | Version | Location |
 | --- | --- | --- |
-| `sqlmodel` | 0.2.2 | `/dp/sqlmodel_rust/crates/sqlmodel` |
-| `sqlmodel-core` | 0.2.2 | `/dp/sqlmodel_rust/crates/sqlmodel-core` |
-| `sqlmodel-query` | 0.2.2 | `/dp/sqlmodel_rust/crates/sqlmodel-query` (present per AGENTS.md; verify path before pinning) |
-| `sqlmodel-schema` | 0.2.2 | `/dp/sqlmodel_rust/crates/sqlmodel-schema` |
-| `sqlmodel-session` | 0.2.2 | `/dp/sqlmodel_rust/crates/sqlmodel-session` |
-| `sqlmodel-pool` | 0.2.2 | `/dp/sqlmodel_rust/crates/sqlmodel-pool` (present per AGENTS.md; verify path before pinning) |
-| `sqlmodel-frankensqlite` | 0.2.2 | `/dp/sqlmodel_rust/crates/sqlmodel-frankensqlite` |
-| `sqlmodel-macros` | 0.2.2 | `/dp/sqlmodel_rust/crates/sqlmodel-macros` |
-| `sqlmodel-sqlite` | 0.2.2 | `/dp/sqlmodel_rust/crates/sqlmodel-sqlite` |
-| `sqlmodel-mysql` | 0.2.2 | `/dp/sqlmodel_rust/crates/sqlmodel-mysql` |
-| `sqlmodel-console` | 0.2.2 | `/dp/sqlmodel_rust/crates/sqlmodel-console` |
+| `sqlmodel` | 0.4.2 | `/dp/sqlmodel_rust/crates/sqlmodel` |
+| `sqlmodel-core` | 0.4.2 | `/dp/sqlmodel_rust/crates/sqlmodel-core` |
+| `sqlmodel-query` | 0.4.2 | `/dp/sqlmodel_rust/crates/sqlmodel-query` |
+| `sqlmodel-schema` | 0.4.2 | `/dp/sqlmodel_rust/crates/sqlmodel-schema` |
+| `sqlmodel-session` | 0.4.2 | `/dp/sqlmodel_rust/crates/sqlmodel-session` |
+| `sqlmodel-pool` | 0.4.2 | `/dp/sqlmodel_rust/crates/sqlmodel-pool` |
+| `sqlmodel-frankensqlite` | 0.4.2 | `/dp/sqlmodel_rust/crates/sqlmodel-frankensqlite` |
+| `sqlmodel-macros` | 0.4.2 | `/dp/sqlmodel_rust/crates/sqlmodel-macros` |
+| `sqlmodel-sqlite` | 0.4.2 | `/dp/sqlmodel_rust/crates/sqlmodel-sqlite` |
+| `sqlmodel-mysql` | 0.4.2 | `/dp/sqlmodel_rust/crates/sqlmodel-mysql` |
+| `sqlmodel-console` | 0.4.2 | `/dp/sqlmodel_rust/crates/sqlmodel-console` |
 
 **`sqlmodel` features:** `default = []`, plus `console`, `c-sqlite-tests`.
 
@@ -161,9 +163,9 @@ Workspace edition: 2024. Workspace `rust-version`: 1.85. Workspace
 `SessionEventCallbacks`, `N1DetectionScope`.
 
 **EE wiring guidance:**
-- `ee-db` will likely depend on `sqlmodel`, `sqlmodel-frankensqlite`,
-  `sqlmodel-session`, and `sqlmodel-schema`. Pin via the workspace `version
-  = "0.2.2"` and use `path = "/dp/sqlmodel_rust/crates/<crate>"` only inside
+- `ee-db` depends on `sqlmodel-core` and `sqlmodel-frankensqlite`. Pin via the
+  workspace `version = "0.4.2"` and use `path =
+  "/dp/sqlmodel_rust/crates/<crate>"` only inside
   the local development profile. Production publication should switch to
   registry pins per ADR 0002 follow-ups (the ADR mentions "release pin
   decision" but does not yet record it).
@@ -174,17 +176,17 @@ Workspace edition: 2024. Workspace `rust-version`: 1.95.
 
 | Crate | Version | Location |
 | --- | --- | --- |
-| `frankensearch` (top-level) | 0.3.0 | `/dp/frankensearch/frankensearch` |
-| `frankensearch-core` | 0.2.0 | `/dp/frankensearch/crates/frankensearch-core` |
-| `frankensearch-embed` | 0.2.0 | `/dp/frankensearch/crates/frankensearch-embed` |
-| `frankensearch-storage` | 0.2.0 | `/dp/frankensearch/crates/frankensearch-storage` |
-| `frankensearch-rerank` | 0.2.0 | `/dp/frankensearch/crates/frankensearch-rerank` |
+| `frankensearch` (top-level) | 0.4.2 | `/dp/frankensearch/frankensearch` |
+| `frankensearch-core` | 0.2.3 | `/dp/frankensearch/crates/frankensearch-core` |
+| `frankensearch-embed` | 0.2.4 | `/dp/frankensearch/crates/frankensearch-embed` |
+| `frankensearch-storage` | 0.2.2 | `/dp/frankensearch/crates/frankensearch-storage` |
+| `frankensearch-rerank` | 0.2.5 | `/dp/frankensearch/crates/frankensearch-rerank` |
 | `frankensearch-ops` | 0.2.0 | `/dp/frankensearch/crates/frankensearch-ops` |
-| `frankensearch-durability` | 0.2.0 | `/dp/frankensearch/crates/frankensearch-durability` |
+| `frankensearch-durability` | 0.2.2 | `/dp/frankensearch/crates/frankensearch-durability` |
 | `frankensearch-tui` | 0.2.0 | `/dp/frankensearch/crates/frankensearch-tui` |
 
-> The version delta (top-level 0.3.0 vs sub-crates 0.2.0) is intentional in
-> the upstream workspace as of 2026-04-29.
+> The top-level and sub-crate versions intentionally advance independently in
+> the upstream workspace.
 
 **`frankensearch` (top-level) features:**
 `default = ["hash"]`. Declared features include `hash`, `model2vec`,
@@ -194,7 +196,7 @@ Workspace edition: 2024. Workspace `rust-version`: 1.95.
 
 **EE feature mapping (from `Cargo.toml` `[features]`):**
 - `embed-fast` → `frankensearch/model2vec` + `frankensearch/download`.
-- `lexical-bm25` → `frankensearch/lexical`.
+- `lexical-bm25` → `frankensearch/lexical-tantivy`.
 
 `embed-quality` is intentionally not exposed in `ee` yet. Enabling
 `frankensearch/fastembed` pulls `fastembed -> hf-hub -> reqwest`, which brings
@@ -219,17 +221,17 @@ blocked until upstream has a clean local profile.
 
 ### 5. franken_networkx (`/dp/franken_networkx`)
 
-Workspace edition: 2024. Workspace `version`: 0.1.0.
+Workspace edition: 2024. Workspace `version`: 0.2.0.
 
 | Crate | Version | Location |
 | --- | --- | --- |
-| `fnx-runtime` | 0.1.0 | `/dp/franken_networkx/crates/fnx-runtime` |
-| `fnx-classes` | 0.1.0 | `/dp/franken_networkx/crates/fnx-classes` |
-| `fnx-algorithms` | 0.1.0 | `/dp/franken_networkx/crates/fnx-algorithms` |
-| `fnx-cgse` | 0.1.0 | `/dp/franken_networkx/crates/fnx-cgse` |
-| `fnx-convert` | 0.1.0 | `/dp/franken_networkx/crates/fnx-convert` |
-| `fnx-views` | 0.1.0 | `/dp/franken_networkx/crates/fnx-views` |
-| `fnx-readwrite` | 0.1.0 | `/dp/franken_networkx/crates/fnx-readwrite` |
+| `fnx-runtime` | 0.2.0 | `/dp/franken_networkx/crates/fnx-runtime` |
+| `fnx-classes` | 0.2.0 | `/dp/franken_networkx/crates/fnx-classes` |
+| `fnx-algorithms` | 0.2.0 | `/dp/franken_networkx/crates/fnx-algorithms` |
+| `fnx-cgse` | 0.2.0 | `/dp/franken_networkx/crates/fnx-cgse` |
+| `fnx-convert` | 0.2.0 | `/dp/franken_networkx/crates/fnx-convert` |
+| `fnx-views` | 0.2.0 | `/dp/franken_networkx/crates/fnx-views` |
+| `fnx-readwrite` | 0.2.0 | `/dp/franken_networkx/crates/fnx-readwrite` |
 
 **`fnx-runtime` features:** `default = []`, plus `asupersync-integration`,
 `ftui-integration`. EE-001 will want `asupersync-integration` enabled to bind
@@ -272,7 +274,7 @@ Per AGENTS.md and Cargo.toml the default feature set is
 - `frankensearch/fts5` enabled for FTS5-backed lexical fallback.
 - `json` reserved as an ee feature; JSON output is unconditional today.
 - `frankensearch/model2vec` and `frankensearch/download` enabled.
-- `frankensearch/lexical` enabled.
+- `frankensearch/lexical-tantivy` enabled.
 - `graph` enabled for the in-tree FrankenNetworkX graph surface.
 
 The `fsqlite/linux-asupersync-uring` default needs an explicit decision: it is

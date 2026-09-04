@@ -67,7 +67,7 @@ use super::verify_ledger::RchVerifyLedgerStatusReport;
 pub const DEPENDENCY_DIAGNOSTICS_SCHEMA_V1: &str = "ee.diag.dependencies.v1";
 pub const FRANKEN_HEALTH_SCHEMA_V1: &str = "ee.doctor.franken_health.v1";
 pub const INTEGRITY_DIAGNOSTICS_SCHEMA_V1: &str = "ee.diag.integrity.v1";
-pub const DEPENDENCY_MATRIX_REVISION: u32 = 3;
+pub const DEPENDENCY_MATRIX_REVISION: u32 = 4;
 pub const DEPENDENCY_MATRIX_SOURCE_BEAD: &str = "eidetic_engine_cli-ilcq";
 pub const DEPENDENCY_MATRIX_SOURCE_PLAN_ITEM: &str = "EE-307";
 pub const DEPENDENCY_MATRIX_DEFAULT_FEATURE_PROFILE: &str = "default";
@@ -3653,7 +3653,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "registry",
-            version: "0.4.9",
+            version: "0.4.10",
             path: "/dp/asupersync/asupersync",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -3679,7 +3679,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
             "runtime.async_boundary",
         ],
         diagnostic_command: "ee status --json",
-        release_pin_decision: "Registry version 0.4.9 is accepted; /dp/asupersync remains the local source reference for API checks.",
+        release_pin_decision: "Registry version 0.4.10 is accepted; /dp/asupersync remains the local source reference for API checks.",
     },
     DependencyContractEntry {
         name: "frankensqlite",
@@ -3689,7 +3689,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_patch",
-            version: "0.3.11",
+            version: "0.3.16",
             path: "/data/projects/frankensqlite",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -3717,7 +3717,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_dependency",
-            version: "0.4.1",
+            version: "0.4.2",
             path: "/data/projects/sqlmodel_rust",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -3745,7 +3745,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_dependency",
-            version: "0.4.0",
+            version: "0.4.2",
             path: "/data/projects/frankensearch",
         },
         default_feature_profile: DependencyFeatureProfile {

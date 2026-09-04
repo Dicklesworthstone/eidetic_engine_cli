@@ -132,3 +132,35 @@ builds and the pinned RCH verify lane both failed.
   `core::model::tests::rerank_model_artifact_read_rejects_length_mismatch_before_hashing`,
   `core::proof_verify::tests::tla_command_uses_sibling_model_config_when_present`,
   `models::jsonl::tests::export_record_union_round_trips_line_delimited_jsonl`.
+
+---
+
+# 2026-09-03 — bd-022z1 Franken-stack convergence
+
+The manifest, resolved lock, pinned source graph, runtime diagnostics, install
+audit, and dependency-contract golden had drifted onto different versions.
+This unit restores one explicit identity across those surfaces.
+
+## Changes
+
+- **Asupersync:** direct and dev requirements `=0.4.9` → `=0.4.10`; source
+  pin `86988e38` → the `v0.4.10` release commit `997e8d11`. The selected
+  no-default `tracing-integration` profile is unchanged.
+- **FrankenSQLite:** direct requirement and every resolved family member
+  `0.3.15` → `0.3.16`; source pin `067d5016` → `a6ae92aa`, which contains
+  the `v0.3.16` release plus the prefix-BM25 and WAL tail-index fixes.
+- **Frankensearch:** declared requirement `0.4.0` → the already-resolved
+  `0.4.2`; source pin `3d8d25ca` → current `main` at `4bd29d44`, including
+  the receipt-skip verification fix. Resolved crate versions are unchanged.
+- **SQLModel:** declared `sqlmodel-core` and `sqlmodel-frankensqlite` floors
+  `0.4.1` → the already-resolved `0.4.2`. Its source stays at the known-good
+  `3d79be0b` pin because upstream has no newer release tag and current `main`
+  is a large unreleased API/test expansion.
+- **Identity surfaces:** dependency doctor matrix revision 4, search manifest
+  metadata, install-pipeline publication requirements, Markdown research and
+  contract matrices, and the contract golden now report the same versions.
+
+## Verification
+
+Pinned RCH verification is pending on the committed tree. Results will be
+recorded here and on `bd-022z1`; no local Cargo command is permitted.
