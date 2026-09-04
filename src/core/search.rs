@@ -10482,7 +10482,7 @@ async fn global_store_frankensearch_hits(
             // A global store that merely needs migration is an optional lane
             // being skipped, not a failure to verify the scope of the results
             // this search is about to return.
-            if error.contains("needs migration") {
+            if error.contains(crate::core::global_store::GLOBAL_STORE_NEEDS_MIGRATION_MARKER) {
                 degraded.push(SearchDegradation::global_lane_migration_required(
                     &paths.database_path,
                 ));

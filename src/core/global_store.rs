@@ -65,6 +65,16 @@ pub use crate::models::GLOBAL_MEMORY_SCHEMA_V1;
 /// single code.
 pub const GLOBAL_MEMORY_DISABLED_CODE: &str = "global_lane_disabled";
 
+/// Marker substring in the read-path error raised when the user-global store
+/// is present but needs a schema migration.
+///
+/// `core::search` matches on this to report the optional lane as skipped
+/// (`global_lane_migration_required`, info) instead of as a failure to verify
+/// the scope of the workspace's own results. The error is a plain `String`, so
+/// the constant is the only thing keeping producer and consumer from drifting
+/// apart silently.
+pub const GLOBAL_STORE_NEEDS_MIGRATION_MARKER: &str = "needs migration";
+
 /// The provenance lane label attached to every memory surfaced from the global
 /// tier, so an agent always knows a memory came from the user-global store and
 /// not the current workspace.
@@ -735,6 +745,8 @@ pub fn read_global_store_memories(
         .needs_migration()
         .map_err(|error| format!("failed to inspect global store migration state: {error}"))?;
     if needs_migration {
+        // Must keep containing `GLOBAL_STORE_NEEDS_MIGRATION_MARKER`; the
+        // search read path classifies this case by that substring.
         return Err(
             "global store database needs migration; skipping read-only global tier".to_owned(),
         );
@@ -856,8 +868,10 @@ mod tests {
             return Err("stale global store read must report pending migration".to_owned());
         };
         assert!(
-            error.contains("needs migration"),
-            "error should identify pending migration, got {error}"
+            error.contains(GLOBAL_STORE_NEEDS_MIGRATION_MARKER),
+            "the read path's pending-migration error must keep containing \
+             `{GLOBAL_STORE_NEEDS_MIGRATION_MARKER}`; core::search classifies \
+             the skipped global lane by that substring. Got {error}"
         );
 
         let connection = DbConnection::open_file_read_only(&paths.database_path)
