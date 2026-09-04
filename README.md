@@ -1656,7 +1656,7 @@ Feature flags:
 | `graph` | active | Default-on graph analytics surface |
 | `differential-networkx` | active test gate | Heavy Python NetworkX differential suite |
 | `mcp` | active optional adapter | Stdio adapter module; default builds keep manifest discovery |
-| `serve` | reserved no-op | The loopback-only `ee serve` adapter is always compiled; this flag gates nothing today |
+| `serve` | reserved | The loopback-only `ee serve` adapter is compiled unconditionally; the flag only changes how `ee capabilities` reports the feature |
 | `science-analytics` | reserved | Future analytics subsystem; current CLI reports degraded/unavailable posture |
 
 See [`docs/feature_flag_registry.md`](docs/feature_flag_registry.md) for the
@@ -2264,9 +2264,12 @@ hardware class.
 
 **These rows are historical (last synced 2026-05-13) and are not currently
 reproduced by release tooling.** A 2026-09-02 probe of the public `v0.14.4`
-binary on an M4 laptop measured roughly 2 s wall for `ee search`, `ee pack`,
-and `ee status` on a 9-memory workspace, because every process re-verifies
-and fully loads the Model2Vec model before answering. Treat the table as a
+binary measured roughly 2 s wall for `ee search`, `ee pack`, and `ee status`
+on a 9-memory workspace, because every process re-verifies and fully loads
+the Model2Vec model before answering. That probe ran on an Apple M4 host,
+which is **not** the `mac-m3-pro` class the table above was measured on, so
+it does not refute those numbers on their own hardware; it does show the
+per-command fixed cost the table omits. Treat the table as a
 target until `bd-reality-core-convergence-1azkt.6` regenerates it from
 attested raw samples.
 
@@ -2496,7 +2499,7 @@ Boundaries to know:
 | Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
 | Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) exists but is refreshed by hand (formula at v0.14.2 as of 2026-09-02). crates.io publication is still pending. Releases are currently cut outside GitHub Actions; `v0.14.4` ships checksums and a manifest but no Sigstore bundle or SLSA provenance, so `--require-provenance` fails against it by design. |
-| Reserved adapters | `science-analytics` reports a capability gap until its adapter matures. The loopback-only `serve` adapter is compiled into every build; the `serve` Cargo feature flag is a reserved no-op. |
+| Reserved adapters | `science-analytics` reports a capability gap until its adapter matures. The loopback-only `serve` adapter is compiled into every build; the `serve` Cargo feature flag only changes how `ee capabilities` reports it. |
 | Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |
 
 ---
