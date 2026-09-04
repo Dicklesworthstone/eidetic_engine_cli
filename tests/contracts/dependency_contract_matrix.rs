@@ -101,6 +101,20 @@ fn strings(object: &Map<String, Value>, key: &str) -> Result<Vec<String>, String
         .collect()
 }
 
+fn toml_strings<'a>(value: &'a toml::Value, context: &str) -> Result<BTreeSet<&'a str>, String> {
+    value
+        .as_array()
+        .ok_or_else(|| format!("{context} must be a TOML array"))?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .as_str()
+                .ok_or_else(|| format!("{context}[{index}] must be a string"))
+        })
+        .collect()
+}
+
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
         Ok(())
@@ -394,6 +408,7 @@ fn frankensearch_default_profile_matches_enabled_download_contract() -> TestResu
         "lexical-tantivy",
         "fts5",
         "rerank",
+        "native",
     ] {
         ensure(
             default_features.contains(expected),
@@ -424,17 +439,36 @@ fn frankensearch_default_profile_matches_enabled_download_contract() -> TestResu
     )?;
 
     let cargo_toml = read_text(CARGO_TOML_PATH)?;
-    ensure(
-        cargo_toml
-            .contains("embed-fast = [\"frankensearch/model2vec\", \"frankensearch/download\"]"),
-        "Cargo embed-fast feature must keep the frankensearch/download edge",
+    let cargo_manifest: toml::Value = toml::from_str(&cargo_toml)
+        .map_err(|error| format!("{CARGO_TOML_PATH} is invalid TOML: {error}"))?;
+    let embed_fast = cargo_manifest
+        .get("features")
+        .and_then(|features| features.get("embed-fast"))
+        .ok_or_else(|| "Cargo feature `embed-fast` is required".to_string())?;
+    let embed_fast = toml_strings(embed_fast, "Cargo feature `embed-fast`")?;
+    for expected in ["frankensearch/model2vec", "frankensearch/download"] {
+        ensure(
+            embed_fast.contains(expected),
+            format!("Cargo embed-fast feature must keep the `{expected}` edge"),
+        )?;
+    }
+
+    let cargo_frankensearch_features = cargo_manifest
+        .get("dependencies")
+        .and_then(|dependencies| dependencies.get("frankensearch"))
+        .and_then(|dependency| dependency.get("features"))
+        .ok_or_else(|| "Cargo frankensearch dependency features are required".to_string())?;
+    let cargo_frankensearch_features = toml_strings(
+        cargo_frankensearch_features,
+        "Cargo frankensearch dependency features",
     )?;
-    ensure(
-        cargo_toml.contains(
-            "features = [\"hash\", \"storage\", \"model2vec\", \"download\", \"rerank\"]",
-        ),
-        "Cargo frankensearch dependency must keep download and rerank enabled by default",
-    )
+    for expected in ["model2vec", "download", "rerank", "native"] {
+        ensure(
+            cargo_frankensearch_features.contains(expected),
+            format!("Cargo frankensearch dependency must enable `{expected}` by default"),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]

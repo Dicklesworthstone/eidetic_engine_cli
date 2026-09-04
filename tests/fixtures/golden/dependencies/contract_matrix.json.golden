@@ -164,7 +164,8 @@
           "download",
           "lexical-tantivy",
           "fts5",
-          "rerank"
+          "rerank",
+          "native"
         ]
       },
       "optional_feature_profiles": [],

@@ -3758,6 +3758,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
                 "lexical-tantivy",
                 "fts5",
                 "rerank",
+                "native",
             ],
         },
         optional_feature_profiles: &[],
@@ -5781,6 +5782,7 @@ mod tests {
             "lexical-tantivy",
             "fts5",
             "rerank",
+            "native",
         ] {
             ensure(
                 default_features.contains(&expected_feature),
