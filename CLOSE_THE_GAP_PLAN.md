@@ -1,4 +1,4 @@
-# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revision 2026-09-01)**
+# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revision 2026-09-04)**
 
 > Track A: mesh / team-confederation acceptance reconciliation after the Unix
 > EE-to-EE campaign. Track B: core-product, durability, verification, and
@@ -308,7 +308,201 @@ The transferable lesson is narrow and worth keeping: *a green
 test-only code, and cfg-gating a test silently changes what compiles on the
 platform you were trying to fix.*
 
-### Current execution ledger (2026-09-01)
+### Reality-check refresh — 2026-09-04
+
+**Verdict: the local memory product is real, but complete recovery, predictable
+retrieval under concurrency, demonstrated usefulness, and release readiness
+are still partial or unproven.** Closing 4,177 of 4,327 tracker records (96.5%)
+does not establish any of those properties. At this audit's starting snapshot,
+150 records were nonclosed: 85 open, 21 in progress, 41 explicitly blocked,
+and 3 deferred. Dependency-blocked and actionable counts use different
+definitions; they must not be substituted for those status counts.
+
+This refresh read all of `AGENTS.md`, `README.md`, `COMPREHENSIVE_PLAN.md`,
+and the active bridge. It examined architectural decisions, mesh acceptance,
+source paths, fixtures, verification scripts, and the active bridge's complete
+task descriptions. Historical design documents remain design evidence, not
+proof that their scenarios execute. This is a comprehensive product and
+coverage assessment, not a claim to have executed every test or audited every
+line of the optional subsystems.
+
+#### Fresh evidence and its limits
+
+The source snapshot is `ea25b367b16a22bfc47dcc9790075b97c43cf66f` on `main`.
+Evidence is retained at `/private/tmp/ee-reality-20260904.wmzHtT/`; this local
+directory is an audit attachment location, not the portable release capsule.
+Older dated evidence below retains its original source and date.
+
+| Check | Observation | What it establishes |
+| --- | --- | --- |
+| Public macOS ARM64 v0.14.4 archive | Downloaded from the release, SHA-256 matched its published checksum; `version --json` reports clean source `b0958e42cde8f8e2cedacf1f0a7c5804880ed9e9`, release profile, and `aarch64-apple-darwin` | Reproducible released-binary identity. The old `gitCommit: null` diagnosis applies to the installed 0.14.2 binary, not this archive. Checksums and self-reported identity are not signed build attestation. |
+| Isolated offline core loop | `init`, `remember`, `search`, `pack`, `why` all exit zero with v2 envelopes; exact unique memory content/ID is retrieved and packed, and `why.selection.latestPackSelection` identifies the persisted pack and ledger | The serial manual-memory loop works in the released lexical fallback configuration. Semantic download was deliberately disabled; this does not prove neural quality or concurrent behavior. |
+| Negative retrieval control | An unrelated unique query returns zero results | This small fixture rejects that distractor; it is not the general retrieval-quality evaluation. |
+| Persisted replay | Public `pack replay` succeeds for the exact pack ID obtained from `why`, with matching ledger/pack hash | The serial released memory-ledger path is usable. Full snapshot and mixed-entity replay acceptance remains separate. |
+| Public-CLI timings | Single observations: init 5.737 s, remember 1.065 s, search 0.913 s, pack 1.242 s, why 0.826 s, minimal status 0.895 s | End-to-end cost on this host/fixture. These are neither percentiles nor a comparison to the historical M3 corpus. Pack's inner `slo.actuals.elapsedMs=1` is not whole-command latency. |
+| Rust AST placeholder scan | No `todo!` or `unimplemented!` invocations under `src/` | Narrow syntactic result only. Partial restore coverage and architectural substitutes exist without either macro. |
+| Vision coverage script | `pass`, no missing documented surfaces | File/registration coverage, not 100% behavioral completion. |
+| Strict contract drift radar | Four dependency-document violations; 43 docs scanned, 230 schemas loaded; 577 documented degraded codes match 577 fixtures | Asupersync 0.4.9 references lag the accepted 0.4.10 profile. Catalog consistency passes; executable behavior remains separate. |
+| Closure linter | `pass`, zero new violations, 94 audit-baseline matches; automatic reopening disabled for the audit | The existing baseline is honored. This is not zero historical closure debt; no tracker status was changed by the audit. |
+| Existing shell walking skeleton | Seven checks execute against the explicit v0.14.4 binary: six pass, `why` exits 3 on a `/var` symlink ancestor. The identical memory/database succeeds with its physical `/private/var` workspace path | Current script contains the v2 walking skeleton. Its trusted temporary-root normalization needs correction under `.5`/`.17`; do not weaken product descendant-symlink guards or relabel the original run green. |
+| Bridge staleness script | Advises “consider planning Part III” against the active Part III plan and reads only old Part II labels | A real steering defect: completion-looking metadata produces obsolete advice. |
+| Public release/workflows | Latest remains v0.14.4 (2026-08-29), 16 assets without Sigstore/SLSA files; all three workflows report `disabled_manually` | The current public distribution is not a verified green candidate for current source. No workflow was enabled or release published by this audit. |
+| Current-source Cargo check | Both pinned RCH attempts fail syncing Asupersync after 30 seconds; the retry sets `RCH_SYNC_TIMEOUT_MS=180000` but the prescribed sidecar still reports 30000 ms. Local fallback is refused | Infrastructure failure, no compiler verdict. `check.json` and `check-retry.json` retain both attempts; `bd-glivu` owns the blocker. No current check, Clippy, or Rust-test pass is claimed. |
+
+#### Correct the diagnosis before assigning more work
+
+1. **Retrieval:** `.23` has already removed the read-only Tantivy writer-lock
+   cause, with focused pinned-source proof. Keep that progress. The two renames
+   in `publish_staged_index_inner` still move the active directory away before
+   staging becomes active; rollback on ordinary errors does not prove abrupt
+   crash safety or a coherent reader snapshot. `.2`/`.3` retain those obligations.
+2. **Recovery:** `src/core/backup.rs` now contains aggregate CASS session/evidence
+   serialization and transactional rehydration, safe source-path omission,
+   workspace rebinding, exact-count coverage checks, and rollback tests.
+   Task-episode recovery already has retained proof. CASS's current code/test
+   presence is progress, not a fresh passing run in this audit. Many nonempty
+   durable tables—including rules, packs, impressions/outcomes, curation, and
+   journals—still have `not_implemented` recovery coverage. `.13`/`.14` stay open.
+3. **Architecture:** private test-only BM25 and Frankensearch global retrieval
+   are not missing implementation. Production pack PPR explicitly degrades;
+   the local personalized algorithm remains in direct/exported graph paths.
+   `.4` must finish the call-site boundary rather than reintroduce a local scorer.
+4. **Proof:** the eval and skyline failure reports are dated, source-specific
+   evidence (`.33`, `.34`). Current eval tests already enumerate ten families
+   and explicitly expect the async-migration empty-failure golden. The missing
+   positive query workload remains `.33`; a passing error golden is not
+   retrieval-quality success. The old 106-failure suite inventory is historical;
+   neither that number nor a historical green check describes current HEAD.
+5. **Planning coverage:** `.27`, `.30`, `.31`, `.33`, and `.34` are not in
+   `.22`'s transitive blocking closure at audit start. `.24`–`.26` and `.28`
+   already are. Add the missing gates at their owning quality/status/release
+   stages; do not mistake parent-child membership for blocking dependencies.
+
+#### Bridge delta and execution order
+
+The existing owners cover the 24 vision goals in §8 in prose. The unanswered
+question is executable, stage-specific coverage: the original task graph can
+close while newer user-visible failures remain, dependency tests outside the
+EE crate can be omitted, and an advisory script can recommend an obsolete
+next phase. Those are coverage gaps even though the broad verification epic
+exists. Add bounded implementation/proof children and refine existing owners;
+do not create another root plan or parallel release program.
+
+1. Repair RCH source-transfer reliability under `bd-glivu`; preserve all
+   failed attempts and never substitute local Cargo or an installed binary.
+2. Establish a usable evaluation gate (`.33` → `.12`) and correct status
+   regression proof (`.31`/`.34` → `.19`). Keep the direct-hit ask test in
+   that evaluation path (`.30` → `.12`).
+3. Implement and prove the remaining native rule loop, durable recovery,
+   immutable publication, library boundaries, privacy, and Maintain under
+   their existing owners. Each implementation has a distinct acceptance test
+   or proof owner, with exact positive and forbidden-result assertions.
+4. Make bridge advice consume the active phase and distinguish metadata
+   coverage from behavioral evidence. Add tests that deliberately create
+   completion-looking metadata with a missing or failed proof.
+5. Verify the exact pinned sibling features and changed upstream tests, then
+   complete `.19`'s functional candidate. Measure that exact candidate via
+   `.6`, classify every advertised claim via `.9`, and privately stage via `.7`.
+6. `.20` remains the publication authority boundary; `.27` is the concrete
+   release/channel deliverable, `.21` audits it, and `.22` closes last.
+
+#### Ambition round 1 — make useful context the measured outcome
+
+The success boundary is the first usable, provenance-bearing context returned
+to a fresh agent. Measure the entire process and the complete recommended
+orientation sequence, alongside—not as a substitute for—inner pack/search
+timers. A fast empty pack, incorrect fallback, or unusable repair is a failed
+sample. `.6` owns cold/warm command and sequence latency; `.12` owns exact
+usefulness and abstention. Record corpus size, model state, source mode,
+candidate count, failures, and resource use with every sample. The current
+one-memory observations establish a measurement recipe, not a percentile SLO.
+
+Improve `.33` beyond changing 9 to 10: every registered fixture must resolve
+its corpus, execute its exact expected query inventory, and retain positive
+and negative assertions. Derive inventory from an authoritative manifest;
+cross-check actual directories to catch an unregistered addition. Repair
+`fx.async_migration.v1` before treating any new evaluation threshold as a
+release gate. Put `.30`'s lexical direct hit and distractor through that same
+public evaluator. This joins code correctness to the user's actual task.
+
+#### Ambition round 2 — require recovery to preserve later behavior
+
+Recovery acceptance is observational equivalence over the five jobs, in
+addition to record equality. After side-path restore and derived rebuild,
+the same admitted entities must search, pack, explain, accept permitted
+feedback, and continue curation/maintenance with preserved identity and audit
+history. Explicit workspace remapping, secret rekeying, host-path omission,
+and intentionally rebuilt caches are the named differences; none permits
+dropping durable business state. Compare both durable projections and those
+public observations in `.14`.
+
+The current CASS/task-episode mechanism is stored among `derived` artifacts
+but contains required durable rows. `.13` must make this distinction visible:
+the default `include_derived=false` must not yield a “complete” backup of a
+store containing those rows. Test both flag settings, exact nonzero counts,
+missing/duplicate references, aggregate truncation, transaction rollback, and
+rebackup after portable source-path omission. Define partial versus complete
+restoration explicitly; transport checksum success cannot imply recoverability.
+Do not weaken live denied-evidence admission to make a restored fixture pass.
+
+#### Ambition round 3 — make proof compositional across repositories
+
+Model acceptance as a directed graph of required claims and their evidence.
+A claim passes only when every required child is present, current for the
+candidate, and passing. Parent membership, byte counts, comments, and green
+unrelated tests do not satisfy a missing edge. An explicitly scoped
+not-applicable decision differs from missing, skipped, or infrastructure-failed
+evidence. This is a small typed composition rule, not another workflow engine.
+
+Add a dedicated test owner for the exact pinned sibling feature matrix:
+downstream EE tests do not automatically execute Frankensearch's own unit
+tests or compile its benches/dev targets. The recently changed read-only
+Tantivy and cached verification-receipt paths need their own positive and
+tamper/forbidden-write negatives. Use exact lock revisions and declared
+features, with no post-capture source changes. `.18` owns effective build
+identity; `.17` owns inventory/aggregation; `.19` consumes both. These tests
+can develop independently of a final green product and must not create a
+`.19` dependency cycle.
+
+#### Beads and refinement record
+
+Phase 3a used the skill's frozen prompt unchanged, retained on the root Bead.
+The baseline added `.35` (active-phase advice) and `.36` (independent false-
+completion proof); after the three ambition rounds it added `.37` (executing
+pinned sibling/API/feature proof) and refined `.6`, `.12`, `.13`, `.14`, `.18`,
+and `.33`. No new root epic was created.
+
+The frozen Phase 5 prompt is likewise retained verbatim on the root Bead and
+applied to each pass:
+
+| Pass | Review and resulting change |
+| --- | --- |
+| 1 | Separate current source, released binaries, and historical failures. Correct `.27`'s false null-provenance premise; retain completed CASS, lexical, backup, and upstream-integration progress. |
+| 2 | Add 11 blocking edges for evaluation, status, release authorization/delivery, local provenance, and new proof owners. All current mandatory nonclosed bridge children become reachable from `.22`. |
+| 3 | Remove implicit prerequisite ambiguity: `.35` can report unknown before the full runner exists; `.36` owns the independent test oracle before `.17` integrates it; `.37` consumes `.18` and feeds `.19`, never the reverse. Keep compile-only and executed matrix rows distinct. |
+| 4 | Execute the existing shell test and inspect its failure. Assign trusted-root normalization to `.5`/`.17`; correct stale walking-skeleton and fixture-count diagnoses, and require real positive eval workloads under `.33`. Preserve baseline-matched closure debt and RCH failures explicitly. |
+| 5 | Final review found no further planning changes: every active mandatory bridge child is reachable through blocking edges, new implementation/proof tasks have exact positive and negative acceptance, source/release evidence remains separated, and existing ownership/status is preserved. `br dep cycles` reports zero active cycles; bounded BV triage completes. |
+
+An implementation dependency means “must complete before closure,” not “no
+planning, test design, or diagnosis can start before the dependency closes.”
+The new exact edges are `.36 → .35`, `.17 → .36`, `.37 → .18`,
+`.19 → .37/.31/.34`, `.12 → .30/.33`, `.27 → .20`, `.21 → .27`, and
+`.19 → bd-provenance-redaction-local-reads-xisfl`, where the left side depends
+on the right. Existing paths already cover `.24`–`.26` and `.28`. The local
+provenance owner preserves usable local evidence locators while retaining
+the established redaction boundary for exported/agent-facing material.
+
+Final validation: the tracker contains 4,330 records, including the three new
+children; no pre-existing issue changed status. The closeout blocking closure
+contains 76 records and omits no nonclosed mandatory bridge child. BV computed
+ranking/triage but skipped its own cycle algorithm because the graph exceeds
+2,000 nodes; the explicit `br dep cycles --json` check supplies that result
+(zero active cycles, one archived closed-only cycle). Required new proof
+tasks remain open; this audit neither executes them nor closes the product.
+`git diff --check` passes. No Rust source was edited, and current-source
+compiler/test verification remains infrastructure-blocked as recorded above.
+
+### Current execution ledger (started 2026-09-01; evidence refreshed 2026-09-04)
 
 This is the bounded working checklist requested by the operator. It is not a
 second requirements source: §§9–15 and the Part III Beads remain authoritative.
@@ -399,18 +593,18 @@ status layer.
 - [x] Enumerate every source-of-truth table by five-job owner and classify it as
   export/restore required, derived/rebuildable, secret/rekeyed, or intentionally
   ephemeral; reconcile the inventory against migrations rather than prose.
-- [ ] Add missing export/restore coverage for rules, CASS sessions/evidence,
+- [ ] Complete export/restore coverage and executed proof for rules, CASS sessions/evidence,
   packs and typed selected items, outcomes/impressions, curation lineage,
   durable jobs, and any other required source-of-truth rows found by inventory.
-  - [ ] Add recovery-only exact insert paths for CASS sessions and evidence;
+  - [ ] Prove the implemented recovery-only exact insert paths for CASS sessions and evidence;
     restore the new workspace binding while preserving IDs, hashes, admission
     posture, revisions, timestamps, and memory/session foreign keys.
-  - [ ] Capture CASS sessions/evidence in bounded aggregate artifacts rather
+  - [ ] Prove the implemented capture of CASS sessions/evidence in bounded aggregate artifacts rather
     than one filesystem entry per span, and prove artifact row counts match the
     same-snapshot inventory before claiming either table covered.
-  - [ ] Omit host-private session source paths from portable artifacts while
+  - [ ] Prove the implemented omission of host-private session source paths from portable artifacts while
     retaining safe upstream identity and explicit restore semantics.
-  - [ ] Restore sessions before evidence after memory import, report both row
+  - [ ] Prove the implemented restoration of sessions before evidence after memory import, report both row
     counts, and fail closed on malformed schema, ambiguous workspace mapping,
     missing session/memory references, or duplicate identities.
   - [ ] Round-trip one admitted and one denied evidence row and prove restore
@@ -899,26 +1093,26 @@ candidate before `.2` changes the implementation.
 | ---: | --- | --- | --- |
 | 1 | Local-first single CLI; core commands need no daemon | **WORKING** | Real direct CLI paths and source-backed storage exist. |
 | 2 | Franken-stack foundations; no forbidden substitute dependencies or core algorithms | **PARTIAL / WRONG-APPROACH** | Static dependency scan is clean; custom BM25 is test-only and global recall plus weighted fusion/diagnostics use Frankensearch. Production pack PPR now degrades explicitly, but direct/exported local PPR and release/proof identity remain open. `.4`, `.18`; `.15` awaits focused runtime proof. |
-| 3 | Manual memory → DB → search → pack → why | **PARTIAL** | The ordinary path and provenance exist. Released-binary probes are unreliable; source-attested attribution is `.10`, then `.2`/`.3`. |
+| 3 | Manual memory → DB → search → pack → why | **WORKING (bounded release proof)** | Fresh v0.14.4 isolated serial offline probe returns the exact memory, pack provenance, and persisted ledger through why. Current-source and concurrent acceptance remain `.10`, `.2`/`.3`. |
 | 4 | CASS import makes permitted prior incident content searchable and safely packable | **WORKING** | Exact pinned no-mock proof now covers canonical-path import/retry, exact typed search, direct evidence pack persistence, verified replay, typed why, outcome recording, and fail-closed denied evidence; §A records the commits and invocation. |
-| 5 | Hybrid BM25 + neural-local retrieval by default | **PARTIAL / UNPROVEN** | Released binary flips backend; current source has plausible causes but no source-attested oracle. Fresh-workspace fallback is `bd-fresh-workspace-hash-fallback-kvltg`; `.10`, `.2`, `.3` own attribution and convergence. |
+| 5 | Hybrid BM25 + neural-local retrieval by default | **PARTIAL / UNPROVEN** | Released concurrent lexical-arm divergence has a focused source fix/proof in `.23`. Whole publication/model concurrency and fresh-workspace fallback remain `.2`, `.3`, `.10`, `bd-fresh-workspace-hash-fallback-kvltg`. |
 | 6 | Same declared snapshot gives byte-stable canonical JSON and pack hash | **UNPROVEN** | Released-binary semantics diverged. ADR 0087 is a `proposed` contract, not implementation; `.1`, `.10`, `.2`, `.3` own closure. |
 | 7 | Retrieval scores and pack quality mean what their names claim | **PARTIAL / UNPROVEN** | Pure lexical pools now use Frankensearch min-max normalization and retain raw BM25, but the query-relative/calibration contract and every downstream admission/quality consumer remain unproven. `.11`, `.12`. |
 | 8 | Explainable packs with typed identity, provenance, freshness, trust, and score reasons | **PARTIAL** | Rendering is strong for admitted memories; rule/evidence v3 identity, calibration, and deterministic admission remain open. |
 | 9 | Learn loop turns repeated evidence into a rule used by later search/pack | **PARTIAL / UNPROVEN** | Rules are stored, indexed, and can hydrate content through a linked source `MemoryId`; native rule identity and the exact later-pack E2E remain open under `bd-3h6bz`, ADR 0085, and `.17`. |
 | 10 | Maintain loop links, decays, consolidates, validates, repairs, and converges | **PARTIAL / UNPROVEN** | Decay/machinery exist; public consolidate → apply → index → retrieve is `bd-1oep7`. |
-| 11 | Complete durable backup, verify, migration, restore, and rebuild | **PARTIAL / UNPROVEN** | Targetless audits, read-snapshot export, non-mutating auth-key dry-run, and typed task-episode capture/restore are fixed in source. Other core durable state and evolved-store proof remain open. `.13`, `.14`. |
+| 11 | Complete durable backup, verify, migration, restore, and rebuild | **PARTIAL / UNPROVEN** | Targetless audits, read-snapshot export, non-mutating auth-key dry-run, task-episode recovery, and aggregate CASS recovery exist. Other durable tables and full evolved-store/current-candidate proof remain open. `.13`, `.14`. |
 | 12 | Graceful offline degradation remains useful and truthful | **PARTIAL** | Honest fallback/abstention exists; released binary may instead return no result/error, and uncalibrated quality is misleading. |
 | 13 | Stable machine envelopes and truthful repair exits | **PARTIAL** | `bd-34l8k`, `bd-3ak9b`, `bd-vv2dw`, `bd-aav4p`, `bd-5k6k7`; typed pack v3 is an intentional future break. |
-| 14 | Exact eight North Star public-CLI scenarios | **UNPROVEN** | `bd-2mpct`, `bd-2mpct.1`, and bridge `.17`; the focused CASS no-mock test fails before semantics on RCH path hermeticity, and prior oracles are permissive. |
+| 14 | Exact eight North Star public-CLI scenarios | **UNPROVEN as a complete set** | The focused CASS loop now passes its retained pinned-source test (§A); this does not prove all eight. `bd-2mpct`, `bd-2mpct.1`, and `.17` own exact complete coverage. |
 | 15 | Privacy/trust holds from ingest through index/model/pack/proof/backup/mesh | **PARTIAL / UNPROVEN** | ADR 0085 and source screening are strong; cross-source live admission, retained-generation, proof-sink, and recovery negatives remain. |
-| 16 | Graph insight and optional adapters are real or explicitly degraded | **PARTIAL** | Core graph/team surfaces are substantial; placeholder insights remain under `bd-2pos6`; stable claims must close or demote in `.9`. |
+| 16 | Graph insight and optional adapters are real or explicitly degraded | **PARTIAL / UNPROVEN** | Core graph/team/serve/insight implementations are substantial. Several formerly placeholder insight sections now have real code and regression assertions; remaining acceptance is tracked by `bd-2pos6` and `.34`, not inferred from stale placeholder labels. `.9` owns stable claims. |
 | 17 | Multi-agent local writes preserve integrity and truthful freshness | **PARTIAL / UNPROVEN** | Strong tests exist; current full-suite proof is red and evidence/linkage/index generation gaps remain. |
 | 18 | Unix team-confederation and documented environment posture | **PARTIAL** | Unix/two-host/Windows/fake-IdP evidence exists; Part III two-human wording and README disagree. `.8`. |
-| 19 | Canonical readiness verification and green CI | **PARTIAL / UNPROVEN** | Exact-HEAD pinned RCH check and strict Clippy pass with proof degradations, but the complete candidate manifest is absent and all hosted GitHub workflows are manually disabled. `.5`, `.17`, `.18`, `.19`. |
-| 20 | Reproducible performance and usable first-agent latency | **UNPROVEN** | README baseline/footer drift, no raw provenance, advisory budgets, and remote/local driver mismatch. `.6`. |
+| 19 | Canonical readiness verification and green CI | **PARTIAL / UNPROVEN** | Historical focused checks are retained; the 2026-09-04 current-source attempt is infrastructure-blocked. The complete candidate manifest is absent and all hosted workflows remain manually disabled. `.5`, `.17`, `.18`, `.19`. |
+| 20 | Reproducible performance and usable first-agent latency | **UNPROVEN** | README now labels the old baseline historical/advisory. Current-candidate raw samples, whole-command/sequence SLOs, correctness and resource evidence remain `.6`; inner packing timers are insufficient. |
 | 21 | Hermetic multi-platform release/install chain | **PARTIAL / UNPROVEN** | Current release has archives/checksums/installers but no candidate checks/provenance set; tag-only workflow inputs remain non-hermetic. `.7`, `.18`, `.20`, `.21`. |
-| 22 | Canonical walking skeleton proves init → remember → search → pack → why | **PARTIAL / UNPROVEN** | Installed release completes the ordinary path, but the claimed basic E2E omits it and still asserts v1; no current-source proof exists. `.5`, `bd-2mpct`. |
+| 22 | Canonical walking skeleton proves init → remember → search → pack → why | **PARTIAL / UNPROVEN as a readiness gate** | Current shell script has exact v2 assertions; released-binary run is 6/7 because of the test-root symlink alias, and the physical-path why control passes. Default manual loop also passes separately. Full candidate/automatic-freshness proof remains `.5`, `.17`, `bd-2mpct`. |
 | 23 | Recommended agent journey is coherent and fast without a daemon | **PARTIAL** | Five-command core exists, while README promotes broader overlapping flows and latency remains unproven. `.6`, `.9`. |
 | 24 | No-silent-mutation lifecycle, helpful/harmful feedback, decay/inversion | **PARTIAL / UNPROVEN** | Machinery exists; exact later-pack behavior, audit semantics, and docs wording need behavioral proof or maturity demotion. `.9`, `.17`, `bd-2mpct`. |
 
@@ -977,8 +1171,11 @@ The end-to-end reality check filed one self-contained bridge epic,
 | `bd-reality-core-convergence-1azkt.20` | P0 | Publication is a separate external authority boundary | Record exact human approval; publish only the verified private draft; no authority is inferred from the bead. |
 | `bd-reality-core-convergence-1azkt.21` | P1 | Public assets/channels/links can drift after publish | Read-only post-public audit and generated evidence reconciliation. |
 | `bd-reality-core-convergence-1azkt.22` | P0 | Prose/related edges can permit premature epic closure | Final graph-encoded evidence-ledger closeout blocked by every mandatory child and reused blocker. |
+| `bd-reality-core-convergence-1azkt.35` | P1 | Bridge advice still targets Part II and recommends the already-active Part III | Active-phase advice distinguishes source coverage, behavioral proof, and tracker activity; unknown remains explicit. |
+| `bd-reality-core-convergence-1azkt.36` | P1 | Metadata-complete input and missing blocking edges can imply false completion | Independent positive/negative graph/evidence fixtures plus real shell advisory tests, integrated through `.17`. |
+| `bd-reality-core-convergence-1azkt.37` | P1 | Downstream tests omit changed sibling unit tests and dev/bench feature targets | Execute exact pinned upstream API negatives and the supported matrix; source identity from `.18`, acceptance consumed by `.19`. |
 
-**Coverage result.** At audit start, closing all 122 nonclosed records would
+**2026-08-24 coverage result (historical).** At that audit's start, closing all 122 nonclosed records would
 still have left determinism attribution, score truth, complete recovery,
 verification authority, reproducible performance, supply-chain hermeticity,
 release staging/publication separation, and two-human disposition without
@@ -987,6 +1184,14 @@ implementation, proof, decision, or maturity-demotion owner. That means the
 *plan* is covered; it does not mean the product gaps are implemented or green.
 The final closeout child encodes mandatory edges, and `br dep cycles --json`
 reports zero active cycles after refinement.
+
+**2026-09-04 coverage result.** The refreshed 24-goal checklist retains the
+existing implementation owners and adds `.35`–`.37` for concrete steering and
+proof omissions. Eleven blocking edges now connect newer evaluation, status,
+provenance, and release work to the right completion gates. Completing all
+open work would close the enumerated vision only if the exact behavioral
+acceptance and retained current-candidate evidence also pass. Task closure
+alone, or completion of the former `.1`–`.22` range, remains insufficient.
 
 ---
 
@@ -1201,8 +1406,10 @@ The bridge may archive only when all of the following are simultaneously true:
 - The two-human criterion is satisfied or explicitly amended with a recorded
   product decision and an owned post-v1 follow-up if still promised.
 - `bd-3k1mg`, `bd-16imy`, and `bd-3h6bz` are behaviorally closed.
-- All children `.1` through `.22` are closed with their required artifacts;
-  `.22` is the final evidence-ledger rollup. Publication `.20` closes only
+- Every mandatory child in the current evidence ledger, including later
+  implementation/proof additions, is closed with its required artifacts and
+  is reachable through blocking edges from `.22`, the final rollup. Parent-child
+  edges and a historical `.1`–`.22` numeric range are insufficient. Publication `.20` closes only
   after exact written human authorization if publication remains in scope.
 - `bd-2mpct` and `bd-2mpct.1` prove all eight exact North Stars and no ignored core-loop
   tripwire remains.
