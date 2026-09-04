@@ -15,12 +15,23 @@ const EXPECTED_FIXTURE_IDS: &[&str] = &[
     "fx.metamorphic_evaluation.v1",
     "fx.release_failure.v1",
     "fx.semantic_model_admissibility.v1",
+    "fx.structural_recall.v1",
 ];
 
 const GOLDEN_REPORTS: &[(&str, ProcessExitCode, &str)] = &[
     (
+        // This fixture reports `status: "failed"` and exits `EvalFailure`, and
+        // its committed golden records exactly that. The cause is degenerate
+        // rather than interesting: none of its three source memories declares
+        // `expected_query_match`, so `build_query_expectations` yields nothing
+        // and the run evaluates zero queries. Expecting `Success` here (while
+        // shipping a golden that says "failed") is what kept this whole test
+        // red. Authoring real query expectations for this fixture, and for the
+        // other three that declare none, needs a source-built binary to
+        // regenerate the golden and is tracked on
+        // bd-reality-core-convergence-1azkt.33.
         "fx.async_migration.v1",
-        ProcessExitCode::Success,
+        ProcessExitCode::EvalFailure,
         include_str!("fixtures/golden/eval/fx.async_migration.v1/report.json.golden"),
     ),
     (
