@@ -101,10 +101,11 @@ fn strings(object: &Map<String, Value>, key: &str) -> Result<Vec<String>, String
         .collect()
 }
 
-fn toml_strings<'a>(value: &'a toml::Value, context: &str) -> Result<BTreeSet<&'a str>, String> {
-    value
-        .as_array()
-        .ok_or_else(|| format!("{context} must be a TOML array"))?
+fn toml_strings<'a>(
+    array: &'a toml_edit::Array,
+    context: &str,
+) -> Result<BTreeSet<&'a str>, String> {
+    array
         .iter()
         .enumerate()
         .map(|(index, value)| {
@@ -439,11 +440,14 @@ fn frankensearch_default_profile_matches_enabled_download_contract() -> TestResu
     )?;
 
     let cargo_toml = read_text(CARGO_TOML_PATH)?;
-    let cargo_manifest: toml::Value = toml::from_str(&cargo_toml)
+    let cargo_manifest = cargo_toml
+        .parse::<toml_edit::DocumentMut>()
         .map_err(|error| format!("{CARGO_TOML_PATH} is invalid TOML: {error}"))?;
     let embed_fast = cargo_manifest
         .get("features")
+        .and_then(toml_edit::Item::as_table)
         .and_then(|features| features.get("embed-fast"))
+        .and_then(toml_edit::Item::as_array)
         .ok_or_else(|| "Cargo feature `embed-fast` is required".to_string())?;
     let embed_fast = toml_strings(embed_fast, "Cargo feature `embed-fast`")?;
     for expected in ["frankensearch/model2vec", "frankensearch/download"] {
@@ -455,8 +459,11 @@ fn frankensearch_default_profile_matches_enabled_download_contract() -> TestResu
 
     let cargo_frankensearch_features = cargo_manifest
         .get("dependencies")
+        .and_then(toml_edit::Item::as_table)
         .and_then(|dependencies| dependencies.get("frankensearch"))
+        .and_then(toml_edit::Item::as_inline_table)
         .and_then(|dependency| dependency.get("features"))
+        .and_then(toml_edit::Value::as_array)
         .ok_or_else(|| "Cargo frankensearch dependency features are required".to_string())?;
     let cargo_frankensearch_features = toml_strings(
         cargo_frankensearch_features,
