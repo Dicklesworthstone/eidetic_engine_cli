@@ -2192,9 +2192,15 @@ TC-D7 remains the canonical trust taxonomy.
 
 ### Prompt-injection guard
 
-The trust pipeline flags suspicious patterns before promotion: fake
-instructions, role override attempts, and exfiltration cues. Flagged memories
-go into `curate candidates` and do not silently enter the procedural layer.
+Before packing, EE screens stored memories for role overrides, hidden-prompt
+requests, credential requests, and authority claims. Matching memories are
+omitted with policy explanations; their stored contents remain available for
+inspection. The check also covers graph, focus, and global memory inputs.
+
+This is a conservative pattern check: quoted or negated override phrases can
+also be omitted. Ordinary command-risk notes remain recallable, and EE never
+uses these matches to deny shell execution. See the [trust model](docs/trust-model.md)
+for the boundary and its limitations.
 
 ### Mesh sharing posture
 

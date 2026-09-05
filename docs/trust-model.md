@@ -109,6 +109,21 @@ code, provenance, and next action where one exists.
 
 ## Prompt-Injection Defense
 
+The context-pack memory boundary applies the existing instruction detector
+after search, graph expansion, focus selection, and global memory fan-in.
+Authority-related matches produce `excluded_by_policy` entries in
+`data.pack.skipped` and a `context_filtered_results` explanation with stable
+signal codes. Stored trust, explicit focus, and output-redaction opt-outs do
+not bypass this check. Older cached packs cannot bypass it either.
+
+This boundary does not delete, rewrite, or automatically quarantine the source
+memory. `ee why` and search can still expose it for review. The pattern detector
+cannot establish intent: quoted and negated override phrases are conservatively
+excluded from pack instructions too. It is not a comprehensive injection
+detector. Tool and destructive-command signals alone do not exclude memories;
+legitimate risk and anti-pattern notes remain useful, and shell execution
+authority stays with the human or harness.
+
 Imported sessions and legacy artifacts can contain text that looks like
 instructions to the current agent. EE treats those strings as evidence, not as
 authority. The trust pipeline must flag:
