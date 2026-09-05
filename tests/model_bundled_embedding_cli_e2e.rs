@@ -647,37 +647,6 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
         false,
         "status active.semantic before artifact download",
     )?;
-    let lifecycle_models = status_data
-        .get("modelLifecycle")
-        .and_then(|v| v.pointer("/models"))
-        .and_then(Value::as_array)
-        .ok_or_else(|| "missing modelLifecycle.models".to_string())?;
-    let lifecycle_entry = find_object_by_string(
-        lifecycle_models,
-        "modelLifecycle.models",
-        "modelId",
-        BUNDLED_EMBEDDING_MODEL_ID,
-    )?;
-    ensure_eq_str(
-        string_member(lifecycle_entry, "provider")?,
-        "model2vec",
-        "lifecycle provider",
-    )?;
-    ensure_eq_str(
-        string_member(lifecycle_entry, "registryStatus")?,
-        "unavailable",
-        "bundled registryStatus before artifact download",
-    )?;
-    ensure_eq_u64(
-        lifecycle_entry
-            .get("embeddingMetadata")
-            .and_then(|v| v.pointer("/dimension"))
-            .and_then(Value::as_u64)
-            .ok_or_else(|| "missing embeddingMetadata.dimension".to_string())?,
-        u64::from(BUNDLED_EMBEDDING_DIMENSION),
-        "bundled embedding dimension",
-    )?;
-
     let list = run_ee(
         &workspace,
         "act_model_list",
@@ -713,6 +682,38 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
         .ok_or_else(|| "missing model list entries".to_string())?;
     let entry = find_object_by_string(entries, "entries", "modelName", BUNDLED_EMBEDDING_MODEL_ID)?;
     let entry_id = string_member(entry, "id")?.to_owned();
+    // Lifecycle identity refers to the authoritative registry row; the
+    // human-facing model name is a separate field on that row.
+    let lifecycle_models = status_data
+        .get("modelLifecycle")
+        .and_then(|v| v.pointer("/models"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "missing modelLifecycle.models".to_string())?;
+    let lifecycle_entry = find_object_by_string(
+        lifecycle_models,
+        "modelLifecycle.models",
+        "modelId",
+        &entry_id,
+    )?;
+    ensure_eq_str(
+        string_member(lifecycle_entry, "provider")?,
+        "model2vec",
+        "lifecycle provider",
+    )?;
+    ensure_eq_str(
+        string_member(lifecycle_entry, "registryStatus")?,
+        "unavailable",
+        "bundled registryStatus before artifact download",
+    )?;
+    ensure_eq_u64(
+        lifecycle_entry
+            .get("embeddingMetadata")
+            .and_then(|v| v.pointer("/dimension"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "missing embeddingMetadata.dimension".to_string())?,
+        u64::from(BUNDLED_EMBEDDING_DIMENSION),
+        "bundled embedding dimension",
+    )?;
     ensure_eq_usize(
         count_objects_by_string(entries, "modelName", BUNDLED_EMBEDDING_MODEL_ID)?,
         1,

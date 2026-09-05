@@ -2297,8 +2297,11 @@ fn hash_model_asset(path: &Path) -> Result<String, std::io::Error> {
 }
 
 fn redact_model_source_uri(value: &str) -> String {
-    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
-    redact_model_source_path_like_segments(&secret_redacted)
+    // Remove paths before a secret scanner can insert a bracketed marker
+    // inside one. Otherwise the path scanner stops at that marker's `]`
+    // and leaves malformed public output such as `[REDACTED_PATH]]`.
+    let paths_redacted = redact_model_source_path_like_segments(value);
+    crate::policy::redact_secret_like_content(&paths_redacted).content
 }
 
 fn redact_model_source_path_like_segments(value: &str) -> String {
@@ -5226,6 +5229,33 @@ mod tests {
         ensure(
             error.message().contains(AUTOMATIC_REPAIR_UNAVAILABLE),
             "reranker fetch error must expose automatic_repair_unavailable",
+        )
+    }
+
+    #[test]
+    fn model_source_redaction_preserves_placeholder_boundaries() -> TestResult {
+        let path = "/tmp/model/api_key=private-model-token";
+        ensure(
+            crate::policy::redact_secret_like_content(path).redacted,
+            "fixture must exercise secret redaction inside a path",
+        )?;
+        ensure(
+            redact_model_source_uri(path) == "[REDACTED_PATH]",
+            "nested path secret must produce one complete path placeholder",
+        )?;
+        let source = "file:///tmp/model/weights.json?api_key=private-query-token";
+        let redacted = redact_model_source_uri(source);
+        ensure(
+            redacted.starts_with("file://[REDACTED_PATH]?api_key="),
+            format!("path redaction must preserve the query boundary: {redacted}"),
+        )?;
+        ensure(
+            !redacted.contains("private-query-token") && redacted.contains("[REDACTED:"),
+            format!("query secrets must still be redacted: {redacted}"),
+        )?;
+        ensure(
+            redact_model_source_uri(&redacted) == redacted,
+            "model source redaction must be idempotent",
         )
     }
 

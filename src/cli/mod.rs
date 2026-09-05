@@ -326,8 +326,7 @@ use crate::search::plan_cache::{
     DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, process_plan_cache_diag_report,
 };
 use crate::search::{
-    CanonicalSearchDocument, DocumentSource, Embedder, EmbedderStack, HashEmbedder, IndexBuilder,
-    SpeedMode,
+    CanonicalSearchDocument, DocumentSource, Embedder, EmbedderStack, HashEmbedder, SpeedMode,
 };
 use crate::shadow::{
     ResourceAdmissionDecision, ResourceAdmissionInput, ResourceBudgetPosture, ResourceCostClass,
@@ -16835,26 +16834,13 @@ fn build_eval_search_index_from_memories(
     let index_dir = index_dir.to_path_buf();
     let metadata_index_dir = index_dir.clone();
     let stats = crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
-        match IndexBuilder::new(&index_dir)
-            .with_embedder_stack(eval_embedder_stack())
-            .add_documents(documents)
-            .build(&cx)
+        // Use the complete production builder: Frankensearch's generic
+        // builder does not create the Tantivy tier in ee's feature lane.
+        match crate::core::index::build_index(&cx, &index_dir, eval_embedder_stack(), documents)
             .await
         {
             Ok(stats) => Ok(stats),
-            Err(frankensearch::SearchError::Cancelled {
-                phase,
-                reason: backend_reason,
-            }) => {
-                let reason = cx.cancel_reason().unwrap_or_else(|| {
-                    let kind =
-                        crate::core::outcome::cancel_kind_from_backend_reason(&backend_reason);
-                    crate::core::outcome::attributed_cancel_reason(
-                        &cx,
-                        kind,
-                        format!("eval index build cancelled during {phase}: {backend_reason}"),
-                    )
-                });
+            Err(crate::core::index::IndexRebuildError::Cancelled(reason)) => {
                 Err(CancellationAwareCliError::Cancelled(reason))
             }
             Err(error) => Err(CancellationAwareCliError::Domain(

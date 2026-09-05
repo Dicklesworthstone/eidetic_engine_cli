@@ -4861,12 +4861,12 @@ fn resolve_index_workspace_id(
 }
 
 #[derive(Debug)]
-struct BuildStats {
+pub(crate) struct BuildStats {
     source_count: usize,
     doc_count: usize,
     error_count: usize,
     has_quality_index: bool,
-    errors: Vec<(String, String)>,
+    pub(crate) errors: Vec<(String, String)>,
 }
 
 /// Build a complete index generation, including the zero-document generation.
@@ -5012,7 +5012,7 @@ pub(crate) async fn build_lexical_tier(
     index_checkpoint(cx)
 }
 
-async fn build_index(
+pub(crate) async fn build_index(
     cx: &asupersync::Cx,
     index_dir: &Path,
     stack: EmbedderStack,
