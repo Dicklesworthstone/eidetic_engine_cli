@@ -42757,7 +42757,8 @@ fn insert_db_check_integrity_audit(
     conn.insert_audit(
         &audit_id,
         &crate::db::CreateAuditInput {
-            workspace_id: migration_audit_workspace_id(conn, workspace_path),
+            workspace_id: migration_audit_workspace_id(conn, workspace_path)
+                .map_err(|error| error.to_string())?,
             actor: Some("ee db check-integrity".to_string()),
             action: DB_CHECK_INTEGRITY_AUDIT_ACTION.to_string(),
             target_type: None,
@@ -43125,8 +43126,16 @@ fn migration_index_rebuild_skipped_json() -> serde_json::Value {
 fn migration_audit_workspace_id(
     conn: &crate::db::DbConnection,
     workspace_path: &Path,
-) -> Option<String> {
-    bound_cli_workspace_id(conn, workspace_path).ok()
+) -> Result<Option<String>, DomainError> {
+    let canonical = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    crate::core::workspace::select_existing_workspace_row(
+        conn,
+        &workspace_core::stable_workspace_id(&canonical),
+        &[workspace_path, canonical.as_path()],
+    )
+    .map(|workspace| workspace.map(|workspace| workspace.id))
 }
 
 fn migration_index_rebuild_audit_details(
@@ -43217,7 +43226,7 @@ fn insert_migration_index_rebuild_audit(
     conn.insert_audit(
         &audit_id,
         &crate::db::CreateAuditInput {
-            workspace_id: migration_audit_workspace_id(conn, audit.workspace_path),
+            workspace_id: migration_audit_workspace_id(conn, audit.workspace_path)?,
             actor: Some("ee migrate run".to_string()),
             action: crate::db::audit_actions::MIGRATION_INDEX_REBUILD.to_string(),
             target_type: Some("migration".to_string()),
@@ -43287,7 +43296,7 @@ fn run_migrate_bayes_backfill(
         return Ok(serde_json::Value::Null);
     };
 
-    let workspace_id = migration_audit_workspace_id(conn, workspace_path)
+    let workspace_id = migration_audit_workspace_id(conn, workspace_path)?
         .unwrap_or_else(|| crate::core::workspace::stable_workspace_id(workspace_path));
     let report = crate::core::bayes_backfill::backfill_workspace(
         conn,
@@ -43348,10 +43357,57 @@ fn run_post_migration_index_rebuild(
         return Ok(migration_index_rebuild_skipped_json());
     }
 
+    // The global-store repair addresses its database from another workspace.
+    // Rebuild that store's own projection, never the caller's local index.
+    let global_paths = crate::core::global_store::default_global_store_paths_from_env()
+        .ok()
+        .filter(|paths| {
+            paths
+                .database_path
+                .canonicalize()
+                .ok()
+                .is_some_and(|path| database_path.canonicalize().ok().as_ref() == Some(&path))
+        });
+    let workspace_path = global_paths
+        .as_ref()
+        .map_or(workspace_path, |paths| paths.root.as_path());
+
+    // A schema-only store has no workspace projection to rebuild. Report
+    // that state explicitly while retaining the migration audit.
+    if conn
+        .list_workspaces()
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to inspect migrated workspaces: {error}"),
+            repair: Some("ee doctor --json".to_string()),
+        })?
+        .is_empty()
+    {
+        let audit_id = insert_migration_index_rebuild_audit(
+            conn,
+            MigrationIndexRebuildAudit {
+                workspace_path,
+                database_path,
+                applied,
+                schema_version,
+                status: "skipped_no_workspaces",
+                report: None,
+                error: None,
+            },
+        )?;
+        return Ok(serde_json::json!({
+            "stepId": POST_MIGRATION_INDEX_REBUILD_STEP_ID,
+            "required": false,
+            "dryRun": false,
+            "status": "skipped_no_workspaces",
+            "reason": "migrated_database_has_no_workspace_records",
+            "auditId": audit_id,
+        }));
+    }
+
     let options = IndexRebuildOptions {
         workspace_path: workspace_path.to_path_buf(),
         database_path: Some(database_path.to_path_buf()),
-        index_dir: None,
+        index_dir: global_paths.as_ref().map(|paths| paths.index_dir.clone()),
         dry_run: false,
     };
 

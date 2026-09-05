@@ -11,13 +11,15 @@
   "severity": "info",
   "repair_present": true,
   "trigger": {
-    "description": "The optional user-global memory lane was skipped because its store was written by a different schema version and needs a migration. Workspace results are fully scope-verified and unaffected, so this is info severity on the read path. Previously this surfaced as scope_metadata_unavailable at medium severity, which made every search in such a workspace look like its own scope verification had failed. The repair addresses the global store database directly because `ee migrate run` has no --global switch.",
+    "description": "The optional user-global memory lane needs migration while the workspace schema is current. This isolated fixture creates a real global SQLite file with no ee migrations; it never touches the operator's global store. Workspace results remain available with an info warning. The repair addresses the global database directly because ee migrate run has no --global switch. The public regression in tests/global_store_e2e.rs also executes that repair and proves the warning disappears.",
     "setup_commands": [
-      "ee init --workspace .",
-      "ee remember 'global rule' --global --json",
-      "# leave the user-global store at an older schema than the running binary"
+      "export XDG_DATA_HOME=\"$(mktemp -d)\"",
+      "ee init --workspace . --json",
+      "ee remember 'Scoped metadata fixture.' --workspace . --json",
+      "ee index rebuild --workspace . --json",
+      "python3 -c \"import os, pathlib, sqlite3; p = pathlib.Path(os.environ['XDG_DATA_HOME']) / 'ee/global/ee.db'; p.parent.mkdir(parents=True, exist_ok=True); c = sqlite3.connect(p); c.execute('CREATE TABLE scope_migration_fixture (id INTEGER PRIMARY KEY)'); c.commit(); c.close()\""
     ],
-    "invocation": "ee search 'rule' --workspace . --json"
+    "invocation": "ee search 'Scoped metadata fixture' --workspace . --source-mode lexical-only --json"
   },
   "expected_emission": {
     "code": "global_lane_migration_required",

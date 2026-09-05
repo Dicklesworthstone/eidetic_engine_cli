@@ -111,6 +111,273 @@ fn stdout_json(output: Output, context: &str) -> Result<serde_json::Value, Strin
         .map_err(|error| format!("{context}: stdout was not JSON: {error}\nstdout: {stdout}"))
 }
 
+#[test]
+fn global_migration_and_workspace_scope_read_failures_remain_distinct() -> TestResult {
+    let root = tempfile::Builder::new()
+        .prefix("ee-scope-read-boundaries-")
+        .tempdir_in("/tmp")
+        .map_err(|error| error.to_string())?
+        .keep();
+    let workspace = root.join("workspace");
+    let data = root.join("data");
+    let home = root.join("home");
+    for path in [&workspace, &data, &home] {
+        std::fs::create_dir_all(path).map_err(|error| error.to_string())?;
+    }
+    eprintln!("retained scope boundary workspace: {}", root.display());
+    let run = |label: &str, args: &[&str]| -> Result<serde_json::Value, String> {
+        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .current_dir(&workspace)
+            .args(args)
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("--json")
+            .env("HOME", &home)
+            .env("XDG_DATA_HOME", &data)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .env_remove("EE_WORKSPACE")
+            .env_remove("EE_WORKSPACE_REGISTRY")
+            .env_remove("EE_DATABASE_PATH")
+            .env_remove("EE_INDEX_DIR")
+            .env_remove("EE_EMBED_MODEL_DIR")
+            .env_remove("EE_EMBED_MODEL_PATH")
+            .env_remove("FRANKENSEARCH_MODEL_DIR")
+            .output()
+            .map_err(|error| error.to_string())?;
+        std::fs::write(root.join(format!("{label}.stdout.json")), &output.stdout)
+            .map_err(|error| error.to_string())?;
+        std::fs::write(root.join(format!("{label}.stderr")), &output.stderr)
+            .map_err(|error| error.to_string())?;
+        let value = stdout_json(output, label)?;
+        assert_eq!(value["schema"], "ee.response.v2", "{label}");
+        assert_eq!(value["success"], true, "{label}");
+        Ok(value)
+    };
+    let search = [
+        "search",
+        "Scoped metadata fixture",
+        "--source-mode",
+        "lexical-only",
+    ];
+    run("init", &["init"])?;
+    let remembered = run(
+        "remember",
+        &[
+            "remember",
+            "Scoped metadata fixture.",
+            "--level",
+            "semantic",
+            "--kind",
+            "fact",
+        ],
+    )?;
+    let memory_id = remembered["data"]["memoryId"]
+        .as_str()
+        .ok_or("remember must return a memory ID")?;
+    run("index", &["index", "rebuild"])?;
+    let baseline = run("baseline", &search)?;
+    assert_eq!(baseline["data"]["resultCount"], 1);
+    assert_eq!(baseline["data"]["results"][0]["memoryId"], memory_id);
+
+    // A real uninitialized global database needs migration, but must not
+    // make the independently verified workspace result look untrustworthy.
+    let global = GlobalStorePaths::from_data_root(&data.join("ee"));
+    std::fs::create_dir_all(&global.root).map_err(|error| error.to_string())?;
+    let connection = ee::db::DbConnection::open_file(&global.database_path)
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute_raw("CREATE TABLE scope_migration_fixture (id INTEGER PRIMARY KEY)")
+        .map_err(|error| error.to_string())?;
+    assert!(
+        connection
+            .needs_migration()
+            .map_err(|error| error.to_string())?
+    );
+    connection.close().map_err(|error| error.to_string())?;
+    let pending = run("global-pending", &search)?;
+    assert_eq!(pending["data"]["resultCount"], 1);
+    assert_eq!(pending["data"]["results"][0]["memoryId"], memory_id);
+    let codes = pending["degraded"]
+        .as_array()
+        .ok_or("degraded array missing")?;
+    assert!(
+        codes
+            .iter()
+            .all(|entry| entry["code"] != "scope_metadata_unavailable")
+    );
+    let migration = codes
+        .iter()
+        .filter(|entry| entry["code"] == "global_lane_migration_required")
+        .collect::<Vec<_>>();
+    assert_eq!(migration.len(), 1);
+    assert_eq!(migration[0]["severity"], "info");
+    let database = global
+        .database_path
+        .to_str()
+        .ok_or("global path is not UTF-8")?;
+    assert_eq!(
+        migration[0]["repair"],
+        format!("ee migrate run --database {database}")
+    );
+    let empty_repair = run("global-repair", &["migrate", "run", "--database", database])?;
+    assert_eq!(
+        empty_repair["data"]["postMigrationIndexRebuild"]["status"],
+        "skipped_no_workspaces"
+    );
+    assert!(empty_repair["data"]["postMigrationIndexRebuild"]["auditId"].is_string());
+    let connection = ee::db::DbConnection::open_file_read_only(&global.database_path)
+        .map_err(|error| error.to_string())?;
+    let audits = connection
+        .list_audit_by_action(ee::db::audit_actions::MIGRATION_INDEX_REBUILD, None)
+        .map_err(|error| error.to_string())?;
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].workspace_id, None);
+    connection.close().map_err(|error| error.to_string())?;
+    let repaired = run("global-repaired", &search)?;
+    assert_eq!(repaired["data"]["resultCount"], 1);
+    assert_eq!(repaired["data"]["results"][0]["memoryId"], memory_id);
+    assert!(
+        repaired["degraded"]
+            .as_array()
+            .ok_or("degraded array missing")?
+            .iter()
+            .all(|entry| entry["code"] != "global_lane_migration_required"
+                && entry["code"] != "scope_metadata_unavailable")
+    );
+
+    // Also migrate a populated historical store. The repair must target
+    // global/indexes even though the invoking workspace has its own index.
+    std::fs::rename(&global.root, root.join("migrated-empty-global"))
+        .map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&global.root).map_err(|error| error.to_string())?;
+    let connection = ee::db::DbConnection::open_file(&global.database_path)
+        .map_err(|error| error.to_string())?;
+    connection
+        .ensure_migration_table()
+        .map_err(|error| error.to_string())?;
+    for migration in ee::db::MIGRATIONS.iter().take(11) {
+        connection
+            .execute_raw(migration.sql())
+            .map_err(|error| error.to_string())?;
+        let record = ee::db::MigrationRecord::new(
+            migration.version(),
+            migration.name(),
+            migration.checksum_label(),
+            "2026-05-01T00:00:00Z",
+        )
+        .map_err(|error| error.to_string())?;
+        connection
+            .record_migration(&record)
+            .map_err(|error| error.to_string())?;
+    }
+    let global_workspace = global_workspace_id(&global);
+    let global_path = global
+        .root
+        .canonicalize()
+        .map_err(|error| error.to_string())?
+        .to_string_lossy()
+        .replace('\'', "''");
+    let global_memory = "mem_00000000000000000000000031";
+    connection.execute_raw(&format!(
+        "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('{global_workspace}', '{global_path}', '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z')"
+    )).map_err(|error| error.to_string())?;
+    connection.execute_raw(&format!(
+        "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, created_at, updated_at, trust_class, trust_subclass) VALUES ('{global_memory}', '{global_workspace}', 'procedural', 'rule', 'Scoped metadata fixture from legacy global store.', 0.8, 0.7, 0.6, '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z', 'human_explicit', 'test')"
+    )).map_err(|error| error.to_string())?;
+    connection.close().map_err(|error| error.to_string())?;
+    let legacy_pending = run("legacy-global-pending", &search)?;
+    assert_eq!(legacy_pending["data"]["resultCount"], 1);
+    assert_eq!(legacy_pending["data"]["results"][0]["memoryId"], memory_id);
+    assert!(
+        legacy_pending["degraded"]
+            .as_array()
+            .ok_or("degraded array missing")?
+            .iter()
+            .any(|entry| entry["code"] == "global_lane_migration_required"
+                && entry["severity"] == "info")
+    );
+    let legacy_repair = run(
+        "legacy-global-repair",
+        &["migrate", "run", "--database", database],
+    )?;
+    let rebuild = &legacy_repair["data"]["postMigrationIndexRebuild"];
+    assert_eq!(rebuild["status"], "success");
+    assert_eq!(rebuild["indexDir"], global.index_dir.display().to_string());
+    assert_eq!(rebuild["memoriesIndexed"], 1);
+    let connection = ee::db::DbConnection::open_file_read_only(&global.database_path)
+        .map_err(|error| error.to_string())?;
+    let audits = connection
+        .list_audit_by_action(ee::db::audit_actions::MIGRATION_INDEX_REBUILD, None)
+        .map_err(|error| error.to_string())?;
+    assert_eq!(audits.len(), 1);
+    assert_eq!(
+        audits[0].workspace_id.as_deref(),
+        Some(global_workspace.as_str())
+    );
+    connection.close().map_err(|error| error.to_string())?;
+    let legacy_repaired = run("legacy-global-repaired", &search)?;
+    let results = legacy_repaired["data"]["results"]
+        .as_array()
+        .ok_or("results missing")?;
+    assert_eq!(results.len(), 2);
+    for id in [memory_id, global_memory] {
+        assert!(results.iter().any(|result| result["memoryId"] == id));
+    }
+    assert!(
+        legacy_repaired["degraded"]
+            .as_array()
+            .ok_or("degraded array missing")?
+            .iter()
+            .all(|entry| entry["code"] != "global_lane_migration_required"
+                && entry["code"] != "scope_metadata_unavailable")
+    );
+
+    // Preserve the row and migration history while making its trust column
+    // unavailable. An empty database fails earlier, before scope admission.
+    let mut scoped_args = search.to_vec();
+    scoped_args.extend(["--memory-scope", "verified"]);
+    let verified = run("workspace-scope-baseline", &scoped_args)?;
+    assert_eq!(verified["data"]["resultCount"], 1);
+    assert_eq!(verified["data"]["results"][0]["memoryId"], memory_id);
+    let connection = ee::db::DbConnection::open_file(&workspace.join(".ee/ee.db"))
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute_raw("ALTER TABLE memories RENAME COLUMN trust_class TO retained_trust_class_probe")
+        .map_err(|error| error.to_string())?;
+    connection.close().map_err(|error| error.to_string())?;
+    let scoped = run("workspace-scope-unavailable", &scoped_args)?;
+    assert_eq!(scoped["data"]["resultCount"], 0);
+    assert_eq!(scoped["data"]["scopeStats"]["candidatesTotal"], 1);
+    assert_eq!(scoped["data"]["scopeStats"]["candidatesExcludedByScope"], 1);
+    assert_eq!(
+        scoped["data"]["scopeStats"]["excludedMemoryIds"],
+        serde_json::json!([memory_id])
+    );
+    let codes = scoped["degraded"]
+        .as_array()
+        .ok_or("degraded array missing")?;
+    assert!(
+        codes
+            .iter()
+            .all(|entry| entry["code"] != "global_lane_migration_required")
+    );
+    let scope = codes
+        .iter()
+        .filter(|entry| entry["code"] == "scope_metadata_unavailable")
+        .collect::<Vec<_>>();
+    assert_eq!(scope.len(), 1);
+    assert_eq!(scope[0]["severity"], "medium");
+    assert_eq!(scope[0]["repair"], "ee doctor --json");
+    assert!(
+        scope[0]["message"]
+            .as_str()
+            .ok_or("scope message missing")?
+            .contains("trust_class")
+    );
+    Ok(())
+}
+
 fn pack_item_memory_ids(envelope: &serde_json::Value) -> Vec<String> {
     envelope
         .pointer("/data/pack/items")

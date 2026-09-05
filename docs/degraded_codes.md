@@ -5858,20 +5858,22 @@ ee search "anything" --workspace . --json
 
 **Introduced by:** bd-reality-core-convergence-1azkt.31 (epic J)
 
-**Trigger.** The optional user-global memory lane was skipped because its store was written by a different schema version and needs a migration. Workspace results are fully scope-verified and unaffected, so this is info severity on the read path. Previously this surfaced as scope_metadata_unavailable at medium severity, which made every search in such a workspace look like its own scope verification had failed. The repair addresses the global store database directly because `ee migrate run` has no --global switch.
+**Trigger.** The optional user-global memory lane needs migration while the workspace schema is current. This isolated fixture creates a real global SQLite file with no ee migrations; it never touches the operator's global store. Workspace results remain available with an info warning. The repair addresses the global database directly because ee migrate run has no --global switch. The public regression in tests/global_store_e2e.rs also executes that repair and proves the warning disappears.
 
 **Setup.**
 
 ```bash
-ee init --workspace .
-ee remember 'global rule' --global --json
-# leave the user-global store at an older schema than the running binary
+export XDG_DATA_HOME="$(mktemp -d)"
+ee init --workspace . --json
+ee remember 'Scoped metadata fixture.' --workspace . --json
+ee index rebuild --workspace . --json
+python3 -c "import os, pathlib, sqlite3; p = pathlib.Path(os.environ['XDG_DATA_HOME']) / 'ee/global/ee.db'; p.parent.mkdir(parents=True, exist_ok=True); c = sqlite3.connect(p); c.execute('CREATE TABLE scope_migration_fixture (id INTEGER PRIMARY KEY)'); c.commit(); c.close()"
 ```
 
 **Invocation.**
 
 ```bash
-ee search 'rule' --workspace . --json
+ee search 'Scoped metadata fixture' --workspace . --source-mode lexical-only --json
 ```
 
 **Expected emission.** Message contains: `user-global memory lane ... needs a schema migration`
@@ -14273,7 +14275,7 @@ ee search 'Scoped mixed-trust fixture' --workspace . --memory-scope self --json
 
 **Introduced by:** bd-17c65.10.6 (epic J)
 
-**Trigger.** A scoped retrieval has search hits but cannot read memory metadata from the workspace database to verify trust-lane membership.
+**Trigger.** In an isolated disposable workspace, a scoped retrieval has a proven indexed hit but cannot read its trust column. Renaming the column preserves the record and migration history while reaching the actual scope-read boundary. An empty replacement database fails earlier at migration validation and does not exercise this code. The public regression is global_migration_and_workspace_scope_read_failures_remain_distinct in tests/global_store_e2e.rs.
 
 **Setup.**
 
@@ -14281,13 +14283,14 @@ ee search 'Scoped mixed-trust fixture' --workspace . --memory-scope self --json
 ee init --workspace . --json
 ee remember --workspace . --level semantic --kind fact 'Scoped metadata fixture.' --json
 ee index rebuild --workspace . --json
-touch empty-scope.db
+ee search 'Scoped metadata fixture' --workspace . --source-mode lexical-only --memory-scope verified --json
+python3 -c "import sqlite3; c = sqlite3.connect('.ee/ee.db'); c.execute('ALTER TABLE memories RENAME COLUMN trust_class TO retained_trust_class_probe'); c.commit(); c.close()"
 ```
 
 **Invocation.**
 
 ```bash
-ee search 'Scoped metadata fixture' --workspace . --database empty-scope.db --memory-scope verified --json
+ee search 'Scoped metadata fixture' --workspace . --source-mode lexical-only --memory-scope verified --json
 ```
 
 **Expected emission.** Message contains: `verify memory scope ... memory database`

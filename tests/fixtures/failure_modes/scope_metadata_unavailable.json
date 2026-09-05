@@ -12,14 +12,15 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "A scoped retrieval has search hits but cannot read memory metadata from the workspace database to verify trust-lane membership.",
+    "description": "In an isolated disposable workspace, a scoped retrieval has a proven indexed hit but cannot read its trust column. Renaming the column preserves the record and migration history while reaching the actual scope-read boundary. An empty replacement database fails earlier at migration validation and does not exercise this code. The public regression is global_migration_and_workspace_scope_read_failures_remain_distinct in tests/global_store_e2e.rs.",
     "setup_commands": [
       "ee init --workspace . --json",
       "ee remember --workspace . --level semantic --kind fact 'Scoped metadata fixture.' --json",
       "ee index rebuild --workspace . --json",
-      "touch empty-scope.db"
+      "ee search 'Scoped metadata fixture' --workspace . --source-mode lexical-only --memory-scope verified --json",
+      "python3 -c \"import sqlite3; c = sqlite3.connect('.ee/ee.db'); c.execute('ALTER TABLE memories RENAME COLUMN trust_class TO retained_trust_class_probe'); c.commit(); c.close()\""
     ],
-    "invocation": "ee search 'Scoped metadata fixture' --workspace . --database empty-scope.db --memory-scope verified --json"
+    "invocation": "ee search 'Scoped metadata fixture' --workspace . --source-mode lexical-only --memory-scope verified --json"
   },
   "expected_emission": {
     "code": "scope_metadata_unavailable",
