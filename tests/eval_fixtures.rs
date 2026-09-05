@@ -1411,28 +1411,32 @@ fn memory_poisoning_json_fixture_maps_to_eval_domain_types() -> TestResult {
         "usr_import_poisoned_memory_guard".to_string(),
         "domain scenario id",
     )?;
-    ensure_equal(scenario.command_sequence.len(), 4, "domain commands")?;
-    ensure_equal(
-        scenario.command_sequence[2].expected_exit_code,
-        7,
-        "poisoned memory command is policy denied",
-    )?;
-    ensure_equal(scenario.expected_outputs.len(), 4, "domain outputs")?;
+    ensure_equal(scenario.command_sequence.len(), 5, "domain commands")?;
+    for command in &scenario.command_sequence[2..4] {
+        ensure_equal(
+            command.expected_exit_code,
+            0,
+            "instruction overrides remain stored for inspection",
+        )?;
+    }
+    ensure_equal(scenario.expected_outputs.len(), 5, "domain outputs")?;
     ensure_equal(
         scenario.degraded_branches.len(),
-        3,
+        2,
         "domain degraded branches",
     )?;
     ensure(
         scenario
             .degraded_branches
             .iter()
-            .any(|branch| !branch.preserves_success_signal),
-        "at least one degraded branch fails closed",
+            .all(|branch| branch.preserves_success_signal),
+        "pack policy and lexical fallback preserve safe guidance",
     )?;
     ensure(
-        scenario.agent_success_signal.contains("poisoned"),
-        "success signal remains agent-facing",
+        scenario
+            .agent_success_signal
+            .contains("stored overrides excluded from authoritative packs"),
+        "success signal names the pack admission boundary",
     )
 }
 
