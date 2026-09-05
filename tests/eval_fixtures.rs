@@ -1122,7 +1122,7 @@ fn memory_poisoning_scenario_contract_is_complete() -> TestResult {
     )?;
 
     let commands = array_field(&scenario, "command_sequence")?;
-    ensure_equal(commands.len(), 4, "command count")?;
+    ensure_equal(commands.len(), 5, "command count")?;
     for (index, command) in commands.iter().enumerate() {
         let argv = array_field(command, "argv")?;
         ensure_equal(
@@ -1146,23 +1146,28 @@ fn memory_poisoning_scenario_contract_is_complete() -> TestResult {
         )?;
     }
 
-    let poisoned_command = &commands[2];
-    ensure_equal(
-        field(poisoned_command, "expected_exit_code")?.as_i64(),
-        Some(7),
-        "poisoned memory is policy-denied",
-    )?;
-    ensure_equal(
-        string_field(poisoned_command, "stdout_schema")?,
-        "ee.error.v2",
-        "poisoned memory returns JSON error",
+    for poisoned_command in &commands[2..4] {
+        ensure_equal(
+            field(poisoned_command, "expected_exit_code")?.as_i64(),
+            Some(0),
+            "override evidence remains inspectable in the store",
+        )?;
+        ensure_equal(
+            string_field(poisoned_command, "stdout_schema")?,
+            "ee.response.v2",
+            "remembering evidence returns a success envelope",
+        )?;
+    }
+    ensure(
+        array_contains_string(array_field(&commands[4], "argv")?, "pack"),
+        "the authority boundary must execute canonical pack",
     )?;
 
     let policy = field(&scenario, "policy_expectations")?;
     ensure_equal(
-        string_field(policy, "required_error_code")?,
-        "policy_instruction_like_content",
-        "policy error code",
+        string_field(policy, "required_degraded_code")?,
+        "context_filtered_results",
+        "pack omission is explained in the response envelope",
     )?;
     ensure_equal(
         string_field(policy, "required_risk")?,
@@ -1188,26 +1193,21 @@ fn memory_poisoning_scenario_contract_is_complete() -> TestResult {
         .filter_map(|branch| branch.get("code").and_then(Value::as_str))
         .collect();
     ensure(
-        degraded_codes.contains(&"policy_guard_unavailable"),
-        "policy_guard_unavailable branch",
+        degraded_codes.contains(&"context_filtered_results"),
+        "authority policy omission branch",
     )?;
     ensure(
-        degraded_codes.contains(&"semantic_disabled"),
-        "semantic_disabled branch",
+        degraded_codes.contains(&"context_lexical_fallback"),
+        "degraded lexical retrieval branch",
     )?;
     ensure(
-        degraded_codes.contains(&"quarantine_store_unavailable"),
-        "quarantine_store_unavailable branch",
-    )?;
-    ensure(
-        degraded_branches.iter().any(|branch| {
-            branch.get("code").and_then(Value::as_str) == Some("quarantine_store_unavailable")
-                && branch
-                    .get("preserves_success_signal")
-                    .and_then(Value::as_bool)
-                    == Some(false)
+        degraded_branches.iter().all(|branch| {
+            branch
+                .get("preserves_success_signal")
+                .and_then(Value::as_bool)
+                == Some(true)
         }),
-        "quarantine storage failure must be fail-closed",
+        "safe guidance remains usable when stored overrides are omitted",
     )?;
 
     let redaction = field(&scenario, "redaction")?;
