@@ -295,20 +295,29 @@ struct RunningInProcessDaemon {
 }
 
 #[cfg(unix)]
+fn model_test_socket_path(workspace: &E2eWorkspace, phase: &str) -> TestResult<PathBuf> {
+    // Workspace/model paths under the build directory exceed Unix socket limits.
+    // Only the socket uses native /tmp (also socket-capable on macOS); large test
+    // artifacts remain under CARGO_TARGET_DIR. Retain the private directory and
+    // record its location alongside the workspace's other diagnostic evidence.
+    let socket_root = fs::canonicalize("/tmp")
+        .map_err(|error| format!("resolve native socket temp directory: {error}"))?;
+    let socket_parent = tempfile::Builder::new()
+        .prefix("ee-model-uds-")
+        .tempdir_in(socket_root)
+        .map_err(|error| format!("create private model test socket directory: {error}"))?
+        .keep();
+    fs::set_permissions(&socket_parent, fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("secure model test socket directory: {error}"))?;
+    let socket_path = socket_parent.join("ee.sock");
+    workspace.log(phase, json!({ "socketPath": path_string(&socket_path) }))?;
+    Ok(socket_path)
+}
+
+#[cfg(unix)]
 impl RunningInProcessDaemon {
     fn start(workspace: &E2eWorkspace) -> TestResult<Self> {
-        let socket_parent = workspace.path.join("in-process-daemon-sockets");
-        fs::create_dir_all(&socket_parent)
-            .map_err(|error| format!("create {}: {error}", socket_parent.display()))?;
-        fs::set_permissions(&socket_parent, fs::Permissions::from_mode(0o700)).map_err(
-            |error| {
-                format!(
-                    "secure in-process daemon socket parent {}: {error}",
-                    socket_parent.display()
-                )
-            },
-        )?;
-        let socket_path = socket_parent.join("registry-order-e2e.sock");
+        let socket_path = model_test_socket_path(workspace, "in_process_daemon_socket")?;
         let handle = start_server(socket_path)
             .map_err(|error| format!("start unbound in-process daemon: {error}"))?;
         Ok(Self { handle })
@@ -394,18 +403,7 @@ impl Drop for RunningInProcessDaemon {
 #[cfg(unix)]
 impl RunningE2eDaemon {
     fn start(workspace: &E2eWorkspace, env: &[(String, String)]) -> TestResult<Self> {
-        let socket_parent = workspace.path.join("daemon-sockets");
-        fs::create_dir_all(&socket_parent)
-            .map_err(|error| format!("create {}: {error}", socket_parent.display()))?;
-        fs::set_permissions(&socket_parent, fs::Permissions::from_mode(0o700)).map_err(
-            |error| {
-                format!(
-                    "secure daemon socket parent {}: {error}",
-                    socket_parent.display()
-                )
-            },
-        )?;
-        let socket_path = socket_parent.join("registry-path-e2e.sock");
+        let socket_path = model_test_socket_path(workspace, "public_daemon_socket")?;
         let socket_arg = path_string(&socket_path);
         let mut command = ee_command_with_env(
             workspace,
