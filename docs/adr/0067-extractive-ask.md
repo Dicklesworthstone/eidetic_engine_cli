@@ -7,7 +7,7 @@ Bead: bd-169v0.1 (epic bd-169v0, 2026-06 idea-wizard wave)
 ## Context
 
 `ee search` returns ranked documents; the agent must then read N bodies to
-extract one fact ("which port does the daemon use?", "master or main?").
+extract one fact ("which port does the daemon use?", "which branch is the default?").
 `ee ask "<question>"` composes a direct answer FROM EXTRACTED SPANS of
 stored memories — no LLM, no generation: retrieval → evidence clustering →
 answer-span extraction → deterministic composition with per-claim citations,
@@ -80,7 +80,8 @@ span_score = w1·lexical_overlap(question, span)
   `conf = top_span_score · corroboration · (1 − contradiction_penalty)`,
   clamped to [0,1] and reported with its components.
 - **Abstention is a SUCCESS response, not an error** (exit 0): when
-  `conf < [ask] min_confidence` (default 0.55) the response sets
+  a non-conflicting answer has `conf < [ask] min_confidence` (default 0.55),
+  or no evidence span clears that floor, the response sets
   `abstained: true` with `no_confident_answer` (info), `nearestEvidence[]`
   (top sub-threshold spans), and a counterfactual hint mirroring why-not
   phrasing ("no memory mentions X; nearest evidence: …"). Every abstention
@@ -99,6 +100,14 @@ each side composed extractively with its own citations — plus
 `ee conflict explain <a> <b>`. Ask never resolves what `ee conflict
 resolve` (ADR 0066) exists to resolve explicitly; the loop is: ask surfaces
 the conflict → resolve fixes it → the next ask answers cleanly.
+
+**Clarification 2026-09-05:** opposing spans remain in separate clusters
+even when stopword normalization gives them identical terms. Every cited
+side must independently clear the evidence floor. A contradiction lowers
+the reported overall confidence but does not hide otherwise supported
+sides through abstention; no unified answer is emitted. Explicit
+`--require-confidence` continues to apply to the penalized confidence and
+returns exit 6 when it is insufficient.
 
 ### 5. Degradation vocabulary
 

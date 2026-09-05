@@ -510,6 +510,12 @@ pub fn cluster_spans(spans: &[AskSpan]) -> Vec<AskSpan> {
             if assigned[other] {
                 continue;
             }
+            // Stopword normalization removes "not". Opposing statements
+            // can therefore have identical terms, but cannot corroborate
+            // one another or collapse into a single winning citation.
+            if has_negation(&spans[seed].text) != has_negation(&spans[other].text) {
+                continue;
+            }
             let sim = jaccard_similarity(&term_sets[seed], &term_sets[other]);
             if sim >= CLUSTER_SIMILARITY_THRESHOLD {
                 assigned[other] = true;
@@ -726,8 +732,11 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
         contradiction_penalty: contradiction_penalty_applied,
     };
 
-    // Abstention check (ADR §3)
-    if confidence < request.min_confidence || clusters.is_empty() {
+    // Each conflict side has already cleared the evidence floor. The
+    // penalty reduces confidence in a single answer, not eligibility to
+    // disclose both supported sides. --require-confidence still checks the
+    // penalized confidence at the CLI boundary.
+    if (!conflict_detected && confidence < request.min_confidence) || clusters.is_empty() {
         let nearest_evidence: Vec<AskNearestEvidence> = all_spans
             .iter()
             .take(max_n.min(3))
@@ -1541,6 +1550,66 @@ mod tests {
         assert!(unrelated.abstained);
         assert!(unrelated.citations.is_empty());
         assert!(unrelated.answer_text.is_none());
+    }
+
+    #[test]
+    fn evaluate_ask_preserves_opposing_evidence_without_treating_it_as_corroboration() {
+        let candidates = [
+            (
+                "affirm",
+                "Remote cache delta is enabled for Project Zephyr on the hz2 worker pool.",
+                0.89,
+            ),
+            (
+                "negate",
+                "Remote cache delta is not enabled for Project Zephyr on the hz2 worker pool.",
+                0.88,
+            ),
+        ]
+        .into_iter()
+        .map(|(id, content, confidence)| AskCandidate {
+            memory_id: id.to_owned(),
+            content: content.to_owned(),
+            confidence,
+            trust_class: "agent_assertion".to_owned(),
+            provenance_uri: Some(format!("manual://ask-test/{id}")),
+            level: "episodic".to_owned(),
+            kind: "observation".to_owned(),
+            team_provenance: None,
+        })
+        .collect::<Vec<_>>();
+        let request = AskRequest {
+            question: "Is remote cache delta enabled for Project Zephyr?".to_owned(),
+            ..AskRequest::default()
+        };
+        let report = evaluate_ask(&request, &candidates);
+        assert!(!report.abstained, "{report:?}");
+        assert!(report.conflict_detected);
+        assert!(report.answer_text.is_none());
+        assert!(report.citations.is_empty());
+        assert!(report.confidence < request.min_confidence);
+        assert_eq!(report.confidence_components.corroboration, 1.0);
+        let sides = report
+            .sides
+            .as_ref()
+            .expect("both supported conflict sides");
+        assert_eq!(sides.len(), 2);
+        for (side, candidate) in sides.iter().zip(&candidates) {
+            assert_eq!(side.citations.len(), 1);
+            assert_eq!(side.citations[0].memory_id, candidate.memory_id);
+            assert_eq!(side.citations[0].text, candidate.content);
+        }
+
+        // A second source agreeing with the first is corroboration, not a
+        // reason to invent a conflict or reduce answer confidence.
+        let mut agreeing = candidates.clone();
+        agreeing[1].content = agreeing[0].content.clone();
+        let agreement = evaluate_ask(&request, &agreeing);
+        assert!(!agreement.abstained);
+        assert!(!agreement.conflict_detected);
+        assert!(agreement.sides.is_none());
+        assert_eq!(agreement.citations.len(), 1);
+        assert!(agreement.confidence_components.corroboration > 1.0);
     }
 
     #[test]

@@ -241,6 +241,13 @@ assert_json_filter_arg "$LAST_JSON" "memory_id" "$remote_negate_id" \
     'any(.data.sides[]?.citations[]?; .memoryId == $memory_id)' \
     "conflict ask cites negating memory"
 
+run_json "12b-conflict-require-confidence" --workspace "$WS" --json ask \
+    "Is remote cache delta enabled for Project Zephyr?" --require-confidence 0.95
+assert_rc 6 "conflict confidence requirement still uses penalized confidence"
+assert_json_filter "$LAST_JSON" \
+    '.schema == "ee.error.v2" and .error.code == "unsatisfied_degraded_mode"' \
+    "supported conflict sides cannot bypass require-confidence"
+
 step "unanswerable question abstains and fail-closed mode exits 6"
 run_json "13-ask-abstain" --workspace "$WS" --json ask \
     "Who approved the lunar invoice for Project Zephyr?"
