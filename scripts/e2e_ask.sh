@@ -114,7 +114,10 @@ remember_memory() {
         "$content"
     assert_rc 0 "$label exits zero"
     assert_json_filter "$LAST_JSON" '.success == true and .data.persisted == true' "$label persists"
-    memory_id_from_remember "$LAST_JSON"
+    LAST_MEMORY_ID="$(memory_id_from_remember "$LAST_JSON")"
+    if [ -z "$LAST_MEMORY_ID" ]; then
+        fail_now "$label returns a memory ID" "$LAST_STDOUT_FILE"
+    fi
 }
 
 with_temp_workspace WS
@@ -125,24 +128,28 @@ assert_rc 0 "init exits zero"
 assert_json_filter "$LAST_JSON" '.success == true' "init succeeds"
 
 step "seed answer, corroboration, conflict, and abstention memories"
-toolchain_id="$(remember_memory "01-remember-toolchain" procedural fact 0.99 \
-    "fixture://ask_e2e/toolchain" \
-    "Zephyr toolchain Rust nightly 1.96.0 active toolchain release verification.")"
-release_primary_id="$(remember_memory "02-remember-release-primary" procedural rule 0.99 \
-    "fixture://ask_e2e/release-primary" \
-    "Project Zephyr release readiness requires smoke gate alpha before deploy.")"
-release_support_id="$(remember_memory "03-remember-release-support" episodic decision 0.96 \
-    "fixture://ask_e2e/release-support" \
-    "Project Zephyr release readiness gate is smoke gate alpha before deploy.")"
-remote_affirm_id="$(remember_memory "04-remember-conflict-affirm" episodic observation 0.99 \
-    "fixture://ask_e2e/remote-cache-affirm" \
-    "Remote cache delta enabled Project Zephyr hz2 worker pool.")"
-remote_negate_id="$(remember_memory "05-remember-conflict-negate" episodic observation 0.99 \
-    "fixture://ask_e2e/remote-cache-negate" \
-    "Zephyr hz2 workers cannot use cache delta.")"
+remember_memory "01-remember-toolchain" procedural fact 0.99 \
+    "manual://ask_e2e/toolchain" \
+    "Zephyr toolchain Rust nightly 1.96.0 active toolchain release verification."
+toolchain_id="$LAST_MEMORY_ID"
+remember_memory "02-remember-release-primary" procedural rule 0.99 \
+    "manual://ask_e2e/release-primary" \
+    "Project Zephyr release readiness requires smoke gate alpha before deploy."
+release_primary_id="$LAST_MEMORY_ID"
+remember_memory "03-remember-release-support" episodic decision 0.96 \
+    "manual://ask_e2e/release-support" \
+    "Project Zephyr release readiness gate is smoke gate alpha before deploy."
+remember_memory "04-remember-conflict-affirm" episodic observation 0.99 \
+    "manual://ask_e2e/remote-cache-affirm" \
+    "Remote cache delta enabled Project Zephyr hz2 worker pool."
+remote_affirm_id="$LAST_MEMORY_ID"
+remember_memory "05-remember-conflict-negate" episodic observation 0.99 \
+    "manual://ask_e2e/remote-cache-negate" \
+    "Zephyr hz2 workers cannot use cache delta."
+remote_negate_id="$LAST_MEMORY_ID"
 remember_memory "06-remember-abstention-distractor" semantic fact 0.70 \
-    "fixture://ask_e2e/invoice-distractor" \
-    "Project Zephyr billing sandbox invoice identifiers are unrelated to approval flows." >/dev/null
+    "manual://ask_e2e/invoice-distractor" \
+    "Project Zephyr billing sandbox invoice identifiers are unrelated to approval flows."
 
 run_json "07-link-contradicts" --workspace "$WS" --json link \
     "$remote_affirm_id" "$remote_negate_id" --relation contradicts
@@ -152,7 +159,7 @@ assert_json_filter "$LAST_JSON" '.success == true' "explicit contradicts link pe
 run_json "08-conflict-explain" --workspace "$WS" --json conflict explain "$remote_affirm_id"
 assert_rc 0 "conflict explain exits zero"
 assert_json_filter_arg "$LAST_JSON" "memory_id" "$remote_negate_id" \
-    'any([.. | scalars | tostring]; . == $memory_id)' \
+    'any(.data.pairs[]?; .memoryA.id == $memory_id or .memoryB.id == $memory_id)' \
     "conflict explain references the opposing memory"
 
 step "direct answer cites resolvable stored memory"
@@ -173,13 +180,14 @@ assert_json_filter "$direct_json" \
 run_json "10-memory-show-citation" --workspace "$WS" --json memory show "$toolchain_id"
 assert_rc 0 "cited memory show exits zero"
 assert_json_filter_arg "$LAST_JSON" "memory_id" "$toolchain_id" \
-    'any([.. | objects | (.id? // .memoryId? // .memory_id? // empty)]; . == $memory_id)' \
+    'any(.. | objects | (.id? // .memoryId? // .memory_id? // empty); . == $memory_id)' \
     "direct citation resolves through memory show"
 
 step "lexical release rule answers the question without semantic scoring"
-format_rule_id="$(remember_memory "10b-remember-format-rule" procedural rule 0.85 \
-    "fixture://ask_e2e/release-tag-format" \
-    "Run cargo fmt --check before every release tag.")"
+remember_memory "10b-remember-format-rule" procedural rule 0.85 \
+    "manual://ask_e2e/release-tag-format" \
+    "Run cargo fmt --check before every release tag."
+format_rule_id="$LAST_MEMORY_ID"
 run_json "10c-ask-release-tag" --workspace "$WS" --json ask \
     "Which command must run before every release tag?"
 assert_rc 0 "release tag ask exits zero"

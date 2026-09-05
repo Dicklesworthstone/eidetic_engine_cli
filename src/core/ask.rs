@@ -696,9 +696,13 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
             .then_with(|| a.byte_start.cmp(&b.byte_start))
     });
 
-    let clusters = cluster_spans(&all_spans);
+    let mut clusters = cluster_spans(&all_spans);
 
     let top_span_score = clusters.first().map(|s| s.score).unwrap_or(0.0);
+    // A confident first span does not make the remaining spans evidence.
+    // Apply the same floor to every citation and to both conflict sides;
+    // retain all_spans for honest nearest-evidence output on abstention.
+    clusters.retain(|span| span.score >= request.min_confidence);
     let conflict_detected = detect_contradiction(&clusters);
     let contradiction_penalty_applied = if conflict_detected {
         CONTRADICTION_PENALTY
@@ -1483,6 +1487,60 @@ mod tests {
         assert!(report.abstained);
         assert_eq!(report.confidence, 0.0);
         assert!(report.answer_text.is_none());
+    }
+
+    #[test]
+    fn evaluate_ask_cites_only_confident_evidence_and_abstains_on_unrelated_questions() {
+        let candidates = [
+            (
+                "format",
+                "Run cargo fmt --check before every release tag.",
+                0.85,
+            ),
+            (
+                "release",
+                "Project Zephyr release readiness gate is smoke gate alpha before deploy.",
+                0.99,
+            ),
+            ("cache", "Zephyr hz2 workers cannot use cache delta.", 0.99),
+        ]
+        .into_iter()
+        .map(|(id, content, confidence)| AskCandidate {
+            memory_id: id.to_owned(),
+            content: content.to_owned(),
+            confidence,
+            trust_class: "human_explicit".to_owned(),
+            provenance_uri: Some(format!("manual://ask-test/{id}")),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            team_provenance: None,
+        })
+        .collect::<Vec<_>>();
+        let report = evaluate_ask(
+            &AskRequest {
+                question: "Which command must run before every release tag?".to_owned(),
+                max_evidence: 10,
+                ..AskRequest::default()
+            },
+            &candidates,
+        );
+        assert!(!report.abstained);
+        assert!(!report.conflict_detected);
+        assert_eq!(report.citations.len(), 1, "{report:?}");
+        assert_eq!(report.citations[0].memory_id, "format");
+        assert_eq!(report.citations[0].text, candidates[0].content);
+        assert!(report.semantic_degraded);
+
+        let unrelated = evaluate_ask(
+            &AskRequest {
+                question: "What colour is the CI dashboard?".to_owned(),
+                ..AskRequest::default()
+            },
+            &candidates,
+        );
+        assert!(unrelated.abstained);
+        assert!(unrelated.citations.is_empty());
+        assert!(unrelated.answer_text.is_none());
     }
 
     #[test]
