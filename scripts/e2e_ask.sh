@@ -176,6 +176,26 @@ assert_json_filter_arg "$LAST_JSON" "memory_id" "$toolchain_id" \
     'any([.. | objects | (.id? // .memoryId? // .memory_id? // empty)]; . == $memory_id)' \
     "direct citation resolves through memory show"
 
+step "lexical release rule answers the question without semantic scoring"
+format_rule_id="$(remember_memory "10b-remember-format-rule" procedural rule 0.85 \
+    "fixture://ask_e2e/release-tag-format" \
+    "Run cargo fmt --check before every release tag.")"
+run_json "10c-ask-release-tag" --workspace "$WS" --json ask \
+    "Which command must run before every release tag?"
+assert_rc 0 "release tag ask exits zero"
+assert_json_filter_arg "$LAST_JSON" "memory_id" "$format_rule_id" \
+    '.success == true and .data.abstained == false and (.data.answerText | contains("cargo fmt --check")) and (.data.citations | length) == 1 and .data.citations[0].memoryId == $memory_id' \
+    "release tag ask returns exactly the grounded format rule"
+assert_json_filter "$LAST_JSON" \
+    'any(.degraded[]?; .code == "ask_semantic_degraded")' \
+    "lexical answer preserves semantic degradation evidence"
+run_json "10d-ask-unrelated-dashboard" --workspace "$WS" --json ask \
+    "What colour is the CI dashboard?"
+assert_rc 0 "unrelated dashboard ask exits zero"
+assert_json_filter "$LAST_JSON" \
+    '.success == true and .data.abstained == true and (.data.citations | length) == 0' \
+    "unrelated dashboard question abstains without citations"
+
 step "multi-memory corroboration raises confidence components"
 run_json "11-ask-corroborated" --workspace "$WS" --json ask \
     "Project Zephyr release readiness smoke gate alpha before deploy"

@@ -281,7 +281,7 @@ fn ask_quality_expectations_validate_ask_v1_fixture() -> TestResult {
         ASK_QUALITY_EXPECTATIONS_SCHEMA_V1.to_string(),
         "ask-quality schema",
     )?;
-    ensure_equal(expectations.cases.len(), 5, "ask case count")?;
+    ensure_equal(expectations.cases.len(), 7, "ask case count")?;
     ensure(
         expectations
             .cases
@@ -300,7 +300,7 @@ fn ask_quality_expectations_validate_ask_v1_fixture() -> TestResult {
         materialize_source_memories(&source)
             .map_err(|error| error.to_string())?
             .len(),
-        60,
+        61,
         "ask_v1 materialized corpus size",
     )
 }

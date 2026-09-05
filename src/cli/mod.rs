@@ -15821,12 +15821,28 @@ fn collect_eval_run_reports(
         );
         report.metrics = fixture_metrics;
         report.semantic_recall = semantic_recall;
+        report.ask_quality = scenario
+            .ask_quality_expectations
+            .as_ref()
+            .map(|expectations| run_eval_ask_queries(&source, expectations))
+            .transpose()?;
         report.duration_ms = start.elapsed().as_secs_f64() * 1000.0;
         let semantic_recall_passed = report
             .semantic_recall
             .as_ref()
             .is_none_or(|semantic_recall| semantic_recall.passed);
-        report.status = if report.metrics.mean_precision_at_1 >= 0.5 && semantic_recall_passed {
+        let ask_quality_passed = report.ask_quality.as_ref().is_none_or(|quality| {
+            quality.gate_mode == crate::eval::AskQualityGateMode::Advisory
+                || quality.aggregate_verdict.is_passing()
+        });
+        report.status = if report.metrics.queries_evaluated == 0 {
+            // An undeclared workload is a configuration error, not measured
+            // poor retrieval. Keep it visible when reporting mixed families.
+            crate::eval::EvalRunStatus::Error
+        } else if report.metrics.mean_precision_at_1 >= 0.5
+            && semantic_recall_passed
+            && ask_quality_passed
+        {
             crate::eval::EvalRunStatus::Passed
         } else {
             crate::eval::EvalRunStatus::Failed
@@ -15925,7 +15941,12 @@ where
         }
     }
 
-    if passed {
+    if reports
+        .iter()
+        .any(|report| report.status == crate::eval::EvalRunStatus::Error)
+    {
+        ProcessExitCode::Configuration
+    } else if passed {
         ProcessExitCode::Success
     } else {
         ProcessExitCode::EvalFailure
@@ -16623,6 +16644,82 @@ fn pack_quality_degraded_branch_reports(
             })
         })
         .collect()
+}
+
+/// Run the same extractive engine as `ee ask`; expected answers are only
+/// consumed by the comparison step, never supplied to answer generation.
+fn run_eval_ask_queries(
+    source: &crate::eval::SourceMemoryFile,
+    expectations: &crate::eval::AskQualityExpectations,
+) -> Result<crate::eval::AskQualityReport, DomainError> {
+    use crate::core::ask::{AskCandidate, AskRequest, evaluate_ask};
+    use crate::eval::{AskQualityActual, AskQualityCitationActual, AskQualitySideActual};
+
+    let candidates = crate::eval::materialize_source_memories(source)?
+        .into_iter()
+        .map(|memory| AskCandidate {
+            memory_id: memory.id,
+            content: memory.content,
+            confidence: memory.confidence as f32,
+            trust_class: memory.trust_class,
+            provenance_uri: memory.provenance_uri,
+            level: memory.level,
+            kind: memory.kind,
+            team_provenance: None,
+        })
+        .collect::<Vec<_>>();
+    let actuals = expectations
+        .cases
+        .iter()
+        .map(|case| {
+            let report = evaluate_ask(
+                &AskRequest {
+                    question: case.question.clone(),
+                    ..AskRequest::default()
+                },
+                &candidates,
+            );
+            let sides = report.sides.as_deref().unwrap_or_default();
+            AskQualityActual {
+                case_id: case.case_id.clone(),
+                answer_text: report.answer_text.or_else(|| {
+                    (!sides.is_empty()).then(|| {
+                        sides
+                            .iter()
+                            .map(|side| side.answer_text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                }),
+                abstained: report.abstained,
+                citations: report
+                    .citations
+                    .iter()
+                    .chain(sides.iter().flat_map(|side| &side.citations))
+                    .map(|citation| AskQualityCitationActual {
+                        memory_id: citation.memory_id.clone(),
+                        text: citation.text.clone(),
+                    })
+                    .collect(),
+                sides: sides
+                    .iter()
+                    .map(|side| AskQualitySideActual {
+                        label: side.label.clone(),
+                        cited_memory_ids: side
+                            .citations
+                            .iter()
+                            .map(|citation| citation.memory_id.clone())
+                            .collect(),
+                    })
+                    .collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(crate::eval::evaluate_ask_quality(
+        &source.fixture_id,
+        expectations,
+        &actuals,
+    ))
 }
 
 fn build_query_expectations(

@@ -5,6 +5,18 @@
   "fixed_clock": "2026-06-14T00:00:00Z",
   "memories": [
     {
+      "id": "mem_ask_release_tag_format",
+      "level": "procedural",
+      "kind": "rule",
+      "trust_class": "human_explicit",
+      "confidence": 0.85,
+      "content": "Run cargo fmt --check before every release tag.",
+      "provenance_uri": "fixture://ask_v1/mem_ask_release_tag_format",
+      "expected_query_match": [
+        "Which command must run before every release tag?"
+      ]
+    },
+    {
       "id": "mem_ask_direct_toolchain",
       "level": "procedural",
       "kind": "fact",

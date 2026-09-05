@@ -6,7 +6,9 @@
     "ask_multi_memory_corroboration",
     "ask_conflicting_evidence",
     "ask_unanswerable_abstention",
-    "ask_version_sensitive_current"
+    "ask_version_sensitive_current",
+    "ask_lexical_release_tag",
+    "ask_unrelated_dashboard"
   ],
   "fixture_family": "ask",
   "coverage_state": "implemented",
@@ -130,9 +132,41 @@
       "stderr_policy": "diagnostics_only",
       "stdout_artifact_path": "target/ee-e2e/ask_v1/<run-id>/05-current.stdout.json",
       "stderr_artifact_path": "target/ee-e2e/ask_v1/<run-id>/05-current.stderr.txt"
+    },
+    {
+      "step": 6,
+      "argv": ["ee", "ask", "Which command must run before every release tag?", "--workspace", "<workspace>", "--json"],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v2",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/ask_v1/<run-id>/06-release-tag.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/ask_v1/<run-id>/06-release-tag.stderr.txt"
+    },
+    {
+      "step": 7,
+      "argv": ["ee", "ask", "What colour is the CI dashboard?", "--workspace", "<workspace>", "--json"],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v2",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/ask_v1/<run-id>/07-dashboard.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/ask_v1/<run-id>/07-dashboard.stderr.txt"
     }
   ],
   "expected_outputs": [
+    {
+      "step": 6,
+      "schema": "ee.response.v2",
+      "required_fields": ["data.answerText", "data.citations", "data.abstained"],
+      "absent_fields": ["secret", "token"]
+    },
+    {
+      "step": 7,
+      "schema": "ee.response.v2",
+      "required_fields": ["data.abstained", "data.citations"],
+      "absent_fields": ["secret", "token"]
+    },
     {
       "step": 1,
       "schema": "ee.response.v2",
@@ -204,6 +238,26 @@
       "gate_mode": "blocking"
     },
     "cases": [
+      {
+        "case_id": "ask.lexical_release_tag",
+        "scenario_id": "ask_lexical_release_tag",
+        "command_step": 6,
+        "question": "Which command must run before every release tag?",
+        "expected_cited_memory_ids": ["mem_ask_release_tag_format"],
+        "expected_answer_terms": ["cargo fmt --check"],
+        "expect_abstention": false,
+        "expect_conflict": false
+      },
+      {
+        "case_id": "ask.unrelated_dashboard",
+        "scenario_id": "ask_unrelated_dashboard",
+        "command_step": 7,
+        "question": "What colour is the CI dashboard?",
+        "expected_cited_memory_ids": [],
+        "expected_answer_terms": [],
+        "expect_abstention": true,
+        "expect_conflict": false
+      },
       {
         "case_id": "ask.direct_toolchain",
         "scenario_id": "ask_direct_fact",

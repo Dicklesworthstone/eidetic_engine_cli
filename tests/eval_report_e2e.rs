@@ -86,8 +86,10 @@ fn ensure_stable_hash(value: &JsonValue, pointer: &str) -> TestResult {
         .and_then(JsonValue::as_str)
         .ok_or_else(|| format!("missing data hash at {pointer}"))?;
     ensure(
-        hash.len() == 16 && hash.chars().all(|ch| ch.is_ascii_hexdigit()),
-        format!("{pointer} is not a 16-character hex data hash: {hash}"),
+        hash.strip_prefix("blake3:").is_some_and(|digest| {
+            digest.len() == 64 && digest.chars().all(|ch| ch.is_ascii_hexdigit())
+        }),
+        format!("{pointer} is not a full BLAKE3 data hash: {hash}"),
     )
 }
 

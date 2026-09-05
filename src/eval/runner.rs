@@ -648,6 +648,8 @@ pub struct EvalRunReport {
     pub metrics: FixtureMetrics,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic_recall: Option<SemanticRecallReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ask_quality: Option<AskQualityReport>,
     pub duration_ms: f64,
     pub data_hash: String,
 }
@@ -661,6 +663,7 @@ impl EvalRunReport {
             status: EvalRunStatus::Pending,
             metrics: FixtureMetrics::default(),
             semantic_recall: None,
+            ask_quality: None,
             duration_ms: 0.0,
             data_hash: String::new(),
         }
@@ -2248,6 +2251,29 @@ pub fn compute_data_hash(report: &EvalRunReport) -> String {
             for id in &case.semantic_retrieved_ids {
                 hasher.update(id.as_bytes());
             }
+        }
+    }
+    if let Some(ask_quality) = &report.ask_quality {
+        hasher.update(ask_quality.schema.as_bytes());
+        hasher.update(ask_quality.gate_mode.as_str().as_bytes());
+        for comparison in &ask_quality.comparisons {
+            // Length-prefix text to distinguish adjacent IDs and terms.
+            for value in std::iter::once(&comparison.case_id)
+                .chain(comparison.expected_cited_memory_ids.iter())
+                .chain(comparison.actual_cited_memory_ids.iter())
+                .chain(comparison.expected_answer_terms.iter())
+                .chain(comparison.actual_answer_text.iter())
+                .chain(comparison.failure_reasons.iter())
+            {
+                hasher.update(&(value.len() as u64).to_le_bytes());
+                hasher.update(value.as_bytes());
+            }
+            hasher.update(&[
+                u8::from(comparison.expected_abstention),
+                u8::from(comparison.actual_abstained),
+                u8::from(comparison.expected_conflict),
+                u8::from(comparison.actual_conflict),
+            ]);
         }
     }
 
