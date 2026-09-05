@@ -16412,6 +16412,14 @@ fn pack_quality_actuals_for_cases(
         std::fs::create_dir(&workspace_path).map_err(|error| {
             pack_quality_execution_error(format!("create eval workspace: {error}"))
         })?;
+        let config_dir = workspace_path.join(".ee");
+        std::fs::create_dir(&config_dir)
+            .map_err(|error| pack_quality_execution_error(error.to_string()))?;
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[memory]\nparticipate = false\ninclude_global = false\n",
+        )
+        .map_err(|error| pack_quality_execution_error(error.to_string()))?;
         let database_path = workspace_path.join("ee.db");
         let index_dir = workspace_path.join("index");
         seed_pack_quality_workspace(
@@ -16420,7 +16428,14 @@ fn pack_quality_actuals_for_cases(
             source,
             &case_memories,
             fixed_clock,
-        )?;
+        )
+        .map_err(|error| {
+            pack_quality_execution_error(format!(
+                "case {}: {error}; evidence: {}",
+                case.case_id,
+                run_root.display()
+            ))
+        })?;
         build_eval_search_index_from_memories(&index_dir, &source.fixture_id, &case_memories)?;
         let connection = crate::db::DbConnection::open_file_read_only(&database_path)
             .map_err(|error| pack_quality_execution_error(error.to_string()))?;
@@ -16541,7 +16556,10 @@ fn pack_quality_actuals_for_cases(
                 .data
                 .degraded
                 .iter()
+                .filter(|entry| entry.category().included_by_default())
                 .map(|entry| entry.code.to_string())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect(),
             selected_memory_ids: pack
                 .items

@@ -622,20 +622,61 @@ fn pack_quality_executes_real_packs_independently_of_expected_answers() -> TestR
         "code":"unobserved_fixture_branch", "description":"Planted declaration without a runtime trigger.",
         "preserves_success_signal":true
     }));
+    let data_home = root.join("data");
+    let global = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .current_dir(&root)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .args([
+            "remember",
+            "--global",
+            "Prepare release using the unrelated global canary checklist.",
+            "--level",
+            "semantic",
+            "--kind",
+            "rule",
+            "--json",
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    std::fs::write(root.join("global.stdout.json"), &global.stdout)
+        .map_err(|error| error.to_string())?;
+    std::fs::write(root.join("global.stderr.txt"), &global.stderr)
+        .map_err(|error| error.to_string())?;
+    ensure_equal(
+        &global.status.code(),
+        &Some(0),
+        "real unrelated global memory planted",
+    )?;
+    let global_response: Value =
+        serde_json::from_slice(&global.stdout).map_err(|error| error.to_string())?;
+    let global_id = global_response
+        .pointer("/data/memory_id")
+        .and_then(Value::as_str)
+        .ok_or("missing global canary ID")?;
+    // Freeze this control after the canary exists: an April as-of timestamp
+    // would exclude it by time and fail to exercise global-store isolation.
+    scenario["deterministic"]["fixed_clock"] = json!(chrono::Utc::now().to_rfc3339());
     std::fs::write(
         fixture.join("scenario.json"),
         serde_json::to_vec_pretty(&scenario).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
-    let output = run_ee(&[
-        "--json",
-        "eval",
-        "run",
-        "fx.release_failure.v1",
-        "--pack-quality",
-        "--fixture-dir",
-        root.to_str().ok_or("non-UTF-8 fixture path")?,
-    ])?;
+    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("XDG_DATA_HOME", &data_home)
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .args([
+            "--json",
+            "eval",
+            "run",
+            "fx.release_failure.v1",
+            "--pack-quality",
+            "--fixture-dir",
+            root.to_str().ok_or("non-UTF-8 fixture path")?,
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
     std::fs::write(root.join("eval.stdout.json"), &output.stdout)
         .map_err(|error| error.to_string())?;
     std::fs::write(root.join("eval.stderr.txt"), &output.stderr)
@@ -661,6 +702,11 @@ fn pack_quality_executes_real_packs_independently_of_expected_answers() -> TestR
         .iter()
         .map(|id| id.as_str().ok_or("non-string ID"))
         .collect::<Result<_, _>>()?;
+    if baseline_ids.contains(global_id) {
+        return Err(format!(
+            "unrelated global memory contaminated eval: {global_id}"
+        ));
+    }
     ensure_equal(
         &baseline_ids,
         &BTreeSet::from([
