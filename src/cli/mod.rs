@@ -44660,6 +44660,9 @@ fn redact_public_projection_strings(value: &mut serde_json::Value, field: Option
                 Some("entityRevision") if crate::db::is_canonical_blake3_hash(text) => {
                     Some(text.clone())
                 }
+                Some("entityRevision") => Some(
+                    crate::policy::redact_public_replay_field("entityRevisionHash", text).content,
+                ),
                 Some("trustSubclass") if text == "imported_transcript_excerpt" => {
                     Some(text.clone())
                 }

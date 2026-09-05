@@ -469,6 +469,7 @@ fn eval_all_retrieval_families_execute_their_complete_workloads() -> TestResult 
         .keep();
     let fixtures = ee::eval::discover_fixtures(std::path::Path::new("tests/fixtures/eval"))
         .map_err(|error| error.to_string())?;
+    let mut empty_retrievals = Vec::new();
     for &(fixture_id, expected_queries) in RETRIEVAL_WORKLOADS {
         let fixture = fixtures
             .iter()
@@ -548,7 +549,7 @@ fn eval_all_retrieval_families_execute_their_complete_workloads() -> TestResult 
                 .as_array()
                 .ok_or("missing retrieved IDs")?;
             if retrieved.is_empty() {
-                return Err(format!(
+                empty_retrievals.push(format!(
                     "{fixture_id} executed an empty retrieval for {text:?}"
                 ));
             }
@@ -566,7 +567,15 @@ fn eval_all_retrieval_families_execute_their_complete_workloads() -> TestResult 
         &classified,
         &EXPECTED_FIXTURE_IDS.iter().copied().collect(),
         "every fixture has an explicit execution classification",
-    )
+    )?;
+    if !empty_retrievals.is_empty() {
+        return Err(format!(
+            "{}\ncomplete workload artifacts: {}",
+            empty_retrievals.join("\n"),
+            artifacts.display()
+        ));
+    }
+    Ok(())
 }
 
 #[test]

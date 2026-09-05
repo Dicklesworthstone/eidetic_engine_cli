@@ -1609,7 +1609,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
     ensure_success(&rejected_reembed, "registry-order rejected reembed")?;
     update_model2vec_registry_metadata_json(
         &rejected_workspace,
-        Some("{registry-order-invalid".to_string()),
+        Some(r#"{"schema":"invalid-model-metadata"}"#.to_string()),
     )?;
 
     // An explicit verified model directory is the operator's highest-priority
@@ -2250,7 +2250,26 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         Some(ModelDistanceMetric::Cosine),
     )?;
     let valid_metadata_json = model2vec_registry_entry(&workspace)?.metadata_json;
-    update_model2vec_registry_metadata_json(&workspace, Some("{not-json".to_string()))?;
+    let invalid_json_error =
+        update_model2vec_registry_metadata_json(&workspace, Some("{not-json".to_string()))
+            .err()
+            .ok_or("the registry must reject syntactically invalid JSON")?;
+    if !invalid_json_error.contains("CHECK constraint failed")
+        || !invalid_json_error.contains("json_valid(metadata_json)")
+    {
+        return Err(format!(
+            "unexpected invalid metadata rejection: {invalid_json_error}"
+        ));
+    }
+    if model2vec_registry_entry(&workspace)?.metadata_json != valid_metadata_json {
+        return Err("rejected metadata update mutated the valid registry row".to_string());
+    }
+    // Keep the database invariant intact while exercising model metadata
+    // validation and its public fallback surfaces below.
+    update_model2vec_registry_metadata_json(
+        &workspace,
+        Some(r#"{"schema":"invalid-model-metadata"}"#.to_string()),
+    )?;
     let malformed_metadata = run_offline_registry_fallback_search(
         &workspace,
         "registry_path_malformed_metadata",
