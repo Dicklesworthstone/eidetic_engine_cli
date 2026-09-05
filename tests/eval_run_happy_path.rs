@@ -300,6 +300,51 @@ fn eval_async_migration_retrieves_the_exact_complete_query_inventory() -> TestRe
 }
 
 #[test]
+fn eval_retrieval_is_independent_of_host_model_selection() -> TestResult {
+    let baseline = command_json(&["--json", "eval", "run", "fx.async_migration.v1"])?;
+    let scratch = tempfile::Builder::new()
+        .prefix("ee-eval-host-model-")
+        .tempdir()
+        .map_err(|error| format!("create host-model fixture: {error}"))?
+        .keep();
+    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(["--json", "eval", "run", "fx.async_migration.v1"])
+        .env("EE_EMBED_DOWNLOAD", "auto")
+        .env("EE_EMBED_MODEL_DIR", scratch.join("missing-host-model"))
+        .env("FRANKENSEARCH_API_PROVIDER", "openai")
+        .env("FRANKENSEARCH_API_MODEL", "ambient-model-must-not-select")
+        .output()
+        .map_err(|error| format!("run eval with hostile host-model selection: {error}"))?;
+    std::fs::write(scratch.join("stdout.json"), &output.stdout)
+        .map_err(|error| format!("retain model-selection stdout: {error}"))?;
+    std::fs::write(scratch.join("stderr.txt"), &output.stderr)
+        .map_err(|error| format!("retain model-selection stderr: {error}"))?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(0),
+        "host-independent eval exit",
+    )?;
+    ensure_equal(
+        &output.stderr,
+        &Vec::<u8>::new(),
+        "host-independent eval stderr",
+    )?;
+    let observed: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("parse host-independent eval: {error}"))?;
+    ensure_equal(
+        &observed["data"]["report"]["metrics"]["queries_evaluated"],
+        &json!(3),
+        "model-selection comparison must execute all three queries",
+    )?;
+    ensure_equal(
+        &normalized_response_for_stability(observed)?,
+        &normalized_response_for_stability(baseline)?,
+        "host model settings cannot change fixture results or their hash",
+    )
+}
+
+#[test]
 fn eval_run_distinguishes_non_retrieval_contracts_from_poor_retrieval() -> TestResult {
     // These families describe model admission and metamorphic transitions;
     // neither declares a retrieval query. They cannot count as quality runs.

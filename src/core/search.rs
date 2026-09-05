@@ -7033,6 +7033,32 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
     run_search_with_filters(options, None, &[])
 }
 
+/// Search a caller-built index with its actual fast embedder. Evaluation
+/// supplies the same deterministic hash embedder used to build the fixture,
+/// so installed host models cannot change its results or trigger downloads.
+/// Index compatibility, source-mode, scope, and visibility policies still
+/// run through the canonical search implementation.
+pub(crate) fn run_search_with_embedder(
+    options: &SearchOptions,
+    embedder: Arc<dyn crate::search::Embedder>,
+) -> Result<SearchReport, SearchError> {
+    let request_timeout = search_request_timeout();
+    crate::core::run_cli_with_cx(request_timeout, |cx| async move {
+        run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+            &cx,
+            options,
+            None,
+            &[],
+            search_index_auto_reconcile_timeout(),
+            request_timeout,
+            Some(embedder),
+        )
+        .await
+        .map(|run| run.report)
+    })
+    .map_err(|error| SearchError::Index(format!("Failed to start search runtime: {error}")))?
+}
+
 pub fn run_search_with_filters(
     options: &SearchOptions,
     kind_filter: Option<&str>,
@@ -7063,6 +7089,7 @@ pub fn run_search_with_performance_and_filters(
             typed_field_filters,
             reconcile_timeout,
             request_timeout,
+            None,
         )
         .await
     })
@@ -7088,6 +7115,7 @@ pub async fn run_search_with_performance_and_filters_with_cx(
         typed_field_filters,
         search_index_auto_reconcile_timeout(),
         request_timeout,
+        None,
     )
     .await
 }
@@ -7099,6 +7127,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     typed_field_filters: &[TypedMemoryFieldFilter],
     reconcile_timeout: Duration,
     request_timeout: Duration,
+    prepared_fast_embedder: Option<Arc<dyn crate::search::Embedder>>,
 ) -> Result<SearchPerformanceRun, SearchError> {
     let total_start = Instant::now();
     options.validate()?;
@@ -7109,7 +7138,8 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     let index_dir = options.resolve_index_dir();
     let database_path = options.resolve_database_path();
     reconcile_search_index_before_read_with_cx_and_timeout(cx, options, reconcile_timeout).await;
-    let embedder_preparation = if options.source_mode.uses_embeddings()
+    let embedder_preparation = if prepared_fast_embedder.is_none()
+        && options.source_mode.uses_embeddings()
         && index_dir.exists()
         && crate::core::index::index_corpus_compatibility_is_current(&index_dir)
     {
@@ -7123,9 +7153,11 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     } else {
         None
     };
-    let fast_embedder_override = embedder_preparation
-        .as_ref()
-        .map(|preparation| Arc::clone(&preparation.fast_embedder));
+    let fast_embedder_override = prepared_fast_embedder.or_else(|| {
+        embedder_preparation
+            .as_ref()
+            .map(|preparation| Arc::clone(&preparation.fast_embedder))
+    });
 
     if database_path.exists() {
         let read_pool = registered_process_read_pool(

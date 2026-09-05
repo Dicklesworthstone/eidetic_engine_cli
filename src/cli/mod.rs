@@ -244,7 +244,7 @@ use crate::core::search::{
     SearchDegradation, SearchError, SearchFamilyReport, SearchOptions, SearchReport,
     SearchScoreRecalibrationReport, SearchSourceMode, SimilarError, SimilarOptions, SimilarReport,
     TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
-    recalibrate_search_score_calibration, run_diag_search, run_family_retrieval, run_search,
+    recalibrate_search_score_calibration, run_diag_search, run_family_retrieval,
     run_search_with_filters, run_search_with_performance_and_filters, run_similar,
 };
 use crate::core::sentinel::{SentinelCheckContext, observe_sentinel, observe_sentinel_explicit};
@@ -16363,9 +16363,17 @@ fn pack_quality_actuals_for_cases(
             message: format!("failed to create pack-quality eval index tempdir: {error}"),
             repair: Some("Check TMPDIR and filesystem permissions.".to_owned()),
         })?;
-    let index_dir = tempdir.path().join("index");
+    // Canonicalize only the root we just created; macOS may spell TMPDIR
+    // through /var while the physical directory lives below /private/var.
+    let workspace_path = tempdir
+        .path()
+        .canonicalize()
+        .map_err(|error| DomainError::Storage {
+            message: format!("failed to resolve pack-quality eval workspace: {error}"),
+            repair: Some("Check TMPDIR and filesystem permissions.".to_owned()),
+        })?;
+    let index_dir = workspace_path.join("index");
     build_eval_search_index_from_memories(&index_dir, &source.fixture_id, memories)?;
-    let workspace_path = tempdir.path().to_path_buf();
 
     let mut actuals = Vec::with_capacity(cases.len());
     for case in cases {
@@ -16380,7 +16388,7 @@ fn pack_quality_actuals_for_cases(
             SpeedMode::Default
         };
         let limit = pack_quality_selection_limit(case, memories.len());
-        let report = run_search(&SearchOptions {
+        let options = SearchOptions {
             workspace_path: workspace_path.clone(),
             database_path: None,
             index_dir: Some(index_dir.clone()),
@@ -16399,7 +16407,11 @@ fn pack_quality_actuals_for_cases(
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
-        })
+        };
+        let report = crate::core::search::run_search_with_embedder(
+            &options,
+            eval_embedder_stack().fast_arc(),
+        )
         .map_err(|error| match error {
             SearchError::Cancelled(reason) => CancellationAwareCliError::Cancelled(reason),
             error => CancellationAwareCliError::Domain(DomainError::SearchIndex {
@@ -16753,14 +16765,20 @@ fn run_eval_retrieval_queries(
             message: format!("failed to create eval index tempdir: {error}"),
             repair: Some("Check TMPDIR and filesystem permissions.".to_owned()),
         })?;
-    let index_dir = tempdir.path().join("index");
+    let workspace_path = tempdir
+        .path()
+        .canonicalize()
+        .map_err(|error| DomainError::Storage {
+            message: format!("failed to resolve retrieval eval workspace: {error}"),
+            repair: Some("Check TMPDIR and filesystem permissions.".to_owned()),
+        })?;
+    let index_dir = workspace_path.join("index");
     build_eval_search_index(&index_dir, source)?;
 
-    let workspace_path = tempdir.path().to_path_buf();
     let limit = u32::try_from(memories.len().max(5)).unwrap_or(u32::MAX);
     let mut per_query = Vec::with_capacity(query_expectations.len());
     for (query, expected_ids) in query_expectations {
-        let report = run_search(&SearchOptions {
+        let options = SearchOptions {
             workspace_path: workspace_path.clone(),
             database_path: None,
             index_dir: Some(index_dir.clone()),
@@ -16779,7 +16797,11 @@ fn run_eval_retrieval_queries(
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
-        })
+        };
+        let report = crate::core::search::run_search_with_embedder(
+            &options,
+            eval_embedder_stack().fast_arc(),
+        )
         .map_err(|error| match error {
             SearchError::Cancelled(reason) => CancellationAwareCliError::Cancelled(reason),
             error => CancellationAwareCliError::Domain(DomainError::SearchIndex {
