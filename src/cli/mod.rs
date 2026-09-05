@@ -16235,7 +16235,7 @@ where
             Ok(memories) => memories,
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
-        let actuals = match pack_quality_actuals_for_cases(
+        let (actuals, observed_artifacts) = match pack_quality_actuals_for_cases(
             &fixture.path,
             &scenario,
             &source,
@@ -16251,9 +16251,9 @@ where
             }
         };
 
-        artifact_paths.extend(pack_quality_artifact_paths(fixture, &scenario, &cases));
+        artifact_paths.extend(observed_artifacts);
         degraded_branches.extend(pack_quality_degraded_branch_reports(
-            fixture, &scenario, &cases,
+            fixture, &scenario, &cases, &actuals,
         ));
         let report = if from_outcomes {
             crate::eval::evaluate_pack_quality_with_outcomes(
@@ -16347,7 +16347,8 @@ fn pack_quality_actuals_for_cases(
     source: &crate::eval::SourceMemoryFile,
     memories: &[crate::eval::SourceMemory],
     cases: &[crate::eval::PackQualityCase],
-) -> Result<Vec<crate::eval::PackQualityActual>, CancellationAwareCliError> {
+) -> Result<(Vec<crate::eval::PackQualityActual>, Vec<serde_json::Value>), CancellationAwareCliError>
+{
     if memories.is_empty() {
         return Err(DomainError::Configuration {
             message: format!("eval fixture {} contains no memories", source.fixture_id),
@@ -16356,89 +16357,296 @@ fn pack_quality_actuals_for_cases(
         .into());
     }
 
-    let tempdir = tempfile::Builder::new()
+    // Retain the actual stores and pack outputs, including failed evaluations.
+    // The fixture's <run-id> artifact templates are declarations, not evidence.
+    let run_root = tempfile::Builder::new()
         .prefix("ee-eval-pack-quality-")
         .tempdir()
         .map_err(|error| DomainError::Storage {
             message: format!("failed to create pack-quality eval index tempdir: {error}"),
             repair: Some("Check TMPDIR and filesystem permissions.".to_owned()),
-        })?;
-    // Canonicalize only the root we just created; macOS may spell TMPDIR
-    // through /var while the physical directory lives below /private/var.
-    let workspace_path = tempdir
-        .path()
+        })?
+        .keep()
         .canonicalize()
         .map_err(|error| DomainError::Storage {
             message: format!("failed to resolve pack-quality eval workspace: {error}"),
             repair: Some("Check TMPDIR and filesystem permissions.".to_owned()),
         })?;
-    let index_dir = workspace_path.join("index");
-    build_eval_search_index_from_memories(&index_dir, &source.fixture_id, memories)?;
-
     let mut actuals = Vec::with_capacity(cases.len());
-    for case in cases {
-        let query = pack_quality_case_query(fixture_path, case)?;
-        let degradation_codes = pack_quality_actual_degradation_codes(scenario, case);
-        let speed = if degradation_codes
+    let mut artifacts = Vec::with_capacity(cases.len());
+    let fixed_clock = scenario
+        .deterministic
+        .fixed_clock
+        .as_deref()
+        .or(source.fixed_clock.as_deref())
+        .ok_or_else(|| pack_quality_execution_error("fixture requires a fixed clock".into()))?;
+    let as_of = chrono::DateTime::parse_from_rfc3339(fixed_clock)
+        .map_err(|error| pack_quality_execution_error(format!("invalid fixture clock: {error}")))?
+        .with_timezone(&chrono::Utc);
+    for (case_index, case) in cases.iter().enumerate() {
+        let step = scenario
+            .command_sequence
             .iter()
-            .any(|code| code == "semantic_disabled")
-        {
-            SpeedMode::Instant
+            .find(|step| step.step == case.command_step)
+            .ok_or_else(|| {
+                pack_quality_execution_error(format!("case {} has no command step", case.case_id))
+            })?;
+        let case_memories = if let Some(tier_name) = &step.tier {
+            let tier = source
+                .tiers
+                .iter()
+                .find(|tier| &tier.name == tier_name)
+                .ok_or_else(|| {
+                    pack_quality_execution_error(format!(
+                        "case {} names unknown tier {tier_name}",
+                        case.case_id
+                    ))
+                })?;
+            let mut tier_source = source.clone();
+            tier_source.tiers = vec![tier.clone()];
+            crate::eval::materialize_source_memories(&tier_source)?
         } else {
-            SpeedMode::Default
+            memories.to_vec()
         };
-        let limit = pack_quality_selection_limit(case, memories.len());
-        let options = SearchOptions {
+        let workspace_path = run_root.join(format!("case-{case_index}"));
+        std::fs::create_dir(&workspace_path).map_err(|error| {
+            pack_quality_execution_error(format!("create eval workspace: {error}"))
+        })?;
+        let database_path = workspace_path.join("ee.db");
+        let index_dir = workspace_path.join("index");
+        seed_pack_quality_workspace(
+            &workspace_path,
+            &database_path,
+            source,
+            &case_memories,
+            fixed_clock,
+        )?;
+        build_eval_search_index_from_memories(&index_dir, &source.fixture_id, &case_memories)?;
+        let connection = crate::db::DbConnection::open_file_read_only(&database_path)
+            .map_err(|error| pack_quality_execution_error(error.to_string()))?;
+        let generation = connection
+            .get_workspace_generation(&source.fixture_id)
+            .map_err(|error| pack_quality_execution_error(error.to_string()))?
+            .unwrap_or(0);
+        crate::core::index::write_memory_eval_index_metadata_for_generation(
+            &index_dir,
+            generation,
+            u32::try_from(case_memories.len()).unwrap_or(u32::MAX),
+        )
+        .map_err(|error| pack_quality_execution_error(error.to_string()))?;
+        drop(connection);
+        let query = pack_quality_case_query(fixture_path, case)?;
+        let mut options = crate::core::context::ContextPackOptions {
             workspace_path: workspace_path.clone(),
-            database_path: None,
+            database_path: Some(database_path),
             index_dir: Some(index_dir.clone()),
-            query: query.clone(),
-            limit,
-            speed,
-            explain: false,
-            as_of: None,
+            query,
+            speed: SpeedMode::Default,
+            source_mode: if step.argv.iter().any(|arg| arg == "--lexical-only") {
+                SearchSourceMode::LexicalOnly
+            } else {
+                SearchSourceMode::Hybrid
+            },
+            strict_source_mode: false,
+            filters: crate::models::QueryFilters::default(),
+            profile: None,
+            max_tokens: Some(case.token_budget.max_tokens),
+            candidate_pool: None,
+            max_results: None,
+            as_of: Some(as_of),
             include_tombstoned: false,
             include_expired: false,
             include_future: false,
             include_stale: false,
             relevance_floor: None,
-            dedup_mode: SearchDedupMode::DocId,
-            source_mode: SearchSourceMode::Hybrid,
-            strict_source_mode: false,
-            memory_scope: MemoryScope::Swarm,
+            redaction_level: crate::models::RedactionLevel::Minimal,
+            memory_scope: MemoryScope::Workspace,
             strict_scope: false,
+            ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
+            pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
+            require_fresh_sentinels: false,
+            output_options: Default::default(),
+            persist_pack: false,
+            baseline_write: None,
+            no_lod: false,
         };
-        let report = crate::core::search::run_search_with_embedder(
+        if case.query_surface.kind == "query_file" {
+            let query_path = resolve_pack_quality_query_path(
+                fixture_path,
+                case.query_surface.path.as_deref().ok_or_else(|| {
+                    pack_quality_execution_error("missing query file path".into())
+                })?,
+            );
+            let request = load_query_file(&query_path).map_err(query_file_error_to_domain)?;
+            options.query = request.query;
+            options.profile = request.profile;
+            options.max_tokens = request.max_tokens.or(options.max_tokens);
+            options.candidate_pool = request.candidate_pool;
+            options.max_results = request.max_results;
+            options.speed = request.speed;
+            options.filters = request.filters;
+        }
+        let response = crate::core::context::run_context_pack_with_embedder(
             &options,
             eval_embedder_stack().fast_arc(),
         )
         .map_err(|error| match error {
-            SearchError::Cancelled(reason) => CancellationAwareCliError::Cancelled(reason),
-            error => CancellationAwareCliError::Domain(DomainError::SearchIndex {
-                message: format!("pack-quality eval search failed for `{query}`: {error}"),
-                repair: error.repair_hint().map(str::to_owned),
-            }),
+            crate::core::context::ContextPackError::Cancelled(reason) => {
+                CancellationAwareCliError::Cancelled(reason)
+            }
+            error => pack_quality_execution_error(format!(
+                "case {}: {error}; evidence: {}",
+                case.case_id,
+                run_root.display()
+            ))
+            .into(),
         })?;
-        let selected_memory_ids = report
-            .results
-            .into_iter()
-            .map(|hit| hit.doc_id)
-            .collect::<Vec<_>>();
-
+        let rendered = crate::output::render_context_response_json(&response);
+        let output_path = workspace_path.join("pack.json");
+        std::fs::write(&output_path, &rendered).map_err(|error| {
+            pack_quality_execution_error(format!("write pack evidence: {error}"))
+        })?;
+        let pack = &response.data.pack;
+        let with_provenance = pack
+            .items
+            .iter()
+            .filter(|item| !item.provenance.is_empty())
+            .count();
+        let selected_text = pack
+            .items
+            .iter()
+            .map(|item| item.content.as_str())
+            .chain(pack.evidence_items.iter().map(|item| item.content.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
         actuals.push(crate::eval::PackQualityActual {
-            tokens_used: estimate_pack_quality_tokens(&selected_memory_ids, memories),
-            provenance_density: pack_quality_provenance_density(&selected_memory_ids, memories),
-            redaction_leaks: detect_pack_quality_redaction_leaks(
-                &selected_memory_ids,
-                memories,
-                &case.forbidden_redaction_leaks,
-            ),
-            degradation_codes,
-            selected_memory_ids,
+            tokens_used: pack.used_tokens,
+            provenance_density: if pack.items.is_empty() {
+                0.0
+            } else {
+                with_provenance as f64 / pack.items.len() as f64
+            },
+            redaction_leaks: case
+                .forbidden_redaction_leaks
+                .iter()
+                .filter(|forbidden| pack_quality_leak_present(&selected_text, forbidden))
+                .cloned()
+                .collect(),
+            degradation_codes: response
+                .data
+                .degraded
+                .iter()
+                .map(|entry| entry.code.to_string())
+                .collect(),
+            selected_memory_ids: pack
+                .items
+                .iter()
+                .map(|item| item.memory_id.to_string())
+                .collect(),
         });
+        artifacts.push(serde_json::json!({
+            "fixtureId": source.fixture_id, "caseId": case.case_id,
+            "scenarioId": case.scenario_id, "commandStep": case.command_step,
+            "stdout": output_path, "stderr": null,
+            "workspace": workspace_path, "memoryCount": case_memories.len(),
+            "mode": "production_pack", "embedder": "fnv1a-256"
+        }));
     }
 
-    Ok(actuals)
+    Ok((actuals, artifacts))
+}
+
+fn pack_quality_execution_error(message: String) -> DomainError {
+    DomainError::Storage {
+        message: format!("pack-quality evaluation: {message}"),
+        repair: Some("Inspect the retained evaluation workspace and fixture inputs.".into()),
+    }
+}
+
+fn seed_pack_quality_workspace(
+    workspace: &Path,
+    database: &Path,
+    source: &crate::eval::SourceMemoryFile,
+    memories: &[crate::eval::SourceMemory],
+    fixed_clock: &str,
+) -> Result<(), DomainError> {
+    use crate::db::{
+        CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
+        MemoryLinkRelation, MemoryLinkSource,
+    };
+    let timestamp = chrono::DateTime::parse_from_rfc3339(fixed_clock)
+        .map_err(|error| pack_quality_execution_error(format!("invalid fixture clock: {error}")))?
+        .with_timezone(&chrono::Utc);
+    let links = source
+        .structural_edges
+        .iter()
+        .map(|edge| {
+            let relation = MemoryLinkRelation::parse(&edge.relation).ok_or_else(|| {
+                pack_quality_execution_error(format!("unknown edge relation {}", edge.relation))
+            })?;
+            Ok(CreateMemoryLinkInput {
+                src_memory_id: edge.source_id.clone(),
+                dst_memory_id: edge.target_id.clone(),
+                relation,
+                weight: edge.weight as f32,
+                confidence: 1.0,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: Some(fixed_clock.into()),
+                source: MemoryLinkSource::Import,
+                created_by: None,
+                metadata_json: None,
+            })
+        })
+        .collect::<Result<Vec<_>, DomainError>>()?;
+    let connection = DbConnection::open_file(database)
+        .map_err(|error| pack_quality_execution_error(error.to_string()))?;
+    connection
+        .migrate()
+        .map_err(|error| pack_quality_execution_error(error.to_string()))?;
+    connection
+        .with_transaction(|| {
+            connection.insert_workspace(
+                &source.fixture_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some(source.fixture_id.clone()),
+                },
+            )?;
+            for memory in memories {
+                connection.insert_memory_at(
+                    &memory.id,
+                    &CreateMemoryInput {
+                        workspace_id: source.fixture_id.clone(),
+                        level: memory.level.clone(),
+                        kind: memory.kind.clone(),
+                        content: memory.content.clone(),
+                        workflow_id: None,
+                        confidence: memory.confidence as f32,
+                        utility: memory.utility as f32,
+                        importance: memory.importance as f32,
+                        provenance_uri: memory.provenance_uri.clone(),
+                        trust_class: memory.trust_class.clone(),
+                        trust_subclass: None,
+                        tags: memory.tags.clone(),
+                        valid_from: Some(fixed_clock.into()),
+                        valid_to: None,
+                    },
+                    timestamp,
+                )?;
+            }
+            for (index, link) in links.iter().enumerate() {
+                connection.insert_memory_link(&format!("eval-edge-{index}"), link)?;
+            }
+            Ok(())
+        })
+        .map_err(|error| pack_quality_execution_error(error.to_string()))?;
+    Ok(())
 }
 
 fn pack_quality_case_query(
@@ -16504,91 +16712,6 @@ fn query_file_error_to_domain(error: QueryFileError) -> DomainError {
     }
 }
 
-fn pack_quality_selection_limit(case: &crate::eval::PackQualityCase, memory_count: usize) -> u32 {
-    let requested = case
-        .expected_selected_memory_ids
-        .len()
-        .max(1)
-        .min(memory_count);
-    u32::try_from(requested).unwrap_or(u32::MAX)
-}
-
-fn pack_quality_actual_degradation_codes(
-    scenario: &crate::eval::FixtureScenario,
-    case: &crate::eval::PackQualityCase,
-) -> Vec<String> {
-    scenario
-        .degraded_branches
-        .iter()
-        .filter(|branch| branch.preserves_success_signal)
-        .filter(|branch| {
-            case.allowed_degradation_codes
-                .iter()
-                .any(|code| code == &branch.code)
-        })
-        .map(|branch| branch.code.clone())
-        .collect()
-}
-
-fn estimate_pack_quality_tokens(
-    selected_memory_ids: &[String],
-    memories: &[crate::eval::SourceMemory],
-) -> u32 {
-    let mut estimated: usize = 0;
-    for memory_id in selected_memory_ids {
-        if let Some(memory) = memories.iter().find(|memory| memory.id == *memory_id) {
-            estimated = estimated.saturating_add(memory.content.len().div_ceil(4));
-            estimated = estimated.saturating_add(24);
-        }
-    }
-    u32::try_from(estimated).unwrap_or(u32::MAX)
-}
-
-fn pack_quality_provenance_density(
-    selected_memory_ids: &[String],
-    memories: &[crate::eval::SourceMemory],
-) -> f64 {
-    if selected_memory_ids.is_empty() {
-        return 0.0;
-    }
-
-    let with_provenance = selected_memory_ids
-        .iter()
-        .filter(|memory_id| {
-            memories
-                .iter()
-                .find(|memory| memory.id == **memory_id)
-                .and_then(|memory| memory.provenance_uri.as_deref())
-                .is_some_and(|uri| !uri.trim().is_empty())
-        })
-        .count();
-
-    if selected_memory_ids.is_empty() {
-        0.0
-    } else {
-        with_provenance as f64 / selected_memory_ids.len() as f64
-    }
-}
-
-fn detect_pack_quality_redaction_leaks(
-    selected_memory_ids: &[String],
-    memories: &[crate::eval::SourceMemory],
-    forbidden_leaks: &[String],
-) -> Vec<String> {
-    let mut leaks = BTreeSet::new();
-    for memory_id in selected_memory_ids {
-        let Some(memory) = memories.iter().find(|memory| memory.id == *memory_id) else {
-            continue;
-        };
-        for forbidden in forbidden_leaks {
-            if pack_quality_leak_present(&memory.content, forbidden) {
-                leaks.insert(forbidden.clone());
-            }
-        }
-    }
-    leaks.into_iter().collect()
-}
-
 fn pack_quality_leak_present(content: &str, forbidden: &str) -> bool {
     let lower_content = content.to_ascii_lowercase();
     match forbidden {
@@ -16598,36 +16721,11 @@ fn pack_quality_leak_present(content: &str, forbidden: &str) -> bool {
     }
 }
 
-fn pack_quality_artifact_paths(
-    fixture: &crate::eval::DiscoveredFixture,
-    scenario: &crate::eval::FixtureScenario,
-    cases: &[crate::eval::PackQualityCase],
-) -> Vec<serde_json::Value> {
-    cases
-        .iter()
-        .filter_map(|case| {
-            scenario
-                .command_sequence
-                .iter()
-                .find(|step| step.step == case.command_step)
-                .map(|step| {
-                    serde_json::json!({
-                        "fixtureId": fixture.fixture_id,
-                        "caseId": case.case_id,
-                        "scenarioId": case.scenario_id,
-                        "commandStep": case.command_step,
-                        "stdout": step.stdout_artifact_path,
-                        "stderr": step.stderr_artifact_path
-                    })
-                })
-        })
-        .collect()
-}
-
 fn pack_quality_degraded_branch_reports(
     fixture: &crate::eval::DiscoveredFixture,
     scenario: &crate::eval::FixtureScenario,
     cases: &[crate::eval::PackQualityCase],
+    actuals: &[crate::eval::PackQualityActual],
 ) -> Vec<serde_json::Value> {
     scenario
         .degraded_branches
@@ -16640,18 +16738,21 @@ fn pack_quality_degraded_branch_reports(
             })
         })
         .map(|branch| {
+            let observed_case_ids = cases
+                .iter()
+                .zip(actuals)
+                .filter(|(_, actual)| actual.degradation_codes.contains(&branch.code))
+                .map(|(case, _)| &case.case_id)
+                .collect::<Vec<_>>();
             serde_json::json!({
                 "fixtureId": fixture.fixture_id,
                 "code": branch.code,
                 "description": branch.description,
                 "repairAction": branch.repair_action,
                 "preservesSuccessSignal": branch.preserves_success_signal,
-                "executed": true,
-                "mode": if branch.code == "semantic_disabled" {
-                    "lexical_only"
-                } else {
-                    "declared_fixture_branch"
-                }
+                "executed": !observed_case_ids.is_empty(),
+                "observedCaseIds": observed_case_ids,
+                "mode": "observed_pack_output"
             })
         })
         .collect()

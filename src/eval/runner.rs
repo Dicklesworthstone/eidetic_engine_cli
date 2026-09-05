@@ -133,6 +133,8 @@ pub struct CommandStep {
     pub step: u32,
     pub argv: Vec<String>,
     #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
     pub cwd: String,
     #[serde(default)]
     pub expected_exit_code: i32,

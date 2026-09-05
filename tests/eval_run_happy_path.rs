@@ -579,6 +579,172 @@ fn eval_all_retrieval_families_execute_their_complete_workloads() -> TestResult 
 }
 
 #[test]
+fn pack_quality_executes_real_packs_independently_of_expected_answers() -> TestResult {
+    let root = tempfile::Builder::new()
+        .prefix("ee-pack-quality-controls-")
+        .tempdir()
+        .map_err(|error| error.to_string())?
+        .keep();
+    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    let fixture = root.join("release_failure");
+    std::fs::create_dir(&fixture).map_err(|error| error.to_string())?;
+    std::fs::copy(
+        "tests/fixtures/eval/release_failure/source_memory.json",
+        fixture.join("source_memory.json"),
+    )
+    .map_err(|error| error.to_string())?;
+    let mut scenario: Value =
+        serde_json::from_str(include_str!("fixtures/eval/release_failure/scenario.json"))
+            .map_err(|error| error.to_string())?;
+    let baseline = scenario["pack_quality_expectations"]["cases"][0].clone();
+    let mut wrong_oracle = baseline.clone();
+    wrong_oracle["case_id"] = json!("pq.oracle_mutation");
+    wrong_oracle["command_step"] = json!(5);
+    wrong_oracle["expected_selected_memory_ids"] = json!(["mem_00000000000000000000000101"]);
+    wrong_oracle["allowed_degradation_codes"] = json!(["unobserved_fixture_branch"]);
+    let mut budget_pressure = baseline.clone();
+    budget_pressure["case_id"] = json!("pq.budget_pressure");
+    budget_pressure["command_step"] = json!(6);
+    budget_pressure["token_budget"] =
+        json!({"max_tokens":1,"expected_used_tokens_max":1,"expect_truncation":true});
+    scenario["pack_quality_expectations"]["cases"] =
+        json!([baseline, wrong_oracle, budget_pressure]);
+    let steps = scenario["command_sequence"]
+        .as_array_mut()
+        .ok_or("missing steps")?;
+    let pack_step = steps[3].clone();
+    for step_number in [5, 6] {
+        let mut step = pack_step.clone();
+        step["step"] = json!(step_number);
+        steps.push(step);
+    }
+    scenario["degraded_branches"].as_array_mut().ok_or("missing branches")?.push(json!({
+        "code":"unobserved_fixture_branch", "description":"Planted declaration without a runtime trigger.",
+        "preserves_success_signal":true
+    }));
+    std::fs::write(
+        fixture.join("scenario.json"),
+        serde_json::to_vec_pretty(&scenario).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let output = run_ee(&[
+        "--json",
+        "eval",
+        "run",
+        "fx.release_failure.v1",
+        "--pack-quality",
+        "--fixture-dir",
+        root.to_str().ok_or("non-UTF-8 fixture path")?,
+    ])?;
+    std::fs::write(root.join("eval.stdout.json"), &output.stdout)
+        .map_err(|error| error.to_string())?;
+    std::fs::write(root.join("eval.stderr.txt"), &output.stderr)
+        .map_err(|error| error.to_string())?;
+    let value: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("{error}; evidence {}", root.display()))?;
+    let comparisons = value
+        .pointer("/data/report/comparisons")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            format!(
+                "missing actual pack comparisons: {value}; evidence {}",
+                root.display()
+            )
+        })?;
+    ensure_equal(&comparisons.len(), &3, "all controls executed")?;
+    let baseline = &comparisons[0];
+    let wrong = &comparisons[1];
+    let budget = &comparisons[2];
+    let baseline_ids: BTreeSet<_> = baseline["actual_selected_ids"]
+        .as_array()
+        .ok_or("missing selected IDs")?
+        .iter()
+        .map(|id| id.as_str().ok_or("non-string ID"))
+        .collect::<Result<_, _>>()?;
+    ensure_equal(
+        &baseline_ids,
+        &BTreeSet::from([
+            "mem_00000000000000000000000101",
+            "mem_00000000000000000000000102",
+        ]),
+        "positive pack retains both original release memories",
+    )?;
+    for field in [
+        "actual_selected_ids",
+        "actual_tokens_used",
+        "provenance_density",
+        "actual_degradation_codes",
+        "actual_redaction_leaks",
+    ] {
+        ensure_equal(
+            &baseline[field],
+            &wrong[field],
+            &format!("expected answers cannot affect {field}"),
+        )?;
+    }
+    ensure_equal(
+        &wrong["unexpected_ids"],
+        &json!(["mem_00000000000000000000000102"]),
+        "wrong oracle is detected",
+    )?;
+    ensure_equal(
+        &budget["actual_selected_ids"],
+        &json!([]),
+        "one token cannot carry either full memory",
+    )?;
+    ensure_equal(
+        &budget["actual_tokens_used"],
+        &json!(0),
+        "real empty pack token cost",
+    )?;
+    let branches = value["data"]["degradedBranches"]
+        .as_array()
+        .ok_or("missing branch reports")?;
+    let phantom = branches
+        .iter()
+        .find(|entry| entry["code"] == "unobserved_fixture_branch")
+        .ok_or("missing planted branch")?;
+    ensure_equal(
+        &phantom["executed"],
+        &json!(false),
+        "declaration is not execution",
+    )?;
+    ensure_equal(
+        &phantom["observedCaseIds"],
+        &json!([]),
+        "no invented branch evidence",
+    )?;
+    let artifacts = value["data"]["artifactPaths"]
+        .as_array()
+        .ok_or("missing actual artifacts")?;
+    ensure_equal(&artifacts.len(), &3, "one actual artifact per pack")?;
+    for (artifact, comparison) in artifacts.iter().zip(comparisons) {
+        let path = artifact["stdout"]
+            .as_str()
+            .ok_or("missing actual pack path")?;
+        let pack: Value =
+            serde_json::from_slice(&std::fs::read(path).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &pack["schema"],
+            &json!("ee.response.v2"),
+            "actual production response envelope",
+        )?;
+        ensure_equal(
+            &pack["data"]["pack"]["budget"]["usedTokens"],
+            &comparison["actual_tokens_used"],
+            "token cost comes from retained pack",
+        )?;
+        ensure_equal(
+            &artifact["memoryCount"],
+            &json!(2),
+            "entire source corpus stored",
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn eval_workload_oracle_rejects_an_omitted_query_or_corpus_record() -> TestResult {
     let source: ee::eval::SourceMemoryFile = serde_json::from_str(include_str!(
         "fixtures/eval/async_migration/source_memory.json"

@@ -4150,7 +4150,6 @@ pub(crate) fn write_memory_eval_index_metadata(
 /// the generation they actually indexed; otherwise the public search path can
 /// correctly interpret the fixture as stale and replace it before the behavior
 /// under test is observed.
-#[cfg(test)]
 pub(crate) fn write_memory_eval_index_metadata_for_generation(
     index_dir: &Path,
     generation: u64,

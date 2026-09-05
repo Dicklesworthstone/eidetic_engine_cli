@@ -21762,7 +21762,18 @@ fn stored_journal_entry_from_row(row: &Row) -> Result<StoredJournalEntry> {
 impl DbConnection {
     /// Insert a new memory and its tags.
     pub fn insert_memory(&self, id: &str, input: &CreateMemoryInput) -> Result<()> {
-        self.insert_memory_inner(id, input, None)
+        self.insert_memory_inner(id, input, None, Utc::now())
+    }
+
+    /// Seed an evaluation store through normal insertion, including provenance
+    /// hashing, tags, and anchor extraction, at the fixture's fixed clock.
+    pub(crate) fn insert_memory_at(
+        &self,
+        id: &str,
+        input: &CreateMemoryInput,
+        timestamp: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        self.insert_memory_inner(id, input, None, timestamp)
     }
 
     /// Insert a new memory with a precomputed content SimHash.
@@ -21772,7 +21783,7 @@ impl DbConnection {
         input: &CreateMemoryInput,
         content_simhash: MemoryContentSimHash,
     ) -> Result<()> {
-        self.insert_memory_inner(id, input, Some(content_simhash))
+        self.insert_memory_inner(id, input, Some(content_simhash), Utc::now())
     }
 
     fn insert_memory_inner(
@@ -21780,8 +21791,9 @@ impl DbConnection {
         id: &str,
         input: &CreateMemoryInput,
         content_simhash: Option<MemoryContentSimHash>,
+        timestamp: chrono::DateTime<Utc>,
     ) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
+        let now = timestamp.to_rfc3339();
         let provenance_chain_hash =
             compute_memory_provenance_chain_hash_fields(&MemoryProvenanceChainFields {
                 id,

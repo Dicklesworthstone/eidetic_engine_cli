@@ -1347,6 +1347,28 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
     run_context_pack_with_performance(options, PACK_COMMAND).map(|run| run.response)
 }
 
+/// Execute the production pack path against an index built with an explicitly
+/// supplied embedder. Evaluation must use the same embedder for documents and
+/// queries, independently of models installed on the host.
+pub(crate) fn run_context_pack_with_embedder(
+    options: &ContextPackOptions,
+    embedder: Arc<dyn crate::search::Embedder>,
+) -> Result<ContextResponse, ContextPackError> {
+    crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+        run_context_pack_with_performance_inner(
+            options,
+            PACK_COMMAND,
+            Deterministic::from_seed(0),
+            PackRecordPersistence::Seeded,
+            ContextPackControl::new(&cx, None, None),
+            Some(embedder),
+        )
+        .await
+        .map(|run| run.response)
+    })
+    .map_err(|error| ContextPackError::Pack(format!("Failed to start pack runtime: {error}")))?
+}
+
 /// Admit the newest live workspace memories through the same policy and pack
 /// machinery used by normal context assembly.
 ///
@@ -2037,6 +2059,7 @@ pub async fn run_context_pack_with_performance_with_cx(
         determinism,
         PackRecordPersistence::Ambient,
         ContextPackControl::new(cx, None, None),
+        None,
     )
     .await
 }
@@ -2110,6 +2133,7 @@ pub fn run_context_pack_with_performance_controlled(
             determinism,
             PackRecordPersistence::Ambient,
             ContextPackControl::new(&cx, deadline, cancellation_flag),
+            None,
         )
         .await
     })
@@ -2128,6 +2152,7 @@ pub fn run_context_pack_with_performance_seeded(
             determinism,
             PackRecordPersistence::Seeded,
             ContextPackControl::new(&cx, None, None),
+            None,
         )
         .await
     })
@@ -2575,6 +2600,7 @@ async fn run_context_pack_with_performance_inner(
     determinism: Deterministic<Seed>,
     pack_record_persistence: PackRecordPersistence,
     control: ContextPackControl<'_>,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
     let total_start = Instant::now();
     control.check()?;
@@ -2645,7 +2671,8 @@ async fn run_context_pack_with_performance_inner(
         strict_scope: options.strict_scope,
     };
     reconcile_search_index_before_read_with_cx(control.cx, &search_options).await;
-    let embedder_preparation = if options.source_mode.uses_embeddings()
+    let embedder_preparation = if fast_embedder_override.is_none()
+        && options.source_mode.uses_embeddings()
         && index_dir.exists()
         && index_corpus_compatibility_is_current(&index_dir)
     {
@@ -2668,11 +2695,19 @@ async fn run_context_pack_with_performance_inner(
     } else {
         None
     };
-    let prepared_embed_backend = embedder_preparation
-        .as_ref()
-        .map_or_else(crate::core::index::active_embed_backend, |preparation| {
-            preparation.backend
-        });
+    let prepared_embed_backend = if let Some(embedder) = &fast_embedder_override {
+        if embedder.is_semantic() {
+            EmbedBackend::NeuralLocal
+        } else {
+            EmbedBackend::HashFallback
+        }
+    } else {
+        embedder_preparation
+            .as_ref()
+            .map_or_else(crate::core::index::active_embed_backend, |preparation| {
+                preparation.backend
+            })
+    };
 
     let (read_pool_config, pin_snapshot) =
         context_read_pool_config(&options.workspace_path, &mut degraded);
@@ -2712,38 +2747,39 @@ async fn run_context_pack_with_performance_inner(
     // a profile lowers the configured ceiling — falsely flags healthy packs that used a
     // tiny fraction of the budget as degraded. See the post-assembly emission below.
 
-    let l2_cache_context = if options.output_options.cache_json_response {
-        let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-        let l2_context = context_pack_l2_prepare(
-            options,
-            read_connection,
-            &request,
-            &effective_filters,
-            &runtime_profile,
-            output_redaction_enabled,
-            prepared_embed_backend,
-            &mut degraded,
-        );
-        if let Some(context) = &l2_context
-            && let Some(cached_run) = context_pack_l2_try_hit(
-                context,
-                command,
+    let l2_cache_context =
+        if options.output_options.cache_json_response && fast_embedder_override.is_none() {
+            let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+            let l2_context = context_pack_l2_prepare(
                 options,
-                &search_options,
                 read_connection,
                 &request,
-                total_start,
-                &mut trace,
+                &effective_filters,
+                &runtime_profile,
+                output_redaction_enabled,
+                prepared_embed_backend,
                 &mut degraded,
-            )
-        {
-            control.check()?;
-            return Ok(cached_run);
-        }
-        l2_context
-    } else {
-        None
-    };
+            );
+            if let Some(context) = &l2_context
+                && let Some(cached_run) = context_pack_l2_try_hit(
+                    context,
+                    command,
+                    options,
+                    &search_options,
+                    read_connection,
+                    &request,
+                    total_start,
+                    &mut trace,
+                    &mut degraded,
+                )
+            {
+                control.check()?;
+                return Ok(cached_run);
+            }
+            l2_context
+        } else {
+            None
+        };
 
     control.check()?;
     let search_start = Instant::now();
@@ -2765,9 +2801,11 @@ async fn run_context_pack_with_performance_inner(
                 output_redaction_enabled,
             }),
             determinism.shared_child("search.rerank"),
-            embedder_preparation
-                .as_ref()
-                .map(|preparation| Arc::clone(&preparation.fast_embedder)),
+            fast_embedder_override.or_else(|| {
+                embedder_preparation
+                    .as_ref()
+                    .map(|preparation| Arc::clone(&preparation.fast_embedder))
+            }),
         )
         .await
         {
