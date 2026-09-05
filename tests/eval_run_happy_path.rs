@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::process::{Command, Output};
 
 use ee::models::ProcessExitCode;
@@ -17,6 +18,166 @@ const EXPECTED_FIXTURE_IDS: &[&str] = &[
     "fx.semantic_model_admissibility.v1",
     "fx.structural_recall.v1",
 ];
+
+// Independent workload oracle: deleting an expectation from a source fixture
+// must fail even if the evaluator faithfully executes the remaining queries.
+const RETRIEVAL_WORKLOADS: &[(&str, &[&str])] = &[
+    (
+        "ask_v1",
+        &[
+            "How should Project Zephyr ask answers cite evidence?",
+            "Is remote cache delta enabled for Project Zephyr?",
+            "What Rust toolchain does Project Zephyr use?",
+            "What is the current retention window for Project Zephyr traces?",
+            "What was the old Project Zephyr trace retention window?",
+            "Where does Project Zephyr store trace metadata?",
+            "Which command must run before every release tag?",
+            "Which release readiness gate must Project Zephyr pass before deploy?",
+        ],
+    ),
+    (
+        "fx.async_migration.v1",
+        &[
+            "background job queue health and capacity",
+            "production backfill timeout and stuck migration",
+            "rollback plan and pre-migration schema checkpoint",
+        ],
+    ),
+    (
+        "fx.bundled_embeddings.v1",
+        &[
+            "RBLX bookings FCF watchlist",
+            "Roblox Robux creator marketplace",
+        ],
+    ),
+    (
+        "fx.dangerous_cleanup.v1",
+        &[
+            "before deleting",
+            "clean up generated build artifacts safely",
+            "cleanup failure",
+            "dangerous cleanup",
+            "dry-run",
+            "explicit written permission",
+            "preserve unknown files",
+            "safe cleanup plan",
+            "untracked fixtures",
+        ],
+    ),
+    (
+        "fx.data_size_tiers.v1",
+        &[
+            "all task relevant memories",
+            "budget truncation",
+            "large workspace history",
+            "medium workspace history",
+            "redundant memories suppressed",
+            "release memory",
+            "section quotas",
+            "small workspace history",
+            "top ranked memories",
+        ],
+    ),
+    (
+        "fx.memory_poisoning.v1",
+        &[
+            "authority claim",
+            "imported memories are evidence",
+            "instruction-like content",
+            "legacy memories",
+            "new system prompt",
+            "policy denial",
+            "prompt injection",
+            "role markup",
+            "source trust",
+        ],
+    ),
+    (
+        "fx.release_failure.v1",
+        &[
+            "clippy before release",
+            "failing release workflow",
+            "prepare release",
+            "release failure",
+            "unused import",
+        ],
+    ),
+    (
+        "fx.structural_recall.v1",
+        &[
+            "RCH queue backpressure authority",
+            "completion audit dominance alias",
+            "fresh workspace init status",
+            "local cargo fallback is acceptable when RCH is busy",
+            "revision lineage aggregate dominance",
+            "thin-thread concurrency release compass",
+        ],
+    ),
+];
+
+fn expected_corpus_ids(fixture_id: &str) -> Result<BTreeSet<String>, String> {
+    let numeric_range = match fixture_id {
+        "fx.bundled_embeddings.v1" => Some(901..=903),
+        "fx.dangerous_cleanup.v1" => Some(301..=303),
+        "fx.data_size_tiers.v1" => Some(501..=1100),
+        "fx.memory_poisoning.v1" => Some(401..=403),
+        "fx.release_failure.v1" => Some(101..=102),
+        "fx.structural_recall.v1" => Some(1101..=1110),
+        _ => None,
+    };
+    if let Some(range) = numeric_range {
+        return Ok(range.map(|id| format!("mem_{id:026}")).collect());
+    }
+    if fixture_id == "fx.async_migration.v1" {
+        return Ok((1..=3).map(|id| format!("memory-{id}")).collect());
+    }
+    if fixture_id == "ask_v1" {
+        let mut ids: BTreeSet<_> = [
+            "release_tag_format",
+            "direct_toolchain",
+            "direct_database",
+            "multi_release_primary",
+            "multi_release_support",
+            "conflict_affirm",
+            "conflict_negate",
+            "version_current",
+            "version_old",
+            "boundary_rule",
+            "low_trust_noise",
+            "unrelated_billing",
+            "unrelated_ui",
+        ]
+        .into_iter()
+        .map(|suffix| format!("mem_ask_{suffix}"))
+        .collect();
+        ids.extend((1..=48).map(|id| format!("mem_ask_noise_{id:03}")));
+        return Ok(ids);
+    }
+    Err(format!("unclassified retrieval fixture {fixture_id}"))
+}
+
+fn check_source_workload(
+    fixture_id: &str,
+    expected_queries: &[&str],
+    memories: &[ee::eval::SourceMemory],
+) -> TestResult {
+    let ids: BTreeSet<_> = memories.iter().map(|memory| memory.id.clone()).collect();
+    ensure_equal(
+        &ids,
+        &expected_corpus_ids(fixture_id)?,
+        "exact materialized corpus IDs",
+    )?;
+    ensure_equal(&ids.len(), &memories.len(), "no duplicate corpus IDs")?;
+    let queries: BTreeSet<_> = memories
+        .iter()
+        .flat_map(|memory| memory.expected_query_match.iter().map(String::as_str))
+        .collect();
+    ensure_equal(
+        &queries,
+        &expected_queries.iter().copied().collect(),
+        "exact declared query inventory",
+    )
+}
 
 const GOLDEN_REPORTS: &[(&str, ProcessExitCode, &str)] = &[
     (
@@ -300,6 +461,139 @@ fn eval_async_migration_retrieves_the_exact_complete_query_inventory() -> TestRe
 }
 
 #[test]
+fn eval_all_retrieval_families_execute_their_complete_workloads() -> TestResult {
+    let artifacts = tempfile::Builder::new()
+        .prefix("ee-eval-workloads-")
+        .tempdir()
+        .map_err(|error| error.to_string())?
+        .keep();
+    let fixtures = ee::eval::discover_fixtures(std::path::Path::new("tests/fixtures/eval"))
+        .map_err(|error| error.to_string())?;
+    for &(fixture_id, expected_queries) in RETRIEVAL_WORKLOADS {
+        let fixture = fixtures
+            .iter()
+            .find(|fixture| fixture.fixture_id == fixture_id)
+            .ok_or_else(|| format!("missing fixture {fixture_id}"))?;
+        let source = ee::eval::load_source_memories(&fixture.source_memory_path)
+            .map_err(|error| error.to_string())?;
+        let memories =
+            ee::eval::materialize_source_memories(&source).map_err(|error| error.to_string())?;
+        check_source_workload(fixture_id, expected_queries, &memories)?;
+        let output = run_ee(&["--json", "eval", "run", fixture_id])?;
+        std::fs::write(artifacts.join(format!("{fixture_id}.json")), &output.stdout)
+            .map_err(|error| error.to_string())?;
+        std::fs::write(
+            artifacts.join(format!("{fixture_id}.stderr")),
+            &output.stderr,
+        )
+        .map_err(|error| error.to_string())?;
+        if !matches!(output.status.code(), Some(0 | 9)) {
+            return Err(format!(
+                "{fixture_id} did not execute retrieval: {:?}\n{}\n{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        ensure_equal(&output.stderr, &Vec::<u8>::new(), "evaluation stderr")?;
+        let value: Value =
+            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+        let metrics = &value["data"]["report"]["metrics"];
+        ensure_equal(
+            &metrics["queries_evaluated"],
+            &json!(expected_queries.len()),
+            "complete executed query count",
+        )?;
+        let queries = metrics["per_query"]
+            .as_array()
+            .ok_or("missing per-query measurements")?;
+        ensure_equal(
+            &queries.len(),
+            &expected_queries.len(),
+            "one result per declared query",
+        )?;
+        let actual_queries = queries
+            .iter()
+            .map(|query| string_field(query, "/query"))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        ensure_equal(
+            &actual_queries,
+            &expected_queries.iter().copied().collect(),
+            "complete executed query inventory",
+        )?;
+        for query in queries {
+            let text = string_field(query, "/query")?;
+            let expected_ids: BTreeSet<_> = memories
+                .iter()
+                .filter(|memory| {
+                    memory
+                        .expected_query_match
+                        .iter()
+                        .any(|expected| expected == text)
+                })
+                .map(|memory| memory.id.as_str())
+                .collect();
+            let observed_ids = query["expected_ids"]
+                .as_array()
+                .ok_or("missing expected IDs")?
+                .iter()
+                .map(|id| id.as_str().ok_or("non-string expected ID"))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            ensure_equal(
+                &observed_ids,
+                &expected_ids,
+                "every declared expected entity is measured",
+            )?;
+            let retrieved = query["retrieved_ids"]
+                .as_array()
+                .ok_or("missing retrieved IDs")?;
+            if retrieved.is_empty() {
+                return Err(format!(
+                    "{fixture_id} executed an empty retrieval for {text:?}"
+                ));
+            }
+        }
+    }
+    let classified: BTreeSet<_> = RETRIEVAL_WORKLOADS
+        .iter()
+        .map(|(id, _)| *id)
+        .chain([
+            "fx.metamorphic_evaluation.v1",
+            "fx.semantic_model_admissibility.v1",
+        ])
+        .collect();
+    ensure_equal(
+        &classified,
+        &EXPECTED_FIXTURE_IDS.iter().copied().collect(),
+        "every fixture has an explicit execution classification",
+    )
+}
+
+#[test]
+fn eval_workload_oracle_rejects_an_omitted_query_or_corpus_record() -> TestResult {
+    let source: ee::eval::SourceMemoryFile = serde_json::from_str(include_str!(
+        "fixtures/eval/async_migration/source_memory.json"
+    ))
+    .map_err(|error| error.to_string())?;
+    let memories =
+        ee::eval::materialize_source_memories(&source).map_err(|error| error.to_string())?;
+    let (_, queries) = RETRIEVAL_WORKLOADS
+        .iter()
+        .find(|(id, _)| *id == "fx.async_migration.v1")
+        .ok_or("missing independent async oracle")?;
+    check_source_workload("fx.async_migration.v1", queries, &memories)?;
+    let mut omitted = memories.clone();
+    omitted[0].expected_query_match.clear();
+    if check_source_workload("fx.async_migration.v1", queries, &omitted).is_ok() {
+        return Err("omitted query passed the independent workload oracle".into());
+    }
+    if check_source_workload("fx.async_migration.v1", queries, &memories[1..]).is_ok() {
+        return Err("omitted corpus record passed the independent workload oracle".into());
+    }
+    Ok(())
+}
+
+#[test]
 fn eval_retrieval_is_independent_of_host_model_selection() -> TestResult {
     let baseline = command_json(&["--json", "eval", "run", "fx.async_migration.v1"])?;
     let scratch = tempfile::Builder::new()
@@ -422,6 +716,7 @@ fn eval_run_executes_every_ask_quality_case_and_rejects_wrong_citations() -> Tes
         .tempdir()
         .map_err(|error| error.to_string())?
         .keep();
+    let root = root.canonicalize().map_err(|error| error.to_string())?;
     let fixture = root.join("ask_v1");
     std::fs::create_dir(&fixture).map_err(|error| error.to_string())?;
     std::fs::copy(

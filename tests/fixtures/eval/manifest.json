@@ -4,7 +4,7 @@
   "discovery_contract": {
     "loader": "src/eval/runner.rs::discover_fixtures",
     "executable_fixture_shape": "subdirectories containing scenario.json and source_memory.json",
-    "root_json_policy": "ignored_by_runner"
+    "root_json_policy": "manifest_validated_against_discovery; other_root_json_ignored"
   },
   "fixtures": [
     {

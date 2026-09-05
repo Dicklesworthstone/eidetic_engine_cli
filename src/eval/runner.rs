@@ -762,7 +762,10 @@ pub fn discover_fixtures(fixture_dir: &Path) -> Result<Vec<DiscoveredFixture>, D
         if !path_is_regular_file_no_follow(&scenario_path)?
             || !path_is_regular_file_no_follow(&source_memory_path)?
         {
-            continue;
+            return Err(fixture_validation_error(format!(
+                "incomplete fixture directory {}: scenario.json and source_memory.json are both required",
+                path.display()
+            )));
         }
 
         let scenario = load_scenario(&scenario_path)?;
@@ -777,7 +780,81 @@ pub fn discover_fixtures(fixture_dir: &Path) -> Result<Vec<DiscoveredFixture>, D
     }
 
     fixtures.sort_by(|a, b| a.fixture_id.cmp(&b.fixture_id));
+    validate_discovered_fixture_manifest(fixture_dir, &fixtures)?;
     Ok(fixtures)
+}
+
+fn validate_discovered_fixture_manifest(
+    fixture_dir: &Path,
+    fixtures: &[DiscoveredFixture],
+) -> Result<(), DomainError> {
+    #[derive(Deserialize)]
+    struct Manifest {
+        schema: String,
+        fixture_root: PathBuf,
+        fixtures: Vec<Entry>,
+    }
+    #[derive(Deserialize)]
+    struct Entry {
+        id: String,
+        path: PathBuf,
+    }
+
+    let path = fixture_dir.join("manifest.json");
+    ensure_eval_fixture_path_has_no_symlink_components(&path, "inspect fixture manifest")?;
+    // Standalone external fixtures need no repository manifest. When present,
+    // the manifest is authoritative; discovery cannot silently shrink it.
+    if !path.exists() {
+        return Ok(());
+    }
+    let content = read_eval_fixture_file(&path, "read fixture manifest", "fixture manifest")?;
+    let manifest: Manifest = serde_json::from_str(&content)
+        .map_err(|error| fixture_validation_error(format!("invalid fixture manifest: {error}")))?;
+    if manifest.schema != "ee.eval.fixture_manifest.v1" {
+        return Err(fixture_validation_error(
+            "unsupported fixture manifest schema",
+        ));
+    }
+    let mut expected = BTreeMap::new();
+    let mut ids = BTreeSet::new();
+    for entry in manifest.fixtures {
+        let relative = entry
+            .path
+            .strip_prefix(&manifest.fixture_root)
+            .map_err(|_| {
+                fixture_validation_error("manifest fixture path must be under fixture_root")
+            })?;
+        let components: Vec<_> = relative.components().collect();
+        if !matches!(components.as_slice(), [std::path::Component::Normal(_)]) {
+            return Err(fixture_validation_error(
+                "manifest fixture path must name one direct child directory",
+            ));
+        }
+        if entry.id.trim().is_empty() || !ids.insert(entry.id.clone()) {
+            return Err(fixture_validation_error(
+                "empty or duplicate manifest fixture ID",
+            ));
+        }
+        if expected.insert(relative.to_path_buf(), entry.id).is_some() {
+            return Err(fixture_validation_error(
+                "duplicate manifest fixture directory",
+            ));
+        }
+    }
+    let mut observed = BTreeMap::new();
+    for fixture in fixtures {
+        let relative = fixture
+            .path
+            .strip_prefix(fixture_dir)
+            .map_err(|_| fixture_validation_error("discovered fixture is outside its root"))?;
+        observed.insert(relative.to_path_buf(), fixture.fixture_id.clone());
+    }
+    if observed != expected {
+        return Err(fixture_validation_error(format!(
+            "fixture manifest/discovery mismatch: expected {expected:?}, observed {observed:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// Load a fixture scenario from JSON.
@@ -3160,6 +3237,64 @@ mod tests {
             format!(r#"{{"schema":"{EVAL_SOURCE_MEMORY_SCHEMA_V1}","memories":[]}}"#),
         )
         .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn discover_fixtures_rejects_missing_corpus_and_manifest_drift() -> TestResult {
+        let root = tempfile::tempdir()
+            .map_err(|error| error.to_string())?
+            .keep();
+        let root = root.canonicalize().map_err(|error| error.to_string())?;
+        let complete = root.join("complete");
+        std::fs::create_dir(&complete).map_err(|error| error.to_string())?;
+        write_minimal_fixture(&complete.join("declared"), "declared")?;
+        let manifest = serde_json::json!({
+            "schema": "ee.eval.fixture_manifest.v1",
+            "fixture_root": "fixtures",
+            "fixtures": [{"id": "declared", "path": "fixtures/declared"}]
+        });
+        std::fs::write(complete.join("manifest.json"), manifest.to_string())
+            .map_err(|error| error.to_string())?;
+        ensure(
+            discover_fixtures(&complete)
+                .map_err(|error| error.to_string())?
+                .len(),
+            1,
+            "complete manifest fixture is discovered",
+        )?;
+
+        write_minimal_fixture(&complete.join("unregistered"), "unregistered")?;
+        let error = discover_fixtures(&complete).expect_err("unregistered fixture must fail");
+        ensure(
+            error.message().contains("manifest/discovery mismatch"),
+            true,
+            "extra fixture",
+        )?;
+
+        let missing = root.join("missing");
+        std::fs::create_dir_all(missing.join("declared")).map_err(|error| error.to_string())?;
+        std::fs::copy(
+            complete.join("declared/scenario.json"),
+            missing.join("declared/scenario.json"),
+        )
+        .map_err(|error| error.to_string())?;
+        let error = discover_fixtures(&missing).expect_err("missing corpus must fail");
+        ensure(
+            error.message().contains("incomplete fixture directory"),
+            true,
+            "missing corpus",
+        )?;
+
+        let absent = root.join("absent");
+        std::fs::create_dir(&absent).map_err(|error| error.to_string())?;
+        std::fs::write(absent.join("manifest.json"), manifest.to_string())
+            .map_err(|error| error.to_string())?;
+        let error = discover_fixtures(&absent).expect_err("absent declared fixture must fail");
+        ensure(
+            error.message().contains("manifest/discovery mismatch"),
+            true,
+            "missing fixture",
+        )
     }
 
     #[cfg(unix)]
