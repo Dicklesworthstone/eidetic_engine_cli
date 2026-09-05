@@ -3384,6 +3384,16 @@ fn run_ee_with_env(
     let output = ee_command_with_env(workspace, args, env)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))?;
+    fs::write(
+        workspace.path.join(format!("{phase}.stdout")),
+        &output.stdout,
+    )
+    .map_err(|error| format!("retain {phase} stdout: {error}"))?;
+    fs::write(
+        workspace.path.join(format!("{phase}.stderr")),
+        &output.stderr,
+    )
+    .map_err(|error| format!("retain {phase} stderr: {error}"))?;
     workspace.log(
         phase,
         json!({

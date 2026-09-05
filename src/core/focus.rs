@@ -1164,11 +1164,6 @@ fn stored_focus_state_to_domain(stored: StoredFocusState) -> Result<FocusState, 
     state.recorder_run_id = stored.recorder_run_id;
     state.handoff_id = stored.handoff_id;
     state.profile = stored.profile;
-    state.focal_memory_id = stored
-        .focal_memory_id
-        .as_deref()
-        .map(parse_memory_id)
-        .transpose()?;
     state.provenance = normalize_string_list(stored.provenance);
 
     for stored_item in stored.items {
@@ -1190,6 +1185,13 @@ fn stored_focus_state_to_domain(stored: StoredFocusState) -> Result<FocusState, 
         }
         state = state.with_item(item).map_err(focus_validation_error)?;
     }
+    // with_item validates the whole state. Restore the focal reference only
+    // after every item is present, then validate it against the complete set.
+    state.focal_memory_id = stored
+        .focal_memory_id
+        .as_deref()
+        .map(parse_memory_id)
+        .transpose()?;
     canonicalize_state(&mut state);
     state.validate().map_err(focus_validation_error)?;
     Ok(state)
@@ -1559,6 +1561,32 @@ mod tests {
                 .map_err(focus_validation_error)?;
         }
         Ok(state)
+    }
+
+    #[test]
+    fn stored_focus_roundtrip_validates_focal_after_all_items() -> TestResult {
+        let first = memory_id(10);
+        let last = memory_id(11);
+        for focal in [None, Some(first), Some(last)] {
+            let mut state = focus_state(&[first, last], 2).map_err(|error| error.message())?;
+            state.focal_memory_id = focal;
+            let stored =
+                serde_json::from_value(state.data_json()).map_err(|error| error.to_string())?;
+            let restored = stored_focus_state_to_domain(stored).map_err(|error| error.message())?;
+            ensure(restored.data_json(), state.data_json(), "focus roundtrip")?;
+        }
+
+        let mut invalid = focus_state(&[first, last], 2).map_err(|error| error.message())?;
+        invalid.focal_memory_id = Some(memory_id(12));
+        let stored =
+            serde_json::from_value(invalid.data_json()).map_err(|error| error.to_string())?;
+        let error = stored_focus_state_to_domain(stored)
+            .expect_err("a focal reference outside the completed set remains invalid");
+        ensure(
+            error.message().contains("focal memory is not present"),
+            true,
+            "missing focal reference rejected",
+        )
     }
 
     #[test]

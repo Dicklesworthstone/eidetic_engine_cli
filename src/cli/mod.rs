@@ -39898,6 +39898,13 @@ where
         }
     };
 
+    // Full orientation contains the pack's retrieval result. Preserve its
+    // actual degradations in the response envelope, as fast orientation does
+    // for its content provider, including the structured recovery evidence.
+    if let Some(entries) = pack.get("degraded").and_then(serde_json::Value::as_array) {
+        degraded.extend(entries.iter().cloned());
+    }
+
     let primer = if args.include_primer {
         orient_primer_value(&workspace_path, &mut degraded)
     } else {
