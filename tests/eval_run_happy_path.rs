@@ -209,7 +209,31 @@ fn eval_list_json_enumerates_all_fixture_directories() -> TestResult {
 
     let actual_ids = fixture_ids(&value)?;
     let expected_ids = EXPECTED_FIXTURE_IDS.to_vec();
-    ensure_equal(&actual_ids, &expected_ids, "fixture IDs")
+    ensure_equal(&actual_ids, &expected_ids, "fixture IDs")?;
+
+    let fixtures = value
+        .pointer("/data/fixtures")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "missing fixture inventory".to_string())?;
+    for (fixture_id, memory_count, query_count) in
+        [("ask_v1", 60, 7), ("fx.data_size_tiers.v1", 600, 9)]
+    {
+        let fixture = fixtures
+            .iter()
+            .find(|fixture| fixture["fixture_id"].as_str() == Some(fixture_id))
+            .ok_or_else(|| format!("missing fixture {fixture_id}"))?;
+        ensure_equal(
+            &fixture["memory_count"].as_u64(),
+            &Some(memory_count),
+            &format!("{fixture_id} materialized memory count"),
+        )?;
+        ensure_equal(
+            &fixture["query_count"].as_u64(),
+            &Some(query_count),
+            &format!("{fixture_id} materialized query count"),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]

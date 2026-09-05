@@ -1842,6 +1842,58 @@ fn data_size_tiers_source_memory_profiles_are_deterministic_and_secret_free() ->
 }
 
 #[test]
+fn data_size_tiers_materialize_the_declared_workload() -> TestResult {
+    let source = parse_source_model(DATA_SIZE_TIERS_SOURCE, "data_size_tiers source")?;
+    for tier in &source.tiers {
+        let mut tier_source = source.clone();
+        tier_source.tiers = vec![tier.clone()];
+        let memories =
+            materialize_source_memories(&tier_source).map_err(|error| error.to_string())?;
+        ensure_equal(
+            memories.len(),
+            tier.expected_memory_count as usize,
+            "materialized tier corpus size",
+        )?;
+    }
+    ensure_equal(
+        materialize_source_memories(&source)
+            .map_err(|error| error.to_string())?
+            .len(),
+        600,
+        "combined tier corpus size",
+    )
+}
+
+#[test]
+fn data_size_tiers_reject_incomplete_generated_corpus() -> TestResult {
+    let mut source = parse_source_model(DATA_SIZE_TIERS_SOURCE, "data_size_tiers source")?;
+    let large = source.tiers.last_mut().ok_or("missing large tier")?;
+    large.id_range.as_mut().ok_or("missing large range")?.end =
+        "mem_00000000000000000000000600".to_owned();
+    let error = materialize_source_memories(&source)
+        .err()
+        .ok_or("undersized range must fail instead of silently clamping")?;
+    ensure(
+        error
+            .message()
+            .contains("declares 600 memories but id_range supplies only 100"),
+        "corpus error must name the expected and actual workload",
+    )?;
+    source
+        .tiers
+        .last_mut()
+        .ok_or("missing large tier")?
+        .id_range = None;
+    let error = materialize_source_memories(&source)
+        .err()
+        .ok_or("missing range must fail instead of silently omitting a tier")?;
+    ensure(
+        error.message().contains("missing id_range"),
+        "missing range repair context",
+    )
+}
+
+#[test]
 fn data_size_tiers_json_fixture_maps_to_eval_domain_types() -> TestResult {
     let raw = parse_json(DATA_SIZE_TIERS_SCENARIO, "data_size_tiers scenario")?;
     let scenario_id = array_field(&raw, "scenario_ids")?

@@ -5358,76 +5358,46 @@ fn default_search_embedder_for_settings(settings: &EeEmbedderSettings) -> Defaul
         "ee embedding model policy resolved"
     );
 
-    if settings.download_mode == EeEmbedDownloadMode::Off {
-        // EE_EMBED_DOWNLOAD=off means "never fetch over the network", NOT "never
-        // use a model". A host that pre-populated the cache (air-gapped install)
-        // or already ran an ee-managed download must still get semantic search.
-        // Consult the on-disk model first and only fall back to the
-        // deterministic hash embedder when no local semantic model is present.
-        // Load the frozen local artifact directly instead of invoking general
-        // auto-detection. That makes this branch independent of ambient remote
-        // provider intent and, by construction, never instantiates either a
-        // downloader or a remote embedder. (GH#18: the previous
-        // unconditional hash fallback made search report
-        // `semantic:false / frankensearch_hash_fallback` even with a valid model
-        // on disk, contradicting `ee index reembed`.)
-        let model_dir = potion_model_destination_dir(&settings.model_root);
-        if verified_potion_model_dir(&model_dir) {
-            match Model2VecEmbedder::load(&model_dir) {
-                Ok(embedder) => {
-                    let fast = Arc::new(embedder) as Arc<dyn crate::search::Embedder>;
-                    let stack = EmbedderStack::from_parts(fast, None);
-                    tracing::info!(
-                        target: "ee::index::embedder",
-                        detected_fast = stack.fast().id(),
-                        "EE_EMBED_DOWNLOAD=off; using verified on-disk semantic model"
-                    );
-                    return DefaultSearchEmbedder::ready(
-                        stack,
-                        EmbedModelResolution::ready(settings.local_source),
-                    );
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        target: "ee::index::embedder",
-                        reason = "verified_local_model_load_failed",
-                        "EE_EMBED_DOWNLOAD=off; verified local model could not be loaded"
-                    );
-                }
+    // The supported local stack has one pinned Model2Vec fast tier. Inspection
+    // and execution share discovery; only execution constructs the real model.
+    // In particular, off prohibits downloads, not use of verified cached files.
+    if let Some(model_dir) = verified_default_model_dir(settings) {
+        match Model2VecEmbedder::load_with_name(&model_dir, POTION_MODEL_NAME) {
+            Ok(embedder) => {
+                return DefaultSearchEmbedder::ready(
+                    EmbedderStack::from_parts(Arc::new(embedder), None),
+                    EmbedModelResolution::ready(settings.local_source),
+                );
             }
-        } else {
-            tracing::info!(
-                target: "ee::index::embedder",
-                "EE_EMBED_DOWNLOAD=off and no verified on-disk semantic model; using deterministic hash fallback"
-            );
+            Err(error) => {
+                tracing::warn!(
+                    target: "ee::index::embedder",
+                    %error,
+                    "verified local model could not be loaded"
+                );
+            }
         }
-        return DefaultSearchEmbedder::ready(
+    }
+    match settings.download_mode {
+        EeEmbedDownloadMode::Off => DefaultSearchEmbedder::ready(
             hash_fallback_embedder_stack(),
             EmbedModelResolution::deterministic_hash(),
-        );
+        ),
+        EeEmbedDownloadMode::Auto => ee_auto_download_embedder(settings.model_root.clone()),
     }
+}
 
-    match EmbedderStack::auto_detect_with(Some(&settings.model_root)) {
-        Ok(stack) if stack.fast().is_semantic() => {
-            DefaultSearchEmbedder::ready(stack, EmbedModelResolution::ready(settings.local_source))
-        }
-        Ok(stack) => {
-            tracing::info!(
-                target: "ee::index::embedder",
-                detected_fast = stack.fast().id(),
-                "semantic model not present locally; enabling ee-managed first-use download"
-            );
-            ee_auto_download_embedder(settings.model_root.clone())
-        }
-        Err(_) => {
-            tracing::warn!(
-                target: "ee::index::embedder",
-                reason = "auto_detect_failed",
-                "Frankensearch default embedder auto-detect failed; enabling ee-managed first-use download"
-            );
-            ee_auto_download_embedder(settings.model_root.clone())
-        }
+fn verified_default_model_dir(settings: &EeEmbedderSettings) -> Option<PathBuf> {
+    let destination = potion_model_destination_dir(&settings.model_root);
+    if verified_potion_model_dir(&destination) {
+        return Some(destination);
     }
+    // Preserve auto-discovery's support for an explicitly supplied model
+    // directory whose basename differs from the canonical model name.
+    (settings.download_mode == EeEmbedDownloadMode::Auto
+        && destination != settings.model_root
+        && verified_potion_model_dir(&settings.model_root))
+    .then(|| settings.model_root.clone())
 }
 
 fn default_embedder_stack() -> EmbedderStack {
@@ -5523,10 +5493,10 @@ fn registered_model2vec_source_path(
         .ok_or(EmbedRegistryRejectionReason::SourceWorkspaceMissing)
 }
 
-enum RegisteredModel2VecResolution {
+enum RegisteredModel2VecResolution<T = EmbedderStack> {
     NotRegistered,
     BundledDefaultDeclared,
-    Ready(EmbedderStack),
+    Ready(T),
     Rejected(EmbedModelResolution),
 }
 
@@ -5562,10 +5532,10 @@ fn workspace_registry_embedder_selection(
         .map(workspace_registry_selection_from_resolution)
 }
 
-fn rejected_registered_model2vec(
+fn rejected_registered_model2vec<T>(
     entry: &StoredModelRegistryEntry,
     reason: EmbedRegistryRejectionReason,
-) -> RegisteredModel2VecResolution {
+) -> RegisteredModel2VecResolution<T> {
     tracing::warn!(
         target: "ee::index::embedder",
         registry_id = entry.id,
@@ -5598,6 +5568,16 @@ fn registered_model2vec_resolution(
     db: &DbConnection,
     workspace_id: &str,
 ) -> Result<RegisteredModel2VecResolution, DbError> {
+    resolve_registered_model2vec(db, workspace_id, load_registered_model2vec)
+}
+
+/// Both inspection and execution must pass the same registry, path, receipt,
+/// fingerprint and dimension checks. Only the execution caller loads weights.
+fn resolve_registered_model2vec<T>(
+    db: &DbConnection,
+    workspace_id: &str,
+    finish: impl FnOnce(RegisteredModel2VecIdentity) -> Result<T, EmbedRegistryRejectionReason>,
+) -> Result<RegisteredModel2VecResolution<T>, DbError> {
     let mut entries = db
         .list_model_registry_entries(workspace_id)?
         .into_iter()
@@ -5757,12 +5737,39 @@ fn registered_model2vec_resolution(
             EmbedRegistryRejectionReason::MetadataMismatch,
         ));
     }
+    let descriptor = EmbedderDescriptor::potion();
+    let expected_hash =
+        descriptor_content_hash(&descriptor, ModelProvider::Model2Vec, Some(&manifest));
+    if !content_hash.eq_ignore_ascii_case(&expected_hash) {
+        return Ok(rejected_registered_model2vec(
+            entry,
+            EmbedRegistryRejectionReason::ContentHashMismatch,
+        ));
+    }
+    if Some(dimension) != u32::try_from(descriptor.dimension).ok() {
+        return Ok(rejected_registered_model2vec(
+            entry,
+            EmbedRegistryRejectionReason::DimensionMismatch,
+        ));
+    }
     let identity = RegisteredModel2VecIdentity {
-        canonical_source: canonical_source.clone(),
-        content_hash: content_hash.clone(),
+        canonical_source,
+        content_hash,
         dimension,
         distance_metric: distance_metric.as_str(),
     };
+    Ok(match finish(identity) {
+        Ok(value) => RegisteredModel2VecResolution::Ready(value),
+        Err(reason) => rejected_registered_model2vec(entry, reason),
+    })
+}
+
+fn load_registered_model2vec(
+    identity: RegisteredModel2VecIdentity,
+) -> Result<EmbedderStack, EmbedRegistryRejectionReason> {
+    let canonical_source = identity.canonical_source.clone();
+    let content_hash = identity.content_hash.clone();
+    let dimension = identity.dimension;
     let fast = REGISTERED_MODEL2VEC_CACHE
         .get_or_init(RegisteredModel2VecCache::default)
         .get_or_try_insert_with(identity, || {
@@ -5793,11 +5800,9 @@ fn registered_model2vec_resolution(
             }
             Err(_) => EmbedRegistryRejectionReason::ModelLoadFailed,
         };
-        return Ok(rejected_registered_model2vec(entry, reason));
+        return Err(reason);
     };
-    Ok(RegisteredModel2VecResolution::Ready(
-        EmbedderStack::from_parts(fast, None),
-    ))
+    Ok(EmbedderStack::from_parts(fast, None))
 }
 
 fn workspace_embedder_stack(
@@ -6546,6 +6551,100 @@ struct ActiveEmbedderFingerprint {
     content_hash: String,
 }
 
+/// Identity and availability for inspection. This cannot embed text and is
+/// never installed into a search stack in place of a real model.
+struct EmbedderDescriptor {
+    id: String,
+    model_name: String,
+    dimension: usize,
+    category: ModelCategory,
+    semantic: bool,
+    ready: bool,
+    pending_download: bool,
+}
+
+impl EmbedderDescriptor {
+    fn from_embedder(embedder: &dyn crate::search::Embedder) -> Self {
+        Self {
+            id: embedder.id().to_owned(),
+            model_name: embedder.model_name().to_owned(),
+            dimension: embedder.dimension(),
+            category: embedder.category(),
+            semantic: embedder.is_semantic(),
+            ready: embedder.is_ready(),
+            pending_download: embedder_reports_pending_model2vec_download(embedder),
+        }
+    }
+
+    fn potion() -> Self {
+        Self {
+            id: POTION_MODEL_NAME.to_owned(),
+            model_name: POTION_MODEL_NAME.to_owned(),
+            dimension: crate::core::model::BUNDLED_EMBEDDING_DIMENSION as usize,
+            category: ModelCategory::StaticEmbedder,
+            semantic: true,
+            ready: true,
+            pending_download: false,
+        }
+    }
+}
+
+fn stack_descriptors(stack: &EmbedderStack) -> (EmbedderDescriptor, Option<EmbedderDescriptor>) {
+    (
+        EmbedderDescriptor::from_embedder(stack.fast()),
+        stack.quality().map(EmbedderDescriptor::from_embedder),
+    )
+}
+
+fn workspace_embedder_descriptors(
+    db: &DbConnection,
+    workspace_id: &str,
+) -> Result<(EmbedderDescriptor, Option<EmbedderDescriptor>), DbError> {
+    #[cfg(test)]
+    if let Some(stack) = TEST_WORKSPACE_EMBEDDER_STACK_OVERRIDES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|overrides| overrides.get(workspace_id).cloned())
+    {
+        return Ok(stack_descriptors(&stack));
+    }
+    if configured_embedder_model_root().is_none() {
+        match resolve_registered_model2vec(db, workspace_id, |_| Ok(EmbedderDescriptor::potion()))?
+        {
+            RegisteredModel2VecResolution::Ready(descriptor) => return Ok((descriptor, None)),
+            RegisteredModel2VecResolution::Rejected(_) => {
+                return Ok(stack_descriptors(&hash_fallback_embedder_stack()));
+            }
+            RegisteredModel2VecResolution::NotRegistered
+            | RegisteredModel2VecResolution::BundledDefaultDeclared => {}
+        }
+    }
+    if let Some(selection) = DEFAULT_SEARCH_EMBEDDER.get() {
+        // Preserve an already-observed load failure or completed download.
+        return Ok(stack_descriptors(&selection.stack));
+    }
+    Ok((
+        default_embedder_descriptor(&default_embedder_settings()),
+        None,
+    ))
+}
+
+fn default_embedder_descriptor(settings: &EeEmbedderSettings) -> EmbedderDescriptor {
+    if verified_default_model_dir(settings).is_some() {
+        return EmbedderDescriptor::potion();
+    }
+    match settings.download_mode {
+        EeEmbedDownloadMode::Off => EmbedderDescriptor::from_embedder(&HashEmbedder::default_256()),
+        EeEmbedDownloadMode::Auto => EmbedderDescriptor {
+            semantic: false,
+            ready: false,
+            pending_download: true,
+            ..EmbedderDescriptor::potion()
+        },
+    }
+}
+
 fn active_embedder_fingerprint(
     embedder: &dyn crate::search::Embedder,
     provider: ModelProvider,
@@ -6569,26 +6668,34 @@ fn active_embedder_content_hash(
     provider: ModelProvider,
     manifest: Option<&frankensearch::embed::ModelManifest>,
 ) -> String {
+    descriptor_content_hash(
+        &EmbedderDescriptor::from_embedder(embedder),
+        provider,
+        manifest,
+    )
+}
+
+fn descriptor_content_hash(
+    embedder: &EmbedderDescriptor,
+    provider: ModelProvider,
+    manifest: Option<&frankensearch::embed::ModelManifest>,
+) -> String {
     let mut hasher = blake3::Hasher::new();
     hash_fingerprint_field(&mut hasher, "schema", EMBEDDING_REGISTRY_FINGERPRINT_SCHEMA);
     hash_fingerprint_field(&mut hasher, "provider", provider.as_str());
-    hash_fingerprint_field(&mut hasher, "model_id", embedder.id());
-    hash_fingerprint_field(&mut hasher, "model_name", embedder.model_name());
-    hash_fingerprint_field(&mut hasher, "dimension", &embedder.dimension().to_string());
-    hash_fingerprint_field(&mut hasher, "category", &embedder.category().to_string());
+    hash_fingerprint_field(&mut hasher, "model_id", &embedder.id);
+    hash_fingerprint_field(&mut hasher, "model_name", &embedder.model_name);
+    hash_fingerprint_field(&mut hasher, "dimension", &embedder.dimension.to_string());
+    hash_fingerprint_field(&mut hasher, "category", &embedder.category.to_string());
     hash_fingerprint_field(
         &mut hasher,
         "semantic",
-        if embedder.is_semantic() {
-            "true"
-        } else {
-            "false"
-        },
+        if embedder.semantic { "true" } else { "false" },
     );
     hash_fingerprint_field(
         &mut hasher,
         "ready",
-        if embedder.is_ready() { "true" } else { "false" },
+        if embedder.ready { "true" } else { "false" },
     );
 
     if let Some(manifest) = manifest {
@@ -6699,10 +6806,8 @@ pub(crate) fn current_embedding_posture(
 /// Resolve any workspace-specific embedding backend before a status caller
 /// pins its long-lived database snapshot.
 ///
-/// Loading a verified local Model2Vec artifact can take longer than the read
-/// pool's snapshot watchdog. The resolved default and registered embedders are
-/// process-cached, so doing this once on a short-lived read-only connection
-/// keeps the subsequent coherent status gather free of model I/O.
+/// Registry inspection verifies files and identity without loading weights.
+/// Do that work before acquiring the long-lived coherent status snapshot.
 pub(crate) fn prepare_index_status_embedder_for_workspace(
     workspace_path: &Path,
     database_path: &Path,
@@ -6712,7 +6817,7 @@ pub(crate) fn prepare_index_status_embedder_for_workspace(
     }
     let db = DbConnection::open_file_read_only(database_path)?;
     if let Some(workspace_id) = workspace_id_for_index_status(&db, workspace_path)? {
-        let _ = workspace_embedder_stack(&db, &workspace_id)?;
+        let _ = workspace_embedder_descriptors(&db, &workspace_id)?;
     }
     Ok(())
 }
@@ -6723,10 +6828,16 @@ fn embedding_posture_for_document_count(
     index_dir: &Path,
     documents_total: u32,
 ) -> Result<EmbeddingPosture, DbError> {
-    let stack = workspace_embedder_stack(db, workspace_id)?;
+    let (fast, quality) = workspace_embedder_descriptors(db, workspace_id)?;
     let vector_coverage =
         embedding_vector_coverage(index_dir, documents_total, read_fast_vector_record_count);
-    embedding_posture_from_stack(db, workspace_id, &stack, vector_coverage)
+    let records = db.list_embedding_metadata_records(workspace_id)?;
+    Ok(embedding_posture_from_records(
+        &fast,
+        quality.as_ref(),
+        &records,
+        vector_coverage,
+    ))
 }
 
 pub(crate) fn embedding_posture_from_stack(
@@ -6735,20 +6846,19 @@ pub(crate) fn embedding_posture_from_stack(
     stack: &EmbedderStack,
     vector_coverage: EmbeddingVectorCoverage,
 ) -> Result<EmbeddingPosture, DbError> {
-    let fast_embedder = stack.fast();
-    let quality_embedder = stack.quality();
+    let (fast_embedder, quality_embedder) = stack_descriptors(stack);
     let records = db.list_embedding_metadata_records(workspace_id)?;
     Ok(embedding_posture_from_records(
-        fast_embedder,
-        quality_embedder,
+        &fast_embedder,
+        quality_embedder.as_ref(),
         &records,
         vector_coverage,
     ))
 }
 
 fn embedding_posture_from_records(
-    fast_embedder: &dyn crate::search::Embedder,
-    quality_embedder: Option<&dyn crate::search::Embedder>,
+    fast_embedder: &EmbedderDescriptor,
+    quality_embedder: Option<&EmbedderDescriptor>,
     records: &[crate::db::StoredEmbeddingMetadataRecord],
     vector_coverage: EmbeddingVectorCoverage,
 ) -> EmbeddingPosture {
@@ -6767,10 +6877,9 @@ fn embedding_posture_from_records(
         .iter()
         .filter(|record| record.registry.status.as_str() == "available")
         .count();
-    let semantic = fast_embedder.is_semantic()
-        || quality_embedder.is_some_and(|embedder| embedder.is_semantic());
-    let pending_local_download =
-        !semantic && embedder_reports_pending_model2vec_download(fast_embedder);
+    let semantic =
+        fast_embedder.semantic || quality_embedder.is_some_and(|embedder| embedder.semantic);
+    let pending_local_download = !semantic && fast_embedder.pending_download;
     let source = if semantic && selected_registry_model.is_some() {
         "registry_observed"
     } else if semantic {
@@ -6793,10 +6902,10 @@ fn embedding_posture_from_records(
         mode,
         semantic,
         source: source.to_owned(),
-        fast_model_id: fast_embedder.id().to_owned(),
-        fast_dimension: fast_embedder.dimension(),
-        quality_model_id: quality_embedder.map(|embedder| embedder.id().to_owned()),
-        quality_dimension: quality_embedder.map(|embedder| embedder.dimension()),
+        fast_model_id: fast_embedder.id.clone(),
+        fast_dimension: fast_embedder.dimension,
+        quality_model_id: quality_embedder.map(|embedder| embedder.id.clone()),
+        quality_dimension: quality_embedder.map(|embedder| embedder.dimension),
         deterministic: true,
         registered_model_count: records.len(),
         available_model_count,
@@ -8892,6 +9001,78 @@ mod tests {
         ensure(
             resolved == model_cache_root,
             "an absent or unverified registry entry must preserve the default cache root",
+        )
+    }
+
+    #[test]
+    fn default_descriptor_rejects_corrupt_files_without_starting_a_download() -> TestResult {
+        let root = unique_test_dir("descriptor-corrupt-model");
+        let model_dir = root.join(POTION_MODEL_NAME);
+        write_marker(&model_dir, "tokenizer.json", "{}")?;
+        write_marker(&model_dir, "model.safetensors", "not model weights")?;
+        for mode in [EeEmbedDownloadMode::Off, EeEmbedDownloadMode::Auto] {
+            let descriptor = default_embedder_descriptor(&EeEmbedderSettings {
+                model_root: root.clone(),
+                download_mode: mode,
+                local_source: EmbedModelSource::Configured,
+            });
+            ensure(!descriptor.semantic, "corrupt model must never be semantic")?;
+            ensure(
+                descriptor.pending_download == (mode == EeEmbedDownloadMode::Auto),
+                "only automatic mode may advertise a pending download",
+            )?;
+            ensure(
+                descriptor.ready == (mode == EeEmbedDownloadMode::Off),
+                "offline fallback is ready; automatic model download is not",
+            )?;
+        }
+        let entries = std::fs::read_dir(&model_dir)
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        ensure(
+            entries.len() == 2,
+            "inspection must not create model or receipt files",
+        )
+    }
+
+    #[test]
+    #[ignore = "requires the real potion-multilingual-128M fixture"]
+    fn verified_potion_descriptor_matches_real_loaded_model() -> TestResult {
+        let root = std::env::var_os("EE_EMBED_MODEL_FIXTURE_DIR")
+            .map(PathBuf::from)
+            .ok_or_else(|| "EE_EMBED_MODEL_FIXTURE_DIR must name the real model".to_owned())?;
+        let settings = EeEmbedderSettings {
+            model_root: root,
+            download_mode: EeEmbedDownloadMode::Auto,
+            local_source: EmbedModelSource::Configured,
+        };
+        let directory = verified_default_model_dir(&settings)
+            .ok_or_else(|| "real model fixture failed pinned verification".to_owned())?;
+        let descriptor = default_embedder_descriptor(&settings);
+        ensure(
+            descriptor.semantic && descriptor.ready,
+            "verified model must be available",
+        )?;
+        let loaded = Model2VecEmbedder::load_with_name(&directory, POTION_MODEL_NAME)
+            .map_err(|error| error.to_string())?;
+        let manifest = ModelManifest::potion_128m();
+        ensure(
+            descriptor_content_hash(&descriptor, ModelProvider::Model2Vec, Some(&manifest))
+                == active_embedder_fingerprint(&loaded, ModelProvider::Model2Vec).content_hash,
+            "weight-free fingerprint must equal the real model's persisted fingerprint",
+        )?;
+        let coverage = EmbeddingVectorCoverage::new(3, 3);
+        let inspected = embedding_posture_from_records(&descriptor, None, &[], coverage);
+        let executed = embedding_posture_from_records(
+            &EmbedderDescriptor::from_embedder(&loaded),
+            None,
+            &[],
+            coverage,
+        );
+        ensure(
+            inspected == executed,
+            "inspection and the real loaded model must report identical posture fields",
         )
     }
 

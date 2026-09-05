@@ -819,15 +819,24 @@ pub fn materialize_source_memories(
 
     for tier in &source.tiers {
         let Some(range) = &tier.id_range else {
-            continue;
+            return Err(fixture_validation_error(format!(
+                "source tier `{}` is missing id_range",
+                tier.name
+            )));
         };
         let ids = expand_source_id_range(range, &tier.name)?;
         let take_count = if tier.expected_memory_count == 0 {
             ids.len()
         } else {
-            usize::try_from(tier.expected_memory_count)
-                .unwrap_or(usize::MAX)
-                .min(ids.len())
+            let expected = usize::try_from(tier.expected_memory_count).unwrap_or(usize::MAX);
+            if expected > ids.len() {
+                return Err(fixture_validation_error(format!(
+                    "source tier `{}` declares {expected} memories but id_range supplies only {}",
+                    tier.name,
+                    ids.len()
+                )));
+            }
+            expected
         };
 
         for (offset, id) in ids.into_iter().take(take_count).enumerate() {
@@ -1832,29 +1841,12 @@ fn stable_numeric_suffix(value: &str) -> Option<(&str, u64, usize)> {
 }
 
 fn source_memory_counts(path: &Path) -> Result<(usize, usize), DomainError> {
-    let content =
-        read_eval_fixture_file(path, "read fixture source memories", "source memory file")?;
-
-    let value: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| DomainError::Import {
-            message: format!("Failed to parse source memory JSON: {e}"),
-            repair: Some("Check source_memory.json syntax".into()),
-        })?;
-
-    let Some(memories) = value.get("memories").and_then(serde_json::Value::as_array) else {
-        return Ok((0, 0));
-    };
+    let source = load_source_memories(path)?;
+    let memories = materialize_source_memories(&source)?;
 
     let query_count = memories
         .iter()
-        .flat_map(|memory| {
-            memory
-                .get("expected_query_match")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-        })
-        .filter_map(serde_json::Value::as_str)
+        .flat_map(|memory| &memory.expected_query_match)
         .collect::<HashSet<_>>()
         .len();
 

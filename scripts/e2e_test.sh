@@ -117,6 +117,10 @@ cleanup() {
 
 setup_workspace() {
     TEST_WORKSPACE=$(mktemp -d -t ee-e2e.XXXXXX)
+    # macOS mktemp can return the /var alias for /private/var. Resolve the
+    # freshly-created root before creating descendants; the product still
+    # rejects unexpected symlinks within that physical workspace.
+    TEST_WORKSPACE=$(cd "${TEST_WORKSPACE}" && pwd -P)
     TEST_HOME="${TEST_WORKSPACE}/home"
     ARTIFACTS_DIR="${TEST_WORKSPACE}/artifacts"
     LOG_FILE="${ARTIFACTS_DIR}/e2e.log"
