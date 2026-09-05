@@ -219,7 +219,6 @@ fn model_fetch_embedding_default_uses_public_embedding_dispatcher() -> TestResul
 }
 
 struct E2eWorkspace {
-    _temp_dir: tempfile::TempDir,
     path: PathBuf,
     home: PathBuf,
     xdg_data: PathBuf,
@@ -244,14 +243,15 @@ impl E2eWorkspace {
             .prefix(&format!("{test_name}-"))
             .tempdir_in(&temp_root)
             .map_err(|error| format!("create isolated test tempdir: {error}"))?;
-        let path = temp_dir.path().to_path_buf();
+        // Keep command events and the real model/database state on failure;
+        // a dropped TempDir previously erased the evidence needed for repair.
+        let path = temp_dir.keep();
         let home = path.join("home");
         let xdg_data = path.join("xdg-data");
         fs::create_dir_all(&home).map_err(|error| format!("create isolated test home: {error}"))?;
         fs::create_dir_all(&xdg_data)
             .map_err(|error| format!("create isolated test data directory: {error}"))?;
         Ok(Self {
-            _temp_dir: temp_dir,
             log_path: path.join("model_bundled_embedding.events.jsonl"),
             path,
             home,
@@ -1089,7 +1089,7 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
         "Verified local semantic models must remain usable when downloads are disabled.",
         "registered packed content",
     )?;
-    let expected_pack_provenance = format!("ee://memory/{memory_id}");
+    let expected_pack_provenance = format!("ee-mem://{memory_id}");
     if !packed_item
         .get("provenance")
         .and_then(Value::as_array)
@@ -1535,7 +1535,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
     )?;
     ensure_u64_at_least(
         diag_search_json
-            .pointer("/final/metrics/fastScoreCount")
+            .pointer("/final/metrics/fieldCoverage/fastScoreCount")
             .and_then(Value::as_u64)
             .ok_or_else(|| "registry-path diag fastScoreCount missing".to_string())?,
         1,
@@ -1655,7 +1655,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
     )?;
     ensure_u64_at_least(
         explicit_override_json
-            .pointer("/data/metrics/fastScoreCount")
+            .pointer("/data/metrics/fieldCoverage/fastScoreCount")
             .and_then(Value::as_u64)
             .ok_or_else(|| "explicit override fastScoreCount missing".to_string())?,
         1,
@@ -1782,7 +1782,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         )?;
         ensure_u64_at_least(
             valid_after_rejected
-                .pointer("/response/data/metrics/fastScoreCount")
+                .pointer("/response/data/metrics/fieldCoverage/fastScoreCount")
                 .and_then(Value::as_u64)
                 .ok_or_else(|| {
                     "registry-order valid-after-rejected fastScoreCount missing".to_string()
@@ -1821,7 +1821,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         )?;
         ensure_eq_u64(
             valid_lexical_after_neural
-                .pointer("/response/data/metrics/fastScoreCount")
+                .pointer("/response/data/metrics/fieldCoverage/fastScoreCount")
                 .and_then(Value::as_u64)
                 .ok_or_else(|| {
                     "registry-order valid-lexical-after-neural fastScoreCount missing".to_string()
@@ -2319,7 +2319,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
     )?;
     ensure_u64_at_least(
         malformed_metadata_with_override_json
-            .pointer("/data/metrics/fastScoreCount")
+            .pointer("/data/metrics/fieldCoverage/fastScoreCount")
             .and_then(Value::as_u64)
             .ok_or_else(|| {
                 "malformed registry with explicit override fastScoreCount missing".to_string()
@@ -2824,7 +2824,7 @@ fn ensure_registry_fallback_search_output(output: &Output, phase: &str) -> TestR
     )?;
     ensure_eq_u64(
         response
-            .pointer("/data/metrics/fastScoreCount")
+            .pointer("/data/metrics/fieldCoverage/fastScoreCount")
             .and_then(Value::as_u64)
             .ok_or_else(|| format!("{phase} fastScoreCount missing"))?,
         0,
@@ -2861,7 +2861,7 @@ fn ensure_registry_fallback_daemon_search_result(result: &Value, phase: &str) ->
     )?;
     ensure_eq_u64(
         result
-            .pointer("/response/data/metrics/fastScoreCount")
+            .pointer("/response/data/metrics/fieldCoverage/fastScoreCount")
             .and_then(Value::as_u64)
             .ok_or_else(|| format!("{phase} fastScoreCount missing"))?,
         0,
@@ -3034,7 +3034,7 @@ fn run_offline_registry_fallback_diag_search(
     )?;
     ensure_eq_u64(
         response
-            .pointer("/final/metrics/fastScoreCount")
+            .pointer("/final/metrics/fieldCoverage/fastScoreCount")
             .and_then(Value::as_u64)
             .ok_or_else(|| format!("{phase} fastScoreCount missing"))?,
         0,

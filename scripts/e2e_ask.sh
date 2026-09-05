@@ -136,9 +136,6 @@ remember_memory "02-remember-release-primary" procedural rule 0.99 \
     "manual://ask_e2e/release-primary" \
     "Project Zephyr release readiness requires smoke gate alpha before deploy."
 release_primary_id="$LAST_MEMORY_ID"
-remember_memory "03-remember-release-support" episodic decision 0.96 \
-    "manual://ask_e2e/release-support" \
-    "Project Zephyr release readiness gate is smoke gate alpha before deploy."
 remember_memory "04-remember-conflict-affirm" episodic observation 0.99 \
     "manual://ask_e2e/remote-cache-affirm" \
     "Remote cache delta enabled Project Zephyr hz2 worker pool."
@@ -205,6 +202,16 @@ assert_json_filter "$LAST_JSON" \
     "unrelated dashboard question abstains without citations"
 
 step "multi-memory corroboration raises confidence components"
+run_json "11a-ask-single-release" --workspace "$WS" --json ask \
+    "Project Zephyr release readiness smoke gate alpha before deploy"
+assert_rc 0 "single release answer exits zero"
+single_release_confidence="$(json_value "$LAST_JSON" '.data.confidence')"
+assert_json_filter_arg "$LAST_JSON" "memory_id" "$release_primary_id" \
+    '.data.abstained == false and (.data.citations | length) == 1 and .data.citations[0].memoryId == $memory_id and .data.confidenceComponents.corroboration == 1.0' \
+    "single release answer has one uncorroborated source"
+remember_memory "11b-remember-release-support" episodic decision 0.96 \
+    "manual://ask_e2e/release-support" \
+    "Project Zephyr release readiness requires smoke gate alpha before deploy."
 run_json "11-ask-corroborated" --workspace "$WS" --json ask \
     "Project Zephyr release readiness smoke gate alpha before deploy"
 assert_rc 0 "corroborated ask exits zero"
@@ -215,11 +222,10 @@ assert_json_filter "$corroborated_json" \
 assert_json_filter_arg "$corroborated_json" "memory_id" "$release_primary_id" \
     'any(.data.citations[]?; .memoryId == $memory_id)' \
     "corroborated ask cites primary release memory"
-direct_confidence="$(json_value "$direct_json" '.data.confidence')"
 corroborated_confidence="$(json_value "$corroborated_json" '.data.confidence')"
-if awk -v direct="$direct_confidence" -v corroborated="$corroborated_confidence" \
-    'BEGIN { exit !(corroborated >= direct) }'; then
-    pass_now "corroborated confidence is at least the single-answer confidence"
+if awk -v single="$single_release_confidence" -v corroborated="$corroborated_confidence" \
+    'BEGIN { exit !(corroborated > single) }'; then
+    pass_now "adding corroboration raises confidence for the same question"
 else
     fail_now "corroborated confidence regressed" "$LOG_DIR/11-ask-corroborated.stdout.json"
 fi

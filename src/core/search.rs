@@ -10410,10 +10410,12 @@ fn search_hit_from_scored_result(
 ///
 /// Pure lexical retrieval carries unbounded, query-dependent BM25 values.
 /// Normalize that complete pool with Frankensearch's canonical min-max
-/// primitive before any relevance-floor, quality, calibration, or pack
-/// consumer sees it. The original engine value remains available in
-/// `lexicalScore`; ordering is unchanged because min-max normalization is
-/// monotone. Other execution modes retain their raw final ranking score.
+/// primitive, including a zero-score reference for no lexical evidence.
+/// Using the weakest returned match as the zero reference discarded that
+/// match at the default floor even when every returned document was relevant.
+/// This is a query-relative projection, not a calibrated probability. The
+/// original engine value remains in `lexicalScore`; positive-score ordering
+/// is unchanged. Other execution modes retain their raw final ranking score.
 fn search_hits_from_scored_results(
     results: Vec<crate::search::ScoredResult>,
     explain: bool,
@@ -10427,10 +10429,20 @@ fn search_hits_from_scored_results(
     if final_score_scale == FrankensearchFinalScoreScale::Native
         && hits.iter().all(|hit| hit.source == ScoreSource::Lexical)
     {
-        let raw_scores = hits.iter().map(|hit| hit.score).collect::<Vec<_>>();
+        let raw_scores = hits
+            .iter()
+            .map(|hit| hit.score.max(0.0))
+            .chain(std::iter::once(0.0))
+            .collect::<Vec<_>>();
         let normalized_scores = frankensearch::fusion::normalize_scores(&raw_scores);
         for (hit, normalized_score) in hits.iter_mut().zip(normalized_scores) {
-            hit.score = normalized_score;
+            // A degenerate all-zero pool normalizes to the midpoint, but
+            // absent or non-finite evidence must still fail admission.
+            hit.score = if hit.score.is_finite() && hit.score > 0.0 {
+                normalized_score
+            } else {
+                0.0
+            };
             if explain {
                 hit.explanation = Some(ScoreExplanation::generate(hit));
             }
@@ -19259,8 +19271,12 @@ mod tests {
 
         assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].score, 1.0);
-        assert!((hits[1].score - (3.0 / 7.0)).abs() < 1e-6);
-        assert_eq!(hits[2].score, 0.0);
+        assert!((hits[1].score - (5.0 / 9.0)).abs() < 1e-6);
+        assert!((hits[2].score - (2.0 / 9.0)).abs() < 1e-6);
+        assert!(
+            hits.iter()
+                .all(|hit| search_hit_meets_relevance_floor(hit, None))
+        );
         assert_eq!(hits[0].lexical_score, Some(9.0));
         assert_eq!(hits[1].lexical_score, Some(5.0));
         assert_eq!(hits[2].lexical_score, Some(2.0));
@@ -19277,7 +19293,7 @@ mod tests {
     }
 
     #[test]
-    fn lexical_batch_maps_a_degenerate_bm25_pool_to_midpoint() {
+    fn lexical_batch_keeps_equal_positive_matches_above_the_floor() {
         let results = [4.25_f32, 4.25]
             .into_iter()
             .enumerate()
@@ -19297,8 +19313,42 @@ mod tests {
         let hits =
             search_hits_from_scored_results(results, false, FrankensearchFinalScoreScale::Native);
 
-        assert!(hits.iter().all(|hit| (hit.score - 0.5).abs() < 1e-6));
+        assert!(hits.iter().all(|hit| hit.score == 1.0));
         assert!(hits.iter().all(|hit| hit.lexical_score == Some(4.25)));
+    }
+
+    #[test]
+    fn lexical_normalization_still_rejects_weak_and_absent_evidence() {
+        for raw in [vec![9.0_f32, 0.001, 0.0], vec![0.0, 0.0]] {
+            let results = raw
+                .iter()
+                .enumerate()
+                .map(|(index, score)| crate::search::ScoredResult {
+                    doc_id: format!("mem_floor_{index}").into(),
+                    score: *score,
+                    source: crate::search::ScoreSource::Lexical,
+                    index: None,
+                    fast_score: None,
+                    quality_score: None,
+                    lexical_score: Some(*score),
+                    rerank_score: None,
+                    explanation: None,
+                    metadata: None,
+                })
+                .collect();
+            let hits = search_hits_from_scored_results(
+                results,
+                false,
+                FrankensearchFinalScoreScale::Native,
+            );
+            for (hit, raw_score) in hits.iter().zip(&raw) {
+                assert_eq!(hit.lexical_score, Some(*raw_score));
+                assert_eq!(
+                    search_hit_meets_relevance_floor(hit, None),
+                    *raw_score == 9.0
+                );
+            }
+        }
     }
 
     #[test]
@@ -19357,7 +19407,7 @@ mod tests {
         assert_eq!(scale, FrankensearchFinalScoreScale::Native);
         assert_eq!(hits[0].source, ScoreSource::Lexical);
         assert_eq!(hits[0].score_kind(), "unit_normalized");
-        assert!((hits[0].score - 0.5).abs() < 1e-6);
+        assert_eq!(hits[0].score, 1.0);
         assert_eq!(hits[0].lexical_score, Some(4.25));
     }
 
