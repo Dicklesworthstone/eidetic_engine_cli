@@ -109,6 +109,19 @@ sides through abstention; no unified answer is emitted. Explicit
 `--require-confidence` continues to apply to the penalized confidence and
 returns exit 6 when it is insufficient.
 
+Explicit `human` or `agent` contradiction links are read from the same
+workspace as the candidates. A link incident to the best query-matching
+span may establish the opposing memory's relational relevance even when
+the opposing sentence uses different words. Its evidence score is bounded
+by the anchor score, link confidence, and both memories' confidence with
+trust tilt; it must clear the same evidence floor. This is one-hop conflict
+disclosure, never transitive confidence amplification. Missing, tombstoned,
+out-of-scope, scan-capped, weak, and automatically inferred endpoints or
+links cannot introduce a cited side. `conflictLink` preserves the selected
+edge's ID, endpoints, source and confidence in JSON; Markdown names the
+edge. An explicit pair uses `query_match` and `linked_opposition` labels
+because contradictory values need not contain a negation word.
+
 ### 5. Degradation vocabulary
 
 | Code | Severity | Class | Trigger |

@@ -88,6 +88,16 @@ pub struct AskCandidate {
     pub team_provenance: Option<crate::core::memory_scope::TeamProvenance>,
 }
 
+/// Stored, explicitly asserted contradiction between two scoped memories.
+#[derive(Clone, Debug)]
+pub struct AskContradiction {
+    pub id: String,
+    pub src_memory_id: String,
+    pub dst_memory_id: String,
+    pub confidence: f32,
+    pub source: String,
+}
+
 /// Input to the ask engine (everything the engine needs to be deterministic).
 #[derive(Clone, Debug)]
 pub struct AskRequest {
@@ -99,6 +109,7 @@ pub struct AskRequest {
     pub max_evidence: usize,
     /// When set, enables fail-closed mode: exit 6 if confidence below this.
     pub require_confidence: Option<f32>,
+    pub contradictions: Vec<AskContradiction>,
 }
 
 impl Default for AskRequest {
@@ -108,6 +119,7 @@ impl Default for AskRequest {
             min_confidence: ASK_MIN_CONFIDENCE_DEFAULT,
             max_evidence: ASK_MAX_EVIDENCE_DEFAULT,
             require_confidence: None,
+            contradictions: Vec::new(),
         }
     }
 }
@@ -189,6 +201,7 @@ pub struct AskReport {
     pub counterfactual_hint: Option<String>,
     pub semantic_degraded: bool,
     pub conflict_detected: bool,
+    pub conflict_link: Option<AskContradiction>,
     /// True when compose_answer returned an error (extractiveness invariant violation).
     pub extractiveness_violated: bool,
     pub candidates_scanned: usize,
@@ -586,6 +599,68 @@ fn detect_contradiction(clusters: &[AskSpan]) -> bool {
     top_neg != second_neg
 }
 
+/// An explicit edge supplies relational relevance for a paraphrased opposing
+/// memory. It cannot create an answer without a query-relevant anchor, raise
+/// either memory's trust, or propagate confidence through a chain of links.
+fn explicit_conflict(
+    request: &AskRequest,
+    ranked_spans: &[AskSpan],
+) -> Option<(AskContradiction, Vec<AskSpan>)> {
+    let mut best_by_memory = std::collections::BTreeMap::new();
+    for span in ranked_spans {
+        best_by_memory
+            .entry(span.memory_id.as_str())
+            .or_insert(span);
+    }
+    let mut links: Vec<_> = request
+        .contradictions
+        .iter()
+        .filter(|link| {
+            matches!(link.source.as_str(), "human" | "agent")
+                && link.confidence.is_finite()
+                && (request.min_confidence..=1.0).contains(&link.confidence)
+                && link.src_memory_id != link.dst_memory_id
+        })
+        .collect();
+    links.sort_by(|a, b| a.id.cmp(&b.id));
+    for anchor in ranked_spans.iter().take(1) {
+        if anchor.score < request.min_confidence {
+            break;
+        }
+        for link in &links {
+            let other_id = if link.src_memory_id == anchor.memory_id {
+                &link.dst_memory_id
+            } else if link.dst_memory_id == anchor.memory_id {
+                &link.src_memory_id
+            } else {
+                continue;
+            };
+            let Some(other) = best_by_memory.get(other_id.as_str()) else {
+                // Out-of-scope, tombstoned, empty and scan-capped memories
+                // cannot be reintroduced by an edge.
+                continue;
+            };
+            let anchor_trust = anchor.memory_confidence * trust_tilt(&anchor.trust_class);
+            let other_trust = other.memory_confidence * trust_tilt(&other.trust_class);
+            if !anchor_trust.is_finite() || !other_trust.is_finite() {
+                continue;
+            }
+            let evidence_score = anchor
+                .score
+                .min(link.confidence)
+                .min(anchor_trust)
+                .min(other_trust);
+            if evidence_score < request.min_confidence {
+                continue;
+            }
+            let mut opposing = (*other).clone();
+            opposing.score = evidence_score;
+            return Some(((*link).clone(), vec![anchor.clone(), opposing]));
+        }
+    }
+    None
+}
+
 // ─── answer composition (ADR §3) ────────────────────────────────────────────
 
 /// Compose the extractive answer from the top `max_n` cluster representatives.
@@ -702,14 +777,17 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
             .then_with(|| a.byte_start.cmp(&b.byte_start))
     });
 
-    let mut clusters = cluster_spans(&all_spans);
+    let (conflict_link, mut clusters) = match explicit_conflict(request, &all_spans) {
+        Some((link, sides)) => (Some(link), sides),
+        None => (None, cluster_spans(&all_spans)),
+    };
 
     let top_span_score = clusters.first().map(|s| s.score).unwrap_or(0.0);
     // A confident first span does not make the remaining spans evidence.
     // Apply the same floor to every citation and to both conflict sides;
     // retain all_spans for honest nearest-evidence output on abstention.
     clusters.retain(|span| span.score >= request.min_confidence);
-    let conflict_detected = detect_contradiction(&clusters);
+    let conflict_detected = conflict_link.is_some() || detect_contradiction(&clusters);
     let contradiction_penalty_applied = if conflict_detected {
         CONTRADICTION_PENALTY
     } else {
@@ -778,6 +856,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
             counterfactual_hint: Some(counterfactual_hint),
             semantic_degraded: true, // semantic always degraded in current impl
             conflict_detected,
+            conflict_link: None,
             extractiveness_violated: false,
             candidates_scanned: candidates.len(),
         };
@@ -785,16 +864,31 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
 
     // Conflict mode: compose each side separately (ADR §4)
     if conflict_detected && clusters.len() >= 2 {
-        let affirming: Vec<AskSpan> = clusters
-            .iter()
-            .filter(|s| !has_negation(&s.text))
-            .cloned()
-            .collect();
-        let negating: Vec<AskSpan> = clusters
-            .iter()
-            .filter(|s| has_negation(&s.text))
-            .cloned()
-            .collect();
+        let (affirming, negating, first_label, second_label) = if conflict_link.is_some() {
+            // Explicit contradictions need not contain a negation word
+            // (for example, two different values for the same port).
+            (
+                vec![clusters[0].clone()],
+                vec![clusters[1].clone()],
+                "query_match",
+                "linked_opposition",
+            )
+        } else {
+            (
+                clusters
+                    .iter()
+                    .filter(|s| !has_negation(&s.text))
+                    .cloned()
+                    .collect(),
+                clusters
+                    .iter()
+                    .filter(|s| has_negation(&s.text))
+                    .cloned()
+                    .collect(),
+                "affirming",
+                "negating",
+            )
+        };
 
         let compose_side = |side_spans: &[AskSpan], label: &str| -> AskSide {
             let mut parts = Vec::new();
@@ -821,8 +915,8 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
         };
 
         let sides = vec![
-            compose_side(&affirming, "affirming"),
-            compose_side(&negating, "negating"),
+            compose_side(&affirming, first_label),
+            compose_side(&negating, second_label),
         ];
 
         return AskReport {
@@ -837,6 +931,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
             counterfactual_hint: None,
             semantic_degraded: true,
             conflict_detected: true,
+            conflict_link,
             extractiveness_violated: false,
             candidates_scanned: candidates.len(),
         };
@@ -856,6 +951,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
             counterfactual_hint: None,
             semantic_degraded: true,
             conflict_detected: false,
+            conflict_link: None,
             extractiveness_violated: false,
             candidates_scanned: candidates.len(),
         },
@@ -879,6 +975,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
                 ),
                 semantic_degraded: true,
                 conflict_detected: false,
+                conflict_link: None,
                 extractiveness_violated: true,
                 candidates_scanned: candidates.len(),
             }
@@ -998,6 +1095,15 @@ pub fn ask_data_json(report: &AskReport) -> serde_json::Value {
     }
     if report.conflict_detected {
         obj["_conflictDetected"] = serde_json::Value::Bool(true);
+    }
+    if let Some(link) = &report.conflict_link {
+        obj["conflictLink"] = serde_json::json!({
+            "id": link.id,
+            "srcMemoryId": link.src_memory_id,
+            "dstMemoryId": link.dst_memory_id,
+            "confidence": link.confidence,
+            "source": link.source,
+        });
     }
     if let Some(query_assist) = ask_query_assist_json(report) {
         obj["queryAssist"] = query_assist;
@@ -1219,6 +1325,12 @@ pub fn render_ask_markdown(report: &AskReport) -> String {
 
     if report.conflict_detected {
         out.push_str("*Conflicting evidence found:*\n\n");
+        if let Some(link) = &report.conflict_link {
+            out.push_str(&format!(
+                "Stored contradiction `{}` ({}; confidence {:.2}).\n\n",
+                link.id, link.source, link.confidence
+            ));
+        }
         if let Some(sides) = &report.sides {
             for side in sides {
                 out.push_str(&format!(
@@ -1491,6 +1603,7 @@ mod tests {
             min_confidence: ASK_MIN_CONFIDENCE_DEFAULT,
             max_evidence: ASK_MAX_EVIDENCE_DEFAULT,
             require_confidence: None,
+            contradictions: Vec::new(),
         };
         let report = evaluate_ask(&request, &[]);
         assert!(report.abstained);
@@ -1613,12 +1726,138 @@ mod tests {
     }
 
     #[test]
+    fn explicit_links_surface_paraphrased_and_same_polarity_conflicts() {
+        for (question, first, second) in [
+            (
+                "Remote cache delta enabled Project Zephyr hz2 worker pool",
+                "Remote cache delta enabled Project Zephyr hz2 worker pool.",
+                "Zephyr hz2 workers cannot use cache delta.",
+            ),
+            (
+                "What port does the database use?",
+                "The database uses port 5432.",
+                "The database uses port 6432.",
+            ),
+        ] {
+            let candidates: Vec<_> = [("first", first), ("second", second)]
+                .into_iter()
+                .map(|(id, text)| AskCandidate {
+                    memory_id: id.to_owned(),
+                    content: text.to_owned(),
+                    confidence: 0.99,
+                    trust_class: "human_explicit".to_owned(),
+                    provenance_uri: Some(format!("manual://explicit-conflict/{id}")),
+                    level: "episodic".to_owned(),
+                    kind: "observation".to_owned(),
+                    team_provenance: None,
+                })
+                .collect();
+            let request = AskRequest {
+                question: question.to_owned(),
+                contradictions: vec![AskContradiction {
+                    id: "link_asserted".to_owned(),
+                    src_memory_id: "first".to_owned(),
+                    dst_memory_id: "second".to_owned(),
+                    confidence: 0.9,
+                    source: "agent".to_owned(),
+                }],
+                ..AskRequest::default()
+            };
+            let report = evaluate_ask(&request, &candidates);
+            assert!(report.conflict_detected && !report.abstained, "{report:?}");
+            assert!(report.answer_text.is_none() && report.citations.is_empty());
+            assert_eq!(report.confidence_components.corroboration, 1.0);
+            assert!(report.confidence < 0.95);
+            let sides = report.sides.as_ref().expect("two supported sides");
+            assert_eq!(sides.len(), 2);
+            for (side, candidate) in sides.iter().zip(&candidates) {
+                assert_eq!(side.citations.len(), 1);
+                let citation = &side.citations[0];
+                assert_eq!(citation.memory_id, candidate.memory_id);
+                assert_eq!(citation.text, candidate.content);
+                assert_eq!(
+                    candidate
+                        .content
+                        .get(citation.byte_start..citation.byte_end),
+                    Some(citation.text.as_str())
+                );
+            }
+            assert_eq!(
+                ask_data_json(&report)["conflictLink"]["id"],
+                "link_asserted"
+            );
+            assert!(render_ask_markdown(&report).contains("link_asserted"));
+            let mut reversed = candidates.clone();
+            reversed.reverse();
+            assert_eq!(
+                ask_data_json(&evaluate_ask(&request, &reversed)),
+                ask_data_json(&report),
+                "candidate order must not change the selected edge or sides"
+            );
+            let mut reverse_edge = request.clone();
+            reverse_edge.contradictions[0].src_memory_id = "second".to_owned();
+            reverse_edge.contradictions[0].dst_memory_id = "first".to_owned();
+            assert!(evaluate_ask(&reverse_edge, &candidates).conflict_detected);
+
+            let mut chain = candidates.clone();
+            let mut remote = candidates[1].clone();
+            remote.memory_id = "third".to_owned();
+            remote.content = "A separately linked memory about an unrelated invoice.".to_owned();
+            chain.push(remote);
+            let mut chain_request = request.clone();
+            chain_request.contradictions.push(AskContradiction {
+                id: "link_chain".to_owned(),
+                src_memory_id: "second".to_owned(),
+                dst_memory_id: "third".to_owned(),
+                confidence: 1.0,
+                source: "human".to_owned(),
+            });
+            let chain_report = evaluate_ask(&chain_request, &chain);
+            assert!(chain_report.conflict_detected);
+            assert!(
+                chain_report
+                    .sides
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|side| &side.citations)
+                    .all(|citation| citation.memory_id != "third"),
+                "a second edge must not propagate question relevance"
+            );
+
+            let mut unrelated = request.clone();
+            unrelated.question = "What colour is the CI dashboard?".to_owned();
+            let missed = evaluate_ask(&unrelated, &candidates);
+            assert!(missed.abstained && !missed.conflict_detected);
+
+            for variant in ["missing", "weak", "auto", "nonfinite"] {
+                let mut rejected = request.clone();
+                let link = &mut rejected.contradictions[0];
+                match variant {
+                    "missing" => link.dst_memory_id = "outside_scope".to_owned(),
+                    "weak" => link.confidence = 0.1,
+                    "auto" => link.source = "auto".to_owned(),
+                    "nonfinite" => link.confidence = f32::NAN,
+                    _ => unreachable!(),
+                }
+                let report = evaluate_ask(&rejected, &candidates);
+                assert!(report.conflict_link.is_none(), "{variant}: {report:?}");
+                assert!(!report.conflict_detected, "{variant}: {report:?}");
+            }
+            let mut untrusted = candidates.clone();
+            untrusted[1].confidence = 0.1;
+            assert!(evaluate_ask(&request, &untrusted).conflict_link.is_none());
+        }
+    }
+
+    #[test]
     fn evaluate_ask_finds_factual_answer() {
         let request = AskRequest {
             question: "what port does the database use".into(),
             min_confidence: 0.01, // very low so we don't abstain in test
             max_evidence: 3,
             require_confidence: None,
+            contradictions: Vec::new(),
         };
         let candidates = vec![AskCandidate {
             memory_id: "mem1".into(),
@@ -1671,6 +1910,7 @@ mod tests {
             counterfactual_hint: None,
             semantic_degraded: true,
             conflict_detected: false,
+            conflict_link: None,
             extractiveness_violated: false,
             candidates_scanned: 1,
         };
@@ -1719,6 +1959,7 @@ mod tests {
             counterfactual_hint: None,
             semantic_degraded: false,
             conflict_detected: false,
+            conflict_link: None,
             extractiveness_violated: false,
             candidates_scanned: 1,
         };
@@ -1762,6 +2003,7 @@ mod tests {
             counterfactual_hint: Some("below threshold".into()),
             semantic_degraded: true,
             conflict_detected: false,
+            conflict_link: None,
             extractiveness_violated: false,
             candidates_scanned: 1,
         };
@@ -1810,6 +2052,7 @@ mod tests {
             counterfactual_hint: Some("below threshold".into()),
             semantic_degraded: true,
             conflict_detected: false,
+            conflict_link: None,
             extractiveness_violated: false,
             candidates_scanned: 7,
         };
@@ -1851,6 +2094,7 @@ mod tests {
             counterfactual_hint: Some("no memory mentions X".into()),
             semantic_degraded: true,
             conflict_detected: false,
+            conflict_link: None,
             extractiveness_violated: false,
             candidates_scanned: 0,
         };

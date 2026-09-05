@@ -246,6 +246,9 @@ assert_json_filter_arg "$LAST_JSON" "memory_id" "$remote_affirm_id" \
 assert_json_filter_arg "$LAST_JSON" "memory_id" "$remote_negate_id" \
     'any(.data.sides[]?.citations[]?; .memoryId == $memory_id)' \
     "conflict ask cites negating memory"
+assert_json_filter_arg "$LAST_JSON" "memory_id" "$remote_affirm_id" \
+    '.data.conflictLink.id != null and .data.conflictLink.srcMemoryId == $memory_id and .data.conflictLink.source == "agent"' \
+    "conflict ask exposes the stored contradiction edge"
 
 run_json "12b-conflict-require-confidence" --workspace "$WS" --json ask \
     "Is remote cache delta enabled for Project Zephyr?" --require-confidence 0.95
