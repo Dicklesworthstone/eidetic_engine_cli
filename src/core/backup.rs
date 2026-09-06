@@ -17,7 +17,7 @@ use serde_json::{Value as JsonValue, json};
 use crate::config::{EnvVar, WORKSPACE_MARKER, read_env_var, read_env_var_os};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::jsonl_import::{
-    IMPORT_ACTION, JsonlImportOptions, import_verified_backup_jsonl_records,
+    IMPORT_ACTION, JsonlImportOptions, import_memory_id, import_verified_backup_jsonl_records,
 };
 use crate::db::shard::{
     ShardFanoutPosture, ShardFanoutResolverInput, ShardFanoutStatusReport,
@@ -37,7 +37,9 @@ use crate::models::{
     ExportLinkRecord, ExportMemoryRecord, ExportScope, ExportTagRecord, ExportWorkspaceRecord,
     ImportSource, RedactionLevel, TrustLevel, jsonl::ExportRecordBuildError,
 };
-use crate::output::jsonl_export::{ExportStats, JsonlExporter, redact_content};
+use crate::output::jsonl_export::{
+    ExportStats, JsonlExporter, redact_content, redact_memory_record,
+};
 use crate::policy::import_auth::{
     ArtifactContext, EXPORT_ARTIFACT_FAMILY, EXPORT_RECORD_ENCODING_V1, STORE_KEY_NAMESPACE_V1,
     authenticate_artifact,
@@ -1496,12 +1498,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
             let export_data = load_export_data_in_current_snapshot(&connection, workspace)?;
             let inventory = build_recovery_inventory(&connection)?;
             let workspace_id = &export_data.workspace.workspace_id;
+            let memory_ids =
+                backup_memory_id_mapping(&export_data.memories, options.redaction_level)?;
             let mut payloads = Vec::new();
             collect_task_episode_payloads(
                 &connection,
                 workspace_id,
                 &created_at,
                 options.redaction_level,
+                &memory_ids,
                 &mut degraded,
                 &mut payloads,
             );
@@ -1510,6 +1515,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 workspace_id,
                 &created_at,
                 options.redaction_level,
+                &memory_ids,
                 &mut degraded,
                 &mut payloads,
             );
@@ -3971,6 +3977,38 @@ fn memory_record(
     builder.build()
 }
 
+fn backup_memory_id_mapping(
+    memories: &[StoredMemory],
+    redaction_level: RedactionLevel,
+) -> Result<BTreeMap<String, String>, DomainError> {
+    let mut exported_ids = BTreeSet::new();
+    let mut restored_ids = BTreeSet::new();
+    let mut mapping = BTreeMap::new();
+    for memory in memories {
+        let record = memory_record(memory, None, None, None)
+            .map_err(export_build_error("build backup memory reference"))?;
+        let record = redact_memory_record(record, redaction_level);
+        let restored_id =
+            import_memory_id(&record, redaction_level).map_err(|issue| DomainError::Storage {
+                message: format!(
+                    "backup memory reference cannot be restored: {}",
+                    issue.message
+                ),
+                repair: Some(
+                    "run ee db check --workspace . before recreating the backup".to_owned(),
+                ),
+            })?;
+        if !exported_ids.insert(record.memory_id) || !restored_ids.insert(restored_id.clone()) {
+            return Err(DomainError::Storage {
+                message: "backup redaction maps distinct memories to the same identity".to_owned(),
+                repair: Some("choose --redaction strict to redact secrets and paths while preserving distinct memory IDs".to_owned()),
+            });
+        }
+        mapping.insert(memory.id.clone(), restored_id);
+    }
+    Ok(mapping)
+}
+
 fn apply_backup_memory_graph_fields(
     mut builder: crate::models::ExportMemoryRecordBuilder,
     fields: &BackupMemoryGraphFields,
@@ -4970,6 +5008,7 @@ fn collect_task_episode_payloads(
     workspace_id: &str,
     captured_at: &str,
     redaction_level: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
     degraded: &mut Vec<BackupDegradation>,
     payloads: &mut Vec<BackupDerivedPayload>,
 ) {
@@ -4985,7 +5024,12 @@ fn collect_task_episode_payloads(
         }
     };
     for episode in episodes {
-        match json_payload_bytes(&task_episode_json(&episode, captured_at, redaction_level)) {
+        match json_payload_bytes(&task_episode_json(
+            &episode,
+            captured_at,
+            redaction_level,
+            memory_ids,
+        )) {
             Ok(bytes) => payloads.push(derived_payload(
                 format!("derived/lab/episodes/{}.json", safe_file_stem(&episode.id)),
                 "lab_episode",
@@ -5006,9 +5050,15 @@ fn task_episode_json(
     episode: &StoredTaskEpisode,
     captured_at: &str,
     redaction_level: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
 ) -> JsonValue {
     let original = episode;
     let mut episode = episode.clone();
+    for id in &mut episode.retrieved_memory_ids {
+        if let Some(restored_id) = memory_ids.get(id) {
+            id.clone_from(restored_id);
+        }
+    }
     episode.task_input = redact_content(&episode.task_input, redaction_level);
     episode.outcome_details = episode
         .outcome_details
@@ -5020,10 +5070,12 @@ fn task_episode_json(
         .map(|text| redact_content(text, redaction_level));
     for action in &mut episode.actions {
         action.action_type = redact_content(&action.action_type, redaction_level);
-        action.target_id = action
-            .target_id
-            .as_deref()
-            .map(|text| redact_content(text, redaction_level));
+        action.target_id = action.target_id.as_deref().map(|text| {
+            memory_ids
+                .get(text)
+                .cloned()
+                .unwrap_or_else(|| redact_content(text, redaction_level))
+        });
         action.details = action
             .details
             .as_deref()
@@ -5061,6 +5113,7 @@ fn collect_cass_payloads(
     workspace_id: &str,
     captured_at: &str,
     redaction_level: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
     degraded: &mut Vec<BackupDegradation>,
     payloads: &mut Vec<BackupDerivedPayload>,
 ) {
@@ -5128,6 +5181,11 @@ fn collect_cass_payloads(
                 .iter()
                 .map(|span| {
                     let mut record = BackupCassEvidenceRecord::from_stored(span);
+                    if let Some(id) = record.memory_id.as_mut()
+                        && let Some(restored_id) = memory_ids.get(id)
+                    {
+                        id.clone_from(restored_id);
+                    }
                     let provenance_admitted = sessions_by_id
                         .get(span.session_id.as_str())
                         .is_some_and(|session| {
@@ -6774,6 +6832,7 @@ mod tests {
                 &source_episode,
                 "2026-09-02T00:00:00Z",
                 RedactionLevel::None,
+                &BTreeMap::new(),
             ))
             .map_err(|error| error.to_string())?,
         )
@@ -9227,6 +9286,45 @@ mod tests {
         assert_backup_history_round_trip(false)
     }
 
+    #[test]
+    fn backup_memory_id_mapping_rejects_redaction_collisions() -> TestResult {
+        let (_tempdir, _workspace, database) = fixture().map_err(|error| error.message())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let first = connection
+            .get_memory(&MemoryId::from_uuid(Uuid::from_u128(2)).to_string())
+            .map_err(|error| error.to_string())?
+            .ok_or("missing fixture memory")?;
+        let mut second = first.clone();
+        second.id = MemoryId::from_uuid(Uuid::from_u128((1 << 30) + 2)).to_string();
+        second.content = "A distinct memory with the same abbreviated ID suffix".to_owned();
+        let memories = [first, second];
+        for level in [
+            RedactionLevel::None,
+            RedactionLevel::Strict,
+            RedactionLevel::Paranoid,
+        ] {
+            let ids =
+                backup_memory_id_mapping(&memories, level).map_err(|error| error.message())?;
+            ensure_equal(ids.len(), 2, "distinct source identities retained")?;
+            ensure(
+                ids.values().collect::<BTreeSet<_>>().len() == 2,
+                "distinct restored identities",
+            )?;
+        }
+        for level in [RedactionLevel::Standard, RedactionLevel::Full] {
+            let error = backup_memory_id_mapping(&memories, level)
+                .err()
+                .ok_or("ambiguous redacted identities must reject the backup")?;
+            ensure(
+                error
+                    .message()
+                    .contains("distinct memories to the same identity"),
+                "identity collision has a specific diagnostic",
+            )?;
+        }
+        Ok(())
+    }
+
     fn assert_backup_history_round_trip(include_derived: bool) -> TestResult {
         let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
         let source_connection =
@@ -9513,6 +9611,21 @@ mod tests {
             .next()
             .ok_or_else(|| "restored database omitted workspace".to_owned())?
             .id;
+        let restored_memories = restored_connection
+            .list_memories(&restored_workspace_id, None, true)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(restored_memories.len(), 1, "history's memory was restored")?;
+        let restored_memory_id = restored_memories[0].id.clone();
+        ensure_equal(
+            restored_memories[0].content.as_str(),
+            "Authorization header should be redacted",
+            "history still references the same memory content",
+        )?;
+        ensure_equal(
+            restored_memory_id == MemoryId::from_uuid(Uuid::from_u128(2)).to_string(),
+            include_derived,
+            "standard redaction remaps the memory identity; no redaction preserves it",
+        )?;
         let restored_session = restored_connection
             .get_session(&source_session_id)
             .map_err(|error| error.to_string())?
@@ -9561,11 +9674,18 @@ mod tests {
                 0,
                 "redaction does not certify evidence",
             )?;
+            ensure_equal(
+                legacy.memory_id.as_deref(),
+                Some(restored_memory_id.as_str()),
+                "legacy evidence references the restored memory",
+            )?;
         }
         let mut expected_admitted_evidence = source_admitted_evidence;
         expected_admitted_evidence.workspace_id = restored_workspace_id.clone();
+        expected_admitted_evidence.memory_id = Some(restored_memory_id.clone());
         let mut expected_denied_evidence = source_denied_evidence;
         expected_denied_evidence.workspace_id = restored_workspace_id.clone();
+        expected_denied_evidence.memory_id = Some(restored_memory_id.clone());
         ensure_equal(
             restored_admitted_evidence,
             expected_admitted_evidence,
@@ -9602,6 +9722,10 @@ mod tests {
         )?;
         let mut expected_episode = source_episode;
         expected_episode.workspace_id = Some(restored_workspace_id);
+        expected_episode.retrieved_memory_ids = vec![restored_memory_id];
+        if !include_derived {
+            expected_episode.episode_hash = None;
+        }
         ensure_equal(
             restored_episode,
             expected_episode,

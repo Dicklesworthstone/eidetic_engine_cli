@@ -23,7 +23,8 @@ use crate::models::{
     EXPORT_FOOTER_SCHEMA_V1, EXPORT_HEADER_SCHEMA_V1, EXPORT_LINK_SCHEMA_V1,
     EXPORT_MEMORY_SCHEMA_V1, EXPORT_TAG_SCHEMA_V1, EXPORT_WORKSPACE_SCHEMA_V1, ExportFooter,
     ExportHeader, ExportMemoryRecord, ExportTagRecord, IMPORT_JSONL_SCHEMA_V1, ImportSource,
-    MemoryContent, MemoryId, MemoryKind, MemoryLevel, Tag, TrustClass, TrustLevel, UnitScore,
+    MemoryContent, MemoryId, MemoryKind, MemoryLevel, RedactionLevel, Tag, TrustClass, TrustLevel,
+    UnitScore,
 };
 use crate::policy::import_auth::{
     ArtifactContext, EXPORT_ARTIFACT_FAMILY, EXPORT_RECORD_ENCODING_V1, ImportAuthOutcome,
@@ -1525,7 +1526,13 @@ fn prepare_memory(
     native_auth: &NativeAuthState,
     native_trust_policy: NativeTrustPolicy,
 ) -> Result<PreparedMemory, JsonlImportIssue> {
-    let import_memory_id = import_memory_id(memory, parsed)?;
+    let import_memory_id = import_memory_id(
+        memory,
+        parsed
+            .header
+            .as_ref()
+            .map_or(RedactionLevel::None, |header| header.redaction_level),
+    )?;
     let import_source = parsed
         .header
         .as_ref()
@@ -1712,13 +1719,13 @@ fn insert_optional_json<T>(
     }
 }
 
-fn import_memory_id(
+pub(super) fn import_memory_id(
     memory: &ExportMemoryRecord,
-    parsed: &ParsedJsonlImport,
+    redaction_level: RedactionLevel,
 ) -> Result<String, JsonlImportIssue> {
     match memory.memory_id.parse::<MemoryId>() {
         Ok(_) => Ok(memory.memory_id.clone()),
-        Err(_) if source_redacts_identifiers(parsed) => {
+        Err(_) if redaction_level.redacts_identifiers() => {
             Ok(stable_redacted_memory_id(memory).to_string())
         }
         Err(error) => Err(JsonlImportIssue::error(
@@ -1727,13 +1734,6 @@ fn import_memory_id(
             format!("memory id `{}` is invalid: {error}", memory.memory_id),
         )),
     }
-}
-
-fn source_redacts_identifiers(parsed: &ParsedJsonlImport) -> bool {
-    parsed
-        .header
-        .as_ref()
-        .is_some_and(|header| header.redaction_level.redacts_identifiers())
 }
 
 fn stable_redacted_memory_id(memory: &ExportMemoryRecord) -> MemoryId {
