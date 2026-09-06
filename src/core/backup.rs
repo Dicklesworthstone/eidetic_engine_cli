@@ -9572,12 +9572,13 @@ mod tests {
             include_derived,
             "WAL diagnostics follow the optional cache flag",
         )?;
-        ensure(
+        ensure_equal(
             restored
                 .restored_derived
                 .iter()
                 .any(|derived| derived.lab_episode_path.is_some()),
-            "restore report includes materialized lab episode path",
+            include_derived,
+            "frozen lab cache paths follow the optional cache flag",
         )?;
         ensure_equal(
             Path::new(&restored.restore_artifact_dir)
