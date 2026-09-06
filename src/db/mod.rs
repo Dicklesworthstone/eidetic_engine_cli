@@ -21677,7 +21677,8 @@ pub struct CreateJournalEntryInput {
 }
 
 /// A stored `journal_entries` row.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredJournalEntry {
     pub entry_id: String,
     pub workspace_id: String,
@@ -22608,6 +22609,34 @@ impl DbConnection {
 
         let rows = self.query_for(DbOperation::Query, &sql, &params)?;
         rows.iter().map(stored_journal_entry_from_row).collect()
+    }
+
+    /// Recover an exact journal row, including consumed and tombstoned history.
+    /// Duplicate identities fail rather than silently dropping recovery data.
+    pub(crate) fn insert_journal_entry_for_recovery(
+        &self,
+        entry: &StoredJournalEntry,
+    ) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO journal_entries (entry_id, workspace_id, agent_name, session_key, kind, source, body, structured, redaction_report, instruction_risk, created_at, distilled_at, tombstoned_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            &[
+                Value::Text(entry.entry_id.clone()),
+                Value::Text(entry.workspace_id.clone()),
+                entry.agent_name.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                entry.session_key.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::Text(entry.kind.clone()),
+                Value::Text(entry.source.clone()),
+                Value::Text(entry.body.clone()),
+                entry.structured.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::Text(entry.redaction_report.clone()),
+                Value::Text(entry.instruction_risk.clone()),
+                Value::Text(entry.created_at.clone()),
+                entry.distilled_at.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                entry.tombstoned_at.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+            ],
+        )?;
+        Ok(())
     }
 
     /// Get one journal entry by workspace and id.
@@ -27626,7 +27655,8 @@ pub struct CreateSearchIndexJobInput {
 }
 
 /// A stored search index job row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredSearchIndexJob {
     pub id: String,
     pub workspace_id: String,
@@ -27679,6 +27709,33 @@ impl DbConnection {
             ],
         )?;
 
+        Ok(())
+    }
+
+    /// Recover a job row after the caller has rebound its workspace and reset
+    /// interrupted work. Preserve terminal history and reject duplicate IDs.
+    pub(crate) fn insert_search_index_job_for_recovery(
+        &self,
+        job: &StoredSearchIndexJob,
+    ) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO search_index_jobs (id, workspace_id, job_type, document_source, document_id, status, documents_total, documents_indexed, error_message, created_at, started_at, completed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            &[
+                Value::Text(job.id.clone()),
+                Value::Text(job.workspace_id.clone()),
+                Value::Text(job.job_type.clone()),
+                job.document_source.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                job.document_id.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::Text(job.status.clone()),
+                Value::BigInt(i64::from(job.documents_total)),
+                Value::BigInt(i64::from(job.documents_indexed)),
+                job.error_message.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::Text(job.created_at.clone()),
+                job.started_at.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                job.completed_at.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+            ],
+        )?;
         Ok(())
     }
 
