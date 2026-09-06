@@ -87696,6 +87696,67 @@ mod tests {
     }
 
     #[test]
+    fn pack_quality_workspace_seeding_uses_valid_typed_ids() -> TestResult {
+        let workspace = tempfile::Builder::new()
+            .prefix("ee-eval-seed-ids-")
+            .tempdir()
+            .map_err(|error| error.to_string())?
+            .keep();
+        let database = workspace.join("ee.db");
+        let mut source: crate::eval::SourceMemoryFile = serde_json::from_str(include_str!(
+            "../../tests/fixtures/eval/release_failure/source_memory.json"
+        ))
+        .map_err(|error| error.to_string())?;
+        source
+            .structural_edges
+            .push(crate::eval::runner::StructuralEdge {
+                source_id: source.memories[0].id.clone(),
+                target_id: source.memories[1].id.clone(),
+                relation: "supports".into(),
+                weight: 0.8,
+            });
+        let workspace_id = super::seed_pack_quality_workspace(
+            &workspace,
+            &database,
+            &source,
+            &source.memories,
+            source
+                .fixed_clock
+                .as_deref()
+                .ok_or("missing fixture clock")?,
+        )
+        .map_err(|error| error.to_string())?;
+        workspace_id
+            .parse::<crate::models::WorkspaceId>()
+            .map_err(|error| error.to_string())?;
+        let db = crate::db::DbConnection::open_file_read_only(&database)
+            .map_err(|error| error.to_string())?;
+        let memory = db
+            .get_memory(&source.memories[0].id)
+            .map_err(|error| error.to_string())?
+            .ok_or("seeded memory missing")?;
+        ensure_equal(
+            &memory.workspace_id,
+            &workspace_id,
+            "memory uses stored workspace ID",
+        )?;
+        ensure_equal(
+            &memory.content,
+            &source.memories[0].content,
+            "original content retained",
+        )?;
+        let links = db
+            .list_memory_links_for_memory(&memory.id, None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&links.len(), &1, "declared link stored")?;
+        links[0]
+            .id
+            .parse::<crate::models::MemoryLinkId>()
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
     fn pack_quality_honors_command_source_modes_and_rejects_invalid_steps() -> TestResult {
         for (argv, expected) in [
             (
