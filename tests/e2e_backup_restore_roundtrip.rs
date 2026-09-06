@@ -498,8 +498,8 @@ fn backup_verify_rejects_modified_inventory_with_nonzero_exit() -> TestResult {
         "--json",
     ])?;
     ensure_equal(
-        verified.pointer("/data/status").and_then(JsonValue::as_str),
-        Some("verified"),
+        &verified.pointer("/data/status").and_then(JsonValue::as_str),
+        &Some("verified"),
         "unaltered signed backup passes public verification",
     )?;
     let manifest_path = Path::new(backup_path).join("manifest.json");
@@ -529,20 +529,20 @@ fn backup_verify_rejects_modified_inventory_with_nonzero_exit() -> TestResult {
         String::from_utf8_lossy(&rejected.stderr)
     );
     ensure_equal(
-        rejected.status.code(),
-        Some(5),
+        &rejected.status.code(),
+        &Some(5),
         "invalid inventory must fail shell verification",
     )?;
     let report: JsonValue =
         serde_json::from_slice(&rejected.stdout).map_err(|error| error.to_string())?;
     ensure_equal(
-        report["success"].as_bool(),
-        Some(false),
+        &report["success"].as_bool(),
+        &Some(false),
         "failed verification envelope",
     )?;
     ensure_equal(
-        report.pointer("/data/status").and_then(JsonValue::as_str),
-        Some("failed"),
+        &report.pointer("/data/status").and_then(JsonValue::as_str),
+        &Some("failed"),
         "failed verification status",
     )?;
     ensure(
@@ -576,8 +576,8 @@ fn backup_verify_rejects_modified_inventory_with_nonzero_exit() -> TestResult {
         String::from_utf8_lossy(&restored.stderr)
     );
     ensure_equal(
-        restored.status.code(),
-        Some(5),
+        &restored.status.code(),
+        &Some(5),
         "invalid inventory must fail restore",
     )?;
     ensure(
