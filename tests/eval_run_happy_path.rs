@@ -683,6 +683,16 @@ fn pack_quality_executes_real_packs_independently_of_expected_answers() -> TestR
         .map_err(|error| error.to_string())?;
     let value: Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("{error}; evidence {}", root.display()))?;
+    ensure_equal(
+        &output.status.code(),
+        &Some(ProcessExitCode::EvalFailure as i32),
+        "wrong oracle and missing required budget items fail the public evaluator",
+    )?;
+    ensure_equal(
+        &value["success"],
+        &json!(false),
+        "failed expectations cannot report success",
+    )?;
     let comparisons = value
         .pointer("/data/report/comparisons")
         .and_then(Value::as_array)
@@ -732,6 +742,16 @@ fn pack_quality_executes_real_packs_independently_of_expected_answers() -> TestR
         &wrong["unexpected_ids"],
         &json!(["mem_00000000000000000000000102"]),
         "wrong oracle is detected",
+    )?;
+    ensure_equal(
+        &wrong["verdict"],
+        &json!("regression"),
+        "wrong oracle fails",
+    )?;
+    ensure_equal(
+        &budget["verdict"],
+        &json!("regression"),
+        "missing required memories fail",
     )?;
     ensure_equal(
         &budget["actual_selected_ids"],

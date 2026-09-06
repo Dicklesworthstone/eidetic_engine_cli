@@ -2369,7 +2369,7 @@ pub enum PackQualityVerdict {
     Within,
     /// Minor deviations within tolerance (e.g., rank order differs but all IDs present).
     Drift,
-    /// Critical expectations failed (e.g., critical memory omitted, forbidden leak).
+    /// Required expectations failed (e.g., missing memory, budget, forbidden leak).
     Regression,
     /// Could not evaluate due to missing data or infrastructure.
     Inconclusive,
@@ -2611,6 +2611,10 @@ pub fn compare_pack_quality(
         failure_reasons.push(format!("Unexpected memories selected: {:?}", unexpected));
     }
 
+    if actual_set.len() != actual.selected_memory_ids.len() {
+        failure_reasons.push("Duplicate memories selected".to_string());
+    }
+
     if !unexpected_degradation.is_empty() {
         failure_reasons.push(format!(
             "Unexpected degradation codes: {:?}",
@@ -2632,14 +2636,11 @@ pub fn compare_pack_quality(
         ));
     }
 
-    let verdict = if !omitted_critical_found.is_empty() || !actual_leaks.is_empty() {
+    let verdict = if !failure_reasons.is_empty() {
         PackQualityVerdict::Regression
-    } else if !missing_expected.is_empty()
-        || !unexpected.is_empty()
-        || !unexpected_degradation.is_empty()
-        || !provenance_density_passed
-        || !token_budget_passed
-    {
+    } else if actual.selected_memory_ids != case.expected_selected_memory_ids {
+        // Identical membership with a different ranking is the only tolerated
+        // pack drift. A stated requirement cannot fail behind exit-zero drift.
         PackQualityVerdict::Drift
     } else {
         PackQualityVerdict::Within
@@ -3847,13 +3848,48 @@ mod tests {
     }
 
     #[test]
+    fn pack_quality_compare_rank_drift_is_passing_but_empty_or_duplicate_is_not() -> TestResult {
+        let case = make_pack_quality_case("membership", vec!["mem_001", "mem_002"], vec![]);
+        let reordered = make_pack_quality_actual(vec!["mem_002", "mem_001"], 2000, 0.8);
+        let result = compare_pack_quality(&case, &reordered);
+        ensure(result.verdict, PackQualityVerdict::Drift, "rank-only drift")?;
+        ensure(
+            result.failure_reasons.is_empty(),
+            true,
+            "no failed requirement",
+        )?;
+        ensure(
+            result.verdict.is_passing(),
+            true,
+            "rank-only drift may pass",
+        )?;
+        for actual in [
+            make_pack_quality_actual(vec![], 0, 0.0),
+            make_pack_quality_actual(vec!["mem_001", "mem_002", "mem_001"], 3000, 0.8),
+        ] {
+            let result = compare_pack_quality(&case, &actual);
+            ensure(
+                result.verdict,
+                PackQualityVerdict::Regression,
+                "invalid membership",
+            )?;
+            ensure(
+                result.verdict.is_passing(),
+                false,
+                "invalid membership fails",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn pack_quality_compare_missing_expected_id() -> TestResult {
         let case = make_pack_quality_case("missing", vec!["mem_001", "mem_002", "mem_003"], vec![]);
         let actual = make_pack_quality_actual(vec!["mem_001", "mem_002"], 2000, 0.8);
 
         let result = compare_pack_quality(&case, &actual);
 
-        ensure(result.verdict, PackQualityVerdict::Drift, "verdict")?;
+        ensure(result.verdict, PackQualityVerdict::Regression, "verdict")?;
         ensure(result.missing_expected_ids.len(), 1, "one missing")?;
         ensure(
             result.missing_expected_ids[0].as_str(),
@@ -3869,7 +3905,7 @@ mod tests {
 
         let result = compare_pack_quality(&case, &actual);
 
-        ensure(result.verdict, PackQualityVerdict::Drift, "verdict")?;
+        ensure(result.verdict, PackQualityVerdict::Regression, "verdict")?;
         ensure(result.unexpected_ids.len(), 1, "one unexpected")?;
         ensure(
             result.unexpected_ids[0].as_str(),
@@ -3882,7 +3918,7 @@ mod tests {
                 .iter()
                 .any(|reason| reason.contains("Unexpected memories selected")),
             true,
-            "unexpected id should explain drift",
+            "unexpected id should explain regression",
         )
     }
 
@@ -3914,7 +3950,7 @@ mod tests {
 
         let result = compare_pack_quality(&case, &actual);
 
-        ensure(result.verdict, PackQualityVerdict::Drift, "verdict")?;
+        ensure(result.verdict, PackQualityVerdict::Regression, "verdict")?;
         ensure(result.provenance_density_passed, false, "provenance failed")
     }
 
@@ -3925,7 +3961,7 @@ mod tests {
 
         let result = compare_pack_quality(&case, &actual);
 
-        ensure(result.verdict, PackQualityVerdict::Drift, "verdict")?;
+        ensure(result.verdict, PackQualityVerdict::Regression, "verdict")?;
         ensure(result.token_budget_passed, false, "budget failed")
     }
 
@@ -3954,7 +3990,7 @@ mod tests {
 
         let result = compare_pack_quality(&case, &actual);
 
-        ensure(result.verdict, PackQualityVerdict::Drift, "verdict")?;
+        ensure(result.verdict, PackQualityVerdict::Regression, "verdict")?;
         ensure(
             result.unexpected_degradation_codes.len(),
             1,
@@ -3966,18 +4002,18 @@ mod tests {
                 .iter()
                 .any(|reason| reason.contains("Unexpected degradation codes")),
             true,
-            "unexpected degradation should explain drift",
+            "unexpected degradation should explain regression",
         )
     }
 
     #[test]
     fn pack_quality_report_aggregates_correctly() -> TestResult {
         let case1 = make_pack_quality_case("case1", vec!["mem_001"], vec![]);
-        let case2 = make_pack_quality_case("case2", vec!["mem_002"], vec![]);
+        let case2 = make_pack_quality_case("case2", vec!["mem_002", "mem_004"], vec![]);
         let case3 = make_pack_quality_case("case3", vec!["mem_003"], vec!["mem_secret"]);
 
         let actual1 = make_pack_quality_actual(vec!["mem_001"], 2000, 0.8); // Within
-        let actual2 = make_pack_quality_actual(vec!["mem_002", "extra"], 2000, 0.8); // Drift
+        let actual2 = make_pack_quality_actual(vec!["mem_004", "mem_002"], 2000, 0.8); // Rank-only drift
         let actual3 = make_pack_quality_actual(vec!["mem_003", "mem_secret"], 2000, 0.8); // Regression
 
         let report = evaluate_pack_quality(

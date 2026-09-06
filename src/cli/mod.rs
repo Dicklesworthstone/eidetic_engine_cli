@@ -16451,18 +16451,15 @@ fn pack_quality_actuals_for_cases(
         .map_err(|error| pack_quality_execution_error(error.to_string()))?;
         drop(connection);
         let query = pack_quality_case_query(fixture_path, case)?;
+        let (source_mode, strict_source_mode) = pack_quality_step_source_mode(&step.argv)?;
         let mut options = crate::core::context::ContextPackOptions {
             workspace_path: workspace_path.clone(),
             database_path: Some(database_path),
             index_dir: Some(index_dir.clone()),
             query,
             speed: SpeedMode::Default,
-            source_mode: if step.argv.iter().any(|arg| arg == "--lexical-only") {
-                SearchSourceMode::LexicalOnly
-            } else {
-                SearchSourceMode::Hybrid
-            },
-            strict_source_mode: false,
+            source_mode,
+            strict_source_mode,
             filters: crate::models::QueryFilters::default(),
             profile: None,
             max_tokens: Some(case.token_budget.max_tokens),
@@ -16572,11 +16569,29 @@ fn pack_quality_actuals_for_cases(
             "scenarioId": case.scenario_id, "commandStep": case.command_step,
             "stdout": output_path, "stderr": null,
             "workspace": workspace_path, "memoryCount": case_memories.len(),
-            "mode": "production_pack", "embedder": "fnv1a-256"
+            "mode": "production_pack", "embedder": "fnv1a-256",
+            "sourceMode": options.source_mode.as_str(),
+            "strictSourceMode": options.strict_source_mode
         }));
     }
 
     Ok((actuals, artifacts))
+}
+
+fn pack_quality_step_source_mode(argv: &[String]) -> Result<(SearchSourceMode, bool), DomainError> {
+    let cli = Cli::try_parse_from(argv).map_err(|error| {
+        pack_quality_execution_error(format!("invalid pack command step: {error}"))
+    })?;
+    match cli.command {
+        Some(Command::Context(args)) => Ok((args.source_mode, args.strict_source_mode)),
+        Some(Command::Pack(args)) if args.command.is_none() => Ok((
+            args.source_mode.unwrap_or(SearchSourceMode::Hybrid),
+            args.strict_source_mode,
+        )),
+        _ => Err(pack_quality_execution_error(
+            "pack-quality command step must assemble a context pack".into(),
+        )),
+    }
 }
 
 fn pack_quality_execution_error(message: String) -> DomainError {
@@ -87674,6 +87689,46 @@ mod tests {
             }
             _ => Err("expected Pack command".to_string()),
         }
+    }
+
+    #[test]
+    fn pack_quality_honors_command_source_modes_and_rejects_invalid_steps() -> TestResult {
+        for (argv, expected) in [
+            (
+                vec!["ee", "pack", "release"],
+                (SearchSourceMode::Hybrid, false),
+            ),
+            (
+                vec![
+                    "ee",
+                    "pack",
+                    "release",
+                    "--source-mode",
+                    "lexical-only",
+                    "--strict-source-mode",
+                ],
+                (SearchSourceMode::LexicalOnly, true),
+            ),
+            (
+                vec!["ee", "context", "release", "--source-mode=semantic_only"],
+                (SearchSourceMode::SemanticOnly, false),
+            ),
+        ] {
+            let argv = argv.into_iter().map(str::to_string).collect::<Vec<_>>();
+            let actual =
+                super::pack_quality_step_source_mode(&argv).map_err(|error| error.to_string())?;
+            ensure_equal(&actual, &expected, "eval command source mode")?;
+        }
+        for argv in [
+            vec!["ee", "search", "release"],
+            vec!["ee", "pack", "release", "--source-mode", "invented"],
+        ] {
+            let argv = argv.into_iter().map(str::to_string).collect::<Vec<_>>();
+            if super::pack_quality_step_source_mode(&argv).is_ok() {
+                return Err(format!("invalid eval pack command accepted: {argv:?}"));
+            }
+        }
+        Ok(())
     }
 
     #[test]
