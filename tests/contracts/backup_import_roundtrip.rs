@@ -832,7 +832,7 @@ fn backup_inspect_and_verify_reports_are_content_addressed() -> TestResult {
 
     let backup_dir = tempfile::tempdir().map_err(|error| format!("backup tempdir: {error}"))?;
     let create_report = create_backup(&BackupCreateOptions {
-        workspace_path: src_workspace,
+        workspace_path: src_workspace.clone(),
         database_path: Some(src_db),
         output_dir: Some(backup_dir.path().to_path_buf()),
         label: Some("inspect-verify-content-addressed".to_owned()),
