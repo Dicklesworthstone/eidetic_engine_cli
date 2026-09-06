@@ -2267,6 +2267,18 @@ fn verify_backup_manifest(
         .map(|artifact| &artifact.path)
         .chain(inspect.derived.iter().map(|asset| &asset.path))
     {
+        // Restore dispatches typed assets by their portable path prefixes.
+        // Aliases such as `./derived/lab/episodes/x.json` must not verify and
+        // then silently miss that dispatch, even without a duplicate entry.
+        if path.split('/').any(|part| matches!(part, "" | "." | "..")) {
+            issues.push(
+                BackupVerificationIssue::error(
+                    "artifact_path_outside_backup",
+                    "backup artifact path must use canonical relative components without empty, dot or parent segments",
+                )
+                .with_path(path.clone()),
+            );
+        }
         // Normalize equivalent spellings such as `./x` and `x`, or repeated
         // separators. Raw string equality misses collisions
         // that otherwise fail only after restore has begun writing files.
@@ -9289,6 +9301,8 @@ mod tests {
             "signed_dot_backup_id",
             "signed_alias_duplicate",
             "signed_separator_duplicate",
+            "signed_unique_derived_alias",
+            "signed_unique_records_alias",
             "signed_records_alias",
             "signed_cross_inventory_duplicate",
             "signed_manifest_alias",
@@ -9385,6 +9399,17 @@ mod tests {
                     });
                     changed["artifacts"] = json!([changed["artifacts"][0].clone(), alias]);
                     expected_code = "manifest_artifact_duplicate";
+                }
+                "signed_unique_derived_alias" => {
+                    let path = changed["derived"][0]["path"]
+                        .as_str()
+                        .ok_or("derived path missing")?;
+                    changed["derived"][0]["path"] = json!(format!("./{path}"));
+                    expected_code = "artifact_path_outside_backup";
+                }
+                "signed_unique_records_alias" => {
+                    changed["artifacts"][0]["path"] = json!("./records.jsonl");
+                    expected_code = "artifact_path_outside_backup";
                 }
                 "signed_cross_inventory_duplicate" => {
                     assets.push(json!({
@@ -9499,27 +9524,6 @@ mod tests {
                 .as_str(),
             "verified",
             "compact manifest remains authentic",
-        )?;
-        // A single alternate spelling is valid; only collisions with another
-        // entry or the manifest itself are forbidden.
-        let mut unique_alias = original.clone();
-        let alias_path = unique_alias["derived"][0]["path"]
-            .as_str()
-            .ok_or("derived path missing")?;
-        unique_alias["derived"][0]["path"] = json!(format!("./{alias_path}"));
-        authenticate_backup_manifest(&mut unique_alias, &root).map_err(|e| e.message())?;
-        fs::write(
-            &created.manifest_path,
-            serde_json::to_vec(&unique_alias).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        ensure_equal(
-            verify_backup(&verify_options)
-                .map_err(|e| e.message())?
-                .status
-                .as_str(),
-            "verified",
-            "unique equivalent path remains valid",
         )?;
         let restored = restore_backup_to_side_path(&BackupRestoreOptions {
             workspace_path: workspace,
@@ -11849,6 +11853,67 @@ mod tests {
             .map_err(|error| error.to_string())?
             .join("restore-derived-side-path");
 
+        // A real episode file remains reachable through this alias, but the
+        // restore dispatcher uses the canonical prefix. Reject the signed
+        // alias before writes instead of silently dropping the episode row.
+        let (original_manifest, mut aliased_manifest) =
+            read_backup_manifest(Path::new(&created.backup_path))
+                .map_err(|error| error.message())?;
+        let episode_asset = aliased_manifest["derived"]
+            .as_array_mut()
+            .ok_or("derived inventory missing")?
+            .iter_mut()
+            .find(|asset| {
+                asset["kind"] == "lab_episode"
+                    && asset["path"]
+                        .as_str()
+                        .is_some_and(|path| path.starts_with("derived/lab/episodes/"))
+            })
+            .ok_or("task episode artifact missing")?;
+        let episode_path = episode_asset["path"]
+            .as_str()
+            .ok_or("episode path missing")?;
+        let alias = format!("./{episode_path}");
+        ensure(
+            Path::new(&created.backup_path).join(&alias).is_file(),
+            "aliased episode file exists; this is a dispatch defect, not a missing-file fixture",
+        )?;
+        episode_asset["path"] = json!(alias);
+        let root = StoreAuthRoot::open(workspace_keys_dir(&workspace)).map_err(|e| e.message())?;
+        authenticate_backup_manifest(&mut aliased_manifest, &root).map_err(|e| e.message())?;
+        verify_backup_manifest_authentication(&workspace, &aliased_manifest)
+            .map_err(|issue| format!("aliased episode fixture must authenticate: {issue:?}"))?;
+        fs::write(
+            &created.manifest_path,
+            serde_json::to_vec(&aliased_manifest).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let rejected = verify_backup(&BackupVerifyOptions {
+            workspace_path: workspace.clone(),
+            backup_path: PathBuf::from(&created.backup_path),
+        })
+        .map_err(|e| e.message())?;
+        ensure(
+            rejected.status == "failed"
+                && rejected
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code == "artifact_path_outside_backup"),
+            "signed episode path alias must fail verification",
+        )?;
+        ensure(
+            restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&created.backup_path),
+                side_path: side_path.clone(),
+                restore_graph_cache: include_derived,
+                dry_run: false,
+            })
+            .is_err()
+                && !side_path.exists(),
+            "signed episode path alias must reject before restore writes",
+        )?;
+        fs::write(&created.manifest_path, original_manifest).map_err(|e| e.to_string())?;
         let restored = restore_backup_to_side_path(&BackupRestoreOptions {
             workspace_path: workspace,
             backup_path: PathBuf::from(&created.backup_path),
