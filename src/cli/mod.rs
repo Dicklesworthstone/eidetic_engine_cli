@@ -87757,6 +87757,79 @@ mod tests {
     }
 
     #[test]
+    fn pack_quality_seeds_complete_generated_and_imported_corpora() -> TestResult {
+        for (raw, expected_count) in [
+            (
+                include_str!("../../tests/fixtures/eval/data_size_tiers/source_memory.json"),
+                600,
+            ),
+            (
+                include_str!("../../tests/fixtures/eval/memory_poisoning/source_memory.json"),
+                3,
+            ),
+            (
+                include_str!("../../tests/fixtures/eval/bundled_embeddings/source_memory.json"),
+                3,
+            ),
+        ] {
+            let source: crate::eval::SourceMemoryFile =
+                serde_json::from_str(raw).map_err(|error| error.to_string())?;
+            let memories = crate::eval::materialize_source_memories(&source)
+                .map_err(|error| error.to_string())?;
+            ensure_equal(&memories.len(), &expected_count, "complete fixture corpus")?;
+            let workspace = tempfile::Builder::new()
+                .prefix("ee-eval-seed-corpus-")
+                .tempdir()
+                .map_err(|error| error.to_string())?
+                .keep();
+            let database = workspace.join("ee.db");
+            let workspace_id = super::seed_pack_quality_workspace(
+                &workspace,
+                &database,
+                &source,
+                &memories,
+                source
+                    .fixed_clock
+                    .as_deref()
+                    .ok_or("missing fixture clock")?,
+            )
+            .map_err(|error| error.to_string())?;
+            let db = crate::db::DbConnection::open_file_read_only(&database)
+                .map_err(|error| error.to_string())?;
+            let stored = db
+                .list_memories(&workspace_id, None, true)
+                .map_err(|error| error.to_string())?;
+            ensure_equal(&stored.len(), &expected_count, "all corpus rows stored")?;
+            for expected in &memories {
+                let actual = stored
+                    .iter()
+                    .find(|memory| memory.id == expected.id)
+                    .ok_or_else(|| format!("missing fixture memory {}", expected.id))?;
+                ensure_equal(
+                    &actual.content,
+                    &expected.content,
+                    "fixture content preserved",
+                )?;
+                ensure_equal(
+                    &actual.trust_class,
+                    &expected.trust_class,
+                    "declared trust preserved",
+                )?;
+                actual
+                    .trust_class
+                    .parse::<crate::models::TrustClass>()
+                    .map_err(|error| error.to_string())?;
+                ensure_equal(
+                    &actual.workspace_id,
+                    &workspace_id,
+                    "fixture workspace preserved",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn pack_quality_honors_command_source_modes_and_rejects_invalid_steps() -> TestResult {
         for (argv, expected) in [
             (

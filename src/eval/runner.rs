@@ -930,7 +930,9 @@ pub fn materialize_source_memories(
                 id: id.clone(),
                 level: "episodic".to_string(),
                 kind: "generated_fixture_memory".to_string(),
-                trust_class: "synthetic_generated".to_string(),
+                trust_class: crate::models::TrustClass::AgentAssertion
+                    .as_str()
+                    .to_owned(),
                 confidence: 0.8,
                 utility: 0.7,
                 importance: 0.6,
