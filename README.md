@@ -2258,6 +2258,8 @@ degraded. `ee backup verify <backup-path> --workspace <source-workspace>`
 authenticates the complete manifest and checks every listed artifact's hash.
 The selected workspace supplies the trusted keys; the manifest cannot choose
 them. Restore uses the same check and validates copied records before import.
+Failed verification returns exit code 5 and `success: false`, retaining the
+individual issues in `data.issues`; warning-only verification stays exit-zero.
 Unsigned manifests, including older backups, cannot pass verification or be
 restored; recreate them with the source keys available. If authentication is
 unavailable, a memory-only emergency export remains visibly partial and

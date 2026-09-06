@@ -467,6 +467,126 @@ fn memory_with_tags(
 }
 
 #[test]
+fn backup_verify_rejects_modified_inventory_with_nonzero_exit() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().join("workspace");
+    fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+    let ws = workspace.to_string_lossy();
+    run_ee(&["init", "--workspace", &ws, "--json"])?;
+    run_ee(&[
+        "remember",
+        "Keep release verification evidence.",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let created = run_ee(&[
+        "backup",
+        "create",
+        "--include-graph-cache=false",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let backup_path = json_str(&created, "/data/backupPath", "created backup")?;
+    let verified = run_ee(&[
+        "backup",
+        "verify",
+        backup_path,
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    ensure_equal(
+        verified.pointer("/data/status").and_then(JsonValue::as_str),
+        Some("verified"),
+        "unaltered signed backup passes public verification",
+    )?;
+    let manifest_path = Path::new(backup_path).join("manifest.json");
+    let mut manifest: JsonValue =
+        serde_json::from_slice(&fs::read(&manifest_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    manifest["artifacts"] = serde_json::json!([]);
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let rejected = Command::new(ee_bin())
+        .args([
+            "backup",
+            "verify",
+            backup_path,
+            "--workspace",
+            &ws,
+            "--json",
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    eprintln!(
+        "verify stdout: {}\nverify stderr: {}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    ensure_equal(
+        rejected.status.code(),
+        Some(5),
+        "invalid inventory must fail shell verification",
+    )?;
+    let report: JsonValue =
+        serde_json::from_slice(&rejected.stdout).map_err(|error| error.to_string())?;
+    ensure_equal(
+        report["success"].as_bool(),
+        Some(false),
+        "failed verification envelope",
+    )?;
+    ensure_equal(
+        report.pointer("/data/status").and_then(JsonValue::as_str),
+        Some("failed"),
+        "failed verification status",
+    )?;
+    ensure(
+        report
+            .pointer("/data/issues")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|issues| {
+                issues
+                    .iter()
+                    .any(|issue| issue["code"] == "manifest_authentication_failed")
+            }),
+        "public verification reports the manifest authentication defect",
+    )?;
+    let side_path = tempdir.path().join("rejected-restore");
+    let restored = Command::new(ee_bin())
+        .args([
+            "backup",
+            "restore",
+            backup_path,
+            "--side-path",
+            &side_path.to_string_lossy(),
+            "--workspace",
+            &ws,
+            "--json",
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    eprintln!(
+        "restore stdout: {}\nrestore stderr: {}",
+        String::from_utf8_lossy(&restored.stdout),
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    ensure_equal(
+        restored.status.code(),
+        Some(5),
+        "invalid inventory must fail restore",
+    )?;
+    ensure(
+        !side_path.exists(),
+        "rejected restore must not create its destination",
+    )
+}
+
+#[test]
 fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
     let _trace = test_tracing::init_test_tracing(
         "bd-3usjw.53",

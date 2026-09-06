@@ -18841,13 +18841,14 @@ where
 
     match verify_backup(&options) {
         Ok(report) => {
+            let verified = report.status != "failed";
             let json = serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
-                "success": true,
+                "success": verified,
                 "data": report.data_json(),
                 "degraded": [],
             });
-            match cli.renderer() {
+            let output_status = match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
                     let mut out = format!("Backup: {} - {}\n", report.backup_id, report.status);
                     out.push_str(&format!(
@@ -18876,6 +18877,11 @@ where
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
                 | output::Renderer::Hook => write_stdout(stdout, &(json.to_string() + "\n")),
+            };
+            if output_status == ProcessExitCode::Success && !verified {
+                ProcessExitCode::Import
+            } else {
+                output_status
             }
         }
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
