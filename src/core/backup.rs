@@ -9141,7 +9141,7 @@ mod tests {
         let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
         let workspace_id = load_workspace(&connection, &workspace)
             .map_err(|e| e.message())?
-            .workspace_id;
+            .id;
         let rule = recovery_rule(&workspace_id, 0);
         connection
             .insert_procedural_rule_for_recovery(&rule)
