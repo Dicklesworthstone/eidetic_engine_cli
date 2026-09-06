@@ -2203,13 +2203,16 @@ fn read_backup_manifest(backup_path: &Path) -> Result<(Vec<u8>, JsonValue), Doma
         });
     }
 
-    let manifest_bytes = fs::read(&manifest_path).map_err(|error| DomainError::Storage {
-        message: format!(
-            "failed to read backup manifest '{}': {error}",
-            manifest_path.display()
-        ),
-        repair: Some("inspect filesystem permissions and retry".to_owned()),
-    })?;
+    let mut manifest_bytes = Vec::new();
+    open_backup_artifact_for_read(&manifest_path)
+        .and_then(|mut file| file.read_to_end(&mut manifest_bytes))
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to read backup manifest '{}': {error}",
+                manifest_path.display()
+            ),
+            repair: Some("inspect filesystem permissions and retry".to_owned()),
+        })?;
     let manifest = serde_json::from_slice::<JsonValue>(&manifest_bytes).map_err(|error| {
         DomainError::Storage {
             message: format!(
@@ -2237,13 +2240,20 @@ pub fn verify_backup(options: &BackupVerifyOptions) -> Result<BackupVerifyReport
         &hash_bytes(&manifest_bytes),
         &manifest,
     );
-    verify_backup_manifest(&options.workspace_path, &backup_path, &manifest, &inspect)
+    verify_backup_manifest(
+        &options.workspace_path,
+        &backup_path,
+        &manifest,
+        manifest_bytes.len() as u64,
+        &inspect,
+    )
 }
 
 fn verify_backup_manifest(
     workspace_path: &Path,
     backup_path: &Path,
     manifest: &JsonValue,
+    manifest_size: u64,
     inspect: &BackupInspectReport,
 ) -> Result<BackupVerifyReport, DomainError> {
     let mut issues = inspect.issues.clone();
@@ -2257,7 +2267,14 @@ fn verify_backup_manifest(
         .map(|artifact| &artifact.path)
         .chain(inspect.derived.iter().map(|asset| &asset.path))
     {
-        if path == MANIFEST_FILE || !paths.insert(path) {
+        // Normalize equivalent spellings such as `./x` and `x`, or repeated
+        // separators. Raw string equality misses collisions
+        // that otherwise fail only after restore has begun writing files.
+        let relative = Path::new(path)
+            .components()
+            .filter(|component| !matches!(component, Component::CurDir))
+            .collect::<PathBuf>();
+        if relative == Path::new(MANIFEST_FILE) || !paths.insert(relative) {
             issues.push(
                 BackupVerificationIssue::error(
                     "manifest_artifact_duplicate",
@@ -2275,6 +2292,44 @@ fn verify_backup_manifest(
             "backup inventory must include the required records.jsonl export",
         ));
     }
+    for artifact in &inspect.artifacts {
+        if artifact.size_bytes.is_none() {
+            issues.push(
+                BackupVerificationIssue::error(
+                    "artifact_size_missing",
+                    "backup artifact manifest entry is missing a valid byte size",
+                )
+                .with_path(artifact.path.clone()),
+            );
+        }
+    }
+    for derived in &inspect.derived {
+        if derived.byte_size.is_none() {
+            issues.push(
+                BackupVerificationIssue::error(
+                    "derived_asset_size_missing",
+                    "derived backup asset manifest entry is missing a valid byte size",
+                )
+                .with_path(derived.path.clone()),
+            );
+        }
+    }
+    // A rejected manifest must not authorize reads of its referenced files.
+    // In particular, an unreadable artifact must not mask the authentication
+    // failure, and malformed producer output must fail before restore writes.
+    if issues.iter().any(backup_verification_issue_is_blocking) {
+        return Ok(BackupVerifyReport {
+            schema: BACKUP_VERIFY_SCHEMA_V1,
+            backup_id: inspect.backup_id.clone(),
+            status: "failed".to_owned(),
+            backup_path: inspect.backup_path.clone(),
+            manifest_path: inspect.manifest_path.clone(),
+            manifest_hash: inspect.manifest_hash.clone(),
+            checked_artifacts: Vec::new(),
+            checked_derived: Vec::new(),
+            issues,
+        });
+    }
     let mut checked_artifacts = Vec::new();
     let mut checked_derived = Vec::new();
 
@@ -2286,12 +2341,11 @@ fn verify_backup_manifest(
         .iter()
         .any(|artifact| artifact.path == MANIFEST_FILE)
     {
-        let manifest_path = backup_path.join(MANIFEST_FILE);
         checked_artifacts.push(BackupArtifactReport {
             path: MANIFEST_FILE.to_owned(),
             kind: "manifest".to_owned(),
             hash: Some(inspect.manifest_hash.clone()),
-            size_bytes: Some(file_size(&manifest_path)?),
+            size_bytes: Some(manifest_size),
             required: true,
         });
     }
@@ -2488,7 +2542,13 @@ pub fn restore_backup_to_side_path(
         &hash_bytes(&manifest_bytes),
         &manifest,
     );
-    let verify = verify_backup_manifest(&workspace_path, &backup_path, &manifest, &inspect)?;
+    let verify = verify_backup_manifest(
+        &workspace_path,
+        &backup_path,
+        &manifest,
+        manifest_bytes.len() as u64,
+        &inspect,
+    )?;
     if verify
         .issues
         .iter()
@@ -2515,6 +2575,8 @@ pub fn restore_backup_to_side_path(
     let restored_database_path = side_path.join(WORKSPACE_MARKER).join(DEFAULT_DB_FILE);
     let mut next_actions = restore_base_next_actions(&inspect.backup_id, &side_path);
 
+    // Preview the same destination constraints that a real restore enforces.
+    ensure_side_path_is_isolated(&side_path)?;
     if options.dry_run {
         return Ok(BackupRestoreReport {
             schema: BACKUP_RESTORE_SCHEMA_V1,
@@ -2549,7 +2611,6 @@ pub fn restore_backup_to_side_path(
         });
     }
 
-    ensure_side_path_is_isolated(&side_path)?;
     fs::create_dir_all(&restore_artifact_dir).map_err(|error| DomainError::Storage {
         message: format!(
             "failed to create restore artifact directory '{}': {error}",
@@ -3678,6 +3739,12 @@ fn inspect_manifest(
             .unwrap_or("<unknown>")
             .to_owned()
     });
+    if backup_id.parse::<BackupId>().is_err() {
+        issues.push(BackupVerificationIssue::error(
+            "backup_id_invalid",
+            "backup manifest backupId must be a valid backup identifier, not a filesystem path",
+        ));
+    }
     let workspace = manifest.get("workspace").unwrap_or(&JsonValue::Null);
     let verification = manifest.get("verification").unwrap_or(&JsonValue::Null);
     let verification_status = json_string(verification, "status");
@@ -3700,7 +3767,14 @@ fn inspect_manifest(
         let total_byte_size = derived
             .iter()
             .filter_map(|asset| asset.byte_size)
-            .sum::<u64>();
+            .try_fold(0u64, u64::checked_add)
+            .unwrap_or_else(|| {
+                issues.push(BackupVerificationIssue::error(
+                    "manifest_derived_size_overflow",
+                    "backup manifest derived asset byte sizes overflow their total",
+                ));
+                u64::MAX
+            });
         tracing::info!(
             target: "ee::backup",
             event = "backup_inspect_derived_summary",
@@ -9206,6 +9280,24 @@ mod tests {
             "substituted_auth",
             "signed_duplicate",
             "signed_missing_records",
+            "signed_absolute_backup_id",
+            "signed_parent_backup_id",
+            "signed_empty_backup_id",
+            "signed_nested_backup_id",
+            "signed_windows_backup_id",
+            "signed_malformed_backup_id",
+            "signed_dot_backup_id",
+            "signed_alias_duplicate",
+            "signed_separator_duplicate",
+            "signed_records_alias",
+            "signed_cross_inventory_duplicate",
+            "signed_manifest_alias",
+            "signed_missing_size",
+            "signed_negative_size",
+            "signed_missing_derived_size",
+            "signed_overflow_sizes",
+            "unsigned_overflow_sizes",
+            "unauthenticated_missing_artifact",
         ] {
             let mut changed = original.clone();
             let mut assets = derived.clone();
@@ -9225,8 +9317,6 @@ mod tests {
                     assets.push(assets[0].clone());
                     changed["derived"] = json!(assets);
                     if defect == "signed_duplicate" {
-                        authenticate_backup_manifest(&mut changed, &root)
-                            .map_err(|e| e.message())?;
                         expected_code = "manifest_artifact_duplicate";
                     }
                 }
@@ -9247,10 +9337,95 @@ mod tests {
                 }
                 "signed_missing_records" => {
                     changed["artifacts"] = json!([]);
-                    authenticate_backup_manifest(&mut changed, &root).map_err(|e| e.message())?;
                     expected_code = "manifest_records_missing";
                 }
+                "signed_absolute_backup_id"
+                | "signed_parent_backup_id"
+                | "signed_empty_backup_id"
+                | "signed_nested_backup_id"
+                | "signed_windows_backup_id"
+                | "signed_malformed_backup_id"
+                | "signed_dot_backup_id" => {
+                    changed["backupId"] = match defect {
+                        "signed_absolute_backup_id" => {
+                            json!(tempdir.path().join("escaped-absolute"))
+                        }
+                        "signed_parent_backup_id" => json!("../../../escaped-relative"),
+                        "signed_empty_backup_id" => json!(""),
+                        "signed_nested_backup_id" => json!("nested/backup"),
+                        "signed_windows_backup_id" => json!("C:\\backup"),
+                        "signed_dot_backup_id" => json!("."),
+                        _ => json!("bk_invalid"),
+                    };
+                    expected_code = "backup_id_invalid";
+                }
+                "signed_alias_duplicate" | "signed_separator_duplicate" => {
+                    let mut alias = assets[0].clone();
+                    let path = alias["path"].as_str().ok_or("derived path missing")?;
+                    let alias_path = if defect == "signed_alias_duplicate" {
+                        format!("./{path}")
+                    } else {
+                        path.replace('/', "//")
+                    };
+                    ensure(
+                        alias_path != path,
+                        "alias fixture must change path spelling",
+                    )?;
+                    alias["path"] = json!(alias_path);
+                    assets.push(alias);
+                    changed["derived"] = json!(assets);
+                    expected_code = "manifest_artifact_duplicate";
+                }
+                "signed_records_alias" | "signed_manifest_alias" => {
+                    let mut alias = changed["artifacts"][0].clone();
+                    alias["path"] = json!(if defect == "signed_records_alias" {
+                        "./records.jsonl"
+                    } else {
+                        "./manifest.json"
+                    });
+                    changed["artifacts"] = json!([changed["artifacts"][0].clone(), alias]);
+                    expected_code = "manifest_artifact_duplicate";
+                }
+                "signed_cross_inventory_duplicate" => {
+                    assets.push(json!({
+                        "path": "./records.jsonl",
+                        "kind": "wal_holds",
+                        "hash": changed["artifacts"][0]["hash"],
+                        "byte_size": changed["artifacts"][0]["sizeBytes"],
+                    }));
+                    changed["derived"] = json!(assets);
+                    expected_code = "manifest_artifact_duplicate";
+                }
+                "signed_missing_size" | "signed_negative_size" => {
+                    changed["artifacts"][0]["sizeBytes"] = if defect == "signed_missing_size" {
+                        JsonValue::Null
+                    } else {
+                        json!(-1)
+                    };
+                    expected_code = "artifact_size_missing";
+                }
+                "signed_missing_derived_size" => {
+                    changed["derived"][0]["byte_size"] = JsonValue::Null;
+                    expected_code = "derived_asset_size_missing";
+                }
+                "signed_overflow_sizes" | "unsigned_overflow_sizes" => {
+                    changed["derived"][0]["byte_size"] = json!(u64::MAX);
+                    changed["derived"][1]["byte_size"] = json!(u64::MAX);
+                    if defect == "signed_overflow_sizes" {
+                        expected_code = "manifest_derived_size_overflow";
+                    }
+                }
+                "unauthenticated_missing_artifact" => {
+                    let mut missing = changed["artifacts"][0].clone();
+                    missing["path"] = json!("does-not-exist.jsonl");
+                    changed["artifacts"] = json!([changed["artifacts"][0].clone(), missing]);
+                }
                 _ => return Err(format!("unhandled defect {defect}")),
+            }
+            if defect.starts_with("signed_") {
+                authenticate_backup_manifest(&mut changed, &root).map_err(|e| e.message())?;
+                verify_backup_manifest_authentication(&workspace, &changed)
+                    .map_err(|issue| format!("{defect}: fixture must authenticate: {issue:?}"))?;
             }
             fs::write(
                 &created.manifest_path,
@@ -9258,6 +9433,10 @@ mod tests {
             )
             .map_err(|e| e.to_string())?;
             let rejected = verify_backup(&verify_options).map_err(|e| e.message())?;
+            eprintln!(
+                "manifest defect {defect}: status={}, issues={:?}",
+                rejected.status, rejected.issues
+            );
             ensure_equal(rejected.status.as_str(), "failed", defect)?;
             ensure(
                 rejected
@@ -9268,6 +9447,17 @@ mod tests {
                     "{defect} must fail for {expected_code}: {:?}",
                     rejected.issues
                 ),
+            )?;
+            ensure(
+                rejected.checked_artifacts.is_empty() && rejected.checked_derived.is_empty(),
+                format!("{defect} must reject the manifest before checking artifacts"),
+            )?;
+            ensure(
+                !rejected
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code == "artifact_missing"),
+                format!("{defect} must not follow unauthenticated inventory references"),
             )?;
             let side_path = tempdir.path().join(format!("rejected-{defect}"));
             for dry_run in [true, false] {
@@ -9287,6 +9477,12 @@ mod tests {
                     format!("{defect} must not start a restore"),
                 )?;
             }
+            for escaped in ["escaped-absolute", "escaped-relative"] {
+                ensure(
+                    !tempdir.path().join(escaped).exists(),
+                    format!("{defect} must not write outside its destination"),
+                )?;
+            }
         }
 
         // Whitespace and object-key order carry no meaning. Re-serialization
@@ -9303,6 +9499,27 @@ mod tests {
                 .as_str(),
             "verified",
             "compact manifest remains authentic",
+        )?;
+        // A single alternate spelling is valid; only collisions with another
+        // entry or the manifest itself are forbidden.
+        let mut unique_alias = original.clone();
+        let alias_path = unique_alias["derived"][0]["path"]
+            .as_str()
+            .ok_or("derived path missing")?;
+        unique_alias["derived"][0]["path"] = json!(format!("./{alias_path}"));
+        authenticate_backup_manifest(&mut unique_alias, &root).map_err(|e| e.message())?;
+        fs::write(
+            &created.manifest_path,
+            serde_json::to_vec(&unique_alias).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        ensure_equal(
+            verify_backup(&verify_options)
+                .map_err(|e| e.message())?
+                .status
+                .as_str(),
+            "verified",
+            "unique equivalent path remains valid",
         )?;
         let restored = restore_backup_to_side_path(&BackupRestoreOptions {
             workspace_path: workspace,
@@ -9429,6 +9646,30 @@ mod tests {
         let original_copy = tempdir.path().join("original-records.jsonl");
         copy_new_file(Path::new(&created.records_path), &original_copy).map_err(|e| e.message())?;
         verify_restored_records(&original_copy, &inspect).map_err(|e| e.message())?;
+        let backup_path = Path::new(&created.backup_path);
+        let (manifest_bytes, manifest) =
+            read_backup_manifest(backup_path).map_err(|e| e.message())?;
+        let mut reformatted = manifest_bytes.clone();
+        reformatted.extend_from_slice(b"\n\n\n");
+        fs::write(&created.manifest_path, reformatted).map_err(|e| e.to_string())?;
+        let verified = verify_backup_manifest(
+            Path::new(&created.workspace_path),
+            backup_path,
+            &manifest,
+            manifest_bytes.len() as u64,
+            &inspect,
+        )
+        .map_err(|e| e.message())?;
+        let checked_manifest = verified
+            .checked_artifacts
+            .iter()
+            .find(|artifact| artifact.path == MANIFEST_FILE)
+            .ok_or("verified manifest missing")?;
+        ensure_equal(
+            checked_manifest.size_bytes,
+            Some(manifest_bytes.len() as u64),
+            "manifest size and hash describe the same read snapshot",
+        )?;
         // Replace the source after the initial inspection. This tests the
         // actual copy/validation boundary without a timing-dependent race.
         let mut changed = fs::read(&created.records_path).map_err(|e| e.to_string())?;
@@ -10124,9 +10365,10 @@ mod tests {
         let records_payload = b"{\"schema\":\"ee.export.header.v1\"}\n";
         fs::write(backup_path.join(RECORDS_FILE), records_payload)
             .map_err(|error| error.to_string())?;
-        let manifest = json!({
+        let mut manifest = json!({
             "schema": BACKUP_MANIFEST_SCHEMA_V1,
-            "backupId": "missing-required-artifact-hash",
+            "backupId": BackupId::now().to_string(),
+            "workspace": { "id": WorkspaceId::now().to_string() },
             "artifacts": [{
                 "path": RECORDS_FILE,
                 "kind": "jsonl_export",
@@ -10134,6 +10376,11 @@ mod tests {
                 "required": true,
             }],
         });
+        // Reach the artifact check through a valid authenticated manifest;
+        // otherwise a missing MAC would reject before this test's subject.
+        let root = StoreAuthRoot::open_or_create(workspace_keys_dir(tempdir.path()))
+            .map_err(|error| error.message())?;
+        authenticate_backup_manifest(&mut manifest, &root).map_err(|error| error.message())?;
         let manifest_bytes =
             serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
         fs::write(backup_path.join(MANIFEST_FILE), manifest_bytes)
@@ -10166,9 +10413,10 @@ mod tests {
             .map_err(|error| error.to_string())?;
         fs::write(backup_path.join(derived_path), derived_payload)
             .map_err(|error| error.to_string())?;
-        let manifest = json!({
+        let mut manifest = json!({
             "schema": BACKUP_MANIFEST_SCHEMA_V2,
-            "backupId": "missing-derived-hash",
+            "backupId": BackupId::now().to_string(),
+            "workspace": { "id": WorkspaceId::now().to_string() },
             "artifacts": [{
                 "path": RECORDS_FILE,
                 "kind": "jsonl_export",
@@ -10183,6 +10431,9 @@ mod tests {
                 "captured_at": "2026-05-25T00:00:00Z",
             }],
         });
+        let root = StoreAuthRoot::open_or_create(workspace_keys_dir(tempdir.path()))
+            .map_err(|error| error.message())?;
+        authenticate_backup_manifest(&mut manifest, &root).map_err(|error| error.message())?;
         let manifest_bytes =
             serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
         fs::write(backup_path.join(MANIFEST_FILE), manifest_bytes)
@@ -10369,9 +10620,10 @@ mod tests {
         fs::write(&outside_records, records_payload).map_err(|error| error.to_string())?;
         std::os::unix::fs::symlink(&outside_records, backup_path.join(RECORDS_FILE))
             .map_err(|error| error.to_string())?;
-        let manifest = json!({
+        let mut manifest = json!({
             "schema": BACKUP_MANIFEST_SCHEMA_V1,
-            "backupId": "backup-test",
+            "backupId": BackupId::now().to_string(),
+            "workspace": { "id": WorkspaceId::now().to_string() },
             "artifacts": [{
                 "path": RECORDS_FILE,
                 "kind": "jsonl_export",
@@ -10380,6 +10632,9 @@ mod tests {
                 "required": true,
             }],
         });
+        let root = StoreAuthRoot::open_or_create(workspace_keys_dir(tempdir.path()))
+            .map_err(|error| error.message())?;
+        authenticate_backup_manifest(&mut manifest, &root).map_err(|error| error.message())?;
         let manifest_bytes =
             serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
         fs::write(backup_path.join(MANIFEST_FILE), manifest_bytes)
@@ -11850,21 +12105,28 @@ mod tests {
         fs::write(side_path.join("occupied.txt"), b"occupied")
             .map_err(|error| error.to_string())?;
 
-        let result = restore_backup_to_side_path(&BackupRestoreOptions {
-            workspace_path: workspace,
-            backup_path: PathBuf::from(&created.backup_path),
-            side_path,
-            restore_graph_cache: true,
-            dry_run: false,
-        });
-
-        match result {
-            Err(DomainError::Storage { message, .. }) => ensure(
-                message.contains("not empty"),
-                "non-empty side path is rejected",
-            ),
-            other => Err(format!("expected storage error, got {other:?}")),
+        for dry_run in [true, false] {
+            let result = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&created.backup_path),
+                side_path: side_path.clone(),
+                restore_graph_cache: true,
+                dry_run,
+            });
+            match result {
+                Err(DomainError::Storage { message, .. }) => ensure(
+                    message.contains("not empty"),
+                    format!("non-empty side path is rejected, dry_run={dry_run}"),
+                )?,
+                other => return Err(format!("expected storage error, got {other:?}")),
+            }
+            ensure_equal(
+                fs::read(side_path.join("occupied.txt")).map_err(|error| error.to_string())?,
+                b"occupied".to_vec(),
+                "rejected restore preserves existing destination data",
+            )?;
         }
+        Ok(())
     }
 
     #[test]
