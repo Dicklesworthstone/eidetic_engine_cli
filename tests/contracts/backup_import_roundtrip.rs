@@ -924,8 +924,11 @@ fn backup_inspect_and_verify_reports_are_content_addressed() -> TestResult {
         ));
     }
 
-    let verify_report = verify_backup(&BackupVerifyOptions { backup_path })
-        .map_err(|error| format!("verify: {error:?}"))?;
+    let verify_report = verify_backup(&BackupVerifyOptions {
+        workspace_path: src_workspace,
+        backup_path,
+    })
+    .map_err(|error| format!("verify: {error:?}"))?;
     if verify_report.schema != BACKUP_VERIFY_SCHEMA_V1 {
         return Err(format!(
             "backup verify schema drifted: {}",

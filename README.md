@@ -2254,9 +2254,16 @@ snapshots, graph algorithm witnesses, and graph algorithm result-cache rows.
 Use `--include-graph-cache=false` when those rebuildable assets are unnecessary,
 and use `ee backup restore --skip-graph-cache` when restore should leave that
 cache cold and re-warm it on first use. Missing index manifests are reported as
-degraded. `ee backup verify` re-hashes everything included on disk; a clean hash
-verdict proves artifact integrity, while `recoveryInventory` separately states
-source coverage.
+degraded. `ee backup verify <backup-path> --workspace <source-workspace>`
+authenticates the complete manifest and checks every listed artifact's hash.
+The selected workspace supplies the trusted keys; the manifest cannot choose
+them. Restore uses the same check and validates copied records before import.
+Unsigned manifests, including older backups, cannot pass verification or be
+restored; recreate them with the source keys available. If authentication is
+unavailable, a memory-only emergency export remains visibly partial and
+unverified. Recovery still requires the source workspace keys: the backup does
+not currently provide portable key recovery. `recoveryInventory` separately
+states source coverage, so authenticated integrity does not imply completeness.
 
 ---
 

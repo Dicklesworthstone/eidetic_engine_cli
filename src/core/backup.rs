@@ -57,6 +57,7 @@ const INIT_AND_MIGRATE_REPAIR_COMMAND: &str =
 const CASS_BACKUP_CHUNK_ROWS: usize = 128;
 const WORK_HISTORY_CHUNK_ROWS: usize = 128;
 const LEARNING_HISTORY_SCHEMA: &str = "ee.backup.learning_history.v1";
+const MANIFEST_AUTH_FAMILY: &str = "ee.backup.manifest";
 const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
 const CASS_SESSION_RESTORE_METADATA_SCHEMA_V1: &str = "ee.backup.restored_cass_session_metadata.v1";
 
@@ -167,6 +168,8 @@ pub struct BackupInspectOptions {
 /// Options for verifying one backup directory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackupVerifyOptions {
+    /// Select the trusted source-store keys independently of manifest contents.
+    pub workspace_path: PathBuf,
     pub backup_path: PathBuf,
 }
 
@@ -1708,7 +1711,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         label: normalized_label(options.label.as_deref()),
         status: if options.dry_run {
             "dry_run".to_owned()
-        } else if recovery_inventory.snapshot_coverage_complete {
+        } else if recovery_inventory.snapshot_coverage_complete && store_auth.is_some() {
             "completed".to_owned()
         } else {
             "partial".to_owned()
@@ -1736,6 +1739,8 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
             "incomplete_source_coverage".to_owned()
         } else if options.dry_run {
             "not_checked".to_owned()
+        } else if store_auth.is_none() {
+            "unauthenticated".to_owned()
         } else {
             "verified".to_owned()
         },
@@ -1745,7 +1750,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         degraded,
     };
 
-    let manifest_json = manifest_json(&report, &created_at, None, &mesh);
+    let mut manifest_json = manifest_json(&report, &created_at, None, &mesh);
     if options.dry_run {
         report.artifacts.push(BackupArtifactReport {
             path: MANIFEST_FILE.to_owned(),
@@ -1756,6 +1761,18 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         });
         return Ok(report);
     }
+
+    // Sign the inventory as well as each artifact's digest: otherwise a
+    // missing family can be hidden simply by removing its manifest entries.
+    if let Some(root) = &store_auth {
+        authenticate_backup_manifest(&mut manifest_json, root)?;
+    }
+    let mut manifest_bytes =
+        serde_json::to_vec_pretty(&manifest_json).map_err(|error| DomainError::Storage {
+            message: format!("failed to render backup manifest JSON: {error}"),
+            repair: Some("retry backup creation with a new label or output directory".to_owned()),
+        })?;
+    manifest_bytes.push(b'\n');
 
     ensure_backup_directory(&backup_root, &backup_path)?;
     write_new_file(&records_path, &records_bytes)?;
@@ -1773,14 +1790,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
             "backup derived asset included"
         );
     }
-    let manifest_bytes =
-        serde_json::to_vec_pretty(&manifest_json).map_err(|error| DomainError::Storage {
-            message: format!("failed to render backup manifest JSON: {error}"),
-            repair: Some("retry backup creation with a new label or output directory".to_owned()),
-        })?;
-    let mut manifest_bytes_with_newline = manifest_bytes;
-    manifest_bytes_with_newline.push(b'\n');
-    write_new_file(&manifest_path, &manifest_bytes_with_newline)?;
+    write_new_file(&manifest_path, &manifest_bytes)?;
 
     let records_hash = hash_file(&records_path)?;
     let manifest_hash = hash_file(&manifest_path)?;
@@ -1834,6 +1844,103 @@ fn load_store_auth_for_backup(
             None
         }
     }
+}
+
+fn manifest_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
+    ArtifactContext {
+        artifact_family: MANIFEST_AUTH_FAMILY,
+        record_encoding_version: "json.v1",
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: workspace_id,
+    }
+}
+
+fn backup_manifest_content_hash(manifest: &JsonValue) -> Result<[u8; 32], DomainError> {
+    let mut body = manifest.clone();
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| work_history_error("backup manifest must be an object"))?;
+    object.insert("authentication".to_owned(), JsonValue::Null);
+    // Object member order and whitespace are not meaningful; array order is.
+    // Sort recursively even if serde_json's preserve_order feature is enabled
+    // elsewhere in the dependency tree.
+    body.sort_all_objects();
+    Ok(canonical_record_hash(
+        &serde_json::to_vec(&body).map_err(work_history_error)?,
+    ))
+}
+
+fn authenticate_backup_manifest(
+    manifest: &mut JsonValue,
+    root: &StoreAuthRoot,
+) -> Result<(), DomainError> {
+    let workspace_id = manifest
+        .pointer("/workspace/id")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| work_history_error("backup manifest has no workspace identity"))?;
+    let header = authenticate_artifact(
+        root,
+        MacDomain::NativeImportRecordsRoot,
+        &manifest_auth_context(workspace_id),
+        &backup_manifest_content_hash(manifest)?,
+        1,
+    )
+    .map_err(work_history_error)?;
+    manifest["authentication"] = serde_json::to_value(header).map_err(work_history_error)?;
+    Ok(())
+}
+
+fn verify_backup_manifest_authentication(
+    workspace_path: &Path,
+    manifest: &JsonValue,
+) -> Result<(), BackupVerificationIssue> {
+    let issue = |code, message| {
+        BackupVerificationIssue::error(code, message).with_path(MANIFEST_FILE.to_owned())
+    };
+    let Some(authentication) = manifest.get("authentication").filter(|v| !v.is_null()) else {
+        return Err(issue(
+            "manifest_authentication_missing",
+            "backup manifest has no authentication; recreate the backup with the source workspace keys available",
+        ));
+    };
+    let malformed = || {
+        issue(
+            "manifest_authentication_failed",
+            "backup manifest authentication or workspace identity is malformed",
+        )
+    };
+    let header: AuthenticatedHeader =
+        serde_json::from_value(authentication.clone()).map_err(|_| malformed())?;
+    let workspace_id = manifest
+        .pointer("/workspace/id")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(malformed)?;
+    let hash = backup_manifest_content_hash(manifest).map_err(|_| malformed())?;
+    // The untrusted workspace.path in the manifest must never select keys.
+    // Opening only also keeps verification and restore previews non-mutating.
+    let root = StoreAuthRoot::open(workspace_keys_dir(&normalize_path(workspace_path)))
+        .map_err(|_| {
+            issue(
+                "manifest_authentication_unavailable",
+                "source-store authentication keys are unavailable; select the source workspace with --workspace and recover its keys before verifying",
+            )
+        })?;
+    let outcome = verify_artifact(
+        &root,
+        MacDomain::NativeImportRecordsRoot,
+        &manifest_auth_context(workspace_id),
+        &header,
+        &hash,
+        1,
+    )
+    .map_err(|_| malformed())?;
+    if !outcome.is_authenticated() {
+        return Err(issue(
+            "manifest_authentication_failed",
+            "backup manifest did not authenticate under the selected source workspace keys; its identity, inventory or contents may have changed",
+        ));
+    }
+    Ok(())
 }
 
 /// List backup manifests under a backup root.
@@ -2068,8 +2175,18 @@ fn backup_list_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainE
 /// Returns a [`DomainError`] if the manifest cannot be read or parsed as JSON.
 pub fn inspect_backup(options: &BackupInspectOptions) -> Result<BackupInspectReport, DomainError> {
     let backup_path = normalize_backup_input_path(&options.backup_path)?;
+    let (manifest_bytes, manifest) = read_backup_manifest(&backup_path)?;
+    Ok(inspect_manifest(
+        &backup_path,
+        &backup_path.join(MANIFEST_FILE),
+        &hash_bytes(&manifest_bytes),
+        &manifest,
+    ))
+}
+
+fn read_backup_manifest(backup_path: &Path) -> Result<(Vec<u8>, JsonValue), DomainError> {
     let manifest_path = backup_path.join(MANIFEST_FILE);
-    if backup_relative_path_has_symlink_component(&backup_path, Path::new(MANIFEST_FILE))? {
+    if backup_relative_path_has_symlink_component(backup_path, Path::new(MANIFEST_FILE))? {
         return Err(DomainError::Storage {
             message: format!(
                 "backup manifest path '{}' traverses a symbolic link",
@@ -2093,7 +2210,6 @@ pub fn inspect_backup(options: &BackupInspectOptions) -> Result<BackupInspectRep
         ),
         repair: Some("inspect filesystem permissions and retry".to_owned()),
     })?;
-    let manifest_hash = hash_bytes(&manifest_bytes);
     let manifest = serde_json::from_slice::<JsonValue>(&manifest_bytes).map_err(|error| {
         DomainError::Storage {
             message: format!(
@@ -2104,12 +2220,7 @@ pub fn inspect_backup(options: &BackupInspectOptions) -> Result<BackupInspectRep
         }
     })?;
 
-    Ok(inspect_manifest(
-        &backup_path,
-        &manifest_path,
-        &manifest_hash,
-        &manifest,
-    ))
+    Ok((manifest_bytes, manifest))
 }
 
 /// Verify one backup manifest and all required artifacts it references.
@@ -2119,10 +2230,51 @@ pub fn inspect_backup(options: &BackupInspectOptions) -> Result<BackupInspectRep
 /// Returns a [`DomainError`] if the manifest cannot be inspected.
 pub fn verify_backup(options: &BackupVerifyOptions) -> Result<BackupVerifyReport, DomainError> {
     let backup_path = normalize_backup_input_path(&options.backup_path)?;
-    let inspect = inspect_backup(&BackupInspectOptions {
-        backup_path: backup_path.clone(),
-    })?;
-    let mut issues = inspect.issues;
+    let (manifest_bytes, manifest) = read_backup_manifest(&backup_path)?;
+    let inspect = inspect_manifest(
+        &backup_path,
+        &backup_path.join(MANIFEST_FILE),
+        &hash_bytes(&manifest_bytes),
+        &manifest,
+    );
+    verify_backup_manifest(&options.workspace_path, &backup_path, &manifest, &inspect)
+}
+
+fn verify_backup_manifest(
+    workspace_path: &Path,
+    backup_path: &Path,
+    manifest: &JsonValue,
+    inspect: &BackupInspectReport,
+) -> Result<BackupVerifyReport, DomainError> {
+    let mut issues = inspect.issues.clone();
+    if let Err(issue) = verify_backup_manifest_authentication(workspace_path, manifest) {
+        issues.push(issue);
+    }
+    let mut paths = BTreeSet::new();
+    for path in inspect
+        .artifacts
+        .iter()
+        .map(|artifact| &artifact.path)
+        .chain(inspect.derived.iter().map(|asset| &asset.path))
+    {
+        if path == MANIFEST_FILE || !paths.insert(path) {
+            issues.push(
+                BackupVerificationIssue::error(
+                    "manifest_artifact_duplicate",
+                    "backup inventory contains a duplicate or self-referencing artifact path",
+                )
+                .with_path(path.clone()),
+            );
+        }
+    }
+    if !inspect.artifacts.iter().any(|artifact| {
+        artifact.path == RECORDS_FILE && artifact.kind == "jsonl_export" && artifact.required
+    }) {
+        issues.push(BackupVerificationIssue::error(
+            "manifest_records_missing",
+            "backup inventory must include the required records.jsonl export",
+        ));
+    }
     let mut checked_artifacts = Vec::new();
     let mut checked_derived = Vec::new();
 
@@ -2145,7 +2297,7 @@ pub fn verify_backup(options: &BackupVerifyOptions) -> Result<BackupVerifyReport
     }
 
     for artifact in &inspect.artifacts {
-        let Some(path) = safe_artifact_path(&backup_path, &artifact.path, &mut issues) else {
+        let Some(path) = safe_artifact_path(backup_path, &artifact.path, &mut issues) else {
             continue;
         };
         if !path.is_file() {
@@ -2207,7 +2359,7 @@ pub fn verify_backup(options: &BackupVerifyOptions) -> Result<BackupVerifyReport
     }
 
     for derived in &inspect.derived {
-        let Some(path) = safe_artifact_path(&backup_path, &derived.path, &mut issues) else {
+        let Some(path) = safe_artifact_path(backup_path, &derived.path, &mut issues) else {
             continue;
         };
         if !path.is_file() {
@@ -2302,11 +2454,11 @@ pub fn verify_backup(options: &BackupVerifyOptions) -> Result<BackupVerifyReport
     };
     Ok(BackupVerifyReport {
         schema: BACKUP_VERIFY_SCHEMA_V1,
-        backup_id: inspect.backup_id,
+        backup_id: inspect.backup_id.clone(),
         status: status.to_owned(),
-        backup_path: inspect.backup_path,
-        manifest_path: inspect.manifest_path,
-        manifest_hash: inspect.manifest_hash,
+        backup_path: inspect.backup_path.clone(),
+        manifest_path: inspect.manifest_path.clone(),
+        manifest_hash: inspect.manifest_hash.clone(),
         checked_artifacts,
         checked_derived,
         issues,
@@ -2327,12 +2479,16 @@ pub fn restore_backup_to_side_path(
     let side_path = normalize_restore_side_path(&options.side_path)?;
     ensure_side_path_outside_workspace(&workspace_path, &side_path)?;
 
-    let inspect = inspect_backup(&BackupInspectOptions {
-        backup_path: backup_path.clone(),
-    })?;
-    let verify = verify_backup(&BackupVerifyOptions {
-        backup_path: backup_path.clone(),
-    })?;
+    // Keep the exact manifest snapshot through authentication, path selection,
+    // copying and reporting. Reopening it between phases permits substitution.
+    let (manifest_bytes, manifest) = read_backup_manifest(&backup_path)?;
+    let inspect = inspect_manifest(
+        &backup_path,
+        &backup_path.join(MANIFEST_FILE),
+        &hash_bytes(&manifest_bytes),
+        &manifest,
+    );
+    let verify = verify_backup_manifest(&workspace_path, &backup_path, &manifest, &inspect)?;
     if verify
         .issues
         .iter()
@@ -2402,13 +2558,6 @@ pub fn restore_backup_to_side_path(
         repair: Some("choose a writable --side-path".to_owned()),
     })?;
 
-    let manifest_bytes = fs::read(&source_manifest_path).map_err(|error| DomainError::Storage {
-        message: format!(
-            "failed to read backup manifest '{}': {error}",
-            source_manifest_path.display()
-        ),
-        repair: Some("verify the backup directory and retry restore".to_owned()),
-    })?;
     let restore_degraded = restore_manifest_degradations(&manifest_bytes);
     if restore_degraded
         .iter()
@@ -2419,6 +2568,7 @@ pub fn restore_backup_to_side_path(
     write_new_file(&restore_manifest_path, &manifest_bytes)?;
 
     copy_new_file(&source_records_path, &restore_records_path)?;
+    verify_restored_records(&restore_records_path, &inspect)?;
     let restored_derived = copy_derived_artifacts_to_restore(
         &backup_path,
         &restore_artifact_dir,
@@ -2712,6 +2862,25 @@ fn backup_artifact_path(
 
 fn backup_verification_issue_is_blocking(issue: &BackupVerificationIssue) -> bool {
     matches!(issue.severity.as_str(), "error" | "high" | "critical")
+}
+
+fn verify_restored_records(
+    records_path: &Path,
+    inspect: &BackupInspectReport,
+) -> Result<(), DomainError> {
+    let artifact = inspect
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.path == RECORDS_FILE)
+        .ok_or_else(|| work_history_error("backup manifest has no records artifact"))?;
+    if artifact.hash.as_deref() != Some(hash_file(records_path)?.as_str())
+        || artifact.size_bytes != Some(file_size(records_path)?)
+    {
+        return Err(work_history_error(
+            "copied backup records differ from the authenticated manifest; no records were imported",
+        ));
+    }
+    Ok(())
 }
 
 fn copy_derived_artifacts_to_restore(
@@ -7175,6 +7344,7 @@ mod tests {
             "manifest snapshot coverage posture",
         )?;
         let verify = verify_backup(&BackupVerifyOptions {
+            workspace_path: workspace.clone(),
             backup_path: PathBuf::from(report.backup_path),
         })
         .map_err(|error| error.message())?;
@@ -8227,6 +8397,25 @@ mod tests {
             })
             .ok_or_else(|| "symlinked key store must degrade the backup".to_owned())?;
         ensure_equal(entry.severity.as_str(), "high", "degraded severity")?;
+        ensure_equal(report.status.as_str(), "partial", "unsigned backup status")?;
+        ensure_equal(
+            report.verification_status.as_str(),
+            "unauthenticated",
+            "unsigned backup cannot claim verified integrity",
+        )?;
+        let verified = verify_backup(&BackupVerifyOptions {
+            workspace_path: workspace.clone(),
+            backup_path: PathBuf::from(&report.backup_path),
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(verified.status.as_str(), "failed", "unsigned verification")?;
+        ensure(
+            verified
+                .issues
+                .iter()
+                .any(|issue| issue.code == "manifest_authentication_missing"),
+            "unsigned emergency export remains visibly unauthenticated",
+        )?;
 
         let records =
             fs::read_to_string(&report.records_path).map_err(|error| error.to_string())?;
@@ -8947,6 +9136,314 @@ mod tests {
     }
 
     #[test]
+    fn backup_manifest_authentication_binds_complete_inventory() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let workspace_id = load_workspace(&connection, &workspace)
+            .map_err(|e| e.message())?
+            .workspace_id;
+        let rule = recovery_rule(&workspace_id, 0);
+        connection
+            .insert_procedural_rule_for_recovery(&rule)
+            .map_err(|e| e.to_string())?;
+        connection.close().map_err(|e| e.to_string())?;
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(workspace.join("authenticated-backups")),
+            label: None,
+            redaction_level: RedactionLevel::None,
+            include_derived: true,
+            include_graph_cache: true,
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        let verify_options = BackupVerifyOptions {
+            workspace_path: workspace.clone(),
+            backup_path: PathBuf::from(&created.backup_path),
+        };
+        let verified = verify_backup(&verify_options).map_err(|e| e.message())?;
+        ensure_equal(
+            verified.status.as_str(),
+            "verified",
+            "complete signed inventory",
+        )?;
+        let (_, original) =
+            read_backup_manifest(&verify_options.backup_path).map_err(|e| e.message())?;
+        let derived = original["derived"]
+            .as_array()
+            .ok_or_else(|| "derived inventory missing".to_owned())?;
+        ensure(
+            derived.len() >= 2,
+            "reordering must change at least two real assets",
+        )?;
+        ensure(
+            derived
+                .iter()
+                .any(|asset| asset["kind"] == "learning_history"),
+            "positive fixture contains learned history",
+        )?;
+        let root = StoreAuthRoot::open(workspace_keys_dir(&workspace)).map_err(|e| e.message())?;
+        let mut other_backup = original.clone();
+        other_backup["backupId"] = json!(BackupId::now().to_string());
+        authenticate_backup_manifest(&mut other_backup, &root).map_err(|e| e.message())?;
+
+        for defect in [
+            "omit_learning_family",
+            "omit_all_derived",
+            "omit_records",
+            "reorder",
+            "duplicate",
+            "coverage",
+            "artifact_hash",
+            "artifact_size",
+            "backup_id",
+            "workspace_id",
+            "workspace_path",
+            "schema",
+            "unsigned",
+            "malformed_auth",
+            "substituted_auth",
+            "signed_duplicate",
+            "signed_missing_records",
+        ] {
+            let mut changed = original.clone();
+            let mut assets = derived.clone();
+            let mut expected_code = "manifest_authentication_failed";
+            match defect {
+                "omit_learning_family" => {
+                    assets.retain(|asset| asset["kind"] != "learning_history");
+                    changed["derived"] = json!(assets);
+                }
+                "omit_all_derived" => changed["derived"] = json!([]),
+                "omit_records" => changed["artifacts"] = json!([]),
+                "reorder" => {
+                    assets.reverse();
+                    changed["derived"] = json!(assets);
+                }
+                "duplicate" | "signed_duplicate" => {
+                    assets.push(assets[0].clone());
+                    changed["derived"] = json!(assets);
+                    if defect == "signed_duplicate" {
+                        authenticate_backup_manifest(&mut changed, &root)
+                            .map_err(|e| e.message())?;
+                        expected_code = "manifest_artifact_duplicate";
+                    }
+                }
+                "coverage" => changed["recoveryInventory"]["uncoveredRequiredRowCount"] = json!(99),
+                "artifact_hash" => changed["artifacts"][0]["hash"] = json!("blake3:modified"),
+                "artifact_size" => changed["artifacts"][0]["sizeBytes"] = json!(0),
+                "backup_id" => changed["backupId"] = other_backup["backupId"].clone(),
+                "workspace_id" => changed["workspace"]["id"] = json!("wsp_foreign"),
+                "workspace_path" => changed["workspace"]["path"] = json!("/untrusted/source"),
+                "schema" => changed["schema"] = json!("ee.backup.manifest.v999"),
+                "unsigned" => {
+                    changed["authentication"] = JsonValue::Null;
+                    expected_code = "manifest_authentication_missing";
+                }
+                "malformed_auth" => changed["authentication"]["mac"] = json!("invalid"),
+                "substituted_auth" => {
+                    changed["authentication"] = other_backup["authentication"].clone()
+                }
+                "signed_missing_records" => {
+                    changed["artifacts"] = json!([]);
+                    authenticate_backup_manifest(&mut changed, &root).map_err(|e| e.message())?;
+                    expected_code = "manifest_records_missing";
+                }
+                _ => return Err(format!("unhandled defect {defect}")),
+            }
+            fs::write(
+                &created.manifest_path,
+                serde_json::to_vec(&changed).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            let rejected = verify_backup(&verify_options).map_err(|e| e.message())?;
+            ensure_equal(rejected.status.as_str(), "failed", defect)?;
+            ensure(
+                rejected
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code == expected_code),
+                format!(
+                    "{defect} must fail for {expected_code}: {:?}",
+                    rejected.issues
+                ),
+            )?;
+            let side_path = tempdir.path().join(format!("rejected-{defect}"));
+            for dry_run in [true, false] {
+                ensure(
+                    restore_backup_to_side_path(&BackupRestoreOptions {
+                        workspace_path: workspace.clone(),
+                        backup_path: verify_options.backup_path.clone(),
+                        side_path: side_path.clone(),
+                        restore_graph_cache: false,
+                        dry_run,
+                    })
+                    .is_err(),
+                    format!("restore must reject {defect}, dry_run={dry_run}"),
+                )?;
+                ensure(
+                    !side_path.exists(),
+                    format!("{defect} must not start a restore"),
+                )?;
+            }
+        }
+
+        // Whitespace and object-key order carry no meaning. Re-serialization
+        // must preserve authentication without regenerating the MAC.
+        fs::write(
+            &created.manifest_path,
+            serde_json::to_vec(&original).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        ensure_equal(
+            verify_backup(&verify_options)
+                .map_err(|e| e.message())?
+                .status
+                .as_str(),
+            "verified",
+            "compact manifest remains authentic",
+        )?;
+        let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: verify_options.backup_path,
+            side_path: tempdir.path().join("authenticated-restore"),
+            restore_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        ensure_equal(
+            restored.restored_rule_count,
+            1,
+            "authentic learned history recovers",
+        )?;
+        let recovered = DbConnection::open_file(&restored.restored_database_path)
+            .map_err(|e| e.to_string())?
+            .get_procedural_rule(&rule.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "restored rule missing".to_owned())?;
+        ensure_equal(
+            recovered.content,
+            rule.content,
+            "rule content survives whole-inventory authentication",
+        )
+    }
+
+    #[test]
+    fn backup_manifest_verification_uses_only_caller_selected_keys() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: None,
+            label: None,
+            redaction_level: RedactionLevel::None,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        let wrong_workspace = tempdir.path().join("different-key-source");
+        StoreAuthRoot::open_or_create(workspace_keys_dir(&wrong_workspace))
+            .map_err(|e| e.message())?;
+        let missing_workspace = tempdir.path().join("no-key-source");
+        for (selected, expected) in [
+            (&wrong_workspace, "manifest_authentication_failed"),
+            (&missing_workspace, "manifest_authentication_unavailable"),
+        ] {
+            let rejected = verify_backup(&BackupVerifyOptions {
+                workspace_path: selected.clone(),
+                backup_path: PathBuf::from(&created.backup_path),
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(rejected.status.as_str(), "failed", "wrong selected source")?;
+            ensure(
+                rejected.issues.iter().any(|issue| issue.code == expected),
+                expected,
+            )?;
+            let side_path = tempdir.path().join(format!("reject-{expected}"));
+            ensure(
+                restore_backup_to_side_path(&BackupRestoreOptions {
+                    workspace_path: selected.clone(),
+                    backup_path: PathBuf::from(&created.backup_path),
+                    side_path: side_path.clone(),
+                    restore_graph_cache: false,
+                    dry_run: false,
+                })
+                .is_err(),
+                "restore cannot select keys from the manifest path",
+            )?;
+            ensure(
+                !side_path.exists(),
+                "wrong keys reject before restore writes",
+            )?;
+        }
+        ensure(
+            !missing_workspace.exists(),
+            "verification never creates missing source keys",
+        )?;
+        let (_, mut manifest) =
+            read_backup_manifest(Path::new(&created.backup_path)).map_err(|e| e.message())?;
+        manifest["workspace"]["path"] = json!(missing_workspace);
+        let root = StoreAuthRoot::open(workspace_keys_dir(&workspace)).map_err(|e| e.message())?;
+        authenticate_backup_manifest(&mut manifest, &root).map_err(|e| e.message())?;
+        fs::write(
+            &created.manifest_path,
+            serde_json::to_vec(&manifest).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let verified = verify_backup(&BackupVerifyOptions {
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&created.backup_path),
+        })
+        .map_err(|e| e.message())?;
+        ensure_equal(
+            verified.status.as_str(),
+            "verified",
+            "authenticated source path is informational",
+        )?;
+        ensure(
+            !missing_workspace.exists(),
+            "manifest path is never used to open keys",
+        )
+    }
+
+    #[test]
+    fn backup_restore_checks_copied_records_against_authenticated_inventory() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            output_dir: None,
+            label: None,
+            redaction_level: RedactionLevel::None,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        let inspect = inspect_backup(&BackupInspectOptions {
+            backup_path: PathBuf::from(&created.backup_path),
+        })
+        .map_err(|e| e.message())?;
+        let original_copy = tempdir.path().join("original-records.jsonl");
+        copy_new_file(Path::new(&created.records_path), &original_copy).map_err(|e| e.message())?;
+        verify_restored_records(&original_copy, &inspect).map_err(|e| e.message())?;
+        // Replace the source after the initial inspection. This tests the
+        // actual copy/validation boundary without a timing-dependent race.
+        let mut changed = fs::read(&created.records_path).map_err(|e| e.to_string())?;
+        changed.push(b'\n');
+        fs::write(&created.records_path, changed).map_err(|e| e.to_string())?;
+        let changed_copy = tempdir.path().join("changed-records.jsonl");
+        copy_new_file(Path::new(&created.records_path), &changed_copy).map_err(|e| e.message())?;
+        ensure(
+            verify_restored_records(&changed_copy, &inspect)
+                .is_err_and(|error| error.message().contains("no records were imported")),
+            "copied source drift must reject before import",
+        )
+    }
+
+    #[test]
     fn verify_backup_detects_tampered_artifact() -> TestResult {
         let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
         let out = workspace.join("backups");
@@ -8964,6 +9461,7 @@ mod tests {
         fs::write(&created.records_path, b"tampered\n").map_err(|error| error.to_string())?;
 
         let verified = verify_backup(&BackupVerifyOptions {
+            workspace_path: PathBuf::from(&created.workspace_path),
             backup_path: PathBuf::from(&created.backup_path),
         })
         .map_err(|error| error.message())?;
@@ -9028,6 +9526,7 @@ mod tests {
         )?;
 
         let verified = verify_backup(&BackupVerifyOptions {
+            workspace_path: PathBuf::from(&created.workspace_path),
             backup_path: PathBuf::from(&created.backup_path),
         })
         .map_err(|error| error.message())?;
@@ -9211,6 +9710,11 @@ mod tests {
             .checked_sub(1)
             .ok_or_else(|| "compiled DB schema version cannot be downgraded for test".to_owned())?;
         manifest["graphCache"]["schemaVersion"] = json!(older_schema_version);
+        // Model an authenticated backup produced by an older schema. The
+        // migration assertions below must exercise restore, not a MAC failure.
+        let root =
+            StoreAuthRoot::open(workspace_keys_dir(&workspace)).map_err(|error| error.message())?;
+        authenticate_backup_manifest(&mut manifest, &root).map_err(|error| error.message())?;
         let mut downgraded_manifest =
             serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
         downgraded_manifest.push(b'\n');
@@ -9537,6 +10041,7 @@ mod tests {
         .map_err(|error| error.message())?;
 
         let verified = verify_backup(&BackupVerifyOptions {
+            workspace_path: PathBuf::from(&created.workspace_path),
             backup_path: PathBuf::from(&created.backup_path),
         })
         .map_err(|error| error.message())?;
@@ -9596,6 +10101,7 @@ mod tests {
         .map_err(|error| error.to_string())?;
 
         let verified = verify_backup(&BackupVerifyOptions {
+            workspace_path: PathBuf::from(&created.workspace_path),
             backup_path: PathBuf::from(&created.backup_path),
         })
         .map_err(|error| error.message())?;
@@ -9633,8 +10139,11 @@ mod tests {
         fs::write(backup_path.join(MANIFEST_FILE), manifest_bytes)
             .map_err(|error| error.to_string())?;
 
-        let verified =
-            verify_backup(&BackupVerifyOptions { backup_path }).map_err(|error| error.message())?;
+        let verified = verify_backup(&BackupVerifyOptions {
+            workspace_path: tempdir.path().to_path_buf(),
+            backup_path,
+        })
+        .map_err(|error| error.message())?;
 
         ensure_equal(verified.status.as_str(), "failed", "verify status")?;
         ensure(
@@ -9679,8 +10188,11 @@ mod tests {
         fs::write(backup_path.join(MANIFEST_FILE), manifest_bytes)
             .map_err(|error| error.to_string())?;
 
-        let verified =
-            verify_backup(&BackupVerifyOptions { backup_path }).map_err(|error| error.message())?;
+        let verified = verify_backup(&BackupVerifyOptions {
+            workspace_path: tempdir.path().to_path_buf(),
+            backup_path,
+        })
+        .map_err(|error| error.message())?;
 
         ensure_equal(verified.status.as_str(), "failed", "verify status")?;
         ensure(
@@ -9873,8 +10385,11 @@ mod tests {
         fs::write(backup_path.join(MANIFEST_FILE), manifest_bytes)
             .map_err(|error| error.to_string())?;
 
-        let verified =
-            verify_backup(&BackupVerifyOptions { backup_path }).map_err(|error| error.message())?;
+        let verified = verify_backup(&BackupVerifyOptions {
+            workspace_path: tempdir.path().to_path_buf(),
+            backup_path,
+        })
+        .map_err(|error| error.message())?;
 
         ensure_equal(
             verified.status.as_str(),
@@ -10537,6 +11052,7 @@ mod tests {
                 )?;
             }
             let verification = verify_backup(&BackupVerifyOptions {
+                workspace_path: workspace.clone(),
                 backup_path: PathBuf::from(&backup.backup_path),
             })
             .map_err(|error| error.message())?;

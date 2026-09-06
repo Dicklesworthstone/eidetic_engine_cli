@@ -231,6 +231,7 @@ fn schema_family_covers_handoff_export_and_backup_surfaces() -> TestResult {
         format!("backup inspect schema drifted: {}", inspected_backup.schema),
     )?;
     let verified_backup = verify_backup(&BackupVerifyOptions {
+        workspace_path: fixture.workspace.clone(),
         backup_path: PathBuf::from(backup_path),
     })
     .map_err(|error| format!("verify backup: {error:?}"))?;

@@ -18834,7 +18834,10 @@ where
     let workspace_path = cli.resolve_workspace();
     let backup_path =
         resolve_backup_path(&workspace_path, &args.backup, args.output_dir.as_deref());
-    let options = BackupVerifyOptions { backup_path };
+    let options = BackupVerifyOptions {
+        workspace_path,
+        backup_path,
+    };
 
     match verify_backup(&options) {
         Ok(report) => {
