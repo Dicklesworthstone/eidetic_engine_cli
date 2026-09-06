@@ -16675,7 +16675,7 @@ fn seed_pack_quality_workspace(
                     timestamp,
                 )?;
             }
-            let mut link_ids = determinism::Deterministic::from_seed(0);
+            let mut link_ids = crate::runtime::determinism::Deterministic::from_seed(0);
             for link in &links {
                 let id = crate::models::MemoryLinkId::now_seeded(&mut link_ids);
                 connection.insert_memory_link(&id.to_string(), link)?;
