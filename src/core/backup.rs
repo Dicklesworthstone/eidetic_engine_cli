@@ -37,7 +37,7 @@ use crate::models::{
     ExportLinkRecord, ExportMemoryRecord, ExportScope, ExportTagRecord, ExportWorkspaceRecord,
     ImportSource, RedactionLevel, TrustLevel, jsonl::ExportRecordBuildError,
 };
-use crate::output::jsonl_export::{ExportStats, JsonlExporter};
+use crate::output::jsonl_export::{ExportStats, JsonlExporter, redact_content};
 use crate::policy::import_auth::{
     ArtifactContext, EXPORT_ARTIFACT_FAMILY, EXPORT_RECORD_ENCODING_V1, STORE_KEY_NAMESPACE_V1,
     authenticate_artifact,
@@ -1062,6 +1062,36 @@ impl BackupCassEvidenceRecord {
             updated_at: self.updated_at,
         }
     }
+
+    fn redact_for_export(&mut self, level: RedactionLevel, provenance_admitted: bool) {
+        if level == RedactionLevel::None {
+            return;
+        }
+        let excerpt = if provenance_admitted {
+            redact_content(&self.excerpt, level)
+        } else {
+            // Legacy or quarantined rows retain their identity and disposition,
+            // but cannot carry unchecked source text into a portable backup.
+            redact_content(&self.excerpt, RedactionLevel::Full)
+        };
+        if !provenance_admitted {
+            self.cass_span_id = hash_bytes(self.cass_span_id.as_bytes());
+            self.span_kind = redact_content(&self.span_kind, level);
+            self.role = self.role.as_deref().map(|role| redact_content(role, level));
+        }
+        if excerpt != self.excerpt || !provenance_admitted {
+            self.excerpt = excerpt;
+            self.content_hash = hash_bytes(self.excerpt.as_bytes());
+            self.canonical_excerpt_hash = None;
+            self.canonical_provenance_revision = 0;
+            self.security_policy_epoch = 0;
+            self.metadata_json = None;
+            self.secret_redaction_status = "redacted".to_owned();
+            self.redaction_classes_json = "[\"backup_redaction\"]".to_owned();
+            self.search_eligibility = "denied".to_owned();
+            self.pack_eligibility = "denied".to_owned();
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1357,7 +1387,6 @@ fn recovery_inventory_degradations(inventory: &BackupRecoveryInventory) -> Vec<B
 
 fn reconcile_derived_recovery_inventory(
     inventory: &mut BackupRecoveryInventory,
-    include_derived: bool,
     derived: &[BackupDerivedPayload],
 ) {
     let captured_task_episode_count = derived
@@ -1382,8 +1411,7 @@ fn reconcile_derived_recovery_inventory(
             .iter_mut()
             .find(|entry| entry.table == table)
         {
-            entry.snapshot_covered =
-                entry.row_count == 0 || (include_derived && captured_count == entry.row_count);
+            entry.snapshot_covered = captured_count == entry.row_count;
         }
     }
 
@@ -1449,8 +1477,6 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         message: error.to_string(),
         repair: Some(INIT_AND_MIGRATE_REPAIR_COMMAND.to_owned()),
     })?;
-    let workspace = load_workspace(&connection, &workspace_path)?;
-    let (export_data, mut recovery_inventory) = load_backup_snapshot(&connection, workspace)?;
     let backup_id = BackupId::now().to_string();
     let backup_root = backup_root(options, &workspace_path);
     let backup_path = backup_root.join(&backup_id);
@@ -1462,43 +1488,60 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         options.include_derived,
         options.include_graph_cache,
     );
+    // Durable history and its coverage counts must describe the same database
+    // snapshot as the memory records. The optional flags only select caches.
+    let (export_data, mut recovery_inventory, derived_payloads, mesh) =
+        with_backup_read_snapshot(&connection, || {
+            let workspace = load_workspace(&connection, &workspace_path)?;
+            let export_data = load_export_data_in_current_snapshot(&connection, workspace)?;
+            let inventory = build_recovery_inventory(&connection)?;
+            let workspace_id = &export_data.workspace.workspace_id;
+            let mut payloads = Vec::new();
+            collect_task_episode_payloads(
+                &connection,
+                workspace_id,
+                &created_at,
+                options.redaction_level,
+                &mut degraded,
+                &mut payloads,
+            );
+            collect_cass_payloads(
+                &connection,
+                workspace_id,
+                &created_at,
+                options.redaction_level,
+                &mut degraded,
+                &mut payloads,
+            );
+            if options.include_derived {
+                payloads.extend(collect_derived_payloads(
+                    &connection,
+                    &workspace_path,
+                    workspace_id,
+                    &created_at,
+                    &mut degraded,
+                ));
+            } else if options.include_graph_cache {
+                payloads.extend(collect_graph_cache_payloads(
+                    &connection,
+                    workspace_id,
+                    &created_at,
+                    &mut degraded,
+                ));
+            }
+            let mesh = backup_mesh_summary(&connection, workspace_id, &mut degraded);
+            Ok((export_data, inventory, payloads, mesh))
+        })?;
     degraded.extend(redaction_pattern_degradations(
         &export_data,
         options.redaction_level,
     ));
-    let derived_payloads = if options.include_derived {
-        collect_derived_payloads(
-            &connection,
-            &workspace_path,
-            &export_data.workspace.workspace_id,
-            &created_at,
-            &mut degraded,
-        )
-    } else if options.include_graph_cache {
-        collect_graph_cache_payloads(
-            &connection,
-            &export_data.workspace.workspace_id,
-            &created_at,
-            &mut degraded,
-        )
-    } else {
-        Vec::new()
-    };
     let derived_reports = derived_payloads
         .iter()
         .map(|payload| payload.report.clone())
         .collect::<Vec<_>>();
-    reconcile_derived_recovery_inventory(
-        &mut recovery_inventory,
-        options.include_derived,
-        &derived_payloads,
-    );
+    reconcile_derived_recovery_inventory(&mut recovery_inventory, &derived_payloads);
     degraded.extend(recovery_inventory_degradations(&recovery_inventory));
-    let mesh = backup_mesh_summary(
-        &connection,
-        &export_data.workspace.workspace_id,
-        &mut degraded,
-    );
 
     // TC-D14: a store-auth fault must not block the backup — the artifact
     // ships unauthenticated with a high degraded entry, and import then
@@ -3625,17 +3668,6 @@ fn load_export_data(
     })
 }
 
-fn load_backup_snapshot(
-    connection: &DbConnection,
-    workspace: crate::db::StoredWorkspace,
-) -> Result<(BackupExportData, BackupRecoveryInventory), DomainError> {
-    with_backup_read_snapshot(connection, || {
-        let export_data = load_export_data_in_current_snapshot(connection, workspace)?;
-        let recovery_inventory = build_recovery_inventory(connection)?;
-        Ok((export_data, recovery_inventory))
-    })
-}
-
 fn with_backup_read_snapshot<T>(
     connection: &DbConnection,
     load: impl FnOnce() -> Result<T, DomainError>,
@@ -4263,7 +4295,7 @@ fn manifest_json(
     mesh: &BackupMeshSummary,
 ) -> JsonValue {
     let mut manifest = json!({
-        "schema": if report.include_derived || report.include_graph_cache {
+        "schema": if report.include_derived || report.include_graph_cache || !report.derived.is_empty() {
             BACKUP_MANIFEST_SCHEMA_V2
         } else {
             BACKUP_MANIFEST_SCHEMA_V1
@@ -4297,7 +4329,7 @@ fn manifest_json(
             "manifestHash": manifest_hash,
         },
     });
-    if report.include_derived || report.include_graph_cache {
+    if report.include_derived || report.include_graph_cache || !report.derived.is_empty() {
         manifest["derived"] = JsonValue::Array(
             report
                 .derived
@@ -4386,20 +4418,6 @@ fn collect_derived_payloads(
         &mut payloads,
     );
     collect_graph_snapshot_payloads(
-        connection,
-        workspace_id,
-        captured_at,
-        degraded,
-        &mut payloads,
-    );
-    collect_task_episode_payloads(
-        connection,
-        workspace_id,
-        captured_at,
-        degraded,
-        &mut payloads,
-    );
-    collect_cass_payloads(
         connection,
         workspace_id,
         captured_at,
@@ -4951,6 +4969,7 @@ fn collect_task_episode_payloads(
     connection: &DbConnection,
     workspace_id: &str,
     captured_at: &str,
+    redaction_level: RedactionLevel,
     degraded: &mut Vec<BackupDegradation>,
     payloads: &mut Vec<BackupDerivedPayload>,
 ) {
@@ -4966,7 +4985,7 @@ fn collect_task_episode_payloads(
         }
     };
     for episode in episodes {
-        match json_payload_bytes(&task_episode_json(&episode, captured_at)) {
+        match json_payload_bytes(&task_episode_json(&episode, captured_at, redaction_level)) {
             Ok(bytes) => payloads.push(derived_payload(
                 format!("derived/lab/episodes/{}.json", safe_file_stem(&episode.id)),
                 "lab_episode",
@@ -4983,7 +5002,37 @@ fn collect_task_episode_payloads(
     }
 }
 
-fn task_episode_json(episode: &StoredTaskEpisode, captured_at: &str) -> JsonValue {
+fn task_episode_json(
+    episode: &StoredTaskEpisode,
+    captured_at: &str,
+    redaction_level: RedactionLevel,
+) -> JsonValue {
+    let original = episode;
+    let mut episode = episode.clone();
+    episode.task_input = redact_content(&episode.task_input, redaction_level);
+    episode.outcome_details = episode
+        .outcome_details
+        .as_deref()
+        .map(|text| redact_content(text, redaction_level));
+    episode.agent = episode
+        .agent
+        .as_deref()
+        .map(|text| redact_content(text, redaction_level));
+    for action in &mut episode.actions {
+        action.action_type = redact_content(&action.action_type, redaction_level);
+        action.target_id = action
+            .target_id
+            .as_deref()
+            .map(|text| redact_content(text, redaction_level));
+        action.details = action
+            .details
+            .as_deref()
+            .map(|text| redact_content(text, redaction_level));
+    }
+    if &episode != original {
+        // A source hash must not authenticate a redacted episode body.
+        episode.episode_hash = None;
+    }
     json!({
         "schema": "ee.backup.derived.lab_episode.v1",
         "capturedAt": captured_at,
@@ -5011,6 +5060,7 @@ fn collect_cass_payloads(
     connection: &DbConnection,
     workspace_id: &str,
     captured_at: &str,
+    redaction_level: RedactionLevel,
     degraded: &mut Vec<BackupDegradation>,
     payloads: &mut Vec<BackupDerivedPayload>,
 ) {
@@ -5029,7 +5079,18 @@ fn collect_cass_payloads(
             source_locator_policy: "omitted_host_local".to_owned(),
             sessions: chunk
                 .iter()
-                .map(BackupCassSessionRecord::from_stored)
+                .map(|session| {
+                    let mut record = BackupCassSessionRecord::from_stored(session);
+                    record.agent_name = record
+                        .agent_name
+                        .as_deref()
+                        .map(|text| redact_content(text, redaction_level));
+                    record.model = record
+                        .model
+                        .as_deref()
+                        .map(|text| redact_content(text, redaction_level));
+                    record
+                })
                 .collect(),
         };
         match serialized_payload_bytes(&chunk) {
@@ -5054,6 +5115,10 @@ fn collect_cass_payloads(
             return;
         }
     };
+    let sessions_by_id = sessions
+        .iter()
+        .map(|session| (session.id.as_str(), session))
+        .collect::<BTreeMap<_, _>>();
     for (index, chunk) in evidence.chunks(CASS_BACKUP_CHUNK_ROWS).enumerate() {
         let chunk = BackupCassEvidenceChunk {
             schema: "ee.backup.derived.cass_evidence_spans.v1".to_owned(),
@@ -5061,7 +5126,16 @@ fn collect_cass_payloads(
             chunk_index: u32::try_from(index).unwrap_or(u32::MAX),
             evidence_spans: chunk
                 .iter()
-                .map(BackupCassEvidenceRecord::from_stored)
+                .map(|span| {
+                    let mut record = BackupCassEvidenceRecord::from_stored(span);
+                    let provenance_admitted = sessions_by_id
+                        .get(span.session_id.as_str())
+                        .is_some_and(|session| {
+                            span.is_derivation_admitted_for_session(workspace_id, session)
+                        });
+                    record.redact_for_export(redaction_level, provenance_admitted);
+                    record
+                })
                 .collect(),
         };
         match serialized_payload_bytes(&chunk) {
@@ -6244,7 +6318,7 @@ mod tests {
             .insert_session(
                 "sess_01234567890123456789012345",
                 &CreateSessionInput {
-                    workspace_id,
+                    workspace_id: workspace_id.clone(),
                     cass_session_id: "cass-backup-uncovered-01".to_owned(),
                     source_path: Some("/Users/alice/private/session.jsonl".to_owned()),
                     agent_name: Some("codex".to_owned()),
@@ -6254,6 +6328,28 @@ mod tests {
                     message_count: 1,
                     token_count: Some(8),
                     content_hash: "blake3:fixture".to_owned(),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        // Sessions are now captured by default. Keep a real, still-unsupported
+        // durable row as the negative control for incomplete recovery.
+        connection
+            .insert_import_ledger(
+                "imp_01234567890123456789012345",
+                &crate::db::CreateImportLedgerInput {
+                    workspace_id,
+                    source_kind: "cass".to_owned(),
+                    source_id: "backup-uncovered-import".to_owned(),
+                    status: "completed".to_owned(),
+                    cursor_json: None,
+                    imported_session_count: 1,
+                    imported_span_count: 0,
+                    attempt_count: 1,
+                    error_code: None,
+                    error_message: None,
+                    started_at: Some("2026-09-01T00:00:00Z".to_owned()),
+                    completed_at: Some("2026-09-01T00:01:00Z".to_owned()),
                     metadata_json: None,
                 },
             )
@@ -6280,7 +6376,7 @@ mod tests {
         )?;
         ensure(
             !report.recovery_inventory.snapshot_coverage_complete,
-            "nonempty uncovered session row must make snapshot coverage incomplete",
+            "nonempty uncovered import row must make snapshot coverage incomplete",
         )?;
         let session = report
             .recovery_inventory
@@ -6288,17 +6384,29 @@ mod tests {
             .iter()
             .find(|entry| entry.table == "sessions")
             .ok_or_else(|| "recovery inventory omitted sessions".to_owned())?;
-        ensure_equal(session.row_count, 1, "uncovered session row count")?;
+        ensure_equal(session.row_count, 1, "captured session row count")?;
         ensure_equal(
             session.coverage.as_str(),
-            "not_implemented",
+            "derived_artifact_restore",
             "session backup coverage",
         )?;
+        ensure(
+            session.snapshot_covered,
+            "default backup covers its session",
+        )?;
+        let ledger = report
+            .recovery_inventory
+            .entries
+            .iter()
+            .find(|entry| entry.table == "import_ledger")
+            .ok_or_else(|| "recovery inventory omitted import_ledger".to_owned())?;
+        ensure_equal(ledger.row_count, 1, "uncovered import row count")?;
+        ensure(!ledger.snapshot_covered, "import ledger remains uncovered")?;
         ensure(
             report.degraded.iter().any(|entry| {
                 entry.code == "backup_source_rows_not_covered"
                     && entry.severity == "high"
-                    && entry.message.contains("sessions=1")
+                    && entry.message.contains("import_ledger=1")
             }),
             format!(
                 "partial backup omitted high source-coverage degradation: {:?}",
@@ -6327,7 +6435,7 @@ mod tests {
     }
 
     #[test]
-    fn task_episode_coverage_requires_complete_derived_capture() -> TestResult {
+    fn task_episode_coverage_is_independent_of_optional_cache_capture() -> TestResult {
         let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         let workspace_id = connection
@@ -6343,7 +6451,7 @@ mod tests {
                 &CreateTaskEpisodeInput {
                     workspace_id: Some(workspace_id),
                     session_id: None,
-                    task_input: "Prove task episode backup coverage".to_owned(),
+                    task_input: "Recover the task using api_key=backup-secret-canary".to_owned(),
                     retrieved_memory_ids: Vec::new(),
                     context_pack_id: None,
                     actions: Vec::new(),
@@ -6382,13 +6490,31 @@ mod tests {
             "task episode recovery mechanism",
         )?;
         ensure(
-            !portable_episode_inventory.snapshot_covered,
-            "task episode row must remain uncovered when derived capture is disabled",
+            portable_episode_inventory.snapshot_covered,
+            "task episode row is captured with optional caches disabled",
         )?;
         ensure_equal(
             portable_only.status.as_str(),
-            "partial",
+            "completed",
             "portable-only task episode backup status",
+        )?;
+        let episode_asset = portable_only
+            .derived
+            .iter()
+            .find(|asset| asset.kind == "lab_episode")
+            .ok_or_else(|| "default backup omitted task episode".to_owned())?;
+        let bytes = fs::read(Path::new(&portable_only.backup_path).join(&episode_asset.path))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            !String::from_utf8_lossy(&bytes).contains("backup-secret-canary"),
+            "default task history must apply export secret redaction",
+        )?;
+        let episode: JsonValue =
+            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        ensure_equal(
+            episode.pointer("/episode/episodeHash"),
+            Some(&JsonValue::Null),
+            "redaction invalidates the original episode body hash",
         )?;
 
         let with_derived = create_backup(&BackupCreateOptions {
@@ -6478,7 +6604,7 @@ mod tests {
             ),
         ];
 
-        reconcile_derived_recovery_inventory(&mut inventory, true, &payloads);
+        reconcile_derived_recovery_inventory(&mut inventory, &payloads);
         let sessions = inventory
             .entries
             .iter()
@@ -6510,7 +6636,7 @@ mod tests {
             None,
             json_payload_bytes(&json!({"sessions": [{}]})).map_err(|error| error.to_string())?,
         ));
-        reconcile_derived_recovery_inventory(&mut inventory, true, &payloads);
+        reconcile_derived_recovery_inventory(&mut inventory, &payloads);
         ensure(
             inventory.snapshot_coverage_complete,
             "exact chunk totals satisfy CASS snapshot coverage",
@@ -6644,8 +6770,12 @@ mod tests {
         let restore_path = tempdir.path().join("task-episode-derived.json");
         fs::write(
             &restore_path,
-            json_payload_bytes(&task_episode_json(&source_episode, "2026-09-02T00:00:00Z"))
-                .map_err(|error| error.to_string())?,
+            json_payload_bytes(&task_episode_json(
+                &source_episode,
+                "2026-09-02T00:00:00Z",
+                RedactionLevel::None,
+            ))
+            .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
         let restored_derived = [BackupRestoredDerivedAssetReport {
@@ -9089,6 +9219,15 @@ mod tests {
 
     #[test]
     fn restore_backup_to_side_path_materializes_derived_assets() -> TestResult {
+        assert_backup_history_round_trip(true)
+    }
+
+    #[test]
+    fn restore_backup_to_side_path_preserves_history_without_optional_caches() -> TestResult {
+        assert_backup_history_round_trip(false)
+    }
+
+    fn assert_backup_history_round_trip(include_derived: bool) -> TestResult {
         let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
         let source_connection =
             DbConnection::open_file(&database).map_err(|error| error.to_string())?;
@@ -9219,6 +9358,22 @@ mod tests {
             .get_task_episode(task_episode_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "source task episode was not stored".to_owned())?;
+        let legacy_evidence_id = EvidenceId::from_uuid(Uuid::from_u128(7)).to_string();
+        if !include_derived {
+            let mut legacy = source_admitted_evidence.clone();
+            legacy.id = legacy_evidence_id.clone();
+            legacy.excerpt = "api_key=legacy-backup-secret-canary".to_owned();
+            legacy.content_hash = hash_bytes(legacy.excerpt.as_bytes());
+            legacy.canonical_excerpt_hash = Some(legacy.content_hash.clone());
+            legacy.security_policy_epoch = 0;
+            legacy.search_eligibility = "denied".to_owned();
+            legacy.pack_eligibility = "denied".to_owned();
+            legacy.cass_span_id = "/Users/alice/private/legacy-backup-secret-canary".to_owned();
+            legacy.metadata_json = Some(r#"{"api_key":"legacy-backup-secret-canary"}"#.to_owned());
+            source_connection
+                .insert_evidence_span_for_recovery(&legacy)
+                .map_err(|error| error.to_string())?;
+        }
         source_connection
             .close()
             .map_err(|error| error.to_string())?;
@@ -9242,9 +9397,13 @@ mod tests {
             database_path: Some(database),
             output_dir: Some(out),
             label: Some("restore-derived".to_owned()),
-            redaction_level: RedactionLevel::None,
-            include_derived: true,
-            include_graph_cache: true,
+            redaction_level: if include_derived {
+                RedactionLevel::None
+            } else {
+                RedactionLevel::Standard
+            },
+            include_derived,
+            include_graph_cache: include_derived,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -9253,6 +9412,19 @@ mod tests {
             .iter()
             .find(|asset| asset.kind == "cass_sessions")
             .ok_or_else(|| "backup omitted CASS session asset".to_owned())?;
+        if !include_derived {
+            for asset in &created.derived {
+                let bytes = fs::read(Path::new(&created.backup_path).join(&asset.path))
+                    .map_err(|error| error.to_string())?;
+                ensure(
+                    !String::from_utf8_lossy(&bytes).contains("legacy-backup-secret-canary"),
+                    format!(
+                        "default backup leaked legacy evidence through {}",
+                        asset.kind
+                    ),
+                )?;
+            }
+        }
         let session_asset_text = String::from_utf8(
             fs::read(Path::new(&created.backup_path).join(&session_asset.path))
                 .map_err(|error| error.to_string())?,
@@ -9273,7 +9445,7 @@ mod tests {
             workspace_path: workspace,
             backup_path: PathBuf::from(&created.backup_path),
             side_path: side_path.clone(),
-            restore_graph_cache: true,
+            restore_graph_cache: include_derived,
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -9291,15 +9463,16 @@ mod tests {
         )?;
         ensure_equal(
             restored.restored_evidence_span_count,
-            2,
+            if include_derived { 2 } else { 3 },
             "restored evidence span count",
         )?;
-        ensure(
+        ensure_equal(
             restored
                 .restored_derived
                 .iter()
                 .any(|derived| derived.kind == "wal_holds"),
-            "restore report includes WAL hold derived asset",
+            include_derived,
+            "WAL diagnostics follow the optional cache flag",
         )?;
         ensure(
             restored
@@ -9308,20 +9481,22 @@ mod tests {
                 .any(|derived| derived.lab_episode_path.is_some()),
             "restore report includes materialized lab episode path",
         )?;
-        ensure(
+        ensure_equal(
             Path::new(&restored.restore_artifact_dir)
                 .join("derived/wal_holds.json")
                 .is_file(),
-            "restore artifact dir includes WAL hold state",
+            include_derived,
+            "WAL diagnostic file follows the optional cache flag",
         )?;
-        ensure(
+        ensure_equal(
             side_path
                 .join(WORKSPACE_MARKER)
                 .join("lab")
                 .join("episodes")
                 .join("ep_restore.json")
                 .is_file(),
-            "restore side path includes frozen lab episode file",
+            include_derived,
+            "frozen lab cache file follows the optional cache flag",
         )?;
 
         let restored_connection =
@@ -9357,6 +9532,36 @@ mod tests {
             .get_evidence_span(&denied_evidence_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "restored database omitted denied evidence".to_owned())?;
+        if !include_derived {
+            let legacy = restored_connection
+                .get_evidence_span(&legacy_evidence_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "restored database omitted legacy evidence identity".to_owned())?;
+            ensure(
+                !legacy.excerpt.contains("legacy-backup-secret-canary"),
+                "restored legacy excerpt stays redacted",
+            )?;
+            ensure_equal(
+                legacy.metadata_json,
+                None,
+                "unchecked legacy metadata removed",
+            )?;
+            ensure_equal(
+                legacy.search_eligibility.as_str(),
+                "denied",
+                "legacy search denied",
+            )?;
+            ensure_equal(
+                legacy.pack_eligibility.as_str(),
+                "denied",
+                "legacy pack denied",
+            )?;
+            ensure_equal(
+                legacy.security_policy_epoch,
+                0,
+                "redaction does not certify evidence",
+            )?;
+        }
         let mut expected_admitted_evidence = source_admitted_evidence;
         expected_admitted_evidence.workspace_id = restored_workspace_id.clone();
         let mut expected_denied_evidence = source_denied_evidence;
