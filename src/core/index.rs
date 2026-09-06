@@ -42,8 +42,8 @@ use crate::search::{
 use crate::search::{LexicalWrite, TantivyIndex};
 use asupersync::sync::OnceCell as AsyncOnceCell;
 use frankensearch::embed::{
-    ConsentSource, DownloadConsent, DownloadProgress, ModelDownloader, ModelLifecycle,
-    ModelManifest, verify_dir_cached,
+    ConsentSource, DownloadConsent, DownloadProgress, ModelArtifactManifestV1, ModelDownloader,
+    ModelLifecycle, ModelManifest,
 };
 use frankensearch::{
     Embedder as _, Model2VecEmbedder, ModelCategory, ModelTier, SearchError, VectorIndex,
@@ -5673,7 +5673,7 @@ fn resolve_registered_model2vec<T>(
             ));
         }
     }
-    if verify_dir_cached(&manifest, &canonical_source).is_err() {
+    if potion_model_dir_verification(&canonical_source).is_err() {
         return Ok(rejected_registered_model2vec(
             entry,
             EmbedRegistryRejectionReason::ManifestVerificationFailed,
@@ -5838,7 +5838,27 @@ fn workspace_embedder_stack_with_default(
 /// runtime requires before loading it. Shared with the lifecycle observer so
 /// both judge a Model2Vec directory by the same rule (GH#30).
 pub(crate) fn verified_potion_model_dir(model_dir: &Path) -> bool {
-    verify_dir_cached(&ModelManifest::potion_128m(), model_dir).is_ok()
+    potion_model_dir_verification(model_dir).is_ok()
+}
+
+/// The exact gate `Model2VecEmbedder::load_with_name` applies before loading
+/// a potion directory, with its error (GH#34).
+///
+/// This is the frozen native artifact manifest check, receipt-cached against
+/// the pinned download manifest: every registered file must match the pinned
+/// size and SHA-256, and no *unregistered* file carrying a semantic role
+/// (`config.json`, `tokenizer_config.json`, `special_tokens_map.json`,
+/// `vocab.txt`, ...) may be present, because the loader would otherwise be
+/// consuming unverified inputs. A full Hugging Face snapshot therefore fails
+/// here even though its two pinned files are byte-identical; only the two
+/// manifest files (plus the `.verified` receipt) may be present. Judging a
+/// directory by a weaker rule than the loader let discovery and
+/// `ee model status` report a directory as usable that the runtime then
+/// refused, silently falling through to the download or hash-fallback path.
+pub(crate) fn potion_model_dir_verification(model_dir: &Path) -> Result<(), SearchError> {
+    ModelArtifactManifestV1::potion_128m_native()?
+        .verify_dir_cached(&ModelManifest::potion_128m(), model_dir)
+        .map(|_| ())
 }
 
 /// Stable, deliberately small backend vocabulary shared by search, pack, and
@@ -8967,6 +8987,65 @@ mod tests {
         ensure(
             potion_model_destination_dir(&direct_model_dir) == direct_model_dir,
             "pre-populated model directories should be honored directly",
+        )
+    }
+
+    /// GH#34: the shared verification gate must apply the loader's rule, not a
+    /// weaker one. Runs only where the bundled model has already been fetched
+    /// (it needs the real pinned artifacts); elsewhere it records why it did
+    /// not run instead of failing.
+    #[test]
+    fn potion_gate_rejects_unregistered_semantic_role_files_like_the_loader() -> TestResult {
+        let real_model_dir = potion_model_destination_dir(&default_embedder_model_root());
+        if !verified_potion_model_dir(&real_model_dir) {
+            eprintln!(
+                "skipping: no verified Model2Vec directory at {}",
+                real_model_dir.display()
+            );
+            return Ok(());
+        }
+
+        let manifest = ModelManifest::potion_128m();
+        let materialize = |label: &str| -> Result<PathBuf, String> {
+            let dir = unique_test_dir(label).join(POTION_MODEL_NAME);
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            for file in &manifest.files {
+                let source = real_model_dir.join(&file.name);
+                let target = dir.join(&file.name);
+                if std::fs::hard_link(&source, &target).is_err() {
+                    std::fs::copy(&source, &target).map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(dir)
+        };
+
+        // Exactly the pinned files, no receipt: verified by full hash pass.
+        let plain = materialize("potion-gate-plain")?;
+        potion_model_dir_verification(&plain)
+            .map_err(|error| format!("pinned files alone must verify: {error}"))?;
+        ensure(
+            verified_potion_model_dir(&plain),
+            "boolean gate must agree with the typed gate",
+        )?;
+
+        // The same bytes plus a Hugging Face snapshot's config.json: the loader
+        // refuses it, so the shared gate must too.
+        let snapshot = materialize("potion-gate-snapshot")?;
+        std::fs::write(snapshot.join("config.json"), "{}").map_err(|e| e.to_string())?;
+        let error = potion_model_dir_verification(&snapshot)
+            .err()
+            .ok_or_else(|| "unregistered config.json must fail verification".to_owned())?;
+        ensure(
+            error.to_string().contains("unregistered file"),
+            "rejection must name the unregistered-file rule",
+        )?;
+        ensure(
+            !verified_potion_model_dir(&snapshot),
+            "boolean gate must reject what the loader rejects",
+        )?;
+        ensure(
+            Model2VecEmbedder::load_with_name(&snapshot, POTION_MODEL_NAME).is_err(),
+            "loader must reject the snapshot directory, matching the gate",
         )
     }
 

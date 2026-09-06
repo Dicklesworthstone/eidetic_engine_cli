@@ -2433,6 +2433,75 @@ You can also keep running lexical fallback; `ee status` and `ee doctor --full`
 show the degraded capability. `EE_EMBED_MODEL_PATH` is a diagnostics/fault
 injection knob, not the model loader.
 
+### Sharing the embedding model with other tools
+
+`ee` pins exactly one local embedder: `minishlab/potion-multilingual-128M`
+(Model2Vec static embeddings, 256-d, revision `a28f4eeb…`, ~531 MB). What is
+on disk, how it is verified, and what can and cannot be shared:
+
+**Registry layout.** `ee model fetch embedding-default` downloads into
+`<root>/potion-multilingual-128M/` and writes exactly three entries:
+
+```
+<root>/potion-multilingual-128M/
+├── model.safetensors   # 512,361,560 bytes, pinned SHA-256
+├── tokenizer.json      #  18,616,131 bytes, pinned SHA-256
+└── .verified           # receipt: manifest fingerprint + per-file size/mtime/inode
+```
+
+`<root>` is `EE_EMBED_MODEL_DIR` when set, otherwise `$XDG_DATA_HOME/ee/models`
+(`~/.local/share/ee/models` on Linux/macOS, `%LOCALAPPDATA%\ee\models` on
+Windows). The `models/model2vec/potion-multilingual-128M/` layout mentioned
+above is *read* (and preferred when it already verifies) but never written by
+`ee model fetch`, so a fresh machine always ends up with the layout shown here.
+
+**Verification.** Frankensearch owns the pinned manifest: each file is checked
+against its pinned size and SHA-256, and the `.verified` receipt lets later
+loads skip re-hashing the 512 MB weights while sizes, mtimes, and inodes still
+match. (The `blake3:` hash printed by `ee model fetch` and stored on the
+registry row is a fingerprint of the *loaded* embedder, not a file digest.) The
+loader additionally rejects a directory that contains any *unregistered* file
+with a semantic role — `config.json`, `tokenizer_config.json`,
+`special_tokens_map.json`, `vocab.txt`, `model.onnx`, … — because it will not
+consume inputs the manifest did not verify. `ee model status` and embedder
+discovery apply that same rule.
+
+**Pointing `ee` at a shared directory.** `EE_EMBED_MODEL_DIR` may name either
+the root (`…/models`) or the model directory itself
+(`…/potion-multilingual-128M`); when set it takes precedence over the
+workspace model registry. The supported recipe is to let `ee` populate the
+shared location once, then reuse it everywhere:
+
+```bash
+export EE_EMBED_MODEL_DIR=/shared/models       # root; the model lands in /shared/models/potion-multilingual-128M
+ee model fetch embedding-default --workspace .  # one download, receipt minted
+# on every other machine/user with the same EE_EMBED_MODEL_DIR:
+EE_EMBED_DOWNLOAD=off ee model status --workspace .   # verified local model, no network
+```
+
+What is **not** supported: a raw Hugging Face snapshot of the same repo. It
+carries `config.json`, `tokenizer_config.json`, `special_tokens_map.json`,
+`vocab.txt`, and `onnx/`, so the loader refuses it even though its
+`model.safetensors` and `tokenizer.json` are byte-identical to the pinned
+files. If you must hand-provision, copy *only* those two files into
+`<root>/potion-multilingual-128M/`; they verify by full SHA-256 on every
+process start until a receipt exists, and only `ee model fetch` mints one.
+Set `EE_EMBED_DOWNLOAD=off` whenever `EE_EMBED_MODEL_DIR` points at a
+hand-managed directory: under the default `auto` policy an unloadable
+directory triggers a fresh ~531 MB download, and an existing
+`potion-multilingual-128M/` at the destination is moved aside to
+`potion-multilingual-128M.backup.<stamp>` rather than overwritten.
+
+**Other tools.** [cass-memory](https://github.com/Dicklesworthstone/cass_memory_system)
+(`cm`) embeds with `Xenova/all-MiniLM-L6-v2` (384-d ONNX via transformers.js),
+a different model family, so today no artifact is byte-compatible between the
+two and their vectors are not comparable; `ee` cannot load `cm`'s model and
+vice versa. `ee` also has no remote embedding backend: the Frankensearch
+build it links omits the `api` provider feature, nothing in the stack speaks
+Ollama, and `ee doctor` reports `OPENAI_API_KEY` / `EMBEDDING_MODEL` as
+present-but-ignored. A shared Ollama daemon therefore only helps tools that
+support it (`cm` does, via `embeddingBackend: "ollama"`), not `ee`.
+
 ### `ee doctor` reports a repair plan
 
 Start with the agent-oriented triage view, then inspect one finding:
