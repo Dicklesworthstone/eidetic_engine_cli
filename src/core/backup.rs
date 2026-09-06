@@ -9619,8 +9619,12 @@ mod tests {
         let restored_memory_id = restored_memories[0].id.clone();
         ensure_equal(
             restored_memories[0].content.as_str(),
-            "Authorization header should be redacted",
-            "history still references the same memory content",
+            if include_derived {
+                "Authorization header should be redacted"
+            } else {
+                "[REDACTED]"
+            },
+            "history's memory content follows the selected export redaction policy",
         )?;
         ensure_equal(
             restored_memory_id == MemoryId::from_uuid(Uuid::from_u128(2)).to_string(),
