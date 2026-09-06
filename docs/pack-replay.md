@@ -198,6 +198,13 @@ Run the command without `--scenario` to evaluate every pack-quality case in the
 fixture family. JSON stdout uses the `ee.response.v2` envelope and carries
 `ee.eval.pack_quality_report.v1`.
 
+Each case creates a private, retained FrankenSQLite store and Frankensearch index,
+then calls the production pack pipeline with a deterministic hash embedder.
+The evaluator measures selected memories, token usage, provenance, redacted
+content, and degradations from that pack. Expected memory IDs and allowed
+degradation codes are comparison inputs; they do not control retrieval.
+This exercises packing with deterministic retrieval, not neural recall quality.
+
 ### Interpreting Results
 
 The report's `aggregate_verdict` is the first field to inspect:
@@ -205,9 +212,16 @@ The report's `aggregate_verdict` is the first field to inspect:
 | Verdict | Meaning | Usual next step |
 |---------|---------|-----------------|
 | `within` | Selection, provenance, degradation, redaction, and budget expectations matched | Keep the fixture as regression coverage |
-| `drift` | Behavior changed without a known critical omission or forbidden leak | Inspect selected/omitted IDs and decide whether to update expectations |
-| `regression` | Critical evidence was omitted, forbidden evidence leaked, or an unexpected degradation appeared | Fix retrieval/packing/redaction behavior before updating fixtures |
-| `inconclusive` | Required fixture, workspace, ledger, or derived-asset evidence was unavailable or malformed | Repair the fixture or rerun after restoring the missing evidence |
+| `drift` | The same unique memories were selected in a different order, with all checked requirements satisfied | Inspect ranking changes |
+| `regression` | A checked memory, provenance, degradation, redaction, or token-budget requirement failed | Fix retrieval/packing/redaction behavior before updating fixtures |
+| `inconclusive` | No actual pack result was supplied for a comparison case | Repair execution and collect the missing result |
+
+Regressions return evaluation-failure exit code 9. A missing required memory,
+unexpected or duplicate selection, insufficient provenance, or exceeded budget
+cannot pass as drift. The fixture's `expect_truncation` declaration is not yet
+checked separately; inspect the retained pack's omissions when evaluating it.
+Fixture setup or pack execution errors can return an error envelope instead of a
+quality report; they do not count as successful evaluations.
 
 Useful JSON checks:
 
@@ -234,8 +248,12 @@ Failure triage:
    is wrong.
 4. Check `unexpected_degradation_codes` and `actual_redaction_leaks` before
    changing expected memory IDs.
-5. Use the reported artifact paths to inspect stdout/stderr from the real-binary
-   scenario run.
+5. Inspect each `artifactPaths[].stdout` file for the rendered production pack.
+   These packs are assembled in process; `stderr: null` means no child-process
+   stderr capture exists. The workspace, memory count, embedder, and requested
+   source mode are recorded alongside the path. A degraded branch is marked
+   `executed` only when its code was observed in a pack, with the matching cases
+   listed in `observedCaseIds`.
 6. Update fixture expectations only after the new behavior is intentional and
    documented.
 7. If pack replay, pack diff, degraded fixtures, RCH proof, or tracker evidence

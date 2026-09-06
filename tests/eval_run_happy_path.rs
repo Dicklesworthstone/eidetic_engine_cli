@@ -586,7 +586,9 @@ fn pack_quality_executes_real_packs_independently_of_expected_answers() -> TestR
         .map_err(|error| error.to_string())?
         .keep();
     let root = root.canonicalize().map_err(|error| error.to_string())?;
-    let fixture = root.join("release_failure");
+    let fixture_dir = root.join("fixtures");
+    std::fs::create_dir(&fixture_dir).map_err(|error| error.to_string())?;
+    let fixture = fixture_dir.join("release_failure");
     std::fs::create_dir(&fixture).map_err(|error| error.to_string())?;
     std::fs::copy(
         "tests/fixtures/eval/release_failure/source_memory.json",
@@ -673,7 +675,7 @@ fn pack_quality_executes_real_packs_independently_of_expected_answers() -> TestR
             "fx.release_failure.v1",
             "--pack-quality",
             "--fixture-dir",
-            root.to_str().ok_or("non-UTF-8 fixture path")?,
+            fixture_dir.to_str().ok_or("non-UTF-8 fixture path")?,
         ])
         .output()
         .map_err(|error| error.to_string())?;

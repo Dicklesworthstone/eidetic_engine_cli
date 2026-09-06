@@ -16422,7 +16422,7 @@ fn pack_quality_actuals_for_cases(
         .map_err(|error| pack_quality_execution_error(error.to_string()))?;
         let database_path = workspace_path.join("ee.db");
         let index_dir = workspace_path.join("index");
-        seed_pack_quality_workspace(
+        let workspace_id = seed_pack_quality_workspace(
             &workspace_path,
             &database_path,
             source,
@@ -16440,7 +16440,7 @@ fn pack_quality_actuals_for_cases(
         let connection = crate::db::DbConnection::open_file_read_only(&database_path)
             .map_err(|error| pack_quality_execution_error(error.to_string()))?;
         let generation = connection
-            .get_workspace_generation(&source.fixture_id)
+            .get_workspace_generation(&workspace_id)
             .map_err(|error| pack_quality_execution_error(error.to_string()))?
             .unwrap_or(0);
         crate::core::index::write_memory_eval_index_metadata_for_generation(
@@ -16568,7 +16568,8 @@ fn pack_quality_actuals_for_cases(
             "fixtureId": source.fixture_id, "caseId": case.case_id,
             "scenarioId": case.scenario_id, "commandStep": case.command_step,
             "stdout": output_path, "stderr": null,
-            "workspace": workspace_path, "memoryCount": case_memories.len(),
+            "workspace": workspace_path, "workspaceId": workspace_id,
+            "memoryCount": case_memories.len(),
             "mode": "production_pack", "embedder": "fnv1a-256",
             "sourceMode": options.source_mode.as_str(),
             "strictSourceMode": options.strict_source_mode
@@ -16607,7 +16608,7 @@ fn seed_pack_quality_workspace(
     source: &crate::eval::SourceMemoryFile,
     memories: &[crate::eval::SourceMemory],
     fixed_clock: &str,
-) -> Result<(), DomainError> {
+) -> Result<String, DomainError> {
     use crate::db::{
         CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
         MemoryLinkRelation, MemoryLinkSource,
@@ -16615,6 +16616,7 @@ fn seed_pack_quality_workspace(
     let timestamp = chrono::DateTime::parse_from_rfc3339(fixed_clock)
         .map_err(|error| pack_quality_execution_error(format!("invalid fixture clock: {error}")))?
         .with_timezone(&chrono::Utc);
+    let workspace_id = crate::core::workspace::stable_workspace_id(workspace);
     let links = source
         .structural_edges
         .iter()
@@ -16645,7 +16647,7 @@ fn seed_pack_quality_workspace(
     connection
         .with_transaction(|| {
             connection.insert_workspace(
-                &source.fixture_id,
+                &workspace_id,
                 &CreateWorkspaceInput {
                     path: workspace.display().to_string(),
                     name: Some(source.fixture_id.clone()),
@@ -16655,7 +16657,7 @@ fn seed_pack_quality_workspace(
                 connection.insert_memory_at(
                     &memory.id,
                     &CreateMemoryInput {
-                        workspace_id: source.fixture_id.clone(),
+                        workspace_id: workspace_id.clone(),
                         level: memory.level.clone(),
                         kind: memory.kind.clone(),
                         content: memory.content.clone(),
@@ -16673,13 +16675,15 @@ fn seed_pack_quality_workspace(
                     timestamp,
                 )?;
             }
-            for (index, link) in links.iter().enumerate() {
-                connection.insert_memory_link(&format!("eval-edge-{index}"), link)?;
+            let mut link_ids = determinism::Deterministic::from_seed(0);
+            for link in &links {
+                let id = crate::models::MemoryLinkId::now_seeded(&mut link_ids);
+                connection.insert_memory_link(&id.to_string(), link)?;
             }
             Ok(())
         })
         .map_err(|error| pack_quality_execution_error(error.to_string()))?;
-    Ok(())
+    Ok(workspace_id)
 }
 
 fn pack_quality_case_query(
