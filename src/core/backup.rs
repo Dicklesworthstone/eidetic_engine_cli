@@ -1661,6 +1661,16 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     // A dry-run must not initialize the key store merely to preview an
     // artifact, so it only opens an already-existing root.
     let store_auth = load_store_auth_for_backup(&workspace_path, options.dry_run, &mut degraded);
+    if !options.dry_run
+        && store_auth.is_none()
+        && derived_payloads
+            .iter()
+            .any(|p| p.report.kind == "learning_history")
+    {
+        return Err(work_history_error(
+            "learned rules and feedback require source-store authentication; repair the workspace key store before creating this backup",
+        ));
+    }
     authenticate_learning_payloads(&mut derived_payloads, store_auth.as_ref())?;
     let derived_reports = derived_payloads
         .iter()
@@ -10223,6 +10233,54 @@ mod tests {
                 "source feedback retained",
             )?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn learning_history_requires_authentication_before_backup_publication() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+        let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        source
+            .insert_procedural_rule_for_recovery(&recovery_rule(&workspace_id, 0))
+            .map_err(|e| e.to_string())?;
+        source.close().map_err(|e| e.to_string())?;
+        let output = tempdir.path().join("backups");
+        let mut options = BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(output.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: true,
+        };
+        let preview = create_backup(&options).map_err(|e| e.message())?;
+        ensure(
+            preview.dry_run,
+            "learning history can be previewed without keys",
+        )?;
+        let keys = workspace_keys_dir(&workspace);
+        ensure(!keys.exists(), "preview does not initialize store keys")?;
+        ensure(!output.exists(), "preview does not create backup output")?;
+        fs::write(&keys, b"key directory obstructed").map_err(|e| e.to_string())?;
+        options.dry_run = false;
+        let error = create_backup(&options)
+            .err()
+            .ok_or("unsigned learned history was published")?;
+        ensure(
+            error
+                .message()
+                .contains("require source-store authentication"),
+            "missing authentication rejects real publication",
+        )?;
+        ensure(!output.exists(), "no unusable backup directory published")?;
+        ensure_equal(
+            fs::read(&keys).map_err(|e| e.to_string())?,
+            b"key directory obstructed".to_vec(),
+            "existing key-store obstruction remains untouched",
+        )?;
         Ok(())
     }
 
