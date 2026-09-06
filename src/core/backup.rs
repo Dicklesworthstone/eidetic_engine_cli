@@ -5555,7 +5555,7 @@ fn authenticate_learning_payloads(
             chunk.authentication = Some(
                 authenticate_artifact(
                     root,
-                    MacDomain::JsonlExport,
+                    MacDomain::NativeImportRecordsRoot,
                     &learning_auth_context(&chunk.workspace_id),
                     &hash,
                     1,
@@ -5624,7 +5624,7 @@ fn restore_learning_history(
         let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
         if !verify_artifact(
             &root,
-            MacDomain::JsonlExport,
+            MacDomain::NativeImportRecordsRoot,
             &learning_auth_context(&source_id),
             &header,
             &hash,
