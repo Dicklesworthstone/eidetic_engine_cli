@@ -14879,7 +14879,8 @@ pub struct CreateFeedbackEventInput {
 }
 
 /// A stored feedback_events row (EE-080).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredFeedbackEvent {
     pub id: String,
     pub workspace_id: String,
@@ -16280,6 +16281,34 @@ impl DbConnection {
             ],
         )?;
 
+        Ok(())
+    }
+
+    /// Restore feedback without generating new timestamps or applying its
+    /// signal twice. The recovery caller owns the surrounding transaction.
+    pub(crate) fn insert_feedback_event_for_recovery(
+        &self,
+        event: &StoredFeedbackEvent,
+    ) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO feedback_events (id, workspace_id, target_type, target_id, signal, weight, source_type, source_id, reason, evidence_json, session_id, applied_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            &[
+                Value::Text(event.id.clone()),
+                Value::Text(event.workspace_id.clone()),
+                Value::Text(event.target_type.clone()),
+                Value::Text(event.target_id.clone()),
+                Value::Text(event.signal.clone()),
+                Value::Float(event.weight),
+                Value::Text(event.source_type.clone()),
+                event.source_id.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                event.reason.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                event.evidence_json.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                event.session_id.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                event.applied_at.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::Text(event.created_at.clone()),
+            ],
+        )?;
         Ok(())
     }
 
@@ -24883,7 +24912,8 @@ pub struct UpdateProceduralRuleLifecycleInput {
 }
 
 /// A stored procedural rule row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredProceduralRule {
     pub id: String,
     pub workspace_id: String,
@@ -26094,6 +26124,74 @@ impl DbConnection {
             )?;
         }
 
+        Ok(())
+    }
+
+    /// Restore a rule node before its supersession and evidence edges. The
+    /// caller inserts every node, then restores edges in the same transaction.
+    pub(crate) fn insert_procedural_rule_for_recovery(
+        &self,
+        rule: &StoredProceduralRule,
+    ) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO procedural_rules (id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, protected, positive_feedback_count, negative_feedback_count, validation_passes, validation_contradictions, last_applied_at, last_validated_at, superseded_by, created_at, updated_at, tombstoned_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, NULL, ?18, ?19, ?20)",
+            &[
+                Value::Text(rule.id.clone()),
+                Value::Text(rule.workspace_id.clone()),
+                Value::Text(rule.content.clone()),
+                Value::Float(rule.confidence),
+                Value::Float(rule.utility),
+                Value::Float(rule.importance),
+                Value::Text(rule.trust_class.clone()),
+                Value::Text(rule.scope.clone()),
+                rule.scope_pattern.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::Text(rule.maturity.clone()),
+                bool_value(rule.protected),
+                Value::BigInt(i64::from(rule.positive_feedback_count)),
+                Value::BigInt(i64::from(rule.negative_feedback_count)),
+                Value::BigInt(i64::from(rule.validation_passes)),
+                Value::BigInt(i64::from(rule.validation_contradictions)),
+                rule.last_applied_at.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                rule.last_validated_at.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                Value::Text(rule.created_at.clone()),
+                Value::Text(rule.updated_at.clone()),
+                rule.tombstoned_at.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Complete the supersession edge after all recovered rule nodes exist.
+    pub(crate) fn restore_rule_supersession(&self, rule: &StoredProceduralRule) -> Result<()> {
+        if let Some(successor) = &rule.superseded_by {
+            self.execute_for(
+                DbOperation::Execute,
+                "UPDATE procedural_rules SET superseded_by = ?1 WHERE id = ?2 AND workspace_id = ?3",
+                &[Value::Text(successor.clone()), Value::Text(rule.id.clone()), Value::Text(rule.workspace_id.clone())],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore_rule_source(&self, rule_id: &str, memory_id: &str) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO rule_source_memories (rule_id, memory_id) VALUES (?1, ?2)",
+            &[
+                Value::Text(rule_id.to_owned()),
+                Value::Text(memory_id.to_owned()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn restore_rule_tag(&self, rule_id: &str, tag: &str) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO rule_tags (rule_id, tag) VALUES (?1, ?2)",
+            &[Value::Text(rule_id.to_owned()), Value::Text(tag.to_owned())],
+        )?;
         Ok(())
     }
 

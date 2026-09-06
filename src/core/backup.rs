@@ -27,9 +27,9 @@ use crate::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
     CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType,
     MeshStorageStatus, StoredAuditEntry, StoredEpisodeAction, StoredEvidenceSpan,
-    StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness, StoredGraphSnapshot,
-    StoredJournalEntry, StoredMemory, StoredMemoryLink, StoredSearchIndexJob, StoredSession,
-    StoredTaskEpisode, audit_actions,
+    StoredFeedbackEvent, StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness,
+    StoredGraphSnapshot, StoredJournalEntry, StoredMemory, StoredMemoryLink, StoredProceduralRule,
+    StoredSearchIndexJob, StoredSession, StoredTaskEpisode, audit_actions,
 };
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
@@ -42,8 +42,8 @@ use crate::output::jsonl_export::{
     ExportStats, JsonlExporter, redact_content, redact_memory_record,
 };
 use crate::policy::import_auth::{
-    ArtifactContext, EXPORT_ARTIFACT_FAMILY, EXPORT_RECORD_ENCODING_V1, STORE_KEY_NAMESPACE_V1,
-    authenticate_artifact,
+    ArtifactContext, AuthenticatedHeader, EXPORT_ARTIFACT_FAMILY, EXPORT_RECORD_ENCODING_V1,
+    STORE_KEY_NAMESPACE_V1, authenticate_artifact, canonical_record_hash, verify_artifact,
 };
 use crate::policy::store_auth::{MacDomain, StoreAuthError, StoreAuthRoot, workspace_keys_dir};
 
@@ -56,6 +56,8 @@ const INIT_AND_MIGRATE_REPAIR_COMMAND: &str =
     "ee init --workspace . && ee migrate run --workspace . --json";
 const CASS_BACKUP_CHUNK_ROWS: usize = 128;
 const WORK_HISTORY_CHUNK_ROWS: usize = 128;
+const LEARNING_HISTORY_SCHEMA: &str = "ee.backup.learning_history.v1";
+const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
 const CASS_SESSION_RESTORE_METADATA_SCHEMA_V1: &str = "ee.backup.restored_cass_session_metadata.v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -569,6 +571,10 @@ pub struct BackupRestoreReport {
     pub restored_evidence_span_count: u32,
     pub restored_journal_entry_count: u32,
     pub restored_search_index_job_count: u32,
+    pub restored_rule_count: u32,
+    pub restored_rule_source_count: u32,
+    pub restored_rule_tag_count: u32,
+    pub restored_feedback_count: u32,
     pub restored_graph_cache_count: u32,
     pub restored_derived: Vec<BackupRestoredDerivedAssetReport>,
     pub issue_count: u32,
@@ -602,6 +608,10 @@ impl BackupRestoreReport {
                 "evidenceSpansRestored": self.restored_evidence_span_count,
                 "journalEntriesRestored": self.restored_journal_entry_count,
                 "searchIndexJobsRestored": self.restored_search_index_job_count,
+                "rulesRestored": self.restored_rule_count,
+                "ruleSourcesRestored": self.restored_rule_source_count,
+                "ruleTagsRestored": self.restored_rule_tag_count,
+                "feedbackEventsRestored": self.restored_feedback_count,
                 "graphCacheRowsRestored": self.restored_graph_cache_count,
                 "issues": self.issue_count,
             },
@@ -615,7 +625,7 @@ impl BackupRestoreReport {
     pub fn human_summary(&self) -> String {
         let prefix = if self.dry_run { "DRY RUN: " } else { "" };
         format!(
-            "{prefix}backup restore {status}: {backup_id}\n  side path: {side_path}\n  restored db: {database}\n  imported memories: {imported} (duplicates: {duplicates})\n  restored task episodes: {episodes}\n  restored CASS sessions/evidence: {sessions}/{evidence}\n  restored journal entries/index jobs: {journals}/{jobs}\n",
+            "{prefix}backup restore {status}: {backup_id}\n  side path: {side_path}\n  restored db: {database}\n  imported memories: {imported} (duplicates: {duplicates})\n  restored task episodes: {episodes}\n  restored CASS sessions/evidence: {sessions}/{evidence}\n  restored journal entries/index jobs: {journals}/{jobs}\n  restored rules/sources/tags/feedback: {rules}/{rule_sources}/{rule_tags}/{feedback}\n",
             status = self.status,
             backup_id = self.backup_id,
             side_path = self.side_path,
@@ -627,6 +637,10 @@ impl BackupRestoreReport {
             evidence = self.restored_evidence_span_count,
             journals = self.restored_journal_entry_count,
             jobs = self.restored_search_index_job_count,
+            rules = self.restored_rule_count,
+            rule_sources = self.restored_rule_source_count,
+            rule_tags = self.restored_rule_tag_count,
+            feedback = self.restored_feedback_count,
         )
     }
 
@@ -1135,6 +1149,35 @@ struct BackupWorkHistory {
     search_index_jobs: Vec<StoredSearchIndexJob>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupLearningHistory {
+    schema: String,
+    backup_id: String,
+    workspace_id: String,
+    chunk_index: usize,
+    chunk_count: usize,
+    rules: Vec<StoredProceduralRule>,
+    sources: Vec<BackupRuleSource>,
+    tags: Vec<BackupRuleTag>,
+    feedback: Vec<StoredFeedbackEvent>,
+    authentication: Option<AuthenticatedHeader>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupRuleSource {
+    rule_id: String,
+    memory_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupRuleTag {
+    rule_id: String,
+    tag: String,
+}
+
 fn portable_cass_session_id(session_id: &str) -> String {
     format!("ee-session:{session_id}")
 }
@@ -1236,6 +1279,13 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
             "export_restore_required",
             "derived_artifact_restore",
         ),
+        "procedural_rules" | "rule_source_memories" | "rule_tags" | "feedback_events" => {
+            BackupTablePolicy::new(
+                "learn",
+                "export_restore_required",
+                "derived_artifact_restore",
+            )
+        }
 
         "agent_context_profiles"
         | "agents"
@@ -1277,16 +1327,12 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
             BackupTablePolicy::new("pack", "export_restore_required", "not_implemented")
         }
         "curation_candidates"
-        | "feedback_events"
         | "feedback_quarantine"
         | "learning_observations"
         | "outcome_evidence_rows"
         | "plan_recipes"
-        | "procedural_rules"
         | "procedure_events"
-        | "procedures"
-        | "rule_source_memories"
-        | "rule_tags" => {
+        | "procedures" => {
             BackupTablePolicy::new("learn", "export_restore_required", "not_implemented")
         }
         _ => BackupTablePolicy::new("maintain", "unclassified", "unclassified"),
@@ -1438,6 +1484,22 @@ fn reconcile_derived_recovery_inventory(
             "search_index_jobs",
             captured_derived_record_count(derived, "work_history", "searchIndexJobs"),
         ),
+        (
+            "procedural_rules",
+            captured_derived_record_count(derived, "learning_history", "rules"),
+        ),
+        (
+            "rule_source_memories",
+            captured_derived_record_count(derived, "learning_history", "sources"),
+        ),
+        (
+            "rule_tags",
+            captured_derived_record_count(derived, "learning_history", "tags"),
+        ),
+        (
+            "feedback_events",
+            captured_derived_record_count(derived, "learning_history", "feedback"),
+        ),
     ] {
         if let Some(entry) = inventory
             .entries
@@ -1523,7 +1585,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     );
     // Durable history and its coverage counts must describe the same database
     // snapshot as the memory records. The optional flags only select caches.
-    let (export_data, mut recovery_inventory, derived_payloads, mesh) =
+    let (export_data, mut recovery_inventory, mut derived_payloads, mesh) =
         with_backup_read_snapshot(&connection, || {
             let workspace = load_workspace(&connection, &workspace_path)?;
             let export_data = load_export_data_in_current_snapshot(&connection, workspace)?;
@@ -1558,6 +1620,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &memory_ids,
                 &mut payloads,
             )?;
+            collect_learning_history_payloads(
+                &connection,
+                workspace_id,
+                &backup_id,
+                &created_at,
+                options.redaction_level,
+                &memory_ids,
+                &mut payloads,
+            )?;
             if options.include_derived {
                 payloads.extend(collect_derived_payloads(
                     &connection,
@@ -1581,10 +1652,6 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         &export_data,
         options.redaction_level,
     ));
-    let derived_reports = derived_payloads
-        .iter()
-        .map(|payload| payload.report.clone())
-        .collect::<Vec<_>>();
     reconcile_derived_recovery_inventory(&mut recovery_inventory, &derived_payloads);
     degraded.extend(recovery_inventory_degradations(&recovery_inventory));
 
@@ -1594,6 +1661,11 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     // A dry-run must not initialize the key store merely to preview an
     // artifact, so it only opens an already-existing root.
     let store_auth = load_store_auth_for_backup(&workspace_path, options.dry_run, &mut degraded);
+    authenticate_learning_payloads(&mut derived_payloads, store_auth.as_ref())?;
+    let derived_reports = derived_payloads
+        .iter()
+        .map(|payload| payload.report.clone())
+        .collect::<Vec<_>>();
 
     let (records_bytes, stats) = render_records(
         &backup_id,
@@ -2299,6 +2371,10 @@ pub fn restore_backup_to_side_path(
             restored_evidence_span_count: 0,
             restored_journal_entry_count: 0,
             restored_search_index_job_count: 0,
+            restored_rule_count: 0,
+            restored_rule_source_count: 0,
+            restored_rule_tag_count: 0,
+            restored_feedback_count: 0,
             restored_graph_cache_count: 0,
             restored_derived: Vec::new(),
             issue_count: u32::try_from(verify.issues.len()).unwrap_or(u32::MAX),
@@ -2363,6 +2439,17 @@ pub fn restore_backup_to_side_path(
         restore_cass_assets(&restored_database_path, &restored_derived)?;
     let (restored_journal_entry_count, restored_search_index_job_count) =
         restore_work_history(&restored_database_path, &restored_derived)?;
+    let (
+        restored_rule_count,
+        restored_rule_source_count,
+        restored_rule_tag_count,
+        restored_feedback_count,
+    ) = restore_learning_history(
+        &restored_database_path,
+        &workspace_path,
+        &inspect.backup_id,
+        &restored_derived,
+    )?;
     let graph_cache_restored_count = if options.restore_graph_cache {
         restore_graph_cache_assets(&restored_database_path, &restored_derived)?
     } else {
@@ -2402,6 +2489,10 @@ pub fn restore_backup_to_side_path(
         restored_evidence_span_count,
         restored_journal_entry_count,
         restored_search_index_job_count,
+        restored_rule_count,
+        restored_rule_source_count,
+        restored_rule_tag_count,
+        restored_feedback_count,
         restored_graph_cache_count: graph_cache_restored_count,
         restored_derived,
         issue_count: u32::try_from(restore_issue_count).unwrap_or(u32::MAX),
@@ -2648,7 +2739,6 @@ fn copy_derived_artifacts_to_restore(
                 ),
                 repair: Some("verify the backup directory and retry restore".to_owned()),
             })?;
-        const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
         if metadata.len() > MAX_DERIVED_ASSET_BYTES {
             return Err(DomainError::Storage {
                 message: format!(
@@ -5327,6 +5417,315 @@ fn restore_work_history(
     Ok((
         u32::try_from(history.journal_entries.len()).unwrap_or(u32::MAX),
         u32::try_from(history.search_index_jobs.len()).unwrap_or(u32::MAX),
+    ))
+}
+
+fn collect_learning_history_payloads(
+    connection: &DbConnection,
+    workspace_id: &str,
+    backup_id: &str,
+    captured_at: &str,
+    redaction: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) -> Result<(), DomainError> {
+    let mut rules = connection
+        .list_procedural_rules(workspace_id, None, None, true)
+        .map_err(work_history_error)?;
+    rules.sort_by(|a, b| a.id.cmp(&b.id));
+    for rule in &mut rules {
+        rule.content = redact_content(&rule.content, redaction);
+        rule.scope_pattern = rule
+            .scope_pattern
+            .as_deref()
+            .map(|s| redact_content(s, redaction));
+    }
+    let mut sources = Vec::new();
+    for (rule_id, ids) in connection
+        .list_rule_source_memory_ids_for_workspace(workspace_id)
+        .map_err(work_history_error)?
+    {
+        for id in ids {
+            let memory_id = memory_ids.get(&id).ok_or_else(|| {
+                work_history_error("rule evidence is outside the recovered workspace memory set")
+            })?;
+            sources.push(BackupRuleSource {
+                rule_id: rule_id.clone(),
+                memory_id: memory_id.clone(),
+            });
+        }
+    }
+    let mut tags = Vec::new();
+    for (rule_id, values) in connection
+        .list_rule_tags_for_workspace(workspace_id)
+        .map_err(work_history_error)?
+    {
+        let mut seen = BTreeSet::new();
+        for tag in values {
+            let tag = redact_content(&tag, redaction);
+            if !seen.insert(tag.clone()) {
+                return Err(work_history_error("redaction merges distinct rule tags"));
+            }
+            tags.push(BackupRuleTag {
+                rule_id: rule_id.clone(),
+                tag,
+            });
+        }
+    }
+    let mut feedback = connection
+        .list_feedback_events(workspace_id)
+        .map_err(work_history_error)?;
+    feedback.sort_by(|a, b| a.id.cmp(&b.id));
+    for event in &mut feedback {
+        if event.target_type == "memory"
+            && let Some(id) = memory_ids.get(&event.target_id)
+        {
+            event.target_id.clone_from(id);
+        } else {
+            event.target_id = redact_content(&event.target_id, redaction);
+        }
+        event.source_id = event
+            .source_id
+            .as_deref()
+            .map(|s| redact_content(s, redaction));
+        event.reason = event
+            .reason
+            .as_deref()
+            .map(|s| redact_content(s, redaction));
+        event.evidence_json = event
+            .evidence_json
+            .as_deref()
+            .map(|s| redact_work_history_json(s, redaction))
+            .transpose()?;
+    }
+    let count = [rules.len(), sources.len(), tags.len(), feedback.len()]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+        .div_ceil(WORK_HISTORY_CHUNK_ROWS);
+    for index in 0..count {
+        let start = index * WORK_HISTORY_CHUNK_ROWS;
+        let end = start + WORK_HISTORY_CHUNK_ROWS;
+        let chunk = BackupLearningHistory {
+            schema: LEARNING_HISTORY_SCHEMA.to_owned(),
+            backup_id: backup_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            chunk_index: index,
+            chunk_count: count,
+            rules: rules[start.min(rules.len())..end.min(rules.len())].to_vec(),
+            sources: sources[start.min(sources.len())..end.min(sources.len())].to_vec(),
+            tags: tags[start.min(tags.len())..end.min(tags.len())].to_vec(),
+            feedback: feedback[start.min(feedback.len())..end.min(feedback.len())].to_vec(),
+            authentication: None,
+        };
+        payloads.push(derived_payload(
+            format!("derived/learning-history/{index:08}.json"),
+            "learning_history",
+            captured_at,
+            None,
+            serialized_payload_bytes(&chunk).map_err(work_history_error)?,
+        ));
+    }
+    Ok(())
+}
+
+fn learning_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
+    ArtifactContext {
+        artifact_family: LEARNING_HISTORY_SCHEMA,
+        record_encoding_version: "json.v1",
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: workspace_id,
+    }
+}
+
+fn authenticate_learning_payloads(
+    payloads: &mut [BackupDerivedPayload],
+    root: Option<&StoreAuthRoot>,
+) -> Result<(), DomainError> {
+    for payload in payloads
+        .iter_mut()
+        .filter(|p| p.report.kind == "learning_history")
+    {
+        let mut chunk: BackupLearningHistory =
+            serde_json::from_slice(&payload.bytes).map_err(work_history_error)?;
+        chunk.authentication = None;
+        if let Some(root) = root {
+            let hash =
+                canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+            chunk.authentication = Some(
+                authenticate_artifact(
+                    root,
+                    MacDomain::JsonlExport,
+                    &learning_auth_context(&chunk.workspace_id),
+                    &hash,
+                    1,
+                )
+                .map_err(work_history_error)?,
+            );
+        }
+        payload.bytes = serialized_payload_bytes(&chunk).map_err(work_history_error)?;
+        if payload.bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES {
+            return Err(work_history_error(
+                "learning-history chunk exceeds the restore asset byte limit",
+            ));
+        }
+        payload.report.hash = Some(hash_bytes(&payload.bytes));
+        payload.report.byte_size = Some(payload.bytes.len() as u64);
+    }
+    Ok(())
+}
+
+fn restore_learning_history(
+    database: &Path,
+    source_workspace: &Path,
+    backup_id: &str,
+    assets: &[BackupRestoredDerivedAssetReport],
+) -> Result<(u32, u32, u32, u32), DomainError> {
+    let mut chunks = assets
+        .iter()
+        .filter(|asset| asset.kind == "learning_history")
+        .map(|asset| {
+            serde_json::from_value::<BackupLearningHistory>(read_restored_derived_json(asset)?)
+                .map_err(work_history_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if chunks.is_empty() {
+        return Ok((0, 0, 0, 0));
+    }
+    let root =
+        StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
+    chunks.sort_by_key(|chunk| chunk.chunk_index);
+    let source_id = chunks[0].workspace_id.clone();
+    let count = chunks.len();
+    for (index, chunk) in chunks.iter_mut().enumerate() {
+        if chunk.schema != LEARNING_HISTORY_SCHEMA
+            || chunk.backup_id != backup_id
+            || chunk.workspace_id != source_id
+            || chunk.chunk_index != index
+            || chunk.chunk_count != count
+            || [
+                chunk.rules.len(),
+                chunk.sources.len(),
+                chunk.tags.len(),
+                chunk.feedback.len(),
+            ]
+            .into_iter()
+            .any(|len| len > WORK_HISTORY_CHUNK_ROWS)
+        {
+            return Err(work_history_error(
+                "unsupported, incomplete, duplicate, or substituted learning-history chunks",
+            ));
+        }
+        let header = chunk.authentication.take().ok_or_else(|| {
+            work_history_error(
+                "learned rules and feedback require an authenticated source-store backup",
+            )
+        })?;
+        let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+        if !verify_artifact(
+            &root,
+            MacDomain::JsonlExport,
+            &learning_auth_context(&source_id),
+            &header,
+            &hash,
+            1,
+        )
+        .map_err(work_history_error)?
+        .is_authenticated()
+        {
+            return Err(work_history_error("learning-history authentication failed"));
+        }
+    }
+    let connection = DbConnection::open_file(database).map_err(work_history_error)?;
+    let workspace = remap_restored_workspace_id(
+        &connection.list_workspaces().map_err(work_history_error)?,
+        Some(&source_id),
+        "learning history",
+    )?
+    .ok_or_else(|| work_history_error("missing learning-history workspace"))?;
+    let mut rules = Vec::new();
+    let mut sources = Vec::new();
+    let mut tags = Vec::new();
+    let mut feedback = Vec::new();
+    for chunk in chunks {
+        rules.extend(chunk.rules);
+        sources.extend(chunk.sources);
+        tags.extend(chunk.tags);
+        feedback.extend(chunk.feedback);
+    }
+    let mut rule_ids = BTreeSet::new();
+    for rule in &mut rules {
+        if rule.workspace_id != source_id || !rule_ids.insert(rule.id.clone()) {
+            return Err(work_history_error("foreign or duplicate recovered rule"));
+        }
+        rule.workspace_id.clone_from(&workspace);
+    }
+    let memory_ids = connection
+        .list_memories(&workspace, None, true)
+        .map_err(work_history_error)?
+        .into_iter()
+        .map(|memory| memory.id)
+        .collect::<BTreeSet<_>>();
+    if rules.iter().any(|r| {
+        r.superseded_by
+            .as_ref()
+            .is_some_and(|id| !rule_ids.contains(id))
+    }) || sources
+        .iter()
+        .any(|s| !rule_ids.contains(&s.rule_id) || !memory_ids.contains(&s.memory_id))
+        || tags.iter().any(|tag| !rule_ids.contains(&tag.rule_id))
+    {
+        return Err(work_history_error(
+            "rule relationship target is missing or outside the recovered workspace",
+        ));
+    }
+    let sessions = connection
+        .list_sessions(&workspace)
+        .map_err(work_history_error)?
+        .into_iter()
+        .map(|session| session.id)
+        .collect::<BTreeSet<_>>();
+    for event in &mut feedback {
+        if event.workspace_id != source_id
+            || event
+                .session_id
+                .as_ref()
+                .is_some_and(|id| !sessions.contains(id))
+        {
+            return Err(work_history_error(
+                "feedback belongs to a foreign workspace or session",
+            ));
+        }
+        event.workspace_id.clone_from(&workspace);
+        if let Some(evidence) = &event.evidence_json {
+            serde_json::from_str::<JsonValue>(evidence).map_err(work_history_error)?;
+        }
+    }
+    connection
+        .with_transaction(|| {
+            for rule in &rules {
+                connection.insert_procedural_rule_for_recovery(rule)?;
+            }
+            for rule in &rules {
+                connection.restore_rule_supersession(rule)?;
+            }
+            for source in &sources {
+                connection.restore_rule_source(&source.rule_id, &source.memory_id)?;
+            }
+            for tag in &tags {
+                connection.restore_rule_tag(&tag.rule_id, &tag.tag)?;
+            }
+            for event in &feedback {
+                connection.insert_feedback_event_for_recovery(event)?;
+            }
+            Ok(())
+        })
+        .map_err(work_history_error)?;
+    Ok((
+        u32::try_from(rules.len()).unwrap_or(u32::MAX),
+        u32::try_from(sources.len()).unwrap_or(u32::MAX),
+        u32::try_from(tags.len()).unwrap_or(u32::MAX),
+        u32::try_from(feedback.len()).unwrap_or(u32::MAX),
     ))
 }
 
@@ -9568,6 +9967,409 @@ mod tests {
     #[test]
     fn restore_backup_to_side_path_preserves_history_without_optional_caches() -> TestResult {
         assert_backup_history_round_trip(false)
+    }
+
+    fn recovery_rule(workspace_id: &str, n: u128) -> StoredProceduralRule {
+        StoredProceduralRule {
+            id: crate::models::RuleId::from_uuid(Uuid::from_u128(1000 + n)).to_string(),
+            workspace_id: workspace_id.to_owned(),
+            content: "Keep release evidence.".to_owned(),
+            confidence: 0.75,
+            utility: 0.5,
+            importance: 0.25,
+            trust_class: "agent_validated".to_owned(),
+            scope: "workspace".to_owned(),
+            scope_pattern: None,
+            maturity: "validated".to_owned(),
+            protected: true,
+            positive_feedback_count: 7,
+            negative_feedback_count: 2,
+            validation_passes: 5,
+            validation_contradictions: 1,
+            last_applied_at: Some("2026-09-01T00:02:00Z".to_owned()),
+            last_validated_at: Some("2026-09-01T00:03:00Z".to_owned()),
+            superseded_by: None,
+            created_at: "2026-09-01T00:00:00Z".to_owned(),
+            updated_at: "2026-09-01T00:04:00Z".to_owned(),
+            tombstoned_at: None,
+        }
+    }
+
+    fn recovery_feedback(workspace_id: &str, memory_id: &str, n: usize) -> StoredFeedbackEvent {
+        StoredFeedbackEvent {
+            id: format!("fb_{n:026}"),
+            workspace_id: workspace_id.to_owned(),
+            target_type: "memory".to_owned(),
+            target_id: memory_id.to_owned(),
+            signal: "helpful".to_owned(),
+            weight: 0.5,
+            source_type: "human_explicit".to_owned(),
+            source_id: Some("api_key=learning-secret-canary".to_owned()),
+            reason: Some("api_key=learning-secret-canary".to_owned()),
+            evidence_json: Some(json!({"exitCode": 9, "stderrTail": "api_key=learning-secret-canary", "paths": ["src/lib.rs"]}).to_string()),
+            session_id: None,
+            applied_at: (n == 1).then(|| "2026-09-01T00:01:00Z".to_owned()),
+            created_at: "2026-09-01T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn default_backup_restores_learning_history() -> TestResult {
+        for redaction in [RedactionLevel::None, RedactionLevel::Standard] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+            let mut rules = (0..129)
+                .map(|n| recovery_rule(&workspace_id, n))
+                .collect::<Vec<_>>();
+            rules[0].content = "api_key=learning-secret-canary".to_owned();
+            rules[0].superseded_by = Some(rules[128].id.clone());
+            rules[0].maturity = "superseded".to_owned();
+            rules[0].tombstoned_at = Some("2026-09-01T00:05:00Z".to_owned());
+            let feedback = (0..2)
+                .map(|n| recovery_feedback(&workspace_id, &memory_id, n))
+                .collect::<Vec<_>>();
+            source
+                .with_transaction(|| {
+                    for rule in &rules {
+                        source.insert_procedural_rule_for_recovery(rule)?;
+                    }
+                    for rule in &rules {
+                        source.restore_rule_supersession(rule)?;
+                        source.restore_rule_source(&rule.id, &memory_id)?;
+                        source.restore_rule_tag(&rule.id, "release")?;
+                    }
+                    for event in &feedback {
+                        source.insert_feedback_event_for_recovery(event)?;
+                    }
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?;
+            source.close().map_err(|e| e.to_string())?;
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            for (table, count) in [
+                ("procedural_rules", 129),
+                ("rule_source_memories", 129),
+                ("rule_tags", 129),
+                ("feedback_events", 2),
+            ] {
+                let entry = backup
+                    .recovery_inventory
+                    .entries
+                    .iter()
+                    .find(|e| e.table == table)
+                    .ok_or("missing learning inventory")?;
+                ensure_equal(entry.row_count, count, "all learning rows counted")?;
+                ensure(entry.snapshot_covered, "all learning rows captured")?;
+            }
+            let assets = backup
+                .derived
+                .iter()
+                .filter(|a| a.kind == "learning_history")
+                .collect::<Vec<_>>();
+            ensure_equal(assets.len(), 2, "129 rules cross the chunk boundary")?;
+            let mut canary_present = false;
+            for asset in assets {
+                let bytes = fs::read(Path::new(&backup.backup_path).join(&asset.path))
+                    .map_err(|e| e.to_string())?;
+                let chunk: BackupLearningHistory =
+                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                ensure(
+                    chunk.authentication.is_some(),
+                    "learning authority authenticated",
+                )?;
+                canary_present |=
+                    String::from_utf8_lossy(&bytes).contains("learning-secret-canary");
+            }
+            ensure_equal(
+                canary_present,
+                redaction == RedactionLevel::None,
+                "learning secrets obey redaction",
+            )?;
+            let side_path = tempdir.path().join("restored-learning");
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: side_path.clone(),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                (
+                    restored.restored_rule_count,
+                    restored.restored_rule_source_count,
+                    restored.restored_rule_tag_count,
+                    restored.restored_feedback_count,
+                ),
+                (129, 129, 129, 2),
+                "restored learning counts",
+            )?;
+            let db = DbConnection::open_file(&restored.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let restored_workspace = db
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .next()
+                .ok_or("missing restored workspace")?;
+            let memories = db
+                .list_memories(&restored_workspace.id, None, true)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(memories.len(), 1, "evidence memory restored")?;
+            for original in &rules {
+                let actual = db
+                    .get_procedural_rule(&original.id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("rule lost")?;
+                let mut expected = original.clone();
+                expected.workspace_id.clone_from(&restored_workspace.id);
+                if redaction == RedactionLevel::Standard && original.id == rules[0].id {
+                    expected.content = "[REDACTED]".to_owned();
+                }
+                ensure_equal(
+                    actual,
+                    expected,
+                    "exact rule lifecycle, trust, scores and counters restored",
+                )?;
+            }
+            let sources = db
+                .list_rule_source_memory_ids_for_workspace(&restored_workspace.id)
+                .map_err(|e| e.to_string())?;
+            let tags = db
+                .list_rule_tags_for_workspace(&restored_workspace.id)
+                .map_err(|e| e.to_string())?;
+            for rule in &rules {
+                ensure_equal(
+                    sources.get(&rule.id),
+                    Some(&vec![memories[0].id.clone()]),
+                    "rule evidence follows restored memory identity",
+                )?;
+                ensure_equal(
+                    tags.get(&rule.id),
+                    Some(&vec!["release".to_owned()]),
+                    "rule tags retained",
+                )?;
+            }
+            let actual_feedback = db
+                .list_feedback_events(&restored_workspace.id)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(actual_feedback.len(), 2, "feedback retained")?;
+            for original in &feedback {
+                let actual = actual_feedback
+                    .iter()
+                    .find(|e| e.id == original.id)
+                    .ok_or("feedback lost")?;
+                let mut expected = original.clone();
+                expected.workspace_id.clone_from(&restored_workspace.id);
+                expected.target_id.clone_from(&memories[0].id);
+                if redaction == RedactionLevel::Standard {
+                    expected.reason = Some("[REDACTED]".to_owned());
+                    expected.source_id = Some("[REDACTED]".to_owned());
+                    expected.evidence_json = Some(
+                        json!({"exitCode": 9, "stderrTail": "[REDACTED]", "paths": ["src/lib.rs"]})
+                            .to_string(),
+                    );
+                }
+                ensure_equal(
+                    actual,
+                    &expected,
+                    "feedback timestamps and applied state preserved without replay",
+                )?;
+            }
+            db.close().map_err(|e| e.to_string())?;
+            let shown = crate::core::rule::show_rule(&crate::core::rule::RuleShowOptions {
+                workspace_path: &side_path,
+                database_path: Some(Path::new(&restored.restored_database_path)),
+                rule_id: &rules[128].id,
+                include_tombstoned: false,
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                shown.rule.content.as_str(),
+                "Keep release evidence.",
+                "public rule read succeeds",
+            )?;
+            ensure_equal(
+                shown.rule.source_memory_ids,
+                vec![memories[0].id.clone()],
+                "public rule provenance recovered",
+            )?;
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                source
+                    .get_procedural_rule(&rules[0].id)
+                    .map_err(|e| e.to_string())?,
+                Some(rules[0].clone()),
+                "backup and restore leave source rule intact",
+            )?;
+            ensure_equal(
+                source
+                    .list_feedback_events(&workspace_id)
+                    .map_err(|e| e.to_string())?
+                    .len(),
+                2,
+                "source feedback retained",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn learning_history_rejects_tampering_and_rolls_back() -> TestResult {
+        for defect in [
+            "tampered",
+            "unsigned",
+            "wrong_backup",
+            "missing_chunk",
+            "duplicate_chunk",
+            "foreign_rule",
+            "foreign_source",
+            "missing_successor",
+            "bad_tag",
+            "bad_feedback",
+            "duplicate_feedback",
+            "foreign_session",
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+            let rule = recovery_rule(&workspace_id, 0);
+            let mut chunk = BackupLearningHistory {
+                schema: LEARNING_HISTORY_SCHEMA.to_owned(),
+                backup_id: "backup-original".to_owned(),
+                workspace_id: workspace_id.clone(),
+                chunk_index: 0,
+                chunk_count: 1,
+                rules: vec![rule.clone()],
+                sources: vec![BackupRuleSource {
+                    rule_id: rule.id.clone(),
+                    memory_id: memory_id.clone(),
+                }],
+                tags: vec![BackupRuleTag {
+                    rule_id: rule.id.clone(),
+                    tag: "release".to_owned(),
+                }],
+                feedback: vec![recovery_feedback(&workspace_id, &memory_id, 0)],
+                authentication: None,
+            };
+            match defect {
+                "missing_chunk" => chunk.chunk_count = 2,
+                "foreign_rule" => {
+                    chunk.rules[0].workspace_id =
+                        WorkspaceId::from_uuid(Uuid::from_u128(9)).to_string()
+                }
+                "foreign_source" => {
+                    chunk.sources[0].memory_id = MemoryId::from_uuid(Uuid::from_u128(9)).to_string()
+                }
+                "missing_successor" => {
+                    chunk.rules[0].superseded_by = Some(recovery_rule(&workspace_id, 9).id)
+                }
+                "bad_tag" => chunk.tags[0].tag = "x".repeat(65),
+                "bad_feedback" => chunk.feedback[0].weight = 99.0,
+                "duplicate_feedback" => chunk.feedback.push(chunk.feedback[0].clone()),
+                "foreign_session" => {
+                    chunk.feedback[0].session_id = Some("missing-session".to_owned())
+                }
+                _ => {}
+            }
+            let root =
+                StoreAuthRoot::create(workspace_keys_dir(&workspace)).map_err(|e| e.to_string())?;
+            let mut payloads = vec![derived_payload(
+                "derived/learning-history/00000000.json".to_owned(),
+                "learning_history",
+                "2026-09-01T00:00:00Z",
+                None,
+                serialized_payload_bytes(&chunk).map_err(|e| e.to_string())?,
+            )];
+            authenticate_learning_payloads(&mut payloads, Some(&root)).map_err(|e| e.message())?;
+            let mut signed: BackupLearningHistory =
+                serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
+            if defect == "tampered" {
+                signed.rules[0].content = "Tampered trusted instructions.".to_owned();
+            }
+            if defect == "unsigned" {
+                signed.authentication = None;
+            }
+            let path = tempdir.path().join("learning.json");
+            fs::write(
+                &path,
+                serialized_payload_bytes(&signed).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            let mut assets = vec![restored_cass_asset(&path, "learning_history")];
+            if defect == "duplicate_chunk" {
+                assets.push(assets[0].clone());
+            }
+            let backup_id = if defect == "wrong_backup" {
+                "backup-substituted"
+            } else {
+                "backup-original"
+            };
+            let error = restore_learning_history(&database, &workspace, backup_id, &assets)
+                .err()
+                .ok_or_else(|| format!("accepted {defect}"))?;
+            let expected_error = match defect {
+                "tampered" => "authentication failed",
+                "unsigned" => "require an authenticated",
+                "wrong_backup" | "missing_chunk" | "duplicate_chunk" => "learning-history chunks",
+                "foreign_rule" => "foreign or duplicate recovered rule",
+                "foreign_source" | "missing_successor" => "relationship target is missing",
+                "foreign_session" => "foreign workspace or session",
+                _ => "constraint",
+            };
+            ensure(
+                error.message().to_lowercase().contains(expected_error),
+                &format!(
+                    "{defect} failed at the intended boundary: {}",
+                    error.message()
+                ),
+            )?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure(
+                db.list_procedural_rules(&workspace_id, None, None, true)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                &format!("{defect}: no partial rules"),
+            )?;
+            ensure(
+                db.list_rule_source_memory_ids_for_workspace(&workspace_id)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "no partial evidence links",
+            )?;
+            ensure(
+                db.list_rule_tags_for_workspace(&workspace_id)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "no partial tags",
+            )?;
+            ensure(
+                db.list_feedback_events(&workspace_id)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "no partial feedback",
+            )?;
+            ensure_equal(
+                db.list_memories(&workspace_id, None, true)
+                    .map_err(|e| e.to_string())?
+                    .len(),
+                1,
+                "existing memory survives failed restore",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
