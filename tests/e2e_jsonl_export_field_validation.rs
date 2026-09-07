@@ -108,62 +108,29 @@ fn run_ee_text(workspace: &Path, args: &[&str]) -> Result<(i32, String, String),
     ))
 }
 
-/// Create a JSONL file with a valid header but a memory record missing its ID.
-fn write_jsonl_with_blank_memory_id(path: &Path) -> TestResult {
-    let header = json!({
-        "schema": "ee.export.v1",
-        "format_version": 1,
-        "export_timestamp": "2026-01-01T00:00:00Z",
-        "source_workspace_id": "ws_test00000000000000000000",
-        "import_source": "native",
-        "scope": "full",
-        "trust_level": "verified",
-        "record_count": 1
-    });
-    let memory = json!({
-        "record_type": "memory",
-        "memory_id": "",  // BLANK - should trigger validation error
-        "level": "episodic",
-        "kind": "fact",
-        "content": "test content",
-        "confidence": 0.8,
-        "utility": 0.5,
-        "importance": 0.5,
-        "created_at": "2026-01-01T00:00:00Z",
-        "updated_at": "2026-01-01T00:00:00Z",
-        "trust_class": "agent_assertion"
-    });
-    let jsonl = format!("{}\n{}\n", header, memory);
-    fs::write(path, jsonl).map_err(|e| format!("write jsonl: {e}"))
-}
-
-/// Create a JSONL file with a valid header but a memory record with blank content.
-fn write_jsonl_with_blank_content(path: &Path) -> TestResult {
-    let header = json!({
-        "schema": "ee.export.v1",
-        "format_version": 1,
-        "export_timestamp": "2026-01-01T00:00:00Z",
-        "source_workspace_id": "ws_test00000000000000000000",
-        "import_source": "native",
-        "scope": "full",
-        "trust_level": "verified",
-        "record_count": 1
-    });
-    let memory = json!({
-        "record_type": "memory",
-        "memory_id": "mem_test00000000000000000000",
-        "level": "episodic",
-        "kind": "fact",
-        "content": "",  // BLANK - should trigger validation error
-        "confidence": 0.8,
-        "utility": 0.5,
-        "importance": 0.5,
-        "created_at": "2026-01-01T00:00:00Z",
-        "updated_at": "2026-01-01T00:00:00Z",
-        "trust_class": "agent_assertion"
-    });
-    let jsonl = format!("{}\n{}\n", header, memory);
-    fs::write(path, jsonl).map_err(|e| format!("write jsonl: {e}"))
+/// Change exactly one field in an otherwise valid, current-schema archive.
+fn write_jsonl_with_memory_field(path: &Path, field: &str, value: Value) -> TestResult {
+    write_valid_jsonl(path)?;
+    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let mut records = text
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    records[1][field] = value.clone();
+    if field == "memory_id" {
+        // Keep the tag attached so an orphan-tag error cannot mask ID validation.
+        records[2]["memory_id"] = value;
+    }
+    fs::write(
+        path,
+        records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn write_valid_jsonl(path: &Path) -> TestResult {
@@ -181,19 +148,9 @@ fn write_valid_jsonl(path: &Path) -> TestResult {
 fn import_jsonl_rejects_blank_memory_id_with_issue_code() -> TestResult {
     let root = unique_artifact_dir("blank-memory-id")?;
     let workspace = root.join("workspace");
-    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
 
-    // 1. Initialize workspace
-    let (exit_code, parsed, _stderr) = run_ee(&workspace, &["init"])?;
-    ensure_equal(&exit_code, &0, "init exit code")?;
-    ensure(
-        parsed.pointer("/success") == Some(&json!(true)),
-        format!("init must succeed: {parsed}"),
-    )?;
-
-    // 2. Create malformed JSONL with blank memory_id
     let jsonl_path = root.join("malformed.jsonl");
-    write_jsonl_with_blank_memory_id(&jsonl_path)?;
+    write_jsonl_with_memory_field(&jsonl_path, "memory_id", json!(""))?;
 
     // 3. Attempt import - should report rejection with issue codes
     let (exit_code, parsed, stderr) = run_ee(
@@ -246,9 +203,10 @@ fn import_jsonl_rejects_blank_memory_id_with_issue_code() -> TestResult {
     ensure(
         issues
             .iter()
-            .any(|issue| issue.get("severity").and_then(Value::as_str) == Some("error")),
-        format!("import must report error-severity issue for blank memory_id: {issues:?}"),
+            .any(|issue| issue["code"] == "invalid_memory_id" && issue["severity"] == "error"),
+        format!("import must reach memory-ID validation: {issues:?}"),
     )?;
+    ensure(!workspace.exists(), "invalid preview creates no workspace")?;
 
     Ok(())
 }
@@ -332,15 +290,9 @@ fn import_jsonl_rejects_orphaned_link_before_creating_workspace() -> TestResult 
 fn import_jsonl_rejects_blank_content_with_issue_code() -> TestResult {
     let root = unique_artifact_dir("blank-content")?;
     let workspace = root.join("workspace");
-    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
 
-    // 1. Initialize workspace
-    let (exit_code, _, _) = run_ee(&workspace, &["init"])?;
-    ensure_equal(&exit_code, &0, "init exit code")?;
-
-    // 2. Create malformed JSONL with blank content
     let jsonl_path = root.join("malformed.jsonl");
-    write_jsonl_with_blank_content(&jsonl_path)?;
+    write_jsonl_with_memory_field(&jsonl_path, "content", json!(""))?;
 
     // 3. Attempt import
     let (exit_code, parsed, stderr) = run_ee(
@@ -378,9 +330,12 @@ fn import_jsonl_rejects_blank_content_with_issue_code() -> TestResult {
         .and_then(Value::as_array)
         .ok_or_else(|| format!("import must expose issues array: {parsed}"))?;
     ensure(
-        !issues.is_empty(),
-        format!("import must report issues for blank content: {issues:?}"),
+        issues
+            .iter()
+            .any(|issue| issue["code"] == "invalid_memory_content" && issue["severity"] == "error"),
+        format!("import must reach memory-content validation: {issues:?}"),
     )?;
+    ensure(!workspace.exists(), "invalid preview creates no workspace")?;
 
     Ok(())
 }

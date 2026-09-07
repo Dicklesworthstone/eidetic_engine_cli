@@ -622,6 +622,20 @@ struct PreparedMemory {
     tag_count: u32,
 }
 
+/// Store-independent validation shared by dry-run and applied imports. Trust
+/// authentication and workspace binding happen only after these fields pass.
+struct ValidatedMemory<'a> {
+    record: &'a ExportMemoryRecord,
+    id: String,
+    level: MemoryLevel,
+    kind: MemoryKind,
+    content: MemoryContent,
+    confidence: Option<f32>,
+    utility: f32,
+    importance: f32,
+    bayes_posterior: Option<(f64, f64)>,
+}
+
 struct PreparedLink {
     id: String,
     input: CreateMemoryLinkInput,
@@ -864,6 +878,14 @@ fn import_jsonl_records_with_policy(
     if parsed.has_errors() {
         return Ok(report);
     }
+    let validated_memories = match validate_memories(&parsed) {
+        Ok(memories) => memories,
+        Err(issues) => {
+            report.issues.extend(issues);
+            report.status = "rejected".to_owned();
+            return Ok(report);
+        }
+    };
     let links = match prepare_links(&parsed) {
         Ok(links) => links,
         Err(issues) => {
@@ -883,8 +905,13 @@ fn import_jsonl_records_with_policy(
     let workspace_id = ensure_workspace(&connection, &workspace_path)?;
 
     let native_auth = native_import_auth_state(&parsed, &workspace_path, &workspace_id);
-    let prepared =
-        prepare_memories_with_policy(&parsed, &workspace_id, &native_auth, native_trust_policy);
+    let prepared = prepare_memories_with_policy(
+        &parsed,
+        validated_memories,
+        &workspace_id,
+        &native_auth,
+        native_trust_policy,
+    );
     if prepared.has_errors() {
         report.issues.extend(prepared.issues);
         report.status = "rejected".to_owned();
@@ -1779,8 +1806,18 @@ fn prepare_memories(
     workspace_id: &str,
     native_auth: &NativeAuthState,
 ) -> PreparedMemories {
+    let validated = match validate_memories(parsed) {
+        Ok(memories) => memories,
+        Err(issues) => {
+            return PreparedMemories {
+                memories: Vec::new(),
+                issues,
+            };
+        }
+    };
     prepare_memories_with_policy(
         parsed,
+        validated,
         workspace_id,
         native_auth,
         NativeTrustPolicy::StoreAuthenticatedOnly,
@@ -1789,6 +1826,7 @@ fn prepare_memories(
 
 fn prepare_memories_with_policy(
     parsed: &ParsedJsonlImport,
+    validated: Vec<ValidatedMemory<'_>>,
     workspace_id: &str,
     native_auth: &NativeAuthState,
     native_trust_policy: NativeTrustPolicy,
@@ -1798,9 +1836,10 @@ fn prepare_memories_with_policy(
     let mut memories = Vec::with_capacity(parsed.memories.len());
     let mut issues = Vec::new();
 
-    for memory in &parsed.memories {
+    for validated_memory in validated {
+        let memory = validated_memory.record;
         match prepare_memory(
-            memory,
+            validated_memory,
             workspace_id,
             trust_class,
             &trust_subclass,
@@ -1832,35 +1871,33 @@ fn prepare_memories_with_policy(
     PreparedMemories { memories, issues }
 }
 
-fn prepare_memory(
-    memory: &ExportMemoryRecord,
-    workspace_id: &str,
-    trust_class: TrustClass,
-    trust_subclass: &str,
+fn validate_memories(
     parsed: &ParsedJsonlImport,
-    native_auth: &NativeAuthState,
-    native_trust_policy: NativeTrustPolicy,
-) -> Result<PreparedMemory, JsonlImportIssue> {
-    let import_memory_id = import_memory_id(
-        memory,
-        parsed
-            .header
-            .as_ref()
-            .map_or(RedactionLevel::None, |header| header.redaction_level),
-    )?;
-    let import_source = parsed
+) -> Result<Vec<ValidatedMemory<'_>>, Vec<JsonlImportIssue>> {
+    let redaction = parsed
         .header
         .as_ref()
-        .map(|header| header.import_source)
-        .unwrap_or(ImportSource::Unknown);
-    let trust_class = trust_class_for_memory(
-        memory,
-        trust_class,
-        import_source,
-        native_auth,
-        native_trust_policy,
-    )?;
-    let trust_subclass = trust_subclass_for_memory(memory, trust_subclass);
+        .map_or(RedactionLevel::None, |header| header.redaction_level);
+    let mut memories = Vec::with_capacity(parsed.memories.len());
+    let mut issues = Vec::new();
+    for memory in &parsed.memories {
+        match validate_memory(memory, redaction) {
+            Ok(memory) => memories.push(memory),
+            Err(issue) => issues.push(issue),
+        }
+    }
+    if issues.is_empty() {
+        Ok(memories)
+    } else {
+        Err(issues)
+    }
+}
+
+fn validate_memory(
+    memory: &ExportMemoryRecord,
+    redaction: RedactionLevel,
+) -> Result<ValidatedMemory<'_>, JsonlImportIssue> {
+    let id = import_memory_id(memory, redaction)?;
     let level: MemoryLevel = memory.level.parse().map_err(|error| {
         JsonlImportIssue::error(
             None,
@@ -1894,7 +1931,12 @@ fn prepare_memory(
             ),
         ));
     }
-    let confidence = score_or_default(memory.confidence, trust_class.initial_confidence())
+    // A missing confidence depends on the authenticated trust class. Validate
+    // explicit values now without assigning that default before authentication.
+    let confidence = memory
+        .confidence
+        .map(|value| score_or_default(Some(value), 0.0))
+        .transpose()
         .map_err(|message| {
             JsonlImportIssue::error(
                 None,
@@ -1917,6 +1959,43 @@ fn prepare_memory(
         )
     })?;
     let bayes_posterior = exported_bayes_posterior(memory)?;
+
+    Ok(ValidatedMemory {
+        record: memory,
+        id,
+        level,
+        kind,
+        content,
+        confidence,
+        utility,
+        importance,
+        bayes_posterior,
+    })
+}
+
+fn prepare_memory(
+    validated: ValidatedMemory<'_>,
+    workspace_id: &str,
+    trust_class: TrustClass,
+    trust_subclass: &str,
+    parsed: &ParsedJsonlImport,
+    native_auth: &NativeAuthState,
+    native_trust_policy: NativeTrustPolicy,
+) -> Result<PreparedMemory, JsonlImportIssue> {
+    let memory = validated.record;
+    let import_source = parsed
+        .header
+        .as_ref()
+        .map(|header| header.import_source)
+        .unwrap_or(ImportSource::Unknown);
+    let trust_class = trust_class_for_memory(
+        memory,
+        trust_class,
+        import_source,
+        native_auth,
+        native_trust_policy,
+    )?;
+    let trust_subclass = trust_subclass_for_memory(memory, trust_subclass);
     let tags = parsed
         .tags_by_memory
         .get(&memory.memory_id)
@@ -1925,16 +2004,18 @@ fn prepare_memory(
     let tag_count = saturating_len(tags.len());
 
     Ok(PreparedMemory {
-        id: import_memory_id,
+        id: validated.id,
         input: CreateMemoryInput {
             workspace_id: workspace_id.to_owned(),
-            level: level.as_str().to_owned(),
-            kind: kind.as_str().to_owned(),
-            content: content.as_str().to_owned(),
+            level: validated.level.as_str().to_owned(),
+            kind: validated.kind.as_str().to_owned(),
+            content: validated.content.as_str().to_owned(),
             workflow_id: None,
-            confidence,
-            utility,
-            importance,
+            confidence: validated
+                .confidence
+                .unwrap_or_else(|| trust_class.initial_confidence()),
+            utility: validated.utility,
+            importance: validated.importance,
             provenance_uri: memory.provenance_uri.clone().or_else(|| {
                 Some(format!(
                     "jsonl-import://{}",
@@ -1952,7 +2033,7 @@ fn prepare_memory(
         },
         tombstoned_at: memory.tombstoned_at.clone(),
         tombstoned_reason: memory.tombstoned_reason.clone(),
-        bayes_posterior,
+        bayes_posterior: validated.bayes_posterior,
         attempt_family: memory.attempt_family.clone(),
         details: json!({
             "schema": IMPORT_JSONL_SCHEMA_V1,
@@ -4679,7 +4760,178 @@ mod tests {
         })
         .map_err(|error| error.to_string())?;
 
-        ensure(report.status.as_str(), "dry_run", "import status")
+        ensure(report.status.as_str(), "dry_run", "import status")?;
+        ensure(report.memories_imported, 0, "dry run imports no memories")?;
+        ensure(
+            tempdir.path().join("workspace").exists(),
+            false,
+            "valid preview creates no workspace",
+        )
+    }
+
+    #[test]
+    fn import_validates_memory_payloads_before_dry_run_or_storage_creation() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let secret = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let cases = [
+            ("memory_id", json!(""), "invalid_memory_id"),
+            ("level", json!("unknown"), "invalid_memory_level"),
+            ("kind", json!("unknown"), "invalid_memory_kind"),
+            ("content", json!(""), "invalid_memory_content"),
+            ("content", json!(" \t\n "), "invalid_memory_content"),
+            (
+                "content",
+                json!("a".repeat(65_537)),
+                "invalid_memory_content",
+            ),
+            (
+                "content",
+                json!(format!("Use {secret}")),
+                "memory_contains_secret",
+            ),
+            ("confidence", json!(1.5), "invalid_memory_confidence"),
+            (
+                "confidence",
+                json!(1.000_000_000_000_000_2),
+                "invalid_memory_confidence",
+            ),
+            ("utility", json!(-0.1), "invalid_memory_utility"),
+            ("importance", json!(1.1), "invalid_memory_importance"),
+            ("bayes_alpha", json!(2.5), "invalid_memory_bayes_posterior"),
+            ("bayes_alpha", json!(0.0), "invalid_memory_bayes_posterior"),
+        ];
+        for (index, (field, value, expected_code)) in cases.into_iter().enumerate() {
+            let mut records = sample_jsonl()
+                .lines()
+                .map(serde_json::from_str::<JsonValue>)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            records[1][field] = value.clone();
+            if field == "memory_id" {
+                records[2]["memory_id"] = value;
+            }
+            if field == "bayes_alpha" && records[1][field] == json!(0.0) {
+                records[1]["bayes_beta"] = json!(1.5);
+            }
+            let source_path = tempdir.path().join(format!("invalid-{index}.jsonl"));
+            fs::write(
+                &source_path,
+                records
+                    .iter()
+                    .map(JsonValue::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+            .map_err(|error| error.to_string())?;
+            for dry_run in [true, false] {
+                let workspace = tempdir.path().join(format!("workspace-{index}-{dry_run}"));
+                let external_database = tempdir.path().join(format!("database-{index}-{dry_run}"));
+                let report = import_jsonl_records(&JsonlImportOptions {
+                    workspace_path: workspace.clone(),
+                    database_path: Some(external_database.join("ee.db")),
+                    source_path: source_path.clone(),
+                    dry_run,
+                })
+                .map_err(|error| format!("case {index}/{dry_run}: {error}"))?;
+                ensure(
+                    report.status.as_str(),
+                    "rejected",
+                    "invalid payload rejected",
+                )?;
+                ensure(report.memories_imported, 0, "no memories imported")?;
+                ensure(report.database_path, None, "destination was never opened")?;
+                ensure(
+                    report.issues.iter().any(|issue| {
+                        issue.code == expected_code
+                            && issue.severity == JsonlImportIssueSeverity::Error
+                    }),
+                    true,
+                    &format!(
+                        "case {index}/{dry_run}: expected {expected_code}, got {:?}",
+                        report.issues
+                    ),
+                )?;
+                ensure(
+                    report
+                        .issues
+                        .iter()
+                        .any(|issue| issue.message.contains(secret)),
+                    false,
+                    "diagnostics must not echo the planted secret",
+                )?;
+                ensure(
+                    workspace.exists(),
+                    false,
+                    "invalid input creates no workspace",
+                )?;
+                ensure(
+                    external_database.exists(),
+                    false,
+                    "invalid input creates no database parent",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn validated_memory_defaults_still_follow_authenticated_trust() -> TestResult {
+        let input = sample_jsonl().replace(
+            r#""confidence":0.9"#,
+            r#""confidence":null,"trust_class":"human_explicit""#,
+        );
+        let parsed = parse_jsonl_source(&input);
+        let prepared = prepare_memories(&parsed, "workspace", &authenticated());
+        ensure(
+            prepared.has_errors(),
+            false,
+            "authenticated memory accepted",
+        )?;
+        let memory = prepared.memories.first().ok_or("prepared memory missing")?;
+        ensure(
+            memory.input.confidence,
+            TrustClass::HumanExplicit.initial_confidence(),
+            "trust default",
+        )?;
+        ensure(memory.input.utility, 0.7, "explicit utility preserved")?;
+        let refused = prepare_memories(&parsed, "workspace", &unauthenticated());
+        ensure(
+            refused.has_errors(),
+            true,
+            "validation cannot confer native trust",
+        )
+    }
+
+    #[test]
+    fn validated_memory_accepts_payload_boundaries() -> TestResult {
+        let mut parsed = parse_jsonl_source(&sample_jsonl());
+        let memory = parsed.memories.first_mut().ok_or("source memory missing")?;
+        memory.content = "a".repeat(65_536);
+        memory.confidence = Some(0.0);
+        memory.utility = Some(1.0);
+        memory.importance = None;
+        memory.bayes_alpha = Some(0.5);
+        memory.bayes_beta = Some(2.5);
+        let prepared = prepare_memories(&parsed, "workspace", &unauthenticated());
+        ensure(
+            prepared.has_errors(),
+            false,
+            "valid boundary payload accepted",
+        )?;
+        let memory = prepared.memories.first().ok_or("prepared memory missing")?;
+        ensure(memory.input.content.len(), 65_536, "maximum body retained")?;
+        ensure(
+            memory.input.confidence,
+            0.0,
+            "explicit zero confidence retained",
+        )?;
+        ensure(memory.input.utility, 1.0, "maximum utility retained")?;
+        ensure(memory.input.importance, 0.5, "missing importance default")?;
+        ensure(
+            memory.bayes_posterior,
+            Some((0.5, 2.5)),
+            "posterior retained",
+        )
     }
 
     #[test]

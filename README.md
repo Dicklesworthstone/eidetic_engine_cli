@@ -2273,7 +2273,11 @@ endpoints map to the corresponding restored memories. JSONL reports include
 `linkRecords`, `linksImported`, `linksSkippedDuplicate`, and
 `linksSkippedConflict`. Repeating an import adds no duplicate links; conflicting
 IDs, edges, or endpoint memories preserve existing state and produce an issue.
-Invalid link records reject the import before creating storage. Rejected JSONL
+Invalid memory IDs, levels, kinds, content, secret-bearing bodies, scores,
+Bayesian posteriors, and link records reject the import before creating storage,
+including in `--dry-run`. The preview validates the archive payload; native-trust
+authentication, destination conflicts, and index publication are checked during
+the applied import. Rejected JSONL
 imports return exit code 5 and `success: false`, with details in `data.issues`.
 Native artifact authentication covers the exact emitted memory, tag, and link
 records in order; changing, appending, removing, or reordering these records
