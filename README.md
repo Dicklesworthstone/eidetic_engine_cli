@@ -2290,6 +2290,14 @@ times use the tombstone time when present, otherwise the creation time; missing
 validity starts use the creation time. Temporal fields are checked before storage
 is created. Reimport preserves existing rows and reports conflicting timestamps.
 
+Exports also carry each memory's `logical_id`, preserving revision chains and
+attempt-family membership across restoration. Redacted roots resolve to the
+corresponding restored memory IDs. A revision archive must include its root,
+with at most one live head per chain. Missing or inconsistent roots reject the
+preview before storage is created; conflicting destination chains reject the
+applied import before any memory or link is inserted. Records without a
+`logical_id` describe singleton memories.
+
 ---
 
 ## Performance

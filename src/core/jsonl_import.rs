@@ -611,6 +611,7 @@ impl ParsedJsonlImport {
 
 struct PreparedMemory {
     id: String,
+    logical_id: String,
     input: CreateMemoryInput,
     created_at: String,
     updated_at: String,
@@ -629,6 +630,7 @@ struct PreparedMemory {
 struct ValidatedMemory<'a> {
     record: &'a ExportMemoryRecord,
     id: String,
+    logical_id: String,
     level: MemoryLevel,
     kind: MemoryKind,
     content: MemoryContent,
@@ -931,6 +933,12 @@ fn import_jsonl_records_with_policy(
     let mut conflicting_memory_ids = BTreeSet::new();
     let mut skipped_duplicate = 0_u32;
     connection.with_transaction(|| {
+        let lineage_issues = destination_lineage_issues(&connection, &prepared.memories)?;
+        if !lineage_issues.is_empty() {
+            report.issues.extend(lineage_issues);
+            report.status = "rejected".to_owned();
+            return Ok(());
+        }
         for memory in prepared.memories {
             match connection.get_memory(&memory.id)? {
                 Some(existing) => {
@@ -954,6 +962,7 @@ fn import_jsonl_records_with_policy(
                 &memory.input,
                 &memory.created_at,
                 &memory.updated_at,
+                &memory.logical_id,
             )?;
             if let Some((alpha, beta)) = memory.bayes_posterior {
                 connection.update_memory_bayes_posterior(&memory.id, alpha, beta)?;
@@ -1089,6 +1098,9 @@ fn import_jsonl_records_with_policy(
     })?;
 
     report.database_path = Some(database_path.to_string_lossy().into_owned());
+    if report.status == "rejected" {
+        return Ok(report);
+    }
     report.status = "completed".to_owned();
     report.memories_imported = saturating_len(to_insert.len());
     report.memories_skipped_duplicate = skipped_duplicate;
@@ -1296,6 +1308,54 @@ fn jsonl_import_shell_quote_arg(value: &str) -> String {
     }
 }
 
+/// A revision archive may fill missing rows in an identical existing chain,
+/// but cannot attach new members to divergent or unrepresented local history.
+/// Run before the first insert, inside the import transaction.
+fn destination_lineage_issues(
+    connection: &DbConnection,
+    memories: &[PreparedMemory],
+) -> Result<Vec<JsonlImportIssue>, DbError> {
+    let revision_roots = memories
+        .iter()
+        .filter(|memory| memory.logical_id != memory.id)
+        .map(|memory| memory.logical_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut existing_counts = BTreeMap::<&str, u32>::new();
+    let mut issues = Vec::new();
+    for memory in memories {
+        let Some(existing) = connection.get_memory(&memory.id)? else {
+            continue;
+        };
+        let existing_logical_id = connection.get_memory_logical_id(&memory.id)?;
+        let chain_changed = existing_logical_id.as_deref() != Some(memory.logical_id.as_str());
+        let fields_changed = revision_roots.contains(memory.logical_id.as_str())
+            && reimport_conflict_issue(&existing, memory).is_some();
+        if chain_changed || fields_changed {
+            issues.push(JsonlImportIssue::error(
+                None,
+                "reimport_divergent_revision_chain",
+                format!(
+                    "memory `{}` conflicts with the existing revision chain; no memories or links were imported",
+                    memory.id,
+                ),
+            ));
+        }
+        *existing_counts.entry(&memory.logical_id).or_default() += 1;
+    }
+    for root in revision_roots {
+        if connection.count_memory_chain(root)? != existing_counts.get(root).copied().unwrap_or(0) {
+            issues.push(JsonlImportIssue::error(
+                None,
+                "reimport_divergent_revision_chain",
+                format!(
+                    "revision chain `{root}` contains local rows absent from the archive; no memories or links were imported",
+                ),
+            ));
+        }
+    }
+    Ok(issues)
+}
+
 fn reimport_conflict_issue(
     existing: &StoredMemory,
     incoming: &PreparedMemory,
@@ -1318,6 +1378,20 @@ fn reimport_conflict_issue(
     }
     if existing.updated_at != incoming.updated_at {
         divergences.push("updated_at");
+    }
+    if existing.valid_from.as_deref()
+        != Some(
+            incoming
+                .input
+                .valid_from
+                .as_deref()
+                .unwrap_or(&incoming.created_at),
+        )
+    {
+        divergences.push("valid_from");
+    }
+    if existing.valid_to != incoming.input.valid_to {
+        divergences.push("valid_to");
     }
     if existing.trust_class != incoming.input.trust_class {
         divergences.push("trust_class");
@@ -1901,6 +1975,55 @@ fn validate_memories(
         }
     }
     if issues.is_empty() {
+        let by_id = memories
+            .iter()
+            .map(|memory| (memory.record.memory_id.as_str(), memory))
+            .collect::<BTreeMap<_, _>>();
+        let mut logical_ids = Vec::with_capacity(memories.len());
+        let mut live_heads = BTreeSet::new();
+        for memory in &memories {
+            let record = memory.record;
+            let root_id = record.logical_id.as_deref().unwrap_or(&record.memory_id);
+            let root = by_id.get(root_id);
+            let message = match root {
+                None => Some("revision root is absent from the archive"),
+                Some(root) if root.record.workspace_id != record.workspace_id => {
+                    Some("revision root belongs to a different source workspace")
+                }
+                Some(root) if root.record.logical_id.as_deref().unwrap_or(root_id) != root_id => {
+                    Some("revision root must identify itself, not another revision")
+                }
+                Some(root) => {
+                    logical_ids.push(root.id.clone());
+                    if record
+                        .valid_to
+                        .as_ref()
+                        .or(record.expires_at.as_ref())
+                        .is_none()
+                        && record.tombstoned_at.is_none()
+                        && !live_heads.insert(root.id.clone())
+                    {
+                        Some("revision chain has more than one live head")
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some(message) = message {
+                issues.push(JsonlImportIssue::error(
+                    None,
+                    "invalid_memory_lineage",
+                    format!("memory `{}`: {message}", record.memory_id),
+                ));
+            }
+        }
+        if issues.is_empty() {
+            for (memory, logical_id) in memories.iter_mut().zip(logical_ids) {
+                memory.logical_id = logical_id;
+            }
+        }
+    }
+    if issues.is_empty() {
         Ok(memories)
     } else {
         Err(issues)
@@ -1997,6 +2120,7 @@ fn validate_memory(
 
     Ok(ValidatedMemory {
         record: memory,
+        logical_id: id.clone(),
         id,
         level,
         kind,
@@ -2040,6 +2164,7 @@ fn prepare_memory(
 
     Ok(PreparedMemory {
         id: validated.id,
+        logical_id: validated.logical_id,
         created_at: memory.created_at.clone(),
         updated_at: memory
             .updated_at
@@ -2080,6 +2205,7 @@ fn prepare_memory(
         details: json!({
             "schema": IMPORT_JSONL_SCHEMA_V1,
             "sourceMemoryId": memory.memory_id,
+            "sourceLogicalId": memory.logical_id,
             "sourceWorkspaceId": memory.workspace_id,
             "sourceCreatedAt": memory.created_at,
             "sourceUpdatedAt": memory.updated_at,
@@ -2674,6 +2800,275 @@ mod tests {
             .map(JsonValue::to_string)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn revision_jsonl_values() -> Result<Vec<JsonValue>, String> {
+        let mut records = linked_jsonl_values()?;
+        let root = records[1]["memory_id"].clone();
+        records[1]["logical_id"] = root.clone();
+        records[1]["valid_to"] = json!("2026-05-01T00:00:00Z");
+        records[3]["logical_id"] = root;
+        records[3]["created_at"] = json!("2026-05-02T00:00:00Z");
+        records[3]["attempt_family"] = json!({
+            "family_id": "fam-import-lineage", "declared_size": 1,
+            "attempt_index": 1, "disposition": "selected", "origin": "manual"
+        });
+        let mut historical = records[1].clone();
+        historical["memory_id"] = json!(MemoryId::from_uuid(Uuid::from_u128(4)).to_string());
+        historical["content"] = json!("Historical revision retained after tombstoning.");
+        historical["created_at"] = json!("2026-05-01T00:00:00Z");
+        historical["valid_to"] = json!("2026-05-02T00:00:00Z");
+        historical["tombstoned_at"] = json!("2026-05-03T00:00:00Z");
+        records.insert(5, historical);
+        records[0]["record_count"] = json!(6);
+        records[6]["total_records"] = json!(7);
+        records[6]["memory_count"] = json!(3);
+        Ok(records)
+    }
+
+    #[test]
+    fn revision_lineage_restores_roots_history_and_family_membership_after_redaction() -> TestResult
+    {
+        for level in [
+            RedactionLevel::None,
+            RedactionLevel::Standard,
+            RedactionLevel::Paranoid,
+        ] {
+            let mut records = revision_jsonl_values()?;
+            records[0]["redaction_level"] = json!(level.as_str());
+            let records = records
+                .into_iter()
+                .map(|value| {
+                    let record = serde_json::from_value::<crate::models::ExportRecord>(value)
+                        .map_err(|error| error.to_string())?;
+                    serde_json::to_value(crate::output::jsonl_export::redact_record(record, level))
+                        .map_err(|error| error.to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let parsed = parse_jsonl_source(&jsonl_values_text(&records));
+            let root =
+                import_memory_id(&parsed.memories[0], level).map_err(|issue| issue.message)?;
+            let head =
+                import_memory_id(&parsed.memories[1], level).map_err(|issue| issue.message)?;
+            let historical =
+                import_memory_id(&parsed.memories[2], level).map_err(|issue| issue.message)?;
+            let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let options = JsonlImportOptions {
+                workspace_path: dir.path().join("workspace"),
+                database_path: None,
+                source_path: dir.path().join("revisions.jsonl"),
+                dry_run: false,
+            };
+            fs::write(&options.source_path, jsonl_values_text(&records))
+                .map_err(|error| error.to_string())?;
+            let report = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+            ensure(
+                report.memories_imported,
+                3,
+                &format!("{}: {:?}", level.as_str(), report.issues),
+            )?;
+            let connection = DbConnection::open_file(database_path(&options))
+                .map_err(|error| error.to_string())?;
+            for id in [&root, &head, &historical] {
+                ensure(
+                    connection
+                        .get_memory_logical_id(id)
+                        .map_err(|error| error.to_string())?,
+                    Some(root.clone()),
+                    "every restored revision shares the restored root",
+                )?;
+            }
+            ensure(
+                connection
+                    .count_memory_chain(&root)
+                    .map_err(|error| error.to_string())?,
+                3,
+                "chain count",
+            )?;
+            let head_memory = connection
+                .get_memory(&head)
+                .map_err(|error| error.to_string())?
+                .ok_or("head")?;
+            ensure(
+                connection
+                    .list_live_memory_revisions_for_logical_id(&head_memory.workspace_id, &root)
+                    .map_err(|error| error.to_string())?
+                    .iter()
+                    .map(|memory| memory.id.clone())
+                    .collect::<Vec<_>>(),
+                vec![head.clone()],
+                "exactly one live head",
+            )?;
+            let family_id = parsed.memories[1]
+                .attempt_family
+                .as_ref()
+                .ok_or("family")?
+                .family_id
+                .as_str();
+            ensure(
+                connection
+                    .list_attempt_family_membership_logical_ids(
+                        &head_memory.workspace_id,
+                        family_id,
+                    )
+                    .map_err(|error| error.to_string())?,
+                vec![root.clone()],
+                "family ledger keys to the root, not the current revision",
+            )?;
+            ensure(
+                connection
+                    .get_memory(&historical)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("historical")?
+                    .tombstoned_at,
+                Some("2026-05-03T00:00:00Z".to_owned()),
+                "historical tombstone survives",
+            )?;
+            drop(connection);
+            let repeat = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+            ensure(
+                (
+                    repeat.status.as_str(),
+                    repeat.memories_imported,
+                    repeat.memories_skipped_duplicate,
+                ),
+                ("completed", 0, 3),
+                "idempotent chain replay",
+            )?;
+            ensure(
+                repeat
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code.starts_with("reimport_divergent")),
+                false,
+                "no false reimport conflict",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_revision_lineage_rejects_before_dry_run_or_storage_creation() -> TestResult {
+        let base = revision_jsonl_values()?;
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        for case in ["missing", "blank", "cycle", "workspace", "two_heads"] {
+            let mut records = base.clone();
+            match case {
+                "missing" => {
+                    records[3]["logical_id"] =
+                        json!(MemoryId::from_uuid(Uuid::from_u128(99)).to_string())
+                }
+                "blank" => records[3]["logical_id"] = json!(""),
+                "cycle" => records[1]["logical_id"] = records[3]["memory_id"].clone(),
+                "workspace" => records[3]["workspace_id"] = json!("wsp_other"),
+                "two_heads" => records[1]["valid_to"] = JsonValue::Null,
+                _ => unreachable!(),
+            }
+            let source_path = dir.path().join(format!("{case}.jsonl"));
+            fs::write(&source_path, jsonl_values_text(&records))
+                .map_err(|error| error.to_string())?;
+            for dry_run in [true, false] {
+                let options = JsonlImportOptions {
+                    workspace_path: dir.path().join(format!("{case}-{dry_run}")),
+                    database_path: None,
+                    source_path: source_path.clone(),
+                    dry_run,
+                };
+                let report = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+                ensure(report.status.as_str(), "rejected", case)?;
+                ensure(
+                    report
+                        .issues
+                        .iter()
+                        .any(|issue| issue.code == "invalid_memory_lineage"),
+                    true,
+                    case,
+                )?;
+                ensure(
+                    options.workspace_path.exists(),
+                    false,
+                    "preflight leaves storage absent",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn divergent_revision_reimport_preserves_existing_chain_and_new_rows() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let options = JsonlImportOptions {
+            workspace_path: dir.path().join("workspace"),
+            database_path: None,
+            source_path: dir.path().join("revisions.jsonl"),
+            dry_run: false,
+        };
+        let base = revision_jsonl_values()?;
+        fs::write(&options.source_path, jsonl_values_text(&base))
+            .map_err(|error| error.to_string())?;
+        let imported = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        ensure(imported.memories_imported, 3, "seed chain")?;
+        let connection =
+            DbConnection::open_file(database_path(&options)).map_err(|error| error.to_string())?;
+        let workspace_id = ensure_workspace(&connection, &options.workspace_path)
+            .map_err(|error| error.to_string())?;
+        let before = connection
+            .list_memories(&workspace_id, None, true)
+            .map_err(|error| error.to_string())?;
+        let audits_before = connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+        for case in ["content", "logical_id", "valid_to", "new_head"] {
+            let mut records = base.clone();
+            match case {
+                "content" => {
+                    records[1]["content"] =
+                        json!("Different source history must not replace the stored chain.")
+                }
+                "logical_id" => records[3]["logical_id"] = records[3]["memory_id"].clone(),
+                "valid_to" => records[1]["valid_to"] = json!("2026-04-30T12:00:00Z"),
+                "new_head" => {
+                    let new_id = json!(MemoryId::from_uuid(Uuid::from_u128(77)).to_string());
+                    records[3]["memory_id"] = new_id.clone();
+                    records[4]["target_memory_id"] = new_id;
+                }
+                _ => unreachable!(),
+            }
+            fs::write(&options.source_path, jsonl_values_text(&records))
+                .map_err(|error| error.to_string())?;
+            let report = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+            ensure(report.status.as_str(), "rejected", case)?;
+            ensure(
+                (report.memories_imported, report.links_imported),
+                (0, 0),
+                case,
+            )?;
+            ensure(
+                report
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code == "reimport_divergent_revision_chain"),
+                true,
+                case,
+            )?;
+        }
+        let connection =
+            DbConnection::open_file(database_path(&options)).map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .list_memories(&workspace_id, None, true)
+                .map_err(|error| error.to_string())?,
+            before,
+            "every memory unchanged",
+        )?;
+        ensure(
+            connection
+                .list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?,
+            audits_before,
+            "no audit changes on rejection",
+        )
     }
 
     #[test]

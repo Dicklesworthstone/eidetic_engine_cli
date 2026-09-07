@@ -528,6 +528,9 @@ pub fn redact_memory_record(
 
     if level.redacts_identifiers() {
         record.memory_id = redact_identifier(&record.memory_id, level);
+        if let Some(logical_id) = record.logical_id.as_mut() {
+            *logical_id = redact_identifier(logical_id, level);
+        }
         record.workspace_id = redact_identifier(&record.workspace_id, level);
         if let Some(agent) = record.source_agent.as_ref() {
             record.source_agent = Some(redact_identifier(agent, level));
@@ -1626,6 +1629,36 @@ mod tests {
                 .as_deref(),
             Some(provenance.as_str())
         );
+    }
+
+    #[test]
+    fn redact_memory_record_preserves_revision_reference_aliases() {
+        let root_id = "mem_00000000000000000000000001";
+        let record = ExportMemoryRecord::builder()
+            .memory_id("mem_00000000000000000000000002")
+            .logical_id(root_id)
+            .workspace_id("wsp_00000000000000000000000003")
+            .level("procedural")
+            .kind("rule")
+            .content("Keep revision lineage intact.")
+            .created_at("2026-05-01T00:00:00Z")
+            .build()
+            .expect("valid revision record");
+        for level in [
+            RedactionLevel::None,
+            RedactionLevel::Minimal,
+            RedactionLevel::Standard,
+            RedactionLevel::Strict,
+            RedactionLevel::Paranoid,
+            RedactionLevel::Full,
+        ] {
+            let redacted = redact_memory_record(record.clone(), level);
+            assert_eq!(redacted.logical_id, Some(redact_identifier(root_id, level)));
+            let serialized = serde_json::to_string(&redacted).expect("serialize revision");
+            let decoded: ExportMemoryRecord =
+                serde_json::from_str(&serialized).expect("decode revision");
+            assert_eq!(decoded, redacted);
+        }
     }
 
     #[test]

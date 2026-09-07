@@ -21793,7 +21793,7 @@ impl DbConnection {
     /// Insert a new memory and its tags.
     pub fn insert_memory(&self, id: &str, input: &CreateMemoryInput) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        self.insert_memory_inner(id, input, None, &now, &now)
+        self.insert_memory_inner(id, input, None, &now, &now, id)
     }
 
     /// Seed an evaluation store through normal insertion, including provenance
@@ -21805,19 +21805,21 @@ impl DbConnection {
         timestamp: chrono::DateTime<Utc>,
     ) -> Result<()> {
         let timestamp = timestamp.to_rfc3339();
-        self.insert_memory_inner(id, input, None, &timestamp, &timestamp)
+        self.insert_memory_inner(id, input, None, &timestamp, &timestamp, id)
     }
 
     /// Import a memory through normal insertion without replacing its history.
-    /// The caller validates both RFC 3339 timestamps before opening storage.
+    /// The caller validates timestamps and the archive's revision lineage
+    /// before opening storage, and checks destination conflicts transactionally.
     pub(crate) fn insert_memory_with_timestamps(
         &self,
         id: &str,
         input: &CreateMemoryInput,
         created_at: &str,
         updated_at: &str,
+        logical_id: &str,
     ) -> Result<()> {
-        self.insert_memory_inner(id, input, None, created_at, updated_at)
+        self.insert_memory_inner(id, input, None, created_at, updated_at, logical_id)
     }
 
     /// Insert a new memory with a precomputed content SimHash.
@@ -21828,7 +21830,7 @@ impl DbConnection {
         content_simhash: MemoryContentSimHash,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        self.insert_memory_inner(id, input, Some(content_simhash), &now, &now)
+        self.insert_memory_inner(id, input, Some(content_simhash), &now, &now, id)
     }
 
     fn insert_memory_inner(
@@ -21838,6 +21840,7 @@ impl DbConnection {
         content_simhash: Option<MemoryContentSimHash>,
         created_at: &str,
         updated_at: &str,
+        logical_id: &str,
     ) -> Result<()> {
         let provenance_chain_hash =
             compute_memory_provenance_chain_hash_fields(&MemoryProvenanceChainFields {
@@ -21855,12 +21858,8 @@ impl DbConnection {
                 created_at,
             });
 
-        // N15.1 (bd-17c65.14.15.2): new memories belong to a singleton
-        // revision chain whose `logical_id` equals the row's `id`. When
-        // the revise write path lands, it will INSERT a new row with the
-        // SAME logical_id but a fresh id, and UPDATE the prior row's
-        // `valid_to`. Until then, every memory's chain is a singleton —
-        // logical_id is equal to id and the field is informational.
+        // Ordinary captures start singleton chains; imports preserve the
+        // validated root identity before any family ledger is reconstructed.
         let valid_from = input
             .valid_from
             .clone()
@@ -21890,7 +21889,7 @@ impl DbConnection {
                 Value::Text(valid_from),
                 input.valid_to.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
                 content_simhash.map_or(Value::Null, |simhash| Value::Bytes(simhash.to_vec())),
-                Value::Text(id.to_string()),
+                Value::Text(logical_id.to_string()),
             ],
         )?;
 
@@ -22829,6 +22828,26 @@ impl DbConnection {
             None => Ok(None),
             Some(row) => Ok(optional_text(row, 0)?.map(str::to_string)),
         }
+    }
+
+    /// Read revision identities in one query for a workspace export snapshot.
+    pub(crate) fn list_memory_logical_ids(
+        &self,
+        workspace_id: &str,
+    ) -> Result<BTreeMap<String, String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, logical_id FROM memories WHERE workspace_id = ?1 ORDER BY id ASC",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        rows.iter()
+            .map(|row| {
+                Ok((
+                    required_text(row, 0, DbOperation::Query, "id")?.to_owned(),
+                    required_text(row, 1, DbOperation::Query, "logical_id")?.to_owned(),
+                ))
+            })
+            .collect()
     }
 
     /// List at most two live heads in one workspace-local revision chain.

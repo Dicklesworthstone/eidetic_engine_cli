@@ -962,6 +962,10 @@ pub struct ExportAttemptFamilyRecord {
 pub struct ExportMemoryRecord {
     pub schema: String,
     pub memory_id: String,
+    /// Root memory identity shared by immutable revisions. Omitted for a
+    /// singleton record whose logical identity is its own memory ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_id: Option<String>,
     pub workspace_id: String,
     pub level: String,
     pub kind: String,
@@ -1020,6 +1024,7 @@ impl ExportMemoryRecord {
 #[derive(Clone, Debug, Default)]
 pub struct ExportMemoryRecordBuilder {
     memory_id: Option<String>,
+    logical_id: Option<String>,
     workspace_id: Option<String>,
     level: Option<String>,
     kind: Option<String>,
@@ -1059,6 +1064,12 @@ impl ExportMemoryRecordBuilder {
     #[must_use]
     pub fn memory_id(mut self, memory_id: impl Into<String>) -> Self {
         self.memory_id = Some(memory_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn logical_id(mut self, logical_id: impl Into<String>) -> Self {
+        self.logical_id = Some(logical_id.into());
         self
     }
 
@@ -1269,6 +1280,7 @@ impl ExportMemoryRecordBuilder {
         Ok(ExportMemoryRecord {
             schema: EXPORT_MEMORY_SCHEMA_V1.to_owned(),
             memory_id: required_string(ExportRecordType::Memory, "memory_id", self.memory_id)?,
+            logical_id: self.logical_id,
             workspace_id: required_string(
                 ExportRecordType::Memory,
                 "workspace_id",

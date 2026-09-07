@@ -827,6 +827,7 @@ fn backup_degraded_data_json(
 struct BackupExportData {
     workspace: ExportWorkspaceRecord,
     memories: Vec<StoredMemory>,
+    logical_ids_by_memory: BTreeMap<String, String>,
     tags_by_memory: BTreeMap<String, Vec<String>>,
     links: Vec<StoredMemoryLink>,
     audits: Vec<StoredAuditEntry>,
@@ -4122,6 +4123,13 @@ fn load_export_data_in_current_snapshot(
         .iter()
         .map(|memory| memory.id.clone())
         .collect::<BTreeSet<_>>();
+    let logical_ids_by_memory =
+        connection
+            .list_memory_logical_ids(&workspace.id)
+            .map_err(|error| DomainError::Storage {
+                message: error.to_string(),
+                repair: Some("ee db check --workspace .".to_owned()),
+            })?;
     let mut tags_by_memory = memories
         .iter()
         .map(|memory| (memory.id.clone(), Vec::new()))
@@ -4208,6 +4216,7 @@ fn load_export_data_in_current_snapshot(
             .build()
             .map_err(export_build_error("build backup workspace record"))?,
         memories,
+        logical_ids_by_memory,
         tags_by_memory,
         links,
         audits,
@@ -4249,16 +4258,16 @@ fn render_records(
 
         let tombstone_reasons = tombstone_reasons_by_memory(&data.audits);
         for memory in &data.memories {
+            let mut record = memory_record(
+                memory,
+                tombstone_reasons.get(&memory.id).map(String::as_str),
+                data.graph_fields_by_memory.get(&memory.id),
+                data.attempt_families_by_memory.get(&memory.id),
+            )
+            .map_err(export_build_error("build backup memory record"))?;
+            record.logical_id = data.logical_ids_by_memory.get(&memory.id).cloned();
             exporter
-                .write_memory(
-                    memory_record(
-                        memory,
-                        tombstone_reasons.get(&memory.id).map(String::as_str),
-                        data.graph_fields_by_memory.get(&memory.id),
-                        data.attempt_families_by_memory.get(&memory.id),
-                    )
-                    .map_err(export_build_error("build backup memory record"))?,
-                )
+                .write_memory(record)
                 .map_err(io_error("write backup memory record"))?;
             for tag in
                 memory_tags(data, memory).map_err(export_build_error("build backup tag record"))?
@@ -8291,6 +8300,70 @@ mod tests {
             current.disposition.as_deref(),
             Some("selected"),
             "current revision preserves selected disposition",
+        )?;
+        ensure_equal(
+            export.logical_ids_by_memory.get(&revised_id),
+            Some(&original_id),
+            "export snapshot retains revision root",
+        )?;
+        let (records, stats) = render_records(
+            "revision-round-trip",
+            "2026-09-07T00:00:00Z",
+            RedactionLevel::None,
+            &export,
+            None,
+            &mut Vec::new(),
+        )
+        .map_err(|error| error.message())?;
+        ensure_equal(stats.memory_count, 2, "both revisions serialized")?;
+        let source_path = workspace.join("revision-round-trip.jsonl");
+        fs::write(&source_path, records).map_err(|error| error.to_string())?;
+        let restored_workspace = workspace.join("restored-revisions");
+        let report = crate::core::jsonl_import::import_jsonl_records(&JsonlImportOptions {
+            workspace_path: restored_workspace.clone(),
+            database_path: None,
+            source_path,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            report.memories_imported,
+            2,
+            &format!("restore revisions: {:?}", report.issues),
+        )?;
+        let restored = DbConnection::open_file(
+            restored_workspace
+                .join(WORKSPACE_MARKER)
+                .join(DEFAULT_DB_FILE),
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            restored
+                .count_memory_chain(&original_id)
+                .map_err(|error| error.to_string())?,
+            2,
+            "restored chain count",
+        )?;
+        ensure_equal(
+            restored
+                .get_memory_logical_id(&revised_id)
+                .map_err(|error| error.to_string())?,
+            Some(original_id.clone()),
+            "restored current revision root",
+        )?;
+        let head = restored
+            .get_memory(&revised_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("restored head")?;
+        ensure_equal(
+            restored
+                .list_attempt_family_membership_logical_ids(
+                    &head.workspace_id,
+                    "fam-backup-revision",
+                )
+                .map_err(|error| error.to_string())?,
+            vec![original_id],
+            "restored family member retains its original logical identity",
         )
     }
 
