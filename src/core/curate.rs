@@ -5724,18 +5724,24 @@ pub fn apply_curation_candidate(
                 &job_id,
                 "procedural rule",
             ),
-            Ok(None) => Some(curate_apply_index_publish_failed(
-                &candidate_id,
-                "committed_rule_job_missing",
-                "procedural rule",
-            )),
+            Ok(None) => Some(CurateCandidatesDegradation {
+                code: CURATE_APPLY_INDEX_PUBLISH_FAILED_CODE.to_owned(),
+                severity: "medium".to_owned(),
+                message: format!(
+                    "The procedural rule for applied candidate {candidate_id} could not be associated with a durable search-index job. Search publication could not be confirmed."
+                ),
+                repair: "ee index rebuild --workspace . --json".to_owned(),
+            }),
             Err(error) => {
                 tracing::warn!(candidate_id, %error, "cannot recover committed rule index job");
-                Some(curate_apply_index_publish_failed(
-                    &candidate_id,
-                    "status_unavailable",
-                    "procedural rule",
-                ))
+                Some(CurateCandidatesDegradation {
+                    code: CURATE_APPLY_INDEX_PUBLISH_FAILED_CODE.to_owned(),
+                    severity: "medium".to_owned(),
+                    message: format!(
+                        "The procedural rule for applied candidate {candidate_id} was committed, but its search-index job could not be inspected. Search publication could not be confirmed."
+                    ),
+                    repair: "ee job run index_coalesce --workspace . --json".to_owned(),
+                })
             }
         };
         degraded.extend(failure);

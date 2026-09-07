@@ -2277,8 +2277,8 @@ impl SearchDegradation {
     /// strong matches. Informational so an agent can choose to
     /// rephrase or fall back to a different source mode.
     ///
-    /// Bead bd-17c65.2.5 (B5). Fires when `qualityAssessment ==
-    /// "weak"` (per B4): top score is below `2 × floor`.
+    /// Bead bd-17c65.2.5 (B5). Fires when the top score is below
+    /// `2 × floor`; task-level quality remains unknown.
     #[must_use]
     fn weak_query_recall(floor: f32, top_score: f32) -> Self {
         Self {
@@ -21707,8 +21707,8 @@ mod tests {
     /// When top score is strictly between floor and 2× floor, the
     /// score-floor proximity advisory fires; it does not assess answer quality.
     #[test]
-    fn weak_query_recall_threshold_aligns_with_quality_weak() {
-        // top exactly at 2× floor → NOT weak (good); top below 2× → weak.
+    fn weak_query_recall_threshold_tracks_score_floor_proximity() {
+        // The advisory fires below 2× floor, not at the boundary.
         // The signal fires when score < 2× floor.
         let floor = 0.05;
         let just_below_two_x = 0.09_f32;

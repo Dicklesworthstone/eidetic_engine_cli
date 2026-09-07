@@ -802,13 +802,28 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
         format!("rule protect must queue a rule index job: {protect}"),
     )?;
 
-    let stale_after_protect = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "status"])?;
+    let ready_after_protect = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "status"])?;
     ensure_equal(
-        &stale_after_protect
+        &ready_after_protect
             .pointer("/data/health")
             .and_then(JsonValue::as_str),
-        &Some("stale"),
-        "rule protect makes the older published index stale",
+        &Some("ready"),
+        "rule protect publishes its changed projection before returning",
+    )?;
+    let protect_job_id = protect
+        .pointer("/data/indexJobId")
+        .and_then(JsonValue::as_str)
+        .ok_or("rule protect omitted its durable job id")?;
+    let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+    let protect_job = connection
+        .get_search_index_job(protect_job_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("rule protect durable job missing")?;
+    connection.close().map_err(|e| e.to_string())?;
+    ensure_equal(
+        &protect_job.status.as_str(),
+        &"completed",
+        "the exact protect job completed without manual maintenance",
     )?;
 
     let coalesce = run_ee_json(&[
@@ -822,7 +837,7 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
     ensure_equal(
         &coalesce.pointer("/success").and_then(JsonValue::as_bool),
         &Some(true),
-        "public index coalesce processes the rule mutation",
+        "public index coalesce remains safe after synchronous rule publication",
     )?;
     let ready_after_coalesce = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "status"])?;
     ensure_equal(
@@ -830,7 +845,7 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
             .pointer("/data/health")
             .and_then(JsonValue::as_str),
         &Some("ready"),
-        "index becomes ready only after truthful rule publication",
+        "index coalesce preserves the ready rule index",
     )?;
 
     let refreshed_search = run_ee_json(&[
