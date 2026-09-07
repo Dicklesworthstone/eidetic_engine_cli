@@ -12835,6 +12835,8 @@ impl StoredEvidenceSpan {
             || !matches!(self.instruction_risk.as_str(), "none" | "low")
             || !evidence_role_matches_producer(producer_kind, self.role.as_deref())
             || !evidence_span_kind_and_role_are_indexable(&self.span_kind, self.role.as_deref())
+            || (producer_kind == EvidenceProducerKind::CassImport
+                && !crate::policy::classify_transcript_record(&self.excerpt).is_indexable())
         {
             return false;
         }
@@ -13030,13 +13032,18 @@ fn valid_evidence_security_token(value: &str) -> bool {
 }
 
 fn evidence_span_kind_and_role_are_indexable(span_kind: &str, role: Option<&str>) -> bool {
-    matches!(span_kind, "message" | "file" | "summary") && !matches!(role, Some("system" | "tool"))
+    matches!(span_kind, "message" | "file" | "summary")
+        && !matches!(role, Some("system" | "developer" | "tool" | "unknown"))
 }
 
 fn evidence_role_matches_producer(producer: EvidenceProducerKind, role: Option<&str>) -> bool {
     match producer {
         EvidenceProducerKind::CassImport => {
-            role.is_none() || matches!(role, Some("user" | "assistant" | "system" | "tool"))
+            role.is_none()
+                || matches!(
+                    role,
+                    Some("user" | "assistant" | "system" | "developer" | "tool" | "unknown")
+                )
         }
         EvidenceProducerKind::AgentsmdImport => role == Some("agentsmd_import"),
         EvidenceProducerKind::DocsBootstrap => role == Some("docs_bootstrap"),
@@ -13114,7 +13121,9 @@ fn prepare_evidence_security(input: &CreateEvidenceSpanInput) -> Result<Prepared
 
     let policy_quarantine = screen.instruction_like
         || matches!(screen.instruction_risk, "medium" | "high")
-        || !evidence_span_kind_and_role_are_indexable(&input.span_kind, input.role.as_deref());
+        || !evidence_span_kind_and_role_are_indexable(&input.span_kind, input.role.as_deref())
+        || (producer_kind == EvidenceProducerKind::CassImport
+            && !crate::policy::classify_transcript_record(&screen.content).is_indexable());
     let (search_eligibility, pack_eligibility) = match producer_kind {
         EvidenceProducerKind::CassImport if !policy_quarantine => ("admitted", "admitted"),
         EvidenceProducerKind::CassImport => ("quarantined", "quarantined"),
@@ -45297,6 +45306,131 @@ mod tests {
                 Err(super::DbError::MalformedRow { .. })
             ),
             "legacy_unknown cannot enter through the live boundary",
+        )
+    }
+
+    #[test]
+    fn transcript_admission_rechecks_raw_records_for_new_and_existing_rows() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace_id = "wsp_01234567890123456789012345";
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x8550)).to_string();
+        connection.insert_session(&session_id, &session_input("raw-transcript-admission"))?;
+        let session = connection
+            .get_session(&session_id)?
+            .ok_or_else(|| TestFailure::new("transcript session missing"))?;
+        let records = [
+            ("Release build completed successfully.", true),
+            (
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":"Release build output."}}"#,
+                true,
+            ),
+            (
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":"Release build output."}}"#,
+                true,
+            ),
+            (
+                r#"{"type":"session_meta","payload":{"cwd":"/private/workspace","note":"Release build output."}}"#,
+                false,
+            ),
+            (
+                r#"{"type":"turn_context","payload":{"cwd":"/private/workspace"}}"#,
+                false,
+            ),
+            (
+                r#"{"type":"response_item","payload":{"type":"message","role":"system","content":"Release build output."}}"#,
+                false,
+            ),
+            (
+                r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":"Release build output."}}"#,
+                false,
+            ),
+            (
+                r#"{"type":"response_item","payload":{"type":"function_call_output","output":"Release build output."}}"#,
+                false,
+            ),
+            (
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"Release build output."}]}}"#,
+                false,
+            ),
+            (
+                r#"{"type":"message","role":"future_role","content":"Release build output."}"#,
+                false,
+            ),
+        ];
+        for (index, (excerpt, expected)) in records.into_iter().enumerate() {
+            let id =
+                crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x8560 + index as u128))
+                    .to_string();
+            let mut input = evidence_span_input(
+                &session_id,
+                &format!("raw-transcript-{index}"),
+                index as u32 + 1,
+            );
+            // Reproduce the old importer: every raw record looked like a
+            // roleless message, including Codex metadata and system payloads.
+            input.role = None;
+            input.excerpt = excerpt.to_owned();
+            input.content_hash = super::canonical_evidence_hash(excerpt);
+            connection.insert_evidence_span(&id, &input)?;
+            let stored = connection
+                .get_evidence_span(&id)?
+                .ok_or_else(|| TestFailure::new("transcript evidence missing"))?;
+            ensure_equal(
+                &stored.search_eligibility.as_str(),
+                &if expected { "admitted" } else { "quarantined" },
+                "fresh import eligibility",
+            )?;
+            ensure_equal(
+                &stored.is_direct_pack_admitted_for_session(workspace_id, &session),
+                &expected,
+                "fresh pack admission",
+            )?;
+
+            // Model rows already admitted by the old boundary, including their
+            // matching security metadata. Hash drift must not be the reason
+            // that their raw record is rejected during live retrieval.
+            let mut metadata: serde_json::Value = serde_json::from_str(
+                stored
+                    .metadata_json
+                    .as_deref()
+                    .ok_or_else(|| TestFailure::new("security metadata missing"))?,
+            )
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+            metadata["searchEligibility"] = serde_json::json!("admitted");
+            metadata["packEligibility"] = serde_json::json!("admitted");
+            connection.execute_for(super::DbOperation::Execute,
+                "UPDATE evidence_spans SET search_eligibility = 'admitted', pack_eligibility = 'admitted', metadata_json = ?1 WHERE id = ?2",
+                &[sqlmodel_core::Value::Text(metadata.to_string()), sqlmodel_core::Value::Text(id.clone())])?;
+            let existing = connection
+                .get_evidence_span(&id)?
+                .ok_or_else(|| TestFailure::new("existing transcript evidence missing"))?;
+            ensure_equal(
+                &existing.is_derivation_admitted_for_session(workspace_id, &session),
+                &expected,
+                "existing derivation admission",
+            )?;
+            ensure_equal(
+                &existing.is_direct_pack_admitted_for_session(workspace_id, &session),
+                &expected,
+                "existing pack admission",
+            )?;
+            ensure_equal(
+                &connection
+                    .get_search_admitted_evidence_span(&id, workspace_id)?
+                    .is_some(),
+                &expected,
+                "existing search admission",
+            )?;
+        }
+        let (admitted, _) =
+            connection.list_search_admitted_evidence_spans_for_workspace(workspace_id)?;
+        ensure_equal(
+            &admitted.len(),
+            &3,
+            "ordinary messages survive workspace scanning",
         )
     }
 

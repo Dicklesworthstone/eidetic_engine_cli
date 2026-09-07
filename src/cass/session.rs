@@ -621,13 +621,14 @@ pub enum CassSpanKind {
     ToolResult,
     /// File content or diff.
     File,
-    /// Session summary or metadata.
+    /// Session summary or metadata. Retrieval eligibility is decided from the
+    /// raw record by the shared transcript policy, not from this coarse kind.
     Summary,
 }
 
 impl CassSpanKind {
     /// Parse a span kind from CASS output, mapping unknown values to
-    /// [`Self::Message`].
+    /// [`Self::Message`]. This storage label does not grant retrieval admission.
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
         match normalized_cass_token(s).as_str() {
@@ -635,7 +636,7 @@ impl CassSpanKind {
             "tool_call" | "toolcall" | "tool_use" | "function_call" => Self::ToolCall,
             "tool_result" | "toolresult" | "function_result" => Self::ToolResult,
             "file" | "diff" | "file_history_snapshot" => Self::File,
-            "summary" | "meta" => Self::Summary,
+            "summary" | "meta" | "metadata" | "session_meta" | "turn_context" => Self::Summary,
             _ => Self::Message,
         }
     }
@@ -677,21 +678,26 @@ pub enum CassRole {
     Assistant,
     /// System message.
     System,
+    /// Developer instruction message.
+    Developer,
     /// Tool invocation/result.
     Tool,
+    /// Unrecognized, conflicting, or malformed role.
+    Unknown,
 }
 
 impl CassRole {
     /// Parse a role from CASS output, mapping unknown values to
-    /// [`Self::User`].
+    /// [`Self::Unknown`].
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
         match normalized_cass_token(s).as_str() {
             "user" | "human" => Self::User,
-            "assistant" | "model" | "ai" => Self::Assistant,
+            "assistant" | "agent" | "model" | "ai" => Self::Assistant,
             "system" => Self::System,
+            "developer" => Self::Developer,
             "tool" | "function" => Self::Tool,
-            _ => Self::User,
+            _ => Self::Unknown,
         }
     }
 
@@ -702,7 +708,9 @@ impl CassRole {
             Self::User => "user",
             Self::Assistant => "assistant",
             Self::System => "system",
+            Self::Developer => "developer",
             Self::Tool => "tool",
+            Self::Unknown => "unknown",
         }
     }
 }

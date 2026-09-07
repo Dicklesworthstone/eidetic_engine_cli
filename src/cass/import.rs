@@ -1694,21 +1694,11 @@ fn cass_view_stream_peak_sample_bytes() -> usize {
 }
 
 fn classify_line(content: &str) -> (CassSpanKind, Option<CassRole>) {
-    let Ok(value) = serde_json::from_str::<JsonValue>(content) else {
-        return (CassSpanKind::Message, None);
-    };
-    let line_type = value
-        .get("type")
-        .and_then(JsonValue::as_str)
-        .unwrap_or_default();
-    let span_kind = CassSpanKind::parse_lossy(line_type);
-    let role = value
-        .get("message")
-        .and_then(|message| message.get("role"))
-        .and_then(JsonValue::as_str)
-        .or_else(|| value.get("role").and_then(JsonValue::as_str))
-        .and_then(|role| role.parse().ok());
-    (span_kind, role)
+    let class = crate::policy::classify_transcript_record(content);
+    (
+        CassSpanKind::parse_lossy(class.span_kind),
+        class.role.map(CassRole::parse_lossy),
+    )
 }
 
 fn dry_run_report(
@@ -3316,6 +3306,56 @@ mod tests {
             "tool result kind",
         )?;
         ensure_equal(&spans[1].role, &Some(CassRole::Tool), "tool role")
+    }
+
+    #[test]
+    fn parses_nested_transcript_roles_without_promoting_unknown_roles() -> TestResult {
+        let lines = [
+            (
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":"build output"}}"#,
+                CassSpanKind::Message,
+                Some(CassRole::Assistant),
+            ),
+            (
+                r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":"build configuration"}}"#,
+                CassSpanKind::Message,
+                Some(CassRole::Developer),
+            ),
+            (
+                r#"{"type":"assistant","message":{"role":"system","content":"build configuration"}}"#,
+                CassSpanKind::Message,
+                Some(CassRole::Unknown),
+            ),
+            (
+                r#"{"type":"message","role":"future_role","content":"build configuration"}"#,
+                CassSpanKind::Message,
+                Some(CassRole::Unknown),
+            ),
+            (
+                r#"{"type":"response_item","payload":{"type":"function_call_output","output":"build output"}}"#,
+                CassSpanKind::ToolResult,
+                None,
+            ),
+            (
+                r#"{"type":"session_meta","payload":{"cwd":"/private/workspace"}}"#,
+                CassSpanKind::Summary,
+                None,
+            ),
+        ];
+        for (index, (content, kind, role)) in lines.into_iter().enumerate() {
+            let document = serde_json::json!({"line": index + 1, "content": content});
+            let spans = parse_view_json(document.to_string().as_bytes(), "/tmp/session.jsonl")
+                .map_err(|error| error.to_string())?;
+            ensure_equal(&spans.len(), &1, "one durable transcript line")?;
+            ensure_equal(&spans[0].span_kind, &kind, "coarse storage kind")?;
+            ensure_equal(&spans[0].role, &role, "authoritative envelope role")?;
+            ensure_equal(
+                &spans[0].excerpt.as_str(),
+                &content,
+                "raw provenance retained",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

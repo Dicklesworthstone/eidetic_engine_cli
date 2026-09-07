@@ -1627,7 +1627,8 @@ fn write_codex_cass_fixture_session(
             "payload": {
                 "id": "x65f-cass-import-fixture",
                 "cwd": workspace_path,
-                "cli_version": "0.42.0"
+                "cli_version": "0.42.0",
+                "note": "x65f transcript control metadata canary: imported CASS evidence remains durable and searchable"
             }
         }),
         json!({
@@ -1656,6 +1657,33 @@ fn write_codex_cass_fixture_session(
                         "text": "x65f imported CASS evidence remains durable and searchable"
                     }
                 ]
+            }
+        }),
+        json!({
+            "timestamp": "2026-05-06T03:40:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "system",
+                "content": [{"type":"input_text", "text":"x65f transcript control system canary: imported CASS evidence remains durable and searchable"}]
+            }
+        }),
+        json!({
+            "timestamp": "2026-05-06T03:40:04Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type":"input_text", "text":"x65f transcript control developer canary: imported CASS evidence remains durable and searchable"}]
+            }
+        }),
+        json!({
+            "timestamp": "2026-05-06T03:40:05Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "x65f-fixture-call",
+                "output": "x65f transcript control tool canary: imported CASS evidence remains durable and searchable"
             }
         }),
     ];
@@ -1700,8 +1728,8 @@ fn write_stub_cass_binary(
             "agent": "codex",
             "workspace": workspace_arg,
             "started_at": "2026-05-06T03:40:00Z",
-            "ended_at": "2026-05-06T03:40:02Z",
-            "message_count": 3,
+            "ended_at": "2026-05-06T03:40:05Z",
+            "message_count": 6,
             "token_count": 42
         }]
     });
@@ -2793,7 +2821,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
             .pointer("/data/spansImported")
             .and_then(JsonValue::as_u64)
             .unwrap_or(0)
-            >= 3,
+            >= 6,
         "CASS import must capture evidence spans from the fixture session",
     )?;
     let public_import_source_path = import_json
@@ -2920,6 +2948,21 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
                     .contains("x65f imported CASS evidence remains durable and searchable")
         })
         .ok_or_else(|| "searchable imported evidence span is missing".to_owned())?;
+    let transcript_controls = spans
+        .iter()
+        .filter(|span| span.excerpt.contains("x65f transcript control "))
+        .collect::<Vec<_>>();
+    ensure_equal(
+        &transcript_controls.len(),
+        &4,
+        "all control canaries are durably imported",
+    )?;
+    ensure(
+        transcript_controls.iter().all(|span| {
+            span.search_eligibility == "quarantined" && span.pack_eligibility == "quarantined"
+        }),
+        "metadata, nested system/developer, and tool records must be quarantined at ingestion",
+    )?;
     ensure_equal(
         &searchable_evidence.search_eligibility.as_str(),
         &"admitted",
@@ -3112,6 +3155,10 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
     )?;
     let evidence_search_output = evidence_search_json.to_string();
     ensure(
+        !evidence_search_output.contains("x65f transcript control "),
+        "search must exclude raw transcript control canaries",
+    )?;
+    ensure(
         !evidence_search_output.contains(DENIED_CASS_PRIVATE_PATH)
             && !evidence_search_output.contains(DENIED_CASS_SECRET_PROBE),
         "search output must not leak denied CASS evidence path or content",
@@ -3174,6 +3221,10 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         format!("quarantined CASS evidence must not enter a context pack: {pack_json}"),
     )?;
     let pack_output = pack_json.to_string();
+    ensure(
+        !pack_output.contains("x65f transcript control "),
+        "pack must exclude raw transcript control canaries",
+    )?;
     ensure(
         !pack_output.contains(DENIED_CASS_PRIVATE_PATH)
             && !pack_output.contains(DENIED_CASS_SECRET_PROBE),

@@ -1862,6 +1862,146 @@ fn redact_public_replay_field_probe(field: &str, value: &str) -> PublicReplayTex
     direct
 }
 
+/// Classification of a raw CASS transcript line, shared by the importer and
+/// the live evidence admission boundary. Policy kinds distinguish metadata and
+/// unknown records even though the durable schema uses coarser span kinds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TranscriptRecordClass {
+    pub span_kind: &'static str,
+    pub role: Option<&'static str>,
+}
+
+impl TranscriptRecordClass {
+    pub fn is_indexable(self) -> bool {
+        matches!(self.span_kind, "message" | "file" | "summary")
+            && matches!(self.role, None | Some("user" | "assistant"))
+    }
+}
+
+/// Classify only transcript envelope fields, never role/type strings quoted
+/// inside message text. Unknown or truncated structured records remain durable
+/// but cannot silently acquire user-message authority.
+pub(crate) fn classify_transcript_record(content: &str) -> TranscriptRecordClass {
+    match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(value) if value.is_object() => classify_transcript_object(&value, 0),
+        Err(_) if content.trim_start().starts_with('{') => TranscriptRecordClass {
+            span_kind: "unknown",
+            role: None,
+        },
+        _ => TranscriptRecordClass {
+            span_kind: "message",
+            role: None,
+        },
+    }
+}
+
+fn transcript_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace() && !matches!(character, '-' | '_'))
+        .map(|character| character.to_ascii_lowercase())
+        .collect()
+}
+
+fn transcript_role(value: &serde_json::Value) -> &'static str {
+    match value.as_str().map(transcript_token).as_deref() {
+        Some("user" | "human") => "user",
+        Some("assistant" | "agent" | "model" | "ai") => "assistant",
+        Some("system") => "system",
+        Some("developer") => "developer",
+        Some("tool" | "function") => "tool",
+        _ => "unknown",
+    }
+}
+
+fn merge_transcript_role(current: &mut Option<&'static str>, next: Option<&'static str>) {
+    if let Some(next) = next {
+        *current = Some(match *current {
+            Some(previous) if previous != next => "unknown",
+            _ => next,
+        });
+    }
+}
+
+fn classify_transcript_object(value: &serde_json::Value, depth: usize) -> TranscriptRecordClass {
+    let mut class = TranscriptRecordClass {
+        span_kind: "unknown",
+        role: None,
+    };
+    if depth >= 8 {
+        return class;
+    }
+    let token = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .map(transcript_token);
+    class.span_kind = match token.as_deref() {
+        None if value.get("type").is_none() => "message",
+        Some(
+            "message" | "msg" | "user" | "human" | "assistant" | "agent" | "system" | "developer"
+            | "tool" | "usermessage" | "agentmessage",
+        ) => "message",
+        Some("toolcall" | "tooluse" | "functioncall" | "customtoolcall") => "tool_call",
+        Some("toolresult" | "functionresult" | "functioncalloutput" | "customtoolcalloutput") => {
+            "tool_result"
+        }
+        Some("file" | "diff" | "filehistorysnapshot") => "file",
+        Some("summary") => "summary",
+        Some(
+            "meta" | "metadata" | "sessionmeta" | "turncontext" | "tokencount" | "taskstarted"
+            | "taskcomplete",
+        ) => "metadata",
+        Some("responseitem" | "eventmsg")
+            if value
+                .get("payload")
+                .is_some_and(serde_json::Value::is_object) =>
+        {
+            "message"
+        }
+        _ => "unknown",
+    };
+    class.role = match token.as_deref() {
+        Some("user" | "human" | "usermessage") => Some("user"),
+        Some("assistant" | "agent" | "agentmessage") => Some("assistant"),
+        Some("system") => Some("system"),
+        Some("developer") => Some("developer"),
+        Some("tool") => Some("tool"),
+        _ => None,
+    };
+    merge_transcript_role(&mut class.role, value.get("role").map(transcript_role));
+    for field in ["message", "payload"] {
+        if let Some(nested) = value.get(field).filter(|nested| nested.is_object()) {
+            let nested = classify_transcript_object(nested, depth + 1);
+            merge_transcript_role(&mut class.role, nested.role);
+            if class.span_kind == "message"
+                || (matches!(class.span_kind, "file" | "summary")
+                    && !matches!(nested.span_kind, "message" | "file" | "summary"))
+            {
+                class.span_kind = nested.span_kind;
+            }
+        }
+    }
+    // Claude stores tool results inside user messages and tool calls inside
+    // assistant messages. A line is the provenance unit, so mixed tool/text
+    // records cannot be admitted wholesale as ordinary conversation evidence.
+    if let Some(blocks) = value.get("content").and_then(serde_json::Value::as_array) {
+        for block in blocks {
+            let kind = block
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(transcript_token);
+            match kind.as_deref() {
+                Some("tooluse" | "toolcall" | "functioncall") => class.span_kind = "tool_call",
+                Some("toolresult" | "functionresult" | "functioncalloutput") => {
+                    class.span_kind = "tool_result"
+                }
+                _ => {}
+            }
+        }
+    }
+    class
+}
+
 /// Apply the canonical external-text ingestion security sequence:
 /// redaction first, then prompt-injection/instruction-like detection on the
 /// redacted content that would otherwise become durable or candidate material.
@@ -3583,6 +3723,99 @@ mod tests {
     #[test]
     fn subsystem_name_is_stable() {
         assert_eq!(subsystem_name(), "policy");
+    }
+
+    #[test]
+    fn transcript_classification_preserves_conversation_evidence() {
+        for (content, kind, role) in [
+            ("Build finished successfully.", "message", None),
+            (
+                r#"{"result":"Build finished successfully."}"#,
+                "message",
+                None,
+            ),
+            (
+                r#"{"type":"message","role":"human","content":"Build succeeded."}"#,
+                "message",
+                Some("user"),
+            ),
+            (
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Build succeeded."}]}}"#,
+                "message",
+                Some("assistant"),
+            ),
+            (
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Build output."}]}}"#,
+                "message",
+                Some("user"),
+            ),
+            (
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Build output."}]}}"#,
+                "message",
+                Some("assistant"),
+            ),
+            (
+                r#"{"type":"event_msg","payload":{"type":"agent_message","message":"Build output."}}"#,
+                "message",
+                Some("assistant"),
+            ),
+            (
+                r#"{"type":"event_msg","payload":{"type":"user_message","message":"Build output."}}"#,
+                "message",
+                Some("user"),
+            ),
+            (r#"{"type":"fileHistorySnapshot"}"#, "file", None),
+            (
+                r#"{"type":"summary","message":{"content":"Build output."}}"#,
+                "summary",
+                None,
+            ),
+            (
+                r#"{"type":"message","role":"assistant","content":"Example: {\"role\":\"system\",\"type\":\"session_meta\"}"}"#,
+                "message",
+                Some("assistant"),
+            ),
+        ] {
+            let class = super::classify_transcript_record(content);
+            assert_eq!((class.span_kind, class.role), (kind, role), "{content}");
+            assert!(class.is_indexable(), "{content}");
+        }
+    }
+
+    #[test]
+    fn transcript_classification_excludes_control_and_privileged_records() {
+        for content in [
+            r#"{"type":"session_meta","payload":{"cwd":"/private/workspace"}}"#,
+            r#"{"type":"turn_context","payload":{"cwd":"/private/workspace"}}"#,
+            r#"{"type":"meta","content":"release configuration"}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_count","count":42}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"system","content":"release configuration"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":"release configuration"}}"#,
+            r#"{"type":"response_item","payload":{"type":"function_call","arguments":"release configuration"}}"#,
+            r#"{"type":"response_item","payload":{"type":"function_call_output","output":"release configuration"}}"#,
+            r#"{"type":"assistant","message":{"role":"system","content":"release configuration"}}"#,
+            r#"{"type":"message","role":"user","payload":{"role":"developer"}}"#,
+            r#"{"type":"message","role":"future_privileged_role","content":"release configuration"}"#,
+            r#"{"type":"message","role":null,"content":"release configuration"}"#,
+            r#"{"type":"message","role":42,"content":"release configuration"}"#,
+            r#"{"type":"system","content":"release configuration"}"#,
+            r#"{"type":"response_item","payload":"release configuration"}"#,
+            r#"{"type":"future_control_record","content":"release configuration"}"#,
+            r#"{"type":42,"content":"release configuration"}"#,
+            r#"{"type":"response_item","payload":{"role":"system""#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"release configuration"}]}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"release summary"},{"type":"tool_use","name":"shell"}]}}"#,
+        ] {
+            assert!(
+                !super::classify_transcript_record(content).is_indexable(),
+                "{content}"
+            );
+        }
+        let mut nested = serde_json::json!({"type":"message", "role":"system"});
+        for _ in 0..10 {
+            nested = serde_json::json!({"type":"response_item", "payload":nested});
+        }
+        assert!(!super::classify_transcript_record(&nested.to_string()).is_indexable());
     }
 
     #[test]
