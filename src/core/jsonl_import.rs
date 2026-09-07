@@ -2811,7 +2811,7 @@ mod tests {
         records[3]["created_at"] = json!("2026-05-02T00:00:00Z");
         records[3]["attempt_family"] = json!({
             "family_id": "fam-import-lineage", "declared_size": 1,
-            "attempt_index": 1, "disposition": "selected", "origin": "manual"
+            "attempt_index": 1, "disposition": "selected", "origin": "declared"
         });
         let mut historical = records[1].clone();
         historical["memory_id"] = json!(MemoryId::from_uuid(Uuid::from_u128(4)).to_string());
