@@ -2801,8 +2801,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         .and_then(JsonValue::as_str)
         .ok_or_else(|| "CASS import report omitted its public source path".to_owned())?;
     ensure(
-        public_import_source_path.contains("[REDACTED_PATH]")
-            && public_import_source_path.ends_with(".jsonl")
+        public_import_source_path == "[REDACTED_PATH]"
             && !public_import_source_path.contains(session_arg.as_str()),
         format!(
             "CASS import report must redact its absolute source path: {public_import_source_path:?}"
