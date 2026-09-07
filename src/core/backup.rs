@@ -8399,8 +8399,8 @@ mod tests {
             "a healthy workspace must not degrade store authentication",
         )?;
 
-        // Recompute the records root exactly the way slice-4 import will: over
-        // the raw emitted memory line bytes, in order.
+        // Recompute authentication over every replayed record family using
+        // the exact emitted line bytes and order.
         let records =
             fs::read_to_string(&report.records_path).map_err(|error| error.to_string())?;
         let mut builder = RecordsRootBuilder::new();
@@ -8408,12 +8408,19 @@ mod tests {
         for line in records.lines() {
             let value: JsonValue = serde_json::from_str(line).map_err(|error| error.to_string())?;
             match value.get("schema").and_then(JsonValue::as_str) {
-                Some("ee.export.memory.v1") => {
+                Some("ee.export.memory.v1" | "ee.export.tag.v1") => {
                     let memory_id = value
                         .get("memory_id")
                         .and_then(JsonValue::as_str)
-                        .ok_or_else(|| "memory record is missing memory_id".to_owned())?;
+                        .ok_or_else(|| "memory/tag record is missing memory_id".to_owned())?;
                     builder.push(memory_id, &canonical_record_hash(line.as_bytes()));
+                }
+                Some("ee.export.link.v1") => {
+                    let link_id = value
+                        .get("link_id")
+                        .and_then(JsonValue::as_str)
+                        .ok_or_else(|| "link record is missing link_id".to_owned())?;
+                    builder.push(link_id, &canonical_record_hash(line.as_bytes()));
                 }
                 Some("ee.export.footer.v1") => {
                     footer = Some(
@@ -8428,7 +8435,11 @@ mod tests {
         let header = footer
             .authentication
             .ok_or_else(|| "footer must carry a store-local authentication block".to_owned())?;
-        ensure_equal(header.record_count, report.memory_count, "record count")?;
+        ensure_equal(
+            header.record_count,
+            report.memory_count + report.tag_count + report.link_count,
+            "authenticated memory, tag, and link count",
+        )?;
 
         let root =
             StoreAuthRoot::open(workspace_keys_dir(&workspace)).map_err(|error| error.message())?;
