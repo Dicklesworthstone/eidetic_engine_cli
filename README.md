@@ -2267,6 +2267,17 @@ unverified. Recovery still requires the source workspace keys: the backup does
 not currently provide portable key recovery. `recoveryInventory` separately
 states source coverage, so authenticated integrity does not imply completeness.
 
+JSONL import and backup restore replay memory relationships with their weights,
+confidence, evidence counts, origin, metadata, and original timestamps. Redacted
+endpoints map to the corresponding restored memories. JSONL reports include
+`linkRecords`, `linksImported`, `linksSkippedDuplicate`, and
+`linksSkippedConflict`. Repeating an import adds no duplicate links; conflicting
+IDs, edges, or endpoint memories preserve existing state and produce an issue.
+Invalid link records reject the import before creating storage. Rejected JSONL
+imports return exit code 5 and `success: false`, with details in `data.issues`.
+Other durable
+families still follow the coverage limitations above.
+
 ---
 
 ## Performance

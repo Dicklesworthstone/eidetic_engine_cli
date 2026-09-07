@@ -677,6 +677,24 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         seeded_memory_ids.push(json_str(&json, "/data/memory_id", "remember")?.to_owned());
     }
 
+    run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "--json",
+        "memory",
+        "link",
+        &seeded_memory_ids[0],
+        &seeded_memory_ids[2],
+        "--relation",
+        "supports",
+        "--weight",
+        "0.75",
+        "--confidence",
+        "0.90",
+        "--evidence-count",
+        "2",
+    ])?;
+
     let tombstoned_memory_id = seeded_memory_ids
         .get(1)
         .ok_or_else(|| "missing memory id to tombstone".to_owned())?;
@@ -791,6 +809,13 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         .map(|memory| memory_with_tags(&src_conn, memory))
         .collect::<Result<_, _>>()?;
     src_pairs.sort_by(|a, b| a.0.content.cmp(&b.0.content));
+    let src_links = src_conn
+        .list_all_memory_links(None)
+        .map_err(|error| format!("source links: {error}"))?;
+    ensure(
+        !src_links.is_empty(),
+        "source contains a real memory relationship",
+    )?;
     drop(src_conn);
     let src_db_arg = src_db.to_string_lossy().into_owned();
     // Let the current context pipeline derive the seed-aware PPR params hash;
@@ -1074,6 +1099,13 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         .map(|memory| memory_with_tags(&restored_conn, memory))
         .collect::<Result<_, _>>()?;
     restored_pairs.sort_by(|a, b| a.0.content.cmp(&b.0.content));
+    ensure_equal(
+        &restored_conn
+            .list_all_memory_links(None)
+            .map_err(|error| format!("restored links: {error}"))?,
+        &src_links,
+        "backup restore preserves every link field, ID and timestamp",
+    )?;
 
     // 8. Row-by-row diff. Content + tag set must match exactly per pair.
     for (index, (src_pair, restored_pair)) in
@@ -1428,10 +1460,10 @@ fn export_import_export_preserves_memory_and_tag_records() -> TestResult {
         &(seeds.len() as u64),
         "imported memory count",
     )?;
-    ensure(
-        json_u64(&import, "/data/ignoredRecords", "import report")?
-            >= source_link_records.len() as u64,
-        "import report accounts for link records that are parsed but not replayed",
+    ensure_equal(
+        &json_u64(&import, "/data/linksImported", "import report")?,
+        &(source_link_records.len() as u64),
+        "every exported relationship is imported",
     )?;
 
     let imported_export = run_ee(&[
@@ -1499,10 +1531,13 @@ fn export_import_export_preserves_memory_and_tag_records() -> TestResult {
         "normalized tag records survive export/import/export",
     )?;
 
-    let imported_link_records = records_with_schema(&imported_records, "ee.export.link.v1");
-    ensure(
-        imported_link_records.is_empty(),
-        "JSONL import currently ignores link records rather than replaying them",
+    let source_links = normalized_records_with_schema(&source_records, "ee.export.link.v1", &[]);
+    let imported_links =
+        normalized_records_with_schema(&imported_records, "ee.export.link.v1", &[]);
+    ensure_equal(
+        &imported_links,
+        &source_links,
+        "complete link records survive export/import/export without normalization",
     )?;
 
     Ok(())

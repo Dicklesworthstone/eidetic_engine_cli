@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 type TestResult = Result<(), String>;
 
 const EXIT_SUCCESS: i32 = 0;
+const EXIT_IMPORT: i32 = 5;
 
 fn ee_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ee")
@@ -209,8 +210,13 @@ fn import_jsonl_rejects_blank_memory_id_with_issue_code() -> TestResult {
     // 4. Assert proper response envelope
     ensure_equal(
         &exit_code,
-        &EXIT_SUCCESS,
-        "rejected import still returns parseable report",
+        &EXIT_IMPORT,
+        "rejected import returns failure while retaining the report",
+    )?;
+    ensure_equal(
+        &parsed.pointer("/success"),
+        &Some(&json!(false)),
+        "failure envelope",
     )?;
     ensure(
         stderr.is_empty(),
@@ -248,6 +254,81 @@ fn import_jsonl_rejects_blank_memory_id_with_issue_code() -> TestResult {
 }
 
 #[test]
+fn import_jsonl_rejects_orphaned_link_before_creating_workspace() -> TestResult {
+    let root = unique_artifact_dir("orphaned-link")?;
+    let source = root.join("source.jsonl");
+    write_valid_jsonl(&source)?;
+    let text = fs::read_to_string(&source).map_err(|error| error.to_string())?;
+    let mut records = text
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    records[3]["link_count"] = json!(1);
+    records[3]["total_records"] = json!(5);
+    records.insert(
+        3,
+        json!({
+            "schema": "ee.export.link.v1",
+            "link_id": "link_00000000000000000000000001",
+            "source_memory_id": "mem_01234567890123456789012345",
+            "target_memory_id": "mem_00000000000000000000000001",
+            "link_type": "supports", "weight": 0.75,
+            "created_at": "2026-04-30T00:00:01Z", "metadata": null
+        }),
+    );
+    fs::write(
+        &source,
+        records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .map_err(|error| error.to_string())?;
+    for dry_run in [false, true] {
+        let workspace = root.join(format!("absent-{dry_run}"));
+        let mut args = vec!["import", "jsonl", "--source", path_arg(&source)?];
+        if dry_run {
+            args.push("--dry-run");
+        }
+        let (exit, report, _stderr) = run_ee(&workspace, &args)?;
+        ensure_equal(&exit, &EXIT_IMPORT, "invalid link must return failure")?;
+        ensure_equal(
+            &report.pointer("/success"),
+            &Some(&json!(false)),
+            "failure envelope",
+        )?;
+        ensure_equal(
+            &report.pointer("/data/status"),
+            &Some(&json!("rejected")),
+            "rejected report",
+        )?;
+        ensure_equal(
+            &report.pointer("/data/linksImported"),
+            &Some(&json!(0)),
+            "no links imported",
+        )?;
+        ensure(
+            report
+                .pointer("/data/issues")
+                .and_then(Value::as_array)
+                .is_some_and(|issues| {
+                    issues
+                        .iter()
+                        .any(|issue| issue["code"] == "invalid_link_record")
+                }),
+            "orphaned endpoint has a concrete link diagnostic",
+        )?;
+        ensure(
+            !workspace.exists(),
+            "invalid import creates no workspace storage",
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn import_jsonl_rejects_blank_content_with_issue_code() -> TestResult {
     let root = unique_artifact_dir("blank-content")?;
     let workspace = root.join("workspace");
@@ -276,8 +357,13 @@ fn import_jsonl_rejects_blank_content_with_issue_code() -> TestResult {
     // 4. Assert proper response envelope
     ensure_equal(
         &exit_code,
-        &EXIT_SUCCESS,
-        "rejected import still returns parseable report",
+        &EXIT_IMPORT,
+        "rejected import returns failure while retaining the report",
+    )?;
+    ensure_equal(
+        &parsed.pointer("/success"),
+        &Some(&json!(false)),
+        "failure envelope",
     )?;
     ensure(stderr.is_empty(), "stderr must be empty in JSON mode")?;
     ensure_equal(

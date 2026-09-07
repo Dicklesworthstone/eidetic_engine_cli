@@ -654,9 +654,7 @@ fn prepare_links(parsed: &ParsedJsonlImport) -> Result<Vec<PreparedLink>, Vec<Js
     let memory_ids = parsed
         .memories
         .iter()
-        .map(|memory| {
-            import_memory_id(memory, redaction).map(|id| (memory.memory_id.as_str(), id))
-        })
+        .map(|memory| import_memory_id(memory, redaction).map(|id| (memory.memory_id.as_str(), id)))
         .collect::<Result<BTreeMap<_, _>, _>>()
         .map_err(|issue| vec![issue])?;
     let mut links = Vec::with_capacity(parsed.links.len());
@@ -675,7 +673,10 @@ fn prepare_links(parsed: &ParsedJsonlImport) -> Result<Vec<PreparedLink>, Vec<Js
                     issues.push(JsonlImportIssue::error(
                         None,
                         "duplicate_link_record",
-                        format!("link `{}` duplicates an ID or ordered endpoint/relation key", record.link_id),
+                        format!(
+                            "link `{}` duplicates an ID or ordered endpoint/relation key",
+                            record.link_id
+                        ),
                     ));
                 } else {
                     links.push(link);
@@ -688,7 +689,11 @@ fn prepare_links(parsed: &ParsedJsonlImport) -> Result<Vec<PreparedLink>, Vec<Js
             )),
         }
     }
-    if issues.is_empty() { Ok(links) } else { Err(issues) }
+    if issues.is_empty() {
+        Ok(links)
+    } else {
+        Err(issues)
+    }
 }
 
 fn prepare_link(
@@ -723,22 +728,32 @@ fn prepare_link(
         .ok_or_else(|| format!("unsupported relation `{}`", record.link_type))?;
     chrono::DateTime::parse_from_rfc3339(&record.created_at)
         .map_err(|error| format!("invalid created_at: {error}"))?;
-    let metadata = record.metadata.as_ref().map_or_else(
-        || Ok(ImportedLinkMetadata::default()),
-        |value| serde_json::from_value::<ImportedLinkMetadata>(value.clone()),
-    )
-    .map_err(|error| format!("invalid link metadata: {error}"))?;
+    let metadata = record
+        .metadata
+        .as_ref()
+        .filter(|value| !value.is_null())
+        .map_or_else(
+            || Ok(ImportedLinkMetadata::default()),
+            |value| serde_json::from_value::<ImportedLinkMetadata>(value.clone()),
+        )
+        .map_err(|error| format!("invalid link metadata: {error}"))?;
     if let Some(timestamp) = &metadata.last_reinforced_at {
         chrono::DateTime::parse_from_rfc3339(timestamp)
             .map_err(|error| format!("invalid lastReinforcedAt: {error}"))?;
     }
-    if metadata.created_by.as_ref().is_some_and(|value| value.trim().is_empty()) {
+    if metadata
+        .created_by
+        .as_ref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
         return Err("createdBy must not be blank".to_owned());
     }
-    let source = metadata.source.as_deref().map_or(
-        Ok(MemoryLinkSource::Import),
-        |source| MemoryLinkSource::parse(source).ok_or_else(|| format!("invalid source `{source}`")),
-    )?;
+    let source = metadata
+        .source
+        .as_deref()
+        .map_or(Ok(MemoryLinkSource::Import), |source| {
+            MemoryLinkSource::parse(source).ok_or_else(|| format!("invalid source `{source}`"))
+        })?;
     let record_json = serde_json::to_string(record).map_err(|error| error.to_string())?;
     if crate::policy::redact_secret_like_content(&record_json).redacted {
         return Err("link contains secrets; redact before import".to_owned());
@@ -756,7 +771,10 @@ fn prepare_link(
             last_reinforced_at: metadata.last_reinforced_at,
             source,
             created_by: metadata.created_by,
-            metadata_json: metadata.metadata.filter(|value| !value.is_null()).map(|value| value.to_string()),
+            metadata_json: metadata
+                .metadata
+                .filter(|value| !value.is_null())
+                .map(|value| value.to_string()),
         },
         created_at: record.created_at.clone(),
         details: json!({
@@ -764,7 +782,8 @@ fn prepare_link(
             "sourceExportId": header.map(|header| &header.export_id),
             "sourceLinkId": record.link_id,
             "sourceRecord": record,
-        }).to_string(),
+        })
+        .to_string(),
     })
 }
 
@@ -781,8 +800,14 @@ fn link_matches(existing: &StoredMemoryLink, incoming: &PreparedLink) -> bool {
         && existing.source == input.source.as_str()
         && existing.created_at == incoming.created_at
         && existing.created_by == input.created_by
-        && existing.metadata_json.as_deref().and_then(|text| serde_json::from_str::<JsonValue>(text).ok())
-            == input.metadata_json.as_deref().and_then(|text| serde_json::from_str::<JsonValue>(text).ok())
+        && existing
+            .metadata_json
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<JsonValue>(text).ok())
+            == input
+                .metadata_json
+                .as_deref()
+                .and_then(|text| serde_json::from_str::<JsonValue>(text).ok())
 }
 
 fn link_conflict_issue(id: &str, reason: &str) -> JsonlImportIssue {
@@ -876,23 +901,23 @@ fn import_jsonl_records_with_policy(
     let mut conflicting_memory_ids = BTreeSet::new();
     let mut skipped_duplicate = 0_u32;
     connection.with_transaction(|| {
-      for memory in prepared.memories {
-        match connection.get_memory(&memory.id)? {
-            Some(existing) => {
-                skipped_duplicate = skipped_duplicate.saturating_add(1);
-                if let Some(issue) = reimport_conflict_issue(&existing, &memory) {
-                    report.issues.push(issue);
-                    conflicting_memory_ids.insert(memory.id.clone());
-                } else {
+        for memory in prepared.memories {
+            match connection.get_memory(&memory.id)? {
+                Some(existing) => {
+                    skipped_duplicate = skipped_duplicate.saturating_add(1);
+                    if let Some(issue) = reimport_conflict_issue(&existing, &memory) {
+                        report.issues.push(issue);
+                        conflicting_memory_ids.insert(memory.id.clone());
+                    } else {
+                        publication_memory_ids.push(memory.id.clone());
+                    }
+                }
+                None => {
                     publication_memory_ids.push(memory.id.clone());
+                    to_insert.push(memory);
                 }
             }
-            None => {
-                publication_memory_ids.push(memory.id.clone());
-                to_insert.push(memory);
-            }
         }
-      }
         for memory in &to_insert {
             connection.insert_memory(&memory.id, &memory.input)?;
             if let Some((alpha, beta)) = memory.bayes_posterior {
@@ -1419,9 +1444,7 @@ fn parse_jsonl_source(input: &str) -> ParsedJsonlImport {
                 parsed.artifact_records = parsed.artifact_records.saturating_add(1);
                 parsed.ignored_records = parsed.ignored_records.saturating_add(1);
             }
-            EXPORT_AGENT_SCHEMA_V1
-            | EXPORT_AUDIT_SCHEMA_V1
-            | EXPORT_WORKSPACE_SCHEMA_V1 => {
+            EXPORT_AGENT_SCHEMA_V1 | EXPORT_AUDIT_SCHEMA_V1 | EXPORT_WORKSPACE_SCHEMA_V1 => {
                 parsed.ignored_records = parsed.ignored_records.saturating_add(1);
             }
             _ => parsed.issues.push(JsonlImportIssue::error(
@@ -2472,6 +2495,315 @@ mod tests {
         sample_jsonl().replace(
             r#""utility":0.7,"created_at""#,
             r#""utility":0.7,"pagerank_score":0.12,"betweenness_score":0.34,"hits_authority":0.56,"hits_hub":0.78,"onion_layer":3,"k_truss_max":4,"articulation_point":true,"bayes_alpha":2.5,"bayes_beta":1.5,"created_at""#,
+        )
+    }
+
+    fn linked_jsonl_values() -> Result<Vec<JsonValue>, String> {
+        let mut records = sample_jsonl()
+            .lines()
+            .map(serde_json::from_str::<JsonValue>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let mut target = records[1].clone();
+        target["memory_id"] = json!(MemoryId::from_uuid(Uuid::from_u128(2)).to_string());
+        target["content"] = json!("Keep the release workflow deterministic.");
+        let link = json!({
+            "schema": EXPORT_LINK_SCHEMA_V1,
+            "link_id": MemoryLinkId::from_uuid(Uuid::from_u128(3)).to_string(),
+            "source_memory_id": records[1]["memory_id"],
+            "target_memory_id": target["memory_id"],
+            "link_type": "supports",
+            "weight": 0.75,
+            "created_at": "2026-04-30T00:00:01Z",
+            "metadata": {
+                "confidence": 0.5, "directed": false, "evidenceCount": 7,
+                "lastReinforcedAt": "2026-05-01T00:00:00Z", "source": "agent",
+                "createdBy": "release-review", "metadata": {"rationale": "two observed releases"}
+            }
+        });
+        records.insert(3, target);
+        records.insert(4, link);
+        records[0]["record_count"] = json!(5);
+        records[5]["total_records"] = json!(6);
+        records[5]["memory_count"] = json!(2);
+        records[5]["link_count"] = json!(1);
+        Ok(records)
+    }
+
+    fn jsonl_values_text(records: &[JsonValue]) -> String {
+        records
+            .iter()
+            .map(JsonValue::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn links_round_trip_with_fields_audit_idempotence_and_conflict_preservation() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let options = JsonlImportOptions {
+            workspace_path: dir.path().join("workspace"),
+            database_path: None,
+            source_path: dir.path().join("links.jsonl"),
+            dry_run: false,
+        };
+        let mut records = linked_jsonl_values()?;
+        fs::write(&options.source_path, jsonl_values_text(&records))
+            .map_err(|error| error.to_string())?;
+        let first = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        ensure(first.status.as_str(), "completed", "first status")?;
+        ensure(first.memories_imported, 2, "two memories")?;
+        ensure(first.links_imported, 1, "one link")?;
+        ensure(first.ignored_records, 0, "link is no longer ignored")?;
+        let connection = DbConnection::open(DatabaseConfig::file(database_path(&options)))
+            .map_err(|error| error.to_string())?;
+        let id = records[4]["link_id"].as_str().ok_or("link id")?.to_owned();
+        let stored = connection
+            .get_memory_link(&id)
+            .map_err(|error| error.to_string())?
+            .ok_or("missing link")?;
+        ensure(
+            stored.src_memory_id.as_str(),
+            records[1]["memory_id"].as_str().ok_or("source id")?,
+            "source",
+        )?;
+        ensure(
+            stored.dst_memory_id.as_str(),
+            records[3]["memory_id"].as_str().ok_or("target id")?,
+            "target",
+        )?;
+        ensure(stored.relation.as_str(), "supports", "relation")?;
+        ensure(
+            (
+                stored.weight,
+                stored.confidence,
+                stored.directed,
+                stored.evidence_count,
+            ),
+            (0.75, 0.5, false, 7),
+            "link scores and evidence",
+        )?;
+        ensure(
+            stored.created_at.as_str(),
+            "2026-04-30T00:00:01Z",
+            "original timestamp",
+        )?;
+        ensure(
+            stored.last_reinforced_at.as_deref(),
+            Some("2026-05-01T00:00:00Z"),
+            "reinforcement time",
+        )?;
+        ensure(stored.source.as_str(), "agent", "origin")?;
+        ensure(
+            stored.created_by.as_deref(),
+            Some("release-review"),
+            "creator",
+        )?;
+        ensure(
+            stored.metadata_json.as_deref(),
+            Some(r#"{"rationale":"two observed releases"}"#),
+            "metadata",
+        )?;
+        let audits = connection
+            .list_audit_by_target("memory_link", &id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(audits.len(), 1, "one link audit")?;
+        ensure(
+            audits[0].action.as_str(),
+            crate::db::audit_actions::MEMORY_LINK_CREATE,
+            "audit action",
+        )?;
+        let details: JsonValue =
+            serde_json::from_str(audits[0].details.as_deref().ok_or("audit details")?)
+                .map_err(|error| error.to_string())?;
+        ensure(&details["sourceRecord"], &records[4], "source provenance")?;
+        drop(connection);
+
+        let repeated = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        ensure(
+            (
+                repeated.memories_imported,
+                repeated.links_imported,
+                repeated.links_skipped_duplicate,
+            ),
+            (0, 0, 1),
+            "idempotent repeat",
+        )?;
+        for field in ["weight", "link_id", "memory_content"] {
+            let mut conflicting = records.clone();
+            match field {
+                "weight" => conflicting[4]["weight"] = json!(0.9),
+                "link_id" => {
+                    conflicting[4]["link_id"] =
+                        json!(MemoryLinkId::from_uuid(Uuid::from_u128(4)).to_string())
+                }
+                _ => {
+                    conflicting[1]["content"] =
+                        json!("A divergent local identity must not gain imported edges.")
+                }
+            }
+            fs::write(&options.source_path, jsonl_values_text(&conflicting))
+                .map_err(|error| error.to_string())?;
+            let report = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+            ensure(
+                (report.links_imported, report.links_skipped_conflict),
+                (0, 1),
+                field,
+            )?;
+        }
+        // A conflicting incoming tombstone must not change the local edge either.
+        let connection = DbConnection::open(DatabaseConfig::file(database_path(&options)))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .get_memory_link(&id)
+                .map_err(|error| error.to_string())?,
+            Some(stored),
+            "conflicts never overwrite the link",
+        )?;
+        ensure(
+            connection
+                .list_audit_by_target("memory_link", &id, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            1,
+            "repeat/conflicts add no link audit",
+        )?;
+        records[1]["tombstoned_at"] = json!("2026-06-01T00:00:00Z");
+        drop(connection);
+        fs::write(&options.source_path, jsonl_values_text(&records))
+            .map_err(|error| error.to_string())?;
+        let report = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        ensure(
+            report.links_skipped_conflict,
+            1,
+            "conflicting tombstone skips incident link",
+        )
+    }
+
+    #[test]
+    fn invalid_links_reject_the_whole_import_before_creating_storage() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let base = linked_jsonl_values()?;
+        let cases = [
+            ("/link_type", json!("invented")),
+            ("/weight", json!(1.01)),
+            ("/metadata/confidence", json!(-0.1)),
+            ("/metadata/evidenceCount", json!(-1)),
+            ("/metadata/directed", json!("false")),
+            ("/metadata/source", json!("invented")),
+            ("/metadata/createdBy", json!(" ")),
+            ("/metadata/lastReinforcedAt", json!("yesterday")),
+            ("/created_at", json!("yesterday")),
+            ("/link_id", json!("invalid")),
+            ("/target_memory_id", base[1]["memory_id"].clone()),
+            (
+                "/target_memory_id",
+                json!(MemoryId::from_uuid(Uuid::from_u128(99)).to_string()),
+            ),
+            (
+                "/metadata/metadata",
+                json!({"credential": "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"}),
+            ),
+        ];
+        for (index, (pointer, value)) in cases.into_iter().enumerate() {
+            let mut records = base.clone();
+            *records[4].pointer_mut(pointer).ok_or("fixture pointer")? = value;
+            let options = JsonlImportOptions {
+                workspace_path: dir.path().join(format!("rejected-{index}")),
+                database_path: None,
+                source_path: dir.path().join(format!("invalid-{index}.jsonl")),
+                dry_run: false,
+            };
+            fs::write(&options.source_path, jsonl_values_text(&records))
+                .map_err(|error| error.to_string())?;
+            for dry_run in [true, false] {
+                let report = import_jsonl_records(&JsonlImportOptions {
+                    dry_run,
+                    ..options.clone()
+                })
+                .map_err(|error| error.to_string())?;
+                ensure(report.status.as_str(), "rejected", pointer)?;
+                ensure(
+                    report.memories_imported + report.links_imported,
+                    0,
+                    "no partial rows",
+                )?;
+                ensure(
+                    options.workspace_path.exists(),
+                    false,
+                    "no database, keys or index created",
+                )?;
+            }
+        }
+        for same_id in [true, false] {
+            let mut records = base.clone();
+            let mut duplicate = records[4].clone();
+            if !same_id {
+                duplicate["link_id"] =
+                    json!(MemoryLinkId::from_uuid(Uuid::from_u128(4)).to_string());
+            }
+            records.insert(5, duplicate);
+            let parsed = parse_jsonl_source(&jsonl_values_text(&records));
+            ensure(
+                prepare_links(&parsed).is_err(),
+                true,
+                "duplicate link ID/edge rejected",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn redacted_links_resolve_to_imported_endpoints_deterministically() -> TestResult {
+        let mut records = linked_jsonl_values()?;
+        records[0]["redaction_level"] = json!("strict");
+        records[1]["memory_id"] = json!("redacted-source");
+        records[2]["memory_id"] = json!("redacted-source");
+        records[3]["memory_id"] = json!("redacted-target");
+        records[4]["source_memory_id"] = json!("redacted-source");
+        records[4]["target_memory_id"] = json!("redacted-target");
+        records[4]["link_id"] = json!("redacted-link");
+        records[4]["metadata"] = JsonValue::Null;
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let options = JsonlImportOptions {
+            workspace_path: dir.path().join("workspace"),
+            database_path: None,
+            source_path: dir.path().join("redacted.jsonl"),
+            dry_run: false,
+        };
+        fs::write(&options.source_path, jsonl_values_text(&records))
+            .map_err(|error| error.to_string())?;
+        let first = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        ensure(
+            (first.memories_imported, first.links_imported),
+            (2, 1),
+            "redacted rows imported",
+        )?;
+        let connection = DbConnection::open(DatabaseConfig::file(database_path(&options)))
+            .map_err(|error| error.to_string())?;
+        let links = connection
+            .list_all_memory_links(None)
+            .map_err(|error| error.to_string())?;
+        ensure(links.len(), 1, "one redacted link")?;
+        for endpoint in [&links[0].src_memory_id, &links[0].dst_memory_id] {
+            ensure(
+                first.imported_memory_ids.contains(endpoint),
+                true,
+                "endpoint resolves to restored row",
+            )?;
+        }
+        ensure(
+            links[0].source.as_str(),
+            "import",
+            "redacted origin uses import default",
+        )?;
+        drop(connection);
+        let repeated = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        ensure(
+            (repeated.links_imported, repeated.links_skipped_duplicate),
+            (0, 1),
+            "stable redacted link identity",
         )
     }
 

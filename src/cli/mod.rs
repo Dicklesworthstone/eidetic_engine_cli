@@ -23400,25 +23400,32 @@ where
     };
 
     match import_jsonl_records(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &report.human_summary())
+        Ok(report) => {
+            let output_status = match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &report.human_summary())
+                }
+                output::Renderer::Toon => {
+                    let json = jsonl_import_response_v2(&report);
+                    write_stdout(
+                        stdout,
+                        &(output::render_toon_from_json(&json.to_string()) + "\n"),
+                    )
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    let json = jsonl_import_response_v2(&report);
+                    write_stdout(stdout, &(json.to_string() + "\n"))
+                }
+            };
+            if output_status == ProcessExitCode::Success && report.status == "rejected" {
+                ProcessExitCode::Import
+            } else {
+                output_status
             }
-            output::Renderer::Toon => {
-                let json = jsonl_import_response_v2(&report);
-                write_stdout(
-                    stdout,
-                    &(output::render_toon_from_json(&json.to_string()) + "\n"),
-                )
-            }
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                let json = jsonl_import_response_v2(&report);
-                write_stdout(stdout, &(json.to_string() + "\n"))
-            }
-        },
+        }
         Err(error) => {
             let domain_error = DomainError::Import {
                 message: error.to_string(),
@@ -23432,7 +23439,7 @@ where
 fn jsonl_import_response_v2(report: &JsonlImportReport) -> serde_json::Value {
     serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
-        "success": true,
+        "success": report.status != "rejected",
         "data": report.data_json(),
         "degraded": report.degraded_json(),
     })
