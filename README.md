@@ -250,9 +250,15 @@ retaining raw BM25 as `lexicalScore`; semantic results identify their raw
 `score` as `cosine_similarity`; results from an executed hybrid fusion identify
 it as `rrf_fused` even when only one arm contributed; deliberate hybrid
 short-circuits retain the native lexical or semantic scale; and reranked results
-use `reranked`. Relevance floors, quality metrics, calibration intervals, and
+use `reranked`. Relevance floors, score summaries, calibration intervals, and
 context packing all consume the normalized relevance projection rather than
 comparing those native scales.
+
+These projections rank results; they are not probabilities that a result answers
+the task. Retrieval metrics report `qualityAssessment: "unknown"` when results
+exist and `"empty"` when none survive. `honestQualityScore` is `null`: score size,
+result count, and interval coverage do not establish task-level correctness.
+Use the returned content, provenance, and evidence to assess usefulness.
 
 ### 6. Search Indexes Are Derived Assets
 
@@ -2258,6 +2264,11 @@ degraded. `ee backup verify <backup-path> --workspace <source-workspace>`
 authenticates the complete manifest and checks every listed artifact's hash.
 The selected workspace supplies the trusted keys; the manifest cannot choose
 them. Restore uses the same check and validates copied records before import.
+It assembles the restored store in a private staging directory and publishes
+`.ee` only after every restore phase succeeds. A failed attempt preserves its
+staging artifacts for inspection and does not expose a partially restored DB.
+Existing destination stores are never replaced. Search indexes remain
+rebuildable; their durable jobs are processed after store publication.
 Failed verification returns exit code 5 and `success: false`, retaining the
 individual issues in `data.issues`; warning-only verification stays exit-zero.
 Unsigned manifests, including older backups, cannot pass verification or be

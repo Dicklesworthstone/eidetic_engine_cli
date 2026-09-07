@@ -11,7 +11,7 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "A create-derived curation apply commits the candidate, derived memory, provenance, audit row, and exact durable index job, but real publication fails after the publisher claims that job.",
+    "description": "A curation apply commits a derived memory or procedural rule with its provenance, audit row and exact durable index job, but automatic index publication fails. The setup below exercises the derived-memory case; rule and anti-pattern applies use the same code and retain the committed job for retry.",
     "setup_commands": [
       "ee init --workspace .",
       "# Create and approve a create-derived curation candidate through the integration harness.",

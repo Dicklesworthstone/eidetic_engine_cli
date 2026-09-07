@@ -1108,7 +1108,15 @@ fn import_jsonl_records_with_policy(
         total.saturating_add(memory.tag_count)
     });
     report.imported_memory_ids = to_insert.into_iter().map(|memory| memory.id).collect();
-    if !publication_memory_ids.is_empty() {
+    // A verified backup restore is still assembling other durable families
+    // in a private store. Keep its jobs pending until that complete store is
+    // published; ordinary JSONL import retains immediate index convergence.
+    if !publication_memory_ids.is_empty()
+        && !matches!(
+            native_trust_policy,
+            NativeTrustPolicy::VerifiedBackupRestore
+        )
+    {
         // The rows above are durable; converge the derived index the same way
         // remember and batch remember do. Identical reimports also enter this
         // path so a prior failed deterministic job is requeued and retried.

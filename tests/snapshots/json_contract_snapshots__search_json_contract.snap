@@ -80,9 +80,9 @@ expression: canonical_json_text(value)
         "qualityScoreCount": 0,
         "rerankScoreCount": 0
       },
-      "honestQualityScore": 0.729977,
+      "honestQualityScore": null,
       "memoryScope": "swarm",
-      "qualityAssessment": "good",
+      "qualityAssessment": "unknown",
       "relevanceFloor": 0.05,
       "requestedLimit": 10,
       "returnedCount": 1,

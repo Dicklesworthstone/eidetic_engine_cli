@@ -1725,19 +1725,13 @@ pub struct RetrievalMetrics {
     pub candidates_below_floor: usize,
 }
 
-/// Agent-readable summary of recall quality (bead bd-17c65.2.4 / B4).
-///
-/// Maps a (top_score, p50_score, floor) tuple onto three states agents
-/// can branch on without recomputing the math themselves.
+/// Retrieval scores rank candidates; they do not establish task-level quality.
+/// Conformal score intervals alone do not calibrate a result set's usefulness.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QualityAssessment {
-    /// Top hit comfortably above floor AND median above floor → use
-    /// top-K confidently.
-    Good,
-    /// Some hits passed the floor but recall is thin OR scores cluster
-    /// near the floor → consider rephrasing.
-    Weak,
-    /// No hits above floor → query missed the corpus entirely.
+    /// Results exist, but their task-level quality has not been established.
+    Unknown,
+    /// No results survived retrieval and admission.
     Empty,
 }
 
@@ -1747,32 +1741,8 @@ impl QualityAssessment {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Good => "good",
-            Self::Weak => "weak",
+            Self::Unknown => "unknown",
             Self::Empty => "empty",
-        }
-    }
-
-    /// Classify a score distribution given the applied floor.
-    ///
-    /// Rules (per B4 design):
-    /// - `Empty`: top score below floor (or no hits at all).
-    /// - `Good`: top score ≥ 2× floor AND p50-like (mean here) ≥ floor.
-    /// - `Weak`: everything else (top ≥ floor but mean below, or only
-    ///   one hit just above floor, etc.).
-    #[must_use]
-    pub fn classify(top: Option<f32>, mean: Option<f32>, floor: f32) -> Self {
-        let Some(top) = top else {
-            return Self::Empty;
-        };
-        if !top.is_finite() || top < floor {
-            return Self::Empty;
-        }
-        let mean = mean.unwrap_or(top);
-        if top >= floor * 2.0 && mean >= floor {
-            Self::Good
-        } else {
-            Self::Weak
         }
     }
 }
@@ -5880,67 +5850,19 @@ impl RetrievalMetrics {
             "candidatesBelowFloor": self.candidates_below_floor,
             // Bead bd-17c65.2.4 (B4): qualityAssessment + honestQualityScore.
             "qualityAssessment": self.quality_assessment().as_str(),
-            "honestQualityScore": optional_score_json(self.honest_quality_score()),
+            "honestQualityScore": serde_json::Value::Null,
         })
     }
 
-    /// Classify recall quality (B4). `floor` defaults to
-    /// `DEFAULT_RELEVANCE_FLOOR` when `relevance_floor` is `None`.
+    /// Report absence or abstain. Score size, spread and result count cannot
+    /// certify recall or correctness without labeled, scoped calibration.
     #[must_use]
     pub fn quality_assessment(&self) -> QualityAssessment {
-        let floor = self.relevance_floor.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
-        QualityAssessment::classify(
-            self.score_distribution.top,
-            self.score_distribution.mean,
-            floor,
-        )
-    }
-
-    /// Single 0..1 confidence summary for agents that don't want to
-    /// reason about three-state quality (B4).
-    ///
-    /// Formula (clamped to `[0.0, 1.0]`):
-    ///
-    ///   0.5 * (1 - exp(-top / floor))           // top-score signal
-    /// + 0.3 * (above_floor / requested_limit)   // recall signal
-    /// + 0.2 * (1 - variance_above_floor)        // confidence signal
-    ///
-    /// Returns `None` when no hits passed the floor (clearly empty;
-    /// signaled by `qualityAssessment == "empty"` instead).
-    #[must_use]
-    pub fn honest_quality_score(&self) -> Option<f32> {
-        let top = self.score_distribution.top?;
-        let floor = self.relevance_floor.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
-        if !top.is_finite() || top < floor {
-            return None;
+        if self.returned_count == 0 {
+            QualityAssessment::Empty
+        } else {
+            QualityAssessment::Unknown
         }
-        let limit = self.requested_limit.max(1) as f32;
-        let above = self.candidates_above_floor as f32;
-        let recall = (above / limit).min(1.0);
-        // Top-score signal: exp(-top/floor) collapses to 0 as top
-        // gets large, so 1 - exp(-x) → 1.
-        let top_signal = 1.0_f32 - (-(top / floor.max(1e-6))).exp();
-        // Variance signal: how tightly clustered are above-floor
-        // scores? Smaller spread → higher confidence. Approximate
-        // variance with (max - min) / max, bounded.
-        let variance_proxy = match (self.score_distribution.max, self.score_distribution.min) {
-            (Some(max), Some(min)) if max > 0.0 => {
-                let v = (max - min) / max;
-                if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) }
-            }
-            _ => 0.0,
-        };
-        let variance_signal = if variance_proxy.is_nan() {
-            1.0
-        } else {
-            (1.0_f32 - variance_proxy).clamp(0.0, 1.0)
-        };
-        let raw = 0.5 * top_signal + 0.3 * recall + 0.2 * variance_signal;
-        Some(if raw.is_nan() {
-            0.0
-        } else {
-            raw.clamp(0.0, 1.0)
-        })
     }
 }
 
@@ -21503,88 +21425,57 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn quality_assessment_classify_empty_when_top_below_floor() {
-        assert_eq!(
-            QualityAssessment::classify(None, None, 0.05),
-            QualityAssessment::Empty
-        );
-        assert_eq!(
-            QualityAssessment::classify(Some(0.02), Some(0.01), 0.05),
-            QualityAssessment::Empty
-        );
-        assert_eq!(
-            QualityAssessment::classify(Some(f32::NAN), None, 0.05),
-            QualityAssessment::Empty
-        );
-    }
-
-    #[test]
-    fn quality_assessment_classify_good_requires_top_2x_floor_and_mean_above() {
-        assert_eq!(
-            QualityAssessment::classify(Some(0.40), Some(0.10), 0.05),
-            QualityAssessment::Good
-        );
-        // top exactly at 2× floor + mean exactly at floor → good
-        assert_eq!(
-            QualityAssessment::classify(Some(0.10), Some(0.05), 0.05),
-            QualityAssessment::Good
-        );
-    }
-
-    #[test]
-    fn quality_assessment_classify_weak_when_top_close_to_floor_or_mean_below() {
-        // Top above floor but not 2× → weak
-        assert_eq!(
-            QualityAssessment::classify(Some(0.06), Some(0.06), 0.05),
-            QualityAssessment::Weak
-        );
-        // Top above 2× but mean below floor → weak (sparse cluster)
-        assert_eq!(
-            QualityAssessment::classify(Some(0.50), Some(0.02), 0.05),
-            QualityAssessment::Weak
-        );
+    fn quality_assessment_abstains_across_ranking_sources_and_score_intervals() {
+        for source in [
+            ScoreSource::Lexical,
+            ScoreSource::Hybrid,
+            ScoreSource::SemanticFast,
+            ScoreSource::SemanticQuality,
+            ScoreSource::Reranked,
+            ScoreSource::HashControl,
+        ] {
+            for calibrated_interval in [false, true] {
+                for scores in [vec![1.0], vec![0.06], vec![1.0, 0.9, 0.8]] {
+                    let hits: Vec<_> = scores
+                        .iter()
+                        .enumerate()
+                        .map(|(index, score)| {
+                            let mut hit = synthetic_hit(&index.to_string(), *score);
+                            hit.source = source;
+                            hit.metadata = Some(serde_json::json!({
+                                "calibrated": calibrated_interval,
+                                "scoreInterval": [0.8, 1.0],
+                                "coverageGuarantee": 0.95,
+                            }));
+                            hit
+                        })
+                        .collect();
+                    let metrics =
+                        RetrievalMetrics::from_hits_with_floor(10, 5.0, &hits, 0, Some(0.05), 2);
+                    let json = metrics.data_json();
+                    assert_eq!(metrics.quality_assessment(), QualityAssessment::Unknown);
+                    assert_eq!(json["qualityAssessment"], "unknown");
+                    assert!(json["honestQualityScore"].is_null());
+                    assert_eq!(json["returnedCount"], scores.len());
+                    assert_eq!(json["candidatesBelowFloor"], 2);
+                    assert!(json["scoreDistribution"]["top"].is_number());
+                }
+            }
+        }
     }
 
     #[test]
     fn quality_assessment_as_str_is_stable() {
         // Wire enum: do not rename without contract bump.
-        assert_eq!(QualityAssessment::Good.as_str(), "good");
-        assert_eq!(QualityAssessment::Weak.as_str(), "weak");
+        assert_eq!(QualityAssessment::Unknown.as_str(), "unknown");
         assert_eq!(QualityAssessment::Empty.as_str(), "empty");
     }
 
     #[test]
-    fn honest_quality_score_returns_none_when_below_floor() {
+    fn quality_assessment_empty_when_no_results_survive() {
         let metrics = RetrievalMetrics::from_hits_with_floor(10, 5.0, &[], 0, Some(0.05), 5);
-        assert!(metrics.honest_quality_score().is_none());
+        assert!(metrics.data_json()["honestQualityScore"].is_null());
         assert_eq!(metrics.quality_assessment(), QualityAssessment::Empty);
-    }
-
-    #[test]
-    fn honest_quality_score_is_higher_for_good_recall_than_weak_recall() {
-        let good_hits = vec![
-            synthetic_hit("a", 0.50),
-            synthetic_hit("b", 0.45),
-            synthetic_hit("c", 0.40),
-            synthetic_hit("d", 0.38),
-            synthetic_hit("e", 0.35),
-        ];
-        let weak_hits = vec![synthetic_hit("a", 0.06)];
-        let good = RetrievalMetrics::from_hits_with_floor(10, 5.0, &good_hits, 0, Some(0.05), 0);
-        let weak = RetrievalMetrics::from_hits_with_floor(10, 5.0, &weak_hits, 0, Some(0.05), 9);
-        let Some(good_score) = good.honest_quality_score() else {
-            panic!("good score present");
-        };
-        let Some(weak_score) = weak.honest_quality_score() else {
-            panic!("weak score present");
-        };
-        assert!(
-            good_score > weak_score,
-            "expected good {good_score} > weak {weak_score}"
-        );
-        // Sanity: both in 0..1
-        assert!((0.0..=1.0).contains(&good_score));
-        assert!((0.0..=1.0).contains(&weak_score));
     }
 
     #[test]
@@ -21592,11 +21483,8 @@ mod tests {
         let hits = vec![synthetic_hit("a", 0.40), synthetic_hit("b", 0.20)];
         let metrics = RetrievalMetrics::from_hits_with_floor(10, 5.0, &hits, 0, Some(0.05), 1);
         let json = metrics.data_json();
-        assert_eq!(json["qualityAssessment"], "good");
-        let Some(score) = json["honestQualityScore"].as_f64() else {
-            panic!("score present: {json}");
-        };
-        assert!((0.0..=1.0).contains(&score));
+        assert_eq!(json["qualityAssessment"], "unknown");
+        assert!(json["honestQualityScore"].is_null());
     }
 
     #[test]
@@ -21817,7 +21705,7 @@ mod tests {
     }
 
     /// When top score is strictly between floor and 2× floor, the
-    /// signal fires. Matches QualityAssessment::Weak from B4.
+    /// score-floor proximity advisory fires; it does not assess answer quality.
     #[test]
     fn weak_query_recall_threshold_aligns_with_quality_weak() {
         // top exactly at 2× floor → NOT weak (good); top below 2× → weak.

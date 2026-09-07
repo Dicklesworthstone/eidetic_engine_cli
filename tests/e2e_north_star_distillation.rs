@@ -716,18 +716,17 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
         format!("rule source memories should include {failure_memory_id}: {source_memories:?}"),
     )?;
 
-    assert_rule_index_job_queued(&database, &workspace_id, &rule_id)?;
+    assert_rule_index_job_completed(&database, &workspace_id, &rule_id)?;
 
-    // bd-3h6bz: behavioral proof beyond the queued job — a pending
-    // document_source=rule job used to point at a document the corpus could
-    // never contain, so asserting the job alone gave false confidence
-    // (bd-lpb5). Rebuild the derived index through the public CLI and assert
-    // the applied rule is retrievable by its own content.
-    let rebuild = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "rebuild"])?;
+    // Observe publication before search can repair it. Apply must complete
+    // the learning-to-retrieval handoff without a manual rebuild.
+    let published = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "status"])?;
     ensure_equal(
-        &rebuild.pointer("/success").and_then(JsonValue::as_bool),
-        &Some(true),
-        "index rebuild after curate apply",
+        &published
+            .pointer("/data/health")
+            .and_then(JsonValue::as_str),
+        &Some("ready"),
+        "curate apply publishes a ready index",
     )?;
     let rule_show = run_ee_json(&["--workspace", &ws_arg, "--json", "rule", "show", &rule_id])?;
     let rule_content = rule_show
@@ -1149,11 +1148,15 @@ fn change_after(value: &JsonValue, field: &str) -> Option<String> {
         })
 }
 
-fn assert_rule_index_job_queued(database: &Path, workspace_id: &str, rule_id: &str) -> TestResult {
+fn assert_rule_index_job_completed(
+    database: &Path,
+    workspace_id: &str,
+    rule_id: &str,
+) -> TestResult {
     let connection = DbConnection::open_file(database)
         .map_err(|error| format!("open {}: {error}", database.display()))?;
     let jobs = connection
-        .list_search_index_jobs(workspace_id, Some(SearchIndexJobStatus::Pending))
+        .list_search_index_jobs(workspace_id, Some(SearchIndexJobStatus::Completed))
         .map_err(|error| format!("list search index jobs: {error}"))?;
     connection
         .close()
@@ -1164,6 +1167,6 @@ fn assert_rule_index_job_queued(database: &Path, workspace_id: &str, rule_id: &s
                 && job.document_id.as_deref() == Some(rule_id)
                 && job.job_type == "single_document"
         }),
-        format!("pending search index jobs should include rule {rule_id}: {jobs:?}"),
+        format!("completed search index jobs should include rule {rule_id}: {jobs:?}"),
     )
 }

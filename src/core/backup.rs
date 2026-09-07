@@ -2583,8 +2583,6 @@ pub fn restore_backup_to_side_path(
         .join(WORKSPACE_MARKER)
         .join(DEFAULT_RESTORE_DIR)
         .join(&inspect.backup_id);
-    let restore_records_path = restore_artifact_dir.join(RECORDS_FILE);
-    let restore_manifest_path = restore_artifact_dir.join(MANIFEST_FILE);
     let restored_database_path = side_path.join(WORKSPACE_MARKER).join(DEFAULT_DB_FILE);
     let mut next_actions = restore_base_next_actions(&inspect.backup_id, &side_path);
 
@@ -2624,6 +2622,41 @@ pub fn restore_backup_to_side_path(
         });
     }
 
+    // Assemble every family outside the active marker. A late failure must
+    // leave diagnostic artifacts, not a discoverable, partially restored DB.
+    let published_artifact_dir = restore_artifact_dir;
+    let published_database_path = restored_database_path;
+    let staging_workspace = side_path.join(format!(".ee-restore-{}", uuid::Uuid::now_v7()));
+    fs::create_dir_all(&side_path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to create restore destination '{}': {error}",
+            side_path.display()
+        ),
+        repair: Some("choose a writable --side-path".to_owned()),
+    })?;
+    let mut staging_builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        staging_builder.mode(0o700);
+    }
+    staging_builder
+        .create(&staging_workspace)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to reserve restore staging directory '{}': {error}",
+                staging_workspace.display()
+            ),
+            repair: Some("choose a fresh --side-path".to_owned()),
+        })?;
+    let staging_store = staging_workspace.join(WORKSPACE_MARKER);
+    let restore_artifact_dir = staging_store
+        .join(DEFAULT_RESTORE_DIR)
+        .join(&inspect.backup_id);
+    let restore_records_path = restore_artifact_dir.join(RECORDS_FILE);
+    let restore_manifest_path = restore_artifact_dir.join(MANIFEST_FILE);
+    let restored_database_path = staging_store.join(DEFAULT_DB_FILE);
+
     fs::create_dir_all(&restore_artifact_dir).map_err(|error| DomainError::Storage {
         message: format!(
             "failed to create restore artifact directory '{}': {error}",
@@ -2643,13 +2676,13 @@ pub fn restore_backup_to_side_path(
 
     copy_new_file(&source_records_path, &restore_records_path)?;
     verify_restored_records(&restore_records_path, &inspect)?;
-    let restored_derived = copy_derived_artifacts_to_restore(
+    let mut restored_derived = copy_derived_artifacts_to_restore(
         &backup_path,
         &restore_artifact_dir,
-        &side_path,
+        &staging_workspace,
         &inspect,
     )?;
-    restore_shard_fanout_assets(&side_path, &restored_derived)?;
+    restore_shard_fanout_assets(&staging_workspace, &restored_derived)?;
 
     let import_report = import_verified_backup_jsonl_records(&JsonlImportOptions {
         workspace_path: side_path.clone(),
@@ -2667,6 +2700,17 @@ pub fn restore_backup_to_side_path(
             "inspect the copied records.jsonl and retry with a fresh --side-path".to_owned(),
         ),
     })?;
+    if import_report.status != "completed" {
+        return Err(DomainError::Import {
+            message: format!(
+                "backup records were rejected; incomplete restore retained at '{}'",
+                staging_workspace.display()
+            ),
+            repair: Some(
+                "inspect the staged records and retry with a fresh --side-path".to_owned(),
+            ),
+        });
+    }
     let restored_task_episode_count =
         restore_task_episode_assets(&restored_database_path, &restored_derived)?;
     let (restored_cass_session_count, restored_evidence_span_count) =
@@ -2702,6 +2746,19 @@ pub fn restore_backup_to_side_path(
         "degraded"
     };
 
+    // The imported workspace binding already names the final side path.
+    // Remap only report paths, before publication can make the store visible.
+    let published_store = side_path.join(WORKSPACE_MARKER);
+    for asset in &mut restored_derived {
+        asset.restore_path =
+            published_restore_asset_path(&asset.restore_path, &staging_store, &published_store)?;
+        if let Some(path) = asset.lab_episode_path.as_mut() {
+            *path = published_restore_asset_path(path, &staging_store, &published_store)?;
+        }
+    }
+    sync_restore_tree(&staging_store)?;
+    publish_restored_store(&staging_store, &published_store)?;
+
     Ok(BackupRestoreReport {
         schema: BACKUP_RESTORE_SCHEMA_V1,
         backup_id: inspect.backup_id,
@@ -2709,11 +2766,11 @@ pub fn restore_backup_to_side_path(
         dry_run: false,
         backup_path: backup_path.to_string_lossy().into_owned(),
         side_path: side_path.to_string_lossy().into_owned(),
-        restore_artifact_dir: restore_artifact_dir.to_string_lossy().into_owned(),
+        restore_artifact_dir: published_artifact_dir.to_string_lossy().into_owned(),
         source_manifest_path: source_manifest_path.to_string_lossy().into_owned(),
         source_records_path: source_records_path.to_string_lossy().into_owned(),
         source_manifest_hash: inspect.manifest_hash,
-        restored_database_path: restored_database_path.to_string_lossy().into_owned(),
+        restored_database_path: published_database_path.to_string_lossy().into_owned(),
         import_status: import_report.status.clone(),
         restore_graph_cache: options.restore_graph_cache,
         imported_memory_count: import_report.memories_imported,
@@ -2733,6 +2790,90 @@ pub fn restore_backup_to_side_path(
         degraded: restore_degraded,
         next_actions,
     })
+}
+
+fn published_restore_asset_path(
+    path: &str,
+    staging: &Path,
+    published: &Path,
+) -> Result<String, DomainError> {
+    let relative = Path::new(path)
+        .strip_prefix(staging)
+        .map_err(|_| DomainError::Import {
+            message: "restored asset escaped the private staging store".to_owned(),
+            repair: Some("inspect the staged restore artifacts".to_owned()),
+        })?;
+    Ok(published.join(relative).to_string_lossy().into_owned())
+}
+
+fn sync_restore_tree(path: &Path) -> Result<(), DomainError> {
+    let sync = || -> io::Result<()> {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
+            return Err(io::Error::other(
+                "restore staging contains a non-regular entry",
+            ));
+        }
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path)? {
+                sync_restore_tree(&entry?.path())
+                    .map_err(|error| io::Error::other(error.message()))?;
+            }
+        }
+        // Windows cannot open directories through File::open. Individual
+        // files still flush before its no-replace directory move.
+        if metadata.is_file() || cfg!(unix) {
+            fs::File::open(path)?.sync_all()?;
+        }
+        Ok(())
+    };
+    sync().map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to sync staged restore '{}': {error}",
+            path.display()
+        ),
+        repair: Some("inspect disk health; the staged restore remains unpublished".to_owned()),
+    })
+}
+
+fn publish_restored_store(staging: &Path, published: &Path) -> Result<(), DomainError> {
+    ensure_backup_write_path_has_no_symlink_components(staging, "restore staging store")?;
+    ensure_backup_write_path_has_no_symlink_components(published, "restore destination store")?;
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    let result = rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        staging,
+        rustix::fs::CWD,
+        published,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(io::Error::from);
+    // Windows directory rename refuses an existing destination, including
+    // an empty directory. Do not use an overwrite-capable Unix fallback.
+    #[cfg(windows)]
+    let result = fs::rename(staging, published);
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        windows
+    )))]
+    let result: io::Result<()> = Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic no-replace directory publication is unavailable on this platform",
+    ));
+    result.map_err(|error| DomainError::Storage {
+        message: format!("failed to publish restored store '{}': {error}; staging retained at '{}'", published.display(), staging.display()),
+        repair: Some("inspect the destination and retry with a fresh --side-path; existing data was not replaced".to_owned()),
+    })?;
+    #[cfg(unix)]
+    if let Some(parent) = published.parent() {
+        fs::File::open(parent).and_then(|file| file.sync_all()).map_err(|error| DomainError::Storage {
+            message: format!("restored store is visible at '{}' but its directory durability could not be confirmed: {error}", published.display()),
+            repair: Some("inspect disk health and verify the restored store before relying on it".to_owned()),
+        })?;
+    }
+    Ok(())
 }
 
 fn restore_base_next_actions(backup_id: &str, side_path: &Path) -> Vec<String> {
@@ -10755,6 +10896,135 @@ mod tests {
     }
 
     #[test]
+    fn restore_late_semantic_failure_keeps_partial_store_unpublished() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(workspace.join("backups")),
+            label: Some("late-failure".to_owned()),
+            redaction_level: RedactionLevel::None,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        let backup_path = PathBuf::from(&created.backup_path);
+        let path = "derived/lab/episodes/invalid.json";
+        // Authentic bytes can still be semantically unrestorable. This reaches
+        // the episode phase after JSONL memory import, not an early MAC refusal.
+        let bytes = br#"{"schema":"ee.backup.derived.lab_episode.v1","episode":{}}"#;
+        write_new_relative_file(&backup_path, path, bytes).map_err(|e| e.message())?;
+        let (_, mut manifest) = read_backup_manifest(&backup_path).map_err(|e| e.message())?;
+        if manifest.get("derived").is_none() {
+            manifest["derived"] = json!([]);
+        }
+        manifest["derived"]
+            .as_array_mut()
+            .ok_or("derived inventory missing")?
+            .push(
+                BackupDerivedAssetReport {
+                    path: path.to_owned(),
+                    kind: "lab_episode".to_owned(),
+                    hash: Some(hash_bytes(bytes)),
+                    byte_size: Some(bytes.len() as u64),
+                    captured_at: None,
+                    episode_id_if_lab: None,
+                }
+                .manifest_json(),
+            );
+        let root = StoreAuthRoot::open(workspace_keys_dir(&workspace)).map_err(|e| e.message())?;
+        authenticate_backup_manifest(&mut manifest, &root).map_err(|e| e.message())?;
+        fs::write(
+            &created.manifest_path,
+            serde_json::to_vec(&manifest).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let side = tempdir.path().join("late-failure-restore");
+        let error = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path,
+            side_path: side.clone(),
+            restore_graph_cache: false,
+            dry_run: false,
+        })
+        .expect_err("missing episode id must reject the late restore phase");
+        assert!(error.message().contains("id"), "{}", error.message());
+        assert!(
+            !side.join(WORKSPACE_MARKER).exists(),
+            "partial store became discoverable"
+        );
+        let staging = fs::read_dir(&side)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        assert_eq!(staging.len(), 1);
+        let staged_database = staging[0]
+            .path()
+            .join(WORKSPACE_MARKER)
+            .join(DEFAULT_DB_FILE);
+        assert!(
+            staged_database.is_file(),
+            "failure must occur after the memory phase"
+        );
+        let connection =
+            DbConnection::open_file_read_only(&staged_database).map_err(|e| e.to_string())?;
+        let workspaces = connection.list_workspaces().map_err(|e| e.to_string())?;
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].path, side.to_string_lossy());
+        assert_eq!(
+            connection
+                .list_memories(&workspaces[0].id, None, true)
+                .map_err(|e| e.to_string())?
+                .len(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restore_publication_never_replaces_an_existing_store() -> TestResult {
+        for existing in [None, Some(false), Some(true)] {
+            let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
+            let staged = tempdir.path().join("staged");
+            let published = tempdir.path().join("published");
+            fs::create_dir(&staged).map_err(|e| e.to_string())?;
+            fs::write(staged.join("new-record"), b"restored state").map_err(|e| e.to_string())?;
+            if let Some(populated) = existing {
+                fs::create_dir(&published).map_err(|e| e.to_string())?;
+                if populated {
+                    fs::write(published.join("existing-record"), b"preserve me")
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            sync_restore_tree(&staged).map_err(|e| e.message())?;
+            let result = publish_restored_store(&staged, &published);
+            if existing.is_some() {
+                assert!(result.is_err());
+                assert_eq!(
+                    fs::read(staged.join("new-record")).map_err(|e| e.to_string())?,
+                    b"restored state"
+                );
+                assert!(!published.join("new-record").exists());
+                if existing == Some(true) {
+                    assert_eq!(
+                        fs::read(published.join("existing-record")).map_err(|e| e.to_string())?,
+                        b"preserve me"
+                    );
+                }
+            } else {
+                result.map_err(|e| e.message())?;
+                assert!(!staged.exists());
+                assert_eq!(
+                    fs::read(published.join("new-record")).map_err(|e| e.to_string())?,
+                    b"restored state"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn restore_backup_to_side_path_imports_memories() -> TestResult {
         let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
         let out = workspace.join("backups");
@@ -10812,6 +11082,11 @@ mod tests {
         ensure(
             !workspaces.is_empty(),
             "restored workspace count is non-zero",
+        )?;
+        ensure_equal(
+            workspaces[0].path.as_str(),
+            side_path.to_string_lossy().as_ref(),
+            "workspace binds the published path",
         )?;
         let total_memories = workspaces
             .iter()

@@ -5688,18 +5688,58 @@ pub fn apply_curation_candidate(
     } else {
         None
     };
-    let degraded = create_derived_index_job_id
+    let mut degraded: Vec<_> = create_derived_index_job_id
         .as_deref()
         .and_then(|index_job_id| {
-            reconcile_create_derived_index_job(
+            reconcile_curation_index_job(
                 &connection,
                 &prepared.workspace_id,
                 &prepared.workspace_path,
                 index_job_id,
+                "create-derived memory",
             )
         })
         .into_iter()
         .collect();
+
+    if !options.dry_run
+        && decision.application.errors.is_empty()
+        && (persisted || decision.application.status == "already_applied")
+        && matches!(
+            parsed_candidate_type,
+            Ok(CandidateType::Rule | CandidateType::AntiPatternProposal)
+        )
+    {
+        // Reuse the committed job on replay. Generating a fresh rule/job here
+        // would duplicate the learning mutation just to repair derived state.
+        let rule_job = match decision.rule_create.as_ref() {
+            Some(rule) => Ok(Some(rule.index_job_id.clone())),
+            None => applied_rule_index_job_id(&connection, &prepared.workspace_id, &candidate_id),
+        };
+        let failure = match rule_job {
+            Ok(Some(job_id)) => reconcile_curation_index_job(
+                &connection,
+                &prepared.workspace_id,
+                &prepared.workspace_path,
+                &job_id,
+                "procedural rule",
+            ),
+            Ok(None) => Some(curate_apply_index_publish_failed(
+                &candidate_id,
+                "committed_rule_job_missing",
+                "procedural rule",
+            )),
+            Err(error) => {
+                tracing::warn!(candidate_id, %error, "cannot recover committed rule index job");
+                Some(curate_apply_index_publish_failed(
+                    &candidate_id,
+                    "status_unavailable",
+                    "procedural rule",
+                ))
+            }
+        };
+        degraded.extend(failure);
+    }
 
     let mut candidate = candidate_summary_from_stored(stored, &prepared.workspace_path);
     if persisted {
@@ -5759,11 +5799,49 @@ pub fn apply_curation_candidate(
     })
 }
 
-fn reconcile_create_derived_index_job(
+fn applied_rule_index_job_id(
+    connection: &DbConnection,
+    workspace_id: &str,
+    candidate_id: &str,
+) -> Result<Option<String>, DbError> {
+    let rule_ids: BTreeSet<String> = connection
+        .list_audit_entries(Some(workspace_id), None)?
+        .into_iter()
+        .filter(|entry| entry.action == audit_actions::CURATION_CANDIDATE_APPLY)
+        .filter_map(|entry| {
+            let details: serde_json::Value =
+                serde_json::from_str(entry.details.as_deref()?).ok()?;
+            if details.get("candidateId")?.as_str()? != candidate_id {
+                return None;
+            }
+            details.get("createdRuleId")?.as_str().map(str::to_owned)
+        })
+        .collect();
+    Ok(connection
+        .list_search_index_jobs(workspace_id, None)?
+        .into_iter()
+        .filter(|job| job.document_source.as_deref() == Some("rule"))
+        .filter(|job| {
+            job.document_id
+                .as_ref()
+                .is_some_and(|id| rule_ids.contains(id))
+        })
+        .min_by(|left, right| {
+            (left.status == "completed", &left.created_at, &left.id).cmp(&(
+                right.status == "completed",
+                &right.created_at,
+                &right.id,
+            ))
+        })
+        .map(|job| job.id))
+}
+
+fn reconcile_curation_index_job(
     connection: &DbConnection,
     workspace_id: &str,
     workspace_path: &Path,
     index_job_id: &str,
+    subject: &str,
 ) -> Option<CurateCandidatesDegradation> {
     match connection.get_search_index_job(index_job_id) {
         Ok(Some(job)) if job.status == "completed" => return None,
@@ -5774,11 +5852,12 @@ fn reconcile_create_derived_index_job(
                 workspace_id,
                 index_job_id,
                 error = %error,
-                "create-derived memory committed but its durable index job could not be inspected"
+                "curation committed but its durable index job could not be inspected"
             );
             return Some(curate_apply_index_publish_failed(
                 index_job_id,
                 "status_unavailable",
+                subject,
             ));
         }
     }
@@ -5796,18 +5875,25 @@ fn reconcile_create_derived_index_job(
     Some(curate_apply_index_publish_failed(
         index_job_id,
         &report.outcome,
+        subject,
     ))
 }
 
 fn curate_apply_index_publish_failed(
     index_job_id: &str,
     outcome: &str,
+    subject: &str,
 ) -> CurateCandidatesDegradation {
+    let entity = if subject == "create-derived memory" {
+        "memory"
+    } else {
+        "rule"
+    };
     CurateCandidatesDegradation {
         code: CURATE_APPLY_INDEX_PUBLISH_FAILED_CODE.to_owned(),
         severity: "medium".to_owned(),
         message: format!(
-            "The create-derived memory was committed, but automatic publication of durable search-index job {index_job_id} did not complete (outcome: {outcome}). Search may omit the new memory until the durable job is retried."
+            "The {subject} was committed, but automatic publication of durable search-index job {index_job_id} did not complete (outcome: {outcome}). Search may omit the new {entity} until the durable job is retried."
         ),
         repair: "ee job run index_coalesce --workspace . --json".to_owned(),
     }
@@ -21462,6 +21548,149 @@ mod tests {
             .ok_or_else(|| "memory missing after low-evidence validation".to_owned())?;
         assert!((memory.confidence - 0.7).abs() < 0.001);
         assert_eq!(memory.trust_class, "human_explicit");
+        Ok(())
+    }
+
+    #[test]
+    fn apply_rule_curation_publishes_exact_rule_and_retries_without_duplicates() -> TestResult {
+        for kind in ["rule", "anti_pattern_proposal"] {
+            let tempdir = tempfile::tempdir_in("/tmp").map_err(|e| e.to_string())?;
+            let workspace = tempdir.path();
+            fs::create_dir(workspace.join(".ee")).map_err(|e| e.to_string())?;
+            let database = workspace.join("ee.db");
+            let workspace_id = test_workspace_id(workspace);
+            let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x6_770)).to_string();
+            let candidate_id = curate_id(0x6_771);
+            let content = "tangerine compass release: verify the signed artifact before deploying";
+            let connection = seed_candidate_database(
+                &database,
+                &workspace_id,
+                &memory_id,
+                &candidate_id,
+                kind,
+                Some("approved"),
+                Some(content),
+            )?;
+            let mut options = super::CurateApplyOptions {
+                workspace_path: workspace,
+                database_path: Some(&database),
+                candidate_id: &candidate_id,
+                actor: Some("rule-publication-test"),
+                dry_run: true,
+                allow_tombstone_load_bearing: false,
+            };
+            let preview = apply_curation_candidate(&options).map_err(|e| e.message())?;
+            assert_eq!(preview.application.status, "would_apply");
+            assert!(
+                connection
+                    .list_procedural_rules(&workspace_id, None, None, true)
+                    .map_err(|e| e.to_string())?
+                    .is_empty()
+            );
+            assert!(
+                connection
+                    .list_search_index_jobs(&workspace_id, None)
+                    .map_err(|e| e.to_string())?
+                    .is_empty()
+            );
+
+            // A regular file blocks directory publication on every platform.
+            // Preserve it by renaming before the same candidate is retried.
+            let index_path = workspace.join(".ee/index");
+            fs::write(&index_path, b"publication blocker").map_err(|e| e.to_string())?;
+            options.dry_run = false;
+            let first = apply_curation_candidate(&options).map_err(|e| e.message())?;
+            assert_eq!(first.application.status, "applied");
+            assert!(first.durable_mutation);
+            assert!(
+                first
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == super::CURATE_APPLY_INDEX_PUBLISH_FAILED_CODE)
+            );
+            let rules = connection
+                .list_procedural_rules(&workspace_id, None, None, true)
+                .map_err(|e| e.to_string())?;
+            assert_eq!(rules.len(), 1);
+            let rule_id = &rules[0].id;
+            assert_eq!(rules[0].content, content);
+            let jobs = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|e| e.to_string())?;
+            assert_eq!(jobs.len(), 1);
+            let job_id = jobs[0].id.clone();
+            assert_ne!(jobs[0].status, "completed");
+            assert_eq!(jobs[0].document_id.as_deref(), Some(rule_id.as_str()));
+            fs::rename(&index_path, workspace.join(".ee/preserved-index-blocker"))
+                .map_err(|e| e.to_string())?;
+
+            let retry = apply_curation_candidate(&options).map_err(|e| e.message())?;
+            assert_eq!(retry.application.status, "already_applied");
+            assert!(!retry.durable_mutation);
+            assert!(retry.degraded.is_empty(), "{:?}", retry.degraded);
+            let jobs = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|e| e.to_string())?;
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].id, job_id);
+            assert_eq!(jobs[0].status, "completed");
+            assert_eq!(
+                connection
+                    .list_procedural_rules(&workspace_id, None, None, true)
+                    .map_err(|e| e.to_string())?
+                    .len(),
+                1
+            );
+            let status = get_index_status(&IndexStatusOptions {
+                workspace_path: workspace.to_path_buf(),
+                database_path: Some(database.clone()),
+                index_dir: None,
+            })
+            .map_err(|e| e.to_string())?;
+            assert_eq!(status.health, IndexHealth::Ready);
+            assert!(status.db_generation.is_some());
+            assert_eq!(status.db_generation, status.index_generation);
+            assert_eq!(
+                status
+                    .index_document_counts
+                    .as_ref()
+                    .map(|counts| counts.rules),
+                Some(1)
+            );
+            // Inspect publication before a search can repair the index.
+            let search = run_search_with_filters(
+                &SearchOptions {
+                    workspace_path: workspace.to_path_buf(),
+                    database_path: Some(database.clone()),
+                    index_dir: None,
+                    query: "tangerine compass".to_owned(),
+                    limit: 10,
+                    speed: SpeedMode::Instant,
+                    explain: false,
+                    as_of: None,
+                    include_tombstoned: false,
+                    include_expired: false,
+                    include_future: false,
+                    include_stale: false,
+                    relevance_floor: None,
+                    dedup_mode: SearchDedupMode::DocId,
+                    source_mode: SearchSourceMode::LexicalOnly,
+                    strict_source_mode: true,
+                    memory_scope: MemoryScope::Workspace,
+                    strict_scope: false,
+                },
+                None,
+                &[],
+            )
+            .map_err(|e| e.to_string())?;
+            assert!(
+                search.results.iter().any(|hit| hit.doc_id == *rule_id),
+                "rule missing after apply retry"
+            );
+            let replay = apply_curation_candidate(&options).map_err(|e| e.message())?;
+            assert!(!replay.durable_mutation);
+            assert!(replay.degraded.is_empty());
+        }
         Ok(())
     }
 
