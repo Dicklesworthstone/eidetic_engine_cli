@@ -28271,7 +28271,16 @@ impl StoredMemoryLink {
 impl DbConnection {
     /// Insert a typed memory link.
     pub fn insert_memory_link(&self, id: &str, input: &CreateMemoryLinkInput) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
+        self.insert_memory_link_at(id, input, &Utc::now().to_rfc3339())
+    }
+
+    /// Restore a typed memory link without replacing its original creation time.
+    pub fn insert_memory_link_at(
+        &self,
+        id: &str,
+        input: &CreateMemoryLinkInput,
+        created_at: &str,
+    ) -> Result<()> {
         self.execute_for(
             DbOperation::Execute,
             "INSERT INTO memory_links (id, src_memory_id, dst_memory_id, relation, weight, confidence, directed, evidence_count, last_reinforced_at, source, created_at, created_by, metadata_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
@@ -28289,7 +28298,7 @@ impl DbConnection {
                     .as_ref()
                     .map_or(Value::Null, |timestamp| Value::Text(timestamp.clone())),
                 Value::Text(input.source.as_str().to_string()),
-                Value::Text(now),
+                Value::Text(created_at.to_owned()),
                 input
                     .created_by
                     .as_ref()
@@ -28312,6 +28321,25 @@ impl DbConnection {
             &[Value::Text(id.to_string())],
         )?;
 
+        rows.first().map(stored_memory_link_from_row).transpose()
+    }
+
+    /// Find the row occupying the unique ordered endpoint/relation key.
+    pub fn get_memory_link_by_edge(
+        &self,
+        src_memory_id: &str,
+        dst_memory_id: &str,
+        relation: MemoryLinkRelation,
+    ) -> Result<Option<StoredMemoryLink>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, src_memory_id, dst_memory_id, relation, weight, confidence, directed, evidence_count, last_reinforced_at, source, created_at, created_by, metadata_json FROM memory_links WHERE src_memory_id = ?1 AND dst_memory_id = ?2 AND relation = ?3",
+            &[
+                Value::Text(src_memory_id.to_owned()),
+                Value::Text(dst_memory_id.to_owned()),
+                Value::Text(relation.as_str().to_owned()),
+            ],
+        )?;
         rows.first().map(stored_memory_link_from_row).transpose()
     }
 

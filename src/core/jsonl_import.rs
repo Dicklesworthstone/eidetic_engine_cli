@@ -1,9 +1,8 @@
 //! JSONL import execution (EE-222).
 //!
 //! The import path consumes EE JSONL export records, validates their schemas,
-//! and imports memory records into the local workspace database. Non-memory
-//! records are parsed for accounting but are not replayed as durable state in
-//! this slice.
+//! and imports memories, tags, and their relationships into the local workspace
+//! database. Other record families are counted but are not replayed here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -15,16 +14,17 @@ use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
 use crate::db::{
-    CreateAuditInput, CreateMemoryInput, CreateSearchIndexJobInput, DatabaseConfig, DbConnection,
-    DbError, DbOperation, SearchIndexJobType, StoredMemory,
+    CreateAuditInput, CreateMemoryInput, CreateMemoryLinkInput, CreateSearchIndexJobInput,
+    DatabaseConfig, DbConnection, DbError, DbOperation, MemoryLinkRelation, MemoryLinkSource,
+    SearchIndexJobType, StoredMemory, StoredMemoryLink,
 };
 use crate::models::{
     EXPORT_AGENT_SCHEMA_V1, EXPORT_ARTIFACT_SCHEMA_V1, EXPORT_AUDIT_SCHEMA_V1,
     EXPORT_FOOTER_SCHEMA_V1, EXPORT_HEADER_SCHEMA_V1, EXPORT_LINK_SCHEMA_V1,
     EXPORT_MEMORY_SCHEMA_V1, EXPORT_TAG_SCHEMA_V1, EXPORT_WORKSPACE_SCHEMA_V1, ExportFooter,
-    ExportHeader, ExportMemoryRecord, ExportTagRecord, IMPORT_JSONL_SCHEMA_V1, ImportSource,
-    MemoryContent, MemoryId, MemoryKind, MemoryLevel, RedactionLevel, Tag, TrustClass, TrustLevel,
-    UnitScore,
+    ExportHeader, ExportLinkRecord, ExportMemoryRecord, ExportTagRecord, IMPORT_JSONL_SCHEMA_V1,
+    ImportSource, MemoryContent, MemoryId, MemoryKind, MemoryLevel, MemoryLinkId, RedactionLevel,
+    Tag, TrustClass, TrustLevel, UnitScore,
 };
 use crate::policy::import_auth::{
     ArtifactContext, EXPORT_ARTIFACT_FAMILY, EXPORT_RECORD_ENCODING_V1, ImportAuthOutcome,
@@ -236,10 +236,14 @@ pub struct JsonlImportReport {
     pub records_total: u32,
     pub memory_records: u32,
     pub tag_records: u32,
+    pub link_records: u32,
     pub ignored_records: u32,
     pub memories_imported: u32,
     pub memories_skipped_duplicate: u32,
     pub tags_imported: u32,
+    pub links_imported: u32,
+    pub links_skipped_duplicate: u32,
+    pub links_skipped_conflict: u32,
     pub imported_memory_ids: Vec<String>,
     pub issues: Vec<JsonlImportIssue>,
 }
@@ -261,10 +265,14 @@ impl JsonlImportReport {
             "recordsTotal": self.records_total,
             "memoryRecords": self.memory_records,
             "tagRecords": self.tag_records,
+            "linkRecords": self.link_records,
             "ignoredRecords": self.ignored_records,
             "memoriesImported": self.memories_imported,
             "memoriesSkippedDuplicate": self.memories_skipped_duplicate,
             "tagsImported": self.tags_imported,
+            "linksImported": self.links_imported,
+            "linksSkippedDuplicate": self.links_skipped_duplicate,
+            "linksSkippedConflict": self.links_skipped_conflict,
             "importedMemoryIds": self.imported_memory_ids,
             "issues": self.issues.iter().map(|issue| {
                 json!({
@@ -576,6 +584,7 @@ struct ParsedJsonlImport {
     footer: Option<ExportFooter>,
     footer_line: Option<u32>,
     memories: Vec<ExportMemoryRecord>,
+    links: Vec<ExportLinkRecord>,
     tags_by_memory: BTreeMap<String, BTreeSet<String>>,
     tag_lines_by_memory: BTreeMap<String, u32>,
     artifact_records: u32,
@@ -608,6 +617,178 @@ struct PreparedMemory {
     attempt_family: Option<crate::models::ExportAttemptFamilyRecord>,
     details: String,
     tag_count: u32,
+}
+
+struct PreparedLink {
+    id: String,
+    input: CreateMemoryLinkInput,
+    created_at: String,
+    details: String,
+}
+
+/// Fields carried in the exporter's link metadata envelope. Missing fields in
+/// minimal/redacted records use the storage defaults; explicit invalid values
+/// are rejected rather than silently replaced.
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportedLinkMetadata {
+    confidence: Option<f64>,
+    directed: Option<bool>,
+    evidence_count: Option<u32>,
+    last_reinforced_at: Option<String>,
+    source: Option<String>,
+    created_by: Option<String>,
+    metadata: Option<JsonValue>,
+}
+
+fn prepare_links(parsed: &ParsedJsonlImport) -> Result<Vec<PreparedLink>, Vec<JsonlImportIssue>> {
+    if parsed.links.is_empty() {
+        return Ok(Vec::new());
+    }
+    let redaction = parsed
+        .header
+        .as_ref()
+        .map_or(RedactionLevel::None, |header| header.redaction_level);
+    let memory_ids = parsed
+        .memories
+        .iter()
+        .map(|memory| {
+            import_memory_id(memory, redaction).map(|id| (memory.memory_id.as_str(), id))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()
+        .map_err(|issue| vec![issue])?;
+    let mut links = Vec::with_capacity(parsed.links.len());
+    let mut issues = Vec::new();
+    let mut seen_ids = BTreeSet::new();
+    let mut seen_edges = BTreeSet::new();
+    for record in &parsed.links {
+        match prepare_link(record, &memory_ids, redaction, parsed.header.as_ref()) {
+            Ok(link) => {
+                let edge = (
+                    link.input.src_memory_id.clone(),
+                    link.input.dst_memory_id.clone(),
+                    link.input.relation.as_str(),
+                );
+                if !seen_ids.insert(link.id.clone()) || !seen_edges.insert(edge) {
+                    issues.push(JsonlImportIssue::error(
+                        None,
+                        "duplicate_link_record",
+                        format!("link `{}` duplicates an ID or ordered endpoint/relation key", record.link_id),
+                    ));
+                } else {
+                    links.push(link);
+                }
+            }
+            Err(message) => issues.push(JsonlImportIssue::error(
+                None,
+                "invalid_link_record",
+                format!("link `{}`: {message}", record.link_id),
+            )),
+        }
+    }
+    if issues.is_empty() { Ok(links) } else { Err(issues) }
+}
+
+fn prepare_link(
+    record: &ExportLinkRecord,
+    memory_ids: &BTreeMap<&str, String>,
+    redaction: RedactionLevel,
+    header: Option<&ExportHeader>,
+) -> Result<PreparedLink, String> {
+    let src_memory_id = memory_ids
+        .get(record.source_memory_id.as_str())
+        .ok_or("source endpoint is absent from the archive's memory records")?
+        .clone();
+    let dst_memory_id = memory_ids
+        .get(record.target_memory_id.as_str())
+        .ok_or("target endpoint is absent from the archive's memory records")?
+        .clone();
+    if src_memory_id == dst_memory_id {
+        return Err("a memory link cannot connect a memory to itself".to_owned());
+    }
+    let id = match record.link_id.parse::<MemoryLinkId>() {
+        Ok(_) => record.link_id.clone(),
+        Err(_) if redaction.redacts_identifiers() && !record.link_id.trim().is_empty() => {
+            MemoryLinkId::from_uuid(stable_uuid(&format!(
+                "jsonl-redacted-link:{}:{}:{}:{}:{}",
+                record.link_id, src_memory_id, dst_memory_id, record.link_type, record.created_at
+            )))
+            .to_string()
+        }
+        Err(error) => return Err(format!("invalid link ID: {error}")),
+    };
+    let relation = MemoryLinkRelation::parse(&record.link_type)
+        .ok_or_else(|| format!("unsupported relation `{}`", record.link_type))?;
+    chrono::DateTime::parse_from_rfc3339(&record.created_at)
+        .map_err(|error| format!("invalid created_at: {error}"))?;
+    let metadata = record.metadata.as_ref().map_or_else(
+        || Ok(ImportedLinkMetadata::default()),
+        |value| serde_json::from_value::<ImportedLinkMetadata>(value.clone()),
+    )
+    .map_err(|error| format!("invalid link metadata: {error}"))?;
+    if let Some(timestamp) = &metadata.last_reinforced_at {
+        chrono::DateTime::parse_from_rfc3339(timestamp)
+            .map_err(|error| format!("invalid lastReinforcedAt: {error}"))?;
+    }
+    if metadata.created_by.as_ref().is_some_and(|value| value.trim().is_empty()) {
+        return Err("createdBy must not be blank".to_owned());
+    }
+    let source = metadata.source.as_deref().map_or(
+        Ok(MemoryLinkSource::Import),
+        |source| MemoryLinkSource::parse(source).ok_or_else(|| format!("invalid source `{source}`")),
+    )?;
+    let record_json = serde_json::to_string(record).map_err(|error| error.to_string())?;
+    if crate::policy::redact_secret_like_content(&record_json).redacted {
+        return Err("link contains secrets; redact before import".to_owned());
+    }
+    Ok(PreparedLink {
+        id,
+        input: CreateMemoryLinkInput {
+            src_memory_id,
+            dst_memory_id,
+            relation,
+            weight: score_or_default(record.weight, 1.0)?,
+            confidence: score_or_default(metadata.confidence, 1.0)?,
+            directed: metadata.directed.unwrap_or(true),
+            evidence_count: metadata.evidence_count.unwrap_or(1),
+            last_reinforced_at: metadata.last_reinforced_at,
+            source,
+            created_by: metadata.created_by,
+            metadata_json: metadata.metadata.filter(|value| !value.is_null()).map(|value| value.to_string()),
+        },
+        created_at: record.created_at.clone(),
+        details: json!({
+            "source": "jsonl_import",
+            "sourceExportId": header.map(|header| &header.export_id),
+            "sourceLinkId": record.link_id,
+            "sourceRecord": record,
+        }).to_string(),
+    })
+}
+
+fn link_matches(existing: &StoredMemoryLink, incoming: &PreparedLink) -> bool {
+    let input = &incoming.input;
+    existing.src_memory_id == input.src_memory_id
+        && existing.dst_memory_id == input.dst_memory_id
+        && existing.relation == input.relation.as_str()
+        && existing.weight == input.weight
+        && existing.confidence == input.confidence
+        && existing.directed == input.directed
+        && existing.evidence_count == input.evidence_count
+        && existing.last_reinforced_at == input.last_reinforced_at
+        && existing.source == input.source.as_str()
+        && existing.created_at == incoming.created_at
+        && existing.created_by == input.created_by
+        && existing.metadata_json.as_deref().and_then(|text| serde_json::from_str::<JsonValue>(text).ok())
+            == input.metadata_json.as_deref().and_then(|text| serde_json::from_str::<JsonValue>(text).ok())
+}
+
+fn link_conflict_issue(id: &str, reason: &str) -> JsonlImportIssue {
+    JsonlImportIssue::warning(
+        None,
+        "reimport_divergent_existing_link",
+        format!("link `{id}` skipped because {reason}; existing state is preserved"),
+    )
 }
 
 /// Run one JSONL import operation.
@@ -652,7 +833,18 @@ fn import_jsonl_records_with_policy(
         &parsed,
     );
 
-    if options.dry_run || parsed.has_errors() {
+    if parsed.has_errors() {
+        return Ok(report);
+    }
+    let links = match prepare_links(&parsed) {
+        Ok(links) => links,
+        Err(issues) => {
+            report.issues.extend(issues);
+            report.status = "rejected".to_owned();
+            return Ok(report);
+        }
+    };
+    if options.dry_run {
         return Ok(report);
     }
 
@@ -679,17 +871,23 @@ fn import_jsonl_records_with_policy(
     // resurrected (ADR 0086 TC-D14).
     let mut to_insert = Vec::new();
     let mut publication_memory_ids = Vec::new();
+    let mut conflicting_memory_ids = BTreeSet::new();
     let mut skipped_duplicate = 0_u32;
     for memory in prepared.memories {
-        publication_memory_ids.push(memory.id.clone());
         match connection.get_memory(&memory.id)? {
             Some(existing) => {
                 skipped_duplicate = skipped_duplicate.saturating_add(1);
                 if let Some(issue) = reimport_conflict_issue(&existing, &memory) {
                     report.issues.push(issue);
+                    conflicting_memory_ids.insert(memory.id.clone());
+                } else {
+                    publication_memory_ids.push(memory.id.clone());
                 }
             }
-            None => to_insert.push(memory),
+            None => {
+                publication_memory_ids.push(memory.id.clone());
+                to_insert.push(memory);
+            }
         }
     }
 
@@ -753,6 +951,58 @@ fn import_jsonl_records_with_policy(
                     details: Some(memory.details.clone()),
                 },
             )?;
+        }
+        for link in &links {
+            if conflicting_memory_ids.contains(&link.input.src_memory_id)
+                || conflicting_memory_ids.contains(&link.input.dst_memory_id)
+            {
+                report.links_skipped_conflict += 1;
+                report.issues.push(link_conflict_issue(
+                    &link.id,
+                    "an endpoint conflicts with an existing memory",
+                ));
+                continue;
+            }
+            if let Some(existing) = connection.get_memory_link(&link.id)? {
+                if link_matches(&existing, link) {
+                    report.links_skipped_duplicate += 1;
+                } else {
+                    report.links_skipped_conflict += 1;
+                    report.issues.push(link_conflict_issue(
+                        &link.id,
+                        "the same link ID already has different fields",
+                    ));
+                }
+                continue;
+            }
+            if connection
+                .get_memory_link_by_edge(
+                    &link.input.src_memory_id,
+                    &link.input.dst_memory_id,
+                    link.input.relation,
+                )?
+                .is_some()
+            {
+                report.links_skipped_conflict += 1;
+                report.issues.push(link_conflict_issue(
+                    &link.id,
+                    "the ordered endpoints and relation already have another link ID",
+                ));
+                continue;
+            }
+            connection.insert_memory_link_at(&link.id, &link.input, &link.created_at)?;
+            connection.insert_audit(
+                &crate::db::generate_audit_id(),
+                &CreateAuditInput {
+                    workspace_id: Some(workspace_id.clone()),
+                    actor: Some("ee import jsonl".to_owned()),
+                    action: crate::db::audit_actions::MEMORY_LINK_CREATE.to_owned(),
+                    target_type: Some("memory_link".to_owned()),
+                    target_id: Some(link.id.clone()),
+                    details: Some(link.details.clone()),
+                },
+            )?;
+            report.links_imported += 1;
         }
         // bd-index-auto-freshness-m5kwf: every valid imported identity needs
         // durable publication work. Reimports preserve an existing logical
@@ -989,6 +1239,9 @@ fn reimport_conflict_issue(
     incoming: &PreparedMemory,
 ) -> Option<JsonlImportIssue> {
     let mut divergences = Vec::new();
+    if existing.workspace_id != incoming.input.workspace_id {
+        divergences.push("workspace_id");
+    }
     if existing.content != incoming.input.content {
         divergences.push("content");
     }
@@ -1061,10 +1314,14 @@ fn report_from_parsed(
         records_total: parsed.records_total,
         memory_records: saturating_len(parsed.memories.len()),
         tag_records: parsed.tag_records,
+        link_records: saturating_len(parsed.links.len()),
         ignored_records: parsed.ignored_records,
         memories_imported: 0,
         memories_skipped_duplicate: 0,
         tags_imported: 0,
+        links_imported: 0,
+        links_skipped_duplicate: 0,
+        links_skipped_conflict: 0,
         imported_memory_ids: Vec::new(),
         issues: parsed.issues.clone(),
     }
@@ -1076,6 +1333,7 @@ fn parse_jsonl_source(input: &str) -> ParsedJsonlImport {
         footer: None,
         footer_line: None,
         memories: Vec::new(),
+        links: Vec::new(),
         tags_by_memory: BTreeMap::new(),
         tag_lines_by_memory: BTreeMap::new(),
         artifact_records: 0,
@@ -1147,6 +1405,14 @@ fn parse_jsonl_source(input: &str) -> ParsedJsonlImport {
                 parse_memory_record(&mut parsed, &mut seen_memory_ids, line_number, value);
             }
             EXPORT_TAG_SCHEMA_V1 => parse_tag_record(&mut parsed, line_number, value),
+            EXPORT_LINK_SCHEMA_V1 => match serde_json::from_value::<ExportLinkRecord>(value) {
+                Ok(link) => parsed.links.push(link),
+                Err(error) => parsed.issues.push(JsonlImportIssue::error(
+                    Some(line_number),
+                    "invalid_link_record",
+                    error.to_string(),
+                )),
+            },
             EXPORT_FOOTER_SCHEMA_V1 => parse_footer_record(&mut parsed, line_number, value),
             EXPORT_ARTIFACT_SCHEMA_V1 => {
                 parsed.artifact_records = parsed.artifact_records.saturating_add(1);
@@ -1154,7 +1420,6 @@ fn parse_jsonl_source(input: &str) -> ParsedJsonlImport {
             }
             EXPORT_AGENT_SCHEMA_V1
             | EXPORT_AUDIT_SCHEMA_V1
-            | EXPORT_LINK_SCHEMA_V1
             | EXPORT_WORKSPACE_SCHEMA_V1 => {
                 parsed.ignored_records = parsed.ignored_records.saturating_add(1);
             }
@@ -1421,6 +1686,17 @@ fn validate_header_and_footer(parsed: &mut ParsedJsonlImport, first_schema: Opti
                 format!(
                     "footer tag_count {} does not match parsed tag records {}",
                     footer.tag_count, parsed_tag_count
+                ),
+            ));
+        }
+        if footer.link_count != parsed.links.len() as u64 {
+            parsed.issues.push(JsonlImportIssue::warning(
+                None,
+                "footer_link_count_mismatch",
+                format!(
+                    "footer link_count {} does not match parsed link records {}",
+                    footer.link_count,
+                    parsed.links.len()
                 ),
             ));
         }
@@ -2212,10 +2488,14 @@ mod tests {
             records_total: 0,
             memory_records: 0,
             tag_records: 0,
+            link_records: 0,
             ignored_records: 0,
             memories_imported: 0,
             memories_skipped_duplicate: 0,
             tags_imported: 0,
+            links_imported: 0,
+            links_skipped_duplicate: 0,
+            links_skipped_conflict: 0,
             imported_memory_ids: Vec::new(),
             issues: Vec::new(),
         }
