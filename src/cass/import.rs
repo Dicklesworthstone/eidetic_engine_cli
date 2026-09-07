@@ -34,6 +34,7 @@ use crate::models::{
 
 const DEFAULT_DB_FILE: &str = "ee.db";
 const DEFAULT_VIEW_CONTEXT: u32 = 4;
+const PAGED_VIEW_CONTEXT: u32 = 64;
 const IMPORT_SOURCE_KIND: &str = "cass";
 const CASS_REDACTION_AUDIT_SCHEMA_V1: &str = "ee.cass.redaction_audit.v1";
 const CASS_REDACTION_AUDIT_ACTION: &str = "cass.evidence.redacted";
@@ -1100,7 +1101,104 @@ fn view_session_spans(
     client: &CassClient,
     source_path: &str,
 ) -> Result<Vec<CassViewSpanForImport>, CassImportError> {
-    let invocation = client.import_view_invocation(source_path, 1, DEFAULT_VIEW_CONTEXT)?;
+    let mut spans = Vec::new();
+    let mut first_line = 1;
+    let mut target_line = 1;
+    let mut context = DEFAULT_VIEW_CONTEXT;
+    let mut expected_total = None;
+    let mut total_bytes = 0_usize;
+    loop {
+        let buffer = read_cass_view_page(client, source_path, target_line, context)?;
+        total_bytes = total_bytes.saturating_add(buffer.as_bytes().len());
+        if total_bytes > CASS_VIEW_STDOUT_TOTAL_MAX_BYTES {
+            return Err(invalid_view_page(
+                "view JSON output exceeds total session byte limit",
+            ));
+        }
+        let total_lines = cass_view_total_lines(buffer.as_bytes())?;
+        if expected_total.is_some() && total_lines != expected_total {
+            return Err(invalid_view_page("view total_lines changed during import"));
+        }
+        let page = parse_view_json(buffer.as_bytes(), source_path)?;
+        let next = match total_lines {
+            Some(total) => next_cass_view_page(&page, first_line, total)?,
+            // A JSONL stream has no window envelope and is consumed to EOF.
+            None => None,
+        };
+        spans.extend(page);
+        let Some((next_first, next_target, next_context)) = next else {
+            return Ok(spans);
+        };
+        first_line = next_first;
+        target_line = next_target;
+        context = next_context;
+        expected_total = total_lines;
+    }
+}
+
+fn invalid_view_page(message: &str) -> CassImportError {
+    CassImportError::InvalidJson {
+        source: "view",
+        message: message.to_owned(),
+    }
+}
+
+fn cass_view_total_lines(input: &[u8]) -> Result<Option<u32>, CassImportError> {
+    let Ok(value) = serde_json::from_slice::<JsonValue>(input) else {
+        return Ok(None);
+    };
+    if value.get("lines").is_none() {
+        return Ok(None);
+    }
+    value
+        .get("total_lines")
+        .and_then(JsonValue::as_u64)
+        .and_then(|total| u32::try_from(total).ok())
+        .map(Some)
+        .ok_or_else(|| invalid_view_page("view envelope requires a valid total_lines count"))
+}
+
+/// Require contiguous progress, then center the next window so its first line
+/// is exactly the successor of this page. Shrink context at EOF to keep the
+/// target in range without overlapping or dropping a tail line.
+fn next_cass_view_page(
+    spans: &[CassViewSpanForImport],
+    first_line: u32,
+    total_lines: u32,
+) -> Result<Option<(u32, u32, u32)>, CassImportError> {
+    for (index, span) in spans.iter().enumerate() {
+        if u64::from(span.start_line) != u64::from(first_line) + index as u64
+            || span.end_line > total_lines
+        {
+            return Err(invalid_view_page(
+                "view page has missing, repeated, or out-of-range lines",
+            ));
+        }
+    }
+    let Some(last) = spans.last() else {
+        return if total_lines == 0 && first_line == 1 {
+            Ok(None)
+        } else {
+            Err(invalid_view_page(
+                "view page made no progress before total_lines",
+            ))
+        };
+    };
+    if last.end_line == total_lines {
+        return Ok(None);
+    }
+    let next = last.end_line + 1; // last < total_lines, so this cannot overflow.
+    let context = PAGED_VIEW_CONTEXT.min(total_lines - next);
+    Ok(Some((next, next + context, context)))
+}
+
+fn read_cass_view_page(
+    client: &CassClient,
+    source_path: &str,
+    line: u32,
+    context: u32,
+) -> Result<CassViewStdoutBuffer, CassImportError> {
+    let invocation = client.import_view_invocation(source_path, line, context)?;
     // `cass view --json` emits ONE pretty-printed `{...,"lines":[...]}` envelope
     // (the first stdout line is just `{`), not a per-line `{"line",..}` JSONL
     // stream. So we cannot `serde_json::from_str` each line in isolation (the
@@ -1124,7 +1222,7 @@ fn view_session_spans(
         "streamed CASS view stdout"
     );
     ensure_successful_stream_outcome(&outcome, "cass view")?;
-    parse_view_json(buffer.as_bytes(), source_path)
+    Ok(buffer)
 }
 
 /// Accumulates `cass view --json` stdout while streaming so the full envelope
@@ -3306,6 +3404,86 @@ mod tests {
             "tool result kind",
         )?;
         ensure_equal(&spans[1].role, &Some(CassRole::Tool), "tool role")
+    }
+
+    #[test]
+    fn view_pagination_covers_tail_and_checks_contiguous_progress() -> TestResult {
+        let page = |first: u32, last: u32| {
+            let lines = (first..=last)
+                .map(|line| json!({"line":line, "content":"build output"}))
+                .collect::<Vec<_>>();
+            parse_view_json(
+                json!({"lines":lines}).to_string().as_bytes(),
+                "/tmp/session.jsonl",
+            )
+            .map_err(|error| error.to_string())
+        };
+        ensure_equal(
+            &next_cass_view_page(&page(1, 5)?, 1, 7).map_err(|e| e.to_string())?,
+            &Some((6, 7, 1)),
+            "tail target stays in range",
+        )?;
+        ensure_equal(
+            &next_cass_view_page(&page(6, 7)?, 6, 7).map_err(|e| e.to_string())?,
+            &None,
+            "tail completes the session",
+        )?;
+        ensure_equal(
+            &next_cass_view_page(&page(1, 5)?, 1, 1000).map_err(|e| e.to_string())?,
+            &Some((6, 70, 64)),
+            "full bounded next page",
+        )?;
+        ensure_equal(
+            &next_cass_view_page(&page(u32::MAX - 2, u32::MAX - 1)?, u32::MAX - 2, u32::MAX)
+                .map_err(|e| e.to_string())?,
+            &Some((u32::MAX, u32::MAX, 0)),
+            "maximum line number",
+        )?;
+        for (spans, first, total) in [
+            (page(1, 5)?, 6, 7),
+            (page(7, 7)?, 6, 7),
+            (page(6, 8)?, 6, 7),
+            (Vec::new(), 6, 7),
+        ] {
+            ensure(
+                next_cass_view_page(&spans, first, total).is_err(),
+                "repeated, missing, out-of-range, and empty pages must fail",
+            )?;
+        }
+        ensure_equal(
+            &next_cass_view_page(&[], 1, 0).map_err(|e| e.to_string())?,
+            &None,
+            "empty session",
+        )
+    }
+
+    #[test]
+    fn view_pagination_requires_total_lines_on_window_envelopes() -> TestResult {
+        ensure_equal(
+            &cass_view_total_lines(br#"{"lines":[],"total_lines":0}"#)
+                .map_err(|e| e.to_string())?,
+            &Some(0),
+            "empty window total",
+        )?;
+        ensure_equal(
+            &cass_view_total_lines(
+                b"{\"line\":1,\"content\":\"a\"}\n{\"line\":2,\"content\":\"b\"}",
+            )
+            .map_err(|e| e.to_string())?,
+            &None,
+            "complete JSONL stream",
+        )?;
+        for input in [
+            br#"{"lines":[]}"#.as_slice(),
+            br#"{"lines":[],"total_lines":-1}"#,
+            br#"{"lines":[],"total_lines":4294967296}"#,
+        ] {
+            ensure(
+                cass_view_total_lines(input).is_err(),
+                "window total must be valid",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

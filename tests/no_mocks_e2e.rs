@@ -1686,6 +1686,15 @@ fn write_codex_cass_fixture_session(
                 "output": "x65f transcript control tool canary: imported CASS evidence remains durable and searchable"
             }
         }),
+        json!({
+            "timestamp": "2026-05-06T03:40:06Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type":"text", "text":"x65f pagination tail sentinel confirms the last transcript message survives import"}]
+            }
+        }),
     ];
 
     let mut jsonl = String::new();
@@ -1728,8 +1737,8 @@ fn write_stub_cass_binary(
             "agent": "codex",
             "workspace": workspace_arg,
             "started_at": "2026-05-06T03:40:00Z",
-            "ended_at": "2026-05-06T03:40:05Z",
-            "message_count": 6,
+            "ended_at": "2026-05-06T03:40:06Z",
+            "message_count": 7,
             "token_count": 42
         }]
     });
@@ -1766,7 +1775,22 @@ case "${1:-}" in
     cat "$CASS_STUB_SESSIONS_JSON"
     ;;
   view)
-    cat "$CASS_STUB_VIEW_JSONL"
+    shift
+    target=1
+    context=4
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -n) target="$2"; shift 2 ;;
+        -C) context="$2"; shift 2 ;;
+        --) break ;;
+        *) shift ;;
+      esac
+    done
+    awk -v target="$target" -v context="$context" '
+      BEGIN { printf "{\"lines\":["; separator="" }
+      NR >= target-context && NR <= target+context { printf "%s%s", separator, $0; separator="," }
+      END { printf "],\"total_lines\":%d}\n", NR }
+    ' "$CASS_STUB_VIEW_JSONL"
     ;;
   *)
     printf 'unexpected cass stub command: %s\n' "$*" >&2
@@ -2821,7 +2845,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
             .pointer("/data/spansImported")
             .and_then(JsonValue::as_u64)
             .unwrap_or(0)
-            >= 6,
+            >= 7,
         "CASS import must capture evidence spans from the fixture session",
     )?;
     let public_import_source_path = import_json
@@ -2963,6 +2987,17 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         }),
         "metadata, nested system/developer, and tool records must be quarantined at ingestion",
     )?;
+    let tail_evidence_id = spans
+        .iter()
+        .find(|span| {
+            span.excerpt.contains("x65f pagination tail sentinel")
+                && span.search_eligibility == "admitted"
+        })
+        .ok_or_else(|| {
+            "the last transcript message was not durably imported and admitted".to_owned()
+        })?
+        .id
+        .clone();
     ensure_equal(
         &searchable_evidence.search_eligibility.as_str(),
         &"admitted",
@@ -3157,6 +3192,39 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
     ensure(
         !evidence_search_output.contains("x65f transcript control "),
         "search must exclude raw transcript control canaries",
+    )?;
+    let (_, tail_search) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "04b_search_tail_transcript_message",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "search".to_owned(),
+                "x65f pagination tail sentinel".to_owned(),
+                "--source-mode".to_owned(),
+                "lexical_only".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v2",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    ensure(
+        tail_search
+            .pointer("/data/results")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row.get("docId").and_then(JsonValue::as_str) == Some(tail_evidence_id.as_str())
+                })
+            }),
+        "public search must retrieve the exact evidence beyond the first CASS view window",
     )?;
     ensure(
         !evidence_search_output.contains(DENIED_CASS_PRIVATE_PATH)
