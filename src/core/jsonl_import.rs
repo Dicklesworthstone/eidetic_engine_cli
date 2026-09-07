@@ -133,11 +133,12 @@ impl JsonlImportIssue {
     }
 
     fn error(line: Option<u32>, code: &str, message: impl Into<String>) -> Self {
+        let message: String = message.into();
         Self {
             line,
             code: code.to_owned(),
             severity: JsonlImportIssueSeverity::Error,
-            message: message.into(),
+            message: crate::policy::redact_secret_like_content(&message).content,
             repair: None,
         }
     }
@@ -2688,6 +2689,7 @@ mod tests {
         let cases = [
             ("/link_type", json!("invented")),
             ("/weight", json!(1.01)),
+            ("/weight", json!("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij")),
             ("/metadata/confidence", json!(-0.1)),
             ("/metadata/evidenceCount", json!(-1)),
             ("/metadata/directed", json!("false")),
@@ -2696,6 +2698,14 @@ mod tests {
             ("/metadata/lastReinforcedAt", json!("yesterday")),
             ("/created_at", json!("yesterday")),
             ("/link_id", json!("invalid")),
+            (
+                "/link_id",
+                json!("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"),
+            ),
+            (
+                "/metadata/source",
+                json!("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"),
+            ),
             ("/target_memory_id", base[1]["memory_id"].clone()),
             (
                 "/target_memory_id",
@@ -2724,6 +2734,14 @@ mod tests {
                 })
                 .map_err(|error| error.to_string())?;
                 ensure(report.status.as_str(), "rejected", pointer)?;
+                ensure(
+                    report
+                        .data_json()
+                        .to_string()
+                        .contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"),
+                    false,
+                    "invalid link diagnostics must not echo secret-shaped field values",
+                )?;
                 ensure(
                     report.memories_imported + report.links_imported,
                     0,
