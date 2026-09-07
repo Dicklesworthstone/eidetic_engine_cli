@@ -612,6 +612,8 @@ impl ParsedJsonlImport {
 struct PreparedMemory {
     id: String,
     input: CreateMemoryInput,
+    created_at: String,
+    updated_at: String,
     tombstoned_at: Option<String>,
     tombstoned_reason: Option<String>,
     bayes_posterior: Option<(f64, f64)>,
@@ -947,7 +949,12 @@ fn import_jsonl_records_with_policy(
             }
         }
         for memory in &to_insert {
-            connection.insert_memory(&memory.id, &memory.input)?;
+            connection.insert_memory_with_timestamps(
+                &memory.id,
+                &memory.input,
+                &memory.created_at,
+                &memory.updated_at,
+            )?;
             if let Some((alpha, beta)) = memory.bayes_posterior {
                 connection.update_memory_bayes_posterior(&memory.id, alpha, beta)?;
             }
@@ -994,6 +1001,7 @@ fn import_jsonl_records_with_policy(
                     },
                 )?;
             }
+            connection.restore_imported_memory_updated_at(&memory.id, &memory.updated_at)?;
             connection.insert_audit(
                 &crate::db::generate_audit_id(),
                 &CreateAuditInput {
@@ -1304,6 +1312,12 @@ fn reimport_conflict_issue(
     }
     if existing.kind != incoming.input.kind {
         divergences.push("kind");
+    }
+    if existing.created_at != incoming.created_at {
+        divergences.push("created_at");
+    }
+    if existing.updated_at != incoming.updated_at {
+        divergences.push("updated_at");
     }
     if existing.trust_class != incoming.input.trust_class {
         divergences.push("trust_class");
@@ -1959,6 +1973,27 @@ fn validate_memory(
         )
     })?;
     let bayes_posterior = exported_bayes_posterior(memory)?;
+    for (field, value) in [
+        ("created_at", Some(memory.created_at.as_str())),
+        ("updated_at", memory.updated_at.as_deref()),
+        ("tombstoned_at", memory.tombstoned_at.as_deref()),
+        ("valid_from", memory.valid_from.as_deref()),
+        ("valid_to", memory.valid_to.as_deref()),
+        ("expires_at", memory.expires_at.as_deref()),
+    ] {
+        if let Some(value) = value {
+            chrono::DateTime::parse_from_rfc3339(value).map_err(|_| {
+                JsonlImportIssue::error(
+                    None,
+                    "invalid_memory_timestamp",
+                    format!(
+                        "memory `{}` has invalid {field}; expected an RFC 3339 timestamp",
+                        memory.memory_id,
+                    ),
+                )
+            })?;
+        }
+    }
 
     Ok(ValidatedMemory {
         record: memory,
@@ -2005,6 +2040,13 @@ fn prepare_memory(
 
     Ok(PreparedMemory {
         id: validated.id,
+        created_at: memory.created_at.clone(),
+        updated_at: memory
+            .updated_at
+            .as_ref()
+            .or(memory.tombstoned_at.as_ref())
+            .unwrap_or(&memory.created_at)
+            .clone(),
         input: CreateMemoryInput {
             workspace_id: workspace_id.to_owned(),
             level: validated.level.as_str().to_owned(),
@@ -3758,6 +3800,123 @@ mod tests {
     }
 
     #[test]
+    fn import_jsonl_preserves_memory_chronology_and_provenance() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut records = sample_jsonl()
+            .lines()
+            .map(serde_json::from_str::<JsonValue>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let template = records[1].clone();
+        let mut footer = records[3].clone();
+        records.truncate(1);
+        records[0]["record_count"] = json!(5);
+        let cases = [
+            (
+                "2020-01-02T03:04:05.123456789+05:30",
+                Some("2020-02-03T04:05:06.987654321-04:00"),
+                None,
+                None,
+            ),
+            (
+                "2021-01-02T00:00:00Z",
+                Some("2021-03-03T00:00:00Z"),
+                Some("2021-02-02T00:00:00Z"),
+                Some("2019-01-01T00:00:00Z"),
+            ),
+            ("2022-01-02T00:00:00Z", None, None, None),
+            (
+                "2023-01-02T00:00:00Z",
+                None,
+                Some("2023-02-02T00:00:00Z"),
+                None,
+            ),
+        ];
+        for (index, &(created, updated, tombstoned, valid_from)) in cases.iter().enumerate() {
+            let mut memory = template.clone();
+            memory["memory_id"] =
+                json!(MemoryId::from_uuid(Uuid::from_u128(index as u128 + 1)).to_string());
+            memory["content"] = json!(format!("Preserve historical release rule {index}."));
+            memory["created_at"] = json!(created);
+            memory["updated_at"] = json!(updated);
+            memory["tombstoned_at"] = json!(tombstoned);
+            memory["valid_from"] = json!(valid_from);
+            memory["bayes_alpha"] = json!(2.5);
+            memory["bayes_beta"] = json!(1.5);
+            records.push(memory);
+        }
+        footer["total_records"] = json!(6);
+        footer["memory_count"] = json!(4);
+        footer["tag_count"] = json!(0);
+        records.push(footer);
+        let source = tempdir.path().join("chronology.jsonl");
+        fs::write(
+            &source,
+            records
+                .iter()
+                .map(JsonValue::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .map_err(|error| error.to_string())?;
+        let options = JsonlImportOptions {
+            workspace_path: tempdir.path().join("workspace"),
+            database_path: None,
+            source_path: source,
+            dry_run: false,
+        };
+        let report = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        ensure(
+            report.status.as_str(),
+            "completed",
+            "chronology import status",
+        )?;
+        ensure(report.memories_imported, 4, "all chronology cases imported")?;
+        let connection = DbConnection::open(DatabaseConfig::file(database_path(&options)))
+            .map_err(|error| error.to_string())?;
+        for (index, &(created, updated, tombstoned, valid_from)) in cases.iter().enumerate() {
+            let id = MemoryId::from_uuid(Uuid::from_u128(index as u128 + 1)).to_string();
+            let memory = connection
+                .get_memory(&id)
+                .map_err(|error| error.to_string())?
+                .ok_or("imported chronology memory missing")?;
+            ensure(
+                memory.created_at.as_str(),
+                created,
+                "exact original creation time",
+            )?;
+            ensure(
+                memory.updated_at.as_str(),
+                updated.or(tombstoned).unwrap_or(created),
+                "modification time survives posterior and tombstone restoration",
+            )?;
+            ensure(
+                memory.tombstoned_at.as_deref(),
+                tombstoned,
+                "original tombstone",
+            )?;
+            ensure(
+                memory.valid_from.as_deref(),
+                Some(valid_from.unwrap_or(created)),
+                "validity defaults to original creation, not import time",
+            )?;
+            ensure(
+                connection
+                    .get_memory_bayes_posterior(&id)
+                    .map_err(|error| error.to_string())?,
+                Some((2.5, 1.5)),
+                "posterior restored even for historical tombstones",
+            )?;
+            ensure(
+                memory.provenance_chain_hash.as_deref(),
+                Some(crate::db::compute_memory_provenance_chain_hash(&memory).as_str()),
+                "provenance hash covers the stored historical creation time",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn import_jsonl_restores_exported_bayes_posterior() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = tempdir.path().join("workspace");
@@ -4671,6 +4830,29 @@ mod tests {
             stored.content.contains("Run cargo fmt --check"),
             true,
             "existing row content must be preserved, never overwritten",
+        )?;
+        let parsed = parse_jsonl_source(&sample_jsonl());
+        let mut prepared = prepare_memories(&parsed, &stored.workspace_id, &unauthenticated());
+        let incoming = prepared
+            .memories
+            .first_mut()
+            .ok_or("prepared reimport missing")?;
+        incoming.updated_at = "2026-05-01T00:00:00Z".to_owned();
+        let issue = reimport_conflict_issue(&stored, incoming)
+            .ok_or("modification-time-only divergence must be reported")?;
+        ensure(
+            issue.message.contains("updated_at"),
+            true,
+            "updated_at divergence",
+        )?;
+        incoming.updated_at.clone_from(&stored.updated_at);
+        incoming.created_at = "2026-04-29T00:00:00Z".to_owned();
+        let issue = reimport_conflict_issue(&stored, incoming)
+            .ok_or("creation-time-only divergence must be reported")?;
+        ensure(
+            issue.message.contains("created_at"),
+            true,
+            "created_at divergence",
         )
     }
 
@@ -4799,6 +4981,20 @@ mod tests {
             ("importance", json!(1.1), "invalid_memory_importance"),
             ("bayes_alpha", json!(2.5), "invalid_memory_bayes_posterior"),
             ("bayes_alpha", json!(0.0), "invalid_memory_bayes_posterior"),
+            ("created_at", json!("yesterday"), "invalid_memory_timestamp"),
+            ("updated_at", json!(""), "invalid_memory_timestamp"),
+            (
+                "tombstoned_at",
+                json!("2026-13-01T00:00:00Z"),
+                "invalid_memory_timestamp",
+            ),
+            ("valid_from", json!("tomorrow"), "invalid_memory_timestamp"),
+            ("valid_to", json!("not-a-date"), "invalid_memory_timestamp"),
+            (
+                "expires_at",
+                json!("2026-01-01"),
+                "invalid_memory_timestamp",
+            ),
         ];
         for (index, (field, value, expected_code)) in cases.into_iter().enumerate() {
             let mut records = sample_jsonl()

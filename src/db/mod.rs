@@ -21792,7 +21792,8 @@ fn stored_journal_entry_from_row(row: &Row) -> Result<StoredJournalEntry> {
 impl DbConnection {
     /// Insert a new memory and its tags.
     pub fn insert_memory(&self, id: &str, input: &CreateMemoryInput) -> Result<()> {
-        self.insert_memory_inner(id, input, None, Utc::now())
+        let now = Utc::now().to_rfc3339();
+        self.insert_memory_inner(id, input, None, &now, &now)
     }
 
     /// Seed an evaluation store through normal insertion, including provenance
@@ -21803,7 +21804,20 @@ impl DbConnection {
         input: &CreateMemoryInput,
         timestamp: chrono::DateTime<Utc>,
     ) -> Result<()> {
-        self.insert_memory_inner(id, input, None, timestamp)
+        let timestamp = timestamp.to_rfc3339();
+        self.insert_memory_inner(id, input, None, &timestamp, &timestamp)
+    }
+
+    /// Import a memory through normal insertion without replacing its history.
+    /// The caller validates both RFC 3339 timestamps before opening storage.
+    pub(crate) fn insert_memory_with_timestamps(
+        &self,
+        id: &str,
+        input: &CreateMemoryInput,
+        created_at: &str,
+        updated_at: &str,
+    ) -> Result<()> {
+        self.insert_memory_inner(id, input, None, created_at, updated_at)
     }
 
     /// Insert a new memory with a precomputed content SimHash.
@@ -21813,7 +21827,8 @@ impl DbConnection {
         input: &CreateMemoryInput,
         content_simhash: MemoryContentSimHash,
     ) -> Result<()> {
-        self.insert_memory_inner(id, input, Some(content_simhash), Utc::now())
+        let now = Utc::now().to_rfc3339();
+        self.insert_memory_inner(id, input, Some(content_simhash), &now, &now)
     }
 
     fn insert_memory_inner(
@@ -21821,9 +21836,9 @@ impl DbConnection {
         id: &str,
         input: &CreateMemoryInput,
         content_simhash: Option<MemoryContentSimHash>,
-        timestamp: chrono::DateTime<Utc>,
+        created_at: &str,
+        updated_at: &str,
     ) -> Result<()> {
-        let now = timestamp.to_rfc3339();
         let provenance_chain_hash =
             compute_memory_provenance_chain_hash_fields(&MemoryProvenanceChainFields {
                 id,
@@ -21837,7 +21852,7 @@ impl DbConnection {
                 provenance_uri: input.provenance_uri.as_deref(),
                 trust_class: &input.trust_class,
                 trust_subclass: input.trust_subclass.as_deref(),
-                created_at: &now,
+                created_at,
             });
 
         // N15.1 (bd-17c65.14.15.2): new memories belong to a singleton
@@ -21846,7 +21861,10 @@ impl DbConnection {
         // SAME logical_id but a fresh id, and UPDATE the prior row's
         // `valid_to`. Until then, every memory's chain is a singleton —
         // logical_id is equal to id and the field is informational.
-        let valid_from = input.valid_from.clone().unwrap_or_else(|| now.clone());
+        let valid_from = input
+            .valid_from
+            .clone()
+            .unwrap_or_else(|| created_at.to_owned());
 
         self.execute_for(
             DbOperation::Execute,
@@ -21867,8 +21885,8 @@ impl DbConnection {
                 Value::Text(provenance_chain_hash),
                 Value::Text(PROVENANCE_CHAIN_HASH_VERSION.to_string()),
                 Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
-                Value::Text(now.clone()),
-                Value::Text(now),
+                Value::Text(created_at.to_owned()),
+                Value::Text(updated_at.to_owned()),
                 Value::Text(valid_from),
                 input.valid_to.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
                 content_simhash.map_or(Value::Null, |simhash| Value::Bytes(simhash.to_vec())),
@@ -24059,6 +24077,26 @@ impl DbConnection {
         if affected > 0 {
             self.garbage_collect_auto_memory_links_for_memory_inner(id)?;
         }
+        Ok(affected > 0)
+    }
+
+    /// Finish replaying a newly imported row's historical modification time.
+    /// Call inside the import transaction after posterior/family/tombstone
+    /// restoration, whose normal mutation paths otherwise advance `updated_at`.
+    /// Existing rows skipped by reimport must never pass through this helper.
+    pub(crate) fn restore_imported_memory_updated_at(
+        &self,
+        id: &str,
+        updated_at: &str,
+    ) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET updated_at = ?1 WHERE id = ?2",
+            &[
+                Value::Text(updated_at.to_owned()),
+                Value::Text(id.to_owned()),
+            ],
+        )?;
         Ok(affected > 0)
     }
 

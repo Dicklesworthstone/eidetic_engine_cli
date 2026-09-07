@@ -2284,6 +2284,12 @@ records in order; changing, appending, removing, or reordering these records
 invalidates the authentication required to preserve local human trust. Other
 durable families still follow the coverage limitations above.
 
+Memory imports preserve the original creation and modification timestamps,
+including after restoring Bayesian posteriors or tombstones. Missing modification
+times use the tombstone time when present, otherwise the creation time; missing
+validity starts use the creation time. Temporal fields are checked before storage
+is created. Reimport preserves existing rows and reports conflicting timestamps.
+
 ---
 
 ## Performance
