@@ -21553,7 +21553,12 @@ mod tests {
 
     #[test]
     fn apply_rule_curation_publishes_exact_rule_and_retries_without_duplicates() -> TestResult {
-        for kind in ["rule", "anti_pattern_proposal"] {
+        for (kind, publication_blocked) in [
+            ("rule", false),
+            ("rule", true),
+            ("anti_pattern_proposal", false),
+            ("anti_pattern_proposal", true),
+        ] {
             let tempdir = tempfile::tempdir_in("/tmp").map_err(|e| e.to_string())?;
             let workspace = tempdir.path();
             fs::create_dir(workspace.join(".ee")).map_err(|e| e.to_string())?;
@@ -21597,16 +21602,19 @@ mod tests {
             // A regular file blocks directory publication on every platform.
             // Preserve it by renaming before the same candidate is retried.
             let index_path = workspace.join(".ee/index");
-            fs::write(&index_path, b"publication blocker").map_err(|e| e.to_string())?;
+            if publication_blocked {
+                fs::write(&index_path, b"publication blocker").map_err(|e| e.to_string())?;
+            }
             options.dry_run = false;
             let first = apply_curation_candidate(&options).map_err(|e| e.message())?;
             assert_eq!(first.application.status, "applied");
             assert!(first.durable_mutation);
-            assert!(
+            assert_eq!(
                 first
                     .degraded
                     .iter()
-                    .any(|entry| entry.code == super::CURATE_APPLY_INDEX_PUBLISH_FAILED_CODE)
+                    .any(|entry| entry.code == super::CURATE_APPLY_INDEX_PUBLISH_FAILED_CODE),
+                publication_blocked,
             );
             let rules = connection
                 .list_procedural_rules(&workspace_id, None, None, true)
@@ -21619,10 +21627,12 @@ mod tests {
                 .map_err(|e| e.to_string())?;
             assert_eq!(jobs.len(), 1);
             let job_id = jobs[0].id.clone();
-            assert_ne!(jobs[0].status, "completed");
+            assert_eq!(jobs[0].status == "completed", !publication_blocked);
             assert_eq!(jobs[0].document_id.as_deref(), Some(rule_id.as_str()));
-            fs::rename(&index_path, workspace.join(".ee/preserved-index-blocker"))
-                .map_err(|e| e.to_string())?;
+            if publication_blocked {
+                fs::rename(&index_path, workspace.join(".ee/preserved-index-blocker"))
+                    .map_err(|e| e.to_string())?;
+            }
 
             let retry = apply_curation_candidate(&options).map_err(|e| e.message())?;
             assert_eq!(retry.application.status, "already_applied");

@@ -2634,7 +2634,7 @@ pub fn restore_backup_to_side_path(
         ),
         repair: Some("choose a writable --side-path".to_owned()),
     })?;
-    let mut staging_builder = fs::DirBuilder::new();
+    let staging_builder = &mut fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -2823,7 +2823,11 @@ fn sync_restore_tree(path: &Path) -> Result<(), DomainError> {
         // Windows cannot open directories through File::open. Individual
         // files still flush before its no-replace directory move.
         if metadata.is_file() || cfg!(unix) {
-            fs::File::open(path)?.sync_all()?;
+            OpenOptions::new()
+                .read(true)
+                .write(metadata.is_file())
+                .open(path)?
+                .sync_all()?;
         }
         Ok(())
     };
