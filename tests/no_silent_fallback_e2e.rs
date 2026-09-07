@@ -370,8 +370,8 @@ fn malformed_jsonl_import_reports_rejected_contract_with_issue_codes() -> TestRe
 
     ensure_equal(
         &result.exit_code,
-        &EXIT_SUCCESS,
-        "malformed JSONL rejection remains a parseable report",
+        &EXIT_IMPORT,
+        "malformed JSONL returns failure while retaining a parseable report",
     )?;
     ensure(
         result.stderr.is_empty(),
@@ -384,7 +384,7 @@ fn malformed_jsonl_import_reports_rejected_contract_with_issue_codes() -> TestRe
     )?;
     ensure_equal(
         &result.parsed.pointer("/success"),
-        &Some(&json!(true)),
+        &Some(&json!(false)),
         "jsonl response success flag",
     )?;
     ensure_equal(
