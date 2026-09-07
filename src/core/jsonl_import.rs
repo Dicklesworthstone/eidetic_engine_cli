@@ -310,12 +310,14 @@ impl JsonlImportReport {
     pub fn human_summary(&self) -> String {
         let mode = if self.dry_run { "DRY RUN: " } else { "" };
         let mut summary = format!(
-            "{mode}JSONL import {status}: {imported} imported, {skipped} duplicates, {issues} issue(s) from {memories} memory record(s)\n",
+            "{mode}JSONL import {status}: {imported} memories imported, {skipped} duplicates, {links} links imported, {link_conflicts} link conflicts, {issues} issue(s) from {memories} memory record(s)\n",
             status = self.status,
             imported = self.memories_imported,
             skipped = self.memories_skipped_duplicate,
             issues = self.issues.len(),
             memories = self.memory_records,
+            links = self.links_imported,
+            link_conflicts = self.links_skipped_conflict,
         );
         for issue in self
             .issues
@@ -873,7 +875,8 @@ fn import_jsonl_records_with_policy(
     let mut publication_memory_ids = Vec::new();
     let mut conflicting_memory_ids = BTreeSet::new();
     let mut skipped_duplicate = 0_u32;
-    for memory in prepared.memories {
+    connection.with_transaction(|| {
+      for memory in prepared.memories {
         match connection.get_memory(&memory.id)? {
             Some(existing) => {
                 skipped_duplicate = skipped_duplicate.saturating_add(1);
@@ -889,9 +892,7 @@ fn import_jsonl_records_with_policy(
                 to_insert.push(memory);
             }
         }
-    }
-
-    connection.with_transaction(|| {
+      }
         for memory in &to_insert {
             connection.insert_memory(&memory.id, &memory.input)?;
             if let Some((alpha, beta)) = memory.bayes_posterior {
