@@ -13,7 +13,6 @@ use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
 
-const EXIT_SUCCESS: i32 = 0;
 const EXIT_IMPORT: i32 = 5;
 
 struct LoggedCommand {
