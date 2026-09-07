@@ -889,7 +889,7 @@ pub struct JsonlExporter<W: Write> {
     link_count: u64,
     tag_count: u64,
     audit_count: u64,
-    /// Ordered digest over the exact emitted memory-record bytes, for the
+    /// Ordered digest over the exact emitted memory, tag, and link bytes, for the
     /// store-local authentication root (ADR 0086 TC-D14).
     records_root: RecordsRootBuilder,
 }
@@ -981,9 +981,9 @@ impl<W: Write> JsonlExporter<W> {
         Ok(())
     }
 
-    /// Finalize the ordered records root over the memory records written so
-    /// far, returning `(records_root, memory_count)`. The exporter feeds every
-    /// emitted memory line into this digest so an authenticated export
+    /// Finalize the ordered records root over the imported record families,
+    /// returning `(records_root, record_count)`. Every emitted memory, tag,
+    /// and link line contributes to this digest so an authenticated export
     /// (ADR 0086 TC-D14) MACs a root that reflects exactly what was written.
     #[must_use]
     pub fn finalize_records_root(&self) -> ([u8; 32], u64) {
@@ -1033,6 +1033,8 @@ impl<W: Write> JsonlExporter<W> {
         let json = serde_json::to_string(&redacted)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         writeln!(self.writer, "{json}")?;
+        self.records_root
+            .push(&redacted.link_id, &canonical_record_hash(json.as_bytes()));
         self.records_written += 1;
         self.link_count += 1;
         Ok(())
@@ -1052,6 +1054,8 @@ impl<W: Write> JsonlExporter<W> {
         let json = serde_json::to_string(&redacted)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         writeln!(self.writer, "{json}")?;
+        self.records_root
+            .push(&redacted.memory_id, &canonical_record_hash(json.as_bytes()));
         self.records_written += 1;
         self.tag_count += 1;
         Ok(())

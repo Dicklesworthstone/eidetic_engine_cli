@@ -2275,8 +2275,10 @@ endpoints map to the corresponding restored memories. JSONL reports include
 IDs, edges, or endpoint memories preserve existing state and produce an issue.
 Invalid link records reject the import before creating storage. Rejected JSONL
 imports return exit code 5 and `success: false`, with details in `data.issues`.
-Other durable
-families still follow the coverage limitations above.
+Native artifact authentication covers the exact emitted memory, tag, and link
+records in order; changing, appending, removing, or reordering these records
+invalidates the authentication required to preserve local human trust. Other
+durable families still follow the coverage limitations above.
 
 ---
 

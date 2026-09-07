@@ -4284,7 +4284,7 @@ fn render_records(
         }
 
         // MAC the canonical header over the records root accumulated from the
-        // exact emitted (post-redaction) memory line bytes of this snapshot.
+        // exact emitted (post-redaction) memory, tag, and link line bytes.
         let authentication = store_auth.and_then(|auth_root| {
             let (records_root, record_count) = exporter.finalize_records_root();
             let context = ArtifactContext {

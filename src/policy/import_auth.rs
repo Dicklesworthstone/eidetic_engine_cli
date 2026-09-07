@@ -49,7 +49,7 @@ pub const NATIVE_IMPORT_AUTH_SCHEMA: &str = "ee.mesh.native_import_auth.v1";
 /// JSONL record artifacts. Exporter and importer must use the exact same
 /// string or verification fails by construction.
 pub const EXPORT_ARTIFACT_FAMILY: &str = "ee.export.memories";
-/// Canonical record-encoding version for exported memory lines: the records
+/// Canonical record-encoding version for exported memory, tag, and link lines: the records
 /// root digests the exact emitted (post-redaction) line bytes.
 pub const EXPORT_RECORD_ENCODING_V1: &str = "ee.export_record.v1";
 /// Source store-key namespace tag bound into artifact contexts.

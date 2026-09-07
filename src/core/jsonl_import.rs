@@ -595,7 +595,7 @@ struct ParsedJsonlImport {
     issues: Vec<JsonlImportIssue>,
     records_total: u32,
     ignored_records: u32,
-    /// Ordered digest over the raw memory line bytes as read, matching what
+    /// Ordered digest over raw memory, tag, and link line bytes, matching what
     /// the exporter MAC'd (ADR 0086 TC-D14). Verified against the footer
     /// authentication block before native trust is honored.
     records_root: RecordsRootBuilder,
@@ -1431,15 +1431,29 @@ fn parse_jsonl_source(input: &str) -> ParsedJsonlImport {
                 }
                 parse_memory_record(&mut parsed, &mut seen_memory_ids, line_number, value);
             }
-            EXPORT_TAG_SCHEMA_V1 => parse_tag_record(&mut parsed, line_number, value),
-            EXPORT_LINK_SCHEMA_V1 => match serde_json::from_value::<ExportLinkRecord>(value) {
-                Ok(link) => parsed.links.push(link),
-                Err(error) => parsed.issues.push(JsonlImportIssue::error(
-                    Some(line_number),
-                    "invalid_link_record",
-                    error.to_string(),
-                )),
-            },
+            EXPORT_TAG_SCHEMA_V1 => {
+                if let Some(memory_id) = value.get("memory_id").and_then(JsonValue::as_str) {
+                    parsed
+                        .records_root
+                        .push(memory_id, &canonical_record_hash(trimmed.as_bytes()));
+                }
+                parse_tag_record(&mut parsed, line_number, value);
+            }
+            EXPORT_LINK_SCHEMA_V1 => {
+                if let Some(link_id) = value.get("link_id").and_then(JsonValue::as_str) {
+                    parsed
+                        .records_root
+                        .push(link_id, &canonical_record_hash(trimmed.as_bytes()));
+                }
+                match serde_json::from_value::<ExportLinkRecord>(value) {
+                    Ok(link) => parsed.links.push(link),
+                    Err(error) => parsed.issues.push(JsonlImportIssue::error(
+                        Some(line_number),
+                        "invalid_link_record",
+                        error.to_string(),
+                    )),
+                }
+            }
             EXPORT_FOOTER_SCHEMA_V1 => parse_footer_record(&mut parsed, line_number, value),
             EXPORT_ARTIFACT_SCHEMA_V1 => {
                 parsed.artifact_records = parsed.artifact_records.saturating_add(1);
@@ -4056,30 +4070,48 @@ mod tests {
         )
     }
 
-    /// Replace the sample footer with one carrying `authentication`, MAC'd by
-    /// the store at `workspace` over the artifact's memory lines, bound to
-    /// `workspace_scope`.
+    /// Emit a native artifact through the real exporter, authenticated by the
+    /// store at `workspace` and bound to `workspace_scope`.
     fn authenticate_sample(
         artifact: &str,
         workspace: &Path,
         workspace_scope: &str,
     ) -> Result<String, String> {
+        use crate::models::ExportScope;
+        use crate::output::jsonl_export::JsonlExporter;
         use crate::policy::import_auth::authenticate_artifact;
 
         let root = StoreAuthRoot::open_or_create(workspace_keys_dir(workspace))
             .map_err(|error| error.message())?;
-        let mut builder = RecordsRootBuilder::new();
+        let mut output = Vec::new();
+        let mut exporter = JsonlExporter::new(&mut output, RedactionLevel::None, ExportScope::All);
+        let mut footer = None;
         for line in artifact.lines() {
             let value: JsonValue =
                 serde_json::from_str(line.trim()).map_err(|error| error.to_string())?;
-            if value.get("schema").and_then(JsonValue::as_str) == Some(EXPORT_MEMORY_SCHEMA_V1) {
-                let memory_id = value
-                    .get("memory_id")
-                    .and_then(JsonValue::as_str)
-                    .ok_or("memory line without memory_id")?;
-                builder.push(memory_id, &canonical_record_hash(line.trim().as_bytes()));
+            match value.get("schema").and_then(JsonValue::as_str) {
+                Some(EXPORT_HEADER_SCHEMA_V1) => exporter.write_header(
+                    serde_json::from_value(value).map_err(|error| error.to_string())?,
+                ),
+                Some(EXPORT_MEMORY_SCHEMA_V1) => exporter.write_memory(
+                    serde_json::from_value(value).map_err(|error| error.to_string())?,
+                ),
+                Some(EXPORT_TAG_SCHEMA_V1) => exporter
+                    .write_tag(serde_json::from_value(value).map_err(|error| error.to_string())?),
+                Some(EXPORT_LINK_SCHEMA_V1) => exporter
+                    .write_link(serde_json::from_value(value).map_err(|error| error.to_string())?),
+                Some(EXPORT_FOOTER_SCHEMA_V1) => {
+                    footer = Some(
+                        serde_json::from_value::<ExportFooter>(value)
+                            .map_err(|error| error.to_string())?,
+                    );
+                    Ok(())
+                }
+                _ => return Err("unsupported authenticated fixture record".to_owned()),
             }
+            .map_err(|error| error.to_string())?;
         }
+        let (records_root, record_count) = exporter.finalize_records_root();
         let header = authenticate_artifact(
             &root,
             MacDomain::NativeImportRecordsRoot,
@@ -4089,15 +4121,16 @@ mod tests {
                 source_key_namespace: STORE_KEY_NAMESPACE_V1,
                 workspace_scope,
             },
-            &builder.finalize(),
-            builder.count(),
+            &records_root,
+            record_count,
         )
         .map_err(|error| error.message())?;
-        let authentication = serde_json::to_string(&header).map_err(|error| error.to_string())?;
-        Ok(artifact.replace(
-            r#""error_message":null}"#,
-            &format!(r#""error_message":null,"authentication":{authentication}}}"#),
-        ))
+        let mut footer = footer.ok_or("authenticated fixture has no footer")?;
+        footer.authentication = Some(header);
+        exporter
+            .write_footer(footer)
+            .map_err(|error| error.to_string())?;
+        String::from_utf8(output).map_err(|error| error.to_string())
     }
 
     /// Workspace fixture for authenticated-import tests: canonical path, a
@@ -4239,6 +4272,143 @@ mod tests {
             "human_explicit",
             "authenticated native import preserves human_explicit",
         )
+    }
+
+    #[test]
+    fn native_authentication_binds_exported_tags_and_links() -> TestResult {
+        for mutation in [
+            "unchanged",
+            "edit_tag",
+            "edit_link",
+            "remove_tag",
+            "remove_link",
+            "append_tag",
+            "append_link",
+            "reorder",
+        ] {
+            let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let (workspace, workspace_id) = authenticated_import_workspace(&tempdir)?;
+            let mut records = linked_jsonl_values()?;
+            records[1]["trust_class"] = json!("human_explicit");
+            records[3]["trust_class"] = json!("human_explicit");
+            let artifact =
+                authenticate_sample(&jsonl_values_text(&records), &workspace, &workspace_id)?;
+            let mut lines = artifact.lines().map(str::to_owned).collect::<Vec<_>>();
+            let footer: JsonValue =
+                serde_json::from_str(&lines[5]).map_err(|error| error.to_string())?;
+            ensure(
+                footer["authentication"]["recordCount"].as_u64(),
+                Some(4),
+                "two memories, one tag, and one link are authenticated",
+            )?;
+
+            // Preserve every untouched line byte-for-byte. Reserializing the
+            // memory lines here would mask an unauthenticated tag/link defect.
+            match mutation {
+                "unchanged" => {}
+                "edit_tag" | "append_tag" => {
+                    let mut tag: JsonValue =
+                        serde_json::from_str(&lines[2]).map_err(|error| error.to_string())?;
+                    tag["tag"] = json!("forged-routing-tag");
+                    if mutation == "edit_tag" {
+                        lines[2] = tag.to_string();
+                    } else {
+                        lines.insert(5, tag.to_string());
+                    }
+                }
+                "edit_link" | "append_link" => {
+                    let mut link: JsonValue =
+                        serde_json::from_str(&lines[4]).map_err(|error| error.to_string())?;
+                    link["weight"] = json!(0.25);
+                    if mutation == "edit_link" {
+                        lines[4] = link.to_string();
+                    } else {
+                        link["link_id"] =
+                            json!(MemoryLinkId::from_uuid(Uuid::from_u128(4)).to_string());
+                        let source = link["source_memory_id"].clone();
+                        link["source_memory_id"] = link["target_memory_id"].clone();
+                        link["target_memory_id"] = source;
+                        lines.insert(5, link.to_string());
+                    }
+                }
+                "remove_tag" => {
+                    lines.remove(2);
+                }
+                "remove_link" => {
+                    lines.remove(4);
+                }
+                "reorder" => lines.swap(2, 4),
+                _ => return Err("unknown tamper test case".to_owned()),
+            }
+            let source_path = tempdir.path().join("source.jsonl");
+            fs::write(&source_path, lines.join("\n")).map_err(|error| error.to_string())?;
+            let report = import_jsonl_records(&JsonlImportOptions {
+                workspace_path: workspace.clone(),
+                database_path: None,
+                source_path,
+                dry_run: false,
+            })
+            .map_err(|error| error.to_string())?;
+            let connection = DbConnection::open(DatabaseConfig::file(
+                workspace
+                    .join(crate::config::WORKSPACE_MARKER)
+                    .join(DEFAULT_DB_FILE),
+            ))
+            .map_err(|error| error.to_string())?;
+            if mutation == "unchanged" {
+                ensure(report.status.as_str(), "completed", "valid native artifact")?;
+                ensure(
+                    report.memories_imported,
+                    2,
+                    "authenticated memories restored",
+                )?;
+                ensure(report.tags_imported, 1, "authenticated tag restored")?;
+                ensure(report.links_imported, 1, "authenticated link restored")?;
+                for record in [&records[1], &records[3]] {
+                    let memory = connection
+                        .get_memory(record["memory_id"].as_str().ok_or("memory id")?)
+                        .map_err(|error| error.to_string())?
+                        .ok_or("restored memory")?;
+                    ensure(
+                        memory.trust_class.as_str(),
+                        "human_explicit",
+                        "native trust preserved",
+                    )?;
+                }
+            } else {
+                ensure(report.status.as_str(), "rejected", mutation)?;
+                ensure(
+                    report.memories_imported,
+                    0,
+                    "tampered artifact imports no memories",
+                )?;
+                ensure(report.tags_imported, 0, "tampered artifact imports no tags")?;
+                ensure(
+                    report.links_imported,
+                    0,
+                    "tampered artifact imports no links",
+                )?;
+                ensure(
+                    report
+                        .issues
+                        .iter()
+                        .any(|issue| issue.code == UNAUTHENTICATED_NATIVE_IMPORT_TRUST_CODE),
+                    true,
+                    mutation,
+                )?;
+                for record in [&records[1], &records[3]] {
+                    ensure(
+                        connection
+                            .get_memory(record["memory_id"].as_str().ok_or("memory id")?)
+                            .map_err(|error| error.to_string())?
+                            .is_none(),
+                        true,
+                        "authentication failure leaves no stored memory",
+                    )?;
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]
