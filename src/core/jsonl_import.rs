@@ -4776,7 +4776,7 @@ mod tests {
         let cases = [
             ("memory_id", json!(""), "invalid_memory_id"),
             ("level", json!("unknown"), "invalid_memory_level"),
-            ("kind", json!("unknown"), "invalid_memory_kind"),
+            ("kind", json!(""), "invalid_memory_kind"),
             ("content", json!(""), "invalid_memory_content"),
             ("content", json!(" \t\n "), "invalid_memory_content"),
             (
@@ -4836,7 +4836,7 @@ mod tests {
                 ensure(
                     report.status.as_str(),
                     "rejected",
-                    "invalid payload rejected",
+                    &format!("case {index}/{field}/{dry_run}: invalid payload rejected"),
                 )?;
                 ensure(report.memories_imported, 0, "no memories imported")?;
                 ensure(report.database_path, None, "destination was never opened")?;
@@ -4906,6 +4906,7 @@ mod tests {
     fn validated_memory_accepts_payload_boundaries() -> TestResult {
         let mut parsed = parse_jsonl_source(&sample_jsonl());
         let memory = parsed.memories.first_mut().ok_or("source memory missing")?;
+        memory.kind = "unknown".to_owned();
         memory.content = "a".repeat(65_536);
         memory.confidence = Some(0.0);
         memory.utility = Some(1.0);
@@ -4919,6 +4920,11 @@ mod tests {
             "valid boundary payload accepted",
         )?;
         let memory = prepared.memories.first().ok_or("prepared memory missing")?;
+        ensure(
+            memory.input.kind.as_str(),
+            "unknown",
+            "custom kind retained",
+        )?;
         ensure(memory.input.content.len(), 65_536, "maximum body retained")?;
         ensure(
             memory.input.confidence,
