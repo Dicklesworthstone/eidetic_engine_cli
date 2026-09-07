@@ -3366,14 +3366,17 @@ async fn run_context_pack_with_performance_inner(
     )
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     apply_context_pack_contradiction_guard(read_connection, &mut draft);
-    append_direct_evidence_pack_items(
-        read_connection,
-        &options.workspace_path,
-        &search_report,
-        &request,
-        &mut draft,
-        &mut degraded,
-    );
+    if concurrent_limit_retry_after_ms.is_none() {
+        append_direct_evidence_pack_items(
+            read_connection,
+            &options.workspace_path,
+            &search_report,
+            &request,
+            &effective_filters,
+            &mut draft,
+            &mut degraded,
+        );
+    }
     if !policy_omissions.is_empty() {
         let omitted_count = policy_omissions.len();
         draft.omitted.extend(policy_omissions);
@@ -11174,27 +11177,8 @@ fn temporal_memory_outcome(
         return TemporalCandidateOutcome::Include;
     }
 
-    let Some(created_at) = parse_stored_memory_timestamp(&memory.created_at) else {
+    if !temporal_record_matches(&memory.created_at, &memory.updated_at, filters) {
         return TemporalCandidateOutcome::Exclude;
-    };
-
-    if let Some(after) = filters.after
-        && created_at < after
-    {
-        return TemporalCandidateOutcome::Exclude;
-    }
-    if let Some(before) = filters.before
-        && created_at > before
-    {
-        return TemporalCandidateOutcome::Exclude;
-    }
-    if let Some(as_of) = filters.as_of {
-        let Some(updated_at) = parse_stored_memory_timestamp(&memory.updated_at) else {
-            return TemporalCandidateOutcome::Exclude;
-        };
-        if created_at > as_of || updated_at > as_of {
-            return TemporalCandidateOutcome::Exclude;
-        }
     }
 
     let Some(validity) = &filters.validity else {
@@ -11229,6 +11213,28 @@ fn temporal_memory_outcome(
             }
         }
     }
+}
+
+fn temporal_record_matches(
+    created_at: &str,
+    updated_at: &str,
+    filters: &crate::models::QueryTemporalFilters,
+) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+    let Some(created_at) = parse_stored_memory_timestamp(created_at) else {
+        return false;
+    };
+    if filters.after.is_some_and(|after| created_at < after)
+        || filters.before.is_some_and(|before| created_at > before)
+    {
+        return false;
+    }
+    filters.as_of.is_none_or(|as_of| {
+        created_at <= as_of
+            && parse_stored_memory_timestamp(updated_at).is_some_and(|updated| updated <= as_of)
+    })
 }
 
 fn memory_temporally_invalid_at(memory: &StoredMemory, reference_time: DateTime<Utc>) -> bool {
@@ -12181,6 +12187,7 @@ fn append_direct_evidence_pack_items(
     workspace_path: &Path,
     search_report: &crate::core::search::SearchReport,
     request: &ContextRequest,
+    filters: &crate::models::QueryFilters,
     draft: &mut PackDraft,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) {
@@ -12196,6 +12203,8 @@ fn append_direct_evidence_pack_items(
         .collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
     let mut rejected_live_admission = 0_usize;
+    let mut filtered_count = 0_usize;
+    let mut result_limit_count = 0_usize;
 
     for hit in &search_report.results {
         if !hit.doc_id.starts_with("ev_") || !seen.insert(hit.doc_id.clone()) {
@@ -12221,11 +12230,25 @@ fn append_direct_evidence_pack_items(
             rejected_live_admission = rejected_live_admission.saturating_add(1);
             continue;
         }
+        // Native evidence has its own identity and trust class. It must not
+        // inherit tags or authority from a linked memory, or bypass filters
+        // simply because it is appended after memory candidate selection.
+        if !direct_evidence_matches_filters(&span, filters) {
+            filtered_count = filtered_count.saturating_add(1);
+            continue;
+        }
         if span
             .memory_id
             .as_ref()
             .is_some_and(|memory_id| selected_memory_ids.contains(memory_id))
         {
+            continue;
+        }
+
+        if request.max_results.is_some_and(|limit| {
+            draft.items.len().saturating_add(draft.evidence_items.len()) >= limit as usize
+        }) {
+            result_limit_count = result_limit_count.saturating_add(1);
             continue;
         }
 
@@ -12312,6 +12335,56 @@ fn append_direct_evidence_pack_items(
             Some("ee index rebuild --json".to_owned()),
         );
     }
+    if filtered_count > 0 {
+        push_degradation(
+            degraded,
+            "context_filtered_results",
+            ContextResponseSeverity::Low,
+            format!("{filtered_count} imported evidence candidates excluded by query filters."),
+            None,
+        );
+    }
+    if result_limit_count > 0 {
+        push_degradation(
+            degraded,
+            "context_query_max_results_applied",
+            ContextResponseSeverity::Low,
+            format!(
+                "{result_limit_count} imported evidence candidates excluded by query-file budget.maxResults."
+            ),
+            Some("Increase budget.maxResults in the query file.".to_owned()),
+        );
+    }
+}
+
+fn direct_evidence_matches_filters(
+    span: &crate::db::StoredEvidenceSpan,
+    filters: &crate::models::QueryFilters,
+) -> bool {
+    let trust_class = TrustClass::CassEvidence.as_str();
+    if !filters
+        .trust
+        .matches(trust_class, posture_for_trust_class(trust_class))
+        || !filters.matches_tags(&[])
+        || !temporal_record_matches(&span.created_at, &span.updated_at, &filters.temporal)
+    {
+        return false;
+    }
+    // CASS spans are point-in-time evidence, with no memory validity window
+    // or tag membership. Redaction categories are retained at ingestion even
+    // though the original secret has already been removed from the excerpt.
+    if !filters.redaction.allow_categories.is_empty() {
+        let Ok(classes) = serde_json::from_str::<Vec<String>>(&span.redaction_classes_json) else {
+            return false;
+        };
+        if classes
+            .iter()
+            .any(|class| !filters.redaction.allow_categories.contains(class))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Resolve an imported-evidence search hit to the memory its span was
@@ -14960,6 +15033,281 @@ pub fn unrelated_context() -> u64 {{
             strict_scope: false,
             scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
         }
+    }
+
+    #[test]
+    fn direct_evidence_pack_applies_request_filters_and_combined_limit() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = directory.path();
+        let workspace_id = crate::core::workspace::stable_workspace_id(workspace);
+        let session_id = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0xe710));
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_session(
+                &session_id.to_string(),
+                &crate::db::CreateSessionInput {
+                    workspace_id: workspace_id.clone(),
+                    cass_session_id: "evidence-filter-session".to_owned(),
+                    source_path: None,
+                    agent_name: Some("codex".to_owned()),
+                    model: None,
+                    started_at: None,
+                    ended_at: None,
+                    message_count: 2,
+                    token_count: None,
+                    content_hash: format!("blake3:{}", blake3::hash(b"session").to_hex()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let mut hits = Vec::new();
+        let mut evidence_ids = Vec::new();
+        for line in 1..=2_u32 {
+            let evidence_id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                0xe710 + u128::from(line),
+            ));
+            let excerpt = if line == 1 {
+                "Release evidence number 1 explains the clippy failure with [REDACTED:api_key]."
+                    .to_owned()
+            } else {
+                "Release evidence number 2 explains the clippy failure.".to_owned()
+            };
+            connection
+                .insert_evidence_span(
+                    &evidence_id.to_string(),
+                    &crate::db::CreateEvidenceSpanInput {
+                        workspace_id: workspace_id.clone(),
+                        session_id: session_id.to_string(),
+                        memory_id: None,
+                        producer_kind: crate::db::EvidenceProducerKind::CassImport,
+                        cass_span_id: format!("filter-span-{line}"),
+                        span_kind: "message".to_owned(),
+                        start_line: line,
+                        end_line: line,
+                        start_byte: None,
+                        end_byte: None,
+                        role: Some("assistant".to_owned()),
+                        content_hash: format!(
+                            "blake3:{}",
+                            blake3::hash(excerpt.as_bytes()).to_hex()
+                        ),
+                        excerpt,
+                        metadata_json: None,
+                        inherited_redaction_classes: if line == 1 {
+                            vec!["api_key".to_owned()]
+                        } else {
+                            Vec::new()
+                        },
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            let mut hit = ppr_hit(MemoryId::from_uuid(uuid::Uuid::from_u128(1)), 0.8, None);
+            hit.doc_id = evidence_id.to_string();
+            // A derived hit cannot grant tags or raise the live evidence trust.
+            hit.metadata = Some(serde_json::json!({
+                "tags": ["release"], "trust_class": "human_explicit"
+            }));
+            hits.push(hit);
+            evidence_ids.push(evidence_id.to_string());
+        }
+        hits.push(hits[0].clone());
+        let search = ppr_search_report(hits);
+        let request = ContextRequest::new(ContextRequestInput {
+            query: "release evidence".to_owned(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(400),
+            candidate_pool: Some(10),
+            max_results: None,
+            sections: Vec::new(),
+        })
+        .map_err(|error| error.to_string())?;
+        let cases = [
+            ("unfiltered", serde_json::json!({}), vec![0, 1]),
+            (
+                "minimum trust",
+                serde_json::json!({"trust":{"minClass":"human_explicit"}}),
+                vec![],
+            ),
+            (
+                "excluded trust",
+                serde_json::json!({"trust":{"excludeClasses":["cass_evidence"]}}),
+                vec![],
+            ),
+            (
+                "authoritative posture",
+                serde_json::json!({"trust":{"requirePosture":"authoritative"}}),
+                vec![],
+            ),
+            (
+                "advisory posture",
+                serde_json::json!({"trust":{"requirePosture":"advisory"}}),
+                vec![0, 1],
+            ),
+            (
+                "required tag",
+                serde_json::json!({"tags":{"require":["release"]}}),
+                vec![],
+            ),
+            (
+                "any tag",
+                serde_json::json!({"tags":{"requireAny":["release"]}}),
+                vec![],
+            ),
+            (
+                "excluded tag",
+                serde_json::json!({"tags":{"exclude":["release"]}}),
+                vec![0, 1],
+            ),
+            (
+                "future after",
+                serde_json::json!({"temporal":{"after":"9999-01-01T00:00:00Z"}}),
+                vec![],
+            ),
+            (
+                "past before",
+                serde_json::json!({"temporal":{"before":"1970-01-01T00:00:00Z"}}),
+                vec![],
+            ),
+            (
+                "past snapshot",
+                serde_json::json!({"temporal":{"asOf":"1970-01-01T00:00:00Z"}}),
+                vec![],
+            ),
+            (
+                "allowed redaction",
+                serde_json::json!({"redaction":{"allowCategories":["api_key"]}}),
+                vec![0, 1],
+            ),
+            (
+                "excluded redaction",
+                serde_json::json!({"redaction":{"allowCategories":["password"]}}),
+                vec![1],
+            ),
+        ];
+        for (name, filter_json, expected_indices) in cases {
+            let timestamp = |field: &str| -> Result<Option<DateTime<Utc>>, String> {
+                filter_json["temporal"][field]
+                    .as_str()
+                    .map(|raw| {
+                        DateTime::parse_from_rfc3339(raw)
+                            .map(|value| value.with_timezone(&Utc))
+                            .map_err(|error| error.to_string())
+                    })
+                    .transpose()
+            };
+            let filters = crate::models::QueryFilters {
+                trust: crate::models::parse_trust(&filter_json["trust"]),
+                tags: crate::models::parse_tags(&filter_json["tags"]),
+                temporal: QueryTemporalFilters {
+                    after: timestamp("after")?,
+                    before: timestamp("before")?,
+                    as_of: timestamp("asOf")?,
+                    validity: None,
+                },
+                redaction: crate::models::parse_redaction(&filter_json["redaction"]),
+                ..Default::default()
+            };
+            let mut draft = assemble_draft_with_profile(
+                request.profile,
+                request.query.clone(),
+                request.budget,
+                Vec::new(),
+            )
+            .map_err(|error| error.to_string())?;
+            let mut degraded = Vec::new();
+            super::append_direct_evidence_pack_items(
+                &connection,
+                workspace,
+                &search,
+                &request,
+                &filters,
+                &mut draft,
+                &mut degraded,
+            );
+            let expected = expected_indices
+                .iter()
+                .map(|index| evidence_ids[*index].as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                draft
+                    .evidence_items
+                    .iter()
+                    .map(|item| item.evidence_id.as_str())
+                    .collect::<Vec<_>>(),
+                expected,
+                "{name}"
+            );
+            assert_eq!(
+                degraded
+                    .iter()
+                    .any(|entry| entry.code == "context_filtered_results"),
+                expected.len() < 2,
+                "{name}: {degraded:?}"
+            );
+            assert!(
+                !degraded
+                    .iter()
+                    .any(|entry| entry.code == "context_evidence_hit_unhydrated"),
+                "{name}: {degraded:?}"
+            );
+            assert_eq!(
+                draft.used_tokens,
+                draft
+                    .evidence_items
+                    .iter()
+                    .map(|item| item.estimated_tokens)
+                    .sum::<u32>()
+            );
+        }
+        for with_memory in [false, true] {
+            let mut limited = request.clone();
+            limited.max_results = Some(1);
+            let candidates = if with_memory {
+                vec![pagination_candidate(17)?]
+            } else {
+                Vec::new()
+            };
+            let mut draft = assemble_draft_with_profile(
+                request.profile,
+                request.query.clone(),
+                request.budget,
+                candidates,
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(draft.items.len(), usize::from(with_memory));
+            let mut degraded = Vec::new();
+            super::append_direct_evidence_pack_items(
+                &connection,
+                workspace,
+                &search,
+                &limited,
+                &Default::default(),
+                &mut draft,
+                &mut degraded,
+            );
+            assert_eq!(draft.items.len() + draft.evidence_items.len(), 1);
+            assert_eq!(draft.evidence_items.len(), usize::from(!with_memory));
+            assert!(
+                degraded
+                    .iter()
+                    .any(|entry| entry.code == "context_query_max_results_applied")
+            );
+            if !with_memory {
+                assert_eq!(draft.evidence_items[0].evidence_id, evidence_ids[0]);
+                assert_eq!(draft.evidence_items[0].rank, 1);
+            }
+        }
+        Ok(())
     }
 
     fn ppr_hit(memory_id: MemoryId, score: f32, lexical_score: Option<f32>) -> SearchHit {

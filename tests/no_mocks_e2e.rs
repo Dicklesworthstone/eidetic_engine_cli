@@ -3429,6 +3429,181 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         "replay output must not leak denied CASS evidence path or content",
     )?;
 
+    // CASS is a contract stub in this scenario; EE, storage, search, pack
+    // persistence, and these public query-file calls are real implementations.
+    for (name, constraint, expect_evidence) in [
+        (
+            "07a_pack_evidence_advisory",
+            json!({"trust":{"requirePosture":"advisory"}}),
+            true,
+        ),
+        (
+            "07b_pack_evidence_minimum_trust",
+            json!({"trust":{"minClass":"human_explicit"}}),
+            false,
+        ),
+        (
+            "07c_pack_evidence_excluded_trust",
+            json!({"trust":{"excludeClasses":["cass_evidence"]}}),
+            false,
+        ),
+        (
+            "07d_pack_evidence_required_tag",
+            json!({"tags":{"require":["release"]}}),
+            false,
+        ),
+        (
+            "07e_pack_evidence_past_snapshot",
+            json!({"asOf":"1970-01-01T00:00:00Z"}),
+            false,
+        ),
+        (
+            "07f_pack_evidence_max_results",
+            json!({"budget":{"maxTokens":1200,"candidatePool":10,"maxResults":1}}),
+            true,
+        ),
+    ] {
+        let mut document = json!({
+            "version": "ee.query.v1",
+            "query": {"text": direct_evidence_query, "mode": "hybrid"},
+            "budget": {"maxTokens": 1200, "candidatePool": 10},
+            "output": {"format": "json"}
+        });
+        let constraints = constraint
+            .as_object()
+            .ok_or("query constraint must be an object")?;
+        for (key, value) in constraints {
+            document[key] = value.clone();
+        }
+        let path = workspace.join(format!("{name}.eeq.json"));
+        write_text(&path, &document.to_string())?;
+        let (_event, filtered) = run_step_with_env(
+            scenario_id,
+            &events_path,
+            &artifact_dir,
+            &workspace,
+            StepSpec {
+                name,
+                args: vec![
+                    "--workspace".to_owned(),
+                    workspace_arg.clone(),
+                    "--json".to_owned(),
+                    "pack".to_owned(),
+                    "--read-only".to_owned(),
+                    "--query-file".to_owned(),
+                    path.display().to_string(),
+                    "--source-mode".to_owned(),
+                    "lexical_only".to_owned(),
+                ],
+                expected_exit_code: 0,
+                expected_schema: "ee.response.v2",
+                expect_clean_stderr: true,
+            },
+            &envs,
+        )?;
+        let items = json_array(&filtered, "/data/pack/items", name)?;
+        if expect_evidence {
+            ensure(
+                items.iter().any(|item| {
+                    item["evidenceSpanId"].as_str() == Some(searchable_evidence_id.as_str())
+                }),
+                format!("{name}: expected native evidence {searchable_evidence_id}: {filtered}"),
+            )?;
+        } else {
+            ensure(
+                items.is_empty(),
+                format!("{name}: query filter was bypassed: {filtered}"),
+            )?;
+            ensure(
+                json_array(&filtered, "/degraded", name)?
+                    .iter()
+                    .any(|entry| entry["code"] == "context_filtered_results"),
+                format!("{name}: filtered evidence must be explained: {filtered}"),
+            )?;
+        }
+        if name == "07f_pack_evidence_max_results" {
+            ensure_equal(
+                &items.len(),
+                &1,
+                "native evidence maxResults applies to the public pack",
+            )?;
+        }
+    }
+
+    // Hold the actual cross-process pack slot while the CLI runs. Releasing
+    // our descriptor below must restore the ordinary positive evidence path.
+    let slots_dir = workspace.join(".ee/pack-slots");
+    fs::create_dir_all(&slots_dir).map_err(|error| error.to_string())?;
+    let slot = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(slots_dir.join("lean-00.lock"))
+        .map_err(|error| error.to_string())?;
+    rustix::fs::flock(&slot, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+        .map_err(|error| format!("could not reserve the isolated test pack slot: {error}"))?;
+    for (name, blocked) in [
+        ("07g_pack_evidence_backoff", true),
+        ("07h_pack_evidence_after_backoff", false),
+    ] {
+        if !blocked {
+            rustix::fs::flock(&slot, rustix::fs::FlockOperation::Unlock)
+                .map_err(|error| error.to_string())?;
+        }
+        let (_event, response) = run_step_with_env(
+            scenario_id,
+            &events_path,
+            &artifact_dir,
+            &workspace,
+            StepSpec {
+                name,
+                args: vec![
+                    "--workspace".to_owned(),
+                    workspace_arg.clone(),
+                    "--json".to_owned(),
+                    "pack".to_owned(),
+                    direct_evidence_query.clone(),
+                    "--read-only".to_owned(),
+                    "--source-mode".to_owned(),
+                    "lexical_only".to_owned(),
+                    "--max-tokens".to_owned(),
+                    "1200".to_owned(),
+                    "--resource-profile".to_owned(),
+                    "lean".to_owned(),
+                ],
+                expected_exit_code: 0,
+                expected_schema: "ee.response.v2",
+                expect_clean_stderr: true,
+            },
+            &envs,
+        )?;
+        let items = json_array(&response, "/data/pack/items", name)?;
+        let has_backoff = json_array(&response, "/degraded", name)?
+            .iter()
+            .any(|entry| entry["code"] == "pack_concurrent_limit_reached");
+        ensure_equal(&has_backoff, &blocked, "pack slot response posture")?;
+        if blocked {
+            ensure(
+                items.is_empty(),
+                format!("backoff must not append native evidence: {response}"),
+            )?;
+            ensure_equal(
+                &response.pointer("/data/pack/budget/usedTokens"),
+                &Some(&json!(0)),
+                "backoff consumes no pack tokens",
+            )?;
+        } else {
+            ensure(
+                items.iter().any(|item| {
+                    item["evidenceSpanId"].as_str() == Some(searchable_evidence_id.as_str())
+                }),
+                format!("native evidence must return after slot release: {response}"),
+            )?;
+        }
+    }
+    drop(slot);
+
     let (_why_event, why_json) = run_step_with_env(
         scenario_id,
         &events_path,
