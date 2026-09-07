@@ -2788,55 +2788,82 @@ mod tests {
 
     #[test]
     fn redacted_links_resolve_to_imported_endpoints_deterministically() -> TestResult {
-        let mut records = linked_jsonl_values()?;
-        records[0]["redaction_level"] = json!("strict");
-        records[1]["memory_id"] = json!("redacted-source");
-        records[2]["memory_id"] = json!("redacted-source");
-        records[3]["memory_id"] = json!("redacted-target");
-        records[4]["source_memory_id"] = json!("redacted-source");
-        records[4]["target_memory_id"] = json!("redacted-target");
-        records[4]["link_id"] = json!("redacted-link");
-        records[4]["metadata"] = JsonValue::Null;
-        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let options = JsonlImportOptions {
-            workspace_path: dir.path().join("workspace"),
-            database_path: None,
-            source_path: dir.path().join("redacted.jsonl"),
-            dry_run: false,
-        };
-        fs::write(&options.source_path, jsonl_values_text(&records))
-            .map_err(|error| error.to_string())?;
-        let first = import_jsonl_records(&options).map_err(|error| error.to_string())?;
-        ensure(
-            (first.memories_imported, first.links_imported),
-            (2, 1),
-            "redacted rows imported",
-        )?;
-        let connection = DbConnection::open(DatabaseConfig::file(database_path(&options)))
-            .map_err(|error| error.to_string())?;
-        let links = connection
-            .list_all_memory_links(None)
-            .map_err(|error| error.to_string())?;
-        ensure(links.len(), 1, "one redacted link")?;
-        for endpoint in [&links[0].src_memory_id, &links[0].dst_memory_id] {
+        for &level in RedactionLevel::all() {
+            let mut records = linked_jsonl_values()?;
+            records[0]["redaction_level"] = json!(level);
+            // Use the production redactor: strict removes link metadata but
+            // keeps IDs; standard and paranoid pseudonymize the identifiers.
+            let records = records
+                .into_iter()
+                .map(|value| {
+                    let record = serde_json::from_value::<crate::models::ExportRecord>(value)
+                        .map_err(|error| error.to_string())?;
+                    serde_json::to_value(crate::output::jsonl_export::redact_record(record, level))
+                        .map_err(|error| error.to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let options = JsonlImportOptions {
+                workspace_path: dir.path().join("workspace"),
+                database_path: None,
+                source_path: dir.path().join("redacted.jsonl"),
+                dry_run: false,
+            };
+            fs::write(&options.source_path, jsonl_values_text(&records))
+                .map_err(|error| error.to_string())?;
+            let first = import_jsonl_records(&options).map_err(|error| error.to_string())?;
             ensure(
-                first.imported_memory_ids.contains(endpoint),
-                true,
-                "endpoint resolves to restored row",
+                (first.memories_imported, first.links_imported),
+                (2, 1),
+                &format!("{} rows imported: {:?}", level.as_str(), first.issues),
+            )?;
+            let connection = DbConnection::open(DatabaseConfig::file(database_path(&options)))
+                .map_err(|error| error.to_string())?;
+            let links = connection
+                .list_all_memory_links(None)
+                .map_err(|error| error.to_string())?;
+            ensure(links.len(), 1, "one restored link")?;
+            for endpoint in [&links[0].src_memory_id, &links[0].dst_memory_id] {
+                ensure(
+                    first.imported_memory_ids.contains(endpoint),
+                    true,
+                    "endpoint resolves to restored row",
+                )?;
+            }
+            if matches!(
+                level,
+                RedactionLevel::None | RedactionLevel::Minimal | RedactionLevel::Strict
+            ) {
+                ensure(
+                    links[0].id.as_str(),
+                    records[4]["link_id"].as_str().ok_or("link id")?,
+                    "unredacted link ID remains intact",
+                )?;
+            } else {
+                ensure(
+                    links[0].id.parse::<MemoryLinkId>().is_ok(),
+                    true,
+                    "pseudonymized link maps to a valid durable ID",
+                )?;
+            }
+            ensure(
+                links[0].source.as_str(),
+                if matches!(level, RedactionLevel::Strict | RedactionLevel::Paranoid) {
+                    "import"
+                } else {
+                    "agent"
+                },
+                "redacted origin uses import default only when metadata was removed",
+            )?;
+            drop(connection);
+            let repeated = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+            ensure(
+                (repeated.links_imported, repeated.links_skipped_duplicate),
+                (0, 1),
+                "stable redacted link identity",
             )?;
         }
-        ensure(
-            links[0].source.as_str(),
-            "import",
-            "redacted origin uses import default",
-        )?;
-        drop(connection);
-        let repeated = import_jsonl_records(&options).map_err(|error| error.to_string())?;
-        ensure(
-            (repeated.links_imported, repeated.links_skipped_duplicate),
-            (0, 1),
-            "stable redacted link identity",
-        )
+        Ok(())
     }
 
     fn import_report_fixture(source_path: &str, source_id: &str) -> JsonlImportReport {
