@@ -14309,7 +14309,7 @@ mod tests {
                     unavailable_rules
                         .get_mut(&rule_id)
                         .ok_or("missing fixture rule")?
-                        .utility = f64::NAN;
+                        .utility = f32::NAN;
                 }
             }
             let unavailable = super::candidate_from_hit_preloaded(
