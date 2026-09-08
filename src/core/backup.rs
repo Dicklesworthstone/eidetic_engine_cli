@@ -5780,13 +5780,23 @@ fn collect_pack_history_payloads(
                 impression.memory_id.clone_from(id);
             }
         }
+        let redact_baseline_key = |key: &str| {
+            let redacted = redact_content(key, redaction);
+            if redacted == key {
+                redacted
+            } else {
+                // Baseline keys carry identity. Replacing every key with a
+                // prose placeholder merges distinct agents/tasks on restore.
+                format!("key_{}", blake3::hash(key.as_bytes()).to_hex())
+            }
+        };
         for baseline in &mut history.baselines {
-            baseline.agent_name = redact_content(&baseline.agent_name, redaction);
-            baseline.task_key = baseline
-                .task_key
-                .as_deref()
-                .map(|s| redact_content(s, redaction));
+            baseline.agent_name = redact_baseline_key(&baseline.agent_name);
+            baseline.task_key = baseline.task_key.as_deref().map(redact_baseline_key);
         }
+        history.baselines.sort_by(|left, right| {
+            (&left.agent_name, &left.task_key).cmp(&(&right.agent_name, &right.task_key))
+        });
         history
             .rebind_recovery_ledger(&original, |s| redact_content(s, redaction))
             .map_err(work_history_error)?;
@@ -11559,19 +11569,25 @@ mod tests {
             }], Some(&crate::db::CreatePackTaskLensInput {
                 id: "release".to_owned(), version: 3, lens_hash: hash_bytes(b"historical lens"),
             })).map_err(|e| e.to_string())?;
-        connection
-            .insert_pack_baseline(
-                &crate::db::CreatePackBaselineInput {
-                    workspace_id,
-                    agent_name: "codex".to_owned(),
-                    task_key: Some("release".to_owned()),
-                    pack_id: pack_id.clone(),
-                    pack_hash: input.pack_hash,
-                },
-                20,
-                None,
-            )
-            .map_err(|e| e.to_string())?;
+        for (agent, task) in [
+            ("codex", "release"),
+            ("codex", "deploy"),
+            ("claude", "release"),
+        ] {
+            connection
+                .insert_pack_baseline(
+                    &crate::db::CreatePackBaselineInput {
+                        workspace_id: workspace_id.clone(),
+                        agent_name: agent.to_owned(),
+                        task_key: Some(task.to_owned()),
+                        pack_id: pack_id.clone(),
+                        pack_hash: input.pack_hash.clone(),
+                    },
+                    20,
+                    None,
+                )
+                .map_err(|e| e.to_string())?;
+        }
         connection
             .get_pack_history_for_recovery(&pack_id)
             .map_err(|e| e.to_string())
@@ -11607,7 +11623,7 @@ mod tests {
                 ("pack_evidence_items", 0),
                 ("pack_omissions", 1),
                 ("pack_candidate_impressions", 1),
-                ("pack_baselines", 1),
+                ("pack_baselines", 3),
             ] {
                 let entry = backup
                     .recovery_inventory
@@ -11669,7 +11685,7 @@ mod tests {
                     evidence_items: 0,
                     omissions: 1,
                     impressions: 1,
-                    baselines: 1,
+                    baselines: 3,
                 },
                 "actual restored pack counts",
             )?;
@@ -11739,16 +11755,18 @@ mod tests {
                 memory.id.as_str(),
                 "impression follows restored memory identity",
             )?;
-            ensure_equal(
-                db.resolve_pack_baseline(
-                    &actual.record.workspace_id,
-                    &actual.baselines[0].agent_name,
-                    actual.baselines[0].task_key.as_deref(),
-                )
-                .map_err(|e| e.to_string())?,
-                Some(actual.baselines[0].clone()),
-                "restored baseline resolves for --since last",
-            )?;
+            for baseline in &actual.baselines {
+                ensure_equal(
+                    db.resolve_pack_baseline(
+                        &actual.record.workspace_id,
+                        &baseline.agent_name,
+                        baseline.task_key.as_deref(),
+                    )
+                    .map_err(|e| e.to_string())?,
+                    Some(baseline.clone()),
+                    "each distinct restored baseline resolves for --since last",
+                )?;
+            }
             db.close().map_err(|e| e.to_string())?;
             let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
             ensure_equal(
