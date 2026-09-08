@@ -29216,7 +29216,8 @@ impl StoredPackHistory {
             .clone()
             .unwrap_or_else(|| "unknown".to_owned());
         if self.record.query != original.record.query {
-            core.request.query = pack_ledger_text_record(&self.record.query);
+            core.request.query =
+                recovered_pack_ledger_text(&core.request.query, &self.record.query);
         }
         core.degraded = pack_ledger_degradations(self.record.degraded_json.as_deref())?;
         let rows = self
@@ -29235,24 +29236,54 @@ impl StoredPackHistory {
                 .get(&selected.rank)
                 .ok_or_else(|| pack_recovery_error("rebound selection has no stored item"))?;
             selected.memory_id.clone_from(&row.memory_id);
-            selected.entity_id.clone_from(&row.entity_id);
-            selected.entity_kind.clone_from(&row.entity_kind);
+            // Older ledgers identify memory selections through memory_id alone.
+            // Preserve that representation when no entity field was recorded.
+            if !selected.entity_id.is_empty() {
+                selected.entity_id.clone_from(&row.entity_id);
+            }
+            if !selected.entity_kind.is_empty() {
+                selected.entity_kind.clone_from(&row.entity_kind);
+            }
             selected.diversity_key.clone_from(&row.diversity_key);
             selected.trust_subclass.clone_from(&row.trust_subclass);
             if selected.why.hash != row.why.hash {
-                selected.why = row.why.clone();
+                let text = self
+                    .items
+                    .iter()
+                    .find(|item| item.rank == selected.rank)
+                    .map(|item| item.why.as_str())
+                    .or_else(|| {
+                        self.evidence_items
+                            .iter()
+                            .find(|item| item.rank == selected.rank)
+                            .map(|item| item.why.as_str())
+                    })
+                    .ok_or_else(|| pack_recovery_error("rebound selection has no explanation"))?;
+                selected.why = recovered_pack_ledger_text(&selected.why, text);
             }
             if selected.provenance.hash != row.provenance.hash {
-                selected.provenance = row.provenance.clone();
+                selected.provenance.hash.clone_from(&row.provenance.hash);
+                selected.provenance.redacted = true;
+                selected
+                    .provenance
+                    .redaction_reasons
+                    .extend(row.provenance.redaction_reasons.iter().cloned());
+                selected
+                    .provenance
+                    .redaction_reasons
+                    .push("backup_redaction".to_owned());
+                selected.provenance.redaction_reasons.sort();
+                selected.provenance.redaction_reasons.dedup();
             }
-            selected
-                .redaction_classes
-                .extend(selected.why.redaction_reasons.iter().cloned());
-            selected
-                .redaction_classes
-                .extend(selected.provenance.redaction_reasons.iter().cloned());
-            selected.redaction_classes.sort();
-            selected.redaction_classes.dedup();
+            selected.redaction_classes = selected
+                .why
+                .redaction_reasons
+                .iter()
+                .chain(&selected.provenance.redaction_reasons)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
         }
         let identities = original
             .omissions
@@ -29281,6 +29312,19 @@ impl StoredPackHistory {
         self.record.ledger_hash = Some(hash);
         self.validate()
     }
+}
+
+fn recovered_pack_ledger_text(original: &PackLedgerTextRecord, text: &str) -> PackLedgerTextRecord {
+    let mut record = pack_ledger_text_record(text);
+    record.redacted_text = record.text.take().or(record.redacted_text);
+    record.redacted = true;
+    record
+        .redaction_reasons
+        .extend(original.redaction_reasons.iter().cloned());
+    record.redaction_reasons.push("backup_redaction".to_owned());
+    record.redaction_reasons.sort();
+    record.redaction_reasons.dedup();
+    record
 }
 
 /// Source taxonomy for outcome evidence (ADR 0055, bd-1n0np.2.3), ordered
@@ -53728,6 +53772,63 @@ mod tests {
             reason: reason.to_string(),
             attempt_family_multiplicity: None,
         }
+    }
+
+    #[test]
+    fn pack_recovery_preserves_legacy_ledger_representation() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_pack_test_memory(&connection)?;
+        let id = "pack_000000000000000000000pack1";
+        connection.insert_pack_record(
+            id,
+            &super::CreatePackRecordInput {
+                workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                query: "cargo formatting".to_owned(),
+                profile: "balanced".to_owned(),
+                max_tokens: 4000,
+                used_tokens: 50,
+                item_count: 1,
+                omitted_count: 0,
+                pack_hash: pack_test_hash("legacy-recovery"),
+                degraded_json: None,
+                created_by: None,
+            },
+            &[pack_item_input(id, "mem_00000000000000000000pack01", 1)],
+            &[],
+        )?;
+        let mut original = connection.get_pack_history_for_recovery(id)?;
+        let parsed = super::parse_stored_pack_ledger(&original.record);
+        let mut ledger: super::PackSelectionLedger = serde_json::from_value(
+            parsed
+                .available_ledger()
+                .cloned()
+                .ok_or_else(|| TestFailure::new("missing source ledger"))?,
+        )
+        .map_err(|error| TestFailure::new(error.to_string()))?;
+        ledger.core.selected_items[0].entity_id.clear();
+        ledger.core.selected_items[0].entity_kind.clear();
+        ledger.ledger_hash =
+            super::blake3_text_hash(&super::pack_ledger_json(&ledger.core, "legacy core")?);
+        original.record.ledger_hash = Some(ledger.ledger_hash.clone());
+        original.record.ledger_json = Some(super::pack_ledger_json(&ledger, "legacy ledger")?);
+        original.validate()?;
+        let mut recovered = original.clone();
+        recovered.rebind_recovery_ledger(&original, str::to_owned)?;
+        ensure_equal(
+            &recovered,
+            &original,
+            "identity transform preserves exact legacy ledger bytes and hash",
+        )?;
+        let target = DbConnection::open_memory()?;
+        target.migrate()?;
+        setup_pack_test_memory(&target)?;
+        target.insert_pack_histories_for_recovery([&recovered])?;
+        ensure_equal(
+            &target.get_pack_history_for_recovery(id)?,
+            &original,
+            "legacy ledger survives real storage recovery",
+        )
     }
 
     #[test]

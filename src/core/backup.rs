@@ -6054,8 +6054,13 @@ fn redact_work_history_json(text: &str, level: RedactionLevel) -> Result<String,
             _ => {}
         }
     }
+    let original = value.clone();
     redact_value(&mut value, level);
-    serde_json::to_string(&value).map_err(work_history_error)
+    if value == original {
+        Ok(text.to_owned())
+    } else {
+        serde_json::to_string(&value).map_err(work_history_error)
+    }
 }
 
 fn restore_work_history(
