@@ -6249,9 +6249,11 @@ fn collect_curation_history_payloads(
             })?);
         }
         if let Some(ids) = source_memories
-            && ids
-                .iter()
-                .any(|id| memory_ids.get(*id).is_some_and(|mapped| mapped.as_str() != *id))
+            && ids.iter().any(|id| {
+                memory_ids
+                    .get(*id)
+                    .is_some_and(|mapped| mapped.as_str() != *id)
+            })
         {
             row.source_id = Some(
                 ids.iter()
