@@ -6224,7 +6224,16 @@ fn collect_curation_history_payloads(
     // Policy IDs can be operator supplied. Alias redacted IDs consistently so
     // distinct policies and their candidate references never collapse.
     for policy in &mut policies {
-        if redact_content(&policy.id, redaction) != policy.id {
+        let built_in = matches!(
+            policy.id.as_str(),
+            "curation.proposed.default"
+                | "curation.validated.default"
+                | "curation.snoozed.default"
+                | "curation.harmful.default"
+        );
+        // New proposals select these IDs in the normal insertion path. They
+        // are protocol constants, including under Full redaction.
+        if !built_in && redact_content(&policy.id, redaction) != policy.id {
             let old = policy.id.clone();
             policy.id = format!("policy_{}", blake3::hash(old.as_bytes()).to_hex());
             for candidate in &mut candidates {
@@ -13255,7 +13264,18 @@ mod tests {
             rejected.id = recovery_candidate(&workspace_id, 2).id;
             rejected.status = "rejected".to_owned();
             rejected.review_state = "rejected".to_owned();
+            let mut policies = db.list_curation_ttl_policies().map_err(|e| e.to_string())?;
+            for id in [
+                "api_key=curation-policy-canary-one",
+                "api_key=curation-policy-canary-two",
+            ] {
+                let mut custom = policies[0].clone();
+                custom.id = id.to_owned();
+                policies.push(custom);
+            }
+            rejected.ttl_policy_id = Some("api_key=curation-policy-canary-two".to_owned());
             db.with_transaction(|| {
+                db.restore_curation_ttl_policies(&policies)?;
                 for row in [&derived, &secret, &rejected] {
                     db.insert_curation_candidate_for_recovery(row)?;
                 }
@@ -13335,6 +13355,29 @@ mod tests {
                 .get_curation_candidate(&destination, &rejected.id)
                 .map_err(|e| e.to_string())?
                 .ok_or("rejected proposal")?;
+            let policies = db.list_curation_ttl_policies().map_err(|e| e.to_string())?;
+            ensure_equal(
+                policies.len(),
+                6,
+                "redaction never collapses distinct custom policies",
+            )?;
+            ensure(
+                policies
+                    .iter()
+                    .any(|policy| actual_rejected.ttl_policy_id.as_deref() == Some(&policy.id)),
+                "terminal review keeps its custom policy reference",
+            )?;
+            for id in [
+                "curation.proposed.default",
+                "curation.validated.default",
+                "curation.snoozed.default",
+                "curation.harmful.default",
+            ] {
+                ensure(
+                    policies.iter().any(|policy| policy.id == id),
+                    "future curation still resolves its built-in TTL policy after redaction",
+                )?;
+            }
             ensure_equal(
                 actual_rejected.status.as_str(),
                 "rejected",
