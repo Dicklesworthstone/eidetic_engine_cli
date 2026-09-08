@@ -6149,16 +6149,28 @@ fn collect_curation_history_payloads(
     memory_ids: &BTreeMap<String, String>,
     payloads: &mut Vec<BackupDerivedPayload>,
 ) -> Result<(), DomainError> {
+    let identity_ids = memory_ids
+        .keys()
+        .map(|id| (id.clone(), id.clone()))
+        .collect();
     let mut candidates = Vec::new();
     for original in connection
         .list_curation_candidates(workspace_id, None, None, None)
         .map_err(work_history_error)?
     {
         let mut row = original.clone();
+        let mut referenced_memories = BTreeSet::new();
+        // Rule proposals can carry a comma-separated source-memory list.
+        let source_memories = original
+            .source_id
+            .as_deref()
+            .map(|raw| raw.split(',').map(str::trim).collect::<Vec<_>>())
+            .filter(|ids| !ids.is_empty() && ids.iter().all(|id| memory_ids.contains_key(*id)));
+        if let Some(ids) = &source_memories {
+            referenced_memories.extend(ids.iter().map(|id| (*id).to_owned()));
+        }
         if let Some(id) = &row.target_memory_id {
-            row.target_memory_id = Some(memory_ids.get(id).cloned().ok_or_else(|| {
-                work_history_error("curation target outside the recovered workspace")
-            })?);
+            referenced_memories.insert(id.clone());
         }
         row.reason = redact_content(&row.reason, redaction);
         row.reviewed_by = row
@@ -6166,10 +6178,11 @@ fn collect_curation_history_payloads(
             .as_deref()
             .map(|s| redact_content(s, redaction));
         row.source_id = row.source_id.as_deref().map(|id| {
-            memory_ids
-                .get(id)
-                .cloned()
-                .unwrap_or_else(|| redact_content(id, redaction))
+            if source_memories.is_some() {
+                id.to_owned()
+            } else {
+                redact_content(id, redaction)
+            }
         });
         row.proposed_content = row
             .proposed_content
@@ -6179,7 +6192,13 @@ fn collect_curation_history_payloads(
                     row.candidate_type.as_str(),
                     "link_proposal" | "contradiction_review"
                 ) {
-                    redact_curation_json(raw, "link", redaction, memory_ids)
+                    let value: JsonValue = serde_json::from_str(raw).map_err(work_history_error)?;
+                    for field in ["memoryA", "memoryB"] {
+                        if let Some(id) = value[field].as_str() {
+                            referenced_memories.insert(id.to_owned());
+                        }
+                    }
+                    redact_curation_json(raw, "link", redaction, &identity_ids)
                 } else {
                     Ok(redact_content(raw, redaction))
                 }
@@ -6188,7 +6207,7 @@ fn collect_curation_history_payloads(
         row.derivation_source_refs_json = row
             .derivation_source_refs_json
             .as_deref()
-            .map(|raw| redact_curation_json(raw, "sources", redaction, memory_ids))
+            .map(|raw| redact_curation_json(raw, "sources", redaction, &identity_ids))
             .transpose()?;
         row.derivation_metadata_json = row
             .derivation_metadata_json
@@ -6202,16 +6221,60 @@ fn collect_curation_history_payloads(
                 .as_array()
                 .ok_or_else(|| work_history_error("invalid curation source refs"))?
             {
+                if source["kind"] == "memory" {
+                    if let Some(id) = source["id"].as_str() {
+                        referenced_memories.insert(id.to_owned());
+                    }
+                }
                 if source["kind"] == "evidence_span" {
                     let span = connection
                         .get_evidence_span(source["id"].as_str().unwrap_or_default())
                         .map_err(work_history_error)?;
-                    requires_fresh_review |= span.is_none_or(|span| {
+                    requires_fresh_review |= span.is_some_and(|span| {
                         redact_content(&span.excerpt, redaction) != span.excerpt
                     });
                 }
             }
         }
+        for id in referenced_memories {
+            let memory = connection.get_memory(&id).map_err(work_history_error)?;
+            requires_fresh_review |= memory
+                .is_some_and(|memory| redact_content(&memory.content, redaction) != memory.content);
+        }
+        // Rebinding is not new evidence. Compute the redaction decision above
+        // with original IDs, then translate references to the exported corpus.
+        if let Some(id) = &row.target_memory_id {
+            row.target_memory_id = Some(memory_ids.get(id).cloned().ok_or_else(|| {
+                work_history_error("curation target outside the recovered workspace")
+            })?);
+        }
+        if let Some(ids) = source_memories
+            && ids
+                .iter()
+                .any(|id| memory_ids.get(*id).is_some_and(|mapped| mapped.as_str() != *id))
+        {
+            row.source_id = Some(
+                ids.iter()
+                    .map(|id| memory_ids.get(*id).map_or(*id, String::as_str))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
+        if matches!(
+            row.candidate_type.as_str(),
+            "link_proposal" | "contradiction_review"
+        ) {
+            row.proposed_content = row
+                .proposed_content
+                .as_deref()
+                .map(|raw| redact_curation_json(raw, "link", RedactionLevel::None, memory_ids))
+                .transpose()?;
+        }
+        row.derivation_source_refs_json = row
+            .derivation_source_refs_json
+            .as_deref()
+            .map(|raw| redact_curation_json(raw, "sources", RedactionLevel::None, memory_ids))
+            .transpose()?;
         candidates.push(BackupCurationCandidate {
             candidate: row,
             requires_fresh_review,
@@ -13082,6 +13145,27 @@ mod tests {
                 .map_err(|e| e.to_string())?
                 .remove(0)
                 .id;
+            let memories = db
+                .list_memories(&destination_id, None, false)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(
+                memories.len(),
+                1,
+                "exactly the original memory is recovered",
+            )?;
+            ensure_equal(
+                memories[0].content.as_str(),
+                "Authorization header should be redacted",
+                "identifier redaction leaves the target evidence unchanged",
+            )?;
+            let restored_target_id = memories[0].id.clone();
+            if redaction == RedactionLevel::None {
+                ensure_equal(
+                    Some(restored_target_id.as_str()),
+                    originals[0].target_memory_id.as_deref(),
+                    "unredacted native target identity is preserved",
+                )?;
+            }
             ensure_equal(
                 db.list_curation_ttl_policies().map_err(|e| e.to_string())?,
                 policies,
@@ -13094,6 +13178,7 @@ mod tests {
                     .ok_or("missing candidate")?;
                 let mut expected = original.clone();
                 expected.workspace_id.clone_from(&destination_id);
+                expected.target_memory_id = Some(restored_target_id.clone());
                 ensure_equal(actual, expected, "every candidate field survives unchanged")?;
             }
             db.close().map_err(|e| e.to_string())?;
@@ -13134,7 +13219,7 @@ mod tests {
             let db = DbConnection::open_file(&restored.restored_database_path)
                 .map_err(|e| e.to_string())?;
             let target = db
-                .get_memory(originals[1].target_memory_id.as_deref().ok_or("target")?)
+                .get_memory(&restored_target_id)
                 .map_err(|e| e.to_string())?
                 .ok_or("restored target")?;
             ensure_equal(
@@ -13235,6 +13320,61 @@ mod tests {
                 "no metadata secrets survive",
             )?;
         }
+        // Identity rebinding alone preserves approval. Changing only the
+        // target evidence must require review even if proposal text is intact.
+        let (_tempdir, _workspace, database) = fixture().map_err(|e| e.message())?;
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let workspace_id = db
+            .list_workspaces()
+            .map_err(|e| e.to_string())?
+            .remove(0)
+            .id;
+        let mut candidate = recovery_candidate(&workspace_id, 1);
+        candidate.source_id = Some(format!("{memory}, {memory}"));
+        db.insert_curation_candidate_for_recovery(&candidate)
+            .map_err(|e| e.to_string())?;
+        for changed_source in [false, true] {
+            if changed_source {
+                db.apply_memory_curation_update(
+                    &memory,
+                    &crate::db::ApplyMemoryCurationInput {
+                        workspace_id: workspace_id.clone(),
+                        content: "api_key=source-only-canary".to_owned(),
+                        confidence: 0.8,
+                        trust_class: "agent_validated".to_owned(),
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            let mut payloads = Vec::new();
+            collect_curation_history_payloads(
+                &db,
+                &workspace_id,
+                "backup-test",
+                "2026-09-01T00:00:00Z",
+                RedactionLevel::Standard,
+                &ids,
+                &mut payloads,
+            )
+            .map_err(|e| e.message())?;
+            let chunk: BackupCurationHistory =
+                serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
+            ensure_equal(
+                chunk.candidates[0].candidate.target_memory_id.as_deref(),
+                Some(mapped.as_str()),
+                "target is rebound in both cases",
+            )?;
+            ensure_equal(
+                chunk.candidates[0].candidate.source_id.as_deref(),
+                Some(format!("{mapped},{mapped}").as_str()),
+                "rule source-memory lists are rebound",
+            )?;
+            ensure_equal(
+                chunk.candidates[0].requires_fresh_review,
+                changed_source,
+                "only a real evidence change requires fresh approval",
+            )?;
+        }
         Ok(())
     }
 
@@ -13267,6 +13407,7 @@ mod tests {
             );
             derived.candidate_type = "create_derived_memory".to_owned();
             derived.target_memory_id = None;
+            derived.source_id = Some(source_memory.id.clone());
             derived.proposed_content =
                 Some("A release review must keep the source evidence available.".to_owned());
             derived.derivation_source_refs_json = Some(

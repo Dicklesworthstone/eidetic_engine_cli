@@ -1475,9 +1475,12 @@ source keys remain distinct opaque history entries; they do not become live
 queries. Import-checkpoint recovery requires the source authentication keys.
 
 Curation proposals, review decisions, snoozes, merge references, and TTL policies
-are included in the same authenticated snapshot. Unchanged proposals remain
-reviewable and applicable after restore. If redaction changes a live proposal or
-its evidence, restore records an audit entry and returns it to `needs_evidence`
+are included in the same authenticated snapshot. Proposals remain reviewable
+after restore and apply through the normal curation checks. Rebinding memory IDs
+alone does not revoke approval; operations whose identity is derived from the old
+workspace and source IDs can still require re-proposal. If redaction changes a
+live proposal or its evidence, restore records an audit entry and returns it to
+`needs_evidence`
 with its automatic TTL policy cleared. Terminal decisions stay historical.
 Derived-source hashes retain their original values so normal curation validation
 can detect changed evidence. Curation recovery also requires the source keys.
