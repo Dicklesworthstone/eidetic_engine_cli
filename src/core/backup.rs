@@ -6261,6 +6261,7 @@ fn collect_curation_history_payloads(
             policy.review_state = redact_content(&policy.review_state, redaction);
         }
     }
+    validate_curation_references(&candidates, &policies)?;
     let count = candidates
         .len()
         .max(policies.len())
@@ -6306,6 +6307,37 @@ fn curation_history_auth_context(workspace: &str) -> ArtifactContext<'_> {
         source_key_namespace: STORE_KEY_NAMESPACE_V1,
         workspace_scope: workspace,
     }
+}
+
+fn validate_curation_references(
+    candidates: &[BackupCurationCandidate],
+    policies: &[StoredCurationTtlPolicy],
+) -> Result<(), DomainError> {
+    let ids = candidates
+        .iter()
+        .map(|entry| &entry.candidate.id)
+        .collect::<BTreeSet<_>>();
+    let policy_ids = policies
+        .iter()
+        .map(|policy| &policy.id)
+        .collect::<BTreeSet<_>>();
+    for entry in candidates {
+        let row = &entry.candidate;
+        if row
+            .ttl_policy_id
+            .as_ref()
+            .is_some_and(|id| !policy_ids.contains(id))
+            || row
+                .merged_into_candidate_id
+                .as_ref()
+                .is_some_and(|id| id == &row.id || !ids.contains(id))
+        {
+            return Err(work_history_error(
+                "missing or invalid curation policy/merge reference",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn authenticate_curation_payloads(
@@ -6434,22 +6466,7 @@ fn restore_curation_history(
             candidates.push(entry);
         }
     }
-    for entry in &candidates {
-        let row = &entry.candidate;
-        if row
-            .ttl_policy_id
-            .as_ref()
-            .is_some_and(|id| !policy_ids.contains(id))
-            || row
-                .merged_into_candidate_id
-                .as_ref()
-                .is_some_and(|id| id == &row.id || !ids.contains(id))
-        {
-            return Err(work_history_error(
-                "missing or invalid curation policy/merge reference",
-            ));
-        }
-    }
+    validate_curation_references(&candidates, &policies)?;
     let now = Utc::now().to_rfc3339();
     connection
         .with_transaction(|| {
@@ -13673,6 +13690,54 @@ mod tests {
             b"key directory obstructed".to_vec(),
             "preview leaves key obstruction unchanged",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn curation_backup_rejects_dangling_review_references() -> TestResult {
+        for missing_policy in [false, true] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            let workspace_id = db
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .remove(0)
+                .id;
+            let mut candidate = recovery_candidate(&workspace_id, 1);
+            if missing_policy {
+                candidate.ttl_policy_id = Some("missing-policy".to_owned());
+            } else {
+                candidate.merged_into_candidate_id = Some(format!("curate_{:026}", 99));
+            }
+            db.insert_curation_candidate_for_recovery(&candidate)
+                .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            let output = tempdir.path().join("invalid-backup");
+            let error = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database),
+                output_dir: Some(output.clone()),
+                label: None,
+                redaction_level: RedactionLevel::Standard,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .err()
+            .ok_or("published an unrestorable curation snapshot")?;
+            ensure(
+                error.message().contains("policy/merge reference"),
+                error.message(),
+            )?;
+            ensure(
+                !output.exists(),
+                "bad references fail before creating backup artifacts",
+            )?;
+            ensure(
+                !workspace_keys_dir(&workspace).exists(),
+                "bad references fail before initializing authentication keys",
+            )?;
+        }
         Ok(())
     }
 
