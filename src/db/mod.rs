@@ -29880,7 +29880,7 @@ impl DbConnection {
         let audit_id = format!("audit_{}", &audit_digest[..26]);
         self.with_transaction(|| {
             if let (Some(ledger_json), Some(ledger_hash)) = (&ledger_json, &ledger_hash) {
-                self.insert_pack_record_row(id, input, &created_at, ledger_json, ledger_hash)?;
+                self.insert_pack_record_row(id, input, &created_at, Some(ledger_json), Some(ledger_hash))?;
             } else {
                 self.execute_for(
                     DbOperation::Execute,
@@ -30052,7 +30052,7 @@ impl DbConnection {
             self.validate_pack_memory_workspace_membership(input, items, omissions)?;
             self.validate_pack_evidence_workspace_membership(input, evidence_items)?;
             let record_start = Instant::now();
-            self.insert_pack_record_row(id, input, created_at, &ledger_json, &ledger_hash)?;
+            self.insert_pack_record_row(id, input, created_at, Some(&ledger_json), Some(&ledger_hash))?;
             timings.record_write = record_start.elapsed();
 
             let item_start = Instant::now();
@@ -30300,8 +30300,8 @@ impl DbConnection {
         id: &str,
         input: &CreatePackRecordInput,
         now: &str,
-        ledger_json: &str,
-        ledger_hash: &str,
+        ledger_json: Option<&str>,
+        ledger_hash: Option<&str>,
     ) -> Result<()> {
         self.execute_for(
             DbOperation::Execute,
@@ -30317,8 +30317,8 @@ impl DbConnection {
                 Value::BigInt(i64::from(input.omitted_count)),
                 Value::Text(input.pack_hash.clone()),
                 input.degraded_json.as_ref().map_or(Value::Null, |json| Value::Text(json.clone())),
-                Value::Text(ledger_json.to_string()),
-                Value::Text(ledger_hash.to_string()),
+                ledger_json.map_or(Value::Null, |json| Value::Text(json.to_owned())),
+                ledger_hash.map_or(Value::Null, |hash| Value::Text(hash.to_owned())),
                 Value::Text(now.to_string()),
                 input.created_by.as_ref().map_or(Value::Null, |by| Value::Text(by.clone())),
             ],
@@ -30659,6 +30659,75 @@ impl DbConnection {
         )?;
 
         rows.iter().map(stored_pack_item_from_row).collect()
+    }
+
+    pub(crate) fn get_pack_history_for_recovery(&self, id: &str) -> Result<StoredPackHistory> {
+        let record = self.get_pack_record(id)?
+            .ok_or_else(|| pack_recovery_error("pack disappeared from recovery snapshot"))?;
+        let omissions = self.query_for(DbOperation::Query,
+            "SELECT pack_id, memory_id, estimated_tokens, reason FROM pack_omissions WHERE pack_id = ?1 ORDER BY memory_id",
+            &[Value::Text(id.to_owned())])?.iter().map(|row| Ok(StoredPackOmission {
+                pack_id: required_text(row, 0, DbOperation::Query, "pack_id")?.to_owned(),
+                memory_id: required_text(row, 1, DbOperation::Query, "memory_id")?.to_owned(),
+                estimated_tokens: required_u32(row, 2, DbOperation::Query, "estimated_tokens")?,
+                reason: required_text(row, 3, DbOperation::Query, "reason")?.to_owned(),
+            })).collect::<Result<Vec<_>>>()?;
+        let baselines = self.query_for(DbOperation::Query,
+            "SELECT agent_name, task_key, pack_id, pack_hash, created_at FROM pack_baselines WHERE pack_id = ?1 AND workspace_id = ?2 ORDER BY agent_name, task_key",
+            &[Value::Text(id.to_owned()), Value::Text(record.workspace_id.clone())])?
+            .iter().map(stored_pack_baseline_from_row).collect::<Result<Vec<_>>>()?;
+        let history = StoredPackHistory {
+            record, items: self.get_pack_items(id)?, evidence_items: self.get_pack_evidence_items(id)?,
+            omissions, impressions: self.list_impressions_for_pack(id)?, baselines,
+        };
+        history.validate()?;
+        Ok(history)
+    }
+
+    /// Restore history with plain parent/child inserts and original timestamps.
+    /// Admission and entity revision describe selection time, so tombstoned or
+    /// subsequently redacted evidence is checked for workspace membership only.
+    pub(crate) fn insert_pack_history_for_recovery(&self, history: &StoredPackHistory) -> Result<()> {
+        history.validate()?;
+        let input = history.record_input();
+        let items = history.item_inputs();
+        let evidence = history.evidence_inputs();
+        let omissions = history.omission_inputs();
+        self.with_transaction(|| {
+            self.validate_pack_memory_workspace_membership(&input, &items, &omissions)?;
+            for item in &evidence {
+                let span = self.get_evidence_span(&item.evidence_id)?
+                    .ok_or_else(|| pack_recovery_error("recovered pack evidence is missing"))?;
+                if span.workspace_id != input.workspace_id {
+                    return Err(pack_recovery_error("recovered pack evidence belongs to a different workspace"));
+                }
+            }
+            self.insert_pack_record_row(&history.record.id, &input, &history.record.created_at,
+                history.record.ledger_json.as_deref(), history.record.ledger_hash.as_deref())?;
+            self.insert_pack_items(&items)?;
+            self.insert_pack_evidence_items(&evidence)?;
+            self.insert_pack_omissions(&omissions)?;
+            // The new parent and validate()'s unique-ID check make the normal
+            // deduplicating insertion lossless here; do not regenerate impressions.
+            let impressions = history.impressions.iter().map(|row| CreateImpressionInput {
+                pack_id: row.pack_id.clone(), memory_id: row.memory_id.clone(),
+                workspace_id: row.workspace_id.clone(), query_hash: row.query_hash.clone(),
+                lens_hash: row.lens_hash.clone(), rank: row.rank, section: row.section.clone(),
+                token_estimate: row.token_estimate, selected: row.selected,
+                omission_reason: row.omission_reason.clone(), db_generation: row.db_generation,
+                index_generation: row.index_generation, graph_generation: row.graph_generation,
+                created_at: row.created_at.clone(),
+            }).collect::<Vec<_>>();
+            self.insert_impressions(&impressions)?;
+            for baseline in &history.baselines {
+                self.execute_for(DbOperation::Execute,
+                    "INSERT INTO pack_baselines (workspace_id, agent_name, task_key, pack_id, pack_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    &[Value::Text(input.workspace_id.clone()), Value::Text(baseline.agent_name.clone()),
+                        Value::Text(baseline.task_key.clone().unwrap_or_default()), Value::Text(baseline.pack_id.clone()),
+                        Value::Text(baseline.pack_hash.clone()), Value::Text(baseline.created_at.clone())])?;
+            }
+            Ok(())
+        })
     }
 
     /// Get direct imported-evidence items for a pack.
