@@ -29026,92 +29026,158 @@ impl StoredPackHistory {
     }
 
     fn item_inputs(&self) -> Vec<CreatePackItemInput> {
-        self.items.iter().map(|item| CreatePackItemInput {
-            pack_id: item.pack_id.clone(), memory_id: item.memory_id.clone(),
-            rank: item.rank, section: item.section.clone(), estimated_tokens: item.estimated_tokens,
-            relevance: item.relevance, utility: item.utility, combined_score: None,
-            attempt_family_multiplicity: None, why: item.why.clone(),
-            diversity_key: item.diversity_key.clone(), provenance_json: item.provenance_json.clone(),
-            trust_class: item.trust_class.clone(), trust_subclass: item.trust_subclass.clone(),
-        }).collect()
+        self.items
+            .iter()
+            .map(|item| CreatePackItemInput {
+                pack_id: item.pack_id.clone(),
+                memory_id: item.memory_id.clone(),
+                rank: item.rank,
+                section: item.section.clone(),
+                estimated_tokens: item.estimated_tokens,
+                relevance: item.relevance,
+                utility: item.utility,
+                combined_score: None,
+                attempt_family_multiplicity: None,
+                why: item.why.clone(),
+                diversity_key: item.diversity_key.clone(),
+                provenance_json: item.provenance_json.clone(),
+                trust_class: item.trust_class.clone(),
+                trust_subclass: item.trust_subclass.clone(),
+            })
+            .collect()
     }
 
     fn evidence_inputs(&self) -> Vec<CreatePackEvidenceItemInput> {
-        self.evidence_items.iter().map(|item| CreatePackEvidenceItemInput {
-            pack_id: item.pack_id.clone(), evidence_id: item.evidence_id.clone(),
-            entity_revision: item.entity_revision.clone(), rank: item.rank,
-            section: item.section.clone(), estimated_tokens: item.estimated_tokens,
-            relevance: item.relevance, utility: item.utility, why: item.why.clone(),
-            provenance_json: item.provenance_json.clone(), trust_class: item.trust_class.clone(),
-            trust_subclass: item.trust_subclass.clone(),
-        }).collect()
+        self.evidence_items
+            .iter()
+            .map(|item| CreatePackEvidenceItemInput {
+                pack_id: item.pack_id.clone(),
+                evidence_id: item.evidence_id.clone(),
+                entity_revision: item.entity_revision.clone(),
+                rank: item.rank,
+                section: item.section.clone(),
+                estimated_tokens: item.estimated_tokens,
+                relevance: item.relevance,
+                utility: item.utility,
+                why: item.why.clone(),
+                provenance_json: item.provenance_json.clone(),
+                trust_class: item.trust_class.clone(),
+                trust_subclass: item.trust_subclass.clone(),
+            })
+            .collect()
     }
 
     fn omission_inputs(&self) -> Vec<CreatePackOmissionInput> {
-        self.omissions.iter().map(|item| CreatePackOmissionInput {
-            pack_id: item.pack_id.clone(), memory_id: item.memory_id.clone(),
-            estimated_tokens: item.estimated_tokens, reason: item.reason.clone(),
-            attempt_family_multiplicity: None,
-        }).collect()
+        self.omissions
+            .iter()
+            .map(|item| CreatePackOmissionInput {
+                pack_id: item.pack_id.clone(),
+                memory_id: item.memory_id.clone(),
+                estimated_tokens: item.estimated_tokens,
+                reason: item.reason.clone(),
+                attempt_family_multiplicity: None,
+            })
+            .collect()
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
         let items = self.item_inputs();
         let evidence = self.evidence_inputs();
-        validate_pack_record_input(&self.record.id, &self.record_input(), &items, &evidence,
-            &self.omission_inputs(), &self.record.created_at)?;
+        validate_pack_record_input(
+            &self.record.id,
+            &self.record_input(),
+            &items,
+            &evidence,
+            &self.omission_inputs(),
+            &self.record.created_at,
+        )?;
         let parsed = parse_stored_pack_ledger(&self.record);
         match parsed.status {
-            PackLedgerStatus::Missing if self.record.ledger_json.is_none()
-                && self.record.ledger_hash.is_none() => {}
+            PackLedgerStatus::Missing
+                if self.record.ledger_json.is_none() && self.record.ledger_hash.is_none() => {}
             PackLedgerStatus::Available => {
                 let ledger: PackSelectionLedger = serde_json::from_value(
-                    parsed.available_ledger().cloned().ok_or_else(|| pack_recovery_error("missing replay ledger"))?
-                ).map_err(|error| pack_recovery_error(error.to_string()))?;
-                let expected = items.iter().map(pack_ledger_selected_item)
+                    parsed
+                        .available_ledger()
+                        .cloned()
+                        .ok_or_else(|| pack_recovery_error("missing replay ledger"))?,
+                )
+                .map_err(|error| pack_recovery_error(error.to_string()))?;
+                let expected = items
+                    .iter()
+                    .map(pack_ledger_selected_item)
                     .chain(evidence.iter().map(pack_ledger_selected_evidence_item))
-                    .map(|item| (item.rank, item)).collect::<BTreeMap<_, _>>();
+                    .map(|item| (item.rank, item))
+                    .collect::<BTreeMap<_, _>>();
                 for selected in &ledger.core.selected_items {
-                    let row = expected.get(&selected.rank).ok_or_else(|| pack_recovery_error("replay selection has no stored item"))?;
-                    if selected.memory_id != row.memory_id || selected.evidence_span_id != row.evidence_span_id
+                    let row = expected.get(&selected.rank).ok_or_else(|| {
+                        pack_recovery_error("replay selection has no stored item")
+                    })?;
+                    if selected.memory_id != row.memory_id
+                        || selected.evidence_span_id != row.evidence_span_id
                         || (!selected.entity_id.is_empty() && selected.entity_id != row.entity_id)
-                        || (!selected.entity_kind.is_empty() && selected.entity_kind != row.entity_kind)
-                        || selected.entity_revision != row.entity_revision || selected.section != row.section
+                        || (!selected.entity_kind.is_empty()
+                            && selected.entity_kind != row.entity_kind)
+                        || selected.entity_revision != row.entity_revision
+                        || selected.section != row.section
                         || selected.estimated_tokens != row.estimated_tokens
-                        || selected.scores.relevance != row.scores.relevance || selected.scores.utility != row.scores.utility
-                        || selected.why.hash != row.why.hash || selected.provenance.hash != row.provenance.hash
-                        || selected.diversity_key != row.diversity_key || selected.trust_class != row.trust_class
-                        || selected.trust_subclass != row.trust_subclass {
-                        return Err(pack_recovery_error("replay selection disagrees with stored pack item"));
+                        || selected.scores.relevance != row.scores.relevance
+                        || selected.scores.utility != row.scores.utility
+                        || selected.why.hash != row.why.hash
+                        || selected.provenance.hash != row.provenance.hash
+                        || selected.diversity_key != row.diversity_key
+                        || selected.trust_class != row.trust_class
+                        || selected.trust_subclass != row.trust_subclass
+                    {
+                        return Err(pack_recovery_error(
+                            "replay selection disagrees with stored pack item",
+                        ));
                     }
                 }
                 for omitted in &ledger.core.omitted_items {
-                    if !self.omissions.iter().any(|row| row.memory_id == omitted.memory_id
-                        && row.estimated_tokens == omitted.estimated_tokens && row.reason == omitted.reason) {
-                        return Err(pack_recovery_error("replay omission disagrees with stored pack omission"));
+                    if !self.omissions.iter().any(|row| {
+                        row.memory_id == omitted.memory_id
+                            && row.estimated_tokens == omitted.estimated_tokens
+                            && row.reason == omitted.reason
+                    }) {
+                        return Err(pack_recovery_error(
+                            "replay omission disagrees with stored pack omission",
+                        ));
                     }
                 }
             }
-            _ => return Err(pack_recovery_error("cannot recover a malformed or mismatched pack replay ledger")),
+            _ => {
+                return Err(pack_recovery_error(
+                    "cannot recover a malformed or mismatched pack replay ledger",
+                ));
+            }
         }
         let mut impressions = BTreeSet::new();
         for impression in &self.impressions {
-            if impression.pack_id != self.record.id || impression.workspace_id != self.record.workspace_id
+            if impression.pack_id != self.record.id
+                || impression.workspace_id != self.record.workspace_id
                 || !is_canonical_memory_id(&impression.memory_id)
                 || !impressions.insert(&impression.memory_id)
                 || !is_canonical_blake3_hash(&impression.query_hash)
                 || !is_canonical_blake3_hash(&impression.lens_hash)
-                || DateTime::parse_from_rfc3339(&impression.created_at).is_err() {
-                return Err(pack_recovery_error("foreign, duplicate, or invalid recovered pack impression"));
+                || DateTime::parse_from_rfc3339(&impression.created_at).is_err()
+            {
+                return Err(pack_recovery_error(
+                    "foreign, duplicate, or invalid recovered pack impression",
+                ));
             }
         }
         let mut baselines = BTreeSet::new();
         for baseline in &self.baselines {
-            if baseline.pack_id != self.record.id || baseline.pack_hash != self.record.pack_hash
+            if baseline.pack_id != self.record.id
+                || baseline.pack_hash != self.record.pack_hash
                 || baseline.agent_name.trim().is_empty()
                 || !baselines.insert((&baseline.agent_name, &baseline.task_key))
-                || DateTime::parse_from_rfc3339(&baseline.created_at).is_err() {
-                return Err(pack_recovery_error("foreign, duplicate, or invalid recovered pack baseline"));
+                || DateTime::parse_from_rfc3339(&baseline.created_at).is_err()
+            {
+                return Err(pack_recovery_error(
+                    "foreign, duplicate, or invalid recovered pack baseline",
+                ));
             }
         }
         Ok(())
@@ -29120,51 +29186,98 @@ impl StoredPackHistory {
     /// Rebind an already validated historical ledger after explicit backup
     /// redaction or identity remapping. Retain lens, generations, combined
     /// scores, and multiplicity evidence rather than rebuilding them today.
-    pub(crate) fn rebind_recovery_ledger(&mut self, original: &Self) -> Result<()> {
+    pub(crate) fn rebind_recovery_ledger(
+        &mut self,
+        original: &Self,
+        redact: impl Fn(&str) -> String,
+    ) -> Result<()> {
         original.validate()?;
-        if self == original || original.record.ledger_json.is_none() {
+        if original.record.ledger_json.is_none() {
             return self.validate();
         }
         let parsed = parse_stored_pack_ledger(&original.record);
         let mut ledger: PackSelectionLedger = serde_json::from_value(
-            parsed.available_ledger().cloned().ok_or_else(|| pack_recovery_error("missing original replay ledger"))?
-        ).map_err(|error| pack_recovery_error(error.to_string()))?;
+            parsed
+                .available_ledger()
+                .cloned()
+                .ok_or_else(|| pack_recovery_error("missing original replay ledger"))?,
+        )
+        .map_err(|error| pack_recovery_error(error.to_string()))?;
+        let original_core = pack_ledger_json(&ledger.core, "original recovered pack ledger core")?;
         let core = &mut ledger.core;
+        if let Some(lens) = &mut core.task_lens {
+            lens.id = redact(&lens.id);
+        }
         core.workspace_id.clone_from(&self.record.workspace_id);
         core.created_by.clone_from(&self.record.created_by);
-        core.command_surface = self.record.created_by.clone().unwrap_or_else(|| "unknown".to_owned());
+        core.command_surface = self
+            .record
+            .created_by
+            .clone()
+            .unwrap_or_else(|| "unknown".to_owned());
         if self.record.query != original.record.query {
             core.request.query = pack_ledger_text_record(&self.record.query);
         }
         core.degraded = pack_ledger_degradations(self.record.degraded_json.as_deref())?;
-        let rows = self.item_inputs().iter().map(pack_ledger_selected_item)
-            .chain(self.evidence_inputs().iter().map(pack_ledger_selected_evidence_item))
-            .map(|item| (item.rank, item)).collect::<BTreeMap<_, _>>();
+        let rows = self
+            .item_inputs()
+            .iter()
+            .map(pack_ledger_selected_item)
+            .chain(
+                self.evidence_inputs()
+                    .iter()
+                    .map(pack_ledger_selected_evidence_item),
+            )
+            .map(|item| (item.rank, item))
+            .collect::<BTreeMap<_, _>>();
         for selected in &mut core.selected_items {
-            let row = rows.get(&selected.rank).ok_or_else(|| pack_recovery_error("rebound selection has no stored item"))?;
+            let row = rows
+                .get(&selected.rank)
+                .ok_or_else(|| pack_recovery_error("rebound selection has no stored item"))?;
             selected.memory_id.clone_from(&row.memory_id);
             selected.entity_id.clone_from(&row.entity_id);
             selected.entity_kind.clone_from(&row.entity_kind);
             selected.diversity_key.clone_from(&row.diversity_key);
             selected.trust_subclass.clone_from(&row.trust_subclass);
-            if selected.why.hash != row.why.hash { selected.why = row.why.clone(); }
-            if selected.provenance.hash != row.provenance.hash { selected.provenance = row.provenance.clone(); }
-            selected.redaction_classes.extend(selected.why.redaction_reasons.iter().cloned());
-            selected.redaction_classes.extend(selected.provenance.redaction_reasons.iter().cloned());
+            if selected.why.hash != row.why.hash {
+                selected.why = row.why.clone();
+            }
+            if selected.provenance.hash != row.provenance.hash {
+                selected.provenance = row.provenance.clone();
+            }
+            selected
+                .redaction_classes
+                .extend(selected.why.redaction_reasons.iter().cloned());
+            selected
+                .redaction_classes
+                .extend(selected.provenance.redaction_reasons.iter().cloned());
             selected.redaction_classes.sort();
             selected.redaction_classes.dedup();
         }
-        let identities = original.omissions.iter().zip(&self.omissions)
-            .map(|(old, new)| (&old.memory_id, &new.memory_id)).collect::<BTreeMap<_, _>>();
+        let identities = original
+            .omissions
+            .iter()
+            .zip(&self.omissions)
+            .map(|(old, new)| (&old.memory_id, &new.memory_id))
+            .collect::<BTreeMap<_, _>>();
         for omitted in &mut core.omitted_items {
-            omitted.memory_id = identities.get(&omitted.memory_id)
-                .ok_or_else(|| pack_recovery_error("rebound omission has no original identity"))?.to_string();
+            omitted.memory_id = identities
+                .get(&omitted.memory_id)
+                .ok_or_else(|| pack_recovery_error("rebound omission has no original identity"))?
+                .to_string();
         }
-        core.omitted_items.sort_by(|left, right| left.memory_id.cmp(&right.memory_id));
-        let hash = blake3_text_hash(&pack_ledger_json(core, "recovered pack ledger core")?);
+        core.omitted_items
+            .sort_by(|left, right| left.memory_id.cmp(&right.memory_id));
+        let updated_core = pack_ledger_json(core, "recovered pack ledger core")?;
+        if updated_core == original_core {
+            return self.validate();
+        }
+        let hash = blake3_text_hash(&updated_core);
         ledger.ledger_hash.clone_from(&hash);
         self.record.ledger_json = Some(store_pack_selection_ledger_json(
-            &pack_ledger_json(&ledger, "recovered pack ledger")?, &hash)?);
+            &pack_ledger_json(&ledger, "recovered pack ledger")?,
+            &hash,
+        )?);
         self.record.ledger_hash = Some(hash);
         self.validate()
     }
@@ -30052,7 +30165,13 @@ impl DbConnection {
             self.validate_pack_memory_workspace_membership(input, items, omissions)?;
             self.validate_pack_evidence_workspace_membership(input, evidence_items)?;
             let record_start = Instant::now();
-            self.insert_pack_record_row(id, input, created_at, Some(&ledger_json), Some(&ledger_hash))?;
+            self.insert_pack_record_row(
+                id,
+                input,
+                created_at,
+                Some(&ledger_json),
+                Some(&ledger_hash),
+            )?;
             timings.record_write = record_start.elapsed();
 
             let item_start = Instant::now();
@@ -30427,10 +30546,21 @@ impl DbConnection {
     /// against the `(pack_id, memory_id)` primary key if a candidate appears
     /// more than once in the input slices.
     pub fn insert_impressions(&self, impressions: &[CreateImpressionInput]) -> Result<()> {
+        self.insert_impressions_with_conflict_policy(impressions, true)
+    }
+
+    fn insert_impressions_with_conflict_policy(
+        &self,
+        impressions: &[CreateImpressionInput],
+        ignore_duplicates: bool,
+    ) -> Result<()> {
         for chunk in impressions.chunks(IMPRESSION_INSERT_BATCH_ROWS) {
-            let mut sql = String::from(
-                "INSERT OR IGNORE INTO pack_candidate_impressions (pack_id, memory_id, workspace_id, query_hash, lens_hash, rank, section, token_estimate, selected, omission_reason, db_generation, index_generation, graph_generation, created_at) VALUES ",
-            );
+            let mut sql = String::from(if ignore_duplicates {
+                "INSERT OR IGNORE"
+            } else {
+                "INSERT"
+            });
+            sql.push_str(" INTO pack_candidate_impressions (pack_id, memory_id, workspace_id, query_hash, lens_hash, rank, section, token_estimate, selected, omission_reason, db_generation, index_generation, graph_generation, created_at) VALUES ");
             append_multi_row_placeholders(&mut sql, chunk.len(), IMPRESSION_INSERT_VALUE_COUNT);
 
             let mut params = Vec::with_capacity(chunk.len() * IMPRESSION_INSERT_VALUE_COUNT);
@@ -30662,7 +30792,8 @@ impl DbConnection {
     }
 
     pub(crate) fn get_pack_history_for_recovery(&self, id: &str) -> Result<StoredPackHistory> {
-        let record = self.get_pack_record(id)?
+        let record = self
+            .get_pack_record(id)?
             .ok_or_else(|| pack_recovery_error("pack disappeared from recovery snapshot"))?;
         let omissions = self.query_for(DbOperation::Query,
             "SELECT pack_id, memory_id, estimated_tokens, reason FROM pack_omissions WHERE pack_id = ?1 ORDER BY memory_id",
@@ -30677,8 +30808,12 @@ impl DbConnection {
             &[Value::Text(id.to_owned()), Value::Text(record.workspace_id.clone())])?
             .iter().map(stored_pack_baseline_from_row).collect::<Result<Vec<_>>>()?;
         let history = StoredPackHistory {
-            record, items: self.get_pack_items(id)?, evidence_items: self.get_pack_evidence_items(id)?,
-            omissions, impressions: self.list_impressions_for_pack(id)?, baselines,
+            record,
+            items: self.get_pack_items(id)?,
+            evidence_items: self.get_pack_evidence_items(id)?,
+            omissions,
+            impressions: self.list_impressions_for_pack(id)?,
+            baselines,
         };
         history.validate()?;
         Ok(history)
@@ -30687,7 +30822,10 @@ impl DbConnection {
     /// Restore history with plain parent/child inserts and original timestamps.
     /// Admission and entity revision describe selection time, so tombstoned or
     /// subsequently redacted evidence is checked for workspace membership only.
-    pub(crate) fn insert_pack_history_for_recovery(&self, history: &StoredPackHistory) -> Result<()> {
+    pub(crate) fn insert_pack_history_for_recovery(
+        &self,
+        history: &StoredPackHistory,
+    ) -> Result<()> {
         history.validate()?;
         let input = history.record_input();
         let items = history.item_inputs();
@@ -30718,7 +30856,7 @@ impl DbConnection {
                 index_generation: row.index_generation, graph_generation: row.graph_generation,
                 created_at: row.created_at.clone(),
             }).collect::<Vec<_>>();
-            self.insert_impressions(&impressions)?;
+            self.insert_impressions_with_conflict_policy(&impressions, false)?;
             for baseline in &history.baselines {
                 self.execute_for(DbOperation::Execute,
                     "INSERT INTO pack_baselines (workspace_id, agent_name, task_key, pack_id, pack_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

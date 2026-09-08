@@ -28,8 +28,8 @@ use crate::db::{
     CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType,
     MeshStorageStatus, StoredAuditEntry, StoredEpisodeAction, StoredEvidenceSpan,
     StoredFeedbackEvent, StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness,
-    StoredGraphSnapshot, StoredJournalEntry, StoredMemory, StoredMemoryLink, StoredProceduralRule,
-    StoredSearchIndexJob, StoredSession, StoredTaskEpisode, audit_actions,
+    StoredGraphSnapshot, StoredJournalEntry, StoredMemory, StoredMemoryLink, StoredPackHistory,
+    StoredProceduralRule, StoredSearchIndexJob, StoredSession, StoredTaskEpisode, audit_actions,
 };
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
@@ -57,6 +57,7 @@ const INIT_AND_MIGRATE_REPAIR_COMMAND: &str =
 const CASS_BACKUP_CHUNK_ROWS: usize = 128;
 const WORK_HISTORY_CHUNK_ROWS: usize = 128;
 const LEARNING_HISTORY_SCHEMA: &str = "ee.backup.learning_history.v1";
+const PACK_HISTORY_SCHEMA: &str = "ee.backup.pack_history.v1";
 const MANIFEST_AUTH_FAMILY: &str = "ee.backup.manifest";
 const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
 const CASS_SESSION_RESTORE_METADATA_SCHEMA_V1: &str = "ee.backup.restored_cass_session_metadata.v1";
@@ -578,6 +579,7 @@ pub struct BackupRestoreReport {
     pub restored_rule_source_count: u32,
     pub restored_rule_tag_count: u32,
     pub restored_feedback_count: u32,
+    pub restored_pack_history: BackupPackHistoryCounts,
     pub restored_graph_cache_count: u32,
     pub restored_derived: Vec<BackupRestoredDerivedAssetReport>,
     pub issue_count: u32,
@@ -615,6 +617,7 @@ impl BackupRestoreReport {
                 "ruleSourcesRestored": self.restored_rule_source_count,
                 "ruleTagsRestored": self.restored_rule_tag_count,
                 "feedbackEventsRestored": self.restored_feedback_count,
+                "packHistoryRestored": self.restored_pack_history,
                 "graphCacheRowsRestored": self.restored_graph_cache_count,
                 "issues": self.issue_count,
             },
@@ -628,7 +631,7 @@ impl BackupRestoreReport {
     pub fn human_summary(&self) -> String {
         let prefix = if self.dry_run { "DRY RUN: " } else { "" };
         format!(
-            "{prefix}backup restore {status}: {backup_id}\n  side path: {side_path}\n  restored db: {database}\n  imported memories: {imported} (duplicates: {duplicates})\n  restored task episodes: {episodes}\n  restored CASS sessions/evidence: {sessions}/{evidence}\n  restored journal entries/index jobs: {journals}/{jobs}\n  restored rules/sources/tags/feedback: {rules}/{rule_sources}/{rule_tags}/{feedback}\n",
+            "{prefix}backup restore {status}: {backup_id}\n  side path: {side_path}\n  restored db: {database}\n  imported memories: {imported} (duplicates: {duplicates})\n  restored task episodes: {episodes}\n  restored CASS sessions/evidence: {sessions}/{evidence}\n  restored journal entries/index jobs: {journals}/{jobs}\n  restored rules/sources/tags/feedback: {rules}/{rule_sources}/{rule_tags}/{feedback}\n  restored packs: {packs}\n",
             status = self.status,
             backup_id = self.backup_id,
             side_path = self.side_path,
@@ -644,6 +647,7 @@ impl BackupRestoreReport {
             rule_sources = self.restored_rule_source_count,
             rule_tags = self.restored_rule_tag_count,
             feedback = self.restored_feedback_count,
+            packs = self.restored_pack_history.records,
         )
     }
 
@@ -1168,6 +1172,40 @@ struct BackupLearningHistory {
     authentication: Option<AuthenticatedHeader>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupPackHistory {
+    schema: String,
+    backup_id: String,
+    workspace_id: String,
+    chunk_index: usize,
+    chunk_count: usize,
+    history: StoredPackHistory,
+    authentication: Option<AuthenticatedHeader>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupPackHistoryCounts {
+    pub records: u64,
+    pub items: u64,
+    pub evidence_items: u64,
+    pub omissions: u64,
+    pub impressions: u64,
+    pub baselines: u64,
+}
+
+impl BackupPackHistoryCounts {
+    fn include(&mut self, history: &StoredPackHistory) {
+        self.records += 1;
+        self.items += history.items.len() as u64;
+        self.evidence_items += history.evidence_items.len() as u64;
+        self.omissions += history.omissions.len() as u64;
+        self.impressions += history.impressions.len() as u64;
+        self.baselines += history.baselines.len() as u64;
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BackupRuleSource {
@@ -1327,9 +1365,11 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
         | "pack_evidence_items"
         | "pack_items"
         | "pack_omissions"
-        | "pack_records" => {
-            BackupTablePolicy::new("pack", "export_restore_required", "not_implemented")
-        }
+        | "pack_records" => BackupTablePolicy::new(
+            "pack",
+            "export_restore_required",
+            "derived_artifact_restore",
+        ),
         "curation_candidates"
         | "feedback_quarantine"
         | "learning_observations"
@@ -1475,8 +1515,23 @@ fn reconcile_derived_recovery_inventory(
         captured_derived_record_count(derived, "cass_sessions", "sessions");
     let captured_evidence_count =
         captured_derived_record_count(derived, "cass_evidence_spans", "evidenceSpans");
+    let mut pack_counts = BackupPackHistoryCounts::default();
+    for asset in derived
+        .iter()
+        .filter(|asset| asset.report.kind == "pack_history")
+    {
+        if let Ok(chunk) = serde_json::from_slice::<BackupPackHistory>(&asset.bytes) {
+            pack_counts.include(&chunk.history);
+        }
+    }
 
     for (table, captured_count) in [
+        ("pack_records", pack_counts.records),
+        ("pack_items", pack_counts.items),
+        ("pack_evidence_items", pack_counts.evidence_items),
+        ("pack_omissions", pack_counts.omissions),
+        ("pack_candidate_impressions", pack_counts.impressions),
+        ("pack_baselines", pack_counts.baselines),
         ("task_episodes", captured_task_episode_count),
         ("sessions", captured_session_count),
         ("evidence_spans", captured_evidence_count),
@@ -1633,6 +1688,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &memory_ids,
                 &mut payloads,
             )?;
+            collect_pack_history_payloads(
+                &connection,
+                workspace_id,
+                &backup_id,
+                &created_at,
+                options.redaction_level,
+                &memory_ids,
+                &mut payloads,
+            )?;
             if options.include_derived {
                 payloads.extend(collect_derived_payloads(
                     &connection,
@@ -1669,13 +1733,14 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         && store_auth.is_none()
         && derived_payloads
             .iter()
-            .any(|p| p.report.kind == "learning_history")
+            .any(|p| matches!(p.report.kind.as_str(), "learning_history" | "pack_history"))
     {
         return Err(work_history_error(
-            "learned rules and feedback require source-store authentication; repair the workspace key store before creating this backup",
+            "learned rules, feedback, and pack history require source-store authentication; repair the workspace key store before creating this backup",
         ));
     }
     authenticate_learning_payloads(&mut derived_payloads, store_auth.as_ref())?;
+    authenticate_pack_payloads(&mut derived_payloads, store_auth.as_ref())?;
     let derived_reports = derived_payloads
         .iter()
         .map(|payload| payload.report.clone())
@@ -2614,6 +2679,7 @@ pub fn restore_backup_to_side_path(
             restored_rule_source_count: 0,
             restored_rule_tag_count: 0,
             restored_feedback_count: 0,
+            restored_pack_history: BackupPackHistoryCounts::default(),
             restored_graph_cache_count: 0,
             restored_derived: Vec::new(),
             issue_count: u32::try_from(verify.issues.len()).unwrap_or(u32::MAX),
@@ -2728,6 +2794,12 @@ pub fn restore_backup_to_side_path(
         &inspect.backup_id,
         &restored_derived,
     )?;
+    let restored_pack_history = restore_pack_history(
+        &restored_database_path,
+        &workspace_path,
+        &inspect.backup_id,
+        &restored_derived,
+    )?;
     let graph_cache_restored_count = if options.restore_graph_cache {
         restore_graph_cache_assets(&restored_database_path, &restored_derived)?
     } else {
@@ -2817,6 +2889,7 @@ pub fn restore_backup_to_side_path(
         restored_rule_source_count,
         restored_rule_tag_count,
         restored_feedback_count,
+        restored_pack_history,
         restored_graph_cache_count: graph_cache_restored_count,
         restored_derived,
         issue_count: u32::try_from(restore_issue_count).unwrap_or(u32::MAX),
@@ -5631,6 +5704,234 @@ fn collect_task_episode_payloads(
             )),
         }
     }
+}
+
+fn collect_pack_history_payloads(
+    connection: &DbConnection,
+    workspace_id: &str,
+    backup_id: &str,
+    captured_at: &str,
+    redaction: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) -> Result<(), DomainError> {
+    let ids = connection
+        .list_recent_pack_record_ids_for_workspace(workspace_id, u32::MAX)
+        .map_err(work_history_error)?;
+    for (index, id) in ids.iter().enumerate() {
+        let original = connection
+            .get_pack_history_for_recovery(id)
+            .map_err(work_history_error)?;
+        let mut history = original.clone();
+        history.record.query = redact_content(&history.record.query, redaction);
+        history.record.created_by = history
+            .record
+            .created_by
+            .as_deref()
+            .map(|s| redact_content(s, redaction));
+        history.record.degraded_json = history
+            .record
+            .degraded_json
+            .as_deref()
+            .map(|s| redact_work_history_json(s, redaction))
+            .transpose()?;
+        let restored_memory = |id: &str| {
+            memory_ids.get(id).cloned().ok_or_else(|| {
+                work_history_error("pack item references a memory outside the recovered workspace")
+            })
+        };
+        for item in &mut history.items {
+            item.memory_id = restored_memory(&item.memory_id)?;
+            item.why = redact_content(&item.why, redaction);
+            item.diversity_key = item
+                .diversity_key
+                .as_deref()
+                .map(|s| redact_content(s, redaction));
+            item.provenance_json = redact_work_history_json(&item.provenance_json, redaction)?;
+            item.trust_subclass = item
+                .trust_subclass
+                .as_deref()
+                .map(|s| redact_content(s, redaction));
+        }
+        for item in &mut history.evidence_items {
+            item.why = redact_content(&item.why, redaction);
+            item.provenance_json = redact_work_history_json(&item.provenance_json, redaction)?;
+            item.trust_subclass = item
+                .trust_subclass
+                .as_deref()
+                .map(|s| redact_content(s, redaction));
+        }
+        for omission in &mut history.omissions {
+            omission.memory_id = restored_memory(&omission.memory_id)?;
+        }
+        for impression in &mut history.impressions {
+            // Impressions deliberately outlive forgotten memories (no memory FK).
+            if let Some(id) = memory_ids.get(&impression.memory_id) {
+                impression.memory_id.clone_from(id);
+            }
+        }
+        for baseline in &mut history.baselines {
+            baseline.agent_name = redact_content(&baseline.agent_name, redaction);
+            baseline.task_key = baseline
+                .task_key
+                .as_deref()
+                .map(|s| redact_content(s, redaction));
+        }
+        history
+            .rebind_recovery_ledger(&original, |s| redact_content(s, redaction))
+            .map_err(work_history_error)?;
+        let chunk = BackupPackHistory {
+            schema: PACK_HISTORY_SCHEMA.to_owned(),
+            backup_id: backup_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            chunk_index: index,
+            chunk_count: ids.len(),
+            history,
+            authentication: None,
+        };
+        payloads.push(derived_payload(
+            format!("derived/pack-history/{index:08}.json"),
+            "pack_history",
+            captured_at,
+            None,
+            serialized_payload_bytes(&chunk).map_err(work_history_error)?,
+        ));
+    }
+    Ok(())
+}
+
+fn pack_history_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
+    ArtifactContext {
+        artifact_family: PACK_HISTORY_SCHEMA,
+        record_encoding_version: "json.v1",
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: workspace_id,
+    }
+}
+
+fn authenticate_pack_payloads(
+    payloads: &mut [BackupDerivedPayload],
+    root: Option<&StoreAuthRoot>,
+) -> Result<(), DomainError> {
+    for payload in payloads
+        .iter_mut()
+        .filter(|p| p.report.kind == "pack_history")
+    {
+        let mut chunk: BackupPackHistory =
+            serde_json::from_slice(&payload.bytes).map_err(work_history_error)?;
+        chunk.authentication = None;
+        if let Some(root) = root {
+            let hash =
+                canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+            chunk.authentication = Some(
+                authenticate_artifact(
+                    root,
+                    MacDomain::NativeImportRecordsRoot,
+                    &pack_history_auth_context(&chunk.workspace_id),
+                    &hash,
+                    1,
+                )
+                .map_err(work_history_error)?,
+            );
+        }
+        payload.bytes = serialized_payload_bytes(&chunk).map_err(work_history_error)?;
+        if payload.bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES {
+            return Err(work_history_error(
+                "pack-history chunk exceeds the restore asset byte limit",
+            ));
+        }
+        payload.report.hash = Some(hash_bytes(&payload.bytes));
+        payload.report.byte_size = Some(payload.bytes.len() as u64);
+    }
+    Ok(())
+}
+
+fn restore_pack_history(
+    database: &Path,
+    source_workspace: &Path,
+    backup_id: &str,
+    assets: &[BackupRestoredDerivedAssetReport],
+) -> Result<BackupPackHistoryCounts, DomainError> {
+    let mut chunks = assets
+        .iter()
+        .filter(|asset| asset.kind == "pack_history")
+        .map(|asset| {
+            serde_json::from_value::<BackupPackHistory>(read_restored_derived_json(asset)?)
+                .map_err(work_history_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut counts = BackupPackHistoryCounts::default();
+    if chunks.is_empty() {
+        return Ok(counts);
+    }
+    let root =
+        StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
+    chunks.sort_by_key(|chunk| chunk.chunk_index);
+    let source_id = chunks[0].workspace_id.clone();
+    let chunk_count = chunks.len();
+    let mut pack_ids = BTreeSet::new();
+    for (index, chunk) in chunks.iter_mut().enumerate() {
+        if chunk.schema != PACK_HISTORY_SCHEMA
+            || chunk.backup_id != backup_id
+            || chunk.workspace_id != source_id
+            || chunk.history.record.workspace_id != source_id
+            || chunk.chunk_index != index
+            || chunk.chunk_count != chunk_count
+            || !pack_ids.insert(chunk.history.record.id.clone())
+        {
+            return Err(work_history_error(
+                "unsupported, incomplete, duplicate, or substituted pack-history chunks",
+            ));
+        }
+        let header = chunk.authentication.take().ok_or_else(|| {
+            work_history_error("pack history requires an authenticated source-store backup")
+        })?;
+        let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+        if !verify_artifact(
+            &root,
+            MacDomain::NativeImportRecordsRoot,
+            &pack_history_auth_context(&source_id),
+            &header,
+            &hash,
+            1,
+        )
+        .map_err(work_history_error)?
+        .is_authenticated()
+        {
+            return Err(work_history_error("pack-history authentication failed"));
+        }
+        chunk.history.validate().map_err(work_history_error)?;
+    }
+    let connection = DbConnection::open_file(database).map_err(work_history_error)?;
+    let workspace = remap_restored_workspace_id(
+        &connection.list_workspaces().map_err(work_history_error)?,
+        Some(&source_id),
+        "pack history",
+    )?
+    .ok_or_else(|| work_history_error("missing pack-history workspace"))?;
+    for chunk in &mut chunks {
+        let original = chunk.history.clone();
+        chunk.history.record.workspace_id.clone_from(&workspace);
+        for impression in &mut chunk.history.impressions {
+            impression.workspace_id.clone_from(&workspace);
+        }
+        chunk
+            .history
+            .rebind_recovery_ledger(&original, str::to_owned)
+            .map_err(work_history_error)?;
+    }
+    connection
+        .with_transaction(|| {
+            for chunk in &chunks {
+                connection.insert_pack_history_for_recovery(&chunk.history)?;
+            }
+            Ok(())
+        })
+        .map_err(work_history_error)?;
+    for chunk in &chunks {
+        counts.include(&chunk.history);
+    }
+    Ok(counts)
 }
 
 fn work_history_error(error: impl std::fmt::Display) -> DomainError {
@@ -11215,6 +11516,551 @@ mod tests {
             applied_at: (n == 1).then(|| "2026-09-01T00:01:00Z".to_owned()),
             created_at: "2026-09-01T00:00:00Z".to_owned(),
         }
+    }
+
+    fn seed_recovery_pack(connection: &DbConnection, n: u128) -> Result<StoredPackHistory, String> {
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        let pack_id = crate::models::PackId::from_uuid(Uuid::from_u128(n)).to_string();
+        let input = crate::db::CreatePackRecordInput {
+            workspace_id: workspace_id.clone(),
+            query: "release api_key=pack-secret-canary".to_owned(),
+            profile: "balanced".to_owned(),
+            max_tokens: 4000,
+            used_tokens: 32,
+            item_count: 1,
+            omitted_count: 1,
+            pack_hash: hash_bytes(format!("pack-{n}").as_bytes()),
+            degraded_json: None,
+            created_by: Some("ee pack".to_owned()),
+        };
+        connection.insert_pack_record_with_timings_and_task_lens(&pack_id, &input,
+            &[crate::db::CreatePackItemInput {
+                pack_id: pack_id.clone(), memory_id: memory_id.clone(), rank: 1,
+                section: "procedural_rules".to_owned(), estimated_tokens: 32, relevance: 0.8,
+                utility: 0.6, combined_score: Some(0.7), attempt_family_multiplicity: None,
+                why: format!("release api_key=pack-secret-canary {}", "Historical explanation. ".repeat(400)), diversity_key: Some("release".to_owned()),
+                provenance_json: json!({"schema": "ee.pack_item.provenance.v1", "entries": [], "note": "api_key=pack-secret-canary"}).to_string(),
+                trust_class: "agent_validated".to_owned(), trust_subclass: Some("fixture".to_owned()),
+            }],
+            &[crate::db::CreatePackOmissionInput {
+                pack_id: pack_id.clone(), memory_id, estimated_tokens: 32,
+                reason: "redundant_candidate".to_owned(), attempt_family_multiplicity: None,
+            }], Some(&crate::db::CreatePackTaskLensInput {
+                id: "release".to_owned(), version: 3, lens_hash: hash_bytes(b"historical lens"),
+            })).map_err(|e| e.to_string())?;
+        connection
+            .insert_pack_baseline(
+                &crate::db::CreatePackBaselineInput {
+                    workspace_id,
+                    agent_name: "codex".to_owned(),
+                    task_key: Some("release".to_owned()),
+                    pack_id: pack_id.clone(),
+                    pack_hash: input.pack_hash,
+                },
+                20,
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .get_pack_history_for_recovery(&pack_id)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn default_backup_restores_pack_history_and_replay() -> TestResult {
+        for redaction in [
+            RedactionLevel::None,
+            RedactionLevel::Standard,
+            RedactionLevel::Strict,
+            RedactionLevel::Full,
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            let original = seed_recovery_pack(&source, 10)?;
+            source.close().map_err(|e| e.to_string())?;
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            for (table, count) in [
+                ("pack_records", 1),
+                ("pack_items", 1),
+                ("pack_evidence_items", 0),
+                ("pack_omissions", 1),
+                ("pack_candidate_impressions", 1),
+                ("pack_baselines", 1),
+            ] {
+                let entry = backup
+                    .recovery_inventory
+                    .entries
+                    .iter()
+                    .find(|e| e.table == table)
+                    .ok_or("missing pack inventory")?;
+                ensure_equal(entry.row_count, count, "pack table row count")?;
+                ensure(
+                    entry.snapshot_covered,
+                    "pack history captured without cache flags",
+                )?;
+            }
+            ensure(
+                backup.recovery_inventory.snapshot_coverage_complete,
+                "pack history no longer makes this recovery point incomplete",
+            )?;
+            let asset = backup
+                .derived
+                .iter()
+                .find(|a| a.kind == "pack_history")
+                .ok_or("missing pack artifact")?;
+            let bytes = fs::read(Path::new(&backup.backup_path).join(&asset.path))
+                .map_err(|e| e.to_string())?;
+            ensure_equal(
+                String::from_utf8_lossy(&bytes).contains("pack-secret-canary"),
+                redaction == RedactionLevel::None,
+                "all pack prose obeys requested redaction",
+            )?;
+            let chunk: BackupPackHistory =
+                serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            ensure(
+                chunk.authentication.is_some(),
+                "pack history is source authenticated",
+            )?;
+            let verified = verify_backup(&BackupVerifyOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                verified.status.as_str(),
+                "verified",
+                "normal pack backup verifies",
+            )?;
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: tempdir.path().join("restored-pack"),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                restored.restored_pack_history.clone(),
+                BackupPackHistoryCounts {
+                    records: 1,
+                    items: 1,
+                    evidence_items: 0,
+                    omissions: 1,
+                    impressions: 1,
+                    baselines: 1,
+                },
+                "actual restored pack counts",
+            )?;
+            ensure_equal(
+                restored.data_json()["counts"]["packHistoryRestored"]["records"].clone(),
+                json!(1),
+                "public count wired",
+            )?;
+            let db = DbConnection::open_file(&restored.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let actual = db
+                .get_pack_history_for_recovery(&original.record.id)
+                .map_err(|e| e.to_string())?;
+            let mut expected = chunk.history;
+            let before_remap = expected.clone();
+            expected
+                .record
+                .workspace_id
+                .clone_from(&actual.record.workspace_id);
+            for row in &mut expected.impressions {
+                row.workspace_id.clone_from(&actual.record.workspace_id);
+            }
+            expected
+                .rebind_recovery_ledger(&before_remap, str::to_owned)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(&actual, &expected, "all saved pack fields round-trip")?;
+            if redaction == RedactionLevel::None {
+                ensure_equal(
+                    &before_remap,
+                    &original,
+                    "unredacted artifact preserves exact replay bytes, hashes, scores, timestamps and baselines",
+                )?;
+            }
+            let ledger = crate::db::parse_stored_pack_ledger(&actual.record);
+            let replay = ledger
+                .available_ledger()
+                .ok_or("restored replay unavailable")?;
+            ensure_equal(
+                replay["taskLens"]["version"].clone(),
+                json!(3),
+                "historical task lens retained",
+            )?;
+            ensure(
+                replay["selectedItems"][0]["scores"]["combinedScore"]
+                    .as_f64()
+                    .is_some_and(|score| (score - 0.7).abs() < 0.0001),
+                "ledger-only combined score retained",
+            )?;
+            let memory = db
+                .list_memories(&actual.record.workspace_id, None, true)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .next()
+                .ok_or("missing recovered memory")?;
+            ensure_equal(
+                actual.items[0].memory_id.as_str(),
+                memory.id.as_str(),
+                "selection follows restored memory identity",
+            )?;
+            ensure_equal(
+                actual.omissions[0].memory_id.as_str(),
+                memory.id.as_str(),
+                "omission follows restored memory identity",
+            )?;
+            ensure_equal(
+                actual.impressions[0].memory_id.as_str(),
+                memory.id.as_str(),
+                "impression follows restored memory identity",
+            )?;
+            ensure_equal(
+                db.resolve_pack_baseline(
+                    &actual.record.workspace_id,
+                    &actual.baselines[0].agent_name,
+                    actual.baselines[0].task_key.as_deref(),
+                )
+                .map_err(|e| e.to_string())?,
+                Some(actual.baselines[0].clone()),
+                "restored baseline resolves for --since last",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                source
+                    .get_pack_history_for_recovery(&original.record.id)
+                    .map_err(|e| e.to_string())?,
+                original,
+                "backup and restore do not mutate source pack history",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pack_history_restores_native_evidence_and_legacy_missing_ledger() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+        let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let legacy = seed_recovery_pack(&source, 10)?;
+        // Model a real pre-ledger record, without manufacturing replay evidence.
+        source
+            .execute_raw(&format!(
+                "UPDATE pack_records SET ledger_json = NULL, ledger_hash = NULL WHERE id = '{}'",
+                legacy.record.id
+            ))
+            .map_err(|e| e.to_string())?;
+        let session_id = SessionId::from_uuid(Uuid::from_u128(20)).to_string();
+        source
+            .insert_session_for_recovery(
+                &backup_cass_session_fixture(&session_id, &workspace_id)
+                    .into_restored(workspace_id.clone()),
+            )
+            .map_err(|e| e.to_string())?;
+        let evidence_id = EvidenceId::from_uuid(Uuid::from_u128(21)).to_string();
+        let excerpt = "The release workflow verified the signed artifact successfully.";
+        source
+            .insert_evidence_span(
+                &evidence_id,
+                &CreateEvidenceSpanInput {
+                    workspace_id: workspace_id.clone(),
+                    session_id: session_id.clone(),
+                    memory_id: None,
+                    producer_kind: EvidenceProducerKind::CassImport,
+                    cass_span_id: "cass://recovery/1".to_owned(),
+                    span_kind: "message".to_owned(),
+                    start_line: 1,
+                    end_line: 2,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some("assistant".to_owned()),
+                    excerpt: excerpt.to_owned(),
+                    content_hash: hash_bytes(excerpt.as_bytes()),
+                    metadata_json: None,
+                    inherited_redaction_classes: Vec::new(),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        let span = source
+            .get_evidence_span(&evidence_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("missing evidence")?;
+        let session = source
+            .get_session(&session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("missing session")?;
+        ensure(
+            span.is_direct_pack_admitted_for_session(&workspace_id, &session),
+            "source evidence is genuinely admitted",
+        )?;
+        let pack_id = crate::models::PackId::from_uuid(Uuid::from_u128(22)).to_string();
+        source
+            .insert_pack_record_with_timings_task_lens_and_evidence(
+                &pack_id,
+                &crate::db::CreatePackRecordInput {
+                    workspace_id,
+                    query: "release verification".to_owned(),
+                    profile: "balanced".to_owned(),
+                    max_tokens: 4000,
+                    used_tokens: 32,
+                    item_count: 1,
+                    omitted_count: 0,
+                    pack_hash: hash_bytes(b"historical native evidence pack"),
+                    degraded_json: None,
+                    created_by: None,
+                },
+                &[],
+                &[crate::db::CreatePackEvidenceItemInput {
+                    pack_id: pack_id.clone(),
+                    evidence_id: evidence_id.clone(),
+                    entity_revision: span.pack_entity_revision(),
+                    rank: 1,
+                    section: "evidence".to_owned(),
+                    estimated_tokens: 32,
+                    relevance: 0.8,
+                    utility: 0.6,
+                    why: "Direct release verification evidence.".to_owned(),
+                    provenance_json: "{}".to_owned(),
+                    trust_class: "cass_evidence".to_owned(),
+                    trust_subclass: None,
+                }],
+                &[],
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+        let original = source
+            .get_pack_history_for_recovery(&pack_id)
+            .map_err(|e| e.to_string())?;
+        source.close().map_err(|e| e.to_string())?;
+        let backup = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: None,
+            label: None,
+            redaction_level: RedactionLevel::Full,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        ensure(
+            backup.recovery_inventory.entries.iter().any(|e| {
+                e.table == "pack_evidence_items" && e.row_count == 1 && e.snapshot_covered
+            }),
+            "native evidence selections are captured",
+        )?;
+        let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&backup.backup_path),
+            side_path: tempdir.path().join("restored-evidence-packs"),
+            restore_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        ensure_equal(
+            restored.restored_pack_history.records,
+            2,
+            "both historical packs restored",
+        )?;
+        ensure_equal(
+            restored.restored_pack_history.evidence_items,
+            1,
+            "native evidence selection restored",
+        )?;
+        let db =
+            DbConnection::open_file(&restored.restored_database_path).map_err(|e| e.to_string())?;
+        let actual = db
+            .get_pack_history_for_recovery(&pack_id)
+            .map_err(|e| e.to_string())?;
+        let evidence = db
+            .get_evidence_span(&evidence_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("restored evidence lost")?;
+        ensure_equal(
+            evidence.pack_eligibility.as_str(),
+            "denied",
+            "full redaction revokes current evidence admission",
+        )?;
+        ensure_equal(
+            &actual.evidence_items[0].entity_revision,
+            &original.evidence_items[0].entity_revision,
+            "historical selection keeps its original evidence revision",
+        )?;
+        ensure(
+            crate::db::parse_stored_pack_ledger(&actual.record)
+                .available_ledger()
+                .is_some(),
+            "historical native replay still verifies",
+        )?;
+        let missing = db
+            .get_pack_history_for_recovery(&legacy.record.id)
+            .map_err(|e| e.to_string())?;
+        ensure_equal(
+            crate::db::parse_stored_pack_ledger(&missing.record).status,
+            crate::db::PackLedgerStatus::Missing,
+            "legacy pack stays explicitly without a ledger",
+        )?;
+        ensure_equal(missing.items.len(), 1, "legacy selected item retained")?;
+        ensure_equal(missing.impressions.len(), 1, "legacy impression retained")?;
+        Ok(())
+    }
+
+    #[test]
+    fn pack_history_rejects_tampering_and_rolls_back() -> TestResult {
+        let (_source_dir, source_workspace, source_database) =
+            fixture().map_err(|e| e.message())?;
+        let source = DbConnection::open_file(&source_database).map_err(|e| e.to_string())?;
+        let originals = [
+            seed_recovery_pack(&source, 10)?,
+            seed_recovery_pack(&source, 11)?,
+        ];
+        let root = StoreAuthRoot::create(workspace_keys_dir(&source_workspace))
+            .map_err(|e| e.to_string())?;
+        for defect in [
+            "tampered",
+            "unsigned",
+            "wrong_backup",
+            "missing_chunk",
+            "duplicate_chunk",
+            "foreign_workspace",
+            "foreign_impression",
+            "duplicate_impression",
+            "mismatched_ledger",
+            "mismatched_child",
+            "invalid_impression",
+            "invalid_baseline",
+        ] {
+            let (tempdir, _workspace, database) = fixture().map_err(|e| e.message())?;
+            let mut chunks = originals
+                .iter()
+                .enumerate()
+                .map(|(index, history)| BackupPackHistory {
+                    schema: PACK_HISTORY_SCHEMA.to_owned(),
+                    backup_id: "backup-original".to_owned(),
+                    workspace_id: history.record.workspace_id.clone(),
+                    chunk_index: index,
+                    chunk_count: 2,
+                    history: history.clone(),
+                    authentication: None,
+                })
+                .collect::<Vec<_>>();
+            match defect {
+                "missing_chunk" => chunks[1].chunk_count = 3,
+                "foreign_workspace" => {
+                    chunks[1].history.record.workspace_id =
+                        WorkspaceId::from_uuid(Uuid::from_u128(99)).to_string()
+                }
+                "foreign_impression" => {
+                    chunks[1].history.impressions[0].workspace_id =
+                        WorkspaceId::from_uuid(Uuid::from_u128(99)).to_string()
+                }
+                "duplicate_impression" => {
+                    let row = chunks[1].history.impressions[0].clone();
+                    chunks[1].history.impressions.push(row);
+                }
+                "mismatched_ledger" => {
+                    chunks[1].history.record.ledger_hash = Some(hash_bytes(b"tampered"))
+                }
+                "mismatched_child" => {
+                    chunks[1].history.items[0].why = "not what selection recorded".to_owned()
+                }
+                // This passes structural decoding and fails the real CHECK
+                // after the first pack's rows were inserted. All must roll back.
+                "invalid_impression" => chunks[1].history.impressions[0].selected = false,
+                "invalid_baseline" => {
+                    chunks[1].history.baselines[0].pack_hash = hash_bytes(b"other pack")
+                }
+                _ => {}
+            }
+            let mut assets = Vec::new();
+            for (index, chunk) in chunks.iter().enumerate() {
+                let mut payloads = vec![derived_payload(
+                    format!("pack-{index}.json"),
+                    "pack_history",
+                    "2026-09-08T00:00:00Z",
+                    None,
+                    serialized_payload_bytes(chunk).map_err(|e| e.to_string())?,
+                )];
+                authenticate_pack_payloads(&mut payloads, Some(&root)).map_err(|e| e.message())?;
+                let mut signed: BackupPackHistory =
+                    serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
+                if index == 1 && defect == "tampered" {
+                    signed.history.record.query = "substituted query".to_owned();
+                }
+                if index == 1 && defect == "unsigned" {
+                    signed.authentication = None;
+                }
+                let path = tempdir.path().join(format!("pack-{index}.json"));
+                fs::write(
+                    &path,
+                    serialized_payload_bytes(&signed).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())?;
+                assets.push(restored_cass_asset(&path, "pack_history"));
+            }
+            if defect == "duplicate_chunk" {
+                assets.push(assets[1].clone());
+            }
+            let error = restore_pack_history(
+                &database,
+                &source_workspace,
+                if defect == "wrong_backup" {
+                    "backup-substituted"
+                } else {
+                    "backup-original"
+                },
+                &assets,
+            )
+            .err()
+            .ok_or_else(|| format!("accepted {defect}"))?;
+            let expected = match defect {
+                "tampered" => "authentication failed",
+                "unsigned" => "requires an authenticated",
+                "wrong_backup" | "missing_chunk" | "duplicate_chunk" | "foreign_workspace" => {
+                    "pack-history chunks"
+                }
+                "foreign_impression" | "duplicate_impression" => "recovered pack impression",
+                "mismatched_ledger" => "mismatched pack replay",
+                "mismatched_child" => "disagrees with stored pack item",
+                "invalid_impression" => "constraint",
+                "invalid_baseline" => "recovered pack baseline",
+                _ => unreachable!(),
+            };
+            ensure(
+                error.message().to_lowercase().contains(expected),
+                format!("{defect} failed at wrong boundary: {}", error.message()),
+            )?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            for table in [
+                "pack_records",
+                "pack_items",
+                "pack_evidence_items",
+                "pack_omissions",
+                "pack_candidate_impressions",
+                "pack_baselines",
+            ] {
+                ensure_equal(
+                    db.count_table_rows(table).map_err(|e| e.to_string())?,
+                    0,
+                    &format!("{defect}: no partial {table}"),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     #[test]
