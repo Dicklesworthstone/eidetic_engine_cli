@@ -6652,9 +6652,8 @@ fn backup_degradations(
     let mut degraded = Vec::new();
     let index_manifest = workspace_path
         .join(WORKSPACE_MARKER)
-        .join("indexes")
-        .join("combined")
-        .join("manifest.json");
+        .join(crate::core::index::DEFAULT_INDEX_SUBDIR)
+        .join("meta.json");
     if !include_derived && !index_manifest.is_file() {
         degraded.push(BackupDegradation::warning(
             "index_manifest_missing",
