@@ -5716,7 +5716,7 @@ fn collect_pack_history_payloads(
     payloads: &mut Vec<BackupDerivedPayload>,
 ) -> Result<(), DomainError> {
     let ids = connection
-        .list_recent_pack_record_ids_for_workspace(workspace_id, u32::MAX)
+        .list_pack_record_ids_for_recovery(workspace_id)
         .map_err(work_history_error)?;
     for (index, id) in ids.iter().enumerate() {
         let original = connection
@@ -11886,6 +11886,12 @@ mod tests {
         let actual = db
             .get_pack_history_for_recovery(&pack_id)
             .map_err(|e| e.to_string())?;
+        ensure_equal(
+            db.list_pack_record_ids_for_recovery(&actual.record.workspace_id)
+                .map_err(|e| e.to_string())?,
+            vec![legacy.record.id.clone(), pack_id.clone()],
+            "historical pack admission order retained",
+        )?;
         let evidence = db
             .get_evidence_span(&evidence_id)
             .map_err(|e| e.to_string())?

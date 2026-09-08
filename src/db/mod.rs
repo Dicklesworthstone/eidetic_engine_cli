@@ -30791,6 +30791,22 @@ impl DbConnection {
         rows.iter().map(stored_pack_item_from_row).collect()
     }
 
+    /// Preserve admission order, including explicitly backdated packs. Runtime
+    /// drift/learning cursors use insertion order rather than wall-clock time.
+    pub(crate) fn list_pack_record_ids_for_recovery(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<String>> {
+        self.query_for(
+            DbOperation::Query,
+            "SELECT id FROM pack_records WHERE workspace_id = ?1 ORDER BY rowid ASC",
+            &[Value::Text(workspace_id.to_owned())],
+        )?
+        .iter()
+        .map(|row| Ok(required_text(row, 0, DbOperation::Query, "id")?.to_owned()))
+        .collect()
+    }
+
     pub(crate) fn get_pack_history_for_recovery(&self, id: &str) -> Result<StoredPackHistory> {
         let record = self
             .get_pack_record(id)?
@@ -30845,8 +30861,8 @@ impl DbConnection {
             self.insert_pack_items(&items)?;
             self.insert_pack_evidence_items(&evidence)?;
             self.insert_pack_omissions(&omissions)?;
-            // The new parent and validate()'s unique-ID check make the normal
-            // deduplicating insertion lossless here; do not regenerate impressions.
+            // Replay the recorded rows with strict inserts. A constraint failure
+            // must roll back recovery rather than silently omit an impression.
             let impressions = history.impressions.iter().map(|row| CreateImpressionInput {
                 pack_id: row.pack_id.clone(), memory_id: row.memory_id.clone(),
                 workspace_id: row.workspace_id.clone(), query_hash: row.query_hash.clone(),
