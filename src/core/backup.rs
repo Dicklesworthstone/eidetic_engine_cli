@@ -17,7 +17,8 @@ use serde_json::{Value as JsonValue, json};
 use crate::config::{EnvVar, WORKSPACE_MARKER, read_env_var, read_env_var_os};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::jsonl_import::{
-    IMPORT_ACTION, JsonlImportOptions, import_memory_id, import_verified_backup_jsonl_records,
+    IMPORT_ACTION, JsonlImportIssueSeverity, JsonlImportOptions, import_memory_id,
+    import_verified_backup_jsonl_records,
 };
 use crate::db::shard::{
     ShardFanoutPosture, ShardFanoutResolverInput, ShardFanoutStatusReport,
@@ -2767,9 +2768,18 @@ pub fn restore_backup_to_side_path(
         ),
     })?;
     if import_report.status != "completed" {
+        let rejection_codes = import_report
+            .issues
+            .iter()
+            .filter(|issue| issue.severity == JsonlImportIssueSeverity::Error)
+            .map(|issue| issue.code.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(DomainError::Import {
             message: format!(
-                "backup records were rejected; incomplete restore retained at '{}'",
+                "backup records were rejected ({rejection_codes}); incomplete restore retained at '{}'",
                 staging_workspace.display()
             ),
             repair: Some(
@@ -11573,6 +11583,7 @@ mod tests {
             RedactionLevel::None,
             RedactionLevel::Standard,
             RedactionLevel::Strict,
+            RedactionLevel::Paranoid,
             RedactionLevel::Full,
         ] {
             let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;

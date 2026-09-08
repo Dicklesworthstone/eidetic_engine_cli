@@ -845,11 +845,10 @@ fn redact_tag_record(mut record: ExportTagRecord, level: RedactionLevel) -> Expo
         record.memory_id = redact_identifier(&record.memory_id, level);
     }
     match level {
-        RedactionLevel::Paranoid => {
+        RedactionLevel::Paranoid | RedactionLevel::Full => {
+            // A prose placeholder such as [REDACTED] is not a valid Tag and
+            // makes our own exported archive impossible to import.
             record.tag = format!("tag_{}", blake3_prefix(&record.tag, 16));
-        }
-        RedactionLevel::Full => {
-            record.tag = REDACTED_PLACEHOLDER.to_owned();
         }
         _ => {}
     }
@@ -2238,6 +2237,31 @@ mod tests {
         assert_eq!(footer.total_records, stats.total_records);
         assert_eq!(footer.memory_count, stats.memory_count);
         assert_eq!(footer.artifact_count, stats.artifact_count);
+    }
+
+    #[test]
+    fn fully_redacted_tags_remain_valid_and_distinct() {
+        for level in [RedactionLevel::Paranoid, RedactionLevel::Full] {
+            let mut aliases = std::collections::BTreeSet::new();
+            for tag in ["private-release", "private-deploy"] {
+                let record = ExportTagRecord::builder()
+                    .memory_id("mem_00000000000000000000000002")
+                    .tag(tag)
+                    .created_at("2026-09-08T00:00:00Z")
+                    .build()
+                    .expect("valid export tag");
+                let redacted = redact_tag_record(record.clone(), level);
+                let parsed = crate::models::Tag::parse(&redacted.tag)
+                    .expect("redacted tag must remain importable");
+                assert_eq!(parsed.as_str(), redacted.tag);
+                assert!(!redacted.tag.contains("private"));
+                assert_eq!(redact_tag_record(record, level), redacted);
+                assert!(
+                    aliases.insert(redacted.tag),
+                    "distinct tags must stay distinct"
+                );
+            }
+        }
     }
 
     #[test]
