@@ -51302,32 +51302,35 @@ mod tests {
             document_id: None,
             documents_total: 5,
         };
-        for state in ["pending", "running", "completed", "failed", "cancelled"] {
-            connection.insert_search_index_job(state, &input)?;
+        let states = ["pending", "running", "completed", "failed", "cancelled"];
+        for (index, state) in states.iter().copied().enumerate() {
+            let job_id = format!("sidx_{index:026}");
+            connection.insert_search_index_job(&job_id, &input)?;
             if state != "pending" {
-                ensure(connection.start_search_index_job(state)?, "claim job")?;
-                connection.update_search_index_job_progress(state, 2)?;
+                ensure(connection.start_search_index_job(&job_id)?, "claim job")?;
+                connection.update_search_index_job_progress(&job_id, 2)?;
             }
             match state {
                 "completed" => {
-                    connection.complete_search_index_job(state, 5)?;
+                    connection.complete_search_index_job(&job_id, 5)?;
                 }
                 "failed" => {
-                    connection.fail_search_index_job(state, "publication blocked")?;
+                    connection.fail_search_index_job(&job_id, "publication blocked")?;
                 }
                 "cancelled" => {
-                    connection.cancel_running_search_index_job(state)?;
+                    connection.cancel_running_search_index_job(&job_id)?;
                 }
                 _ => {}
             }
         }
         ensure(
-            !connection.requeue_search_index_job_for_retry("missing")?,
+            !connection.requeue_search_index_job_for_retry("sidx_00000000000000000000000099")?,
             "missing job is not created",
         )?;
-        for state in ["failed", "cancelled", "pending", "running", "completed"] {
+        for (index, state) in states.iter().copied().enumerate() {
+            let job_id = format!("sidx_{index:026}");
             let before = connection.list_search_index_jobs(&input.workspace_id, None)?;
-            let changed = connection.requeue_search_index_job_for_retry(state)?;
+            let changed = connection.requeue_search_index_job_for_retry(&job_id)?;
             ensure_equal(
                 &changed,
                 &matches!(state, "failed" | "cancelled"),
@@ -51337,7 +51340,7 @@ mod tests {
                 let stored = connection
                     .get_search_index_job(&original.id)?
                     .ok_or_else(|| TestFailure::new("retry lost job identity"))?;
-                if original.id == state && changed {
+                if original.id == job_id && changed {
                     ensure_equal(&stored.status.as_str(), &"pending", "retry is pending")?;
                     ensure_equal(&stored.documents_total, &5, "total preserved")?;
                     ensure_equal(&stored.documents_indexed, &0, "progress reset")?;
