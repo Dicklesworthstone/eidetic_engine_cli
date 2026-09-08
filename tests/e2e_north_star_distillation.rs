@@ -390,13 +390,14 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
     fs::write(
         &view_path,
         serde_json::json!({
+            "total_lines": 2,
             "lines": [
                 {
-                    "line": 10,
+                    "line": 1,
                     "content": r#"{"type":"message","message":{"role":"assistant","content":"clippy warning release failed because cargo test was skipped before the release tag"}}"#
                 },
                 {
-                    "line": 11,
+                    "line": 2,
                     "content": r#"{"type":"message","message":{"role":"assistant","content":"fix was to run cargo test, cargo clippy, and re-check the failing warning before tagging"}}"#
                 }
             ]
