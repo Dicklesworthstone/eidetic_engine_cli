@@ -11518,24 +11518,30 @@ fn candidate_from_hit_preloaded(
         subspans.candidate_construction += construction_start.elapsed();
         return None;
     };
-    // bd-3h6bz: a rule-artifact hit hydrates the promoted RULE body into the
-    // pack candidate — not merely its source memory. The source memory stays
-    // the identity anchor and provenance base; tombstoned rules never
-    // hydrate.
-    let promoted_rule = artifact_id
+    // A rule hit must hydrate that live rule. Its source memory remains the
+    // identity/provenance anchor, but cannot inherit a missing or retired
+    // rule's retrieval score by silently substituting its own body.
+    let promoted_rule = match artifact_id
         .as_deref()
         .filter(|artifact| artifact.starts_with("rule_"))
-        .and_then(|artifact| source.rules.get(artifact))
-        .filter(|rule| rule.tombstoned_at.is_none());
-    let utility = match promoted_rule.and_then(|rule| unit_score(rule.utility)) {
-        Some(rule_utility) => rule_utility,
-        None => {
-            let Some(memory_utility) = unit_score(memory.utility) else {
+    {
+        Some(artifact) => {
+            let Some(rule) = source
+                .rules
+                .get(artifact)
+                .filter(|rule| rule.tombstoned_at.is_none())
+            else {
                 subspans.candidate_construction += construction_start.elapsed();
                 return None;
             };
-            memory_utility
+            Some(rule)
         }
+        None => None,
+    };
+    let Some(utility) = unit_score(promoted_rule.map_or(memory.utility, |rule| rule.utility))
+    else {
+        subspans.candidate_construction += construction_start.elapsed();
+        return None;
     };
     let content = match promoted_rule {
         Some(rule) => rule.content.clone(),
@@ -14286,6 +14292,50 @@ mod tests {
         assert!(promoted.why.contains("utility 0.3500"), "{}", promoted.why);
         assert!(!promoted.why.contains("utility 0.8000"), "{}", promoted.why);
         assert!(promoted.why.contains(&rule_id), "{}", promoted.why);
+
+        for invalid in ["missing", "tombstoned", "invalid_utility"] {
+            let mut unavailable_rules = rules.clone();
+            match invalid {
+                "missing" => {
+                    unavailable_rules.remove(&rule_id);
+                }
+                "tombstoned" => {
+                    unavailable_rules
+                        .get_mut(&rule_id)
+                        .ok_or("missing fixture rule")?
+                        .tombstoned_at = Some("2026-05-02T00:00:00Z".to_owned());
+                }
+                _ => {
+                    unavailable_rules
+                        .get_mut(&rule_id)
+                        .ok_or("missing fixture rule")?
+                        .utility = f64::NAN;
+                }
+            }
+            let unavailable = super::candidate_from_hit_preloaded(
+                super::PreloadedCandidateSource {
+                    memories: &memory_batch,
+                    tags_map: &tags_map,
+                    workspace_path: Path::new("/tmp/ee-hybrid-pack-relevance-test"),
+                    bound_workspace_id: None,
+                    query: "hybrid recall",
+                    validity_reference_time: None,
+                    include_tombstoned: false,
+                    freshness_file_cache: &mut freshness_file_cache,
+                    rules: &unavailable_rules,
+                },
+                &hit,
+                &memory_key,
+                memory_id,
+                Some(rule_id.clone()),
+                &mut degraded,
+                &mut subspans,
+            );
+            assert!(
+                unavailable.is_none(),
+                "{invalid} rule must not substitute its source memory"
+            );
+        }
         Ok(())
     }
 

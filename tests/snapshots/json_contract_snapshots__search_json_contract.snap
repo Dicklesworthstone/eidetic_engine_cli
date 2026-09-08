@@ -87,10 +87,10 @@ expression: canonical_json_text(value)
       "requestedLimit": 10,
       "returnedCount": 1,
       "scoreDistribution": {
-        "max": 0.5,
-        "mean": 0.5,
-        "min": 0.5,
-        "top": 0.5
+        "max": 1.0,
+        "mean": 1.0,
+        "min": 1.0,
+        "top": 1.0
       },
       "sourceCounts": {
         "hybrid": 0,
@@ -247,8 +247,8 @@ expression: canonical_json_text(value)
             "kind": "search_document"
           }
         ],
-        "relevanceScore": 0.5,
-        "score": 0.5,
+        "relevanceScore": 1.0,
+        "score": 1.0,
         "scoreInterval": [
           0.0,
           1.0
@@ -258,7 +258,7 @@ expression: canonical_json_text(value)
         "validFrom": "[TIMESTAMP]",
         "validityStatus": "current",
         "validityWindowKind": "starts_at",
-        "why": "Selected by lexical retrieval with relevance 0.5000 from score 0.5000 (unit_normalized)."
+        "why": "Selected by lexical retrieval with relevance 1.0000 from score 1.0000 (unit_normalized)."
       }
     ],
     "scopeStats": {
