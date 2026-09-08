@@ -14580,7 +14580,8 @@ pub struct CompleteImportLedgerInput {
 }
 
 /// A stored import_ledger row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredImportLedger {
     pub id: String,
     pub workspace_id: String,
@@ -14601,6 +14602,45 @@ pub struct StoredImportLedger {
 }
 
 impl DbConnection {
+    /// Recover an import checkpoint without replaying the import or changing its timestamps.
+    /// The caller owns the recovery transaction and workspace/source rebinding.
+    pub(crate) fn insert_import_ledger_for_recovery(&self, row: &StoredImportLedger) -> Result<()> {
+        for raw in [row.cursor_json.as_deref(), row.metadata_json.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            serde_json::from_str::<serde_json::Value>(raw).map_err(|error| {
+                DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: format!("invalid recovered import JSON: {error}"),
+                }
+            })?;
+        }
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO import_ledger (id, workspace_id, source_kind, source_id, status, cursor_json, imported_session_count, imported_span_count, attempt_count, error_code, error_message, started_at, completed_at, metadata_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            &[
+                Value::Text(row.id.clone()),
+                Value::Text(row.workspace_id.clone()),
+                Value::Text(row.source_kind.clone()),
+                Value::Text(row.source_id.clone()),
+                Value::Text(row.status.clone()),
+                row.cursor_json.clone().map_or(Value::Null, Value::Text),
+                Value::BigInt(i64::from(row.imported_session_count)),
+                Value::BigInt(i64::from(row.imported_span_count)),
+                Value::BigInt(i64::from(row.attempt_count)),
+                row.error_code.clone().map_or(Value::Null, Value::Text),
+                row.error_message.clone().map_or(Value::Null, Value::Text),
+                row.started_at.clone().map_or(Value::Null, Value::Text),
+                row.completed_at.clone().map_or(Value::Null, Value::Text),
+                row.metadata_json.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.created_at.clone()),
+                Value::Text(row.updated_at.clone()),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Insert a resumable import ledger row.
     pub fn insert_import_ledger(&self, id: &str, input: &CreateImportLedgerInput) -> Result<()> {
         let now = Utc::now().to_rfc3339();

@@ -29,8 +29,9 @@ use crate::db::{
     CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType,
     MeshStorageStatus, StoredAuditEntry, StoredEpisodeAction, StoredEvidenceSpan,
     StoredFeedbackEvent, StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness,
-    StoredGraphSnapshot, StoredJournalEntry, StoredMemory, StoredMemoryLink, StoredPackHistory,
-    StoredProceduralRule, StoredSearchIndexJob, StoredSession, StoredTaskEpisode, audit_actions,
+    StoredGraphSnapshot, StoredImportLedger, StoredJournalEntry, StoredMemory, StoredMemoryLink,
+    StoredPackHistory, StoredProceduralRule, StoredSearchIndexJob, StoredSession,
+    StoredTaskEpisode, audit_actions,
 };
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
@@ -59,6 +60,7 @@ const CASS_BACKUP_CHUNK_ROWS: usize = 128;
 const WORK_HISTORY_CHUNK_ROWS: usize = 128;
 const LEARNING_HISTORY_SCHEMA: &str = "ee.backup.learning_history.v1";
 const PACK_HISTORY_SCHEMA: &str = "ee.backup.pack_history.v1";
+const IMPORT_HISTORY_SCHEMA: &str = "ee.backup.import_history.v1";
 const MANIFEST_AUTH_FAMILY: &str = "ee.backup.manifest";
 const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
 const CASS_SESSION_RESTORE_METADATA_SCHEMA_V1: &str = "ee.backup.restored_cass_session_metadata.v1";
@@ -580,6 +582,7 @@ pub struct BackupRestoreReport {
     pub restored_rule_source_count: u32,
     pub restored_rule_tag_count: u32,
     pub restored_feedback_count: u32,
+    pub restored_import_ledger_count: u32,
     pub restored_pack_history: BackupPackHistoryCounts,
     pub restored_graph_cache_count: u32,
     pub restored_derived: Vec<BackupRestoredDerivedAssetReport>,
@@ -618,6 +621,7 @@ impl BackupRestoreReport {
                 "ruleSourcesRestored": self.restored_rule_source_count,
                 "ruleTagsRestored": self.restored_rule_tag_count,
                 "feedbackEventsRestored": self.restored_feedback_count,
+                "importLedgersRestored": self.restored_import_ledger_count,
                 "packHistoryRestored": self.restored_pack_history,
                 "graphCacheRowsRestored": self.restored_graph_cache_count,
                 "issues": self.issue_count,
@@ -632,7 +636,7 @@ impl BackupRestoreReport {
     pub fn human_summary(&self) -> String {
         let prefix = if self.dry_run { "DRY RUN: " } else { "" };
         format!(
-            "{prefix}backup restore {status}: {backup_id}\n  side path: {side_path}\n  restored db: {database}\n  imported memories: {imported} (duplicates: {duplicates})\n  restored task episodes: {episodes}\n  restored CASS sessions/evidence: {sessions}/{evidence}\n  restored journal entries/index jobs: {journals}/{jobs}\n  restored rules/sources/tags/feedback: {rules}/{rule_sources}/{rule_tags}/{feedback}\n  restored packs: {packs}\n",
+            "{prefix}backup restore {status}: {backup_id}\n  side path: {side_path}\n  restored db: {database}\n  imported memories: {imported} (duplicates: {duplicates})\n  restored task episodes: {episodes}\n  restored CASS sessions/evidence: {sessions}/{evidence}\n  restored import checkpoints: {checkpoints}\n  restored journal entries/index jobs: {journals}/{jobs}\n  restored rules/sources/tags/feedback: {rules}/{rule_sources}/{rule_tags}/{feedback}\n  restored packs: {packs}\n",
             status = self.status,
             backup_id = self.backup_id,
             side_path = self.side_path,
@@ -642,6 +646,7 @@ impl BackupRestoreReport {
             episodes = self.restored_task_episode_count,
             sessions = self.restored_cass_session_count,
             evidence = self.restored_evidence_span_count,
+            checkpoints = self.restored_import_ledger_count,
             journals = self.restored_journal_entry_count,
             jobs = self.restored_search_index_job_count,
             rules = self.restored_rule_count,
@@ -1185,6 +1190,26 @@ struct BackupPackHistory {
     authentication: Option<AuthenticatedHeader>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupImportHistory {
+    schema: String,
+    backup_id: String,
+    workspace_id: String,
+    chunk_index: usize,
+    chunk_count: usize,
+    imports: Vec<BackupImportCheckpoint>,
+    authentication: Option<AuthenticatedHeader>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupImportCheckpoint {
+    ledger: StoredImportLedger,
+    /// Validated CASS query options, without the host-local workspace path.
+    cass_query: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupPackHistoryCounts {
@@ -1358,9 +1383,11 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
             "export_restore_required",
             "derived_artifact_restore",
         ),
-        "import_ledger" => {
-            BackupTablePolicy::new("ingest", "export_restore_required", "not_implemented")
-        }
+        "import_ledger" => BackupTablePolicy::new(
+            "ingest",
+            "export_restore_required",
+            "derived_artifact_restore",
+        ),
         "pack_baselines"
         | "pack_candidate_impressions"
         | "pack_evidence_items"
@@ -1537,6 +1564,10 @@ fn reconcile_derived_recovery_inventory(
         ("sessions", captured_session_count),
         ("evidence_spans", captured_evidence_count),
         (
+            "import_ledger",
+            captured_derived_record_count(derived, "import_history", "imports"),
+        ),
+        (
             "journal_entries",
             captured_derived_record_count(derived, "work_history", "journalEntries"),
         ),
@@ -1680,6 +1711,14 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &memory_ids,
                 &mut payloads,
             )?;
+            collect_import_history_payloads(
+                &connection,
+                &export_data.workspace,
+                &backup_id,
+                &created_at,
+                options.redaction_level,
+                &mut payloads,
+            )?;
             collect_learning_history_payloads(
                 &connection,
                 workspace_id,
@@ -1732,16 +1771,20 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     let store_auth = load_store_auth_for_backup(&workspace_path, options.dry_run, &mut degraded);
     if !options.dry_run
         && store_auth.is_none()
-        && derived_payloads
-            .iter()
-            .any(|p| matches!(p.report.kind.as_str(), "learning_history" | "pack_history"))
+        && derived_payloads.iter().any(|p| {
+            matches!(
+                p.report.kind.as_str(),
+                "learning_history" | "pack_history" | "import_history"
+            )
+        })
     {
         return Err(work_history_error(
-            "learned rules, feedback, and pack history require source-store authentication; repair the workspace key store before creating this backup",
+            "learned rules, feedback, pack history, and import checkpoints require source-store authentication; repair the workspace key store before creating this backup",
         ));
     }
     authenticate_learning_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_pack_payloads(&mut derived_payloads, store_auth.as_ref())?;
+    authenticate_import_payloads(&mut derived_payloads, store_auth.as_ref())?;
     let derived_reports = derived_payloads
         .iter()
         .map(|payload| payload.report.clone())
@@ -2675,6 +2718,7 @@ pub fn restore_backup_to_side_path(
             restored_cass_session_count: 0,
             restored_evidence_span_count: 0,
             restored_journal_entry_count: 0,
+            restored_import_ledger_count: 0,
             restored_search_index_job_count: 0,
             restored_rule_count: 0,
             restored_rule_source_count: 0,
@@ -2793,6 +2837,12 @@ pub fn restore_backup_to_side_path(
         restore_cass_assets(&restored_database_path, &restored_derived)?;
     let (restored_journal_entry_count, restored_search_index_job_count) =
         restore_work_history(&restored_database_path, &restored_derived)?;
+    let restored_import_ledger_count = restore_import_history(
+        &restored_database_path,
+        &workspace_path,
+        &inspect.backup_id,
+        &restored_derived,
+    )?;
     let (
         restored_rule_count,
         restored_rule_source_count,
@@ -2894,6 +2944,7 @@ pub fn restore_backup_to_side_path(
         restored_cass_session_count,
         restored_evidence_span_count,
         restored_journal_entry_count,
+        restored_import_ledger_count,
         restored_search_index_job_count,
         restored_rule_count,
         restored_rule_source_count,
@@ -5716,6 +5767,236 @@ fn collect_task_episode_payloads(
     }
 }
 
+fn valid_cass_checkpoint_query(query: &str) -> bool {
+    let Some(rest) = query.strip_prefix("limit=") else {
+        return false;
+    };
+    let (limit, since) = rest
+        .split_once("&since=")
+        .map_or((rest, None), |(l, s)| (l, Some(s)));
+    limit
+        .parse::<u32>()
+        .is_ok_and(|value| value.to_string() == limit)
+        && since.is_none_or(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok())
+}
+
+fn collect_import_history_payloads(
+    connection: &DbConnection,
+    workspace: &ExportWorkspaceRecord,
+    backup_id: &str,
+    captured_at: &str,
+    redaction: RedactionLevel,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) -> Result<(), DomainError> {
+    let prefix = format!("cass://sessions?workspace={}&", workspace.path);
+    let mut imports = Vec::new();
+    for mut ledger in connection
+        .list_import_ledgers(&workspace.workspace_id)
+        .map_err(work_history_error)?
+    {
+        let cass_query = ledger
+            .source_id
+            .strip_prefix(&prefix)
+            .filter(|query| valid_cass_checkpoint_query(query))
+            .map(str::to_owned);
+        let redacted_source = redact_content(&ledger.source_id, redaction);
+        if cass_query.is_some() || redacted_source != ledger.source_id {
+            // Preserve uniqueness without carrying the old host path. The query
+            // options restore the live source key; other sources retain an alias.
+            ledger.source_id = format!(
+                "source_{}",
+                blake3::hash(ledger.source_id.as_bytes()).to_hex()
+            );
+        }
+        ledger.error_message = ledger
+            .error_message
+            .as_deref()
+            .map(|s| redact_content(s, redaction));
+        ledger.error_code = ledger
+            .error_code
+            .as_deref()
+            .map(|s| redact_content(s, redaction));
+        ledger.cursor_json = ledger
+            .cursor_json
+            .as_deref()
+            .map(|s| redact_work_history_json(s, redaction))
+            .transpose()?;
+        ledger.metadata_json = ledger
+            .metadata_json
+            .as_deref()
+            .map(|s| redact_work_history_json(s, redaction))
+            .transpose()?;
+        imports.push(BackupImportCheckpoint { ledger, cass_query });
+    }
+    imports.sort_by(|a, b| a.ledger.id.cmp(&b.ledger.id));
+    let count = imports.len().div_ceil(WORK_HISTORY_CHUNK_ROWS);
+    for (index, records) in imports.chunks(WORK_HISTORY_CHUNK_ROWS).enumerate() {
+        let chunk = BackupImportHistory {
+            schema: IMPORT_HISTORY_SCHEMA.to_owned(),
+            backup_id: backup_id.to_owned(),
+            workspace_id: workspace.workspace_id.clone(),
+            chunk_index: index,
+            chunk_count: count,
+            imports: records.to_vec(),
+            authentication: None,
+        };
+        payloads.push(derived_payload(
+            format!("derived/import-history/{index:08}.json"),
+            "import_history",
+            captured_at,
+            None,
+            serialized_payload_bytes(&chunk).map_err(work_history_error)?,
+        ));
+    }
+    Ok(())
+}
+
+fn import_history_auth_context(workspace: &str) -> ArtifactContext<'_> {
+    ArtifactContext {
+        artifact_family: IMPORT_HISTORY_SCHEMA,
+        record_encoding_version: "json.v1",
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: workspace,
+    }
+}
+
+fn authenticate_import_payloads(
+    payloads: &mut [BackupDerivedPayload],
+    root: Option<&StoreAuthRoot>,
+) -> Result<(), DomainError> {
+    for payload in payloads
+        .iter_mut()
+        .filter(|p| p.report.kind == "import_history")
+    {
+        let mut chunk: BackupImportHistory =
+            serde_json::from_slice(&payload.bytes).map_err(work_history_error)?;
+        chunk.authentication = None;
+        if let Some(root) = root {
+            let hash =
+                canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+            chunk.authentication = Some(
+                authenticate_artifact(
+                    root,
+                    MacDomain::NativeImportRecordsRoot,
+                    &import_history_auth_context(&chunk.workspace_id),
+                    &hash,
+                    1,
+                )
+                .map_err(work_history_error)?,
+            );
+        }
+        payload.bytes = serialized_payload_bytes(&chunk).map_err(work_history_error)?;
+        if payload.bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES {
+            return Err(work_history_error(
+                "import-history chunk exceeds the restore asset byte limit",
+            ));
+        }
+        payload.report.hash = Some(hash_bytes(&payload.bytes));
+        payload.report.byte_size = Some(payload.bytes.len() as u64);
+    }
+    Ok(())
+}
+
+fn restore_import_history(
+    database: &Path,
+    source_workspace: &Path,
+    backup_id: &str,
+    assets: &[BackupRestoredDerivedAssetReport],
+) -> Result<u32, DomainError> {
+    let mut chunks = assets
+        .iter()
+        .filter(|a| a.kind == "import_history")
+        .map(|a| {
+            serde_json::from_value::<BackupImportHistory>(read_restored_derived_json(a)?)
+                .map_err(work_history_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if chunks.is_empty() {
+        return Ok(0);
+    }
+    chunks.sort_by_key(|c| c.chunk_index);
+    let source_id = chunks[0].workspace_id.clone();
+    let count = chunks.len();
+    let root =
+        StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
+    for (index, chunk) in chunks.iter_mut().enumerate() {
+        if chunk.schema != IMPORT_HISTORY_SCHEMA
+            || chunk.backup_id != backup_id
+            || chunk.workspace_id != source_id
+            || chunk.chunk_index != index
+            || chunk.chunk_count != count
+            || chunk.imports.is_empty()
+            || chunk.imports.len() > WORK_HISTORY_CHUNK_ROWS
+        {
+            return Err(work_history_error(
+                "unsupported, incomplete, duplicate, or substituted import-history chunks",
+            ));
+        }
+        let header = chunk.authentication.take().ok_or_else(|| {
+            work_history_error("import checkpoints require an authenticated source-store backup")
+        })?;
+        let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+        if !verify_artifact(
+            &root,
+            MacDomain::NativeImportRecordsRoot,
+            &import_history_auth_context(&source_id),
+            &header,
+            &hash,
+            1,
+        )
+        .map_err(work_history_error)?
+        .is_authenticated()
+        {
+            return Err(work_history_error("import-history authentication failed"));
+        }
+    }
+    let connection = DbConnection::open_file(database).map_err(work_history_error)?;
+    let workspaces = connection.list_workspaces().map_err(work_history_error)?;
+    let workspace_id =
+        remap_restored_workspace_id(&workspaces, Some(&source_id), "import history")?
+            .ok_or_else(|| work_history_error("missing import-history workspace"))?;
+    let workspace = workspaces
+        .iter()
+        .find(|w| w.id == workspace_id)
+        .ok_or_else(|| work_history_error("missing restored import workspace"))?;
+    let mut rows = Vec::new();
+    let mut ids = BTreeSet::new();
+    let mut sources = BTreeSet::new();
+    for checkpoint in chunks.into_iter().flat_map(|c| c.imports) {
+        let mut row = checkpoint.ledger;
+        if row.workspace_id != source_id || !ids.insert(row.id.clone()) {
+            return Err(work_history_error("foreign or duplicate import checkpoint"));
+        }
+        if let Some(query) = checkpoint.cass_query {
+            if row.source_kind != "cass" || !valid_cass_checkpoint_query(&query) {
+                return Err(work_history_error("invalid portable CASS checkpoint query"));
+            }
+            row.source_id = format!("cass://sessions?workspace={}&{query}", workspace.path);
+        }
+        if !sources.insert((row.source_kind.clone(), row.source_id.clone())) {
+            return Err(work_history_error("duplicate recovered import source"));
+        }
+        row.workspace_id.clone_from(&workspace_id);
+        if row.status == "running" {
+            // The old process is absent. Keep durable progress and diagnostics,
+            // but never advertise an active worker in the recovered workspace.
+            row.status = "pending".to_owned();
+            row.started_at = None;
+            row.completed_at = None;
+        }
+        rows.push(row);
+    }
+    connection
+        .with_transaction(|| {
+            for row in &rows {
+                connection.insert_import_ledger_for_recovery(row)?;
+            }
+            Ok(())
+        })
+        .map_err(work_history_error)?;
+    Ok(u32::try_from(rows.len()).unwrap_or(u32::MAX))
+}
+
 fn collect_pack_history_payloads(
     connection: &DbConnection,
     workspace_id: &str,
@@ -7845,13 +8126,12 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
-        // Sessions are now captured by default. Keep a real, still-unsupported
-        // durable row as the negative control for incomplete recovery.
+        // Sessions and import checkpoints must both be captured by default.
         connection
             .insert_import_ledger(
                 "imp_01234567890123456789012345",
                 &crate::db::CreateImportLedgerInput {
-                    workspace_id,
+                    workspace_id: workspace_id.clone(),
                     source_kind: "cass".to_owned(),
                     source_id: "backup-uncovered-import".to_owned(),
                     status: "completed".to_owned(),
@@ -7867,6 +8147,29 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
+        // Keep a real, still-unsupported durable row as the negative control.
+        connection
+            .insert_curation_candidate(
+                "curate_01234567890123456789012345",
+                &crate::db::CreateCurationCandidateInput {
+                    workspace_id,
+                    candidate_type: "promote".to_owned(),
+                    target_memory_id: Some(MemoryId::from_uuid(Uuid::from_u128(2)).to_string()),
+                    proposed_content: None,
+                    proposed_confidence: Some(0.8),
+                    proposed_trust_class: None,
+                    source_type: "human_request".to_owned(),
+                    source_id: None,
+                    reason: "Pending review remains durable.".to_owned(),
+                    confidence: 0.8,
+                    status: None,
+                    created_at: None,
+                    ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
 
         let report = create_backup(&BackupCreateOptions {
@@ -7889,7 +8192,7 @@ mod tests {
         )?;
         ensure(
             !report.recovery_inventory.snapshot_coverage_complete,
-            "nonempty uncovered import row must make snapshot coverage incomplete",
+            "nonempty uncovered curation row must make snapshot coverage incomplete",
         )?;
         let session = report
             .recovery_inventory
@@ -7913,13 +8216,24 @@ mod tests {
             .iter()
             .find(|entry| entry.table == "import_ledger")
             .ok_or_else(|| "recovery inventory omitted import_ledger".to_owned())?;
-        ensure_equal(ledger.row_count, 1, "uncovered import row count")?;
-        ensure(!ledger.snapshot_covered, "import ledger remains uncovered")?;
+        ensure_equal(ledger.row_count, 1, "captured import row count")?;
+        ensure(ledger.snapshot_covered, "import ledger is covered")?;
+        let candidate = report
+            .recovery_inventory
+            .entries
+            .iter()
+            .find(|entry| entry.table == "curation_candidates")
+            .ok_or("missing curation inventory")?;
+        ensure_equal(candidate.row_count, 1, "uncovered curation row count")?;
+        ensure(
+            !candidate.snapshot_covered,
+            "curation review remains uncovered",
+        )?;
         ensure(
             report.degraded.iter().any(|entry| {
                 entry.code == "backup_source_rows_not_covered"
                     && entry.severity == "high"
-                    && entry.message.contains("import_ledger=1")
+                    && entry.message.contains("curation_candidates=1")
             }),
             format!(
                 "partial backup omitted high source-coverage degradation: {:?}",
@@ -12102,6 +12416,431 @@ mod tests {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    fn recovery_import(workspace: &str, path: &Path, n: u32) -> StoredImportLedger {
+        let timestamp = "2026-09-01T00:00:00Z".to_owned();
+        let status = ["pending", "running", "completed", "failed", "skipped"][(n % 5) as usize];
+        StoredImportLedger {
+            id: format!("imp_{n:026}"), workspace_id: workspace.to_owned(),
+            source_kind: "cass".to_owned(),
+            source_id: format!("cass://sessions?workspace={}&limit={}&since=2026-09-01T00:00:00Z", path.display(), n + 1),
+            status: status.to_owned(), cursor_json: Some(json!({"sessionsImported": n, "lastLine": 7, "lastSourcePath": "api_key=import-cursor-canary"}).to_string()),
+            imported_session_count: n, imported_span_count: n * 2, attempt_count: 3,
+            error_code: (status == "failed").then(|| "source_unavailable".to_owned()),
+            error_message: (status == "failed").then(|| "api_key=import-error-canary".to_owned()),
+            started_at: (status != "pending").then(|| timestamp.clone()),
+            completed_at: matches!(status, "completed" | "failed" | "skipped").then(|| timestamp.clone()),
+            metadata_json: Some(json!({"schema":"ee.cass.import.v1","note":"api_key=import-metadata-canary"}).to_string()),
+            created_at: timestamp.clone(), updated_at: timestamp,
+        }
+    }
+
+    #[test]
+    fn default_backup_restores_import_checkpoints_and_reopens_same_source() -> TestResult {
+        for redaction in [
+            RedactionLevel::None,
+            RedactionLevel::Standard,
+            RedactionLevel::Paranoid,
+            RedactionLevel::Full,
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            let source_workspace = source
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .remove(0);
+            let mut originals = (0..129)
+                .map(|n| {
+                    recovery_import(&source_workspace.id, Path::new(&source_workspace.path), n)
+                })
+                .collect::<Vec<_>>();
+            // Noncanonical source keys still retain distinct historical identities.
+            originals[127].source_id = "api_key=import-source-canary-one".to_owned();
+            originals[128].source_id = "api_key=import-source-canary-two".to_owned();
+            source
+                .with_transaction(|| {
+                    for row in &originals {
+                        source.insert_import_ledger_for_recovery(row)?;
+                    }
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?;
+            source.close().map_err(|e| e.to_string())?;
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            let entry = backup
+                .recovery_inventory
+                .entries
+                .iter()
+                .find(|e| e.table == "import_ledger")
+                .ok_or("missing import inventory")?;
+            ensure_equal(entry.row_count, 129, "all checkpoints counted")?;
+            ensure(entry.snapshot_covered, "all checkpoints captured")?;
+            let assets = backup
+                .derived
+                .iter()
+                .filter(|a| a.kind == "import_history")
+                .collect::<Vec<_>>();
+            ensure_equal(assets.len(), 2, "129 checkpoints cross chunk boundary")?;
+            let mut raw = String::new();
+            for asset in assets {
+                raw.push_str(
+                    &fs::read_to_string(Path::new(&backup.backup_path).join(&asset.path))
+                        .map_err(|e| e.to_string())?,
+                );
+            }
+            for canary in [
+                "import-cursor-canary",
+                "import-error-canary",
+                "import-metadata-canary",
+                "import-source-canary",
+            ] {
+                ensure_equal(
+                    raw.contains(canary),
+                    redaction == RedactionLevel::None,
+                    "checkpoint secrets obey redaction",
+                )?;
+            }
+            ensure(
+                !raw.contains(&source_workspace.path),
+                "portable query omits old workspace path",
+            )?;
+            let verification = verify_backup(&BackupVerifyOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                verification.status.as_str(),
+                "verified",
+                "checkpoint backup verifies",
+            )?;
+            let side_path = tempdir.path().join("restored-imports");
+            let mut options = BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: side_path.clone(),
+                restore_graph_cache: false,
+                dry_run: true,
+            };
+            let preview = restore_backup_to_side_path(&options).map_err(|e| e.message())?;
+            ensure_equal(
+                preview.restored_import_ledger_count,
+                0,
+                "dry-run does not claim restored rows",
+            )?;
+            ensure(!side_path.exists(), "dry-run leaves destination absent")?;
+            options.dry_run = false;
+            let restored = restore_backup_to_side_path(&options).map_err(|e| e.message())?;
+            ensure_equal(
+                restored.restored_import_ledger_count,
+                129,
+                "all checkpoints restored",
+            )?;
+            let db = DbConnection::open_file(&restored.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let dest = db.list_workspaces().map_err(|e| e.to_string())?.remove(0);
+            let actual = db
+                .list_import_ledgers(&dest.id)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(
+                actual.len(),
+                129,
+                "no missing or duplicate import checkpoints",
+            )?;
+            for (n, original) in originals.iter().enumerate() {
+                let row = actual
+                    .iter()
+                    .find(|r| r.id == original.id)
+                    .ok_or("checkpoint lost")?;
+                let mut expected = original.clone();
+                expected.workspace_id.clone_from(&dest.id);
+                expected.source_id = if n < 127 {
+                    format!(
+                        "cass://sessions?workspace={}&limit={}&since=2026-09-01T00:00:00Z",
+                        dest.path,
+                        n + 1
+                    )
+                } else if redaction == RedactionLevel::None {
+                    original.source_id.clone()
+                } else {
+                    format!(
+                        "source_{}",
+                        blake3::hash(original.source_id.as_bytes()).to_hex()
+                    )
+                };
+                if original.status == "running" {
+                    expected.status = "pending".to_owned();
+                    expected.started_at = None;
+                    expected.completed_at = None;
+                }
+                if redaction != RedactionLevel::None {
+                    expected.cursor_json = Some(json!({"sessionsImported": n, "lastLine": 7, "lastSourcePath": "[REDACTED]"}).to_string());
+                    expected.metadata_json = Some(json!({"schema": if redaction == RedactionLevel::Standard { "ee.cass.import.v1" } else { "[REDACTED]" }, "note":"[REDACTED]"}).to_string());
+                    if expected.error_message.is_some() {
+                        expected.error_message = Some("[REDACTED]".to_owned());
+                    }
+                    if expected.error_code.is_some() && redaction != RedactionLevel::Standard {
+                        expected.error_code = Some("[REDACTED]".to_owned());
+                    }
+                }
+                ensure_equal(
+                    row,
+                    &expected,
+                    "exact checkpoint progress, diagnostics and timestamps",
+                )?;
+            }
+            let original = &originals[1];
+            let key = format!(
+                "cass://sessions?workspace={}&limit=2&since=2026-09-01T00:00:00Z",
+                dest.path
+            );
+            let reopened = db
+                .upsert_running_import_ledger(
+                    "imp_99999999999999999999999999",
+                    &crate::db::CreateImportLedgerInput {
+                        workspace_id: dest.id.clone(),
+                        source_kind: "cass".to_owned(),
+                        source_id: key,
+                        status: "running".to_owned(),
+                        cursor_json: None,
+                        imported_session_count: 0,
+                        imported_span_count: 0,
+                        attempt_count: 1,
+                        error_code: None,
+                        error_message: None,
+                        started_at: Some("2026-09-02T00:00:00Z".to_owned()),
+                        completed_at: None,
+                        metadata_json: None,
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            ensure_equal(
+                reopened.id,
+                original.id.clone(),
+                "real importer upsert reuses recovered identity",
+            )?;
+            ensure_equal(
+                (
+                    reopened.imported_session_count,
+                    reopened.imported_span_count,
+                    reopened.attempt_count,
+                ),
+                (1, 2, 4),
+                "reopen preserves progress and advances attempts",
+            )?;
+            ensure_equal(
+                db.list_import_ledgers(&dest.id)
+                    .map_err(|e| e.to_string())?
+                    .len(),
+                129,
+                "reopen creates no extra ledger",
+            )?;
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                source
+                    .get_import_ledger(&original.id)
+                    .map_err(|e| e.to_string())?,
+                Some(original.clone()),
+                "source checkpoint remains intact",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn import_history_rejects_tampering_and_rolls_back() -> TestResult {
+        for defect in [
+            "tampered",
+            "unsigned",
+            "wrong_backup",
+            "missing_chunk",
+            "duplicate_chunk",
+            "foreign_workspace",
+            "duplicate_id",
+            "duplicate_source",
+            "invalid_query",
+            "invalid_json",
+            "invalid_row",
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let mut records = (0..2)
+                .map(|n| BackupImportCheckpoint {
+                    ledger: recovery_import(&workspace_id, &workspace, n),
+                    cass_query: Some(format!("limit={}", n + 1)),
+                })
+                .collect::<Vec<_>>();
+            match defect {
+                "foreign_workspace" => records[1].ledger.workspace_id = "wsp_foreign".to_owned(),
+                "duplicate_id" => records[1].ledger.id = records[0].ledger.id.clone(),
+                "duplicate_source" => records[1].cass_query = records[0].cass_query.clone(),
+                "invalid_query" => {
+                    records[1].cass_query = Some("limit=2&source=/private/secret".to_owned())
+                }
+                "invalid_json" => records[1].ledger.cursor_json = Some("{broken".to_owned()),
+                "invalid_row" => records[1].ledger.status = "unknown".to_owned(),
+                _ => {}
+            }
+            let chunk = BackupImportHistory {
+                schema: IMPORT_HISTORY_SCHEMA.to_owned(),
+                backup_id: "backup-original".to_owned(),
+                workspace_id,
+                chunk_index: 0,
+                chunk_count: if defect == "missing_chunk" { 2 } else { 1 },
+                imports: records,
+                authentication: None,
+            };
+            let root =
+                StoreAuthRoot::create(workspace_keys_dir(&workspace)).map_err(|e| e.to_string())?;
+            let mut payloads = vec![derived_payload(
+                "derived/import-history/00000000.json",
+                "import_history",
+                "2026-09-01T00:00:00Z",
+                None,
+                serialized_payload_bytes(&chunk).map_err(|e| e.to_string())?,
+            )];
+            authenticate_import_payloads(&mut payloads, Some(&root)).map_err(|e| e.message())?;
+            let mut signed: BackupImportHistory =
+                serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
+            if defect == "tampered" {
+                signed.imports[0].ledger.imported_session_count = 99;
+            }
+            if defect == "unsigned" {
+                signed.authentication = None;
+            }
+            let path = tempdir.path().join("import-history.json");
+            fs::write(
+                &path,
+                serialized_payload_bytes(&signed).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            let mut assets = vec![restored_cass_asset(&path, "import_history")];
+            if defect == "duplicate_chunk" {
+                assets.push(assets[0].clone());
+            }
+            let error = restore_import_history(
+                &database,
+                &workspace,
+                if defect == "wrong_backup" {
+                    "other-backup"
+                } else {
+                    "backup-original"
+                },
+                &assets,
+            )
+            .err()
+            .ok_or_else(|| format!("accepted {defect}"))?;
+            let expected = match defect {
+                "tampered" => "authentication failed",
+                "unsigned" => "require an authenticated",
+                "wrong_backup" | "missing_chunk" | "duplicate_chunk" => "import-history chunks",
+                "foreign_workspace" | "duplicate_id" => "foreign or duplicate import",
+                "duplicate_source" => "duplicate recovered import source",
+                "invalid_query" => "invalid portable CASS",
+                "invalid_json" => "invalid recovered import JSON",
+                _ => "constraint",
+            };
+            ensure(
+                error.message().contains(expected),
+                format!("{defect} reaches intended failure: {}", error.message()),
+            )?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                db.count_table_rows("import_ledger")
+                    .map_err(|e| e.to_string())?,
+                0,
+                "invalid second checkpoint rolls back first",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn portable_import_query_requires_canonical_options() -> TestResult {
+        for query in [
+            "limit=0",
+            "limit=4294967295",
+            "limit=12&since=2026-09-01T00:00:00Z",
+            "limit=12&since=2026-09-01T00:00:00+02:00",
+        ] {
+            ensure(
+                valid_cass_checkpoint_query(query),
+                format!("valid query {query}"),
+            )?;
+        }
+        for query in [
+            "",
+            "limit=-1",
+            "limit=01",
+            "limit=4294967296",
+            "limit=1&since=invalid",
+            "limit=1&since=2026-09-01T00:00:00Z&workspace=/private",
+            "limit=1&limit=2",
+        ] {
+            ensure(
+                !valid_cass_checkpoint_query(query),
+                format!("invalid query {query}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn import_checkpoint_backup_requires_keys_before_publication() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        db.insert_import_ledger_for_recovery(&recovery_import(&workspace_id, &workspace, 0))
+            .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        let output = tempdir.path().join("checkpoint-backups");
+        let mut options = BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(output.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: true,
+        };
+        let preview = create_backup(&options).map_err(|e| e.message())?;
+        ensure(
+            preview.dry_run,
+            "checkpoint preview works without creating keys",
+        )?;
+        let keys = workspace_keys_dir(&workspace);
+        ensure(!keys.exists(), "checkpoint preview leaves keys absent")?;
+        ensure(!output.exists(), "checkpoint preview leaves output absent")?;
+        fs::write(&keys, b"obstructed keys").map_err(|e| e.to_string())?;
+        options.dry_run = false;
+        let error = create_backup(&options)
+            .err()
+            .ok_or("published unsigned checkpoints")?;
+        ensure(
+            error
+                .message()
+                .contains("require source-store authentication"),
+            "checkpoint publication requires keys",
+        )?;
+        ensure(!output.exists(), "no unsigned checkpoint backup published")?;
+        ensure_equal(
+            fs::read(&keys).map_err(|e| e.to_string())?,
+            b"obstructed keys".to_vec(),
+            "key obstruction remains intact",
+        )?;
         Ok(())
     }
 

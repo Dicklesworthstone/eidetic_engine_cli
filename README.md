@@ -1466,6 +1466,13 @@ currently requires access to the source workspace's authentication keys; the
 manifest's `recoveryInventory` still identifies other durable tables that are
 not yet covered.
 
+Import checkpoints are also included by default. Restore preserves their IDs,
+progress counters, diagnostics, and timestamps, rebinds canonical CASS query
+keys to the destination workspace, and returns interrupted imports to pending.
+The next import of the same query reuses that checkpoint. Redacted noncanonical
+source keys remain distinct opaque history entries; they do not become live
+queries. Import-checkpoint recovery requires the source authentication keys.
+
 ### Diagnostics, eval, ops
 
 | Command | Purpose |
