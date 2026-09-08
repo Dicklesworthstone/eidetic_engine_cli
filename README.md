@@ -1457,6 +1457,15 @@ base retrieval signal dominant.
 | `ee backup list` / `verify <id>` / `inspect <id>` | Audit artifact integrity and the manifest `recoveryInventory` |
 | `ee backup restore <backup-id> --side-path <path>` | Restore into an isolated side path |
 
+Backups include saved pack selections, direct evidence selections, omissions,
+impressions, and agent baselines even when optional caches are excluded. Restore
+preserves their historical scores and provenance, rebinds replay data to the
+destination workspace, and applies the backup's requested redaction. Packs that
+predate replay ledgers remain explicitly without one. Restoring pack history
+currently requires access to the source workspace's authentication keys; the
+manifest's `recoveryInventory` still identifies other durable tables that are
+not yet covered.
+
 ### Diagnostics, eval, ops
 
 | Command | Purpose |

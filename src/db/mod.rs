@@ -30838,50 +30838,76 @@ impl DbConnection {
     /// Restore history with plain parent/child inserts and original timestamps.
     /// Admission and entity revision describe selection time, so tombstoned or
     /// subsequently redacted evidence is checked for workspace membership only.
-    pub(crate) fn insert_pack_history_for_recovery(
+    pub(crate) fn insert_pack_histories_for_recovery<'a>(
         &self,
-        history: &StoredPackHistory,
+        histories: impl IntoIterator<Item = &'a StoredPackHistory>,
     ) -> Result<()> {
+        self.with_transaction(|| {
+            for history in histories {
+                self.insert_pack_history_rows_for_recovery(history)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn insert_pack_history_rows_for_recovery(&self, history: &StoredPackHistory) -> Result<()> {
         history.validate()?;
         let input = history.record_input();
         let items = history.item_inputs();
         let evidence = history.evidence_inputs();
         let omissions = history.omission_inputs();
-        self.with_transaction(|| {
-            self.validate_pack_memory_workspace_membership(&input, &items, &omissions)?;
-            for item in &evidence {
-                let span = self.get_evidence_span(&item.evidence_id)?
-                    .ok_or_else(|| pack_recovery_error("recovered pack evidence is missing"))?;
-                if span.workspace_id != input.workspace_id {
-                    return Err(pack_recovery_error("recovered pack evidence belongs to a different workspace"));
-                }
+        self.validate_pack_memory_workspace_membership(&input, &items, &omissions)?;
+        for item in &evidence {
+            let span = self
+                .get_evidence_span(&item.evidence_id)?
+                .ok_or_else(|| pack_recovery_error("recovered pack evidence is missing"))?;
+            if span.workspace_id != input.workspace_id {
+                return Err(pack_recovery_error(
+                    "recovered pack evidence belongs to a different workspace",
+                ));
             }
-            self.insert_pack_record_row(&history.record.id, &input, &history.record.created_at,
-                history.record.ledger_json.as_deref(), history.record.ledger_hash.as_deref())?;
-            self.insert_pack_items(&items)?;
-            self.insert_pack_evidence_items(&evidence)?;
-            self.insert_pack_omissions(&omissions)?;
-            // Replay the recorded rows with strict inserts. A constraint failure
-            // must roll back recovery rather than silently omit an impression.
-            let impressions = history.impressions.iter().map(|row| CreateImpressionInput {
-                pack_id: row.pack_id.clone(), memory_id: row.memory_id.clone(),
-                workspace_id: row.workspace_id.clone(), query_hash: row.query_hash.clone(),
-                lens_hash: row.lens_hash.clone(), rank: row.rank, section: row.section.clone(),
-                token_estimate: row.token_estimate, selected: row.selected,
-                omission_reason: row.omission_reason.clone(), db_generation: row.db_generation,
-                index_generation: row.index_generation, graph_generation: row.graph_generation,
+        }
+        self.insert_pack_record_row(
+            &history.record.id,
+            &input,
+            &history.record.created_at,
+            history.record.ledger_json.as_deref(),
+            history.record.ledger_hash.as_deref(),
+        )?;
+        self.insert_pack_items(&items)?;
+        self.insert_pack_evidence_items(&evidence)?;
+        self.insert_pack_omissions(&omissions)?;
+        // Replay the recorded rows with strict inserts. A constraint failure
+        // must roll back recovery rather than silently omit an impression.
+        let impressions = history
+            .impressions
+            .iter()
+            .map(|row| CreateImpressionInput {
+                pack_id: row.pack_id.clone(),
+                memory_id: row.memory_id.clone(),
+                workspace_id: row.workspace_id.clone(),
+                query_hash: row.query_hash.clone(),
+                lens_hash: row.lens_hash.clone(),
+                rank: row.rank,
+                section: row.section.clone(),
+                token_estimate: row.token_estimate,
+                selected: row.selected,
+                omission_reason: row.omission_reason.clone(),
+                db_generation: row.db_generation,
+                index_generation: row.index_generation,
+                graph_generation: row.graph_generation,
                 created_at: row.created_at.clone(),
-            }).collect::<Vec<_>>();
-            self.insert_impressions_with_conflict_policy(&impressions, false)?;
-            for baseline in &history.baselines {
-                self.execute_for(DbOperation::Execute,
+            })
+            .collect::<Vec<_>>();
+        self.insert_impressions_with_conflict_policy(&impressions, false)?;
+        for baseline in &history.baselines {
+            self.execute_for(DbOperation::Execute,
                     "INSERT INTO pack_baselines (workspace_id, agent_name, task_key, pack_id, pack_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     &[Value::Text(input.workspace_id.clone()), Value::Text(baseline.agent_name.clone()),
                         Value::Text(baseline.task_key.clone().unwrap_or_default()), Value::Text(baseline.pack_id.clone()),
                         Value::Text(baseline.pack_hash.clone()), Value::Text(baseline.created_at.clone())])?;
-            }
-            Ok(())
-        })
+        }
+        Ok(())
     }
 
     /// Get direct imported-evidence items for a pack.

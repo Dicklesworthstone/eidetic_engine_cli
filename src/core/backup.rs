@@ -5921,12 +5921,7 @@ fn restore_pack_history(
             .map_err(work_history_error)?;
     }
     connection
-        .with_transaction(|| {
-            for chunk in &chunks {
-                connection.insert_pack_history_for_recovery(&chunk.history)?;
-            }
-            Ok(())
-        })
+        .insert_pack_histories_for_recovery(chunks.iter().map(|chunk| &chunk.history))
         .map_err(work_history_error)?;
     for chunk in &chunks {
         counts.include(&chunk.history);
