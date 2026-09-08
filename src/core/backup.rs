@@ -11959,9 +11959,16 @@ mod tests {
         let (_source_dir, source_workspace, source_database) =
             fixture().map_err(|e| e.message())?;
         let source = DbConnection::open_file(&source_database).map_err(|e| e.to_string())?;
+        let first = seed_recovery_pack(&source, 10)?;
+        let second = seed_recovery_pack(&source, 11)?;
+        // The second pack advances the same agent/task baselines. Capture
+        // their final state so a duplicate baseline cannot mask the invalid
+        // impression's CHECK failure and make the rollback test pass falsely.
         let originals = [
-            seed_recovery_pack(&source, 10)?,
-            seed_recovery_pack(&source, 11)?,
+            source
+                .get_pack_history_for_recovery(&first.record.id)
+                .map_err(|e| e.to_string())?,
+            second,
         ];
         let root = StoreAuthRoot::create(workspace_keys_dir(&source_workspace))
             .map_err(|e| e.to_string())?;
