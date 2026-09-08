@@ -14331,10 +14331,21 @@ mod tests {
                 &mut degraded,
                 &mut subspans,
             );
-            assert!(
-                unavailable.is_none(),
-                "{invalid} rule must not substitute its source memory"
-            );
+            if invalid == "invalid_utility" {
+                let normalized = unavailable.ok_or("non-finite utility normalizes to zero")?;
+                assert_eq!(normalized.content, "Validate signed release artifacts.");
+                assert_eq!(normalized.utility.into_inner(), 0.0);
+                assert!(
+                    normalized.why.contains("utility 0.0000"),
+                    "{}",
+                    normalized.why
+                );
+            } else {
+                assert!(
+                    unavailable.is_none(),
+                    "{invalid} rule must not substitute its source memory"
+                );
+            }
         }
         Ok(())
     }
