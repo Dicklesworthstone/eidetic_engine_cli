@@ -28707,7 +28707,8 @@ pub struct CreatePackBaselineInput {
 }
 
 /// A stored pack_baselines row.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredPackBaseline {
     pub agent_name: String,
     /// `None` when the row was recorded without a task key.
@@ -28733,7 +28734,8 @@ fn stored_pack_baseline_from_row(row: &Row) -> Result<StoredPackBaseline> {
 }
 
 /// A stored pack_records row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredPackRecord {
     pub id: String,
     pub workspace_id: String,
@@ -28864,7 +28866,8 @@ pub struct CreatePackItemInput {
 }
 
 /// A stored pack_items row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredPackItem {
     pub pack_id: String,
     pub memory_id: String,
@@ -28898,7 +28901,8 @@ pub struct CreatePackEvidenceItemInput {
 }
 
 /// A stored `pack_evidence_items` row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredPackEvidenceItem {
     pub pack_id: String,
     pub evidence_id: String,
@@ -28925,7 +28929,8 @@ pub struct CreatePackOmissionInput {
 }
 
 /// A stored pack_omissions row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredPackOmission {
     pub pack_id: String,
     pub memory_id: String,
@@ -28965,7 +28970,8 @@ pub struct CreateImpressionInput {
 }
 
 /// A stored `impressions` row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredImpression {
     pub pack_id: String,
     pub memory_id: String,
@@ -28981,6 +28987,187 @@ pub struct StoredImpression {
     pub index_generation: Option<u32>,
     pub graph_generation: Option<u32>,
     pub created_at: String,
+}
+
+/// One historical pack and all of its durable children. Recovery preserves
+/// recorded decisions; it must not rerun selection or infer new impressions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct StoredPackHistory {
+    pub record: StoredPackRecord,
+    pub items: Vec<StoredPackItem>,
+    pub evidence_items: Vec<StoredPackEvidenceItem>,
+    pub omissions: Vec<StoredPackOmission>,
+    pub impressions: Vec<StoredImpression>,
+    pub baselines: Vec<StoredPackBaseline>,
+}
+
+fn pack_recovery_error(message: impl Into<String>) -> DbError {
+    DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message: message.into(),
+    }
+}
+
+impl StoredPackHistory {
+    fn record_input(&self) -> CreatePackRecordInput {
+        CreatePackRecordInput {
+            workspace_id: self.record.workspace_id.clone(),
+            query: self.record.query.clone(),
+            profile: self.record.profile.clone(),
+            max_tokens: self.record.max_tokens,
+            used_tokens: self.record.used_tokens,
+            item_count: self.record.item_count,
+            omitted_count: self.record.omitted_count,
+            pack_hash: self.record.pack_hash.clone(),
+            degraded_json: self.record.degraded_json.clone(),
+            created_by: self.record.created_by.clone(),
+        }
+    }
+
+    fn item_inputs(&self) -> Vec<CreatePackItemInput> {
+        self.items.iter().map(|item| CreatePackItemInput {
+            pack_id: item.pack_id.clone(), memory_id: item.memory_id.clone(),
+            rank: item.rank, section: item.section.clone(), estimated_tokens: item.estimated_tokens,
+            relevance: item.relevance, utility: item.utility, combined_score: None,
+            attempt_family_multiplicity: None, why: item.why.clone(),
+            diversity_key: item.diversity_key.clone(), provenance_json: item.provenance_json.clone(),
+            trust_class: item.trust_class.clone(), trust_subclass: item.trust_subclass.clone(),
+        }).collect()
+    }
+
+    fn evidence_inputs(&self) -> Vec<CreatePackEvidenceItemInput> {
+        self.evidence_items.iter().map(|item| CreatePackEvidenceItemInput {
+            pack_id: item.pack_id.clone(), evidence_id: item.evidence_id.clone(),
+            entity_revision: item.entity_revision.clone(), rank: item.rank,
+            section: item.section.clone(), estimated_tokens: item.estimated_tokens,
+            relevance: item.relevance, utility: item.utility, why: item.why.clone(),
+            provenance_json: item.provenance_json.clone(), trust_class: item.trust_class.clone(),
+            trust_subclass: item.trust_subclass.clone(),
+        }).collect()
+    }
+
+    fn omission_inputs(&self) -> Vec<CreatePackOmissionInput> {
+        self.omissions.iter().map(|item| CreatePackOmissionInput {
+            pack_id: item.pack_id.clone(), memory_id: item.memory_id.clone(),
+            estimated_tokens: item.estimated_tokens, reason: item.reason.clone(),
+            attempt_family_multiplicity: None,
+        }).collect()
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        let items = self.item_inputs();
+        let evidence = self.evidence_inputs();
+        validate_pack_record_input(&self.record.id, &self.record_input(), &items, &evidence,
+            &self.omission_inputs(), &self.record.created_at)?;
+        let parsed = parse_stored_pack_ledger(&self.record);
+        match parsed.status {
+            PackLedgerStatus::Missing if self.record.ledger_json.is_none()
+                && self.record.ledger_hash.is_none() => {}
+            PackLedgerStatus::Available => {
+                let ledger: PackSelectionLedger = serde_json::from_value(
+                    parsed.available_ledger().cloned().ok_or_else(|| pack_recovery_error("missing replay ledger"))?
+                ).map_err(|error| pack_recovery_error(error.to_string()))?;
+                let expected = items.iter().map(pack_ledger_selected_item)
+                    .chain(evidence.iter().map(pack_ledger_selected_evidence_item))
+                    .map(|item| (item.rank, item)).collect::<BTreeMap<_, _>>();
+                for selected in &ledger.core.selected_items {
+                    let row = expected.get(&selected.rank).ok_or_else(|| pack_recovery_error("replay selection has no stored item"))?;
+                    if selected.memory_id != row.memory_id || selected.evidence_span_id != row.evidence_span_id
+                        || (!selected.entity_id.is_empty() && selected.entity_id != row.entity_id)
+                        || (!selected.entity_kind.is_empty() && selected.entity_kind != row.entity_kind)
+                        || selected.entity_revision != row.entity_revision || selected.section != row.section
+                        || selected.estimated_tokens != row.estimated_tokens
+                        || selected.scores.relevance != row.scores.relevance || selected.scores.utility != row.scores.utility
+                        || selected.why.hash != row.why.hash || selected.provenance.hash != row.provenance.hash
+                        || selected.diversity_key != row.diversity_key || selected.trust_class != row.trust_class
+                        || selected.trust_subclass != row.trust_subclass {
+                        return Err(pack_recovery_error("replay selection disagrees with stored pack item"));
+                    }
+                }
+                for omitted in &ledger.core.omitted_items {
+                    if !self.omissions.iter().any(|row| row.memory_id == omitted.memory_id
+                        && row.estimated_tokens == omitted.estimated_tokens && row.reason == omitted.reason) {
+                        return Err(pack_recovery_error("replay omission disagrees with stored pack omission"));
+                    }
+                }
+            }
+            _ => return Err(pack_recovery_error("cannot recover a malformed or mismatched pack replay ledger")),
+        }
+        let mut impressions = BTreeSet::new();
+        for impression in &self.impressions {
+            if impression.pack_id != self.record.id || impression.workspace_id != self.record.workspace_id
+                || !is_canonical_memory_id(&impression.memory_id)
+                || !impressions.insert(&impression.memory_id)
+                || !is_canonical_blake3_hash(&impression.query_hash)
+                || !is_canonical_blake3_hash(&impression.lens_hash)
+                || DateTime::parse_from_rfc3339(&impression.created_at).is_err() {
+                return Err(pack_recovery_error("foreign, duplicate, or invalid recovered pack impression"));
+            }
+        }
+        let mut baselines = BTreeSet::new();
+        for baseline in &self.baselines {
+            if baseline.pack_id != self.record.id || baseline.pack_hash != self.record.pack_hash
+                || baseline.agent_name.trim().is_empty()
+                || !baselines.insert((&baseline.agent_name, &baseline.task_key))
+                || DateTime::parse_from_rfc3339(&baseline.created_at).is_err() {
+                return Err(pack_recovery_error("foreign, duplicate, or invalid recovered pack baseline"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Rebind an already validated historical ledger after explicit backup
+    /// redaction or identity remapping. Retain lens, generations, combined
+    /// scores, and multiplicity evidence rather than rebuilding them today.
+    pub(crate) fn rebind_recovery_ledger(&mut self, original: &Self) -> Result<()> {
+        original.validate()?;
+        if self == original || original.record.ledger_json.is_none() {
+            return self.validate();
+        }
+        let parsed = parse_stored_pack_ledger(&original.record);
+        let mut ledger: PackSelectionLedger = serde_json::from_value(
+            parsed.available_ledger().cloned().ok_or_else(|| pack_recovery_error("missing original replay ledger"))?
+        ).map_err(|error| pack_recovery_error(error.to_string()))?;
+        let core = &mut ledger.core;
+        core.workspace_id.clone_from(&self.record.workspace_id);
+        core.created_by.clone_from(&self.record.created_by);
+        core.command_surface = self.record.created_by.clone().unwrap_or_else(|| "unknown".to_owned());
+        if self.record.query != original.record.query {
+            core.request.query = pack_ledger_text_record(&self.record.query);
+        }
+        core.degraded = pack_ledger_degradations(self.record.degraded_json.as_deref())?;
+        let rows = self.item_inputs().iter().map(pack_ledger_selected_item)
+            .chain(self.evidence_inputs().iter().map(pack_ledger_selected_evidence_item))
+            .map(|item| (item.rank, item)).collect::<BTreeMap<_, _>>();
+        for selected in &mut core.selected_items {
+            let row = rows.get(&selected.rank).ok_or_else(|| pack_recovery_error("rebound selection has no stored item"))?;
+            selected.memory_id.clone_from(&row.memory_id);
+            selected.entity_id.clone_from(&row.entity_id);
+            selected.entity_kind.clone_from(&row.entity_kind);
+            selected.diversity_key.clone_from(&row.diversity_key);
+            selected.trust_subclass.clone_from(&row.trust_subclass);
+            if selected.why.hash != row.why.hash { selected.why = row.why.clone(); }
+            if selected.provenance.hash != row.provenance.hash { selected.provenance = row.provenance.clone(); }
+            selected.redaction_classes.extend(selected.why.redaction_reasons.iter().cloned());
+            selected.redaction_classes.extend(selected.provenance.redaction_reasons.iter().cloned());
+            selected.redaction_classes.sort();
+            selected.redaction_classes.dedup();
+        }
+        let identities = original.omissions.iter().zip(&self.omissions)
+            .map(|(old, new)| (&old.memory_id, &new.memory_id)).collect::<BTreeMap<_, _>>();
+        for omitted in &mut core.omitted_items {
+            omitted.memory_id = identities.get(&omitted.memory_id)
+                .ok_or_else(|| pack_recovery_error("rebound omission has no original identity"))?.to_string();
+        }
+        core.omitted_items.sort_by(|left, right| left.memory_id.cmp(&right.memory_id));
+        let hash = blake3_text_hash(&pack_ledger_json(core, "recovered pack ledger core")?);
+        ledger.ledger_hash.clone_from(&hash);
+        self.record.ledger_json = Some(store_pack_selection_ledger_json(
+            &pack_ledger_json(&ledger, "recovered pack ledger")?, &hash)?);
+        self.record.ledger_hash = Some(hash);
+        self.validate()
+    }
 }
 
 /// Source taxonomy for outcome evidence (ADR 0055, bd-1n0np.2.3), ordered
