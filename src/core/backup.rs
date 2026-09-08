@@ -13052,6 +13052,26 @@ mod tests {
         }
     }
 
+    fn seed_unredacted_curation_evidence(db: &DbConnection, workspace_id: &str) -> TestResult {
+        let content = "Verify the release artifact checksum.";
+        ensure_equal(
+            redact_content(content, RedactionLevel::Standard),
+            content.to_owned(),
+            "positive curation evidence must survive standard redaction",
+        )?;
+        db.apply_memory_curation_update(
+            &MemoryId::from_uuid(Uuid::from_u128(2)).to_string(),
+            &crate::db::ApplyMemoryCurationInput {
+                workspace_id: workspace_id.to_owned(),
+                content: content.to_owned(),
+                confidence: 0.8,
+                trust_class: "agent_validated".to_owned(),
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     #[test]
     fn default_backup_restores_curation_history_and_applies_review() -> TestResult {
         use crate::core::curate::{
@@ -13069,6 +13089,7 @@ mod tests {
             let originals = (0..129)
                 .map(|n| recovery_candidate(&source_id, n))
                 .collect::<Vec<_>>();
+            seed_unredacted_curation_evidence(&source, &source_id)?;
             let mut policies = source
                 .list_curation_ttl_policies()
                 .map_err(|e| e.to_string())?;
@@ -13157,7 +13178,7 @@ mod tests {
             )?;
             ensure_equal(
                 memories[0].content.as_str(),
-                "Authorization header should be redacted",
+                "Verify the release artifact checksum.",
                 "identifier redaction leaves the target evidence unchanged",
             )?;
             let restored_target_id = memories[0].id.clone();
@@ -13332,6 +13353,7 @@ mod tests {
             .remove(0)
             .id;
         let mut candidate = recovery_candidate(&workspace_id, 1);
+        seed_unredacted_curation_evidence(&db, &workspace_id)?;
         candidate.source_id = Some(format!("{memory}, {memory}"));
         db.insert_curation_candidate_for_recovery(&candidate)
             .map_err(|e| e.to_string())?;
@@ -13399,6 +13421,7 @@ mod tests {
                 .remove(0)
                 .id;
             let mut derived = recovery_candidate(&workspace_id, 1);
+            seed_unredacted_curation_evidence(&db, &workspace_id)?;
             let source_memory = db
                 .get_memory(derived.target_memory_id.as_deref().ok_or("source")?)
                 .map_err(|e| e.to_string())?
@@ -13410,8 +13433,10 @@ mod tests {
             derived.candidate_type = "create_derived_memory".to_owned();
             derived.target_memory_id = None;
             derived.source_id = Some(source_memory.id.clone());
-            derived.proposed_content =
-                Some("A release review must keep the source evidence available.".to_owned());
+            derived.proposed_content = Some(
+                "In src/core/backup.rs, `ee backup restore` retains blake3 source hashes so `ee curate apply` can reject changed evidence."
+                    .to_owned(),
+            );
             derived.derivation_source_refs_json = Some(
                 json!([{"kind":"memory", "id":source_memory.id, "contentHash":hash}]).to_string(),
             );
@@ -13443,6 +13468,21 @@ mod tests {
             })
             .map_err(|e| e.to_string())?;
             db.close().map_err(|e| e.to_string())?;
+            let source_validation = validate_curation_candidate(&CurateValidateOptions {
+                workspace_path: &workspace,
+                database_path: None,
+                candidate_id: &derived.id,
+                actor: Some("recovery-reviewer"),
+                dry_run: true,
+            })
+            .map_err(|e| e.message())?;
+            ensure(
+                source_validation.validation.errors.is_empty(),
+                format!(
+                    "source derivation must be applicable before backup: {:?}",
+                    source_validation.validation
+                ),
+            )?;
             let backup = create_backup(&BackupCreateOptions {
                 workspace_path: workspace.clone(),
                 database_path: Some(database.clone()),
