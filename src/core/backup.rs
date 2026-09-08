@@ -27,11 +27,11 @@ use crate::db::shard::{
 use crate::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
     CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType,
-    MeshStorageStatus, StoredAuditEntry, StoredEpisodeAction, StoredEvidenceSpan,
-    StoredFeedbackEvent, StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness,
-    StoredGraphSnapshot, StoredImportLedger, StoredJournalEntry, StoredMemory, StoredMemoryLink,
-    StoredPackHistory, StoredProceduralRule, StoredSearchIndexJob, StoredSession,
-    StoredTaskEpisode, audit_actions,
+    MeshStorageStatus, StoredAuditEntry, StoredCurationCandidate, StoredCurationTtlPolicy,
+    StoredEpisodeAction, StoredEvidenceSpan, StoredFeedbackEvent, StoredGraphAlgorithmResult,
+    StoredGraphAlgorithmWitness, StoredGraphSnapshot, StoredImportLedger, StoredJournalEntry,
+    StoredMemory, StoredMemoryLink, StoredPackHistory, StoredProceduralRule, StoredSearchIndexJob,
+    StoredSession, StoredTaskEpisode, audit_actions,
 };
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
@@ -61,6 +61,7 @@ const WORK_HISTORY_CHUNK_ROWS: usize = 128;
 const LEARNING_HISTORY_SCHEMA: &str = "ee.backup.learning_history.v1";
 const PACK_HISTORY_SCHEMA: &str = "ee.backup.pack_history.v1";
 const IMPORT_HISTORY_SCHEMA: &str = "ee.backup.import_history.v1";
+const CURATION_HISTORY_SCHEMA: &str = "ee.backup.curation_history.v1";
 const MANIFEST_AUTH_FAMILY: &str = "ee.backup.manifest";
 const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
 const CASS_SESSION_RESTORE_METADATA_SCHEMA_V1: &str = "ee.backup.restored_cass_session_metadata.v1";
@@ -583,6 +584,8 @@ pub struct BackupRestoreReport {
     pub restored_rule_tag_count: u32,
     pub restored_feedback_count: u32,
     pub restored_import_ledger_count: u32,
+    pub restored_curation_candidate_count: u32,
+    pub restored_curation_policy_count: u32,
     pub restored_pack_history: BackupPackHistoryCounts,
     pub restored_graph_cache_count: u32,
     pub restored_derived: Vec<BackupRestoredDerivedAssetReport>,
@@ -622,6 +625,8 @@ impl BackupRestoreReport {
                 "ruleTagsRestored": self.restored_rule_tag_count,
                 "feedbackEventsRestored": self.restored_feedback_count,
                 "importLedgersRestored": self.restored_import_ledger_count,
+                "curationCandidatesRestored": self.restored_curation_candidate_count,
+                "curationPoliciesRestored": self.restored_curation_policy_count,
                 "packHistoryRestored": self.restored_pack_history,
                 "graphCacheRowsRestored": self.restored_graph_cache_count,
                 "issues": self.issue_count,
@@ -636,7 +641,7 @@ impl BackupRestoreReport {
     pub fn human_summary(&self) -> String {
         let prefix = if self.dry_run { "DRY RUN: " } else { "" };
         format!(
-            "{prefix}backup restore {status}: {backup_id}\n  side path: {side_path}\n  restored db: {database}\n  imported memories: {imported} (duplicates: {duplicates})\n  restored task episodes: {episodes}\n  restored CASS sessions/evidence: {sessions}/{evidence}\n  restored import checkpoints: {checkpoints}\n  restored journal entries/index jobs: {journals}/{jobs}\n  restored rules/sources/tags/feedback: {rules}/{rule_sources}/{rule_tags}/{feedback}\n  restored packs: {packs}\n",
+            "{prefix}backup restore {status}: {backup_id}\n  side path: {side_path}\n  restored db: {database}\n  imported memories: {imported} (duplicates: {duplicates})\n  restored task episodes: {episodes}\n  restored CASS sessions/evidence: {sessions}/{evidence}\n  restored import checkpoints: {checkpoints}\n  restored curation proposals/policies: {candidates}/{policies}\n  restored journal entries/index jobs: {journals}/{jobs}\n  restored rules/sources/tags/feedback: {rules}/{rule_sources}/{rule_tags}/{feedback}\n  restored packs: {packs}\n",
             status = self.status,
             backup_id = self.backup_id,
             side_path = self.side_path,
@@ -647,6 +652,8 @@ impl BackupRestoreReport {
             sessions = self.restored_cass_session_count,
             evidence = self.restored_evidence_span_count,
             checkpoints = self.restored_import_ledger_count,
+            candidates = self.restored_curation_candidate_count,
+            policies = self.restored_curation_policy_count,
             journals = self.restored_journal_entry_count,
             jobs = self.restored_search_index_job_count,
             rules = self.restored_rule_count,
@@ -1210,6 +1217,27 @@ struct BackupImportCheckpoint {
     cass_query: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupCurationHistory {
+    schema: String,
+    backup_id: String,
+    workspace_id: String,
+    chunk_index: usize,
+    chunk_count: usize,
+    candidates: Vec<BackupCurationCandidate>,
+    policies: Vec<StoredCurationTtlPolicy>,
+    authentication: Option<AuthenticatedHeader>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupCurationCandidate {
+    candidate: StoredCurationCandidate,
+    /// Approval is evidence about the original proposal, not its redacted copy.
+    requires_fresh_review: bool,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupPackHistoryCounts {
@@ -1294,7 +1322,7 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
             BackupTablePolicy::new("maintain", "derived_rebuildable", "rebuild_on_restore")
         }
 
-        "ee_schema_migrations" | "curation_ttl_policies" => BackupTablePolicy::new(
+        "ee_schema_migrations" => BackupTablePolicy::new(
             "maintain",
             "migration_metadata",
             "recreated_by_current_binary",
@@ -1398,8 +1426,12 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
             "export_restore_required",
             "derived_artifact_restore",
         ),
-        "curation_candidates"
-        | "feedback_quarantine"
+        "curation_candidates" | "curation_ttl_policies" => BackupTablePolicy::new(
+            "learn",
+            "export_restore_required",
+            "derived_artifact_restore",
+        ),
+        "feedback_quarantine"
         | "learning_observations"
         | "outcome_evidence_rows"
         | "plan_recipes"
@@ -1568,6 +1600,14 @@ fn reconcile_derived_recovery_inventory(
             captured_derived_record_count(derived, "import_history", "imports"),
         ),
         (
+            "curation_candidates",
+            captured_derived_record_count(derived, "curation_history", "candidates"),
+        ),
+        (
+            "curation_ttl_policies",
+            captured_derived_record_count(derived, "curation_history", "policies"),
+        ),
+        (
             "journal_entries",
             captured_derived_record_count(derived, "work_history", "journalEntries"),
         ),
@@ -1719,6 +1759,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 options.redaction_level,
                 &mut payloads,
             )?;
+            collect_curation_history_payloads(
+                &connection,
+                workspace_id,
+                &backup_id,
+                &created_at,
+                options.redaction_level,
+                &memory_ids,
+                &mut payloads,
+            )?;
             collect_learning_history_payloads(
                 &connection,
                 workspace_id,
@@ -1775,16 +1824,19 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
             matches!(
                 p.report.kind.as_str(),
                 "learning_history" | "pack_history" | "import_history"
-            )
+            ) || (p.report.kind == "curation_history"
+                && serde_json::from_slice::<BackupCurationHistory>(&p.bytes)
+                    .is_ok_and(|chunk| !chunk.candidates.is_empty()))
         })
     {
         return Err(work_history_error(
-            "learned rules, feedback, pack history, and import checkpoints require source-store authentication; repair the workspace key store before creating this backup",
+            "learned rules, feedback, pack history, import checkpoints, and curation history require source-store authentication; repair the workspace key store before creating this backup",
         ));
     }
     authenticate_learning_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_pack_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_import_payloads(&mut derived_payloads, store_auth.as_ref())?;
+    authenticate_curation_payloads(&mut derived_payloads, store_auth.as_ref())?;
     let derived_reports = derived_payloads
         .iter()
         .map(|payload| payload.report.clone())
@@ -2719,6 +2771,8 @@ pub fn restore_backup_to_side_path(
             restored_evidence_span_count: 0,
             restored_journal_entry_count: 0,
             restored_import_ledger_count: 0,
+            restored_curation_candidate_count: 0,
+            restored_curation_policy_count: 0,
             restored_search_index_job_count: 0,
             restored_rule_count: 0,
             restored_rule_source_count: 0,
@@ -2860,6 +2914,13 @@ pub fn restore_backup_to_side_path(
         &inspect.backup_id,
         &restored_derived,
     )?;
+    let (restored_curation_candidate_count, restored_curation_policy_count) =
+        restore_curation_history(
+            &restored_database_path,
+            &workspace_path,
+            &inspect.backup_id,
+            &restored_derived,
+        )?;
     let graph_cache_restored_count = if options.restore_graph_cache {
         restore_graph_cache_assets(&restored_database_path, &restored_derived)?
     } else {
@@ -2945,6 +3006,8 @@ pub fn restore_backup_to_side_path(
         restored_evidence_span_count,
         restored_journal_entry_count,
         restored_import_ledger_count,
+        restored_curation_candidate_count,
+        restored_curation_policy_count,
         restored_search_index_job_count,
         restored_rule_count,
         restored_rule_source_count,
@@ -5997,6 +6060,430 @@ fn restore_import_history(
     Ok(u32::try_from(rows.len()).unwrap_or(u32::MAX))
 }
 
+/// Redact text while retaining only validated protocol fields. In particular,
+/// Full redaction must not turn a link relation or memory kind into prose.
+fn redact_curation_json(
+    raw: &str,
+    shape: &str,
+    redaction: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
+) -> Result<String, DomainError> {
+    let original: JsonValue = serde_json::from_str(raw).map_err(work_history_error)?;
+    let mut value: JsonValue = serde_json::from_str(&redact_work_history_json(raw, redaction)?)
+        .map_err(work_history_error)?;
+    match shape {
+        "sources" => {
+            let sources = original
+                .as_array()
+                .ok_or_else(|| work_history_error("invalid curation source refs"))?;
+            for (index, source) in sources.iter().enumerate() {
+                let kind = source["kind"].as_str().unwrap_or_default();
+                let id = source["id"].as_str().unwrap_or_default();
+                let hash = source["contentHash"].as_str().unwrap_or_default();
+                let valid_id = match kind {
+                    "memory" => id.parse::<crate::models::MemoryId>().is_ok(),
+                    "evidence_span" => id.parse::<crate::models::EvidenceId>().is_ok(),
+                    _ => false,
+                };
+                if !valid_id || !crate::db::is_canonical_blake3_hash(hash) {
+                    return Err(work_history_error(
+                        "invalid curation source ref identity or hash",
+                    ));
+                }
+                value[index]["kind"] = source["kind"].clone();
+                value[index]["id"] = json!(if kind == "memory" {
+                    memory_ids.get(id).map_or(id, String::as_str)
+                } else {
+                    id
+                });
+                // This is historical evidence. Never certify redacted text by
+                // replacing the original hash with a freshly calculated one.
+                value[index]["contentHash"] = source["contentHash"].clone();
+            }
+        }
+        "metadata" => {
+            for field in ["level", "kind", "trustClass", "validFrom", "validTo"] {
+                if let Some(text) = original["memorySpec"][field].as_str() {
+                    let valid = match field {
+                        "level" => text.parse::<crate::models::MemoryLevel>().is_ok(),
+                        "kind" => text.parse::<crate::models::MemoryKind>().is_ok(),
+                        "trustClass" => text.parse::<crate::models::TrustClass>().is_ok(),
+                        _ => chrono::DateTime::parse_from_rfc3339(text).is_ok(),
+                    };
+                    if valid {
+                        value["memorySpec"][field] = json!(text);
+                    }
+                }
+            }
+        }
+        "link" => {
+            for field in ["memoryA", "memoryB"] {
+                let id = original[field]
+                    .as_str()
+                    .ok_or_else(|| work_history_error("missing curation link endpoint"))?;
+                value[field] = json!(memory_ids.get(id).ok_or_else(|| work_history_error(
+                    "curation link endpoint outside the recovered workspace"
+                ))?);
+            }
+            let relation = original["relation"].as_str().unwrap_or_default();
+            if !matches!(relation, "related" | "supports" | "contradicts") {
+                return Err(work_history_error("invalid curation link relation"));
+            }
+            value["relation"] = json!(relation);
+        }
+        _ => return Err(work_history_error("unknown curation JSON shape")),
+    }
+    if value == original {
+        Ok(raw.to_owned())
+    } else {
+        serde_json::to_string(&value).map_err(work_history_error)
+    }
+}
+
+fn collect_curation_history_payloads(
+    connection: &DbConnection,
+    workspace_id: &str,
+    backup_id: &str,
+    captured_at: &str,
+    redaction: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) -> Result<(), DomainError> {
+    let mut candidates = Vec::new();
+    for original in connection
+        .list_curation_candidates(workspace_id, None, None, None)
+        .map_err(work_history_error)?
+    {
+        let mut row = original.clone();
+        if let Some(id) = &row.target_memory_id {
+            row.target_memory_id = Some(memory_ids.get(id).cloned().ok_or_else(|| {
+                work_history_error("curation target outside the recovered workspace")
+            })?);
+        }
+        row.reason = redact_content(&row.reason, redaction);
+        row.reviewed_by = row
+            .reviewed_by
+            .as_deref()
+            .map(|s| redact_content(s, redaction));
+        row.source_id = row.source_id.as_deref().map(|id| {
+            memory_ids
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| redact_content(id, redaction))
+        });
+        row.proposed_content = row
+            .proposed_content
+            .as_deref()
+            .map(|raw| {
+                if matches!(
+                    row.candidate_type.as_str(),
+                    "link_proposal" | "contradiction_review"
+                ) {
+                    redact_curation_json(raw, "link", redaction, memory_ids)
+                } else {
+                    Ok(redact_content(raw, redaction))
+                }
+            })
+            .transpose()?;
+        row.derivation_source_refs_json = row
+            .derivation_source_refs_json
+            .as_deref()
+            .map(|raw| redact_curation_json(raw, "sources", redaction, memory_ids))
+            .transpose()?;
+        row.derivation_metadata_json = row
+            .derivation_metadata_json
+            .as_deref()
+            .map(|raw| redact_curation_json(raw, "metadata", redaction, memory_ids))
+            .transpose()?;
+        let mut requires_fresh_review = row != original;
+        if let Some(raw) = &original.derivation_source_refs_json {
+            let refs: JsonValue = serde_json::from_str(raw).map_err(work_history_error)?;
+            for source in refs
+                .as_array()
+                .ok_or_else(|| work_history_error("invalid curation source refs"))?
+            {
+                if source["kind"] == "evidence_span" {
+                    let span = connection
+                        .get_evidence_span(source["id"].as_str().unwrap_or_default())
+                        .map_err(work_history_error)?;
+                    requires_fresh_review |= span.is_none_or(|span| {
+                        redact_content(&span.excerpt, redaction) != span.excerpt
+                    });
+                }
+            }
+        }
+        candidates.push(BackupCurationCandidate {
+            candidate: row,
+            requires_fresh_review,
+        });
+    }
+    candidates.sort_by(|a, b| a.candidate.id.cmp(&b.candidate.id));
+    let mut policies = connection
+        .list_curation_ttl_policies()
+        .map_err(work_history_error)?;
+    // Policy IDs can be operator supplied. Alias redacted IDs consistently so
+    // distinct policies and their candidate references never collapse.
+    for policy in &mut policies {
+        if redact_content(&policy.id, redaction) != policy.id {
+            let old = policy.id.clone();
+            policy.id = format!("policy_{}", blake3::hash(old.as_bytes()).to_hex());
+            for candidate in &mut candidates {
+                if candidate.candidate.ttl_policy_id.as_deref() == Some(&old) {
+                    candidate.candidate.ttl_policy_id = Some(policy.id.clone());
+                }
+            }
+        }
+        // Queue states are control values, not user prose. Preserve the
+        // vocabulary actually consumed by the queue and redact unknown labels.
+        if !matches!(
+            policy.review_state.as_str(),
+            "new"
+                | "needs_evidence"
+                | "needs_scope"
+                | "duplicate"
+                | "snoozed"
+                | "accepted"
+                | "rejected"
+                | "merged"
+                | "superseded"
+                | "expired"
+                | "applied"
+        ) {
+            policy.review_state = redact_content(&policy.review_state, redaction);
+        }
+    }
+    let count = candidates
+        .len()
+        .max(policies.len())
+        .div_ceil(WORK_HISTORY_CHUNK_ROWS)
+        .max(1);
+    for index in 0..count {
+        let start = index * WORK_HISTORY_CHUNK_ROWS;
+        let chunk = BackupCurationHistory {
+            schema: CURATION_HISTORY_SCHEMA.to_owned(),
+            backup_id: backup_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            chunk_index: index,
+            chunk_count: count,
+            candidates: candidates
+                .iter()
+                .skip(start)
+                .take(WORK_HISTORY_CHUNK_ROWS)
+                .cloned()
+                .collect(),
+            policies: policies
+                .iter()
+                .skip(start)
+                .take(WORK_HISTORY_CHUNK_ROWS)
+                .cloned()
+                .collect(),
+            authentication: None,
+        };
+        payloads.push(derived_payload(
+            format!("derived/curation-history/{index:08}.json"),
+            "curation_history",
+            captured_at,
+            None,
+            serialized_payload_bytes(&chunk).map_err(work_history_error)?,
+        ));
+    }
+    Ok(())
+}
+
+fn curation_history_auth_context(workspace: &str) -> ArtifactContext<'_> {
+    ArtifactContext {
+        artifact_family: CURATION_HISTORY_SCHEMA,
+        record_encoding_version: "json.v1",
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: workspace,
+    }
+}
+
+fn authenticate_curation_payloads(
+    payloads: &mut [BackupDerivedPayload],
+    root: Option<&StoreAuthRoot>,
+) -> Result<(), DomainError> {
+    for payload in payloads
+        .iter_mut()
+        .filter(|p| p.report.kind == "curation_history")
+    {
+        let mut chunk: BackupCurationHistory =
+            serde_json::from_slice(&payload.bytes).map_err(work_history_error)?;
+        chunk.authentication = None;
+        if let Some(root) = root {
+            let hash =
+                canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+            chunk.authentication = Some(
+                authenticate_artifact(
+                    root,
+                    MacDomain::NativeImportRecordsRoot,
+                    &curation_history_auth_context(&chunk.workspace_id),
+                    &hash,
+                    1,
+                )
+                .map_err(work_history_error)?,
+            );
+        }
+        payload.bytes = serialized_payload_bytes(&chunk).map_err(work_history_error)?;
+        if payload.bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES {
+            return Err(work_history_error(
+                "curation-history chunk exceeds the restore asset byte limit",
+            ));
+        }
+        payload.report.hash = Some(hash_bytes(&payload.bytes));
+        payload.report.byte_size = Some(payload.bytes.len() as u64);
+    }
+    Ok(())
+}
+
+fn restore_curation_history(
+    database: &Path,
+    source_workspace: &Path,
+    backup_id: &str,
+    assets: &[BackupRestoredDerivedAssetReport],
+) -> Result<(u32, u32), DomainError> {
+    let mut chunks = assets
+        .iter()
+        .filter(|a| a.kind == "curation_history")
+        .map(|a| {
+            serde_json::from_value::<BackupCurationHistory>(read_restored_derived_json(a)?)
+                .map_err(work_history_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if chunks.is_empty() {
+        return Ok((0, 0));
+    }
+    chunks.sort_by_key(|c| c.chunk_index);
+    let source_id = chunks[0].workspace_id.clone();
+    let count = chunks.len();
+    let root =
+        StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
+    for (index, chunk) in chunks.iter_mut().enumerate() {
+        if chunk.schema != CURATION_HISTORY_SCHEMA
+            || chunk.backup_id != backup_id
+            || chunk.workspace_id != source_id
+            || chunk.chunk_index != index
+            || chunk.chunk_count != count
+            || chunk.candidates.len() > WORK_HISTORY_CHUNK_ROWS
+            || chunk.policies.len() > WORK_HISTORY_CHUNK_ROWS
+            || (count > 1 && chunk.candidates.is_empty() && chunk.policies.is_empty())
+        {
+            return Err(work_history_error(
+                "unsupported, incomplete, duplicate, or substituted curation-history chunks",
+            ));
+        }
+        let header = chunk.authentication.take().ok_or_else(|| {
+            work_history_error("curation history requires an authenticated source-store backup")
+        })?;
+        let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+        if !verify_artifact(
+            &root,
+            MacDomain::NativeImportRecordsRoot,
+            &curation_history_auth_context(&source_id),
+            &header,
+            &hash,
+            1,
+        )
+        .map_err(work_history_error)?
+        .is_authenticated()
+        {
+            return Err(work_history_error("curation-history authentication failed"));
+        }
+    }
+    let connection = DbConnection::open_file(database).map_err(work_history_error)?;
+    let workspace_id = remap_restored_workspace_id(
+        &connection.list_workspaces().map_err(work_history_error)?,
+        Some(&source_id),
+        "curation history",
+    )?
+    .ok_or_else(|| work_history_error("missing curation-history workspace"))?;
+    let mut candidates = Vec::new();
+    let mut policies = Vec::new();
+    let mut ids = BTreeSet::new();
+    let mut policy_ids = BTreeSet::new();
+    for chunk in chunks {
+        for row in chunk.policies {
+            if !policy_ids.insert(row.id.clone()) {
+                return Err(work_history_error("duplicate curation policy"));
+            }
+            policies.push(row);
+        }
+        for mut entry in chunk.candidates {
+            let row = &mut entry.candidate;
+            if row.workspace_id != source_id || !ids.insert(row.id.clone()) {
+                return Err(work_history_error(
+                    "foreign or duplicate curation candidate",
+                ));
+            }
+            row.workspace_id.clone_from(&workspace_id);
+            if let Some(id) = &row.target_memory_id {
+                let target = connection.get_memory(id).map_err(work_history_error)?;
+                if target.is_none_or(|m| m.workspace_id != workspace_id) {
+                    return Err(work_history_error("invalid recovered curation target"));
+                }
+            }
+            candidates.push(entry);
+        }
+    }
+    for entry in &candidates {
+        let row = &entry.candidate;
+        if row
+            .ttl_policy_id
+            .as_ref()
+            .is_some_and(|id| !policy_ids.contains(id))
+            || row
+                .merged_into_candidate_id
+                .as_ref()
+                .is_some_and(|id| id == &row.id || !ids.contains(id))
+        {
+            return Err(work_history_error(
+                "missing or invalid curation policy/merge reference",
+            ));
+        }
+    }
+    let now = Utc::now().to_rfc3339();
+    connection
+        .with_transaction(|| {
+            connection.restore_curation_ttl_policies(&policies)?;
+            for entry in &candidates {
+                let mut row = entry.candidate.clone();
+                if entry.requires_fresh_review
+                    && matches!(row.status.as_str(), "pending" | "approved")
+                {
+                    let details = json!({"backupId": backup_id, "reason": "backup_redaction",
+                    "fromStatus": row.status, "fromReviewState": row.review_state,
+                    "toStatus": "pending", "toReviewState": "needs_evidence"});
+                    row.status = "pending".to_owned();
+                    row.review_state = "needs_evidence".to_owned();
+                    row.state_entered_at = Some(now.clone());
+                    row.last_action_at = Some(now.clone());
+                    row.snoozed_until = None;
+                    row.merged_into_candidate_id = None;
+                    // No default policy may silently auto-promote changed evidence.
+                    row.ttl_policy_id = None;
+                    connection.insert_audit(
+                        &crate::models::AuditId::now().to_string(),
+                        &crate::db::CreateAuditInput {
+                            workspace_id: Some(workspace_id.clone()),
+                            actor: Some("ee backup restore".to_owned()),
+                            action: "curation.backup_redaction_review_required".to_owned(),
+                            target_type: Some("curation_candidate".to_owned()),
+                            target_id: Some(row.id.clone()),
+                            details: Some(details.to_string()),
+                        },
+                    )?;
+                }
+                connection.insert_curation_candidate_for_recovery(&row)?;
+            }
+            Ok(())
+        })
+        .map_err(work_history_error)?;
+    Ok((
+        u32::try_from(candidates.len()).unwrap_or(u32::MAX),
+        u32::try_from(policies.len()).unwrap_or(u32::MAX),
+    ))
+}
+
 fn collect_pack_history_payloads(
     connection: &DbConnection,
     workspace_id: &str,
@@ -8147,12 +8634,13 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
-        // Keep a real, still-unsupported durable row as the negative control.
+        // Curation is covered too; keep a separate, still-unsupported learning
+        // observation as the negative control for honest partial coverage.
         connection
             .insert_curation_candidate(
                 "curate_01234567890123456789012345",
                 &crate::db::CreateCurationCandidateInput {
-                    workspace_id,
+                    workspace_id: workspace_id.clone(),
                     candidate_type: "promote".to_owned(),
                     target_memory_id: Some(MemoryId::from_uuid(Uuid::from_u128(2)).to_string()),
                     proposed_content: None,
@@ -8167,6 +8655,23 @@ mod tests {
                     ttl_expires_at: None,
                     derivation_source_refs_json: None,
                     derivation_metadata_json: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .insert_learning_observation(
+                "lobs_backup_uncovered",
+                &crate::db::CreateLearningObservationInput {
+                    workspace_id,
+                    observation_kind: "curation_apply".to_owned(),
+                    source_type: "curation".to_owned(),
+                    source_id: None,
+                    target_type: "memory".to_owned(),
+                    target_id: MemoryId::from_uuid(Uuid::from_u128(2)).to_string(),
+                    topic: None,
+                    signal: "neutral".to_owned(),
+                    evidence_json: None,
+                    observed_at: "2026-09-01T00:00:00Z".to_owned(),
                 },
             )
             .map_err(|e| e.to_string())?;
@@ -8192,7 +8697,7 @@ mod tests {
         )?;
         ensure(
             !report.recovery_inventory.snapshot_coverage_complete,
-            "nonempty uncovered curation row must make snapshot coverage incomplete",
+            "nonempty uncovered learning observation must make snapshot coverage incomplete",
         )?;
         let session = report
             .recovery_inventory
@@ -8224,16 +8729,13 @@ mod tests {
             .iter()
             .find(|entry| entry.table == "curation_candidates")
             .ok_or("missing curation inventory")?;
-        ensure_equal(candidate.row_count, 1, "uncovered curation row count")?;
-        ensure(
-            !candidate.snapshot_covered,
-            "curation review remains uncovered",
-        )?;
+        ensure_equal(candidate.row_count, 1, "captured curation row count")?;
+        ensure(candidate.snapshot_covered, "curation review is covered")?;
         ensure(
             report.degraded.iter().any(|entry| {
                 entry.code == "backup_source_rows_not_covered"
                     && entry.severity == "high"
-                    && entry.message.contains("curation_candidates=1")
+                    && entry.message.contains("learning_observations=1")
             }),
             format!(
                 "partial backup omitted high source-coverage degradation: {:?}",
@@ -12416,6 +12918,718 @@ mod tests {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    fn recovery_candidate(workspace: &str, n: u32) -> StoredCurationCandidate {
+        let (status, state) = [
+            ("pending", "new"),
+            ("approved", "accepted"),
+            ("rejected", "rejected"),
+            ("expired", "expired"),
+            ("applied", "applied"),
+            ("pending", "snoozed"),
+            ("rejected", "merged"),
+        ][(n % 7) as usize];
+        let timestamp = "2026-09-01T00:00:00Z".to_owned();
+        StoredCurationCandidate {
+            id: format!("curate_{n:026}"),
+            workspace_id: workspace.to_owned(),
+            candidate_type: "promote".to_owned(),
+            target_memory_id: Some(MemoryId::from_uuid(Uuid::from_u128(2)).to_string()),
+            proposed_content: None,
+            proposed_confidence: Some(0.95),
+            proposed_trust_class: None,
+            source_type: "human_request".to_owned(),
+            source_id: None,
+            reason: "Preserve the verified release lesson.".to_owned(),
+            confidence: 0.9,
+            status: status.to_owned(),
+            created_at: timestamp.clone(),
+            reviewed_at: (state != "new").then(|| timestamp.clone()),
+            reviewed_by: (state != "new").then(|| "reviewer".to_owned()),
+            applied_at: (state == "applied").then(|| timestamp.clone()),
+            ttl_expires_at: Some("2050-09-01T00:00:00Z".to_owned()),
+            review_state: state.to_owned(),
+            snoozed_until: (state == "snoozed").then(|| "2050-08-01T00:00:00Z".to_owned()),
+            merged_into_candidate_id: (state == "merged").then(|| format!("curate_{:026}", 0)),
+            state_entered_at: Some(timestamp.clone()),
+            last_action_at: Some(timestamp),
+            ttl_policy_id: Some("curation.proposed.default".to_owned()),
+            derivation_source_refs_json: None,
+            derivation_metadata_json: None,
+        }
+    }
+
+    #[test]
+    fn default_backup_restores_curation_history_and_applies_review() -> TestResult {
+        use crate::core::curate::{
+            CurateApplyOptions, CurateReviewAction, CurateReviewOptions, apply_curation_candidate,
+            review_curation_candidate,
+        };
+        for redaction in [RedactionLevel::None, RedactionLevel::Standard] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            let source_id = source
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .remove(0)
+                .id;
+            let originals = (0..129)
+                .map(|n| recovery_candidate(&source_id, n))
+                .collect::<Vec<_>>();
+            let mut policies = source
+                .list_curation_ttl_policies()
+                .map_err(|e| e.to_string())?;
+            policies[0].threshold_seconds = 42;
+            let mut custom = policies[0].clone();
+            custom.id = "curation.custom.review".to_owned();
+            custom.threshold_seconds = 3600;
+            policies.push(custom);
+            policies.sort_by(|a, b| a.id.cmp(&b.id));
+            source
+                .with_transaction(|| {
+                    source.restore_curation_ttl_policies(&policies)?;
+                    for row in &originals {
+                        source.insert_curation_candidate_for_recovery(row)?;
+                    }
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?;
+            source.close().map_err(|e| e.to_string())?;
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            for (table, count) in [("curation_candidates", 129), ("curation_ttl_policies", 5)] {
+                let entry = backup
+                    .recovery_inventory
+                    .entries
+                    .iter()
+                    .find(|e| e.table == table)
+                    .ok_or("missing curation inventory")?;
+                ensure_equal(entry.row_count, count, "exact curation inventory count")?;
+                ensure(
+                    entry.snapshot_covered,
+                    "default snapshot contains durable curation state",
+                )?;
+            }
+            ensure_equal(
+                backup
+                    .derived
+                    .iter()
+                    .filter(|a| a.kind == "curation_history")
+                    .count(),
+                2,
+                "curation crosses chunk boundary",
+            )?;
+            let side = tempdir.path().join("restored");
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: side.clone(),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                restored.restored_curation_candidate_count,
+                129,
+                "all proposals restored",
+            )?;
+            ensure_equal(
+                restored.restored_curation_policy_count,
+                5,
+                "all policies restored",
+            )?;
+            let db = DbConnection::open_file(&restored.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let destination_id = db
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .remove(0)
+                .id;
+            ensure_equal(
+                db.list_curation_ttl_policies().map_err(|e| e.to_string())?,
+                policies,
+                "custom TTL policy values retained",
+            )?;
+            for original in &originals {
+                let actual = db
+                    .get_curation_candidate(&destination_id, &original.id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("missing candidate")?;
+                let mut expected = original.clone();
+                expected.workspace_id.clone_from(&destination_id);
+                ensure_equal(actual, expected, "every candidate field survives unchanged")?;
+            }
+            db.close().map_err(|e| e.to_string())?;
+            // Exercise the actual command use cases, including a preexisting
+            // approval and a new explicit review in the recovered workspace.
+            let applied = apply_curation_candidate(&CurateApplyOptions {
+                workspace_path: &side,
+                database_path: None,
+                candidate_id: &originals[1].id,
+                actor: Some("recovery-reviewer"),
+                dry_run: false,
+                allow_tombstone_load_bearing: false,
+            })
+            .map_err(|e| e.message())?;
+            ensure(
+                applied.mutation.persisted,
+                format!(
+                    "restored approved proposal applies: {:?}",
+                    applied.application
+                ),
+            )?;
+            let accepted = review_curation_candidate(&CurateReviewOptions {
+                workspace_path: &side,
+                database_path: None,
+                candidate_id: &originals[0].id,
+                action: CurateReviewAction::Accept,
+                actor: Some("recovery-reviewer"),
+                dry_run: false,
+                snoozed_until: None,
+                reason: Some("Reviewed after recovery"),
+                merge_into_candidate_id: None,
+            })
+            .map_err(|e| e.message())?;
+            ensure(
+                accepted.mutation.persisted,
+                "restored pending proposal accepts review",
+            )?;
+            let db = DbConnection::open_file(&restored.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let target = db
+                .get_memory(originals[1].target_memory_id.as_deref().ok_or("target")?)
+                .map_err(|e| e.to_string())?
+                .ok_or("restored target")?;
+            ensure_equal(
+                target.confidence,
+                0.95,
+                "apply changes the recovered memory",
+            )?;
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            for original in &originals {
+                ensure_equal(
+                    source
+                        .get_curation_candidate(&source_id, &original.id)
+                        .map_err(|e| e.to_string())?,
+                    Some(original.clone()),
+                    "recovery never edits source review history",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn curation_redaction_preserves_typed_links_and_historical_hashes() -> TestResult {
+        let memory = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        let mapped = MemoryId::from_uuid(Uuid::from_u128(3)).to_string();
+        let other = MemoryId::from_uuid(Uuid::from_u128(4)).to_string();
+        let ids = BTreeMap::from([
+            (memory.clone(), mapped.clone()),
+            (other.clone(), other.clone()),
+        ]);
+        let hash = format!("blake3:{}", blake3::hash(b"original evidence").to_hex());
+        let invalid =
+            json!([{"kind":"memory", "id":"api_key=curation-identity-canary", "contentHash":hash}])
+                .to_string();
+        ensure(
+            redact_curation_json(&invalid, "sources", RedactionLevel::Full, &ids).is_err(),
+            "unvalidated source strings cannot bypass redaction as identity fields",
+        )?;
+        for redaction in [
+            RedactionLevel::Standard,
+            RedactionLevel::Paranoid,
+            RedactionLevel::Full,
+        ] {
+            let refs = json!([{"kind":"memory", "id":memory, "contentHash":hash, "note":"api_key=curation-source-canary"}]).to_string();
+            let actual: JsonValue = serde_json::from_str(
+                &redact_curation_json(&refs, "sources", redaction, &ids)
+                    .map_err(|e| e.message())?,
+            )
+            .map_err(|e| e.to_string())?;
+            ensure_equal(
+                actual[0]["id"].as_str(),
+                Some(mapped.as_str()),
+                "source ID rebound",
+            )?;
+            ensure_equal(
+                actual[0]["contentHash"].as_str(),
+                Some(hash.as_str()),
+                "source hash never recertifies changed content",
+            )?;
+            ensure_equal(
+                actual[0]["note"].as_str(),
+                Some("[REDACTED]"),
+                "source prose redacted",
+            )?;
+            let link = json!({"memoryA":memory,"memoryB":other,"relation":"supports","why":"api_key=curation-link-canary"}).to_string();
+            let actual: JsonValue = serde_json::from_str(
+                &redact_curation_json(&link, "link", redaction, &ids).map_err(|e| e.message())?,
+            )
+            .map_err(|e| e.to_string())?;
+            ensure_equal(
+                actual["memoryA"].as_str(),
+                Some(mapped.as_str()),
+                "link endpoint rebound",
+            )?;
+            ensure_equal(
+                actual["relation"].as_str(),
+                Some("supports"),
+                "typed link stays executable",
+            )?;
+            ensure_equal(
+                actual["why"].as_str(),
+                Some("[REDACTED]"),
+                "link explanation redacted",
+            )?;
+            let metadata = json!({"memorySpec":{"level":"semantic","kind":"fact","trustClass":"agent_assertion","provenanceUri":"api_key=curation-uri-canary"},"producer":{"producer":"reflection","producerPayload":{"note":"api_key=curation-producer-canary"}}}).to_string();
+            let actual: JsonValue = serde_json::from_str(
+                &redact_curation_json(&metadata, "metadata", redaction, &ids)
+                    .map_err(|e| e.message())?,
+            )
+            .map_err(|e| e.to_string())?;
+            ensure_equal(
+                actual["memorySpec"]["kind"].as_str(),
+                Some("fact"),
+                "derived kind remains typed",
+            )?;
+            ensure(
+                !actual.to_string().contains("canary"),
+                "no metadata secrets survive",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn restored_derivation_applies_only_with_unchanged_evidence() -> TestResult {
+        use crate::core::curate::{
+            CurateApplyOptions, CurateValidateOptions, apply_curation_candidate,
+            validate_curation_candidate,
+        };
+        for redaction in [
+            RedactionLevel::None,
+            RedactionLevel::Standard,
+            RedactionLevel::Full,
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            let workspace_id = db
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .remove(0)
+                .id;
+            let mut derived = recovery_candidate(&workspace_id, 1);
+            let source_memory = db
+                .get_memory(derived.target_memory_id.as_deref().ok_or("source")?)
+                .map_err(|e| e.to_string())?
+                .ok_or("source memory")?;
+            let hash = format!(
+                "blake3:{}",
+                blake3::hash(source_memory.content.as_bytes()).to_hex()
+            );
+            derived.candidate_type = "create_derived_memory".to_owned();
+            derived.target_memory_id = None;
+            derived.proposed_content =
+                Some("A release review must keep the source evidence available.".to_owned());
+            derived.derivation_source_refs_json = Some(
+                json!([{"kind":"memory", "id":source_memory.id, "contentHash":hash}]).to_string(),
+            );
+            derived.derivation_metadata_json = Some(json!({"memorySpec":{"level":"semantic", "kind":"fact", "trustClass":"agent_assertion"},"producer":{"producer":"reflection"}}).to_string());
+            let mut secret = recovery_candidate(&workspace_id, 8);
+            secret.proposed_content = Some("api_key=curation-proposal-canary".to_owned());
+            secret.reason = "api_key=curation-reason-canary".to_owned();
+            secret.reviewed_by = Some("api_key=curation-reviewer-canary".to_owned());
+            let mut rejected = secret.clone();
+            rejected.id = recovery_candidate(&workspace_id, 2).id;
+            rejected.status = "rejected".to_owned();
+            rejected.review_state = "rejected".to_owned();
+            db.with_transaction(|| {
+                for row in [&derived, &secret, &rejected] {
+                    db.insert_curation_candidate_for_recovery(row)?;
+                }
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            let asset = backup
+                .derived
+                .iter()
+                .find(|a| a.kind == "curation_history")
+                .ok_or("missing curation payload")?;
+            let raw = fs::read_to_string(Path::new(&backup.backup_path).join(&asset.path))
+                .map_err(|e| e.to_string())?;
+            ensure_equal(
+                raw.contains("canary"),
+                redaction == RedactionLevel::None,
+                "all candidate prose observes privacy level",
+            )?;
+            let side = tempdir.path().join("restored");
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: side.clone(),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            let db = DbConnection::open_file(&restored.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let destination = db
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .remove(0)
+                .id;
+            let actual = db
+                .get_curation_candidate(&destination, &derived.id)
+                .map_err(|e| e.to_string())?
+                .ok_or("derived proposal")?;
+            let refs: JsonValue = serde_json::from_str(
+                actual
+                    .derivation_source_refs_json
+                    .as_deref()
+                    .ok_or("source refs")?,
+            )
+            .map_err(|e| e.to_string())?;
+            ensure_equal(
+                refs[0]["contentHash"].as_str(),
+                Some(hash.as_str()),
+                "historical source hash preserved",
+            )?;
+            let source = db
+                .get_memory(refs[0]["id"].as_str().ok_or("restored source ID")?)
+                .map_err(|e| e.to_string())?
+                .ok_or("restored source")?;
+            ensure_equal(
+                source.content == source_memory.content,
+                redaction != RedactionLevel::Full,
+                "source redaction is observable",
+            )?;
+            let actual_secret = db
+                .get_curation_candidate(&destination, &secret.id)
+                .map_err(|e| e.to_string())?
+                .ok_or("secret proposal")?;
+            let actual_rejected = db
+                .get_curation_candidate(&destination, &rejected.id)
+                .map_err(|e| e.to_string())?
+                .ok_or("rejected proposal")?;
+            ensure_equal(
+                actual_rejected.status.as_str(),
+                "rejected",
+                "terminal review is historical",
+            )?;
+            if redaction != RedactionLevel::None {
+                ensure_equal(
+                    actual_secret.status.as_str(),
+                    "pending",
+                    "redaction revokes old proposal approval",
+                )?;
+                ensure_equal(
+                    actual_secret.review_state.as_str(),
+                    "needs_evidence",
+                    "changed proposal requests fresh evidence",
+                )?;
+                ensure(
+                    actual_secret.ttl_policy_id.is_none(),
+                    "changed proposal cannot inherit an automatic promotion policy",
+                )?;
+                let audits = db
+                    .list_audit_entries(Some(&destination), None)
+                    .map_err(|e| e.to_string())?;
+                ensure(
+                    audits.iter().any(|a| {
+                        a.action == "curation.backup_redaction_review_required"
+                            && a.target_id.as_deref() == Some(&secret.id)
+                    }),
+                    "changed approval is explicitly audited",
+                )?;
+            }
+            db.close().map_err(|e| e.to_string())?;
+            let apply = apply_curation_candidate(&CurateApplyOptions {
+                workspace_path: &side,
+                database_path: None,
+                candidate_id: &derived.id,
+                actor: Some("recovery-reviewer"),
+                dry_run: false,
+                allow_tombstone_load_bearing: false,
+            })
+            .map_err(|e| e.message())?;
+            if redaction == RedactionLevel::Full {
+                ensure(
+                    !apply.mutation.persisted,
+                    "changed evidence cannot use original approval",
+                )?;
+                let validation = validate_curation_candidate(&CurateValidateOptions {
+                    workspace_path: &side,
+                    database_path: None,
+                    candidate_id: &derived.id,
+                    actor: Some("recovery-reviewer"),
+                    dry_run: true,
+                })
+                .map_err(|e| e.message())?;
+                ensure(
+                    validation
+                        .validation
+                        .errors
+                        .iter()
+                        .any(|e| e.code == "derived_source_hash_mismatch"),
+                    format!(
+                        "fresh validation must detect changed evidence: {:?}",
+                        validation.validation
+                    ),
+                )?;
+            } else {
+                ensure(
+                    apply.mutation.persisted,
+                    format!(
+                        "unchanged derived proposal applies: {:?}",
+                        apply.application
+                    ),
+                )?;
+                let created = apply
+                    .application
+                    .created_memory_id
+                    .ok_or("derived apply must create a memory")?;
+                let db = DbConnection::open_file(&restored.restored_database_path)
+                    .map_err(|e| e.to_string())?;
+                let memory = db
+                    .get_memory(&created)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("created memory")?;
+                ensure_equal(
+                    memory.content,
+                    derived.proposed_content.clone().ok_or("proposal content")?,
+                    "derived content materialized",
+                )?;
+                ensure(
+                    !db.list_memory_links_for_memory(&created, None)
+                        .map_err(|e| e.to_string())?
+                        .is_empty(),
+                    "derived memory retains source provenance links",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn curation_history_rejects_tampering_and_rolls_back() -> TestResult {
+        for defect in [
+            "tampered",
+            "unsigned",
+            "wrong_backup",
+            "missing_chunk",
+            "duplicate_chunk",
+            "foreign_workspace",
+            "duplicate_candidate",
+            "foreign_target",
+            "missing_merge",
+            "missing_policy",
+            "duplicate_policy",
+            "invalid_policy",
+            "invalid_row",
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            let workspace_id = db
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .remove(0)
+                .id;
+            let policies = db.list_curation_ttl_policies().map_err(|e| e.to_string())?;
+            let audits = db
+                .count_table_rows("audit_log")
+                .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            let mut chunk = BackupCurationHistory {
+                schema: CURATION_HISTORY_SCHEMA.to_owned(),
+                backup_id: "backup-original".to_owned(),
+                workspace_id: workspace_id.clone(),
+                chunk_index: 0,
+                chunk_count: if defect == "missing_chunk" { 2 } else { 1 },
+                candidates: (0..2)
+                    .map(|n| BackupCurationCandidate {
+                        candidate: recovery_candidate(&workspace_id, n),
+                        requires_fresh_review: true,
+                    })
+                    .collect(),
+                policies: policies.clone(),
+                authentication: None,
+            };
+            match defect {
+                "foreign_workspace" => {
+                    chunk.candidates[1].candidate.workspace_id = "wsp_foreign".to_owned()
+                }
+                "duplicate_candidate" => {
+                    chunk.candidates[1].candidate.id = chunk.candidates[0].candidate.id.clone()
+                }
+                "foreign_target" => {
+                    chunk.candidates[1].candidate.target_memory_id =
+                        Some(MemoryId::from_uuid(Uuid::from_u128(99)).to_string())
+                }
+                "missing_merge" => {
+                    chunk.candidates[1].candidate.merged_into_candidate_id =
+                        Some(format!("curate_{:026}", 99))
+                }
+                "missing_policy" => {
+                    chunk.candidates[1].candidate.ttl_policy_id = Some("missing".to_owned())
+                }
+                "duplicate_policy" => chunk.policies.push(chunk.policies[0].clone()),
+                "invalid_policy" => chunk.policies[1].threshold_seconds = u64::MAX,
+                "invalid_row" => chunk.candidates[1].candidate.confidence = 2.0,
+                _ => {}
+            }
+            let root =
+                StoreAuthRoot::create(workspace_keys_dir(&workspace)).map_err(|e| e.to_string())?;
+            let mut payloads = vec![derived_payload(
+                "derived/curation-history/00000000.json",
+                "curation_history",
+                "2026-09-01T00:00:00Z",
+                None,
+                serialized_payload_bytes(&chunk).map_err(|e| e.to_string())?,
+            )];
+            authenticate_curation_payloads(&mut payloads, Some(&root)).map_err(|e| e.message())?;
+            let mut signed: BackupCurationHistory =
+                serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
+            if defect == "tampered" {
+                signed.candidates[0].candidate.reason = "tampered".to_owned();
+            }
+            if defect == "unsigned" {
+                signed.authentication = None;
+            }
+            let path = tempdir.path().join("curation.json");
+            fs::write(
+                &path,
+                serialized_payload_bytes(&signed).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            let mut assets = vec![restored_cass_asset(&path, "curation_history")];
+            if defect == "duplicate_chunk" {
+                assets.push(assets[0].clone());
+            }
+            let error = restore_curation_history(
+                &database,
+                &workspace,
+                if defect == "wrong_backup" {
+                    "wrong-backup"
+                } else {
+                    "backup-original"
+                },
+                &assets,
+            )
+            .err()
+            .ok_or_else(|| format!("accepted {defect}"))?;
+            let expected = match defect {
+                "tampered" => "authentication failed",
+                "unsigned" => "requires an authenticated",
+                "wrong_backup" | "missing_chunk" | "duplicate_chunk" => "curation-history chunks",
+                "foreign_workspace" | "duplicate_candidate" => {
+                    "foreign or duplicate curation candidate"
+                }
+                "foreign_target" => "curation target",
+                "missing_merge" | "missing_policy" => "policy/merge reference",
+                "duplicate_policy" => "duplicate curation policy",
+                "invalid_policy" => "integer range",
+                "invalid_row" => "constraint",
+                _ => unreachable!(),
+            };
+            ensure(
+                error.message().to_lowercase().contains(expected),
+                format!("{defect} failed at wrong boundary: {}", error.message()),
+            )?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                db.count_table_rows("curation_candidates")
+                    .map_err(|e| e.to_string())?,
+                0,
+                "no partial candidates",
+            )?;
+            ensure_equal(
+                db.list_curation_ttl_policies().map_err(|e| e.to_string())?,
+                policies,
+                "policy replacement rolls back",
+            )?;
+            ensure_equal(
+                db.count_table_rows("audit_log")
+                    .map_err(|e| e.to_string())?,
+                audits,
+                "redaction audit rolls back with candidate failure",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn curation_backup_requires_keys_before_publication() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let workspace_id = db
+            .list_workspaces()
+            .map_err(|e| e.to_string())?
+            .remove(0)
+            .id;
+        db.insert_curation_candidate_for_recovery(&recovery_candidate(&workspace_id, 1))
+            .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        let keys = workspace_keys_dir(&workspace);
+        fs::write(&keys, b"key directory obstructed").map_err(|e| e.to_string())?;
+        let output = tempdir.path().join("backups");
+        let options = BackupCreateOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            output_dir: Some(output.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        };
+        let error = create_backup(&options)
+            .err()
+            .ok_or("unauthenticated curation backup was published")?;
+        ensure(
+            error
+                .message()
+                .contains("curation history require source-store authentication"),
+            error.message(),
+        )?;
+        ensure(
+            !output.exists(),
+            "key failure occurs before artifact publication",
+        )?;
+        create_backup(&BackupCreateOptions {
+            dry_run: true,
+            ..options
+        })
+        .map_err(|e| e.message())?;
+        ensure(!output.exists(), "preview creates no backup")?;
+        ensure_equal(
+            fs::read(&keys).map_err(|e| e.to_string())?,
+            b"key directory obstructed".to_vec(),
+            "preview leaves key obstruction unchanged",
+        )?;
         Ok(())
     }
 

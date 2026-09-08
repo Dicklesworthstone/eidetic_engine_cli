@@ -25065,7 +25065,8 @@ pub struct CreateCurationCandidateInput {
 }
 
 /// A stored curation candidate row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredCurationCandidate {
     pub id: String,
     pub workspace_id: String,
@@ -25107,7 +25108,8 @@ pub struct CurationCandidateReviewUpdate<'a> {
 }
 
 /// Deterministic TTL policy row for the curation review queue.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredCurationTtlPolicy {
     pub id: String,
     pub review_state: String,
@@ -25425,6 +25427,63 @@ fn malformed_curation_candidate_input(message: &str) -> DbError {
 }
 
 impl DbConnection {
+    /// Restore an exact candidate, without inventing review times or TTL defaults.
+    /// The recovery caller owns the transaction and validates cross-row references.
+    pub fn insert_curation_candidate_for_recovery(
+        &self,
+        row: &StoredCurationCandidate,
+    ) -> Result<()> {
+        validate_curation_candidate_insert_input(&CreateCurationCandidateInput {
+            workspace_id: row.workspace_id.clone(),
+            candidate_type: row.candidate_type.clone(),
+            target_memory_id: row.target_memory_id.clone(),
+            proposed_content: row.proposed_content.clone(),
+            proposed_confidence: row.proposed_confidence,
+            proposed_trust_class: row.proposed_trust_class.clone(),
+            source_type: row.source_type.clone(),
+            source_id: row.source_id.clone(),
+            reason: row.reason.clone(),
+            confidence: row.confidence,
+            status: Some(row.status.clone()),
+            created_at: Some(row.created_at.clone()),
+            ttl_expires_at: row.ttl_expires_at.clone(),
+            derivation_source_refs_json: row.derivation_source_refs_json.clone(),
+            derivation_metadata_json: row.derivation_metadata_json.clone(),
+        })?;
+        if !row.confidence.is_finite()
+            || row
+                .proposed_confidence
+                .is_some_and(|value| !value.is_finite())
+        {
+            return Err(malformed_curation_candidate_input(
+                "non-finite recovery confidence",
+            ));
+        }
+        let optional = |value: &Option<String>| {
+            value
+                .as_ref()
+                .map_or(Value::Null, |s| Value::Text(s.clone()))
+        };
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO curation_candidates (id, workspace_id, candidate_type, target_memory_id, proposed_content, proposed_confidence, proposed_trust_class, source_type, source_id, reason, confidence, status, created_at, reviewed_at, reviewed_by, applied_at, ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id, state_entered_at, last_action_at, ttl_policy_id, derivation_source_refs_json, derivation_metadata_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+            &[
+                Value::Text(row.id.clone()), Value::Text(row.workspace_id.clone()),
+                Value::Text(row.candidate_type.clone()), optional(&row.target_memory_id),
+                optional(&row.proposed_content), row.proposed_confidence.map_or(Value::Null, Value::Float),
+                optional(&row.proposed_trust_class), Value::Text(row.source_type.clone()),
+                optional(&row.source_id), Value::Text(row.reason.clone()), Value::Float(row.confidence),
+                Value::Text(row.status.clone()), Value::Text(row.created_at.clone()),
+                optional(&row.reviewed_at), optional(&row.reviewed_by), optional(&row.applied_at),
+                optional(&row.ttl_expires_at), Value::Text(row.review_state.clone()),
+                optional(&row.snoozed_until), optional(&row.merged_into_candidate_id),
+                optional(&row.state_entered_at), optional(&row.last_action_at), optional(&row.ttl_policy_id),
+                optional(&row.derivation_source_refs_json), optional(&row.derivation_metadata_json),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Insert a curation candidate proposal.
     pub fn insert_curation_candidate(
         &self,
@@ -25579,6 +25638,46 @@ impl DbConnection {
         rows.iter()
             .map(stored_curation_ttl_policy_from_row)
             .collect()
+    }
+
+    /// Replace migration defaults with the snapshot's exact policy set. This is
+    /// only for a fresh recovery store, inside the caller's restore transaction.
+    pub fn restore_curation_ttl_policies(
+        &self,
+        policies: &[StoredCurationTtlPolicy],
+    ) -> Result<()> {
+        if self.count_table_rows("curation_candidates")? != 0 {
+            return Err(malformed_curation_candidate_input(
+                "policy recovery requires an empty curation queue",
+            ));
+        }
+        self.execute_for(
+            DbOperation::Execute,
+            "DELETE FROM curation_ttl_policies",
+            &[],
+        )?;
+        let integer = |value: u64| {
+            i64::try_from(value).map(Value::BigInt).map_err(|_| {
+                malformed_curation_candidate_input(
+                    "recovered TTL threshold exceeds SQLite integer range",
+                )
+            })
+        };
+        for row in policies {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO curation_ttl_policies (id, review_state, threshold_seconds, action, requires_evidence_count, requires_distinct_sessions, requires_no_harmful_within_seconds, auto_promote_enabled, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                &[
+                    Value::Text(row.id.clone()), Value::Text(row.review_state.clone()),
+                    integer(row.threshold_seconds)?, Value::Text(row.action.clone()),
+                    Value::BigInt(i64::from(row.requires_evidence_count)),
+                    Value::BigInt(i64::from(row.requires_distinct_sessions)),
+                    row.requires_no_harmful_within_seconds.map(integer).transpose()?.unwrap_or(Value::Null),
+                    Value::BigInt(i64::from(row.auto_promote_enabled)), Value::Text(row.created_at.clone()),
+                ],
+            )?;
+        }
+        Ok(())
     }
 
     /// Apply an approved curation candidate to a memory's mutable scored fields.
