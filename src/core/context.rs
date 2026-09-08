@@ -11545,7 +11545,7 @@ fn candidate_from_hit_preloaded(
         source.query,
         hit.source.as_str(),
         relevance.into_inner(),
-        memory.utility,
+        utility.into_inner(),
         artifact_id.as_deref(),
     );
     let mut candidate_provenances = vec![provenance];
@@ -11879,7 +11879,7 @@ fn candidate_selection_why(
     query: &str,
     search_source: &str,
     search_score: f32,
-    memory_utility: f32,
+    utility: f32,
     artifact_id: Option<&str>,
 ) -> String {
     // Trim the query for readability; over-long queries get the
@@ -11893,7 +11893,7 @@ fn candidate_selection_why(
     };
 
     let base = format!(
-        "matched '{display_query}' via {search_source} (relevance {search_score:.4}, utility {memory_utility:.4})",
+        "matched '{display_query}' via {search_source} (relevance {search_score:.4}, utility {utility:.4})",
     );
     // The linked-document slot carries a registered artifact id, an applied
     // procedural rule id (bd-3h6bz), or an imported evidence span id
@@ -14185,6 +14185,7 @@ mod tests {
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(939));
         let memory = tier_memory(memory_id, 0.9, 0.8, 0.7, "rule");
         let memory_key = memory.id.clone();
+        let workspace_id = memory.workspace_id.clone();
         let memory_batch = super::CandidateMemoryBatch::Owned(tier_memory_map(vec![memory]));
         let tags_map = BTreeMap::new();
         let mut freshness_file_cache = crate::core::memory::EvidenceFreshnessFileCache::default();
@@ -14234,6 +14235,57 @@ mod tests {
             "why text must report normalized relevance, got: {}",
             candidate.why
         );
+        let rule_id = crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(940)).to_string();
+        let rule = super::StoredProceduralRule {
+            id: rule_id.clone(),
+            workspace_id,
+            content: "Validate signed release artifacts.".to_owned(),
+            confidence: 0.9,
+            utility: 0.35,
+            importance: 0.7,
+            trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+            scope: "workspace".to_owned(),
+            scope_pattern: None,
+            maturity: "validated".to_owned(),
+            protected: false,
+            positive_feedback_count: 0,
+            negative_feedback_count: 0,
+            validation_passes: 0,
+            validation_contradictions: 0,
+            last_applied_at: None,
+            last_validated_at: None,
+            superseded_by: None,
+            created_at: "2026-05-01T00:00:00Z".to_owned(),
+            updated_at: "2026-05-01T00:00:00Z".to_owned(),
+            tombstoned_at: None,
+        };
+        let rules = BTreeMap::from([(rule_id.clone(), rule)]);
+        let promoted = super::candidate_from_hit_preloaded(
+            super::PreloadedCandidateSource {
+                memories: &memory_batch,
+                tags_map: &tags_map,
+                workspace_path: Path::new("/tmp/ee-hybrid-pack-relevance-test"),
+                bound_workspace_id: None,
+                query: "hybrid recall",
+                validity_reference_time: None,
+                include_tombstoned: false,
+                freshness_file_cache: &mut freshness_file_cache,
+                rules: &rules,
+            },
+            &hit,
+            &memory_key,
+            memory_id,
+            Some(rule_id.clone()),
+            &mut degraded,
+            &mut subspans,
+        )
+        .ok_or("promoted rule should convert into a pack candidate")?;
+        assert_eq!(promoted.content, "Validate signed release artifacts.");
+        assert_eq!(promoted.section, PackSection::ProceduralRules);
+        assert!((promoted.utility.into_inner() - 0.35).abs() < 1e-6);
+        assert!(promoted.why.contains("utility 0.3500"), "{}", promoted.why);
+        assert!(!promoted.why.contains("utility 0.8000"), "{}", promoted.why);
+        assert!(promoted.why.contains(&rule_id), "{}", promoted.why);
         Ok(())
     }
 
