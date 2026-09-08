@@ -2162,7 +2162,7 @@ pub(crate) fn reconcile_committed_memory_index_job(
                         index_dir,
                     )
                 }
-                Ok(report) => {
+                Ok(report) if remember_index_status(&report) == "indexed" => {
                     if let Err(error) =
                         remember_drain_peer_tail_after_publish(connection, workspace_id, index_dir)
                     {
@@ -2176,6 +2176,7 @@ pub(crate) fn reconcile_committed_memory_index_job(
                     }
                     report
                 }
+                Ok(report) => report,
                 Err(error) => {
                     tracing::warn!(
                         target: "ee::memory",
@@ -2609,16 +2610,17 @@ const REMEMBER_INDEX_DRAIN_PROBE_ATTEMPTS: usize = 3;
 /// burst whose initial publisher already finished. Exactly one racing
 /// writer wins the election lock; losers defer immediately.
 ///
-/// Handoff invariant (bd-index-auto-freshness-m5kwf final-round race): a
-/// leader may finish its stint only after RELEASING the election lock and
-/// THEN observing zero pending jobs. Any deferring loser's enqueue is
+/// Handoff invariant after successful publication (bd-index-auto-freshness-m5kwf
+/// final-round race): a leader may finish its stint only after RELEASING the
+/// election lock and THEN observing zero pending jobs. Any deferring loser's enqueue is
 /// strictly ordered before its failed election attempt, which is ordered
 /// before the current holder's release, which is ordered before that
 /// holder's post-release pending check — so every deferred job is seen by
 /// a still-running holder, which must either re-elect and drain it or
 /// lose the re-election to a newer holder that inherits the same
 /// obligation. The chain terminates at the first holder that observes an
-/// empty queue after release.
+/// empty queue after release. A publication failure ends the invocation after
+/// releasing leadership, leaving durable jobs available for an explicit retry.
 fn remember_lead_coalesced_index_drain(
     connection: &DbConnection,
     workspace_id: &str,
@@ -2694,9 +2696,9 @@ fn remember_drain_leadership_cycles(
     //        reporting it AlreadyHeld; AlreadyHeld therefore means an
     //        alive same-host holder or an unprobeable (remote/foreign)
     //        holder that deliberately fails closed;
-    //   E3 — the ambient Cx deadline/cancellation or a persistently
-    //        failing inspection ended the stint: report our own truthful
-    //        outcome (queued when undecided) and NEVER claim quiescence.
+    //   E3 — publication failure, ambient Cx deadline/cancellation, or a
+    //        persistently failing inspection ended the stint: report our own
+    //        truthful outcome (queued when undecided) and NEVER claim quiescence.
     // There is deliberately no numeric cycle cap and no drain-progress
     // heuristic: the coalesced drain snapshots pending rows before
     // processing, so an empty report can mean "a writer enqueued after
@@ -2746,20 +2748,21 @@ fn remember_drain_leadership_cycles(
                     .unwrap_or_else(|| remember_index_job_queued_for_coalescing(index_job_id));
             }
         }
-        let release_result = {
+        let (release_result, publication_failed) = {
             let leadership = RememberWorkspaceWriteLock {
                 connection,
                 lock_id: lock_id.clone(),
                 holder_id: holder_id.clone(),
                 release_complete: false,
             };
-            let cycle_report = remember_drain_pending_rounds(
+            let round = remember_drain_pending_rounds(
                 index_job_id,
                 REMEMBER_INDEX_DRAIN_MAX_ROUNDS,
                 &mut *drain,
                 &mut *pending_remaining,
                 || remember_index_job_report_from_durable_state(connection, index_job_id),
             );
+            let cycle_report = round.own_report;
             // First cycle pins the report; a later cycle may only upgrade
             // an undecided (queued) posture to an observed terminal
             // outcome — our own job can be drained by a later stint after
@@ -2777,7 +2780,7 @@ fn remember_drain_leadership_cycles(
             if adopt_cycle_report {
                 own_report = Some(cycle_report);
             }
-            leadership.release()
+            (leadership.release(), round.publication_failed)
         };
         match release_result {
             Ok(true) => {}
@@ -2800,6 +2803,20 @@ fn remember_drain_leadership_cycles(
                 );
                 return remember_index_job_queued_for_coalescing(index_job_id);
             }
+        }
+        if publication_failed {
+            // A failed publication is not quiescence or a successful handoff.
+            // Preserve terminal job evidence for a later explicit retry; the
+            // pending probe re-arms failed rows, so probing here would erase
+            // that failure and immediately repeat the same broken publication.
+            tracing::warn!(
+                target: "ee::memory",
+                workspace_id,
+                index_job_id,
+                "ending coalesced drain after publication failure; durable work remains retryable"
+            );
+            return own_report
+                .unwrap_or_else(|| remember_index_job_queued_for_coalescing(index_job_id));
         }
         // The election lock is now observably RELEASED before the handoff
         // probe below, so any writer that deferred against this stint is
@@ -2852,6 +2869,11 @@ fn remember_drain_leadership_cycles(
     }
 }
 
+struct RememberDrainRoundResult {
+    own_report: IndexProcessingJobReport,
+    publication_failed: bool,
+}
+
 /// Pure round driver for the elected leader: drain, pick out our own
 /// job's report, and run at most one bounded straggler pass when jobs
 /// remain pending after a round. Never claims success for work that did
@@ -2866,7 +2888,7 @@ fn remember_drain_pending_rounds<D, P, A>(
     mut drain: D,
     mut pending_remaining: P,
     resolve_absent: A,
-) -> IndexProcessingJobReport
+) -> RememberDrainRoundResult
 where
     D: FnMut() -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError>,
     P: FnMut() -> Option<bool>,
@@ -2876,16 +2898,26 @@ where
     for _round in 0..max_rounds.max(1) {
         match drain() {
             Ok(reports) => {
+                let publication_failed = reports.iter().any(|report| report.outcome == "failed");
                 if own_report.is_none() {
                     own_report = reports
                         .into_iter()
                         .find(|report| report.job_id == index_job_id);
                 }
+                if publication_failed {
+                    return RememberDrainRoundResult {
+                        own_report: own_report.unwrap_or_else(resolve_absent),
+                        publication_failed: true,
+                    };
+                }
             }
             Err(error) if remember_index_failure_is_deferable(&error) => {
-                return own_report.unwrap_or_else(|| {
-                    remember_index_job_queued_after_transient_failure(index_job_id, &error)
-                });
+                return RememberDrainRoundResult {
+                    own_report: own_report.unwrap_or_else(|| {
+                        remember_index_job_queued_after_transient_failure(index_job_id, &error)
+                    }),
+                    publication_failed: true,
+                };
             }
             Err(error) => {
                 tracing::warn!(
@@ -2894,8 +2926,10 @@ where
                     error = %error,
                     "coalesced drain leadership round failed; leaving remaining jobs for the next election"
                 );
-                return own_report
-                    .unwrap_or_else(|| remember_index_job_queued_for_coalescing(index_job_id));
+                return RememberDrainRoundResult {
+                    own_report: own_report.unwrap_or_else(resolve_absent),
+                    publication_failed: true,
+                };
             }
         }
         match pending_remaining() {
@@ -2903,7 +2937,10 @@ where
             Some(false) | None => break,
         }
     }
-    own_report.unwrap_or_else(resolve_absent)
+    RememberDrainRoundResult {
+        own_report: own_report.unwrap_or_else(resolve_absent),
+        publication_failed: false,
+    }
 }
 
 /// Resolve this writer's report when the leader's own drain rounds never
@@ -18480,6 +18517,199 @@ mod tests {
     }
 
     #[test]
+    fn remember_publication_failure_returns_and_same_jobs_recover() -> TestResult {
+        for count in [1, 2] {
+            let temp = upgrade_test_workspace()?;
+            let canonical = temp.path().canonicalize().map_err(|e| e.to_string())?;
+            let workspace_id = stable_workspace_id(&canonical);
+            let mut memory_ids = Vec::new();
+            for content in [
+                "Obsidian sundial: compiler diagnostics identify an invalid lifetime in the parser",
+                "Obsidian sundial: signing keys must match the release artifact verification policy",
+            ].into_iter().take(count) {
+                let stored = remember_memory_with_index_mode(
+                    &upgrade_remember_options(
+                        &canonical,
+                        content,
+                        0.9,
+                        None,
+                        false,
+                    ),
+                    true,
+                    &[],
+                    None,
+                )
+                .map_err(|e| e.message())?;
+                memory_ids.push(stored.memory_id.to_string());
+            }
+            let connection = open_upgrade_test_db(&canonical)?;
+            let jobs = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|e| e.to_string())?;
+            ensure(jobs.len(), count, "one durable job per memory")?;
+            let job_id = &jobs[0].id;
+            let expected_route = if count == 1 {
+                RememberIndexPublishRoute::Inline
+            } else {
+                RememberIndexPublishRoute::LeadCoalescedDrain
+            };
+            ensure(
+                remember_inline_index_publish_route(&connection, &workspace_id, job_id),
+                expected_route,
+                "exercise singleton and peer-drain publication",
+            )?;
+            let index_dir = canonical.join(".ee").join(DEFAULT_INDEX_SUBDIR);
+            if index_dir.exists() {
+                fs::rename(
+                    &index_dir,
+                    canonical.join(".ee/index-before-publication-failure"),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            fs::write(&index_dir, b"preserved publication blocker").map_err(|e| e.to_string())?;
+            let failed = reconcile_committed_memory_index_job(
+                &connection,
+                &workspace_id,
+                job_id,
+                &index_dir,
+            );
+            ensure(
+                remember_index_status(&failed),
+                "failed".to_owned(),
+                "failure returns truthfully",
+            )?;
+            for job in &jobs {
+                let stored = connection
+                    .get_search_index_job(&job.id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "publication lost its durable job".to_owned())?;
+                ensure(
+                    stored.status,
+                    "failed".to_owned(),
+                    "failed rows are not immediately rearmed",
+                )?;
+                ensure(
+                    stored.error_message.is_some(),
+                    true,
+                    "failure cause is retained",
+                )?;
+            }
+            ensure(
+                connection
+                    .is_lock_held(&remember_index_drain_leader_lock(&workspace_id))
+                    .map_err(|e| e.to_string())?
+                    .is_none(),
+                true,
+                "failure releases drain leadership",
+            )?;
+            fs::rename(
+                &index_dir,
+                canonical.join(".ee/preserved-publication-blocker"),
+            )
+            .map_err(|e| e.to_string())?;
+            let recovered = reconcile_committed_memory_index_job(
+                &connection,
+                &workspace_id,
+                job_id,
+                &index_dir,
+            );
+            ensure(
+                remember_index_status(&recovered),
+                "indexed".to_owned(),
+                "explicit retry recovers",
+            )?;
+            let after = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|e| e.to_string())?;
+            ensure(after.len(), jobs.len(), "retry does not create jobs")?;
+            for job in &after {
+                ensure(
+                    jobs.iter().any(|before| before.id == job.id),
+                    true,
+                    "job identity preserved",
+                )?;
+                ensure(job.status.as_str(), "completed", "same jobs complete")?;
+            }
+            let search = run_search(&SearchOptions {
+                workspace_path: canonical,
+                database_path: None,
+                index_dir: None,
+                query: "Obsidian sundial".to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            })
+            .map_err(|e| e.to_string())?;
+            for id in memory_ids {
+                ensure(
+                    search.results.iter().any(|hit| hit.doc_id == id),
+                    true,
+                    "exact memory searchable",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn remember_drain_stops_on_peer_failure_before_rearming_the_queue() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        let canonical = temp.path().canonicalize().map_err(|e| e.to_string())?;
+        let workspace_id = stable_workspace_id(&canonical);
+        for returns_error in [false, true] {
+            let calls = std::cell::Cell::new(0);
+            let report = remember_drain_leadership_cycles(
+                &connection,
+                &workspace_id,
+                "sidx_owner",
+                &mut || Ok(()),
+                &mut || {
+                    calls.set(calls.get() + 1);
+                    if returns_error {
+                        Err(IndexRebuildError::Index(
+                            "publication unavailable".to_owned(),
+                        ))
+                    } else {
+                        let mut peer = drained_test_report("sidx_peer");
+                        peer.outcome = "failed".to_owned();
+                        peer.documents_indexed = 0;
+                        peer.error = Some("publication unavailable".to_owned());
+                        Ok(vec![drained_test_report("sidx_owner"), peer])
+                    }
+                },
+                &mut || panic!("failed publication must not run a probe that re-arms jobs"),
+            );
+            ensure(calls.get(), 1, "publication failure ends this invocation")?;
+            ensure(
+                remember_index_status(&report),
+                if returns_error { "queued" } else { "indexed" }.to_owned(),
+                "own result remains truthful when a peer fails",
+            )?;
+            ensure(
+                connection
+                    .is_lock_held(&remember_index_drain_leader_lock(&workspace_id))
+                    .map_err(|e| e.to_string())?
+                    .is_none(),
+                true,
+                "failed publication releases the leadership lease",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn remember_drain_leadership_elects_one_winner_and_losers_defer() -> TestResult {
         let temp = upgrade_test_workspace()?;
         let connection = open_upgrade_test_db(temp.path())?;
@@ -18724,6 +18954,12 @@ mod tests {
             true,
             "the second pass drains the straggler",
         )?;
+        ensure(
+            report.publication_failed,
+            false,
+            "healthy rounds may continue handoff",
+        )?;
+        let report = report.own_report;
         ensure(report.job_id.clone(), own.to_owned(), "own report kept")?;
         ensure(
             remember_index_status(&report),
@@ -18734,6 +18970,7 @@ mod tests {
         // Planted negative: a failing drain with our job still pending must
         // NOT claim success — it reports the queued posture so the next
         // writer's election owns the remainder.
+        let failure_resolver_ran = std::cell::Cell::new(false);
         let failed = remember_drain_pending_rounds(
             own,
             2,
@@ -18742,11 +18979,24 @@ mod tests {
                     "synthetic drain failure".to_owned(),
                 ))
             },
-            || Some(true),
-            || unreachable!("a failed round resolves before the absent resolver"),
+            || panic!("failed publication must not re-arm the pending queue"),
+            || {
+                failure_resolver_ran.set(true);
+                remember_index_job_queued_for_coalescing(own)
+            },
         );
         ensure(
-            remember_index_status(&failed),
+            failure_resolver_ran.get(),
+            true,
+            "a failed round resolves an unreported job from durable state",
+        )?;
+        ensure(
+            failed.publication_failed,
+            true,
+            "failed rounds stop re-election",
+        )?;
+        ensure(
+            remember_index_status(&failed.own_report),
             "queued".to_owned(),
             "drain failure with pending work never reports success",
         )?;
@@ -18770,7 +19020,12 @@ mod tests {
             "an absent own report consults the durable-state resolver",
         )?;
         ensure(
-            remember_index_status(&absent),
+            absent.publication_failed,
+            false,
+            "absence alone is not failure",
+        )?;
+        ensure(
+            remember_index_status(&absent.own_report),
             "queued".to_owned(),
             "absence never hard-codes success",
         )
