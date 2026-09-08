@@ -640,8 +640,12 @@ fn export_record_redaction_covers_all_record_types() -> TestResult {
 
     if let ExportRecord::Tag(t) = redact_record(tag, RedactionLevel::Full) {
         ensure(
-            t.tag == REDACTED_PLACEHOLDER,
-            "tag should be redacted at full level",
+            !t.tag.contains("sensitive-tag") && t.tag.starts_with("tag_"),
+            "tag should have an opaque alias at full level",
+        )?;
+        ensure(
+            ee::models::Tag::parse(&t.tag).is_ok(),
+            "fully redacted tag must remain valid for backup import",
         )?;
     } else {
         return Err("expected tag variant".into());
