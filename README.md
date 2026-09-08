@@ -2267,8 +2267,9 @@ them. Restore uses the same check and validates copied records before import.
 It assembles the restored store in a private staging directory and publishes
 `.ee` only after every restore phase succeeds. A failed attempt preserves its
 staging artifacts for inspection and does not expose a partially restored DB.
-Existing destination stores are never replaced. Search indexes remain
-rebuildable; their durable jobs are processed after store publication.
+Existing destination stores are never replaced. Restore rebuilds search indexes
+from the complete staged corpus before publication, so the restored memories
+are searchable immediately.
 Failed verification returns exit code 5 and `success: false`, retaining the
 individual issues in `data.issues`; warning-only verification stays exit-zero.
 Unsigned manifests, including older backups, cannot pass verification or be

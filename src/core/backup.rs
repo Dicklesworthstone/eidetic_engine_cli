@@ -2733,6 +2733,39 @@ pub fn restore_backup_to_side_path(
     } else {
         0
     };
+    // Build from the complete restored corpus while it is still private.
+    // Imported job history alone cannot make a missing lexical index usable,
+    // and strict search deliberately does not repair that absence on read.
+    let index = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+        workspace_path: side_path.clone(),
+        database_path: Some(restored_database_path.clone()),
+        index_dir: Some(staging_store.join(crate::core::index::DEFAULT_INDEX_SUBDIR)),
+        dry_run: false,
+    })
+    .map_err(|error| DomainError::SearchIndex {
+        message: format!(
+            "failed to build the restored search index: {error}; unpublished store retained at '{}'",
+            staging_workspace.display()
+        ),
+        repair: Some("inspect the staged restore and retry with a fresh --side-path".to_owned()),
+    })?;
+    if !matches!(
+        index.status,
+        crate::core::index::IndexRebuildStatus::Success
+            | crate::core::index::IndexRebuildStatus::NoDocuments
+    ) || !index.errors.is_empty()
+    {
+        return Err(DomainError::SearchIndex {
+            message: format!(
+                "restored search index did not complete: {}; unpublished store retained at '{}'",
+                index.errors.join("; "),
+                staging_workspace.display()
+            ),
+            repair: Some(
+                "inspect the staged restore and retry with a fresh --side-path".to_owned(),
+            ),
+        });
+    }
     let restore_issue_count = import_report
         .issues
         .len()
@@ -11103,7 +11136,32 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .sum::<usize>();
-        ensure_equal(total_memories, 1, "restored memory count")
+        ensure_equal(total_memories, 1, "restored memory count")?;
+        restored_connection
+            .close()
+            .map_err(|error| error.to_string())?;
+        // Verify the published index before any search can repair it.
+        let index = crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+            workspace_path: side_path,
+            database_path: Some(PathBuf::from(&restored.restored_database_path)),
+            index_dir: None,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            index.health,
+            crate::core::index::IndexHealth::Ready,
+            "restore publishes a ready search index",
+        )?;
+        ensure_equal(
+            index.db_generation,
+            index.index_generation,
+            "restored index generation",
+        )?;
+        ensure_equal(
+            index.index_document_count,
+            Some(1),
+            "restored index document count",
+        )
     }
 
     #[test]

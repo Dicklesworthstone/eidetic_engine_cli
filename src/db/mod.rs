@@ -28079,6 +28079,22 @@ impl DbConnection {
         Ok(affected > 0)
     }
 
+    /// Re-arm one failed or cancelled job without retrying unrelated work or
+    /// taking ownership of a running publisher. Preserve the durable job ID.
+    pub fn requeue_search_index_job_for_retry(&self, id: &str) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE search_index_jobs SET status = ?1, started_at = NULL, completed_at = NULL, error_message = NULL, documents_indexed = 0 WHERE id = ?2 AND status IN (?3, ?4)",
+            &[
+                Value::Text(SearchIndexJobStatus::Pending.as_str().to_owned()),
+                Value::Text(id.to_owned()),
+                Value::Text(SearchIndexJobStatus::Failed.as_str().to_owned()),
+                Value::Text(SearchIndexJobStatus::Cancelled.as_str().to_owned()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
     /// Public retry path for interrupted or failed index work. Cancelled and
     /// failed rows are always re-armed; `running` rows are re-armed only when
     /// no live or unprobeable index-publish owner protects them. Every
@@ -51270,6 +51286,94 @@ mod tests {
         )?;
         ensure(job.completed_at.is_some(), "completed_at is set on failure")?;
 
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn search_index_job_retry_preserves_identity_and_other_job_states() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let input = super::CreateSearchIndexJobInput {
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            job_type: super::SearchIndexJobType::FullRebuild,
+            document_source: None,
+            document_id: None,
+            documents_total: 5,
+        };
+        for state in ["pending", "running", "completed", "failed", "cancelled"] {
+            connection.insert_search_index_job(state, &input)?;
+            if state != "pending" {
+                ensure(connection.start_search_index_job(state)?, "claim job")?;
+                connection.update_search_index_job_progress(state, 2)?;
+            }
+            match state {
+                "completed" => {
+                    connection.complete_search_index_job(state, 5)?;
+                }
+                "failed" => {
+                    connection.fail_search_index_job(state, "publication blocked")?;
+                }
+                "cancelled" => {
+                    connection.cancel_running_search_index_job(state)?;
+                }
+                _ => {}
+            }
+        }
+        ensure(
+            !connection.requeue_search_index_job_for_retry("missing")?,
+            "missing job is not created",
+        )?;
+        for state in ["failed", "cancelled", "pending", "running", "completed"] {
+            let before = connection.list_search_index_jobs(&input.workspace_id, None)?;
+            let changed = connection.requeue_search_index_job_for_retry(state)?;
+            ensure_equal(
+                &changed,
+                &matches!(state, "failed" | "cancelled"),
+                "only failed and cancelled jobs can retry",
+            )?;
+            for original in before {
+                let stored = connection
+                    .get_search_index_job(&original.id)?
+                    .ok_or_else(|| TestFailure::new("retry lost job identity"))?;
+                if original.id == state && changed {
+                    ensure_equal(&stored.status.as_str(), &"pending", "retry is pending")?;
+                    ensure_equal(&stored.documents_total, &5, "total preserved")?;
+                    ensure_equal(&stored.documents_indexed, &0, "progress reset")?;
+                    ensure(stored.started_at.is_none(), "start reset")?;
+                    ensure(stored.completed_at.is_none(), "completion reset")?;
+                    ensure(stored.error_message.is_none(), "error reset")?;
+                    ensure_equal(
+                        &stored.created_at,
+                        &original.created_at,
+                        "creation preserved",
+                    )?;
+                } else {
+                    ensure_equal(&stored.status, &original.status, "peer status preserved")?;
+                    ensure_equal(
+                        &stored.started_at,
+                        &original.started_at,
+                        "peer start preserved",
+                    )?;
+                    ensure_equal(
+                        &stored.completed_at,
+                        &original.completed_at,
+                        "peer completion preserved",
+                    )?;
+                    ensure_equal(
+                        &stored.error_message,
+                        &original.error_message,
+                        "peer error preserved",
+                    )?;
+                    ensure_equal(
+                        &stored.documents_indexed,
+                        &original.documents_indexed,
+                        "peer progress preserved",
+                    )?;
+                }
+            }
+        }
         connection.close()?;
         Ok(())
     }

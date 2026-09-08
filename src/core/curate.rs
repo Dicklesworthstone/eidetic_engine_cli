@@ -20,8 +20,7 @@ use serde::{Serialize, Serializer};
 use crate::config::env_registry::{EnvVar, read};
 use crate::config::{ConfigFile, GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
-use crate::core::index::DEFAULT_INDEX_SUBDIR;
-use crate::core::memory::reconcile_committed_memory_index_job;
+use crate::core::index::{DEFAULT_INDEX_SUBDIR, process_index_job_for_connection};
 use crate::curate::{
     CandidateInput, CandidateSource, CandidateStatus, CandidateType, CandidateValidationError,
     DerivationMemorySpec, DerivationMetadata, DerivationProducerMetadata, DerivationSourceKind,
@@ -5851,6 +5850,22 @@ fn reconcile_curation_index_job(
 ) -> Option<CurateCandidatesDegradation> {
     match connection.get_search_index_job(index_job_id) {
         Ok(Some(job)) if job.status == "completed" => return None,
+        Ok(Some(job)) if matches!(job.status.as_str(), "failed" | "cancelled") => {
+            if let Err(error) = connection.requeue_search_index_job_for_retry(index_job_id) {
+                tracing::warn!(
+                    target: "ee::curate",
+                    workspace_id,
+                    index_job_id,
+                    error = %error,
+                    "curation committed but its durable index job could not be retried"
+                );
+                return Some(curate_apply_index_publish_failed(
+                    index_job_id,
+                    "retry_unavailable",
+                    subject,
+                ));
+            }
+        }
         Ok(_) => {}
         Err(error) => {
             tracing::warn!(
@@ -5869,8 +5884,26 @@ fn reconcile_curation_index_job(
     }
 
     let index_dir = workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR);
-    let report =
-        reconcile_committed_memory_index_job(connection, workspace_id, index_job_id, &index_dir);
+    // Attempt this candidate's durable publication once. The workspace drain
+    // re-arms failed peer jobs between cycles, which can loop indefinitely on
+    // a persistent failure when curation has no enclosing command deadline.
+    let report = match process_index_job_for_connection(connection, index_job_id, &index_dir) {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::curate",
+                workspace_id,
+                index_job_id,
+                error = %error,
+                "curation committed but its durable index job could not be published"
+            );
+            return Some(curate_apply_index_publish_failed(
+                index_job_id,
+                "publication_failed",
+                subject,
+            ));
+        }
+    };
     if matches!(
         report.outcome.as_str(),
         "completed" | "completed_no_documents"
