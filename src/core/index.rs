@@ -15,8 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::remote_embed::{
-    EmbedBackendSelection, RemoteEmbedResolution, configured_embed_backend,
-    resolve_configured_remote_embedder,
+    EmbedBackendSelection, configured_embed_backend, resolve_configured_remote_embedder,
 };
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, CreateSearchIndexJobInput, DbConnection, DbError,
@@ -5361,9 +5360,12 @@ enum ActiveRemoteEmbedder {
     NotConfigured,
     /// A remote endpoint answered and its dimension is known.
     Ready(Arc<dyn crate::search::Embedder>),
-    /// A remote endpoint was requested but could not be brought up. Never a
-    /// silent fallback: `ee model status` and `ee doctor` both name this.
-    Failed(RemoteEmbedResolution),
+    /// A remote endpoint was requested but could not be brought up.
+    ///
+    /// Never a silent fallback: the reason is logged here, `ee model status`
+    /// reports the `neural_remote_unavailable` posture, and `ee doctor`'s
+    /// `remote_embedding_endpoint` check probes live and names the cause.
+    Failed,
 }
 
 /// Resolve (once) the configured remote embedding backend.
@@ -5386,27 +5388,24 @@ fn active_remote_embedder() -> &'static ActiveRemoteEmbedder {
             // `Ok(None)` cannot happen here: the backend check above already
             // established that `remote` is configured. Treat it as a failure
             // rather than pretending the local backend was requested.
-            Ok(None) => ActiveRemoteEmbedder::Failed(RemoteEmbedResolution::Config(
-                crate::core::remote_embed::RemoteEmbedConfigError::MissingUrl,
-            )),
+            Ok(None) => {
+                tracing::error!(
+                    target: "ee::index::embedder",
+                    "remote embedding backend selection disagreed with itself"
+                );
+                ActiveRemoteEmbedder::Failed
+            }
             Err(error) => {
                 tracing::error!(
                     target: "ee::index::embedder",
                     code = error.code(),
+                    reason = %error,
                     "remote embedding backend was configured but could not be used"
                 );
-                ActiveRemoteEmbedder::Failed(error)
+                ActiveRemoteEmbedder::Failed
             }
         }
     })
-}
-
-/// The remote backend failure, when one is configured and broken.
-pub(crate) fn active_remote_embed_failure() -> Option<&'static RemoteEmbedResolution> {
-    match active_remote_embedder() {
-        ActiveRemoteEmbedder::Failed(error) => Some(error),
-        ActiveRemoteEmbedder::NotConfigured | ActiveRemoteEmbedder::Ready(_) => None,
-    }
 }
 
 /// Descriptor for the active remote embedder, when one is serving.
@@ -5415,7 +5414,7 @@ fn remote_embedder_descriptor() -> Option<EmbedderDescriptor> {
         ActiveRemoteEmbedder::Ready(embedder) => {
             Some(EmbedderDescriptor::from_embedder(embedder.as_ref()))
         }
-        ActiveRemoteEmbedder::NotConfigured | ActiveRemoteEmbedder::Failed(_) => None,
+        ActiveRemoteEmbedder::NotConfigured | ActiveRemoteEmbedder::Failed => None,
     }
 }
 
@@ -5526,7 +5525,7 @@ fn default_search_embedder_for_settings(settings: &EeEmbedderSettings) -> Defaul
                 EmbedModelResolution::remote_ready(),
             );
         }
-        ActiveRemoteEmbedder::Failed(_) => {
+        ActiveRemoteEmbedder::Failed => {
             return DefaultSearchEmbedder::ready(
                 hash_fallback_embedder_stack(),
                 EmbedModelResolution::remote_unavailable(),
@@ -6818,12 +6817,11 @@ fn workspace_embedder_descriptors(
     {
         return Ok(stack_descriptors(&stack));
     }
-    match active_remote_embedder() {
-        ActiveRemoteEmbedder::Ready(embedder) => {
-            return Ok((EmbedderDescriptor::from_embedder(embedder.as_ref()), None));
-        }
-        ActiveRemoteEmbedder::Failed(_) => return Ok(remote_unavailable_descriptors()),
-        ActiveRemoteEmbedder::NotConfigured => {}
+    if let Some(descriptor) = remote_embedder_descriptor() {
+        return Ok((descriptor, None));
+    }
+    if matches!(active_remote_embedder(), ActiveRemoteEmbedder::Failed) {
+        return Ok(remote_unavailable_descriptors());
     }
     if configured_embedder_model_root().is_none() {
         match resolve_registered_model2vec(db, workspace_id, |_| Ok(EmbedderDescriptor::potion()))?
