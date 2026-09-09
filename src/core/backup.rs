@@ -16895,9 +16895,19 @@ mod tests {
             .map_err(|e| e.message())?;
             ensure_equal(listed.len(), 129, "normal recorder listing usable")?;
             ensure_equal(
+                listed.first().ok_or("missing newest event")?.sequence,
+                129,
+                "normal listing is newest first",
+            )?;
+            ensure_equal(
+                listed.last().ok_or("missing oldest event")?.sequence,
+                1,
+                "normal listing ends with root",
+            )?;
+            ensure_equal(
                 listed
-                    .last()
-                    .ok_or("missing last event")?
+                    .first()
+                    .ok_or("missing newest event")?
                     .chain_status
                     .as_str(),
                 "broken",
