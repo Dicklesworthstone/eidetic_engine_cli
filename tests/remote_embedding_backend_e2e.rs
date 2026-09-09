@@ -1,9 +1,14 @@
-//! End-to-end coverage for the OpenAI-compatible remote embedding backend
-//! (GH #34), driven against a real local HTTP server rather than a mock.
+//! HTTP transport coverage for the OpenAI-compatible remote embedding backend
+//! (GH #34), driven against a synthetic loopback server.
 //!
 //! The stub is a plain `std::net::TcpListener` on a loopback ephemeral port
 //! speaking just enough HTTP/1.1 to be a `/v1/embeddings` endpoint. Nothing
-//! here reaches the network, and each test owns its own server and port.
+//! here reaches an external provider or executes a model; each test owns its
+//! own server and port.
+
+// These expects are test setup and outcome assertions, as allowed by the
+// repository's test lint policy.
+#![allow(clippy::expect_used)]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -25,6 +30,8 @@ enum StubBehavior {
     Raw { status: u16, body: String },
     /// Read the request, then never answer.
     Hang,
+    /// Send response headers and optionally a body prefix, then stop sending.
+    HangAfterHeaders { partial_body: bool },
 }
 
 /// A single-purpose local `/v1/embeddings` server.
@@ -137,9 +144,6 @@ fn handle_connection(
         return;
     }
     let body = String::from_utf8_lossy(&body).into_owned();
-    let input_count = body.matches("\"").count(); // placeholder, refined below
-    let _ = input_count;
-
     seen_auth.lock().expect("auth lock").push(authorization);
     seen_bodies.lock().expect("body lock").push(body.clone());
 
@@ -147,6 +151,16 @@ fn handle_connection(
         StubBehavior::Hang => {
             // Hold the connection open without answering. The client's timeout
             // is what must end this exchange.
+            std::thread::sleep(Duration::from_secs(30));
+            return;
+        }
+        StubBehavior::HangAfterHeaders { partial_body } => {
+            let headers = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1024\r\nconnection: close\r\n\r\n";
+            stream.write_all(headers).expect("write response headers");
+            if *partial_body {
+                stream.write_all(b"{\"data\":[").expect("write body prefix");
+            }
+            stream.flush().expect("flush incomplete response");
             std::thread::sleep(Duration::from_secs(30));
             return;
         }
@@ -338,6 +352,31 @@ fn a_stalled_endpoint_times_out_instead_of_hanging_forever() {
         elapsed < Duration::from_secs(10),
         "timeout took {elapsed:?}, which means the bound did not apply"
     );
+}
+
+#[test]
+fn a_stalled_response_body_obeys_the_request_deadline() {
+    for partial_body in [false, true] {
+        let server = StubServer::start(StubBehavior::HangAfterHeaders { partial_body });
+        let settings = server.settings("all-minilm", None, Some("384"));
+        let embedder = RemoteApiEmbedder::with_dimension(settings, 384)
+            .with_request_timeout(Duration::from_millis(300));
+
+        let started = std::time::Instant::now();
+        let error =
+            embed_one(&embedder, "hello").expect_err("an incomplete response must time out");
+        let elapsed = started.elapsed();
+
+        assert_eq!(server.observed_bodies().len(), 1);
+        assert!(
+            error.contains("unreachable") && error.contains("no complete response"),
+            "partial_body={partial_body}: expected the exchange deadline, got {error}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "partial_body={partial_body}: body read exceeded the request deadline: {elapsed:?}"
+        );
+    }
 }
 
 #[test]

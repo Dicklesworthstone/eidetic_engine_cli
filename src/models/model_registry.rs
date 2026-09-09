@@ -2456,7 +2456,9 @@ mod remote_backend_vocabulary_tests {
     fn an_unreachable_remote_endpoint_degrades_to_the_hash_backend() {
         // A configured-but-broken endpoint is a hash-tier fallback, and must
         // stay distinguishable from a machine that never configured one.
-        assert!(EmbedModelSource::RemoteUnavailable.is_valid_for_backend(EmbedBackend::HashFallback));
+        assert!(
+            EmbedModelSource::RemoteUnavailable.is_valid_for_backend(EmbedBackend::HashFallback)
+        );
         assert!(!EmbedModelSource::RemoteUnavailable.is_valid_for_backend(EmbedBackend::RemoteApi));
         assert_ne!(
             EmbedModelSource::RemoteUnavailable,

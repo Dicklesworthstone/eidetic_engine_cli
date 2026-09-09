@@ -6253,7 +6253,11 @@ mod remote_embedding_endpoint_tests {
         assert_eq!(check.severity, CheckSeverity::Ok);
         assert_eq!(check.tier, CheckTier::Advisory);
         assert!(check.is_topline_healthy());
-        assert!(check.message.contains("not configured"), "{}", check.message);
+        assert!(
+            check.message.contains("not configured"),
+            "{}",
+            check.message
+        );
     }
 
     #[test]

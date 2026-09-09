@@ -225,7 +225,7 @@ impl fmt::Debug for RemoteEmbedSettings {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RemoteEmbedSettings")
-            .field("endpoint", &self.endpoint)
+            .field("endpoint", &self.redacted_endpoint())
             .field("model", &self.model)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("dimension", &self.dimension)
@@ -605,65 +605,67 @@ async fn post_json(
     body: Vec<u8>,
     request_timeout: Duration,
 ) -> Result<Vec<u8>, RemoteEmbedError> {
-    let request = client.request_streaming(
-        cx,
-        Method::Post,
-        &settings.endpoint,
-        request_headers(settings),
-        body,
-    );
-    // Bind the exchange to a timer so a server that accepts the connection and
-    // then stalls surfaces as an error instead of parking the runtime forever
-    // (the same failure mode documented for the bundled-model download).
-    let response = asupersync::time::TimeoutFuture::after(cx.now(), request_timeout, request).await;
-    let mut response = match response {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => {
-            return Err(RemoteEmbedError::Unreachable {
+    let exchange = async {
+        let mut response = client
+            .request_streaming(
+                cx,
+                Method::Post,
+                &settings.endpoint,
+                request_headers(settings),
+                body,
+            )
+            .await
+            .map_err(|error| RemoteEmbedError::Unreachable {
                 detail: bounded_detail(&error.to_string()),
-            });
-        }
-        Err(_elapsed) => {
-            return Err(RemoteEmbedError::Unreachable {
-                detail: format!("no response within {}ms", request_timeout.as_millis()),
-            });
-        }
-    };
+            })?;
 
-    let status = response.head.status;
-    let mut payload = Vec::new();
-    while let Some(frame) =
-        std::future::poll_fn(|task_cx| Pin::new(&mut response.body).poll_frame(task_cx)).await
-    {
-        match frame {
-            Ok(Frame::Data(mut chunk)) => {
-                while chunk.has_remaining() {
-                    let bytes = chunk.chunk();
-                    if bytes.is_empty() {
-                        break;
+        let status = response.head.status;
+        let mut payload = Vec::new();
+        while let Some(frame) =
+            std::future::poll_fn(|task_cx| Pin::new(&mut response.body).poll_frame(task_cx)).await
+        {
+            match frame {
+                Ok(Frame::Data(mut chunk)) => {
+                    while chunk.has_remaining() {
+                        let bytes = chunk.chunk();
+                        if bytes.is_empty() {
+                            break;
+                        }
+                        if payload.len().saturating_add(bytes.len()) > MAX_RESPONSE_BYTES {
+                            return Err(RemoteEmbedError::MalformedResponse {
+                                detail: "response exceeded the accepted byte budget".to_owned(),
+                            });
+                        }
+                        payload.extend_from_slice(bytes);
+                        chunk.advance(bytes.len());
                     }
-                    if payload.len().saturating_add(bytes.len()) > MAX_RESPONSE_BYTES {
-                        return Err(RemoteEmbedError::MalformedResponse {
-                            detail: "response exceeded the accepted byte budget".to_owned(),
-                        });
-                    }
-                    payload.extend_from_slice(bytes);
-                    chunk.advance(bytes.len());
+                }
+                Ok(Frame::Trailers(_)) => {}
+                Err(error) => {
+                    return Err(RemoteEmbedError::Unreachable {
+                        detail: bounded_detail(&error.to_string()),
+                    });
                 }
             }
-            Ok(Frame::Trailers(_)) => {}
-            Err(error) => {
-                return Err(RemoteEmbedError::Unreachable {
-                    detail: bounded_detail(&error.to_string()),
-                });
-            }
         }
-    }
 
-    if !(200..300).contains(&status) {
-        return Err(RemoteEmbedError::Status { status });
+        if !(200..300).contains(&status) {
+            return Err(RemoteEmbedError::Status { status });
+        }
+        Ok(payload)
+    };
+    // request_streaming's timeout ends after the headers. Keep one deadline
+    // around the complete exchange so a stalled or trickling body cannot
+    // outlive the configured request budget.
+    match asupersync::time::TimeoutFuture::after(cx.now(), request_timeout, exchange).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(RemoteEmbedError::Unreachable {
+            detail: format!(
+                "no complete response within {}ms",
+                request_timeout.as_millis()
+            ),
+        }),
     }
-    Ok(payload)
 }
 
 /// Bound and sanitise a transport error string before it reaches a log or a
@@ -1017,7 +1019,7 @@ mod tests {
     #[test]
     fn settings_never_debug_print_the_api_key() {
         let settings = RemoteEmbedSettings::new(
-            Some("http://127.0.0.1:11434/v1"),
+            Some("http://user:endpoint-secret@127.0.0.1:11434/v1"),
             Some("all-minilm"),
             Some("sk-super-secret"),
             Some("384"),
@@ -1029,6 +1031,10 @@ mod tests {
             "api key leaked into Debug output: {rendered}"
         );
         assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(
+            !rendered.contains("endpoint-secret"),
+            "endpoint credentials leaked into Debug output: {rendered}"
+        );
     }
 
     #[test]
