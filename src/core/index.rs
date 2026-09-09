@@ -14,6 +14,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
+use crate::core::remote_embed::{
+    EmbedBackendSelection, RemoteEmbedResolution, configured_embed_backend,
+    resolve_configured_remote_embedder,
+};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, CreateSearchIndexJobInput, DbConnection, DbError,
     DbOperation, EVIDENCE_CANONICAL_PROVENANCE_REVISION, EVIDENCE_SCREENING_VERSION,
@@ -30,10 +34,6 @@ use crate::models::{
     EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH, EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
     EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, EMBEDDING_POSTURE_MODE_NEURAL_REMOTE,
     EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_UNAVAILABLE, EMBEDDING_POSTURE_SCHEMA_V1, EmbedBackend,
-};
-use crate::core::remote_embed::{
-    EmbedBackendSelection, RemoteEmbedResolution, configured_embed_backend,
-    resolve_configured_remote_embedder,
 };
 use crate::search::{
     ARTIFACT_INDEX_PROJECTION_SCHEMA_V1, CanonicalSearchDocument,
@@ -4286,6 +4286,36 @@ fn active_semantic_identity() -> Option<(String, u32)> {
     Some((fast_embedder.id().to_owned(), dimension))
 }
 
+/// GH #34: vectors from two different embedding spaces must never share one
+/// index.
+///
+/// Only compares when BOTH sides actually declare a semantic identity: a
+/// lexical/hash-tier index legitimately carries no fingerprint, and a process
+/// that has not resolved an embedder has nothing to expect. Dimension is
+/// checked before model id because the two usually change together and the
+/// dimension is the more precise diagnosis.
+fn embedding_space_compatibility_error(
+    metadata_path: &Path,
+    stored: Option<(&str, u32)>,
+    active: Option<(&str, u32)>,
+) -> Option<String> {
+    let (stored_model_id, stored_dimension) = stored?;
+    let (active_model_id, active_dimension) = active?;
+    if stored_dimension != active_dimension {
+        return Some(format!(
+            "index metadata '{}' was built at {stored_dimension}d by embedder '{stored_model_id}', but the active embedder '{active_model_id}' produces {active_dimension}d vectors; embedding dimensions cannot be mixed and a full index rebuild is required",
+            metadata_path.display()
+        ));
+    }
+    if stored_model_id != active_model_id {
+        return Some(format!(
+            "index metadata '{}' was built by embedder '{stored_model_id}', but the active embedder is '{active_model_id}'; vectors from different embedding backends cannot be mixed and a full index rebuild is required",
+            metadata_path.display()
+        ));
+    }
+    None
+}
+
 fn index_metadata_compatibility_error(
     metadata_path: &Path,
     metadata: &ParsedIndexMetadata,
@@ -4305,25 +4335,15 @@ fn index_metadata_compatibility_error(
             metadata.schema
         ));
     }
-    // GH #34: vectors from two different embedding spaces must never share one
-    // index. Only compare when BOTH sides actually declare a semantic identity:
-    // a lexical/hash-tier index legitimately carries no fingerprint, and a
-    // process that has not resolved an embedder has nothing to expect.
-    if let (Some((stored_model_id, stored_dimension)), Some((active_model_id, active_dimension))) =
-        (stored_semantic_identity(metadata), active_semantic_identity())
-    {
-        if stored_dimension != active_dimension {
-            return Some(format!(
-                "index metadata '{}' was built at {stored_dimension}d by embedder '{stored_model_id}', but the active embedder '{active_model_id}' produces {active_dimension}d vectors; embedding dimensions cannot be mixed and a full index rebuild is required",
-                metadata_path.display()
-            ));
-        }
-        if stored_model_id != active_model_id {
-            return Some(format!(
-                "index metadata '{}' was built by embedder '{stored_model_id}', but the active embedder is '{active_model_id}'; vectors from different embedding backends cannot be mixed and a full index rebuild is required",
-                metadata_path.display()
-            ));
-        }
+    let active_identity = active_semantic_identity();
+    if let Some(error) = embedding_space_compatibility_error(
+        metadata_path,
+        stored_semantic_identity(metadata),
+        active_identity
+            .as_ref()
+            .map(|(model_id, dimension)| (model_id.as_str(), *dimension)),
+    ) {
+        return Some(error);
     }
     if metadata.evidence_security_policy_epoch != Some(u64::from(EVIDENCE_SECURITY_POLICY_EPOCH)) {
         return Some(format!(
@@ -5361,9 +5381,7 @@ fn active_remote_embedder() -> &'static ActiveRemoteEmbedder {
                     dimension = embedder.settings().dimension.unwrap_or_default(),
                     "remote embedding backend active"
                 );
-                ActiveRemoteEmbedder::Ready(
-                    Arc::new(embedder) as Arc<dyn crate::search::Embedder>
-                )
+                ActiveRemoteEmbedder::Ready(Arc::new(embedder) as Arc<dyn crate::search::Embedder>)
             }
             // `Ok(None)` cannot happen here: the backend check above already
             // established that `remote` is configured. Treat it as a failure
@@ -16781,5 +16799,98 @@ mod tests {
             report.processed_jobs == 1,
             format!("workspace A's pending job must be processed: {report:?}"),
         )
+    }
+}
+
+#[cfg(test)]
+mod remote_embedding_space_tests {
+    use super::*;
+
+    fn metadata_path() -> PathBuf {
+        PathBuf::from("/tmp/ee-test-index/meta.json")
+    }
+
+    #[test]
+    fn compatible_identities_are_accepted() {
+        assert!(
+            embedding_space_compatibility_error(
+                &metadata_path(),
+                Some(("remote-api:all-minilm", 384)),
+                Some(("remote-api:all-minilm", 384)),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_dimension_change_is_refused_and_names_both_widths() {
+        let error = embedding_space_compatibility_error(
+            &metadata_path(),
+            Some(("remote-api:all-minilm", 384)),
+            Some(("potion-multilingual-128M", 256)),
+        )
+        .expect("dimension mismatch must be refused");
+        assert!(error.contains("384d"), "{error}");
+        assert!(error.contains("256d"), "{error}");
+        assert!(error.contains("cannot be mixed"), "{error}");
+        assert!(error.contains("rebuild"), "{error}");
+    }
+
+    #[test]
+    fn a_backend_change_at_the_same_width_is_still_refused() {
+        // 384d on both sides, but a different producer: the vectors are not
+        // comparable even though the widths line up.
+        let error = embedding_space_compatibility_error(
+            &metadata_path(),
+            Some(("remote-api:all-minilm", 384)),
+            Some(("remote-api:bge-small", 384)),
+        )
+        .expect("model change must be refused");
+        assert!(error.contains("remote-api:all-minilm"), "{error}");
+        assert!(error.contains("remote-api:bge-small"), "{error}");
+        assert!(error.contains("different embedding backends"), "{error}");
+    }
+
+    #[test]
+    fn a_missing_identity_on_either_side_stays_silent() {
+        // A lexical/hash index carries no fingerprint, and a process that has
+        // not resolved an embedder has no expectation. Neither is a conflict.
+        assert!(
+            embedding_space_compatibility_error(
+                &metadata_path(),
+                None,
+                Some(("potion-multilingual-128M", 256)),
+            )
+            .is_none()
+        );
+        assert!(
+            embedding_space_compatibility_error(
+                &metadata_path(),
+                Some(("potion-multilingual-128M", 256)),
+                None,
+            )
+            .is_none()
+        );
+        assert!(embedding_space_compatibility_error(&metadata_path(), None, None).is_none());
+    }
+
+    #[test]
+    fn parsed_metadata_recovers_the_stamped_identity() {
+        let metadata = ParsedIndexMetadata {
+            schema: None,
+            generation: None,
+            last_rebuild_at: None,
+            corpus_revision: None,
+            evidence_security_policy_epoch: None,
+            document_count: None,
+            document_counts: None,
+            tier_document_counts: None,
+            stored_model_id: Some("remote-api:all-minilm".to_owned()),
+            stored_dimension: Some(384),
+        };
+        assert_eq!(
+            stored_semantic_identity(&metadata),
+            Some(("remote-api:all-minilm", 384))
+        );
     }
 }

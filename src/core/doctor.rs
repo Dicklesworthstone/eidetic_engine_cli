@@ -3003,9 +3003,7 @@ fn check_embedding_posture(workspace_path: Option<&Path>) -> CheckResult {
 /// Always [`CheckTier::Advisory`]: a broken remote endpoint degrades retrieval
 /// to the deterministic hash tier, which is the same "still works, worse"
 /// posture the embedding check reports, and must not flip top-line health.
-fn remote_embedding_endpoint_check_result(
-    outcome: &RemoteEndpointProbe,
-) -> CheckResult {
+fn remote_embedding_endpoint_check_result(outcome: &RemoteEndpointProbe) -> CheckResult {
     let check = match outcome {
         RemoteEndpointProbe::NotConfigured => CheckResult::ok(
             "remote_embedding_endpoint",
@@ -6241,5 +6239,63 @@ mod tests {
         assert_eq!(check.tier, CheckTier::Advisory);
         assert!(check.is_topline_healthy());
         assert!(check.message.contains("could not be determined"));
+    }
+}
+
+#[cfg(test)]
+mod remote_embedding_endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn an_unconfigured_backend_is_ok_and_advisory() {
+        let check = remote_embedding_endpoint_check_result(&RemoteEndpointProbe::NotConfigured);
+        assert_eq!(check.name, "remote_embedding_endpoint");
+        assert_eq!(check.severity, CheckSeverity::Ok);
+        assert_eq!(check.tier, CheckTier::Advisory);
+        assert!(check.is_topline_healthy());
+        assert!(check.message.contains("not configured"), "{}", check.message);
+    }
+
+    #[test]
+    fn a_ready_endpoint_reports_the_model_and_dimension() {
+        let check = remote_embedding_endpoint_check_result(&RemoteEndpointProbe::Ready {
+            endpoint: "http://127.0.0.1:11434/v1/embeddings".to_owned(),
+            model: "all-minilm".to_owned(),
+            dimension: 384,
+        });
+        assert_eq!(check.severity, CheckSeverity::Ok);
+        assert!(check.message.contains("all-minilm"), "{}", check.message);
+        assert!(check.message.contains("384d"), "{}", check.message);
+    }
+
+    #[test]
+    fn a_misconfigured_backend_warns_with_repair_text() {
+        let check = remote_embedding_endpoint_check_result(&RemoteEndpointProbe::Misconfigured {
+            reason: "EE_EMBED_REMOTE_URL is not set".to_owned(),
+            repair: "Set EE_EMBED_REMOTE_URL",
+        });
+        assert_eq!(check.severity, CheckSeverity::Warning);
+        assert_eq!(check.tier, CheckTier::Advisory);
+        assert_eq!(check.repair, Some("Set EE_EMBED_REMOTE_URL"));
+        assert!(
+            check.message.contains("deterministic-hash"),
+            "the degraded tier must be named: {}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn an_unreachable_endpoint_warns_without_flipping_topline_health() {
+        let check = remote_embedding_endpoint_check_result(&RemoteEndpointProbe::Unreachable {
+            endpoint: "http://127.0.0.1:11434/v1/embeddings".to_owned(),
+            reason: "connection refused".to_owned(),
+        });
+        assert_eq!(check.severity, CheckSeverity::Warning);
+        assert_eq!(check.tier, CheckTier::Advisory);
+        assert!(
+            check.is_topline_healthy(),
+            "an advisory check must never flip the top-line verdict"
+        );
+        assert!(check.repair.is_some());
     }
 }

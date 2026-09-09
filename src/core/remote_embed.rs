@@ -184,9 +184,7 @@ impl RemoteEmbedConfigError {
             Self::MissingModel => {
                 "Set EE_EMBED_REMOTE_MODEL to the model tag your endpoint serves, e.g. all-minilm"
             }
-            Self::UnsupportedScheme => {
-                "EE_EMBED_REMOTE_URL must start with http:// or https://"
-            }
+            Self::UnsupportedScheme => "EE_EMBED_REMOTE_URL must start with http:// or https://",
             Self::MissingHost => "EE_EMBED_REMOTE_URL must include a host, e.g. 127.0.0.1:11434",
             Self::InvalidDimension => {
                 "EE_EMBED_REMOTE_DIMENSION must be a positive integer, or unset to discover it from the first response"
@@ -332,9 +330,7 @@ fn normalize_embeddings_endpoint(url: &str) -> Result<String, RemoteEmbedConfigE
         return Err(RemoteEmbedConfigError::UnsupportedScheme);
     };
     // Everything before the first '/', '?' or '#' is authority.
-    let authority_end = rest
-        .find(['/', '?', '#'])
-        .unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
     // Reject a bare scheme, and a URL whose host is empty after any userinfo.
     let host = authority.rsplit('@').next().unwrap_or(authority);
@@ -492,16 +488,14 @@ impl RemoteApiEmbedder {
         &self.settings
     }
 
-    async fn embed_chunk(&self, cx: &Cx, texts: &[&str]) -> Result<Vec<Vec<f32>>, RemoteEmbedError> {
+    async fn embed_chunk(
+        &self,
+        cx: &Cx,
+        texts: &[&str],
+    ) -> Result<Vec<Vec<f32>>, RemoteEmbedError> {
         let body = serialize_request(&self.settings.model, texts);
-        let payload = post_json(
-            cx,
-            &self.client,
-            &self.settings,
-            body,
-            self.request_timeout,
-        )
-        .await?;
+        let payload =
+            post_json(cx, &self.client, &self.settings, body, self.request_timeout).await?;
         let vectors = parse_embeddings_response(&payload, texts.len())?;
         for vector in &vectors {
             if vector.len() != self.dimension {
@@ -621,8 +615,7 @@ async fn post_json(
     // Bind the exchange to a timer so a server that accepts the connection and
     // then stalls surfaces as an error instead of parking the runtime forever
     // (the same failure mode documented for the bundled-model download).
-    let response =
-        asupersync::time::TimeoutFuture::after(cx.now(), request_timeout, request).await;
+    let response = asupersync::time::TimeoutFuture::after(cx.now(), request_timeout, request).await;
     let mut response = match response {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => {
@@ -738,7 +731,10 @@ fn parse_embeddings_response(
         }
         if values.len() > MAX_ACCEPTED_DIMENSION {
             return Err(RemoteEmbedError::MalformedResponse {
-                detail: format!("response dimension {} exceeds the accepted ceiling", values.len()),
+                detail: format!(
+                    "response dimension {} exceeds the accepted ceiling",
+                    values.len()
+                ),
             });
         }
         let mut vector = Vec::with_capacity(values.len());
@@ -816,9 +812,7 @@ pub async fn probe_dimension(
 ///
 /// Returns [`RemoteEmbedError`] when the endpoint is unreachable, answers with
 /// a non-2xx status, or returns a malformed body.
-pub fn probe_dimension_blocking(
-    settings: &RemoteEmbedSettings,
-) -> Result<usize, RemoteEmbedError> {
+pub fn probe_dimension_blocking(settings: &RemoteEmbedSettings) -> Result<usize, RemoteEmbedError> {
     probe_dimension_blocking_with_timeout(settings, REMOTE_EMBED_PROBE_TIMEOUT)
 }
 
@@ -881,8 +875,8 @@ pub fn resolve_configured_remote_embedder()
     if let Some(dimension) = settings.dimension {
         return Ok(Some(RemoteApiEmbedder::with_dimension(settings, dimension)));
     }
-    let cached = *RESOLVED_REMOTE_DIMENSION
-        .get_or_init(|| probe_dimension_blocking(&settings).ok());
+    let cached =
+        *RESOLVED_REMOTE_DIMENSION.get_or_init(|| probe_dimension_blocking(&settings).ok());
     let dimension = cached.ok_or_else(|| {
         RemoteEmbedResolution::Endpoint(RemoteEmbedError::Unreachable {
             detail: "dimension probe failed; set EE_EMBED_REMOTE_DIMENSION to skip discovery"

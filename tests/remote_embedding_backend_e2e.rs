@@ -66,7 +66,12 @@ impl StubServer {
         }
     }
 
-    fn settings(&self, model: &str, api_key: Option<&str>, dimension: Option<&str>) -> RemoteEmbedSettings {
+    fn settings(
+        &self,
+        model: &str,
+        api_key: Option<&str>,
+        dimension: Option<&str>,
+    ) -> RemoteEmbedSettings {
         RemoteEmbedSettings::new(Some(&self.base_url), Some(model), api_key, dimension)
             .expect("valid stub settings")
     }
@@ -318,8 +323,8 @@ fn a_malformed_body_is_reported_rather_than_indexed() {
 fn a_stalled_endpoint_times_out_instead_of_hanging_forever() {
     let server = StubServer::start(StubBehavior::Hang);
     let settings = server.settings("all-minilm", None, Some("384"));
-    let embedder =
-        RemoteApiEmbedder::with_dimension(settings, 384).with_request_timeout(Duration::from_millis(300));
+    let embedder = RemoteApiEmbedder::with_dimension(settings, 384)
+        .with_request_timeout(Duration::from_millis(300));
 
     let started = std::time::Instant::now();
     let error = embed_one(&embedder, "hello").expect_err("a stalled endpoint must time out");

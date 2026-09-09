@@ -796,10 +796,7 @@ impl ModelStatusReport {
     #[must_use]
     pub fn human_summary(&self) -> String {
         let mut output = String::new();
-        output.push_str(&format!(
-            "Backend: {}\n",
-            self.active.backend.as_str()
-        ));
+        output.push_str(&format!("Backend: {}\n", self.active.backend.as_str()));
         output.push_str(&format!(
             "Active embedder: {} (dim {}{}semantic={}, deterministic={})\n",
             self.active.fast_model_id,
@@ -5683,5 +5680,59 @@ mod tests {
             !same_embedder_identity("model2vec/", "model2vec/"),
             "prefix-only ids never match",
         )
+    }
+}
+
+#[cfg(test)]
+mod remote_backend_status_tests {
+    use super::*;
+    use crate::core::index::EmbeddingPosture;
+    use crate::models::{
+        EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH, EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
+        EMBEDDING_POSTURE_SCHEMA_V1,
+    };
+
+    fn posture(mode: &'static str, semantic: bool) -> EmbeddingPosture {
+        EmbeddingPosture {
+            schema: EMBEDDING_POSTURE_SCHEMA_V1,
+            mode,
+            semantic,
+            source: "test".to_owned(),
+            fast_model_id: "test-embedder".to_owned(),
+            fast_dimension: 384,
+            quality_model_id: None,
+            quality_dimension: None,
+            deterministic: true,
+            registered_model_count: 0,
+            available_model_count: 0,
+            selected_registry_model: None,
+            vector_coverage: crate::core::index::EmbeddingVectorCoverage::default(),
+        }
+    }
+
+    #[test]
+    fn a_remote_posture_reports_the_remote_backend() {
+        // The remote embedder is semantic too, so the mode must win over the
+        // semantic flag or this would report neural_local.
+        assert_eq!(
+            backend_for_posture(&posture(EMBEDDING_POSTURE_MODE_NEURAL_REMOTE, true)),
+            EmbedBackend::RemoteApi
+        );
+    }
+
+    #[test]
+    fn a_local_semantic_posture_still_reports_neural_local() {
+        assert_eq!(
+            backend_for_posture(&posture(EMBEDDING_POSTURE_MODE_NEURAL_LOCAL, true)),
+            EmbedBackend::NeuralLocal
+        );
+    }
+
+    #[test]
+    fn a_non_semantic_posture_reports_the_hash_fallback() {
+        assert_eq!(
+            backend_for_posture(&posture(EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH, false)),
+            EmbedBackend::HashFallback
+        );
     }
 }
