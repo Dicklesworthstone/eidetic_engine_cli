@@ -10776,6 +10776,12 @@ mod tests {
     }
 
     fn fixture() -> Result<(TempDir, PathBuf, PathBuf), DomainError> {
+        fixture_with_memory_content("Authorization header should be redacted")
+    }
+
+    fn fixture_with_memory_content(
+        content: &str,
+    ) -> Result<(TempDir, PathBuf, PathBuf), DomainError> {
         let tempdir = tempfile::tempdir().map_err(|error| DomainError::Storage {
             message: error.to_string(),
             repair: None,
@@ -10825,7 +10831,7 @@ mod tests {
                     workspace_id: workspace_id.clone(),
                     level: "procedural".to_owned(),
                     kind: "rule".to_owned(),
-                    content: "Authorization header should be redacted".to_owned(),
+                    content: content.to_owned(),
                     workflow_id: None,
                     confidence: 0.8,
                     utility: 0.6,
@@ -19738,6 +19744,7 @@ mod tests {
     #[test]
     fn default_backup_restores_agent_profiles_and_live_pack() -> TestResult {
         const AGENT: &str = "RecoveryAgent";
+        const CONTENT: &str = "Before the tangerine compass release, inspect the build report.";
         // A child gets the real process environment without mutating the
         // environment of concurrently running Rust tests.
         if crate::core::memory_scope::current_agent_name().as_deref() != Some(AGENT) {
@@ -19762,7 +19769,8 @@ mod tests {
             RedactionLevel::Standard,
             RedactionLevel::Full,
         ] {
-            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let (tempdir, workspace, database) =
+                fixture_with_memory_content(CONTENT).map_err(|e| e.message())?;
             let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
             let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
             let mut profiles = (0..129)
@@ -19867,6 +19875,15 @@ mod tests {
                 .list_memories(&restored_workspace.id, None, true)
                 .map_err(|e| e.to_string())?;
             ensure_equal(memories.len(), 1, "restored profile memory")?;
+            ensure_equal(
+                memories[0].content.as_str(),
+                if redaction == RedactionLevel::Full {
+                    "[REDACTED]"
+                } else {
+                    CONTENT
+                },
+                "profile memory body follows backup redaction",
+            )?;
             let actual = db
                 .list_agent_context_profiles_for_recovery(&restored_workspace.id)
                 .map_err(|e| e.to_string())?;
@@ -19911,7 +19928,7 @@ mod tests {
                         workspace_path: side_path,
                         database_path: Some(PathBuf::from(&restored.restored_database_path)),
                         index_dir: None,
-                        query: "Authorization header".to_owned(),
+                        query: "tangerine compass release".to_owned(),
                         speed: crate::search::SpeedMode::Default,
                         source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
                         strict_source_mode: true,
@@ -19952,7 +19969,10 @@ mod tests {
                 ensure_equal(
                     profile["memoryBiasApplied"].as_u64(),
                     Some(1),
-                    "real pack applied learned bias",
+                    &format!(
+                        "real pack applied learned bias ({redaction:?}); profile={profile}; degraded={:?}",
+                        response.data.degraded
+                    ),
                 )?;
                 ensure_equal(
                     profile["helpfulCount"].as_u64(),
