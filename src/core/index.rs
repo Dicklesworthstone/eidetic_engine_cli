@@ -5360,8 +5360,11 @@ enum ActiveRemoteEmbedder {
     NotConfigured,
     /// A remote endpoint answered and its dimension is known.
     Ready(Arc<dyn crate::search::Embedder>),
-    /// A remote endpoint was requested but could not be brought up. Never a
-    /// silent fallback: `ee model status` and `ee doctor` both name this.
+    /// A remote endpoint was requested but could not be brought up.
+    ///
+    /// Never a silent fallback: the reason is logged here, `ee model status`
+    /// reports the `neural_remote_unavailable` posture, and `ee doctor`'s
+    /// `remote_embedding_endpoint` check probes live and names the cause.
     Failed,
 }
 
@@ -5385,17 +5388,34 @@ fn active_remote_embedder() -> &'static ActiveRemoteEmbedder {
             // `Ok(None)` cannot happen here: the backend check above already
             // established that `remote` is configured. Treat it as a failure
             // rather than pretending the local backend was requested.
-            Ok(None) => ActiveRemoteEmbedder::Failed,
+            Ok(None) => {
+                tracing::error!(
+                    target: "ee::index::embedder",
+                    "remote embedding backend selection disagreed with itself"
+                );
+                ActiveRemoteEmbedder::Failed
+            }
             Err(error) => {
                 tracing::error!(
                     target: "ee::index::embedder",
                     code = error.code(),
+                    reason = %error,
                     "remote embedding backend was configured but could not be used"
                 );
                 ActiveRemoteEmbedder::Failed
             }
         }
     })
+}
+
+/// Descriptor for the active remote embedder, when one is serving.
+fn remote_embedder_descriptor() -> Option<EmbedderDescriptor> {
+    match active_remote_embedder() {
+        ActiveRemoteEmbedder::Ready(embedder) => {
+            Some(EmbedderDescriptor::from_embedder(embedder.as_ref()))
+        }
+        ActiveRemoteEmbedder::NotConfigured | ActiveRemoteEmbedder::Failed => None,
+    }
 }
 
 /// Hash-tier descriptors marked as "the remote backend you asked for is down".
@@ -6797,12 +6817,11 @@ fn workspace_embedder_descriptors(
     {
         return Ok(stack_descriptors(&stack));
     }
-    match active_remote_embedder() {
-        ActiveRemoteEmbedder::Ready(embedder) => {
-            return Ok((EmbedderDescriptor::from_embedder(embedder.as_ref()), None));
-        }
-        ActiveRemoteEmbedder::Failed => return Ok(remote_unavailable_descriptors()),
-        ActiveRemoteEmbedder::NotConfigured => {}
+    if let Some(descriptor) = remote_embedder_descriptor() {
+        return Ok((descriptor, None));
+    }
+    if matches!(active_remote_embedder(), ActiveRemoteEmbedder::Failed) {
+        return Ok(remote_unavailable_descriptors());
     }
     if configured_embedder_model_root().is_none() {
         match resolve_registered_model2vec(db, workspace_id, |_| Ok(EmbedderDescriptor::potion()))?
