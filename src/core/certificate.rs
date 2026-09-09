@@ -487,6 +487,8 @@ pub struct CertificateVerifyReport {
     pub certificate_id: String,
     pub result: VerificationResult,
     pub checked_at: String,
+    /// True only after the payload hash check succeeds. False includes checks
+    /// not reached because an earlier verification stage refused the record.
     pub hash_verified: bool,
     pub payload_hash_fresh: bool,
     pub schema_version_valid: bool,
@@ -554,14 +556,14 @@ impl CertificateVerifyReport {
             certificate_id: certificate_id.into(),
             result: VerificationResult::Expired,
             checked_at: current_verify_timestamp(),
-            hash_verified: true,
-            payload_hash_fresh: true,
+            hash_verified: false,
+            payload_hash_fresh: false,
             schema_version_valid: true,
-            assumptions_valid: true,
+            assumptions_valid: false,
             status_valid: false,
             expiry_valid: false,
             mismatches: vec!["expired".to_owned()],
-            attestation_ok: true,
+            attestation_ok: false,
             signer: None,
             failure_codes: vec!["expired".to_owned()],
             message: "Certificate has expired".to_owned(),
@@ -582,7 +584,7 @@ impl CertificateVerifyReport {
             status_valid: true,
             expiry_valid: true,
             mismatches: vec!["stale_payload_hash".to_owned()],
-            attestation_ok: true,
+            attestation_ok: false,
             signer: None,
             failure_codes: vec!["stale_payload_hash".to_owned()],
             message: "Certificate payload hash no longer matches the current payload".to_owned(),
@@ -596,14 +598,14 @@ impl CertificateVerifyReport {
             certificate_id: certificate_id.into(),
             result: VerificationResult::StaleSchemaVersion,
             checked_at: current_verify_timestamp(),
-            hash_verified: true,
-            payload_hash_fresh: true,
+            hash_verified: false,
+            payload_hash_fresh: false,
             schema_version_valid: false,
-            assumptions_valid: true,
-            status_valid: true,
-            expiry_valid: true,
+            assumptions_valid: false,
+            status_valid: false,
+            expiry_valid: false,
             mismatches: vec!["stale_schema_version".to_owned()],
-            attestation_ok: true,
+            attestation_ok: false,
             signer: None,
             failure_codes: vec!["stale_schema_version".to_owned()],
             message: "Certificate schema version is no longer supported".to_owned(),
@@ -617,14 +619,14 @@ impl CertificateVerifyReport {
             certificate_id: certificate_id.into(),
             result: VerificationResult::FailedAssumptions,
             checked_at: current_verify_timestamp(),
-            hash_verified: true,
-            payload_hash_fresh: true,
+            hash_verified: false,
+            payload_hash_fresh: false,
             schema_version_valid: true,
             assumptions_valid: false,
             status_valid: true,
             expiry_valid: true,
             mismatches: vec!["failed_assumptions".to_owned()],
-            attestation_ok: true,
+            attestation_ok: false,
             signer: None,
             failure_codes: vec!["failed_assumptions".to_owned()],
             message: "Certificate assumptions failed during verification".to_owned(),
@@ -645,7 +647,7 @@ impl CertificateVerifyReport {
             status_valid: true,
             expiry_valid: true,
             mismatches: vec!["hash_mismatch".to_owned()],
-            attestation_ok: true,
+            attestation_ok: false,
             signer: None,
             failure_codes: vec!["hash_mismatch".to_owned()],
             message: "Certificate payload hash does not match the manifest".to_owned(),
@@ -659,14 +661,14 @@ impl CertificateVerifyReport {
             certificate_id: certificate_id.into(),
             result: VerificationResult::Revoked,
             checked_at: current_verify_timestamp(),
-            hash_verified: true,
-            payload_hash_fresh: true,
+            hash_verified: false,
+            payload_hash_fresh: false,
             schema_version_valid: true,
-            assumptions_valid: true,
+            assumptions_valid: false,
             status_valid: false,
-            expiry_valid: true,
+            expiry_valid: false,
             mismatches: vec!["revoked".to_owned()],
-            attestation_ok: true,
+            attestation_ok: false,
             signer: None,
             failure_codes: vec!["revoked".to_owned()],
             message: "Certificate has been revoked".to_owned(),
@@ -680,14 +682,14 @@ impl CertificateVerifyReport {
             certificate_id: certificate_id.into(),
             result: VerificationResult::InvalidStatus,
             checked_at: current_verify_timestamp(),
-            hash_verified: true,
-            payload_hash_fresh: true,
+            hash_verified: false,
+            payload_hash_fresh: false,
             schema_version_valid: true,
-            assumptions_valid: true,
+            assumptions_valid: false,
             status_valid: false,
-            expiry_valid: true,
+            expiry_valid: false,
             mismatches: vec!["invalid_status".to_owned()],
-            attestation_ok: true,
+            attestation_ok: false,
             signer: None,
             failure_codes: vec!["invalid_status".to_owned()],
             message: "Certificate status is not valid for use".to_owned(),
@@ -3196,6 +3198,122 @@ mod tests {
             &VerificationResult::NotFound,
             "should be not found",
         )
+    }
+
+    #[test]
+    fn verification_refusals_do_not_claim_unperformed_checks() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let metadata_dir = dir.path().join(".ee");
+        fs::create_dir(&metadata_dir).map_err(|e| e.to_string())?;
+        let database = metadata_dir.join("ee.db");
+        let workspace_id =
+            crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_u128(1)).to_string();
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        db.migrate().map_err(|e| e.to_string())?;
+        db.insert_workspace(
+            &workspace_id,
+            &crate::db::CreateWorkspaceInput {
+                path: dir.path().to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        let cases = [
+            ("schema", "valid", VerificationResult::StaleSchemaVersion),
+            ("revoked", "revoked", VerificationResult::Revoked),
+            ("expired", "expired", VerificationResult::Expired),
+            ("pending", "pending", VerificationResult::InvalidStatus),
+            ("invalid", "invalid", VerificationResult::InvalidStatus),
+            ("expiry", "valid", VerificationResult::Expired),
+            (
+                "assumptions",
+                "valid",
+                VerificationResult::FailedAssumptions,
+            ),
+            ("payload", "valid", VerificationResult::HashMismatch),
+        ];
+        let mut records = Vec::new();
+        for (id, status, _) in &cases {
+            let schema = if *id == "schema" {
+                "ee.certificate.payload.v999"
+            } else {
+                CERTIFICATE_PAYLOAD_SCHEMA_V1
+            };
+            let expiry = (*id == "expiry").then_some("2000-01-01T00:00:00Z");
+            let assumptions = *id != "assumptions";
+            let hash = format!("blake3:{}", blake3::hash(b"absent payload").to_hex());
+            db.upsert_certificate(
+                id,
+                &crate::db::CreateCertificateInput {
+                    workspace_id: workspace_id.clone(),
+                    target_kind: "pack".to_owned(),
+                    target_id: (*id).to_owned(),
+                    hash_algo: "blake3".to_owned(),
+                    content_hash: hash.clone(),
+                    signature: None,
+                    signature_algorithm: None,
+                    signer: None,
+                    signed_at: None,
+                    verified_at: None,
+                    status: (*status).to_owned(),
+                    manifest_path: None,
+                    payload_path: Some("absent.json".to_owned()),
+                    metadata_json: Some(
+                        serde_json::json!({"payloadSchema": schema, "expiresAt": expiry,
+                    "assumptionsValid": assumptions})
+                        .to_string(),
+                    ),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            records.push(serde_json::json!({"id": id, "kind": "pack", "status": status, "workspaceId": workspace_id,
+                "issuedAt": "2026-09-01T00:00:00Z", "payloadHash": hash, "payloadSchema": schema,
+                "expiresAt": expiry, "assumptionsValid": assumptions, "payloadPath": "absent.json"}));
+        }
+        db.close().map_err(|e| e.to_string())?;
+        let manifest = dir.path().join("certificates.json");
+        fs::write(
+            &manifest,
+            serde_json::json!({"schema": CERTIFICATE_MANIFEST_SCHEMA_V1,
+            "certificates": records})
+            .to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+        for (id, _, expected) in cases {
+            for from_manifest in [false, true] {
+                let options = if from_manifest {
+                    CertificateLookupOptions::new(id).with_manifest_path(&manifest)
+                } else {
+                    CertificateLookupOptions {
+                        certificate_id: id.to_owned(),
+                        manifest_path: None,
+                        database_path: Some(database.clone()),
+                        workspace_id: Some(workspace_id.clone()),
+                    }
+                };
+                let report = verify_certificate_with_options(&options);
+                let label = format!("{id}, manifest={from_manifest}");
+                ensure_equal(&report.result, &expected, &label)?;
+                ensure(
+                    !report.hash_verified && !report.payload_hash_fresh && !report.attestation_ok,
+                    &format!("{label}: unperformed content checks cannot be reported as verified"),
+                )?;
+                let passed_metadata = matches!(id, "assumptions" | "payload");
+                ensure_equal(
+                    &report.schema_version_valid,
+                    &(id != "schema"),
+                    "schema stage",
+                )?;
+                ensure_equal(&report.status_valid, &passed_metadata, "status stage")?;
+                ensure_equal(&report.expiry_valid, &passed_metadata, "expiry stage")?;
+                ensure_equal(
+                    &report.assumptions_valid,
+                    &(id == "payload"),
+                    "assumptions stage",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     #[test]
