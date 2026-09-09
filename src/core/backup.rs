@@ -866,7 +866,9 @@ impl BackupRestoreReport {
             rule_tags = self.restored_rule_tag_count,
             feedback = self.restored_feedback_count,
             packs = self.restored_pack_history.records,
-        )
+        ) + &format!("  restored recorder runs/events/verification: {}/{}/{}\n",
+            self.restored_recorded_history.runs, self.restored_recorded_history.events,
+            self.restored_recorded_history.verification)
     }
 
     #[must_use]
@@ -8063,18 +8065,22 @@ fn collect_recorded_history_payloads(
         event.source_span_id = event.source_span_id.as_deref().map(reference);
     }
     verification.sort_by(|a, b| a.id.cmp(&b.id));
+    // Machine labels drive blocker classification and bead filters. Full
+    // redaction removes free text, while labels retain standard secret scanning.
+    let label_level = if redaction == RedactionLevel::Full { RedactionLevel::Standard } else { redaction };
+    let label = |value: &str| redact_learning_reference(value, label_level, memory_ids, &references);
     let verification = verification.into_iter().map(|mut row| {
         let original = row.clone();
         for text in [&mut row.command_text, &mut row.stdout_tail, &mut row.stderr_tail] {
             *text = text.as_deref().map(|s| redact_content(s, redaction));
         }
         for text in [&mut row.bead_id, &mut row.worker_id, &mut row.blocker_fingerprint, &mut row.remediation_bead] {
-            *text = text.as_deref().map(reference);
+            *text = text.as_deref().map(label);
         }
-        row.command_kind = reference(&row.command_kind);
-        row.verification_attribution = reference(&row.verification_attribution);
+        row.command_kind = label(&row.command_kind);
+        row.verification_attribution = label(&row.verification_attribution);
         row.degraded_codes_json = row.degraded_codes_json.as_deref()
-            .map(|s| redact_work_history_json(s, redaction)).transpose()?;
+            .map(|s| redact_work_history_json(s, label_level)).transpose()?;
         Ok(BackupVerificationRun { redacted: original != row, row })
     }).collect::<Result<Vec<_>, DomainError>>()?;
     let count = runs.len().max(events.len()).max(verification.len()).div_ceil(WORK_HISTORY_CHUNK_ROWS);
