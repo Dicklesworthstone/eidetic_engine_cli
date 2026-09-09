@@ -20233,7 +20233,7 @@ mod tests {
         for redaction in [
             RedactionLevel::None,
             RedactionLevel::Standard,
-            RedactionLevel::Full,
+            RedactionLevel::Paranoid,
         ] {
             let (tempdir, workspace, database) =
                 fixture_with_memory_content("Inspect the release toolchain.")
@@ -20389,7 +20389,7 @@ mod tests {
             )?;
             ensure_equal(
                 trace.summary.as_str(),
-                if redaction == RedactionLevel::Full {
+                if redaction == RedactionLevel::Paranoid {
                     "[REDACTED]"
                 } else {
                     rationale.trace.summary.as_str()
@@ -20496,6 +20496,96 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn full_redaction_restores_visible_rationale_for_one_memory() -> TestResult {
+        // Full redaction deliberately collapses exported memory identifiers;
+        // multi-memory backups are rejected by the existing collision policy.
+        let (tempdir, workspace, database) =
+            fixture_with_memory_content("Inspect the toolchain.").map_err(|e| e.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let original = recovery_rationale(&workspace_id, &memory_id)?;
+        db.insert_rationale_trace(&workspace_id, &original.trace)
+            .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        let backup = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: None,
+            label: None,
+            redaction_level: RedactionLevel::Full,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: PathBuf::from(backup.backup_path),
+            side_path: tempdir.path().join("full-reasoning"),
+            restore_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        ensure_equal(
+            restored.restored_reasoning_history,
+            BackupReasoningHistoryCounts {
+                traces: 1,
+                links: 3,
+                causal_evidence: 0,
+            },
+            "trace-only recovery",
+        )?;
+        let db =
+            DbConnection::open_file(&restored.restored_database_path).map_err(|e| e.to_string())?;
+        let trace = db
+            .get_rationale_trace("rat_recovery")
+            .map_err(|e| e.to_string())?
+            .ok_or("restored full trace")?
+            .trace;
+        ensure_equal(
+            trace.summary.as_str(),
+            "[REDACTED]",
+            "full summary redaction",
+        )?;
+        ensure_equal(
+            trace.redaction_status,
+            crate::models::RedactionStatus::Full,
+            "full redaction marked",
+        )?;
+        ensure_equal(
+            trace.confidence_basis_points,
+            original.trace.confidence_basis_points,
+            "full redaction preserves confidence",
+        )?;
+        ensure_equal(
+            &trace.created_at,
+            &original.trace.created_at,
+            "full redaction preserves chronology",
+        )?;
+        ensure(
+            !serde_json::to_string(&trace)
+                .map_err(|e| e.to_string())?
+                .contains("-canary"),
+            "full redaction removes author/evidence canaries",
+        )?;
+        let why = crate::core::why::explain_memory_with_connection(
+            &crate::core::why::WhyOptions {
+                database_path: Path::new(&restored.restored_database_path),
+                memory_id: &trace.linked_memory_ids[0],
+                confidence_threshold: crate::core::why::WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
+            },
+            &db,
+        );
+        ensure(
+            why.rationale_traces
+                .iter()
+                .any(|t| t.trace_id == "rat_recovery" && t.summary == "[REDACTED]"),
+            "ordinary why exposes fully redacted rationale",
+        )
     }
 
     #[test]
