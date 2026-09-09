@@ -19117,6 +19117,8 @@ impl DbConnection {
             ("rch_verify_runs", "id"),
             ("error_repair_links", "link_id"),
             ("artifacts", "id"),
+            ("rationale_traces", "trace_id"),
+            ("causal_evidence", "id"),
         ] {
             let rows = self.query_for(
                 DbOperation::Query,
@@ -25475,6 +25477,20 @@ pub struct CreateCausalEvidenceInput {
     pub method: String,
 }
 
+/// Exact causal ledger state carried by authenticated local recovery.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoredCausalEvidence {
+    pub id: String,
+    pub workspace_id: String,
+    pub failure_id: String,
+    pub candidate_cause_id: String,
+    pub contribution_score: f64,
+    pub evidence_uris: Vec<String>,
+    pub computed_at: String,
+    pub method: String,
+}
+
 /// Canonical details schema for `memory.level_transition` audit rows.
 pub const MEMORY_LEVEL_TRANSITION_AUDIT_SCHEMA_V1: &str = "ee.audit.memory_level_transition.v1";
 
@@ -26122,6 +26138,44 @@ impl DbConnection {
             ],
         )?;
 
+        Ok(())
+    }
+
+    /// Read the complete workspace ledger without rounding its scores.
+    pub fn list_causal_evidence_for_recovery(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredCausalEvidence>> {
+        self.query_for(DbOperation::Query,
+            "SELECT id, workspace_id, failure_id, candidate_cause_id, contribution_score, evidence_uris_json, computed_at, method FROM causal_evidence WHERE workspace_id = ?1 ORDER BY id",
+            &[Value::Text(workspace_id.to_owned())])?
+            .iter().map(|row| Ok(StoredCausalEvidence {
+                id: required_text(row, 0, DbOperation::Query, "id")?.to_owned(),
+                workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_owned(),
+                failure_id: required_text(row, 2, DbOperation::Query, "failure_id")?.to_owned(),
+                candidate_cause_id: required_text(row, 3, DbOperation::Query, "candidate_cause_id")?.to_owned(),
+                contribution_score: required_f64(row, 4, DbOperation::Query, "contribution_score")?,
+                evidence_uris: required_json_string_vec(row, 5, "evidence_uris_json")?,
+                computed_at: required_text(row, 6, DbOperation::Query, "computed_at")?.to_owned(),
+                method: required_text(row, 7, DbOperation::Query, "method")?.to_owned(),
+            })).collect()
+    }
+
+    /// Strict insertion in the caller's recovery transaction; never replace evidence.
+    pub fn insert_causal_evidence_for_recovery(&self, row: &StoredCausalEvidence) -> Result<()> {
+        if !row.contribution_score.is_finite() || !(0.0..=1.0).contains(&row.contribution_score) {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "recovered causal contribution must be finite and within 0..=1".to_owned(),
+            });
+        }
+        self.execute_for(DbOperation::Execute,
+            "INSERT INTO causal_evidence (id, workspace_id, failure_id, candidate_cause_id, contribution_score, evidence_uris_json, computed_at, method) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            &[Value::Text(row.id.clone()), Value::Text(row.workspace_id.clone()),
+                Value::Text(row.failure_id.clone()), Value::Text(row.candidate_cause_id.clone()),
+                Value::Double(row.contribution_score),
+                Value::Text(json_string_vec(&row.evidence_uris, "causal evidence URIs")?),
+                Value::Text(row.computed_at.clone()), Value::Text(row.method.clone())])?;
         Ok(())
     }
 
@@ -33334,14 +33388,16 @@ fn stored_pack_evidence_item_from_row(row: &Row) -> Result<StoredPackEvidenceIte
 // ============================================================================
 
 /// Durable rationale trace row plus its workspace scope.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredRationaleTrace {
     pub workspace_id: String,
     pub trace: RationaleTrace,
 }
 
 /// One durable link from a rationale trace to an evidence or target artifact.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredRationaleTraceLink {
     pub trace_id: String,
     pub target_type: String,
@@ -33417,6 +33473,18 @@ impl DbConnection {
         workspace_id: &str,
         trace: &RationaleTrace,
     ) -> Result<()> {
+        self.insert_rationale_trace_record(workspace_id, trace)?;
+        for link in rationale_trace_link_rows(trace) {
+            self.insert_rationale_trace_link(&link)?;
+        }
+        Ok(())
+    }
+
+    fn insert_rationale_trace_record(
+        &self,
+        workspace_id: &str,
+        trace: &RationaleTrace,
+    ) -> Result<()> {
         self.execute_for(
             DbOperation::Execute,
             "INSERT INTO rationale_traces (trace_id, workspace_id, schema, kind, author, summary, posture, confidence_basis_points, visibility, redaction_status, evidence_uris_json, linked_memory_ids_json, linked_context_pack_ids_json, linked_recorder_run_ids_json, linked_recorder_event_ids_json, linked_causal_trace_ids_json, supersedes_trace_ids_json, contradicted_by_trace_ids_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
@@ -33464,18 +33532,45 @@ impl DbConnection {
             ],
         )?;
 
-        for link in rationale_trace_link_rows(trace) {
-            self.insert_rationale_trace_link(&link)?;
-        }
-
         Ok(())
+    }
+
+    /// Read every trace, including traces with no target links, in the caller's snapshot.
+    pub fn list_rationale_traces_for_recovery(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredRationaleTrace>> {
+        let sql = format!("{RATIONALE_TRACE_SELECT_SQL} WHERE workspace_id = ?1 ORDER BY trace_id");
+        self.query_for(
+            DbOperation::Query,
+            &sql,
+            &[Value::Text(workspace_id.to_owned())],
+        )?
+        .iter()
+        .map(stored_rationale_trace_from_row)
+        .collect()
+    }
+
+    /// Validate the normal safety policy while retaining original vectors and timestamps.
+    /// Links are restored separately so additional links and their chronology survive.
+    pub fn insert_rationale_trace_for_recovery(&self, row: &StoredRationaleTrace) -> Result<()> {
+        normalized_rationale_trace(&row.trace)?;
+        self.insert_rationale_trace_record(&row.workspace_id, &row.trace)
+    }
+
+    /// Strictly preserve a link inside the caller's recovery transaction.
+    pub fn insert_rationale_trace_link_for_recovery(
+        &self,
+        link: &StoredRationaleTraceLink,
+    ) -> Result<()> {
+        self.insert_rationale_trace_link(link)
     }
 
     /// Get one rationale trace by ID.
     pub fn get_rationale_trace(&self, trace_id: &str) -> Result<Option<StoredRationaleTrace>> {
         let rows = self.query_for(
             DbOperation::Query,
-            RATIONALE_TRACE_SELECT_SQL_WITH_WHERE,
+            &format!("{RATIONALE_TRACE_SELECT_SQL} WHERE trace_id = ?1"),
             &[Value::Text(trace_id.to_string())],
         )?;
 
@@ -33536,7 +33631,7 @@ impl DbConnection {
     }
 }
 
-const RATIONALE_TRACE_SELECT_SQL_WITH_WHERE: &str = "SELECT trace_id, workspace_id, schema, kind, author, summary, posture, confidence_basis_points, visibility, redaction_status, evidence_uris_json, linked_memory_ids_json, linked_context_pack_ids_json, linked_recorder_run_ids_json, linked_recorder_event_ids_json, linked_causal_trace_ids_json, supersedes_trace_ids_json, contradicted_by_trace_ids_json, created_at FROM rationale_traces WHERE trace_id = ?1";
+const RATIONALE_TRACE_SELECT_SQL: &str = "SELECT trace_id, workspace_id, schema, kind, author, summary, posture, confidence_basis_points, visibility, redaction_status, evidence_uris_json, linked_memory_ids_json, linked_context_pack_ids_json, linked_recorder_run_ids_json, linked_recorder_event_ids_json, linked_causal_trace_ids_json, supersedes_trace_ids_json, contradicted_by_trace_ids_json, created_at FROM rationale_traces";
 
 fn normalized_rationale_trace(trace: &RationaleTrace) -> Result<RationaleTrace> {
     if !text_matches(trace.schema, RATIONALE_TRACE_SCHEMA_V1) {

@@ -28,12 +28,13 @@ use crate::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
     CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType,
     MeshStorageStatus, StoredAgentContextProfile, StoredArtifact, StoredArtifactLink,
-    StoredAuditEntry, StoredCurationCandidate, StoredCurationTtlPolicy, StoredEpisodeAction,
-    StoredErrorFingerprint, StoredErrorRepairLink, StoredEvidenceSpan, StoredFeedbackEvent,
-    StoredFeedbackQuarantine, StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness,
-    StoredGraphSnapshot, StoredImportLedger, StoredJournalEntry, StoredLearningObservation,
-    StoredMemory, StoredMemoryLink, StoredOutcomeEvidence, StoredPackHistory, StoredProceduralRule,
-    StoredProcedure, StoredProcedureEvent, StoredRchVerifyRun, StoredRecorderEvent,
+    StoredAuditEntry, StoredCausalEvidence, StoredCurationCandidate, StoredCurationTtlPolicy,
+    StoredEpisodeAction, StoredErrorFingerprint, StoredErrorRepairLink, StoredEvidenceSpan,
+    StoredFeedbackEvent, StoredFeedbackQuarantine, StoredGraphAlgorithmResult,
+    StoredGraphAlgorithmWitness, StoredGraphSnapshot, StoredImportLedger, StoredJournalEntry,
+    StoredLearningObservation, StoredMemory, StoredMemoryLink, StoredOutcomeEvidence,
+    StoredPackHistory, StoredProceduralRule, StoredProcedure, StoredProcedureEvent,
+    StoredRationaleTrace, StoredRationaleTraceLink, StoredRchVerifyRun, StoredRecorderEvent,
     StoredRecorderRun, StoredSearchIndexJob, StoredSession, StoredTaskEpisode, audit_actions,
 };
 use crate::models::{
@@ -70,6 +71,7 @@ const LEARNING_SIGNALS_SCHEMA: &str = "ee.backup.learning_signals.v1";
 const RECORDED_HISTORY_SCHEMA: &str = "ee.backup.recorded_history.v1";
 const ERROR_RECALL_SCHEMA: &str = "ee.backup.error_recall.v1";
 const ARTIFACT_REGISTRY_SCHEMA: &str = "ee.backup.artifact_registry.v1";
+const REASONING_HISTORY_SCHEMA: &str = "ee.backup.reasoning_history.v1";
 const MANIFEST_AUTH_FAMILY: &str = "ee.backup.manifest";
 const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
 const RECOVERY_KEYS_FILE: &str = "store-auth.recovery.json";
@@ -787,6 +789,7 @@ pub struct BackupRestoreReport {
     pub restored_recorded_history: BackupRecordedHistoryCounts,
     pub restored_error_recall: BackupErrorRecallCounts,
     pub restored_artifact_registry: BackupArtifactRegistryCounts,
+    pub restored_reasoning_history: BackupReasoningHistoryCounts,
     pub restored_pack_history: BackupPackHistoryCounts,
     pub restored_graph_cache_count: u32,
     pub restored_derived: Vec<BackupRestoredDerivedAssetReport>,
@@ -835,6 +838,7 @@ impl BackupRestoreReport {
                 "recordedHistoryRestored": self.restored_recorded_history,
                 "errorRecallRestored": self.restored_error_recall,
                 "artifactRegistryRestored": self.restored_artifact_registry,
+                "reasoningHistoryRestored": self.restored_reasoning_history,
                 "packHistoryRestored": self.restored_pack_history,
                 "graphCacheRowsRestored": self.restored_graph_cache_count,
                 "issues": self.issue_count,
@@ -888,6 +892,11 @@ impl BackupRestoreReport {
         ) + &format!(
             "  restored agent context profiles: {}\n",
             self.restored_agent_profile_count
+        ) + &format!(
+            "  restored rationale traces/links/causal evidence: {}/{}/{}\n",
+            self.restored_reasoning_history.traces,
+            self.restored_reasoning_history.links,
+            self.restored_reasoning_history.causal_evidence
         )
     }
 
@@ -1589,6 +1598,28 @@ struct BackupArtifactRegistry {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupReasoningHistory {
+    schema: String,
+    backup_id: String,
+    workspace_id: String,
+    chunk_index: usize,
+    chunk_count: usize,
+    traces: Vec<StoredRationaleTrace>,
+    links: Vec<StoredRationaleTraceLink>,
+    causal_evidence: Vec<StoredCausalEvidence>,
+    authentication: Option<AuthenticatedHeader>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupReasoningHistoryCounts {
+    pub traces: u32,
+    pub links: u32,
+    pub causal_evidence: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BackupArtifact {
     row: StoredArtifact,
     source_snippet_hash: Option<String>,
@@ -1735,9 +1766,18 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
             "export_restore_required",
             "derived_artifact_restore",
         ),
-        "journal_entries" | "search_index_jobs" | "recorder_runs" | "recorder_events"
-        | "rch_verify_runs" | "error_fingerprints" | "error_repair_links" | "artifacts"
-        | "artifact_links" => BackupTablePolicy::new(
+        "journal_entries"
+        | "search_index_jobs"
+        | "recorder_runs"
+        | "recorder_events"
+        | "rch_verify_runs"
+        | "error_fingerprints"
+        | "error_repair_links"
+        | "artifacts"
+        | "artifact_links"
+        | "rationale_traces"
+        | "rationale_trace_links"
+        | "causal_evidence" => BackupTablePolicy::new(
             "maintain",
             "export_restore_required",
             "derived_artifact_restore",
@@ -1753,13 +1793,10 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
         ),
 
         "agents"
-        | "causal_evidence"
         | "certificates"
         | "debt_snapshots"
         | "memory_seals"
         | "memory_sentinel_specs"
-        | "rationale_trace_links"
-        | "rationale_traces"
         | "reflection_request_ledger"
         | "situation_records"
         | "tripwire_check_events"
@@ -1951,6 +1988,18 @@ fn reconcile_derived_recovery_inventory(
     }
 
     for (table, captured_count) in [
+        (
+            "rationale_traces",
+            captured_derived_record_count(derived, "reasoning_history", "traces"),
+        ),
+        (
+            "rationale_trace_links",
+            captured_derived_record_count(derived, "reasoning_history", "links"),
+        ),
+        (
+            "causal_evidence",
+            captured_derived_record_count(derived, "reasoning_history", "causalEvidence"),
+        ),
         (
             "artifacts",
             captured_derived_record_count(derived, "artifact_registry", "artifacts"),
@@ -2239,6 +2288,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &memory_ids,
                 &mut payloads,
             )?;
+            collect_reasoning_history_payloads(
+                &connection,
+                workspace_id,
+                &backup_id,
+                &created_at,
+                options.redaction_level,
+                &memory_ids,
+                &mut payloads,
+            )?;
             collect_pack_history_payloads(
                 &connection,
                 workspace_id,
@@ -2293,13 +2351,14 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                     | "recorded_history"
                     | "error_recall"
                     | "artifact_registry"
+                    | "reasoning_history"
             ) || (p.report.kind == "curation_history"
                 && serde_json::from_slice::<BackupCurationHistory>(&p.bytes)
                     .is_ok_and(|chunk| !chunk.candidates.is_empty()))
         })
     {
         return Err(work_history_error(
-            "learned rules, feedback, agent profiles, pack history, import checkpoints, curation history, procedures, learning signals, recorded history, error recall, and artifact registry require source-store authentication; repair the workspace key store before creating this backup",
+            "learned rules, feedback, agent profiles, pack history, import checkpoints, curation history, procedures, learning signals, recorded history, error recall, artifact registry, and reasoning history require source-store authentication; repair the workspace key store before creating this backup",
         ));
     }
     authenticate_learning_payloads(&mut derived_payloads, store_auth.as_ref())?;
@@ -2311,6 +2370,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     authenticate_recorded_history_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_error_recall_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_artifact_registry_payloads(&mut derived_payloads, store_auth.as_ref())?;
+    authenticate_reasoning_history_payloads(&mut derived_payloads, store_auth.as_ref())?;
     let derived_reports = derived_payloads
         .iter()
         .map(|payload| payload.report.clone())
@@ -3253,6 +3313,7 @@ pub fn restore_backup_to_side_path(
             restored_recorded_history: BackupRecordedHistoryCounts::default(),
             restored_error_recall: BackupErrorRecallCounts::default(),
             restored_artifact_registry: BackupArtifactRegistryCounts::default(),
+            restored_reasoning_history: BackupReasoningHistoryCounts::default(),
             restored_search_index_job_count: 0,
             restored_rule_count: 0,
             restored_rule_source_count: 0,
@@ -3433,6 +3494,12 @@ pub fn restore_backup_to_side_path(
         &inspect.backup_id,
         &restored_derived,
     )?;
+    let restored_reasoning_history = restore_reasoning_history(
+        &restored_database_path,
+        &workspace_path,
+        &inspect.backup_id,
+        &restored_derived,
+    )?;
     let graph_cache_restored_count = if options.restore_graph_cache {
         restore_graph_cache_assets(&restored_database_path, &restored_derived)?
     } else {
@@ -3527,6 +3594,7 @@ pub fn restore_backup_to_side_path(
         restored_recorded_history,
         restored_error_recall,
         restored_artifact_registry,
+        restored_reasoning_history,
         restored_search_index_job_count,
         restored_rule_count,
         restored_rule_source_count,
@@ -8056,6 +8124,18 @@ fn redact_learning_reference(
         return id.clone();
     }
     if references.contains(value) {
+        // Reasoning IDs allow arbitrary suffixes. Preserve their cross-family
+        // links using the same secret-safe identities as reasoning recovery.
+        if level != RedactionLevel::None
+            && (value.starts_with("rat_") || value.starts_with("cev_"))
+            && redact_content(value, RedactionLevel::Standard) != value
+        {
+            return format!(
+                "{}_{}",
+                &value[..3],
+                blake3::hash(value.as_bytes()).to_hex()
+            );
+        }
         return value.to_owned();
     }
     let redacted = redact_content(value, level);
@@ -8459,6 +8539,360 @@ fn collect_error_recall_payloads(
         ));
     }
     Ok(())
+}
+
+fn collect_reasoning_history_payloads(
+    connection: &DbConnection,
+    workspace_id: &str,
+    backup_id: &str,
+    captured_at: &str,
+    redaction: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) -> Result<(), DomainError> {
+    let mut traces = connection
+        .list_rationale_traces_for_recovery(workspace_id)
+        .map_err(work_history_error)?;
+    let mut causal = connection
+        .list_causal_evidence_for_recovery(workspace_id)
+        .map_err(work_history_error)?;
+    if traces.is_empty() && causal.is_empty() {
+        return Ok(());
+    }
+    let references = connection
+        .learning_recovery_references(workspace_id)
+        .map_err(work_history_error)?;
+    let mut ids = memory_ids.clone();
+    let mut identities = BTreeSet::new();
+    for (id, prefix) in traces
+        .iter()
+        .map(|r| (r.trace.trace_id.as_str(), "rat"))
+        .chain(causal.iter().map(|r| (r.id.as_str(), "cev")))
+    {
+        let safe = if redaction != RedactionLevel::None
+            && redact_content(id, RedactionLevel::Standard) != id
+        {
+            format!("{prefix}_{}", blake3::hash(id.as_bytes()).to_hex())
+        } else {
+            id.to_owned()
+        };
+        if !identities.insert(safe.clone()) {
+            return Err(work_history_error("redacted reasoning identities collide"));
+        }
+        ids.insert(id.to_owned(), safe);
+    }
+    let reference = |s: &str| redact_learning_reference(s, redaction, &ids, &references);
+    let memory = |s: &str| {
+        memory_ids.get(s).cloned().ok_or_else(|| {
+            work_history_error(
+                "reasoning memory reference is missing or outside the backup workspace",
+            )
+        })
+    };
+    let mut links = Vec::new();
+    for row in &mut traces {
+        let trace = &mut row.trace;
+        crate::models::validate_rationale_summary(&trace.summary).map_err(work_history_error)?;
+        if !trace.visibility.is_storable() || trace.confidence_basis_points > 10_000 {
+            return Err(work_history_error(
+                "unsafe or invalid rationale trace cannot be backed up",
+            ));
+        }
+        let original = trace.clone();
+        let mut children = connection
+            .list_rationale_trace_links(&trace.trace_id)
+            .map_err(work_history_error)?;
+        trace.trace_id = reference(&trace.trace_id);
+        trace.author = redact_recovery_identity(&trace.author, redaction);
+        trace.summary = redact_content(&trace.summary, redaction);
+        trace.linked_memory_ids = trace
+            .linked_memory_ids
+            .iter()
+            .map(|s| memory(s))
+            .collect::<Result<_, _>>()?;
+        for values in [
+            &mut trace.evidence_uris,
+            &mut trace.linked_context_pack_ids,
+            &mut trace.linked_recorder_run_ids,
+            &mut trace.linked_recorder_event_ids,
+            &mut trace.linked_causal_trace_ids,
+            &mut trace.supersedes_trace_ids,
+            &mut trace.contradicted_by_trace_ids,
+        ] {
+            for value in values {
+                *value = reference(value);
+            }
+        }
+        for link in &mut children {
+            link.trace_id.clone_from(&trace.trace_id);
+            link.target_id = if link.target_type == "memory" {
+                memory(&link.target_id)?
+            } else {
+                reference(&link.target_id)
+            };
+        }
+        if redaction != RedactionLevel::None && *trace != original {
+            trace.visibility = crate::models::RationaleTraceVisibility::Redacted;
+            trace.redaction_status = if redaction == RedactionLevel::Full {
+                crate::models::RedactionStatus::Full
+            } else {
+                crate::models::RedactionStatus::Partial
+            };
+        }
+        links.extend(children);
+    }
+    for row in &mut causal {
+        if !row.contribution_score.is_finite() || !(0.0..=1.0).contains(&row.contribution_score) {
+            return Err(work_history_error(
+                "invalid causal contribution cannot be backed up",
+            ));
+        }
+        row.id = reference(&row.id);
+        row.failure_id = memory(&row.failure_id)?;
+        row.candidate_cause_id = memory(&row.candidate_cause_id)?;
+        for uri in &mut row.evidence_uris {
+            *uri = reference(uri);
+        }
+    }
+    traces.sort_by(|a, b| a.trace.trace_id.cmp(&b.trace.trace_id));
+    links.sort_by(|a, b| {
+        (&a.trace_id, &a.target_type, &a.target_id, &a.relation).cmp(&(
+            &b.trace_id,
+            &b.target_type,
+            &b.target_id,
+            &b.relation,
+        ))
+    });
+    causal.sort_by(|a, b| a.id.cmp(&b.id));
+    if links.windows(2).any(|pair| {
+        let a = &pair[0];
+        let b = &pair[1];
+        (&a.trace_id, &a.target_type, &a.target_id, &a.relation)
+            == (&b.trace_id, &b.target_type, &b.target_id, &b.relation)
+    }) {
+        return Err(work_history_error(
+            "redaction merges distinct rationale links",
+        ));
+    }
+    let count = traces
+        .len()
+        .max(links.len())
+        .max(causal.len())
+        .div_ceil(WORK_HISTORY_CHUNK_ROWS);
+    for index in 0..count {
+        let start = index * WORK_HISTORY_CHUNK_ROWS;
+        let end = start + WORK_HISTORY_CHUNK_ROWS;
+        let chunk = BackupReasoningHistory {
+            schema: REASONING_HISTORY_SCHEMA.to_owned(),
+            backup_id: backup_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            chunk_index: index,
+            chunk_count: count,
+            traces: traces[start.min(traces.len())..end.min(traces.len())].to_vec(),
+            links: links[start.min(links.len())..end.min(links.len())].to_vec(),
+            causal_evidence: causal[start.min(causal.len())..end.min(causal.len())].to_vec(),
+            authentication: None,
+        };
+        payloads.push(derived_payload(
+            format!("derived/reasoning-history/{index:08}.json"),
+            "reasoning_history",
+            captured_at,
+            None,
+            serialized_payload_bytes(&chunk).map_err(work_history_error)?,
+        ));
+    }
+    Ok(())
+}
+
+fn reasoning_history_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
+    ArtifactContext {
+        artifact_family: REASONING_HISTORY_SCHEMA,
+        record_encoding_version: "json.v1",
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: workspace_id,
+    }
+}
+
+fn authenticate_reasoning_history_payloads(
+    payloads: &mut [BackupDerivedPayload],
+    root: Option<&StoreAuthRoot>,
+) -> Result<(), DomainError> {
+    for payload in payloads
+        .iter_mut()
+        .filter(|p| p.report.kind == "reasoning_history")
+    {
+        let mut chunk: BackupReasoningHistory =
+            serde_json::from_slice(&payload.bytes).map_err(work_history_error)?;
+        chunk.authentication = None;
+        if let Some(root) = root {
+            let hash =
+                canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+            chunk.authentication = Some(
+                authenticate_artifact(
+                    root,
+                    MacDomain::NativeImportRecordsRoot,
+                    &reasoning_history_auth_context(&chunk.workspace_id),
+                    &hash,
+                    1,
+                )
+                .map_err(work_history_error)?,
+            );
+        }
+        payload.bytes = serialized_payload_bytes(&chunk).map_err(work_history_error)?;
+        if payload.bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES {
+            return Err(work_history_error(
+                "reasoning-history chunk exceeds the restore asset byte limit",
+            ));
+        }
+        payload.report.hash = Some(hash_bytes(&payload.bytes));
+        payload.report.byte_size = Some(payload.bytes.len() as u64);
+    }
+    Ok(())
+}
+
+fn restore_reasoning_history(
+    database: &Path,
+    source_workspace: &Path,
+    backup_id: &str,
+    assets: &[BackupRestoredDerivedAssetReport],
+) -> Result<BackupReasoningHistoryCounts, DomainError> {
+    let mut chunks = assets
+        .iter()
+        .filter(|a| a.kind == "reasoning_history")
+        .map(|a| {
+            serde_json::from_value::<BackupReasoningHistory>(read_restored_derived_json(a)?)
+                .map_err(work_history_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if chunks.is_empty() {
+        return Ok(BackupReasoningHistoryCounts::default());
+    }
+    let root =
+        StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
+    chunks.sort_by_key(|c| c.chunk_index);
+    let source_id = chunks[0].workspace_id.clone();
+    let count = chunks.len();
+    for (index, chunk) in chunks.iter_mut().enumerate() {
+        if chunk.schema != REASONING_HISTORY_SCHEMA
+            || chunk.backup_id != backup_id
+            || chunk.workspace_id != source_id
+            || chunk.chunk_index != index
+            || chunk.chunk_count != count
+            || [
+                chunk.traces.len(),
+                chunk.links.len(),
+                chunk.causal_evidence.len(),
+            ]
+            .into_iter()
+            .any(|n| n > WORK_HISTORY_CHUNK_ROWS)
+        {
+            return Err(work_history_error(
+                "unsupported, incomplete, duplicate, or substituted reasoning-history chunks",
+            ));
+        }
+        let header = chunk.authentication.take().ok_or_else(|| {
+            work_history_error("reasoning history requires source-store authentication")
+        })?;
+        let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+        if !verify_artifact(
+            &root,
+            MacDomain::NativeImportRecordsRoot,
+            &reasoning_history_auth_context(&source_id),
+            &header,
+            &hash,
+            1,
+        )
+        .map_err(work_history_error)?
+        .is_authenticated()
+        {
+            return Err(work_history_error(
+                "reasoning-history authentication failed",
+            ));
+        }
+    }
+    let db = DbConnection::open_file(database).map_err(work_history_error)?;
+    let workspace_id = remap_restored_workspace_id(
+        &db.list_workspaces().map_err(work_history_error)?,
+        Some(&source_id),
+        "reasoning history",
+    )?
+    .ok_or_else(|| work_history_error("missing reasoning-history workspace"))?;
+    let memories = db
+        .list_memories(&workspace_id, None, true)
+        .map_err(work_history_error)?
+        .into_iter()
+        .map(|m| m.id)
+        .collect::<BTreeSet<_>>();
+    let mut traces = Vec::new();
+    let mut links = Vec::new();
+    let mut causal = Vec::new();
+    for chunk in chunks {
+        traces.extend(chunk.traces);
+        links.extend(chunk.links);
+        causal.extend(chunk.causal_evidence);
+    }
+    let mut ids = BTreeSet::new();
+    for row in &mut traces {
+        if row.workspace_id != source_id
+            || !ids.insert(row.trace.trace_id.clone())
+            || row
+                .trace
+                .linked_memory_ids
+                .iter()
+                .any(|id| !memories.contains(id))
+        {
+            return Err(work_history_error(
+                "foreign, orphan, or duplicate recovered rationale trace",
+            ));
+        }
+        row.workspace_id.clone_from(&workspace_id);
+    }
+    let mut link_ids = BTreeSet::new();
+    for link in &links {
+        if !ids.contains(&link.trace_id)
+            || (link.target_type == "memory" && !memories.contains(&link.target_id))
+            || !link_ids.insert((
+                &link.trace_id,
+                &link.target_type,
+                &link.target_id,
+                &link.relation,
+            ))
+        {
+            return Err(work_history_error(
+                "orphan or duplicate recovered rationale link",
+            ));
+        }
+    }
+    let mut edge_ids = BTreeSet::new();
+    for row in &mut causal {
+        if row.workspace_id != source_id
+            || !edge_ids.insert(row.id.clone())
+            || !memories.contains(&row.failure_id)
+            || !memories.contains(&row.candidate_cause_id)
+        {
+            return Err(work_history_error(
+                "foreign, orphan, or duplicate recovered causal evidence",
+            ));
+        }
+        row.workspace_id.clone_from(&workspace_id);
+    }
+    db.with_transaction(|| {
+        for row in &traces { db.insert_rationale_trace_for_recovery(row)?; }
+        for link in &links { db.insert_rationale_trace_link_for_recovery(link)?; }
+        for row in &causal { db.insert_causal_evidence_for_recovery(row)?; }
+        db.insert_audit(&crate::models::AuditId::now().to_string(), &crate::db::CreateAuditInput {
+            workspace_id: Some(workspace_id.clone()), actor: Some("ee backup restore".to_owned()),
+            action: "backup.reasoning_history_restored".to_owned(), target_type: Some("backup".to_owned()), target_id: Some(backup_id.to_owned()),
+            details: Some(json!({"sourceWorkspaceId": source_id, "traces": traces.len(), "links": links.len(), "causalEvidence": causal.len(),
+                "reason": "Recovered recorded explanations and contribution claims with original chronology. Recovery does not validate their claims or replay decisions."}).to_string()),
+        })?;
+        Ok(())
+    }).map_err(work_history_error)?;
+    Ok(BackupReasoningHistoryCounts {
+        traces: u32::try_from(traces.len()).unwrap_or(u32::MAX),
+        links: u32::try_from(links.len()).unwrap_or(u32::MAX),
+        causal_evidence: u32::try_from(causal.len()).unwrap_or(u32::MAX),
+    })
 }
 
 fn collect_artifact_registry_payloads(
@@ -19722,6 +20156,631 @@ mod tests {
             fs::read(&keys).map_err(|e| e.to_string())?,
             b"obstructed keys".to_vec(),
             "key obstruction unchanged",
+        )?;
+        Ok(())
+    }
+
+    fn recovery_rationale(
+        workspace_id: &str,
+        memory_id: &str,
+    ) -> Result<StoredRationaleTrace, String> {
+        use crate::models::{RationaleTrace, RationaleTraceKind, RationaleTracePosture};
+        Ok(StoredRationaleTrace {
+            workspace_id: workspace_id.to_owned(),
+            trace: RationaleTrace::new(
+                "rat_recovery",
+                RationaleTraceKind::Decision,
+                "api_key=reasoning-author-canary",
+                "The release failed because the toolchain changed.",
+                "2026-09-01T00:00:00Z",
+            )
+            .map_err(|e| e.to_string())?
+            .with_confidence_basis_points(7301)
+            .map_err(|e| e.to_string())?
+            .with_posture(RationaleTracePosture::Supported)
+            .with_memory_id(memory_id)
+            .with_evidence_uri("https://example.test/run?api_key=reasoning-evidence-canary")
+            .with_causal_trace_id("cev_recovery"),
+        })
+    }
+
+    fn recovery_causal(
+        workspace_id: &str,
+        failure_id: &str,
+        cause_id: &str,
+    ) -> StoredCausalEvidence {
+        StoredCausalEvidence {
+            id: "cev_recovery".to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            failure_id: failure_id.to_owned(),
+            candidate_cause_id: cause_id.to_owned(),
+            contribution_score: 0.8123456789012345,
+            evidence_uris: vec![
+                "https://example.test/run?api_key=reasoning-causal-canary".to_owned(),
+            ],
+            computed_at: "2026-09-01T00:00:03Z".to_owned(),
+            method: "manual".to_owned(),
+        }
+    }
+
+    fn insert_recovery_cause(db: &DbConnection, workspace_id: &str) -> Result<String, String> {
+        let id = MemoryId::from_uuid(Uuid::from_u128(3)).to_string();
+        db.insert_memory(
+            &id,
+            &CreateMemoryInput {
+                workspace_id: workspace_id.to_owned(),
+                level: "episodic".to_owned(),
+                kind: "failure".to_owned(),
+                content: "The toolchain changed during the release.".to_owned(),
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.6,
+                importance: 0.7,
+                provenance_uri: Some("ee-test://reasoning".to_owned()),
+                trust_class: "agent_validated".to_owned(),
+                trust_subclass: None,
+                tags: vec![],
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(id)
+    }
+
+    #[test]
+    fn default_backup_restores_reasoning_and_live_explanations() -> TestResult {
+        for redaction in [
+            RedactionLevel::None,
+            RedactionLevel::Standard,
+            RedactionLevel::Full,
+        ] {
+            let (tempdir, workspace, database) =
+                fixture_with_memory_content("Inspect the release toolchain.")
+                    .map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            let cause_id = insert_recovery_cause(&source, &workspace_id)?;
+            let rationale = recovery_rationale(&workspace_id, &memory_id)?;
+            source
+                .insert_rationale_trace(&workspace_id, &rationale.trace)
+                .map_err(|e| e.to_string())?;
+            let mut unlinked = rationale.clone();
+            unlinked.trace.trace_id = "rat_unlinked".to_owned();
+            unlinked.trace.linked_memory_ids.clear();
+            unlinked.trace.linked_causal_trace_ids.clear();
+            unlinked.trace.evidence_uris.clear();
+            source
+                .insert_rationale_trace(&workspace_id, &unlinked.trace)
+                .map_err(|e| e.to_string())?;
+            source
+                .with_transaction(|| {
+                    for n in 0..129 {
+                        source.insert_rationale_trace_link_for_recovery(
+                            &StoredRationaleTraceLink {
+                                trace_id: "rat_recovery".to_owned(),
+                                target_type: "evidence_uri".to_owned(),
+                                target_id: format!("https://example.test/extra/{n}"),
+                                relation: "reuses".to_owned(),
+                                created_at: "2026-09-02T00:00:00Z".to_owned(),
+                            },
+                        )?;
+                    }
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?;
+            let edge = recovery_causal(&workspace_id, &memory_id, &cause_id);
+            source
+                .insert_causal_evidence_for_recovery(&edge)
+                .map_err(|e| e.to_string())?;
+            let originals = source
+                .list_rationale_traces_for_recovery(&workspace_id)
+                .map_err(|e| e.to_string())?;
+            let original_links = source
+                .list_rationale_trace_links("rat_recovery")
+                .map_err(|e| e.to_string())?;
+            source.close().map_err(|e| e.to_string())?;
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            for (table, rows) in [
+                ("rationale_traces", 2),
+                ("rationale_trace_links", 132),
+                ("causal_evidence", 1),
+            ] {
+                let inventory = backup
+                    .recovery_inventory
+                    .entries
+                    .iter()
+                    .find(|e| e.table == table)
+                    .ok_or("missing reasoning inventory")?;
+                ensure_equal(inventory.row_count, rows, "reasoning row count")?;
+                ensure(
+                    inventory.schema_covered && inventory.snapshot_covered,
+                    "reasoning snapshot covered",
+                )?;
+            }
+            let assets = backup
+                .derived
+                .iter()
+                .filter(|a| a.kind == "reasoning_history")
+                .collect::<Vec<_>>();
+            ensure_equal(
+                assets.len(),
+                2,
+                "extra links cross chunk boundary without derived opt-in",
+            )?;
+            let mut canary = false;
+            for asset in assets {
+                let bytes = fs::read(Path::new(&backup.backup_path).join(&asset.path))
+                    .map_err(|e| e.to_string())?;
+                let chunk: BackupReasoningHistory =
+                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                ensure(chunk.authentication.is_some(), "reasoning authenticated")?;
+                canary |= String::from_utf8_lossy(&bytes).contains("-canary");
+            }
+            ensure_equal(
+                canary,
+                redaction == RedactionLevel::None,
+                "reasoning evidence and authors obey redaction",
+            )?;
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: tempdir.path().join("restored-reasoning"),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                restored.restored_reasoning_history.clone(),
+                BackupReasoningHistoryCounts {
+                    traces: 2,
+                    links: 132,
+                    causal_evidence: 1,
+                },
+                "restored reasoning counts",
+            )?;
+            ensure_equal(
+                restored.data_json()["counts"]["reasoningHistoryRestored"]["links"].as_u64(),
+                Some(132),
+                "JSON link count",
+            )?;
+            ensure(
+                restored.human_summary().contains("2/132/1"),
+                "human reasoning counts",
+            )?;
+            let db = DbConnection::open_file(&restored.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let target = db
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .next()
+                .ok_or("restored workspace")?;
+            let traces = db
+                .list_rationale_traces_for_recovery(&target.id)
+                .map_err(|e| e.to_string())?;
+            let trace = &traces
+                .iter()
+                .find(|r| r.trace.trace_id == "rat_recovery")
+                .ok_or("restored trace")?
+                .trace;
+            ensure_equal(trace.confidence_basis_points, 7301, "original confidence")?;
+            ensure_equal(trace.posture, rationale.trace.posture, "original posture")?;
+            ensure_equal(
+                &trace.created_at,
+                &rationale.trace.created_at,
+                "original trace chronology",
+            )?;
+            ensure_equal(
+                trace.linked_causal_trace_ids.as_slice(),
+                &["cev_recovery".to_owned()],
+                "causal identity remains linked",
+            )?;
+            ensure_equal(
+                trace.summary.as_str(),
+                if redaction == RedactionLevel::Full {
+                    "[REDACTED]"
+                } else {
+                    rationale.trace.summary.as_str()
+                },
+                "visible summary",
+            )?;
+            let links = db
+                .list_rationale_trace_links("rat_recovery")
+                .map_err(|e| e.to_string())?;
+            ensure_equal(
+                links
+                    .iter()
+                    .filter(|l| l.relation == "reuses" && l.created_at == "2026-09-02T00:00:00Z")
+                    .count(),
+                129,
+                "extra link chronology preserved",
+            )?;
+            let causal = db
+                .list_causal_evidence_for_recovery(&target.id)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(causal.len(), 1, "causal row restored")?;
+            ensure_equal(
+                causal[0].contribution_score,
+                edge.contribution_score,
+                "double precision contribution preserved",
+            )?;
+            ensure_equal(
+                &causal[0].computed_at,
+                &edge.computed_at,
+                "original causal chronology",
+            )?;
+            ensure_equal(
+                &causal[0].failure_id,
+                &trace.linked_memory_ids[0],
+                "causal and rationale memory remapping agrees",
+            )?;
+            if redaction == RedactionLevel::None {
+                let mut expected = originals.clone();
+                for row in &mut expected {
+                    row.workspace_id.clone_from(&target.id);
+                }
+                ensure_equal(
+                    traces,
+                    expected,
+                    "unredacted trace metadata preserved exactly",
+                )?;
+                ensure_equal(
+                    links,
+                    original_links.clone(),
+                    "all original links preserved exactly",
+                )?;
+            }
+            let why = crate::core::why::explain_memory_with_connection(
+                &crate::core::why::WhyOptions {
+                    database_path: Path::new(&restored.restored_database_path),
+                    memory_id: &causal[0].failure_id,
+                    confidence_threshold:
+                        crate::core::why::WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
+                },
+                &db,
+            );
+            ensure(
+                why.rationale_traces
+                    .iter()
+                    .any(|t| t.trace_id == "rat_recovery" && t.confidence_basis_points == 7301),
+                "ordinary why reads recovered rationale",
+            )?;
+            let chains = crate::core::causal::trace_causal_chains_from_store(
+                &db,
+                &target.id,
+                &crate::core::causal::TraceOptions::new().with_memory_id(&causal[0].failure_id),
+            )
+            .map_err(|e| e.message())?;
+            ensure(
+                chains.chains.iter().any(|c| {
+                    c.edges.iter().any(|e| {
+                        e.edge_id == edge.id && e.contribution_score == edge.contribution_score
+                    })
+                }),
+                "ordinary causal trace reads recovered edge",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                source
+                    .list_rationale_traces_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                originals,
+                "source rationale unchanged",
+            )?;
+            ensure_equal(
+                source
+                    .list_rationale_trace_links("rat_recovery")
+                    .map_err(|e| e.to_string())?,
+                original_links,
+                "source links unchanged",
+            )?;
+            ensure_equal(
+                source
+                    .list_causal_evidence_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                vec![edge],
+                "source causal evidence unchanged",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reasoning_restore_rejects_corruption_and_rolls_back() -> TestResult {
+        for defect in [
+            "tampered",
+            "unsigned",
+            "schema",
+            "missing_chunk",
+            "duplicate_chunk",
+            "oversize",
+            "foreign_trace",
+            "duplicate_trace",
+            "missing_memory",
+            "orphan_link",
+            "duplicate_link",
+            "foreign_edge",
+            "orphan_edge",
+            "duplicate_edge",
+            "late_invalid_method",
+            "late_self_edge",
+            "late_invalid_score",
+            "private_trace",
+            "unsafe_summary",
+            "existing_trace",
+        ] {
+            let (tempdir, workspace, database) =
+                fixture_with_memory_content("Inspect the release toolchain.")
+                    .map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            let cause_id = insert_recovery_cause(&db, &workspace_id)?;
+            let rationale = recovery_rationale(&workspace_id, &memory_id)?;
+            let mut existing = rationale.clone();
+            existing.trace.trace_id = if defect == "existing_trace" {
+                "rat_recovery"
+            } else {
+                "rat_existing"
+            }
+            .to_owned();
+            db.insert_rationale_trace(&workspace_id, &existing.trace)
+                .map_err(|e| e.to_string())?;
+            let before_traces = db
+                .list_rationale_traces_for_recovery(&workspace_id)
+                .map_err(|e| e.to_string())?;
+            let before_links = db
+                .list_rationale_trace_links(&existing.trace.trace_id)
+                .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            let mut chunk = BackupReasoningHistory {
+                schema: REASONING_HISTORY_SCHEMA.to_owned(),
+                backup_id: "backup-reasoning".to_owned(),
+                workspace_id: workspace_id.clone(),
+                chunk_index: 0,
+                chunk_count: 1,
+                traces: vec![rationale],
+                links: vec![StoredRationaleTraceLink {
+                    trace_id: "rat_recovery".to_owned(),
+                    target_type: "memory".to_owned(),
+                    target_id: memory_id.clone(),
+                    relation: "linked".to_owned(),
+                    created_at: "2026-09-01T00:00:00Z".to_owned(),
+                }],
+                causal_evidence: vec![recovery_causal(&workspace_id, &memory_id, &cause_id)],
+                authentication: None,
+            };
+            match defect {
+                "schema" => chunk.schema.push_str(".unknown"),
+                "missing_chunk" => chunk.chunk_count = 2,
+                "oversize" => {
+                    chunk.links = vec![chunk.links[0].clone(); WORK_HISTORY_CHUNK_ROWS + 1]
+                }
+                "foreign_trace" => chunk.traces[0].workspace_id = "wsp_foreign".to_owned(),
+                "duplicate_trace" => chunk.traces.push(chunk.traces[0].clone()),
+                "missing_memory" => chunk.traces[0]
+                    .trace
+                    .linked_memory_ids
+                    .push("mem_missing".to_owned()),
+                "orphan_link" => chunk.links[0].trace_id = "rat_missing".to_owned(),
+                "duplicate_link" => chunk.links.push(chunk.links[0].clone()),
+                "foreign_edge" => chunk.causal_evidence[0].workspace_id = "wsp_foreign".to_owned(),
+                "orphan_edge" => {
+                    chunk.causal_evidence[0].candidate_cause_id = "mem_missing".to_owned()
+                }
+                "duplicate_edge" => chunk.causal_evidence.push(chunk.causal_evidence[0].clone()),
+                "late_invalid_method" => chunk.causal_evidence[0].method = "invented".to_owned(),
+                "late_self_edge" => chunk.causal_evidence[0]
+                    .candidate_cause_id
+                    .clone_from(&memory_id),
+                "late_invalid_score" => chunk.causal_evidence[0].contribution_score = 1.1,
+                "private_trace" => {
+                    chunk.traces[0].trace.visibility =
+                        crate::models::RationaleTraceVisibility::PrivateRejected
+                }
+                "unsafe_summary" => {
+                    chunk.traces[0].trace.summary = "api_key=unsafe-secret-value".to_owned()
+                }
+                _ => {}
+            }
+            let root =
+                StoreAuthRoot::create(workspace_keys_dir(&workspace)).map_err(|e| e.to_string())?;
+            let mut payloads = vec![derived_payload(
+                "reasoning.json".to_owned(),
+                "reasoning_history",
+                "2026-09-01T00:00:00Z",
+                None,
+                serialized_payload_bytes(&chunk).map_err(|e| e.to_string())?,
+            )];
+            authenticate_reasoning_history_payloads(&mut payloads, Some(&root))
+                .map_err(|e| e.message())?;
+            let mut signed: BackupReasoningHistory =
+                serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
+            if defect == "tampered" {
+                signed.traces[0].trace.confidence_basis_points = 9999;
+            }
+            if defect == "unsigned" {
+                signed.authentication = None;
+            }
+            let path = tempdir.path().join("reasoning.json");
+            fs::write(
+                &path,
+                serialized_payload_bytes(&signed).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            let mut assets = vec![restored_cass_asset(&path, "reasoning_history")];
+            if defect == "duplicate_chunk" {
+                assets.push(restored_cass_asset(&path, "reasoning_history"));
+            }
+            let error =
+                restore_reasoning_history(&database, &workspace, "backup-reasoning", &assets)
+                    .err()
+                    .ok_or_else(|| format!("accepted {defect}"))?;
+            let expected = match defect {
+                "tampered" => "authentication failed",
+                "unsigned" => "requires source-store authentication",
+                "schema" | "missing_chunk" | "duplicate_chunk" | "oversize" => {
+                    "reasoning-history chunks"
+                }
+                "foreign_trace" | "duplicate_trace" | "missing_memory" => {
+                    "recovered rationale trace"
+                }
+                "orphan_link" | "duplicate_link" => "recovered rationale link",
+                "foreign_edge" | "orphan_edge" | "duplicate_edge" => "recovered causal evidence",
+                "late_invalid_score" => "contribution",
+                "private_trace" => "private",
+                "unsafe_summary" => "secret",
+                _ => "constraint",
+            };
+            ensure(
+                error.message().to_lowercase().contains(expected),
+                &format!(
+                    "{defect} rejected at intended boundary: {}",
+                    error.message()
+                ),
+            )?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                db.list_rationale_traces_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                before_traces,
+                "no partial or overwritten rationale",
+            )?;
+            ensure_equal(
+                db.list_rationale_trace_links(&existing.trace.trace_id)
+                    .map_err(|e| e.to_string())?,
+                before_links,
+                "existing links unchanged",
+            )?;
+            if defect != "existing_trace" {
+                ensure(
+                    db.list_rationale_trace_links("rat_recovery")
+                        .map_err(|e| e.to_string())?
+                        .is_empty(),
+                    "new links rolled back",
+                )?;
+            }
+            ensure(
+                db.list_causal_evidence_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "no partial causal evidence",
+            )?;
+            ensure(
+                !db.list_audit_entries(Some(&workspace_id), Some(100))
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|a| a.action == "backup.reasoning_history_restored"),
+                "no successful recovery audit on failure",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reasoning_backup_rejects_colliding_references_before_publication() -> TestResult {
+        let (_tempdir, workspace, database) =
+            fixture_with_memory_content("Inspect the toolchain.").map_err(|e| e.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let secret = "https://example.test/?api_key=collision-secret-value";
+        let collision = format!("backup-ref:{}", blake3::hash(secret.as_bytes()).to_hex());
+        let trace = recovery_rationale(&workspace_id, &memory_id)?
+            .trace
+            .with_evidence_uri(secret)
+            .with_evidence_uri(collision);
+        db.insert_rationale_trace(&workspace_id, &trace)
+            .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        let output = workspace.join("colliding-backup");
+        let error = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(output.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .err()
+        .ok_or("published colliding rationale links")?;
+        ensure(
+            error
+                .message()
+                .contains("redaction merges distinct rationale links"),
+            "collision detected before publication",
+        )?;
+        ensure(
+            !output.exists() && !workspace_keys_dir(&workspace).exists(),
+            "collision writes neither backup nor keys",
+        )
+    }
+
+    #[test]
+    fn reasoning_backup_requires_keys_before_publication() -> TestResult {
+        let (_tempdir, workspace, database) =
+            fixture_with_memory_content("Inspect the release toolchain.")
+                .map_err(|e| e.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        db.insert_rationale_trace(
+            &workspace_id,
+            &recovery_rationale(&workspace_id, &memory_id)?.trace,
+        )
+        .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        let output = workspace.join("reasoning-backup");
+        let mut options = BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(output.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: true,
+        };
+        ensure(
+            create_backup(&options).map_err(|e| e.message())?.dry_run,
+            "keyless preview",
+        )?;
+        let keys = workspace_keys_dir(&workspace);
+        ensure(
+            !keys.exists() && !output.exists(),
+            "preview creates neither keys nor output",
+        )?;
+        fs::write(&keys, b"obstructed keys").map_err(|e| e.to_string())?;
+        options.dry_run = false;
+        let error = create_backup(&options)
+            .err()
+            .ok_or("published unsigned reasoning")?;
+        ensure(
+            error
+                .message()
+                .contains("require source-store authentication"),
+            "reasoning requires keys",
+        )?;
+        ensure(!output.exists(), "unsigned reasoning not published")?;
+        ensure_equal(
+            fs::read(&keys).map_err(|e| e.to_string())?,
+            b"obstructed keys".to_vec(),
+            "obstruction unchanged",
         )?;
         Ok(())
     }

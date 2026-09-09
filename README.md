@@ -1541,6 +1541,15 @@ identities or profile links outside the recovered workspace reject recovery.
 This uses learning-history format v2; recreate backups containing v1 learning
 history before relying on the new recovery path.
 
+Default backups also retain authenticated rationale traces, their extra evidence
+links, and causal contribution records. Restored `ee why` and `ee causal trace`
+commands use this history immediately, with original confidence, scores, and
+timestamps. Summaries, authors, and external references follow the selected
+redaction level. Recovery preserves recorded claims; it does not validate them
+or replay decisions. Missing memory references, conflicting records, and unsafe
+rationale summaries reject recovery. These records require the source signing
+keys, just like the other authenticated history above.
+
 ### Diagnostics, eval, ops
 
 | Command | Purpose |

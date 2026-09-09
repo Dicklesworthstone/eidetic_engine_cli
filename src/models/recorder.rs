@@ -12,6 +12,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Deserializer, Serialize};
+
 // ============================================================================
 // Schema Constants
 // ============================================================================
@@ -471,7 +473,8 @@ impl RecorderPayload {
 // ============================================================================
 
 /// Redaction status for privacy-sensitive data.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RedactionStatus {
     #[default]
     None,
@@ -606,7 +609,8 @@ impl RedactionStatusSnapshot {
 ///
 /// These are concise user/agent-visible summaries. They are not raw private
 /// model chain-of-thought, scratchpads, or complete hidden transcripts.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RationaleTraceKind {
     Hypothesis,
     Decision,
@@ -676,7 +680,8 @@ impl FromStr for RationaleTraceKind {
 }
 
 /// Evidence posture for a rationale trace.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RationaleTracePosture {
     Asserted,
     Supported,
@@ -728,7 +733,8 @@ impl FromStr for RationaleTracePosture {
 }
 
 /// Visibility/redaction posture for a rationale trace.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RationaleTraceVisibility {
     Public,
     Redacted,
@@ -829,8 +835,10 @@ impl fmt::Display for RationaleTraceValidationError {
 impl std::error::Error for RationaleTraceValidationError {}
 
 /// A safe, evidence-linked rationale summary.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RationaleTrace {
+    #[serde(deserialize_with = "deserialize_rationale_schema")]
     pub schema: &'static str,
     pub trace_id: String,
     pub kind: RationaleTraceKind,
@@ -849,6 +857,19 @@ pub struct RationaleTrace {
     pub supersedes_trace_ids: Vec<String>,
     pub contradicted_by_trace_ids: Vec<String>,
     pub created_at: String,
+}
+
+fn deserialize_rationale_schema<'de, D>(deserializer: D) -> Result<&'static str, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let schema = String::deserialize(deserializer)?;
+    if schema != RATIONALE_TRACE_SCHEMA_V1 {
+        return Err(serde::de::Error::custom(
+            "unsupported rationale trace schema",
+        ));
+    }
+    Ok(RATIONALE_TRACE_SCHEMA_V1)
 }
 
 impl RationaleTrace {
@@ -2088,6 +2109,39 @@ mod tests {
             ensure(parsed, visibility, "visibility roundtrip")?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn rationale_trace_serde_preserves_metadata_and_rejects_unknown_schema() -> TestResult {
+        let original = trace(RationaleTrace::new(
+            "rat_json",
+            RationaleTraceKind::Decision,
+            "Agent",
+            "Use the pinned toolchain.",
+            "2026-09-01T00:00:00Z",
+        ))?
+        .with_memory_id("mem_001")
+        .with_posture(RationaleTracePosture::Supported);
+        let value = serde_json::to_value(&original).map_err(|e| e.to_string())?;
+        ensure(
+            serde_json::from_value::<RationaleTrace>(value.clone()).map_err(|e| e.to_string())?,
+            original,
+            "serde roundtrip",
+        )?;
+        let mut invalid = value.clone();
+        invalid["schema"] = serde_json::json!("ee.rationale_trace.v999");
+        ensure(
+            serde_json::from_value::<RationaleTrace>(invalid).is_err(),
+            true,
+            "unknown schema refused",
+        )?;
+        let mut invalid = value;
+        invalid["unrecognizedField"] = serde_json::json!(true);
+        ensure(
+            serde_json::from_value::<RationaleTrace>(invalid).is_err(),
+            true,
+            "unknown field refused",
+        )
     }
 
     #[test]
