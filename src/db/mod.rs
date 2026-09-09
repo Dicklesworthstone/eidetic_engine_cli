@@ -19026,6 +19026,7 @@ impl DbConnection {
             ("journal_entries", "entry_id"),
             ("import_ledger", "id"),
             ("rch_verify_runs", "id"),
+            ("error_repair_links", "link_id"),
         ] {
             let rows = self.query_for(
                 DbOperation::Query,
@@ -21809,7 +21810,8 @@ fn stored_memory_sentinel_result_from_row(row: &Row) -> Result<StoredMemorySenti
 /// A persisted `error_fingerprints` row (bd-1n0np.4.3 / V072): the DB-local
 /// projection of the `core::error_recall::ErrorFingerprint` model plus workspace
 /// scope and audit timestamps. `stderr_simhash` is the 32-hex simhash string.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredErrorFingerprint {
     pub fingerprint_key: String,
     pub workspace_id: String,
@@ -21838,7 +21840,8 @@ pub struct CreateErrorRepairLinkInput {
 }
 
 /// A stored `error_repair_links` row.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredErrorRepairLink {
     pub link_id: String,
     pub workspace_id: String,
@@ -22692,6 +22695,53 @@ impl DbConnection {
         rows.first()
             .map(stored_error_fingerprint_from_row)
             .transpose()
+    }
+
+    /// Read every fingerprint in the caller's recovery snapshot.
+    pub(crate) fn list_error_fingerprints_for_recovery(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredErrorFingerprint>> {
+        self.query_for(DbOperation::Query,
+            "SELECT fingerprint_key, workspace_id, tool, canonical_code, message_template_signature, location_shape, stderr_simhash, version_hints, created_at, updated_at FROM error_fingerprints WHERE workspace_id = ?1 ORDER BY fingerprint_key",
+            &[Value::Text(workspace_id.to_owned())])?
+            .iter().map(stored_error_fingerprint_from_row).collect()
+    }
+
+    /// Preserve history exactly, refusing collisions instead of refreshing rows.
+    pub(crate) fn insert_error_fingerprint_for_recovery(
+        &self,
+        row: &StoredErrorFingerprint,
+    ) -> Result<()> {
+        self.execute_for(DbOperation::Execute,
+            "INSERT INTO error_fingerprints (fingerprint_key, workspace_id, tool, canonical_code, message_template_signature, location_shape, stderr_simhash, version_hints, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            &[
+                Value::Text(row.fingerprint_key.clone()), Value::Text(row.workspace_id.clone()),
+                Value::Text(row.tool.clone()), row.canonical_code.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.message_template_signature.clone()), row.location_shape.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.stderr_simhash.clone()), row.version_hints.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.created_at.clone()), Value::Text(row.updated_at.clone()),
+            ])?;
+        Ok(())
+    }
+
+    /// Strict recovery insertion keeps link identities and both timestamps.
+    pub(crate) fn insert_error_repair_link_for_recovery(
+        &self,
+        row: &StoredErrorRepairLink,
+    ) -> Result<()> {
+        self.execute_for(DbOperation::Execute,
+            "INSERT INTO error_repair_links (link_id, workspace_id, fingerprint_key, link_kind, target_id, outcome, evidence_ref, stale_version_warning, created_by, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            &[
+                Value::Text(row.link_id.clone()), Value::Text(row.workspace_id.clone()),
+                Value::Text(row.fingerprint_key.clone()), Value::Text(row.link_kind.clone()),
+                Value::Text(row.target_id.clone()), Value::Text(row.outcome.clone()),
+                row.evidence_ref.clone().map_or(Value::Null, Value::Text),
+                row.stale_version_warning.clone().map_or(Value::Null, Value::Text),
+                row.created_by.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.created_at.clone()), Value::Text(row.updated_at.clone()),
+            ])?;
+        Ok(())
     }
 
     /// Upsert one error-repair link (bd-uafu0 / V073). Re-observing the same

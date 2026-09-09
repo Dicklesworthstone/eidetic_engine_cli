@@ -1514,6 +1514,13 @@ restored. Verification hashes continue to identify the original evidence; any
 redaction of display text is audited. Machine labels retain secret scanning so
 bead filters and blocker classification still work under full redaction.
 
+Error fingerprints and their repair links are included in authenticated backups.
+Restored error diagnosis recalls helpful and harmful repairs and their proof
+links, with memory references remapped to the recovered store. Link identities,
+outcomes, and timestamps are preserved; free text follows the backup's redaction
+level. Ordinary error codes remain searchable under full redaction. Recovery
+does not execute repairs or claim that historical proofs were rerun.
+
 ### Diagnostics, eval, ops
 
 | Command | Purpose |

@@ -28,12 +28,13 @@ use crate::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
     CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType,
     MeshStorageStatus, StoredAuditEntry, StoredCurationCandidate, StoredCurationTtlPolicy,
-    StoredEpisodeAction, StoredEvidenceSpan, StoredFeedbackEvent, StoredFeedbackQuarantine,
-    StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness, StoredGraphSnapshot,
-    StoredImportLedger, StoredJournalEntry, StoredLearningObservation, StoredMemory,
-    StoredMemoryLink, StoredOutcomeEvidence, StoredPackHistory, StoredProceduralRule,
-    StoredProcedure, StoredProcedureEvent, StoredRchVerifyRun, StoredRecorderEvent,
-    StoredRecorderRun, StoredSearchIndexJob, StoredSession, StoredTaskEpisode, audit_actions,
+    StoredEpisodeAction, StoredErrorFingerprint, StoredErrorRepairLink, StoredEvidenceSpan,
+    StoredFeedbackEvent, StoredFeedbackQuarantine, StoredGraphAlgorithmResult,
+    StoredGraphAlgorithmWitness, StoredGraphSnapshot, StoredImportLedger, StoredJournalEntry,
+    StoredLearningObservation, StoredMemory, StoredMemoryLink, StoredOutcomeEvidence,
+    StoredPackHistory, StoredProceduralRule, StoredProcedure, StoredProcedureEvent,
+    StoredRchVerifyRun, StoredRecorderEvent, StoredRecorderRun, StoredSearchIndexJob,
+    StoredSession, StoredTaskEpisode, audit_actions,
 };
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
@@ -67,6 +68,7 @@ const CURATION_HISTORY_SCHEMA: &str = "ee.backup.curation_history.v1";
 const PROCEDURE_HISTORY_SCHEMA: &str = "ee.backup.procedure_history.v1";
 const LEARNING_SIGNALS_SCHEMA: &str = "ee.backup.learning_signals.v1";
 const RECORDED_HISTORY_SCHEMA: &str = "ee.backup.recorded_history.v1";
+const ERROR_RECALL_SCHEMA: &str = "ee.backup.error_recall.v1";
 const MANIFEST_AUTH_FAMILY: &str = "ee.backup.manifest";
 const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
 const RECOVERY_KEYS_FILE: &str = "store-auth.recovery.json";
@@ -781,6 +783,7 @@ pub struct BackupRestoreReport {
     pub restored_procedure_event_count: u32,
     pub restored_learning_signals: BackupLearningSignalCounts,
     pub restored_recorded_history: BackupRecordedHistoryCounts,
+    pub restored_error_recall: BackupErrorRecallCounts,
     pub restored_pack_history: BackupPackHistoryCounts,
     pub restored_graph_cache_count: u32,
     pub restored_derived: Vec<BackupRestoredDerivedAssetReport>,
@@ -826,6 +829,7 @@ impl BackupRestoreReport {
                 "procedureEventsRestored": self.restored_procedure_event_count,
                 "learningSignalsRestored": self.restored_learning_signals,
                 "recordedHistoryRestored": self.restored_recorded_history,
+                "errorRecallRestored": self.restored_error_recall,
                 "packHistoryRestored": self.restored_pack_history,
                 "graphCacheRowsRestored": self.restored_graph_cache_count,
                 "issues": self.issue_count,
@@ -870,6 +874,9 @@ impl BackupRestoreReport {
             self.restored_recorded_history.runs,
             self.restored_recorded_history.events,
             self.restored_recorded_history.verification
+        ) + &format!(
+            "  restored error fingerprints/repair links: {}/{}\n",
+            self.restored_error_recall.fingerprints, self.restored_error_recall.links
         )
     }
 
@@ -1535,6 +1542,26 @@ pub struct BackupRecordedHistoryCounts {
     pub verification: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupErrorRecall {
+    schema: String,
+    backup_id: String,
+    workspace_id: String,
+    chunk_index: usize,
+    chunk_count: usize,
+    fingerprints: Vec<StoredErrorFingerprint>,
+    links: Vec<StoredErrorRepairLink>,
+    authentication: Option<AuthenticatedHeader>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupErrorRecallCounts {
+    pub fingerprints: u32,
+    pub links: u32,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupPackHistoryCounts {
@@ -1668,11 +1695,13 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
             "derived_artifact_restore",
         ),
         "journal_entries" | "search_index_jobs" | "recorder_runs" | "recorder_events"
-        | "rch_verify_runs" => BackupTablePolicy::new(
-            "maintain",
-            "export_restore_required",
-            "derived_artifact_restore",
-        ),
+        | "rch_verify_runs" | "error_fingerprints" | "error_repair_links" => {
+            BackupTablePolicy::new(
+                "maintain",
+                "export_restore_required",
+                "derived_artifact_restore",
+            )
+        }
         "procedural_rules" | "rule_source_memories" | "rule_tags" | "feedback_events" => {
             BackupTablePolicy::new(
                 "learn",
@@ -1688,8 +1717,6 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
         | "causal_evidence"
         | "certificates"
         | "debt_snapshots"
-        | "error_fingerprints"
-        | "error_repair_links"
         | "memory_seals"
         | "memory_sentinel_specs"
         | "rationale_trace_links"
@@ -1885,6 +1912,14 @@ fn reconcile_derived_recovery_inventory(
     }
 
     for (table, captured_count) in [
+        (
+            "error_fingerprints",
+            captured_derived_record_count(derived, "error_recall", "fingerprints"),
+        ),
+        (
+            "error_repair_links",
+            captured_derived_record_count(derived, "error_recall", "links"),
+        ),
         (
             "recorder_runs",
             captured_derived_record_count(derived, "recorded_history", "runs"),
@@ -2135,6 +2170,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &memory_ids,
                 &mut payloads,
             )?;
+            collect_error_recall_payloads(
+                &connection,
+                workspace_id,
+                &backup_id,
+                &created_at,
+                options.redaction_level,
+                &memory_ids,
+                &mut payloads,
+            )?;
             collect_pack_history_payloads(
                 &connection,
                 workspace_id,
@@ -2187,13 +2231,14 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                     | "procedure_history"
                     | "learning_signals"
                     | "recorded_history"
+                    | "error_recall"
             ) || (p.report.kind == "curation_history"
                 && serde_json::from_slice::<BackupCurationHistory>(&p.bytes)
                     .is_ok_and(|chunk| !chunk.candidates.is_empty()))
         })
     {
         return Err(work_history_error(
-            "learned rules, feedback, pack history, import checkpoints, curation history, procedures, learning signals, and recorded history require source-store authentication; repair the workspace key store before creating this backup",
+            "learned rules, feedback, pack history, import checkpoints, curation history, procedures, learning signals, recorded history, and error recall require source-store authentication; repair the workspace key store before creating this backup",
         ));
     }
     authenticate_learning_payloads(&mut derived_payloads, store_auth.as_ref())?;
@@ -2203,6 +2248,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     authenticate_procedure_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_learning_signal_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_recorded_history_payloads(&mut derived_payloads, store_auth.as_ref())?;
+    authenticate_error_recall_payloads(&mut derived_payloads, store_auth.as_ref())?;
     let derived_reports = derived_payloads
         .iter()
         .map(|payload| payload.report.clone())
@@ -3143,6 +3189,7 @@ pub fn restore_backup_to_side_path(
             restored_procedure_event_count: 0,
             restored_learning_signals: BackupLearningSignalCounts::default(),
             restored_recorded_history: BackupRecordedHistoryCounts::default(),
+            restored_error_recall: BackupErrorRecallCounts::default(),
             restored_search_index_job_count: 0,
             restored_rule_count: 0,
             restored_rule_source_count: 0,
@@ -3309,6 +3356,12 @@ pub fn restore_backup_to_side_path(
         &inspect.backup_id,
         &restored_derived,
     )?;
+    let restored_error_recall = restore_error_recall(
+        &restored_database_path,
+        &workspace_path,
+        &inspect.backup_id,
+        &restored_derived,
+    )?;
     let graph_cache_restored_count = if options.restore_graph_cache {
         restore_graph_cache_assets(&restored_database_path, &restored_derived)?
     } else {
@@ -3400,6 +3453,7 @@ pub fn restore_backup_to_side_path(
         restored_procedure_event_count,
         restored_learning_signals,
         restored_recorded_history,
+        restored_error_recall,
         restored_search_index_job_count,
         restored_rule_count,
         restored_rule_source_count,
@@ -8173,6 +8227,259 @@ fn collect_recorded_history_payloads(
         ));
     }
     Ok(())
+}
+
+fn collect_error_recall_payloads(
+    connection: &DbConnection,
+    workspace_id: &str,
+    backup_id: &str,
+    captured_at: &str,
+    redaction: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) -> Result<(), DomainError> {
+    let mut fingerprints = connection
+        .list_error_fingerprints_for_recovery(workspace_id)
+        .map_err(work_history_error)?;
+    if fingerprints.is_empty() {
+        return Ok(());
+    }
+    let references = connection
+        .learning_recovery_references(workspace_id)
+        .map_err(work_history_error)?;
+    let reference =
+        |value: &str| redact_learning_reference(value, redaction, memory_ids, &references);
+    // Canonical codes are lookup keys, not display text. Keep normal codes
+    // usable under full redaction, but still scan them for secrets.
+    let label_level = if redaction == RedactionLevel::Full {
+        RedactionLevel::Standard
+    } else {
+        redaction
+    };
+    let mut links = Vec::new();
+    for row in &mut fingerprints {
+        let mut children = connection
+            .list_error_repair_links(workspace_id, &row.fingerprint_key)
+            .map_err(work_history_error)?;
+        row.fingerprint_key = redact_learning_reference(
+            &row.fingerprint_key,
+            label_level,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+        );
+        row.canonical_code = row
+            .canonical_code
+            .as_deref()
+            .map(|s| redact_content(s, label_level));
+        row.location_shape = row
+            .location_shape
+            .as_deref()
+            .map(|s| redact_content(s, redaction));
+        row.version_hints = row
+            .version_hints
+            .as_deref()
+            .map(|s| redact_content(s, redaction));
+        for link in &mut children {
+            link.fingerprint_key.clone_from(&row.fingerprint_key);
+            link.target_id = reference(&link.target_id);
+            link.evidence_ref = link.evidence_ref.as_deref().map(reference);
+            link.created_by = link
+                .created_by
+                .as_deref()
+                .map(|s| redact_content(s, redaction));
+            link.stale_version_warning = link
+                .stale_version_warning
+                .as_deref()
+                .map(|s| redact_content(s, redaction));
+        }
+        links.extend(children);
+    }
+    let count = fingerprints
+        .len()
+        .max(links.len())
+        .div_ceil(WORK_HISTORY_CHUNK_ROWS);
+    for index in 0..count {
+        let start = index * WORK_HISTORY_CHUNK_ROWS;
+        let end = start + WORK_HISTORY_CHUNK_ROWS;
+        let chunk = BackupErrorRecall {
+            schema: ERROR_RECALL_SCHEMA.to_owned(),
+            backup_id: backup_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            chunk_index: index,
+            chunk_count: count,
+            fingerprints: fingerprints[start.min(fingerprints.len())..end.min(fingerprints.len())]
+                .to_vec(),
+            links: links[start.min(links.len())..end.min(links.len())].to_vec(),
+            authentication: None,
+        };
+        payloads.push(derived_payload(
+            format!("derived/error-recall/{index:08}.json"),
+            "error_recall",
+            captured_at,
+            None,
+            serialized_payload_bytes(&chunk).map_err(work_history_error)?,
+        ));
+    }
+    Ok(())
+}
+
+fn error_recall_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
+    ArtifactContext {
+        artifact_family: ERROR_RECALL_SCHEMA,
+        record_encoding_version: "json.v1",
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: workspace_id,
+    }
+}
+
+fn authenticate_error_recall_payloads(
+    payloads: &mut [BackupDerivedPayload],
+    root: Option<&StoreAuthRoot>,
+) -> Result<(), DomainError> {
+    for payload in payloads
+        .iter_mut()
+        .filter(|p| p.report.kind == "error_recall")
+    {
+        let mut chunk: BackupErrorRecall =
+            serde_json::from_slice(&payload.bytes).map_err(work_history_error)?;
+        chunk.authentication = None;
+        if let Some(root) = root {
+            let hash =
+                canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+            chunk.authentication = Some(
+                authenticate_artifact(
+                    root,
+                    MacDomain::NativeImportRecordsRoot,
+                    &error_recall_auth_context(&chunk.workspace_id),
+                    &hash,
+                    1,
+                )
+                .map_err(work_history_error)?,
+            );
+        }
+        payload.bytes = serialized_payload_bytes(&chunk).map_err(work_history_error)?;
+        if payload.bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES {
+            return Err(work_history_error(
+                "error-recall chunk exceeds the restore asset byte limit",
+            ));
+        }
+        payload.report.hash = Some(hash_bytes(&payload.bytes));
+        payload.report.byte_size = Some(payload.bytes.len() as u64);
+    }
+    Ok(())
+}
+
+fn restore_error_recall(
+    database: &Path,
+    source_workspace: &Path,
+    backup_id: &str,
+    assets: &[BackupRestoredDerivedAssetReport],
+) -> Result<BackupErrorRecallCounts, DomainError> {
+    let mut chunks = assets
+        .iter()
+        .filter(|a| a.kind == "error_recall")
+        .map(|a| {
+            serde_json::from_value::<BackupErrorRecall>(read_restored_derived_json(a)?)
+                .map_err(work_history_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if chunks.is_empty() {
+        return Ok(BackupErrorRecallCounts::default());
+    }
+    let root =
+        StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
+    chunks.sort_by_key(|c| c.chunk_index);
+    let source_id = chunks[0].workspace_id.clone();
+    let count = chunks.len();
+    for (index, chunk) in chunks.iter_mut().enumerate() {
+        if chunk.schema != ERROR_RECALL_SCHEMA
+            || chunk.backup_id != backup_id
+            || chunk.workspace_id != source_id
+            || chunk.chunk_index != index
+            || chunk.chunk_count != count
+            || chunk.fingerprints.len() > WORK_HISTORY_CHUNK_ROWS
+            || chunk.links.len() > WORK_HISTORY_CHUNK_ROWS
+        {
+            return Err(work_history_error(
+                "unsupported, incomplete, duplicate, or substituted error-recall chunks",
+            ));
+        }
+        let header = chunk.authentication.take().ok_or_else(|| {
+            work_history_error("error recall requires source-store authentication")
+        })?;
+        let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+        if !verify_artifact(
+            &root,
+            MacDomain::NativeImportRecordsRoot,
+            &error_recall_auth_context(&source_id),
+            &header,
+            &hash,
+            1,
+        )
+        .map_err(work_history_error)?
+        .is_authenticated()
+        {
+            return Err(work_history_error("error-recall authentication failed"));
+        }
+    }
+    let db = DbConnection::open_file(database).map_err(work_history_error)?;
+    let workspace_id = remap_restored_workspace_id(
+        &db.list_workspaces().map_err(work_history_error)?,
+        Some(&source_id),
+        "error recall",
+    )?
+    .ok_or_else(|| work_history_error("missing error-recall workspace"))?;
+    let mut fingerprints = Vec::new();
+    let mut links = Vec::new();
+    for chunk in chunks {
+        fingerprints.extend(chunk.fingerprints);
+        links.extend(chunk.links);
+    }
+    let mut keys = BTreeSet::new();
+    for row in &mut fingerprints {
+        if row.workspace_id != source_id || !keys.insert(row.fingerprint_key.clone()) {
+            return Err(work_history_error(
+                "foreign or duplicate recovered error fingerprint",
+            ));
+        }
+        row.workspace_id.clone_from(&workspace_id);
+    }
+    let mut ids = BTreeSet::new();
+    let mut identities = BTreeSet::new();
+    for row in &mut links {
+        if row.workspace_id != source_id
+            || !keys.contains(&row.fingerprint_key)
+            || !ids.insert(row.link_id.clone())
+            || !identities.insert((
+                row.fingerprint_key.clone(),
+                row.link_kind.clone(),
+                row.target_id.clone(),
+                row.outcome.clone(),
+            ))
+        {
+            return Err(work_history_error(
+                "foreign, orphan, or duplicate recovered error-repair link",
+            ));
+        }
+        row.workspace_id.clone_from(&workspace_id);
+    }
+    db.with_transaction(|| {
+        for row in &fingerprints { db.insert_error_fingerprint_for_recovery(row)?; }
+        for row in &links { db.insert_error_repair_link_for_recovery(row)?; }
+        db.insert_audit(&crate::models::AuditId::now().to_string(), &crate::db::CreateAuditInput {
+            workspace_id: Some(workspace_id.clone()), actor: Some("ee backup restore".to_owned()),
+            action: "backup.error_recall_restored".to_owned(), target_type: Some("backup".to_owned()),
+            target_id: Some(backup_id.to_owned()), details: Some(json!({
+                "sourceWorkspaceId": source_id, "fingerprintCount": fingerprints.len(), "linkCount": links.len(),
+                "reason": "Recovered historical error classes and repair evidence. Workspace and memory references follow the restored store; free text follows backup redaction. No repair or proof was executed."
+            }).to_string()),
+        })?;
+        Ok(())
+    }).map_err(work_history_error)?;
+    Ok(BackupErrorRecallCounts {
+        fingerprints: u32::try_from(fingerprints.len()).unwrap_or(u32::MAX),
+        links: u32::try_from(links.len()).unwrap_or(u32::MAX),
+    })
 }
 
 fn recorded_history_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
@@ -17170,6 +17477,508 @@ mod tests {
             )?;
             db.close().map_err(|e| e.to_string())?;
         }
+        Ok(())
+    }
+
+    fn recovery_error_fingerprint(workspace_id: &str) -> StoredErrorFingerprint {
+        let canonical = crate::core::error_recall::from_rustc(
+            Some("E0277"),
+            "the trait bound is not satisfied",
+        );
+        let fingerprint = crate::core::error_recall::ErrorFingerprint::from_canonical(&canonical);
+        StoredErrorFingerprint {
+            fingerprint_key: fingerprint.layered_key().key,
+            workspace_id: workspace_id.to_owned(),
+            tool: "rustc".to_owned(),
+            canonical_code: fingerprint.canonical_code,
+            message_template_signature: fingerprint.message_template_signature,
+            location_shape: Some("<path>:<num>".to_owned()),
+            stderr_simhash: format!("{:032x}", fingerprint.stderr_simhash),
+            version_hints: Some("Authorization: Bearer recall-canary-token".to_owned()),
+            created_at: "2026-09-01T00:00:00Z".to_owned(),
+            updated_at: "2026-09-02T00:00:00Z".to_owned(),
+        }
+    }
+
+    fn recovery_error_link(
+        fingerprint: &StoredErrorFingerprint,
+        index: usize,
+    ) -> StoredErrorRepairLink {
+        StoredErrorRepairLink {
+            link_id: format!("erl_recovery_{index:04}"),
+            workspace_id: fingerprint.workspace_id.clone(),
+            fingerprint_key: fingerprint.fingerprint_key.clone(),
+            link_kind: "outcome".to_owned(),
+            target_id: format!("Authorization: Bearer recall-canary-{index:04}"),
+            outcome: "unknown".to_owned(),
+            evidence_ref: None,
+            stale_version_warning: Some("Authorization: Bearer recall-canary-warning".to_owned()),
+            created_by: Some("Authorization: Bearer recall-canary-author".to_owned()),
+            created_at: fingerprint.created_at.clone(),
+            updated_at: fingerprint.updated_at.clone(),
+        }
+    }
+
+    #[test]
+    fn default_backup_restores_error_recall_and_live_diagnosis() -> TestResult {
+        use crate::core::error_diagnosis::{
+            ErrorRepairLinkRecording, error_recall_report, record_error_repair_links,
+        };
+        for redaction in [
+            RedactionLevel::None,
+            RedactionLevel::Standard,
+            RedactionLevel::Full,
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+            let fingerprint = recovery_error_fingerprint(&workspace_id);
+            let proof = recovery_verification(&workspace_id, 0);
+            let mut links: Vec<_> = (0..129)
+                .map(|i| recovery_error_link(&fingerprint, i))
+                .collect();
+            for (i, outcome) in [(0, "helpful"), (1, "harmful")] {
+                links[i].link_kind = "repair".to_owned();
+                links[i].target_id.clone_from(&memory_id);
+                links[i].outcome = outcome.to_owned();
+                links[i].evidence_ref = Some(proof.id.clone());
+            }
+            links[2].link_kind = "proof".to_owned();
+            links[2].target_id.clone_from(&proof.id);
+            let mut observation = recovery_observation(&workspace_id, &memory_id, 0);
+            observation.source_id = Some(links[0].link_id.clone());
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            db.with_transaction(|| {
+                db.insert_error_fingerprint_for_recovery(&fingerprint)?;
+                db.insert_rch_verify_run_for_recovery(&proof)?;
+                for row in &links {
+                    db.insert_error_repair_link_for_recovery(row)?;
+                }
+                db.insert_learning_observation_for_recovery(&observation)?;
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?;
+            let source_links = db
+                .list_error_repair_links(&workspace_id, &fingerprint.fingerprint_key)
+                .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            for (table, count) in [("error_fingerprints", 1), ("error_repair_links", 129)] {
+                let entry = backup
+                    .recovery_inventory
+                    .entries
+                    .iter()
+                    .find(|e| e.table == table)
+                    .ok_or("missing error inventory")?;
+                ensure_equal(entry.row_count, count, "error inventory count")?;
+                ensure(entry.snapshot_covered, "all error rows captured")?;
+            }
+            let assets: Vec<_> = backup
+                .derived
+                .iter()
+                .filter(|a| a.kind == "error_recall")
+                .collect();
+            ensure_equal(assets.len(), 2, "repair links cross chunk boundary")?;
+            for asset in assets {
+                let bytes = fs::read(Path::new(&backup.backup_path).join(&asset.path))
+                    .map_err(|e| e.to_string())?;
+                if redaction != RedactionLevel::None {
+                    ensure(
+                        !String::from_utf8_lossy(&bytes).contains("canary"),
+                        "error secrets absent",
+                    )?;
+                }
+            }
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: fs::canonicalize(tempdir.path())
+                    .map_err(|e| e.to_string())?
+                    .join("restored-errors"),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                &restored.restored_error_recall,
+                &BackupErrorRecallCounts {
+                    fingerprints: 1,
+                    links: 129,
+                },
+                "error restore counts",
+            )?;
+            ensure_equal(
+                restored.data_json()["counts"]["errorRecallRestored"]["links"].as_u64(),
+                Some(129),
+                "error JSON counts",
+            )?;
+            ensure(
+                restored
+                    .human_summary()
+                    .contains("error fingerprints/repair links: 1/129"),
+                "error human counts",
+            )?;
+            let db = DbConnection::open_file(Path::new(&restored.restored_database_path))
+                .map_err(|e| e.to_string())?;
+            let restored_id = db
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .first()
+                .ok_or("missing restored workspace")?
+                .id
+                .clone();
+            let restored_memory_id = db
+                .list_memories(&restored_id, None, false)
+                .map_err(|e| e.to_string())?
+                .first()
+                .ok_or("missing recovered memory")?
+                .id
+                .clone();
+            let stored = db
+                .get_error_fingerprint(&restored_id, &fingerprint.fingerprint_key)
+                .map_err(|e| e.to_string())?
+                .ok_or("missing recovered fingerprint")?;
+            let mut expected = fingerprint.clone();
+            expected.workspace_id.clone_from(&restored_id);
+            expected.location_shape = expected
+                .location_shape
+                .as_deref()
+                .map(|s| redact_content(s, redaction));
+            expected.version_hints = expected
+                .version_hints
+                .as_deref()
+                .map(|s| redact_content(s, redaction));
+            ensure_equal(
+                stored,
+                expected,
+                "fingerprint hashes and timestamps preserved",
+            )?;
+            let recovered = db
+                .list_error_repair_links(&restored_id, &fingerprint.fingerprint_key)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(recovered.len(), 129, "all links recovered")?;
+            let observations = db
+                .list_learning_observations(&restored_id, None)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(observations.len(), 1, "linked observation recovered")?;
+            ensure_equal(
+                &observations[0].source_id,
+                &Some(links[0].link_id.clone()),
+                "learning provenance retains the recovered repair-link identity",
+            )?;
+            for row in &recovered {
+                let original = links
+                    .iter()
+                    .find(|l| l.link_id == row.link_id)
+                    .ok_or("link identity changed")?;
+                ensure_equal(
+                    (
+                        &row.created_at,
+                        &row.updated_at,
+                        &row.outcome,
+                        &row.link_kind,
+                    ),
+                    (
+                        &original.created_at,
+                        &original.updated_at,
+                        &original.outcome,
+                        &original.link_kind,
+                    ),
+                    "link history retained",
+                )?;
+                if row.link_kind == "repair" {
+                    ensure_equal(
+                        &row.target_id,
+                        &restored_memory_id,
+                        "memory reference remapped",
+                    )?;
+                    ensure_equal(
+                        &row.evidence_ref,
+                        &Some(proof.id.clone()),
+                        "verification evidence retained",
+                    )?;
+                }
+                if redaction == RedactionLevel::None {
+                    let mut original = original.clone();
+                    original.workspace_id.clone_from(&restored_id);
+                    ensure_equal(row, &original, "unredacted link lossless")?;
+                }
+            }
+            let distinct: BTreeSet<_> = recovered
+                .iter()
+                .filter(|l| l.link_kind == "outcome")
+                .map(|l| &l.target_id)
+                .collect();
+            ensure_equal(
+                distinct.len(),
+                126,
+                "redaction cannot collapse distinct warning references",
+            )?;
+            let canonical = crate::core::error_recall::from_rustc(
+                Some("E0277"),
+                "another instance of this compiler error",
+            );
+            let report =
+                error_recall_report(&db, &restored_id, &canonical).map_err(|e| e.to_string())?;
+            ensure(report.exact, "live diagnosis recognizes restored error")?;
+            ensure_equal(
+                report.helpful_repairs,
+                vec![restored_memory_id.clone()],
+                "live helpful repairs",
+            )?;
+            ensure_equal(
+                report.harmful_repairs,
+                vec![restored_memory_id.clone()],
+                "live harmful repairs",
+            )?;
+            ensure_equal(
+                report.proof_links,
+                vec![proof.id.clone()],
+                "live verification proof links",
+            )?;
+            record_error_repair_links(
+                &db,
+                &restored_id,
+                &canonical,
+                &ErrorRepairLinkRecording {
+                    helpful_repairs: vec![restored_memory_id.clone()],
+                    harmful_repairs: vec![restored_memory_id],
+                    proof_links: vec![proof.id],
+                    ..ErrorRepairLinkRecording::default()
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            let refreshed = db
+                .list_error_repair_links(&restored_id, &fingerprint.fingerprint_key)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(
+                refreshed.len(),
+                129,
+                "normal recording remains idempotent after workspace remap",
+            )?;
+            ensure_equal(
+                refreshed
+                    .iter()
+                    .map(|r| &r.link_id)
+                    .collect::<BTreeSet<_>>(),
+                recovered
+                    .iter()
+                    .map(|r| &r.link_id)
+                    .collect::<BTreeSet<_>>(),
+                "refresh preserves recovered identities",
+            )?;
+            ensure(
+                db.list_audit_entries(Some(&restored_id), None)
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|a| a.action == "backup.error_recall_restored"),
+                "error recovery audited",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                db.get_error_fingerprint(&workspace_id, &fingerprint.fingerprint_key)
+                    .map_err(|e| e.to_string())?,
+                Some(fingerprint.clone()),
+                "source fingerprint unchanged",
+            )?;
+            ensure_equal(
+                db.list_error_repair_links(&workspace_id, &fingerprint.fingerprint_key)
+                    .map_err(|e| e.to_string())?,
+                source_links,
+                "source links unchanged",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn error_recall_rejects_tampering_and_rolls_back() -> TestResult {
+        for defect in [
+            "tampered",
+            "unsigned",
+            "wrong_backup",
+            "wrong_schema",
+            "missing_chunk",
+            "duplicate_chunk",
+            "oversized_chunk",
+            "foreign_fingerprint",
+            "duplicate_fingerprint",
+            "foreign_link",
+            "orphan_link",
+            "duplicate_link",
+            "duplicate_identity",
+            "late_constraint",
+            "existing_collision",
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let fingerprint = recovery_error_fingerprint(&workspace_id);
+            let mut existing = fingerprint.clone();
+            existing.fingerprint_key = "rustc:E0599".to_owned();
+            existing.canonical_code = Some("E0599".to_owned());
+            let existing_link = recovery_error_link(&existing, 999);
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            db.insert_error_fingerprint_for_recovery(&existing)
+                .map_err(|e| e.to_string())?;
+            db.insert_error_repair_link_for_recovery(&existing_link)
+                .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            let mut chunk = BackupErrorRecall {
+                schema: ERROR_RECALL_SCHEMA.to_owned(),
+                backup_id: "backup-original".to_owned(),
+                workspace_id: workspace_id.clone(),
+                chunk_index: 0,
+                chunk_count: 1,
+                links: vec![recovery_error_link(&fingerprint, 0)],
+                fingerprints: vec![fingerprint],
+                authentication: None,
+            };
+            match defect {
+                "wrong_schema" => chunk.schema = "unknown".to_owned(),
+                "missing_chunk" => chunk.chunk_count = 2,
+                "oversized_chunk" => chunk.links = vec![chunk.links[0].clone(); 129],
+                "foreign_fingerprint" => chunk.fingerprints[0].workspace_id = "foreign".to_owned(),
+                "duplicate_fingerprint" => chunk.fingerprints.push(chunk.fingerprints[0].clone()),
+                "foreign_link" => chunk.links[0].workspace_id = "foreign".to_owned(),
+                "orphan_link" => chunk.links[0].fingerprint_key = "missing".to_owned(),
+                "duplicate_link" => chunk.links.push(chunk.links[0].clone()),
+                "duplicate_identity" => {
+                    let mut row = chunk.links[0].clone();
+                    row.link_id = "erl_other".to_owned();
+                    chunk.links.push(row);
+                }
+                "late_constraint" => chunk.links[0].outcome = "invalid".to_owned(),
+                "existing_collision" => chunk.links[0].link_id.clone_from(&existing_link.link_id),
+                _ => {}
+            }
+            let root = StoreAuthRoot::open_or_create(workspace_keys_dir(&workspace))
+                .map_err(|e| e.to_string())?;
+            let mut payloads = vec![derived_payload(
+                "derived/error-recall/00000000.json".to_owned(),
+                "error_recall",
+                "2026-09-01T00:00:00Z",
+                None,
+                serialized_payload_bytes(&chunk).map_err(|e| e.to_string())?,
+            )];
+            authenticate_error_recall_payloads(&mut payloads, Some(&root))
+                .map_err(|e| e.message())?;
+            let mut signed: BackupErrorRecall =
+                serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
+            if defect == "tampered" {
+                signed.links[0].outcome = "helpful".to_owned();
+            }
+            if defect == "unsigned" {
+                signed.authentication = None;
+            }
+            let path = tempdir.path().join("error-recall.json");
+            fs::write(
+                &path,
+                serialized_payload_bytes(&signed).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            let mut assets = vec![restored_cass_asset(&path, "error_recall")];
+            if defect == "duplicate_chunk" {
+                assets.push(assets[0].clone());
+            }
+            let backup_id = if defect == "wrong_backup" {
+                "wrong"
+            } else {
+                "backup-original"
+            };
+            ensure(
+                restore_error_recall(&database, &workspace, backup_id, &assets).is_err(),
+                &format!("reject {defect}"),
+            )?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                db.list_error_fingerprints_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                vec![existing.clone()],
+                "failure rolls back fingerprints and preserves existing row",
+            )?;
+            ensure_equal(
+                db.list_error_repair_links(&workspace_id, &existing.fingerprint_key)
+                    .map_err(|e| e.to_string())?,
+                vec![existing_link],
+                "failure preserves existing link",
+            )?;
+            ensure(
+                db.list_error_repair_links(&workspace_id, "rustc:E0277")
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "failure leaves no new links",
+            )?;
+            ensure(
+                !db.list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|a| a.action == "backup.error_recall_restored"),
+                "failure leaves no recovery audit",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn error_recall_requires_keys_before_publication() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        db.insert_error_fingerprint_for_recovery(&recovery_error_fingerprint(&workspace_id))
+            .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        let output = fs::canonicalize(tempdir.path())
+            .map_err(|e| e.to_string())?
+            .join("unsigned-error-recall");
+        let mut options = BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(output.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: true,
+        };
+        ensure(
+            create_backup(&options).map_err(|e| e.message())?.dry_run,
+            "keyless error preview works",
+        )?;
+        let keys = workspace_keys_dir(&workspace);
+        ensure(
+            !keys.exists() && !output.exists(),
+            "preview creates no keys or output",
+        )?;
+        fs::write(&keys, b"obstructed keys").map_err(|e| e.to_string())?;
+        options.dry_run = false;
+        let error = create_backup(&options)
+            .err()
+            .ok_or("published unsigned error recall")?;
+        ensure(
+            error
+                .message()
+                .contains("require source-store authentication"),
+            "error recall requires keys",
+        )?;
+        ensure(!output.exists(), "no unsigned error recall publication")?;
+        ensure_equal(
+            fs::read(&keys).map_err(|e| e.to_string())?,
+            b"obstructed keys".to_vec(),
+            "key obstruction untouched",
+        )?;
         Ok(())
     }
 
