@@ -39,7 +39,8 @@ pub fn memory_seal_commitment(content: &[u8]) -> String {
 }
 
 /// A stored seal row joined to its memory.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MemorySeal {
     pub memory_id: String,
     pub content_commitment: String,

@@ -27,25 +27,26 @@ use crate::db::shard::{
 use crate::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
     CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType,
-    MeshStorageStatus, StoredAgentContextProfile, StoredArtifact, StoredArtifactLink,
-    StoredAuditEntry, StoredCausalEvidence, StoredCurationCandidate, StoredCurationTtlPolicy,
-    StoredEpisodeAction, StoredErrorFingerprint, StoredErrorRepairLink, StoredEvidenceSpan,
-    StoredFeedbackEvent, StoredFeedbackQuarantine, StoredGraphAlgorithmResult,
+    MeshStorageStatus, StoredAgent, StoredAgentContextProfile, StoredArtifact, StoredArtifactLink,
+    StoredAuditEntry, StoredCausalEvidence, StoredCertificateRecord, StoredCurationCandidate,
+    StoredCurationTtlPolicy, StoredEpisodeAction, StoredErrorFingerprint, StoredErrorRepairLink,
+    StoredEvidenceSpan, StoredFeedbackEvent, StoredFeedbackQuarantine, StoredGraphAlgorithmResult,
     StoredGraphAlgorithmWitness, StoredGraphSnapshot, StoredImportLedger, StoredJournalEntry,
     StoredLearningObservation, StoredMemory, StoredMemoryLink, StoredOutcomeEvidence,
     StoredPackHistory, StoredProceduralRule, StoredProcedure, StoredProcedureEvent,
     StoredRationaleTrace, StoredRationaleTraceLink, StoredRchVerifyRun, StoredRecorderEvent,
-    StoredRecorderRun, StoredSearchIndexJob, StoredSession, StoredTaskEpisode, audit_actions,
+    StoredRecorderRun, StoredSearchIndexJob, StoredSession, StoredTaskEpisode,
+    StoredTrustQuarantine, audit_actions,
 };
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
     BACKUP_MANIFEST_SCHEMA_V1, BACKUP_MANIFEST_SCHEMA_V2, BACKUP_RESTORE_SCHEMA_V1,
     BACKUP_VERIFY_SCHEMA_V1, BackupId, DomainError, ExportAuditRecord, ExportFooter, ExportHeader,
     ExportLinkRecord, ExportMemoryRecord, ExportScope, ExportTagRecord, ExportWorkspaceRecord,
-    ImportSource, RedactionLevel, TrustLevel, jsonl::ExportRecordBuildError,
+    ImportSource, MemorySeal, RedactionLevel, TrustLevel, jsonl::ExportRecordBuildError,
 };
 use crate::output::jsonl_export::{
-    ExportStats, JsonlExporter, redact_content, redact_memory_record,
+    ExportStats, JsonlExporter, redact_content, redact_memory_record, redact_provenance_uri,
 };
 use crate::policy::import_auth::{
     ArtifactContext, AuthenticatedHeader, EXPORT_ARTIFACT_FAMILY, EXPORT_RECORD_ENCODING_V1,
@@ -72,6 +73,7 @@ const RECORDED_HISTORY_SCHEMA: &str = "ee.backup.recorded_history.v1";
 const ERROR_RECALL_SCHEMA: &str = "ee.backup.error_recall.v1";
 const ARTIFACT_REGISTRY_SCHEMA: &str = "ee.backup.artifact_registry.v1";
 const REASONING_HISTORY_SCHEMA: &str = "ee.backup.reasoning_history.v1";
+const TRUST_HISTORY_SCHEMA: &str = "ee.backup.trust_history.v1";
 const MANIFEST_AUTH_FAMILY: &str = "ee.backup.manifest";
 const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
 const RECOVERY_KEYS_FILE: &str = "store-auth.recovery.json";
@@ -790,6 +792,7 @@ pub struct BackupRestoreReport {
     pub restored_error_recall: BackupErrorRecallCounts,
     pub restored_artifact_registry: BackupArtifactRegistryCounts,
     pub restored_reasoning_history: BackupReasoningHistoryCounts,
+    pub restored_trust_history: BackupTrustHistoryCounts,
     pub restored_pack_history: BackupPackHistoryCounts,
     pub restored_graph_cache_count: u32,
     pub restored_derived: Vec<BackupRestoredDerivedAssetReport>,
@@ -839,6 +842,7 @@ impl BackupRestoreReport {
                 "errorRecallRestored": self.restored_error_recall,
                 "artifactRegistryRestored": self.restored_artifact_registry,
                 "reasoningHistoryRestored": self.restored_reasoning_history,
+                "trustHistoryRestored": self.restored_trust_history,
                 "packHistoryRestored": self.restored_pack_history,
                 "graphCacheRowsRestored": self.restored_graph_cache_count,
                 "issues": self.issue_count,
@@ -897,6 +901,12 @@ impl BackupRestoreReport {
             self.restored_reasoning_history.traces,
             self.restored_reasoning_history.links,
             self.restored_reasoning_history.causal_evidence
+        ) + &format!(
+            "  restored seals/quarantines/certificates/agents: {}/{}/{}/{}\n",
+            self.restored_trust_history.seals,
+            self.restored_trust_history.quarantines,
+            self.restored_trust_history.certificates,
+            self.restored_trust_history.agents
         )
     }
 
@@ -1620,6 +1630,30 @@ pub struct BackupReasoningHistoryCounts {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupTrustHistory {
+    schema: String,
+    backup_id: String,
+    workspace_id: String,
+    chunk_index: usize,
+    chunk_count: usize,
+    seals: Vec<MemorySeal>,
+    quarantines: Vec<StoredTrustQuarantine>,
+    certificates: Vec<StoredCertificateRecord>,
+    agents: Vec<StoredAgent>,
+    authentication: Option<AuthenticatedHeader>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupTrustHistoryCounts {
+    pub seals: u32,
+    pub quarantines: u32,
+    pub certificates: u32,
+    pub agents: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BackupArtifact {
     row: StoredArtifact,
     source_snippet_hash: Option<String>,
@@ -1777,7 +1811,11 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
         | "artifact_links"
         | "rationale_traces"
         | "rationale_trace_links"
-        | "causal_evidence" => BackupTablePolicy::new(
+        | "causal_evidence"
+        | "agents"
+        | "certificates"
+        | "memory_seals"
+        | "trust_quarantine" => BackupTablePolicy::new(
             "maintain",
             "export_restore_required",
             "derived_artifact_restore",
@@ -1792,16 +1830,12 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
             "derived_artifact_restore",
         ),
 
-        "agents"
-        | "certificates"
-        | "debt_snapshots"
-        | "memory_seals"
+        "debt_snapshots"
         | "memory_sentinel_specs"
         | "reflection_request_ledger"
         | "situation_records"
         | "tripwire_check_events"
-        | "tripwires"
-        | "trust_quarantine" => {
+        | "tripwires" => {
             BackupTablePolicy::new("maintain", "export_restore_required", "not_implemented")
         }
         "evidence_spans" | "sessions" => BackupTablePolicy::new(
@@ -1988,6 +2022,22 @@ fn reconcile_derived_recovery_inventory(
     }
 
     for (table, captured_count) in [
+        (
+            "memory_seals",
+            captured_derived_record_count(derived, "trust_history", "seals"),
+        ),
+        (
+            "trust_quarantine",
+            captured_derived_record_count(derived, "trust_history", "quarantines"),
+        ),
+        (
+            "certificates",
+            captured_derived_record_count(derived, "trust_history", "certificates"),
+        ),
+        (
+            "agents",
+            captured_derived_record_count(derived, "trust_history", "agents"),
+        ),
         (
             "rationale_traces",
             captured_derived_record_count(derived, "reasoning_history", "traces"),
@@ -2297,6 +2347,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &memory_ids,
                 &mut payloads,
             )?;
+            collect_trust_history_payloads(
+                &connection,
+                workspace_id,
+                &backup_id,
+                &created_at,
+                options.redaction_level,
+                &memory_ids,
+                &mut payloads,
+            )?;
             collect_pack_history_payloads(
                 &connection,
                 workspace_id,
@@ -2352,13 +2411,14 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                     | "error_recall"
                     | "artifact_registry"
                     | "reasoning_history"
+                    | "trust_history"
             ) || (p.report.kind == "curation_history"
                 && serde_json::from_slice::<BackupCurationHistory>(&p.bytes)
                     .is_ok_and(|chunk| !chunk.candidates.is_empty()))
         })
     {
         return Err(work_history_error(
-            "learned rules, feedback, agent profiles, pack history, import checkpoints, curation history, procedures, learning signals, recorded history, error recall, artifact registry, and reasoning history require source-store authentication; repair the workspace key store before creating this backup",
+            "learned rules, feedback, agent profiles, pack history, import checkpoints, curation history, procedures, learning signals, recorded history, error recall, artifact registry, reasoning history, and trust history require source-store authentication; repair the workspace key store before creating this backup",
         ));
     }
     authenticate_learning_payloads(&mut derived_payloads, store_auth.as_ref())?;
@@ -2371,6 +2431,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     authenticate_error_recall_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_artifact_registry_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_reasoning_history_payloads(&mut derived_payloads, store_auth.as_ref())?;
+    authenticate_trust_history_payloads(&mut derived_payloads, store_auth.as_ref())?;
     let derived_reports = derived_payloads
         .iter()
         .map(|payload| payload.report.clone())
@@ -3314,6 +3375,7 @@ pub fn restore_backup_to_side_path(
             restored_error_recall: BackupErrorRecallCounts::default(),
             restored_artifact_registry: BackupArtifactRegistryCounts::default(),
             restored_reasoning_history: BackupReasoningHistoryCounts::default(),
+            restored_trust_history: BackupTrustHistoryCounts::default(),
             restored_search_index_job_count: 0,
             restored_rule_count: 0,
             restored_rule_source_count: 0,
@@ -3500,6 +3562,12 @@ pub fn restore_backup_to_side_path(
         &inspect.backup_id,
         &restored_derived,
     )?;
+    let restored_trust_history = restore_trust_history(
+        &restored_database_path,
+        &workspace_path,
+        &inspect.backup_id,
+        &restored_derived,
+    )?;
     let graph_cache_restored_count = if options.restore_graph_cache {
         restore_graph_cache_assets(&restored_database_path, &restored_derived)?
     } else {
@@ -3595,6 +3663,7 @@ pub fn restore_backup_to_side_path(
         restored_error_recall,
         restored_artifact_registry,
         restored_reasoning_history,
+        restored_trust_history,
         restored_search_index_job_count,
         restored_rule_count,
         restored_rule_source_count,
@@ -8541,6 +8610,322 @@ fn collect_error_recall_payloads(
     Ok(())
 }
 
+fn collect_trust_history_payloads(
+    connection: &DbConnection,
+    workspace_id: &str,
+    backup_id: &str,
+    captured_at: &str,
+    redaction: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) -> Result<(), DomainError> {
+    let mut seals = connection
+        .list_memory_seals_for_recovery(workspace_id)
+        .map_err(work_history_error)?;
+    let mut quarantines = connection
+        .list_trust_quarantine(workspace_id, false)
+        .map_err(work_history_error)?;
+    let mut certificates = connection
+        .list_certificates_for_recovery(workspace_id)
+        .map_err(work_history_error)?;
+    let mut agents = connection
+        .list_agents_for_recovery(workspace_id)
+        .map_err(work_history_error)?;
+    let count = seals
+        .len()
+        .max(quarantines.len())
+        .max(certificates.len())
+        .max(agents.len())
+        .div_ceil(WORK_HISTORY_CHUNK_ROWS);
+    if count == 0 {
+        return Ok(());
+    }
+    let references = connection
+        .learning_recovery_references(workspace_id)
+        .map_err(work_history_error)?;
+    for seal in &mut seals {
+        seal.memory_id = memory_ids.get(&seal.memory_id).cloned().ok_or_else(|| {
+            work_history_error("seal memory is missing or outside the backup workspace")
+        })?;
+    }
+    let mut source_keys = BTreeSet::new();
+    for row in &mut quarantines {
+        // Match the native memory provenance transformation, including path
+        // redaction. A collision must never merge distinct source histories.
+        row.source_uri = redact_provenance_uri(&row.source_uri, redaction);
+        if !source_keys.insert(row.source_uri.clone()) {
+            return Err(work_history_error(
+                "redacted trust-quarantine sources collide",
+            ));
+        }
+        row.reason = redact_content(&row.reason, redaction);
+    }
+    let mut certificate_ids = BTreeSet::new();
+    let mut certificate_targets = BTreeSet::new();
+    for row in &mut certificates {
+        row.id = redact_recovery_identity(&row.id, redaction);
+        row.target_id =
+            redact_learning_reference(&row.target_id, redaction, memory_ids, &references);
+        for value in [
+            &mut row.signature,
+            &mut row.signature_algorithm,
+            &mut row.signer,
+            &mut row.manifest_path,
+            &mut row.payload_path,
+        ] {
+            *value = value.as_deref().map(|s| redact_content(s, redaction));
+        }
+        row.metadata_json = redact_work_history_json(&row.metadata_json, redaction)?;
+        // Keep historical status and verification times. No certificate is
+        // signed, verified, or made valid by recovery; ordinary verification
+        // still checks the original content hash against the available payload.
+        if !certificate_ids.insert(row.id.clone())
+            || !certificate_targets.insert((
+                row.target_kind.clone(),
+                row.target_id.clone(),
+                row.content_hash.clone(),
+            ))
+        {
+            return Err(work_history_error(
+                "redacted certificate identities collide",
+            ));
+        }
+    }
+    let mut agent_ids = BTreeSet::new();
+    for row in &mut agents {
+        if redaction != RedactionLevel::None
+            && redact_content(&row.id, RedactionLevel::Standard) != row.id
+        {
+            row.id = format!("agt_{}", &blake3::hash(row.id.as_bytes()).to_hex()[..26]);
+        }
+        if !agent_ids.insert(row.id.clone()) {
+            return Err(work_history_error("redacted agent identities collide"));
+        }
+        row.name = redact_content(&row.name, redaction);
+        row.model = row.model.as_deref().map(|s| redact_content(s, redaction));
+    }
+    for index in 0..count {
+        let start = index * WORK_HISTORY_CHUNK_ROWS;
+        let end = start + WORK_HISTORY_CHUNK_ROWS;
+        let chunk = BackupTrustHistory {
+            schema: TRUST_HISTORY_SCHEMA.to_owned(),
+            backup_id: backup_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            chunk_index: index,
+            chunk_count: count,
+            seals: seals[start.min(seals.len())..end.min(seals.len())].to_vec(),
+            quarantines: quarantines[start.min(quarantines.len())..end.min(quarantines.len())]
+                .to_vec(),
+            certificates: certificates[start.min(certificates.len())..end.min(certificates.len())]
+                .to_vec(),
+            agents: agents[start.min(agents.len())..end.min(agents.len())].to_vec(),
+            authentication: None,
+        };
+        payloads.push(derived_payload(
+            format!("derived/trust-history/{index:08}.json"),
+            "trust_history",
+            captured_at,
+            None,
+            serialized_payload_bytes(&chunk).map_err(work_history_error)?,
+        ));
+    }
+    Ok(())
+}
+
+fn trust_history_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
+    ArtifactContext {
+        artifact_family: TRUST_HISTORY_SCHEMA,
+        record_encoding_version: "json.v1",
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: workspace_id,
+    }
+}
+
+fn authenticate_trust_history_payloads(
+    payloads: &mut [BackupDerivedPayload],
+    root: Option<&StoreAuthRoot>,
+) -> Result<(), DomainError> {
+    for payload in payloads
+        .iter_mut()
+        .filter(|p| p.report.kind == "trust_history")
+    {
+        let mut chunk: BackupTrustHistory =
+            serde_json::from_slice(&payload.bytes).map_err(work_history_error)?;
+        chunk.authentication = None;
+        if let Some(root) = root {
+            let hash =
+                canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+            chunk.authentication = Some(
+                authenticate_artifact(
+                    root,
+                    MacDomain::NativeImportRecordsRoot,
+                    &trust_history_auth_context(&chunk.workspace_id),
+                    &hash,
+                    1,
+                )
+                .map_err(work_history_error)?,
+            );
+        }
+        payload.bytes = serialized_payload_bytes(&chunk).map_err(work_history_error)?;
+        if payload.bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES {
+            return Err(work_history_error(
+                "trust-history chunk exceeds the restore asset byte limit",
+            ));
+        }
+        payload.report.hash = Some(hash_bytes(&payload.bytes));
+        payload.report.byte_size = Some(payload.bytes.len() as u64);
+    }
+    Ok(())
+}
+
+fn restore_trust_history(
+    database: &Path,
+    source_workspace: &Path,
+    backup_id: &str,
+    assets: &[BackupRestoredDerivedAssetReport],
+) -> Result<BackupTrustHistoryCounts, DomainError> {
+    let mut chunks = assets
+        .iter()
+        .filter(|a| a.kind == "trust_history")
+        .map(|a| {
+            serde_json::from_value::<BackupTrustHistory>(read_restored_derived_json(a)?)
+                .map_err(work_history_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if chunks.is_empty() {
+        return Ok(BackupTrustHistoryCounts::default());
+    }
+    let root =
+        StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
+    chunks.sort_by_key(|c| c.chunk_index);
+    let source_id = chunks[0].workspace_id.clone();
+    let count = chunks.len();
+    for (index, chunk) in chunks.iter_mut().enumerate() {
+        if chunk.schema != TRUST_HISTORY_SCHEMA
+            || chunk.backup_id != backup_id
+            || chunk.workspace_id != source_id
+            || chunk.chunk_index != index
+            || chunk.chunk_count != count
+            || [
+                chunk.seals.len(),
+                chunk.quarantines.len(),
+                chunk.certificates.len(),
+                chunk.agents.len(),
+            ]
+            .into_iter()
+            .any(|n| n > WORK_HISTORY_CHUNK_ROWS)
+        {
+            return Err(work_history_error(
+                "unsupported, incomplete, duplicate, or substituted trust-history chunks",
+            ));
+        }
+        let header = chunk.authentication.take().ok_or_else(|| {
+            work_history_error("trust history requires source-store authentication")
+        })?;
+        let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+        if !verify_artifact(
+            &root,
+            MacDomain::NativeImportRecordsRoot,
+            &trust_history_auth_context(&source_id),
+            &header,
+            &hash,
+            1,
+        )
+        .map_err(work_history_error)?
+        .is_authenticated()
+        {
+            return Err(work_history_error("trust-history authentication failed"));
+        }
+    }
+    let db = DbConnection::open_file(database).map_err(work_history_error)?;
+    let workspace_id = remap_restored_workspace_id(
+        &db.list_workspaces().map_err(work_history_error)?,
+        Some(&source_id),
+        "trust history",
+    )?
+    .ok_or_else(|| work_history_error("missing trust-history workspace"))?;
+    let memories = db
+        .list_memories(&workspace_id, None, true)
+        .map_err(work_history_error)?
+        .into_iter()
+        .map(|m| (m.id.clone(), m))
+        .collect::<BTreeMap<_, _>>();
+    let (mut seals, mut quarantines, mut certificates, mut agents) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for chunk in chunks {
+        seals.extend(chunk.seals);
+        quarantines.extend(chunk.quarantines);
+        certificates.extend(chunk.certificates);
+        agents.extend(chunk.agents);
+    }
+    let mut ids = BTreeSet::new();
+    for seal in &seals {
+        if !ids.insert(&seal.memory_id)
+            || !memories.contains_key(&seal.memory_id)
+            || (seal.is_sealed()
+                && memories[&seal.memory_id].content
+                    != crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT)
+        {
+            return Err(work_history_error(
+                "orphan, duplicate, or exposed recovered memory seal",
+            ));
+        }
+    }
+    let mut sources = BTreeSet::new();
+    for row in &mut quarantines {
+        if row.workspace_id != source_id || !sources.insert(row.source_uri.clone()) {
+            return Err(work_history_error(
+                "foreign or duplicate recovered trust quarantine",
+            ));
+        }
+        row.workspace_id.clone_from(&workspace_id);
+    }
+    let mut certificate_ids = BTreeSet::new();
+    let mut targets = BTreeSet::new();
+    for row in &mut certificates {
+        if row.workspace_id != source_id
+            || !certificate_ids.insert(row.id.clone())
+            || !targets.insert((
+                row.target_kind.clone(),
+                row.target_id.clone(),
+                row.content_hash.clone(),
+            ))
+        {
+            return Err(work_history_error(
+                "foreign or duplicate recovered certificate",
+            ));
+        }
+        row.workspace_id.clone_from(&workspace_id);
+    }
+    let mut agent_ids = BTreeSet::new();
+    for row in &mut agents {
+        if row.workspace_id != source_id || !agent_ids.insert(row.id.clone()) {
+            return Err(work_history_error("foreign or duplicate recovered agent"));
+        }
+        row.workspace_id.clone_from(&workspace_id);
+    }
+    db.with_transaction(|| {
+        for seal in &seals { db.insert_memory_seal_for_recovery(seal)?; }
+        for row in &quarantines { db.insert_trust_quarantine_for_recovery(row)?; }
+        for row in &certificates { db.insert_certificate_for_recovery(row)?; }
+        for row in &agents { db.insert_agent_for_recovery(row)?; }
+        db.insert_audit(&crate::models::AuditId::now().to_string(), &crate::db::CreateAuditInput {
+            workspace_id: Some(workspace_id.clone()), actor: Some("ee backup restore".to_owned()),
+            action: "backup.trust_history_restored".to_owned(), target_type: Some("backup".to_owned()),
+            target_id: Some(backup_id.to_owned()), details: Some(json!({"sourceWorkspaceId": source_id,
+                "seals": seals.len(), "quarantines": quarantines.len(), "certificates": certificates.len(), "agents": agents.len(),
+                "reason": "Recovered historical seal, quarantine, certificate, and agent records. Recovery neither reveals memory content nor verifies certificate payloads or signatures."}).to_string()),
+        })?;
+        Ok(())
+    }).map_err(work_history_error)?;
+    Ok(BackupTrustHistoryCounts {
+        seals: u32::try_from(seals.len()).unwrap_or(u32::MAX),
+        quarantines: u32::try_from(quarantines.len()).unwrap_or(u32::MAX),
+        certificates: u32::try_from(certificates.len()).unwrap_or(u32::MAX),
+        agents: u32::try_from(agents.len()).unwrap_or(u32::MAX),
+    })
+}
+
 fn collect_reasoning_history_payloads(
     connection: &DbConnection,
     workspace_id: &str,
@@ -11501,8 +11886,8 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
-        // Curation and observations are covered; an agent registry row remains
-        // the negative control for honest partial coverage.
+        // Curation, observations, and agents are covered. Retain a real
+        // unsupported debt snapshot as the negative control for partial coverage.
         connection
             .insert_curation_candidate(
                 "curate_01234567890123456789012345",
@@ -11545,6 +11930,9 @@ mod tests {
         connection.execute_raw(&format!(
             "INSERT INTO agents (id, workspace_id, name, created_at, last_seen_at) VALUES ('agt_00000000000000000000000000', '{workspace_id}', 'backup-agent', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')"
         )).map_err(|e| e.to_string())?;
+        connection.execute_raw(&format!(
+            "INSERT INTO debt_snapshots (workspace_id, snapshot_day, generation, report_hash, report_json, item_count, total_score, created_at) VALUES ('{workspace_id}', '2026-09-01', 1, 'blake3:debt-fixture', '{{}}', 0, 0.0, '2026-09-01T00:00:00Z')"
+        )).map_err(|e| e.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
 
         let report = create_backup(&BackupCreateOptions {
@@ -11567,7 +11955,7 @@ mod tests {
         )?;
         ensure(
             !report.recovery_inventory.snapshot_coverage_complete,
-            "nonempty uncovered agent registry must make snapshot coverage incomplete",
+            "nonempty uncovered debt snapshot must make snapshot coverage incomplete",
         )?;
         let session = report
             .recovery_inventory
@@ -11616,7 +12004,7 @@ mod tests {
             report.degraded.iter().any(|entry| {
                 entry.code == "backup_source_rows_not_covered"
                     && entry.severity == "high"
-                    && entry.message.contains("agents=1")
+                    && entry.message.contains("debt_snapshots=1")
             }),
             format!(
                 "partial backup omitted high source-coverage degradation: {:?}",
@@ -20226,6 +20614,669 @@ mod tests {
         )
         .map_err(|e| e.to_string())?;
         Ok(id)
+    }
+
+    fn recovery_trust_history(workspace_id: &str, memory_id: &str) -> BackupTrustHistory {
+        let timestamp = "2026-09-01T00:00:00Z";
+        BackupTrustHistory {
+            schema: TRUST_HISTORY_SCHEMA.to_owned(),
+            backup_id: "backup-trust".to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            chunk_index: 0,
+            chunk_count: 1,
+            seals: vec![MemorySeal {
+                memory_id: memory_id.to_owned(),
+                content_commitment: crate::models::memory_seal_commitment(
+                    b"cobalt comet experiment",
+                ),
+                sealed_at: timestamp.to_owned(),
+                revealed_at: None,
+                reveal_verified: None,
+            }],
+            quarantines: vec![StoredTrustQuarantine {
+                workspace_id: workspace_id.to_owned(),
+                source_uri: "ee-test://backup".to_owned(),
+                first_event_at: timestamp.to_owned(),
+                last_event_at: "2026-09-02T00:00:00Z".to_owned(),
+                harmful_event_count: 7,
+                quarantined_until: Some("2099-01-01T00:00:00Z".to_owned()),
+                reason: "api_key=trust-secret-reason".to_owned(),
+                status: "active".to_owned(),
+                created_at: timestamp.to_owned(),
+                updated_at: "2026-09-03T00:00:00Z".to_owned(),
+            }],
+            certificates: vec![StoredCertificateRecord {
+                id: "cert_recovery".to_owned(),
+                workspace_id: workspace_id.to_owned(),
+                target_kind: "pack".to_owned(),
+                target_id: "pack_historical".to_owned(),
+                hash_algo: "blake3".to_owned(),
+                content_hash: hash_bytes(b"original payload"),
+                signature: Some("api_key=trust-secret-signature".to_owned()),
+                signature_algorithm: Some("local-content-attestation-v1".to_owned()),
+                signer: Some("api_key=trust-secret-signer".to_owned()),
+                signed_at: Some(timestamp.to_owned()),
+                verified_at: Some("2026-09-02T00:00:00Z".to_owned()),
+                status: "valid".to_owned(),
+                manifest_path: None,
+                payload_path: None,
+                metadata_json: r#"{"api_key":"trust-secret-metadata","assumptionsValid":false}"#
+                    .to_owned(),
+                created_at: timestamp.to_owned(),
+                updated_at: "2026-09-03T00:00:00Z".to_owned(),
+            }],
+            agents: vec![StoredAgent {
+                id: format!("agt_{:026}", 1),
+                workspace_id: workspace_id.to_owned(),
+                name: "api_key=trust-secret-agent".to_owned(),
+                model: Some("api_key=trust-secret-model".to_owned()),
+                created_at: timestamp.to_owned(),
+                last_seen_at: "2026-09-04T00:00:00Z".to_owned(),
+            }],
+            authentication: None,
+        }
+    }
+
+    #[test]
+    fn default_backup_restores_trust_history_and_live_consumers() -> TestResult {
+        use crate::core::search::{SearchDedupMode, SearchOptions, SearchSourceMode, run_search};
+        for redaction in [
+            RedactionLevel::None,
+            RedactionLevel::Standard,
+            RedactionLevel::Strict,
+            RedactionLevel::Paranoid,
+            RedactionLevel::Full,
+        ] {
+            let revealed = redaction == RedactionLevel::Strict;
+            let content = if revealed {
+                "cobalt comet experiment"
+            } else {
+                crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+            };
+            let (tempdir, workspace, database) =
+                fixture_with_memory_content(content).map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+            let mut original = recovery_trust_history(&workspace_id, &memory_id);
+            if revealed {
+                original.seals[0].revealed_at = Some("2026-09-02T00:00:00Z".to_owned());
+                original.seals[0].reveal_verified = Some(true);
+                original.quarantines[0].status = "released".to_owned();
+                original.certificates[0].status = "revoked".to_owned();
+            }
+            original.agents = (0..129)
+                .map(|n| {
+                    let mut a = original.agents[0].clone();
+                    a.id = format!("agt_{n:026}");
+                    a
+                })
+                .collect();
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            source
+                .with_transaction(|| {
+                    source.insert_memory_seal_for_recovery(&original.seals[0])?;
+                    source.insert_trust_quarantine_for_recovery(&original.quarantines[0])?;
+                    source.insert_certificate_for_recovery(&original.certificates[0])?;
+                    for agent in &original.agents {
+                        source.insert_agent_for_recovery(agent)?;
+                    }
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?;
+            source.close().map_err(|e| e.to_string())?;
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            for (table, count) in [
+                ("memory_seals", 1),
+                ("trust_quarantine", 1),
+                ("certificates", 1),
+                ("agents", 129),
+            ] {
+                let entry = backup
+                    .recovery_inventory
+                    .entries
+                    .iter()
+                    .find(|e| e.table == table)
+                    .ok_or("trust inventory absent")?;
+                ensure_equal(entry.row_count, count, "trust row count")?;
+                ensure(entry.snapshot_covered, "trust rows covered")?;
+            }
+            let assets = backup
+                .derived
+                .iter()
+                .filter(|a| a.kind == "trust_history")
+                .collect::<Vec<_>>();
+            ensure_equal(assets.len(), 2, "trust history crosses chunk boundary")?;
+            for asset in assets {
+                let bytes = fs::read(Path::new(&backup.backup_path).join(&asset.path))
+                    .map_err(|e| e.to_string())?;
+                let chunk: BackupTrustHistory =
+                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                ensure(chunk.authentication.is_some(), "trust chunks authenticated")?;
+                ensure_equal(
+                    String::from_utf8_lossy(&bytes).contains("trust-secret-"),
+                    redaction == RedactionLevel::None,
+                    "trust privacy",
+                )?;
+            }
+            let side = tempdir.path().join("restored-trust");
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: side.clone(),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                restored.restored_trust_history.clone(),
+                BackupTrustHistoryCounts {
+                    seals: 1,
+                    quarantines: 1,
+                    certificates: 1,
+                    agents: 129,
+                },
+                "trust restored counts",
+            )?;
+            ensure_equal(
+                restored.data_json()["counts"]["trustHistoryRestored"]["agents"].as_u64(),
+                Some(129),
+                "JSON trust count",
+            )?;
+            ensure(
+                restored.human_summary().contains("1/1/1/129"),
+                "human trust counts",
+            )?;
+            let db = DbConnection::open_file(&restored.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let target = db
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .next()
+                .ok_or("target workspace")?;
+            let memories = db
+                .list_memories(&target.id, None, true)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(memories.len(), 1, "one memory restored")?;
+            ensure_equal(
+                memories[0].content.as_str(),
+                content,
+                "sealed marker or revealed content preserved",
+            )?;
+            let mut expected_seal = original.seals[0].clone();
+            expected_seal.memory_id.clone_from(&memories[0].id);
+            ensure_equal(
+                db.get_memory_seal(&memories[0].id)
+                    .map_err(|e| e.to_string())?,
+                Some(expected_seal.clone()),
+                "all seal evidence preserved",
+            )?;
+            let attestation = crate::core::attest::build_memory_attestation_for_workspace(
+                &db,
+                &memories[0].id,
+                &target.id,
+            )
+            .map_err(|e| e.to_string())?
+            .ok_or("attestation")?
+            .seal
+            .ok_or("seal attestation")?;
+            ensure_equal(
+                attestation.content_commitment,
+                expected_seal.content_commitment.clone(),
+                "ordinary attestation reads restored commitment",
+            )?;
+            ensure_equal(
+                attestation.reveal_verified,
+                expected_seal.reveal_verified,
+                "ordinary attestation keeps reveal history",
+            )?;
+            let why = crate::core::why::explain_memory_with_connection(
+                &crate::core::why::WhyOptions {
+                    database_path: Path::new(&restored.restored_database_path),
+                    memory_id: &memories[0].id,
+                    confidence_threshold:
+                        crate::core::why::WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
+                },
+                &db,
+            );
+            ensure_equal(
+                why.seal.ok_or("why seal")?["sealed"].as_bool(),
+                Some(!revealed),
+                "ordinary why seal state",
+            )?;
+            let quarantines = db
+                .list_trust_quarantine(&target.id, false)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(quarantines.len(), 1, "quarantine restored")?;
+            ensure_equal(
+                quarantines[0].source_uri.as_str(),
+                memories[0]
+                    .provenance_uri
+                    .as_deref()
+                    .ok_or("memory source")?,
+                "source redaction agrees with memory provenance",
+            )?;
+            ensure_equal(
+                quarantines[0].harmful_event_count,
+                7,
+                "quarantine evidence count",
+            )?;
+            ensure_equal(
+                &quarantines[0].updated_at,
+                &original.quarantines[0].updated_at,
+                "quarantine chronology",
+            )?;
+            ensure_equal(
+                &quarantines[0].status,
+                &original.quarantines[0].status,
+                "quarantine release preserved",
+            )?;
+            let certificates = db
+                .list_certificates_for_recovery(&target.id)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(certificates.len(), 1, "certificate restored")?;
+            ensure_equal(
+                &certificates[0].verified_at,
+                &original.certificates[0].verified_at,
+                "no fresh verification time",
+            )?;
+            ensure_equal(
+                &certificates[0].content_hash,
+                &original.certificates[0].content_hash,
+                "original certificate hash",
+            )?;
+            ensure_equal(
+                &certificates[0].status,
+                &original.certificates[0].status,
+                "historical certificate status",
+            )?;
+            let agents = db
+                .list_agents_for_recovery(&target.id)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(agents.len(), 129, "all agents restored")?;
+            ensure_equal(
+                &agents[128].last_seen_at,
+                &original.agents[128].last_seen_at,
+                "original agent chronology",
+            )?;
+            if redaction == RedactionLevel::None {
+                let mut expected_q = original.quarantines.clone();
+                expected_q[0].workspace_id.clone_from(&target.id);
+                let mut expected_c = original.certificates.clone();
+                expected_c[0].workspace_id.clone_from(&target.id);
+                let mut expected_a = original.agents.clone();
+                for a in &mut expected_a {
+                    a.workspace_id.clone_from(&target.id);
+                }
+                ensure_equal(quarantines, expected_q, "exact quarantine recovery")?;
+                ensure_equal(
+                    certificates.clone(),
+                    expected_c,
+                    "exact certificate recovery",
+                )?;
+                ensure_equal(agents, expected_a, "exact agent recovery")?;
+            }
+            ensure(
+                db.list_audit_entries(Some(&target.id), None)
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|a| a.action == "backup.trust_history_restored"),
+                "trust restore audited",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+            let quarantine = crate::core::quarantine::QuarantineReport::gather_for_workspace(&side);
+            ensure_equal(
+                quarantine.summary.blocked_count,
+                u32::from(!revealed),
+                "ordinary quarantine diagnostics",
+            )?;
+            let lookup = crate::core::certificate::CertificateLookupOptions {
+                manifest_path: None,
+                database_path: Some(PathBuf::from(&restored.restored_database_path)),
+                workspace_id: Some(target.id.clone()),
+                certificate_id: certificates[0].id.clone(),
+            };
+            let shown = crate::core::certificate::show_certificate_with_options(&lookup);
+            ensure_equal(
+                shown.certificate.workspace_id,
+                target.id.clone(),
+                "ordinary certificate show finds history in restored workspace",
+            )?;
+            let verified = crate::core::certificate::verify_certificate_with_options(&lookup);
+            ensure(
+                !verified.hash_verified && !verified.attestation_ok,
+                "recovery does not turn absent payload into verified evidence",
+            )?;
+            let search = run_search(&SearchOptions {
+                workspace_path: side.clone(),
+                database_path: Some(PathBuf::from(&restored.restored_database_path)),
+                index_dir: None,
+                query: if revealed {
+                    "cobalt comet"
+                } else {
+                    "sealed memory content"
+                }
+                .to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Instant,
+                explain: true,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: SearchDedupMode::DocId,
+                source_mode: SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            })
+            .map_err(|e| e.to_string())?;
+            ensure_equal(
+                search.results.iter().any(|h| h.doc_id == memories[0].id),
+                revealed,
+                "search excludes sealed and finds revealed memory",
+            )?;
+            let packed =
+                crate::core::context::run_context_pack(&crate::core::context::ContextPackOptions {
+                    workspace_path: side,
+                    database_path: Some(PathBuf::from(&restored.restored_database_path)),
+                    index_dir: None,
+                    query: "sealed memory cobalt comet experiment".to_owned(),
+                    speed: crate::search::SpeedMode::Instant,
+                    source_mode: SearchSourceMode::LexicalOnly,
+                    strict_source_mode: true,
+                    filters: Default::default(),
+                    profile: None,
+                    max_tokens: Some(2000),
+                    candidate_pool: Some(10),
+                    max_results: None,
+                    include_tombstoned: false,
+                    as_of: None,
+                    include_expired: false,
+                    include_future: false,
+                    include_stale: false,
+                    relevance_floor: Some(0.0),
+                    redaction_level: RedactionLevel::Standard,
+                    memory_scope: crate::models::MemoryScope::Workspace,
+                    strict_scope: false,
+                    ppr_weight: Some(0.0),
+                    changed_symbols: Vec::new(),
+                    changed_symbols_from_git: false,
+                    pagination: None,
+                    coordination_snapshot_path: None,
+                    coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+                    task_lens: None,
+                    require_fresh_sentinels: false,
+                    output_options: Default::default(),
+                    persist_pack: true,
+                    baseline_write: None,
+                    no_lod: false,
+                })
+                .map_err(|e| format!("restored trust pack: {e:?}"))?;
+            ensure_equal(
+                packed.data.pack.items.is_empty(),
+                !revealed,
+                "ordinary pack excludes sealed and includes revealed content",
+            )?;
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                source
+                    .list_memory_seals_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                original.seals,
+                "source seals untouched",
+            )?;
+            ensure_equal(
+                source
+                    .list_trust_quarantine(&workspace_id, false)
+                    .map_err(|e| e.to_string())?,
+                original.quarantines,
+                "source quarantine untouched",
+            )?;
+            ensure_equal(
+                source
+                    .list_certificates_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                original.certificates,
+                "source certificates untouched",
+            )?;
+            ensure_equal(
+                source
+                    .list_agents_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                original.agents,
+                "source agents untouched",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn trust_history_rejects_corruption_and_rolls_back() -> TestResult {
+        for defect in [
+            "tampered",
+            "unsigned",
+            "schema",
+            "backup",
+            "missing_chunk",
+            "duplicate_chunk",
+            "oversize",
+            "orphan_seal",
+            "duplicate_seal",
+            "exposed_seal",
+            "invalid_seal",
+            "foreign_quarantine",
+            "duplicate_quarantine",
+            "foreign_certificate",
+            "duplicate_certificate",
+            "foreign_agent",
+            "duplicate_agent",
+            "late_agent_constraint",
+            "existing_agent",
+        ] {
+            let content = if defect == "exposed_seal" {
+                "content exposed before reveal"
+            } else {
+                crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+            };
+            let (tempdir, workspace, database) =
+                fixture_with_memory_content(content).map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+            let mut chunk = recovery_trust_history(&workspace_id, &memory_id);
+            let mut existing = chunk.agents[0].clone();
+            if defect != "existing_agent" {
+                existing.id = format!("agt_{:026}", 99);
+            }
+            existing.name = "OriginalAgent".to_owned();
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            db.insert_agent_for_recovery(&existing)
+                .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            match defect {
+                "schema" => chunk.schema = "ee.backup.trust_history.v999".to_owned(),
+                "backup" => chunk.backup_id = "other-backup".to_owned(),
+                "missing_chunk" => chunk.chunk_count = 2,
+                "oversize" => chunk.agents.resize(129, chunk.agents[0].clone()),
+                "orphan_seal" => chunk.seals[0].memory_id = "missing-memory".to_owned(),
+                "duplicate_seal" => chunk.seals.push(chunk.seals[0].clone()),
+                "invalid_seal" => chunk.seals[0].reveal_verified = Some(true),
+                "foreign_quarantine" => chunk.quarantines[0].workspace_id = "foreign".to_owned(),
+                "duplicate_quarantine" => chunk.quarantines.push(chunk.quarantines[0].clone()),
+                "foreign_certificate" => chunk.certificates[0].workspace_id = "foreign".to_owned(),
+                "duplicate_certificate" => chunk.certificates.push(chunk.certificates[0].clone()),
+                "foreign_agent" => chunk.agents[0].workspace_id = "foreign".to_owned(),
+                "duplicate_agent" => chunk.agents.push(chunk.agents[0].clone()),
+                "late_agent_constraint" => chunk.agents[0].last_seen_at.clear(),
+                _ => {}
+            }
+            let root =
+                StoreAuthRoot::create(workspace_keys_dir(&workspace)).map_err(|e| e.to_string())?;
+            let mut payloads = vec![derived_payload(
+                "derived/trust-history/00000000.json".to_owned(),
+                "trust_history",
+                "2026-09-01T00:00:00Z",
+                None,
+                serialized_payload_bytes(&chunk).map_err(|e| e.to_string())?,
+            )];
+            authenticate_trust_history_payloads(&mut payloads, Some(&root))
+                .map_err(|e| e.message())?;
+            let mut signed: BackupTrustHistory =
+                serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
+            if defect == "tampered" {
+                signed.quarantines[0].harmful_event_count += 1;
+            }
+            if defect == "unsigned" {
+                signed.authentication = None;
+            }
+            let path = tempdir.path().join("trust-history.json");
+            fs::write(
+                &path,
+                serialized_payload_bytes(&signed).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            let mut assets = vec![restored_cass_asset(&path, "trust_history")];
+            if defect == "duplicate_chunk" {
+                assets.push(restored_cass_asset(&path, "trust_history"));
+            }
+            let error = restore_trust_history(&database, &workspace, "backup-trust", &assets)
+                .err()
+                .ok_or_else(|| format!("accepted {defect}"))?;
+            let expected = match defect {
+                "tampered" => "authentication failed",
+                "unsigned" => "requires source-store authentication",
+                "schema" | "backup" | "missing_chunk" | "duplicate_chunk" | "oversize" => {
+                    "trust-history chunks"
+                }
+                "orphan_seal" | "duplicate_seal" | "exposed_seal" => "recovered memory seal",
+                "invalid_seal" => "invalid public seal evidence",
+                "foreign_quarantine" | "duplicate_quarantine" => "recovered trust quarantine",
+                "foreign_certificate" | "duplicate_certificate" => "recovered certificate",
+                "foreign_agent" | "duplicate_agent" => "recovered agent",
+                _ => "constraint",
+            };
+            ensure(
+                error.message().to_lowercase().contains(expected),
+                &format!("{defect}: wrong boundary: {}", error.message()),
+            )?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure(
+                db.list_memory_seals_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "failed restore leaves no seals",
+            )?;
+            ensure(
+                db.list_trust_quarantine(&workspace_id, false)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "earlier quarantines rolled back",
+            )?;
+            ensure(
+                db.list_certificates_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "earlier certificates rolled back",
+            )?;
+            ensure_equal(
+                db.list_agents_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                vec![existing],
+                "preexisting agent untouched",
+            )?;
+            ensure(
+                !db.list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|a| a.action == "backup.trust_history_restored"),
+                "no success audit on failure",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn trust_backup_rejects_source_collisions_and_requires_keys() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        let chunk = recovery_trust_history(&workspace_id, &memory_id);
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        for uri in [
+            "file:///private/first/source",
+            "file:///private/second/source",
+        ] {
+            let mut row = chunk.quarantines[0].clone();
+            row.source_uri = uri.to_owned();
+            db.insert_trust_quarantine_for_recovery(&row)
+                .map_err(|e| e.to_string())?;
+        }
+        db.close().map_err(|e| e.to_string())?;
+        let output = workspace.join("trust-backups");
+        let mut options = BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            output_dir: Some(output.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Full,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        };
+        let error = create_backup(&options)
+            .err()
+            .ok_or("merged source identities")?;
+        ensure(
+            error.message().contains("trust-quarantine sources collide"),
+            "source collision rejected",
+        )?;
+        let keys = workspace_keys_dir(&workspace);
+        ensure(
+            !output.exists() && !keys.exists(),
+            "collision leaves output and keys absent",
+        )?;
+        options.redaction_level = RedactionLevel::None;
+        options.dry_run = true;
+        let before = fs::read(&database).map_err(|e| e.to_string())?;
+        let preview = create_backup(&options).map_err(|e| e.message())?;
+        ensure(
+            preview.dry_run && !output.exists() && !keys.exists(),
+            "preview is read-only",
+        )?;
+        ensure_equal(
+            fs::read(&database).map_err(|e| e.to_string())?,
+            before,
+            "preview database unchanged",
+        )?;
+        fs::write(&keys, b"trust key obstruction").map_err(|e| e.to_string())?;
+        options.dry_run = false;
+        let error = create_backup(&options)
+            .err()
+            .ok_or("published unauthenticated trust history")?;
+        ensure(
+            error
+                .message()
+                .contains("require source-store authentication"),
+            "trust history requires keys",
+        )?;
+        ensure(!output.exists(), "no unsigned backup published")?;
+        ensure_equal(
+            fs::read(&keys).map_err(|e| e.to_string())?,
+            b"trust key obstruction".to_vec(),
+            "key obstruction unchanged",
+        )
     }
 
     #[test]

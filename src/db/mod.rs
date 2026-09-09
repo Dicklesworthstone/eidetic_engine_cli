@@ -10988,7 +10988,8 @@ pub struct CreateCertificateInput {
 }
 
 /// Stored certificate verification state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredCertificateRecord {
     pub id: String,
     pub workspace_id: String,
@@ -11023,7 +11024,8 @@ pub struct UpsertTrustQuarantineInput {
 }
 
 /// Stored source-level trust quarantine summary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredTrustQuarantine {
     pub workspace_id: String,
     pub source_uri: String,
@@ -11037,7 +11039,86 @@ pub struct StoredTrustQuarantine {
     pub updated_at: String,
 }
 
+/// Durable agent identity, distinct from a rediscoverable harness installation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoredAgent {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub model: Option<String>,
+    pub created_at: String,
+    pub last_seen_at: String,
+}
+
 impl DbConnection {
+    /// Read the complete durable registry in stable order for recovery.
+    pub fn list_agents_for_recovery(&self, workspace_id: &str) -> Result<Vec<StoredAgent>> {
+        self.query_for(DbOperation::Query,
+            "SELECT id, workspace_id, name, model, created_at, last_seen_at FROM agents WHERE workspace_id = ?1 ORDER BY id",
+            &[Value::Text(workspace_id.to_owned())])?.iter().map(|row| Ok(StoredAgent {
+                id: required_text(row, 0, DbOperation::Query, "id")?.to_owned(),
+                workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_owned(),
+                name: required_text(row, 2, DbOperation::Query, "name")?.to_owned(),
+                model: optional_text(row, 3)?.map(str::to_owned),
+                created_at: required_text(row, 4, DbOperation::Query, "created_at")?.to_owned(),
+                last_seen_at: required_text(row, 5, DbOperation::Query, "last_seen_at")?.to_owned(),
+            })).collect()
+    }
+
+    /// Restore without replacing existing identities or changing chronology.
+    pub fn insert_agent_for_recovery(&self, row: &StoredAgent) -> Result<()> {
+        self.execute_for(DbOperation::Execute,
+            "INSERT INTO agents (id, workspace_id, name, model, created_at, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            &[Value::Text(row.id.clone()), Value::Text(row.workspace_id.clone()),
+                Value::Text(row.name.clone()), row.model.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.created_at.clone()), Value::Text(row.last_seen_at.clone())])?;
+        Ok(())
+    }
+
+    /// Read all certificate history, including revoked and expired records.
+    pub fn list_certificates_for_recovery(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredCertificateRecord>> {
+        self.query_for(DbOperation::Query,
+            "SELECT id, workspace_id, target_kind, target_id, hash_algo, content_hash, signature, signature_algorithm, signer, signed_at, verified_at, status, manifest_path, payload_path, metadata_json, created_at, updated_at FROM certificates WHERE workspace_id = ?1 ORDER BY id",
+            &[Value::Text(workspace_id.to_owned())])?.iter().map(stored_certificate_from_row).collect()
+    }
+
+    /// Restore a historical claim; this does not verify its payload or signature.
+    pub fn insert_certificate_for_recovery(&self, row: &StoredCertificateRecord) -> Result<()> {
+        self.execute_for(DbOperation::Execute,
+            "INSERT INTO certificates (id, workspace_id, target_kind, target_id, hash_algo, content_hash, signature, signature_algorithm, signer, signed_at, verified_at, status, manifest_path, payload_path, metadata_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            &[Value::Text(row.id.clone()), Value::Text(row.workspace_id.clone()),
+                Value::Text(row.target_kind.clone()), Value::Text(row.target_id.clone()),
+                Value::Text(row.hash_algo.clone()), Value::Text(row.content_hash.clone()),
+                row.signature.clone().map_or(Value::Null, Value::Text),
+                row.signature_algorithm.clone().map_or(Value::Null, Value::Text),
+                row.signer.clone().map_or(Value::Null, Value::Text),
+                row.signed_at.clone().map_or(Value::Null, Value::Text),
+                row.verified_at.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.status.clone()),
+                row.manifest_path.clone().map_or(Value::Null, Value::Text),
+                row.payload_path.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.metadata_json.clone()), Value::Text(row.created_at.clone()),
+                Value::Text(row.updated_at.clone())])?;
+        Ok(())
+    }
+
+    /// Restore quarantine/release history without merging counters or timestamps.
+    pub fn insert_trust_quarantine_for_recovery(&self, row: &StoredTrustQuarantine) -> Result<()> {
+        self.execute_for(DbOperation::Execute,
+            "INSERT INTO trust_quarantine (workspace_id, source_uri, first_event_at, last_event_at, harmful_event_count, quarantined_until, reason, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            &[Value::Text(row.workspace_id.clone()), Value::Text(row.source_uri.clone()),
+                Value::Text(row.first_event_at.clone()), Value::Text(row.last_event_at.clone()),
+                Value::BigInt(i64::from(row.harmful_event_count)),
+                row.quarantined_until.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.reason.clone()), Value::Text(row.status.clone()),
+                Value::Text(row.created_at.clone()), Value::Text(row.updated_at.clone())])?;
+        Ok(())
+    }
+
     /// Insert or update a certificate row without mutating target artifacts.
     pub fn upsert_certificate(&self, id: &str, input: &CreateCertificateInput) -> Result<()> {
         let now = Utc::now().to_rfc3339();
@@ -11223,6 +11304,35 @@ impl DbConnection {
         )?;
         rows.iter().map(stored_trust_quarantine_from_row).collect()
     }
+}
+
+fn stored_memory_seal_from_row(row: &Row) -> Result<MemorySeal> {
+    let verified = optional_u64(row, 4, DbOperation::Query, "reveal_verified")?;
+    if verified.is_some_and(|value| value > 1) {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "memory_seals row contains invalid verification flag".to_owned(),
+        });
+    }
+    let seal = MemorySeal {
+        memory_id: required_text(row, 0, DbOperation::Query, "memory_id")?.to_owned(),
+        content_commitment: required_text(row, 1, DbOperation::Query, "content_commitment")?
+            .to_owned(),
+        sealed_at: required_text(row, 2, DbOperation::Query, "sealed_at")?.to_owned(),
+        revealed_at: optional_text(row, 3)?.map(str::to_owned),
+        reveal_verified: verified.map(|value| value == 1),
+    };
+    validate_attestation_seal_fields(
+        &seal.content_commitment,
+        &seal.sealed_at,
+        seal.revealed_at.as_deref(),
+        seal.reveal_verified,
+    )
+    .map_err(|_| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: "memory_seals row contains invalid public seal evidence".to_owned(),
+    })?;
+    Ok(seal)
 }
 
 fn stored_certificate_from_row(row: &Row) -> Result<StoredCertificateRecord> {
@@ -22439,35 +22549,34 @@ impl DbConnection {
             "SELECT memory_id, content_commitment, sealed_at, revealed_at, reveal_verified FROM memory_seals WHERE memory_id = ?1",
             &[Value::Text(memory_id.to_string())],
         )?;
-        rows.first()
-            .map(|row| {
-                let seal = MemorySeal {
-                    memory_id: required_text(row, 0, DbOperation::Query, "memory_id")?.to_string(),
-                    content_commitment: required_text(
-                        row,
-                        1,
-                        DbOperation::Query,
-                        "content_commitment",
-                    )?
-                    .to_string(),
-                    sealed_at: required_text(row, 2, DbOperation::Query, "sealed_at")?.to_string(),
-                    revealed_at: optional_text(row, 3)?.map(str::to_string),
-                    reveal_verified: optional_u64(row, 4, DbOperation::Query, "reveal_verified")?
-                        .map(|value| value == 1),
-                };
-                validate_attestation_seal_fields(
-                    &seal.content_commitment,
-                    &seal.sealed_at,
-                    seal.revealed_at.as_deref(),
-                    seal.reveal_verified,
-                )
-                .map_err(|_| DbError::MalformedRow {
-                    operation: DbOperation::Query,
-                    message: "memory_seals row contains invalid public seal evidence".to_owned(),
-                })?;
-                Ok(seal)
-            })
-            .transpose()
+        rows.first().map(stored_memory_seal_from_row).transpose()
+    }
+
+    /// Include sealed and revealed history, including tombstoned memories.
+    pub fn list_memory_seals_for_recovery(&self, workspace_id: &str) -> Result<Vec<MemorySeal>> {
+        self.query_for(DbOperation::Query,
+            "SELECT s.memory_id, s.content_commitment, s.sealed_at, s.revealed_at, s.reveal_verified FROM memory_seals s JOIN memories m ON m.id = s.memory_id WHERE m.workspace_id = ?1 ORDER BY s.memory_id",
+            &[Value::Text(workspace_id.to_owned())])?.iter().map(stored_memory_seal_from_row).collect()
+    }
+
+    /// Restore public seal evidence without revealing content or replaying a reveal.
+    pub fn insert_memory_seal_for_recovery(&self, seal: &MemorySeal) -> Result<()> {
+        validate_attestation_seal_fields(
+            &seal.content_commitment,
+            &seal.sealed_at,
+            seal.revealed_at.as_deref(),
+            seal.reveal_verified,
+        )
+        .map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "memory_seals recovery rejected invalid public seal evidence".to_owned(),
+        })?;
+        self.execute_for(DbOperation::Execute,
+            "INSERT INTO memory_seals (memory_id, content_commitment, sealed_at, revealed_at, reveal_verified) VALUES (?1, ?2, ?3, ?4, ?5)",
+            &[Value::Text(seal.memory_id.clone()), Value::Text(seal.content_commitment.clone()),
+                Value::Text(seal.sealed_at.clone()), seal.revealed_at.clone().map_or(Value::Null, Value::Text),
+                seal.reveal_verified.map_or(Value::Null, |v| Value::BigInt(i64::from(v)))])?;
+        Ok(())
     }
 
     /// Record a verified reveal on an existing, still-sealed row. Returns

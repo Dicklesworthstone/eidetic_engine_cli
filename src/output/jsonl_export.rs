@@ -464,7 +464,7 @@ pub fn redact_path(path: &str, level: RedactionLevel) -> String {
     }
 }
 
-fn redact_provenance_uri(uri: &str, level: RedactionLevel) -> String {
+pub(crate) fn redact_provenance_uri(uri: &str, level: RedactionLevel) -> String {
     let path_redacted = if level.redacts_paths() {
         redact_path(uri, level)
     } else {
@@ -514,7 +514,12 @@ pub fn redact_memory_record(
     ) {
         record.content_hash = Some(blake3_digest(&original_content));
     }
-    record.content = redact_content(&original_content, level);
+    // This public marker is structural state: search and packing use it to
+    // exclude content that has not been revealed. Redacting it would turn a
+    // sealed memory into an ordinary (redacted) search document on import.
+    if original_content != crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+        record.content = redact_content(&original_content, level);
+    }
     if let Some(reason) = record.tombstoned_reason.as_ref() {
         record.tombstoned_reason = Some(redact_content(reason, level));
     }
@@ -1543,6 +1548,49 @@ mod tests {
             REDACTED_ID_PLACEHOLDER.to_owned(),
             "full redacts all IDs",
         )
+    }
+
+    #[test]
+    fn sealed_memory_marker_survives_every_redaction_level() {
+        for level in [
+            RedactionLevel::None,
+            RedactionLevel::Minimal,
+            RedactionLevel::Standard,
+            RedactionLevel::Strict,
+            RedactionLevel::Paranoid,
+            RedactionLevel::Full,
+        ] {
+            let record = ExportMemoryRecord::builder()
+                .memory_id("mem-sealed")
+                .workspace_id("ws-sealed")
+                .level("procedural")
+                .kind("rule")
+                .content(crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT)
+                .provenance_uri("https://example.test/?api_key=seal-secret-canary")
+                .created_at("2026-09-01T00:00:00Z")
+                .build()
+                .expect("valid sealed record");
+            let mut ordinary = record.clone();
+            ordinary.content = "api_key=ordinary-secret-canary".to_owned();
+            let sealed = redact_memory_record(record, level);
+            assert_eq!(
+                sealed.content,
+                crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+            );
+            if level != RedactionLevel::None {
+                assert!(
+                    !sealed
+                        .provenance_uri
+                        .expect("provenance retained")
+                        .contains("seal-secret-canary")
+                );
+                assert!(
+                    !redact_memory_record(ordinary, level)
+                        .content
+                        .contains("ordinary-secret-canary")
+                );
+            }
+        }
     }
 
     #[test]

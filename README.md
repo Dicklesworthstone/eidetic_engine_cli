@@ -2348,6 +2348,15 @@ artifacts, creation returns `status: "partial"`, verification posture is
 `incomplete_source_coverage`, and `degraded[]` names the affected tables. Do
 not treat that artifact as a complete recovery point.
 
+Authenticated backup assets also preserve memory seals (including reveal
+history), source quarantine and release history, certificate records, and the
+durable agent registry. Restore retains their original chronology. Sealed
+content remains withheld and excluded from search and packs even under full
+redaction. Restoring a certificate preserves a historical claim; it does not
+verify its payload or signature. Referenced certificate files are not copied.
+Source quarantines retain their diagnostic and release state. Redaction that
+would merge distinct source identities is rejected rather than dropping history.
+
 By default, `ee backup create` also includes graph-cache derived assets: graph
 snapshots, graph algorithm witnesses, and graph algorithm result-cache rows.
 Use `--include-graph-cache=false` when those rebuildable assets are unnecessary,
