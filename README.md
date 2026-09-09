@@ -1505,6 +1505,15 @@ entries stay reviewed. Valid payload hashes are rebound to the restored workspac
 and redacted data with an audit linking the original hash. Invalid quarantine
 payloads remain untrusted. Recovery does not reapply feedback or rerun scoring.
 
+Recorder runs, recorder events, and verification history are included by default
+in authenticated backups. Restore preserves event-chain hashes (including broken
+chains), counts, timestamps, verification results, and blocker history. Recorder
+listing and verification queries work against the recovered database. Active
+recordings become abandoned with an audit entry because their processes are not
+restored. Verification hashes continue to identify the original evidence; any
+redaction of display text is audited. Machine labels retain secret scanning so
+bead filters and blocker classification still work under full redaction.
+
 ### Diagnostics, eval, ops
 
 | Command | Purpose |

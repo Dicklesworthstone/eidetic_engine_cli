@@ -35596,7 +35596,12 @@ impl DbConnection {
         self.insert_recorder_run_at(run_id, input, &now)
     }
 
-    fn insert_recorder_run_at(&self, run_id: &str, input: &CreateRecorderRunInput, created_at: &str) -> Result<()> {
+    fn insert_recorder_run_at(
+        &self,
+        run_id: &str,
+        input: &CreateRecorderRunInput,
+        created_at: &str,
+    ) -> Result<()> {
         let event_count = sqlite_u64_value("recorder run event_count", input.event_count)?;
         let redacted_count = sqlite_u64_value("recorder run redacted_count", input.redacted_count)?;
         let payload_bytes = sqlite_u64_value("recorder run payload_bytes", input.payload_bytes)?;
@@ -35666,7 +35671,12 @@ impl DbConnection {
         self.insert_recorder_event_at(event_id, input, &now)
     }
 
-    fn insert_recorder_event_at(&self, event_id: &str, input: &CreateRecorderEventInput, created_at: &str) -> Result<()> {
+    fn insert_recorder_event_at(
+        &self,
+        event_id: &str,
+        input: &CreateRecorderEventInput,
+        created_at: &str,
+    ) -> Result<()> {
         let sequence = recorder_event_sequence_value(input.sequence)?;
         let payload_bytes = sqlite_u64_value("recorder event payload_bytes", input.payload_bytes)?;
         let redacted_bytes =
@@ -35701,7 +35711,10 @@ impl DbConnection {
     }
 
     /// Snapshot workspace-local and unscoped recorder history in stable order.
-    pub(crate) fn list_recorder_runs_for_recovery(&self, workspace_id: &str) -> Result<Vec<StoredRecorderRun>> {
+    pub(crate) fn list_recorder_runs_for_recovery(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredRecorderRun>> {
         self.query_for(DbOperation::Query,
             "SELECT run_id, workspace_id, agent_id, session_id, source_type, source_id, status, started_at, ended_at, event_count, redacted_count, payload_bytes, chain_complete, created_at FROM recorder_runs WHERE workspace_id = ?1 OR workspace_id IS NULL ORDER BY run_id",
             &[Value::Text(workspace_id.to_owned())])?
@@ -35710,26 +35723,50 @@ impl DbConnection {
 
     /// Strict inserts preserve historical timestamps and reject collisions.
     pub(crate) fn insert_recorder_run_for_recovery(&self, row: &StoredRecorderRun) -> Result<()> {
-        self.insert_recorder_run_at(&row.run_id, &CreateRecorderRunInput {
-            workspace_id: row.workspace_id.clone(), agent_id: row.agent_id.clone(),
-            session_id: row.session_id.clone(), source_type: row.source_type.clone(),
-            source_id: row.source_id.clone(), status: row.status.clone(),
-            started_at: row.started_at.clone(), ended_at: row.ended_at.clone(),
-            event_count: row.event_count, redacted_count: row.redacted_count,
-            payload_bytes: row.payload_bytes, chain_complete: row.chain_complete,
-        }, &row.created_at)
+        self.insert_recorder_run_at(
+            &row.run_id,
+            &CreateRecorderRunInput {
+                workspace_id: row.workspace_id.clone(),
+                agent_id: row.agent_id.clone(),
+                session_id: row.session_id.clone(),
+                source_type: row.source_type.clone(),
+                source_id: row.source_id.clone(),
+                status: row.status.clone(),
+                started_at: row.started_at.clone(),
+                ended_at: row.ended_at.clone(),
+                event_count: row.event_count,
+                redacted_count: row.redacted_count,
+                payload_bytes: row.payload_bytes,
+                chain_complete: row.chain_complete,
+            },
+            &row.created_at,
+        )
     }
 
-    pub(crate) fn insert_recorder_event_for_recovery(&self, row: &StoredRecorderEvent) -> Result<()> {
-        self.insert_recorder_event_at(&row.event_id, &CreateRecorderEventInput {
-            run_id: row.run_id.clone(), sequence: row.sequence, event_type: row.event_type.clone(),
-            timestamp: row.timestamp.clone(), payload_hash: row.payload_hash.clone(),
-            payload_bytes: row.payload_bytes, redaction_status: row.redaction_status.clone(),
-            redacted_bytes: row.redacted_bytes, previous_event_hash: row.previous_event_hash.clone(),
-            event_hash: row.event_hash.clone(), chain_status: row.chain_status.clone(),
-            source_span_id: row.source_span_id.clone(), source_line_start: row.source_line_start,
-            source_line_end: row.source_line_end,
-        }, &row.created_at)
+    pub(crate) fn insert_recorder_event_for_recovery(
+        &self,
+        row: &StoredRecorderEvent,
+    ) -> Result<()> {
+        self.insert_recorder_event_at(
+            &row.event_id,
+            &CreateRecorderEventInput {
+                run_id: row.run_id.clone(),
+                sequence: row.sequence,
+                event_type: row.event_type.clone(),
+                timestamp: row.timestamp.clone(),
+                payload_hash: row.payload_hash.clone(),
+                payload_bytes: row.payload_bytes,
+                redaction_status: row.redaction_status.clone(),
+                redacted_bytes: row.redacted_bytes,
+                previous_event_hash: row.previous_event_hash.clone(),
+                event_hash: row.event_hash.clone(),
+                chain_status: row.chain_status.clone(),
+                source_span_id: row.source_span_id.clone(),
+                source_line_start: row.source_line_start,
+                source_line_end: row.source_line_end,
+            },
+            &row.created_at,
+        )
     }
 
     /// Get a recorder run by ID.
@@ -35918,7 +35955,10 @@ pub enum RchVerifyIngestOutcome {
 impl DbConnection {
     /// Recovery must not use the normal ingest path's INSERT OR IGNORE: a
     /// duplicate or invalid record must roll back the entire recovered family.
-    pub(crate) fn insert_rch_verify_run_for_recovery(&self, row: &StoredRchVerifyRun) -> Result<()> {
+    pub(crate) fn insert_rch_verify_run_for_recovery(
+        &self,
+        row: &StoredRchVerifyRun,
+    ) -> Result<()> {
         self.execute_for(DbOperation::Execute,
             "INSERT INTO rch_verify_runs (id, workspace_id, schema_id, command_text, command_hash, command_kind, bead_id, git_head, git_tree, source_state_hash, dirty_status_hash, verification_attribution, remote_required, worker_id, status, exit_code, degraded_codes_json, stdout_tail_hash, stderr_tail_hash, stdout_tail, stderr_tail, blocker_fingerprint, remediation_bead, retry_after, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             &[

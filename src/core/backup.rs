@@ -32,9 +32,8 @@ use crate::db::{
     StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness, StoredGraphSnapshot,
     StoredImportLedger, StoredJournalEntry, StoredLearningObservation, StoredMemory,
     StoredMemoryLink, StoredOutcomeEvidence, StoredPackHistory, StoredProceduralRule,
-    StoredProcedure, StoredProcedureEvent, StoredRecorderRun, StoredRecorderEvent,
-    StoredRchVerifyRun, StoredSearchIndexJob, StoredSession, StoredTaskEpisode,
-    audit_actions,
+    StoredProcedure, StoredProcedureEvent, StoredRchVerifyRun, StoredRecorderEvent,
+    StoredRecorderRun, StoredSearchIndexJob, StoredSession, StoredTaskEpisode, audit_actions,
 };
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
@@ -866,9 +865,12 @@ impl BackupRestoreReport {
             rule_tags = self.restored_rule_tag_count,
             feedback = self.restored_feedback_count,
             packs = self.restored_pack_history.records,
-        ) + &format!("  restored recorder runs/events/verification: {}/{}/{}\n",
-            self.restored_recorded_history.runs, self.restored_recorded_history.events,
-            self.restored_recorded_history.verification)
+        ) + &format!(
+            "  restored recorder runs/events/verification: {}/{}/{}\n",
+            self.restored_recorded_history.runs,
+            self.restored_recorded_history.events,
+            self.restored_recorded_history.verification
+        )
     }
 
     #[must_use]
@@ -1665,7 +1667,8 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
             "export_restore_required",
             "derived_artifact_restore",
         ),
-        "journal_entries" | "search_index_jobs" | "recorder_runs" | "recorder_events" | "rch_verify_runs" => BackupTablePolicy::new(
+        "journal_entries" | "search_index_jobs" | "recorder_runs" | "recorder_events"
+        | "rch_verify_runs" => BackupTablePolicy::new(
             "maintain",
             "export_restore_required",
             "derived_artifact_restore",
@@ -1882,9 +1885,18 @@ fn reconcile_derived_recovery_inventory(
     }
 
     for (table, captured_count) in [
-        ("recorder_runs", captured_derived_record_count(derived, "recorded_history", "runs")),
-        ("recorder_events", captured_derived_record_count(derived, "recorded_history", "events")),
-        ("rch_verify_runs", captured_derived_record_count(derived, "recorded_history", "verification")),
+        (
+            "recorder_runs",
+            captured_derived_record_count(derived, "recorded_history", "runs"),
+        ),
+        (
+            "recorder_events",
+            captured_derived_record_count(derived, "recorded_history", "events"),
+        ),
+        (
+            "rch_verify_runs",
+            captured_derived_record_count(derived, "recorded_history", "verification"),
+        ),
         (
             "learning_observations",
             captured_derived_record_count(derived, "learning_signals", "observations"),
@@ -2114,8 +2126,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &memory_ids,
                 &mut payloads,
             )?;
-            collect_recorded_history_payloads(&connection, workspace_id, &backup_id,
-                &created_at, options.redaction_level, &memory_ids, &mut payloads)?;
+            collect_recorded_history_payloads(
+                &connection,
+                workspace_id,
+                &backup_id,
+                &created_at,
+                options.redaction_level,
+                &memory_ids,
+                &mut payloads,
+            )?;
             collect_pack_history_payloads(
                 &connection,
                 workspace_id,
@@ -3285,7 +3304,10 @@ pub fn restore_backup_to_side_path(
         &restored_derived,
     )?;
     let restored_recorded_history = restore_recorded_history(
-        &restored_database_path, &workspace_path, &inspect.backup_id, &restored_derived,
+        &restored_database_path,
+        &workspace_path,
+        &inspect.backup_id,
+        &restored_derived,
     )?;
     let graph_cache_restored_count = if options.restore_graph_cache {
         restore_graph_cache_assets(&restored_database_path, &restored_derived)?
@@ -8041,20 +8063,36 @@ fn collect_learning_signal_payloads(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn collect_recorded_history_payloads(
-    connection: &DbConnection, workspace_id: &str, backup_id: &str, captured_at: &str,
-    redaction: RedactionLevel, memory_ids: &BTreeMap<String, String>,
+    connection: &DbConnection,
+    workspace_id: &str,
+    backup_id: &str,
+    captured_at: &str,
+    redaction: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
     payloads: &mut Vec<BackupDerivedPayload>,
 ) -> Result<(), DomainError> {
-    let mut runs = connection.list_recorder_runs_for_recovery(workspace_id).map_err(work_history_error)?;
-    let mut verification = connection.query_rch_verify_runs(workspace_id, None, None, captured_at).map_err(work_history_error)?;
-    if runs.is_empty() && verification.is_empty() { return Ok(()); }
-    let references = connection.learning_recovery_references(workspace_id).map_err(work_history_error)?;
-    let reference = |value: &str| redact_learning_reference(value, redaction, memory_ids, &references);
+    let mut runs = connection
+        .list_recorder_runs_for_recovery(workspace_id)
+        .map_err(work_history_error)?;
+    let mut verification = connection
+        .query_rch_verify_runs(workspace_id, None, None, captured_at)
+        .map_err(work_history_error)?;
+    if runs.is_empty() && verification.is_empty() {
+        return Ok(());
+    }
+    let references = connection
+        .learning_recovery_references(workspace_id)
+        .map_err(work_history_error)?;
+    let reference =
+        |value: &str| redact_learning_reference(value, redaction, memory_ids, &references);
     let mut events = Vec::new();
     for run in &mut runs {
-        events.extend(connection.list_recorder_events(&run.run_id).map_err(work_history_error)?);
+        events.extend(
+            connection
+                .list_recorder_events(&run.run_id)
+                .map_err(work_history_error)?,
+        );
         run.agent_id = reference(&run.agent_id);
         run.session_id = run.session_id.as_deref().map(reference);
         run.source_id = run.source_id.as_deref().map(reference);
@@ -8067,57 +8105,115 @@ fn collect_recorded_history_payloads(
     verification.sort_by(|a, b| a.id.cmp(&b.id));
     // Machine labels drive blocker classification and bead filters. Full
     // redaction removes free text, while labels retain standard secret scanning.
-    let label_level = if redaction == RedactionLevel::Full { RedactionLevel::Standard } else { redaction };
-    let label = |value: &str| redact_learning_reference(value, label_level, memory_ids, &references);
-    let verification = verification.into_iter().map(|mut row| {
-        let original = row.clone();
-        for text in [&mut row.command_text, &mut row.stdout_tail, &mut row.stderr_tail] {
-            *text = text.as_deref().map(|s| redact_content(s, redaction));
-        }
-        for text in [&mut row.bead_id, &mut row.worker_id, &mut row.blocker_fingerprint, &mut row.remediation_bead] {
-            *text = text.as_deref().map(label);
-        }
-        row.command_kind = label(&row.command_kind);
-        row.verification_attribution = label(&row.verification_attribution);
-        row.degraded_codes_json = row.degraded_codes_json.as_deref()
-            .map(|s| redact_work_history_json(s, label_level)).transpose()?;
-        Ok(BackupVerificationRun { redacted: original != row, row })
-    }).collect::<Result<Vec<_>, DomainError>>()?;
-    let count = runs.len().max(events.len()).max(verification.len()).div_ceil(WORK_HISTORY_CHUNK_ROWS);
+    let label_level = if redaction == RedactionLevel::Full {
+        RedactionLevel::Standard
+    } else {
+        redaction
+    };
+    let label =
+        |value: &str| redact_learning_reference(value, label_level, memory_ids, &references);
+    let verification = verification
+        .into_iter()
+        .map(|mut row| {
+            let original = row.clone();
+            for text in [
+                &mut row.command_text,
+                &mut row.stdout_tail,
+                &mut row.stderr_tail,
+            ] {
+                *text = text.as_deref().map(|s| redact_content(s, redaction));
+            }
+            for text in [
+                &mut row.bead_id,
+                &mut row.worker_id,
+                &mut row.blocker_fingerprint,
+                &mut row.remediation_bead,
+            ] {
+                *text = text.as_deref().map(label);
+            }
+            row.command_kind = label(&row.command_kind);
+            row.verification_attribution = label(&row.verification_attribution);
+            row.degraded_codes_json = row
+                .degraded_codes_json
+                .as_deref()
+                .map(|s| redact_work_history_json(s, label_level))
+                .transpose()?;
+            Ok(BackupVerificationRun {
+                redacted: original != row,
+                row,
+            })
+        })
+        .collect::<Result<Vec<_>, DomainError>>()?;
+    let count = runs
+        .len()
+        .max(events.len())
+        .max(verification.len())
+        .div_ceil(WORK_HISTORY_CHUNK_ROWS);
     for index in 0..count {
         let start = index * WORK_HISTORY_CHUNK_ROWS;
         let end = start + WORK_HISTORY_CHUNK_ROWS;
         let chunk = BackupRecordedHistory {
-            schema: RECORDED_HISTORY_SCHEMA.to_owned(), backup_id: backup_id.to_owned(),
-            workspace_id: workspace_id.to_owned(), chunk_index: index, chunk_count: count,
+            schema: RECORDED_HISTORY_SCHEMA.to_owned(),
+            backup_id: backup_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            chunk_index: index,
+            chunk_count: count,
             runs: runs[start.min(runs.len())..end.min(runs.len())].to_vec(),
             events: events[start.min(events.len())..end.min(events.len())].to_vec(),
-            verification: verification[start.min(verification.len())..end.min(verification.len())].to_vec(),
+            verification: verification[start.min(verification.len())..end.min(verification.len())]
+                .to_vec(),
             authentication: None,
         };
-        payloads.push(derived_payload(format!("derived/recorded-history/{index:08}.json"),
-            "recorded_history", captured_at, None, serialized_payload_bytes(&chunk).map_err(work_history_error)?));
+        payloads.push(derived_payload(
+            format!("derived/recorded-history/{index:08}.json"),
+            "recorded_history",
+            captured_at,
+            None,
+            serialized_payload_bytes(&chunk).map_err(work_history_error)?,
+        ));
     }
     Ok(())
 }
 
 fn recorded_history_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
-    ArtifactContext { artifact_family: RECORDED_HISTORY_SCHEMA, record_encoding_version: "json.v1",
-        source_key_namespace: STORE_KEY_NAMESPACE_V1, workspace_scope: workspace_id }
+    ArtifactContext {
+        artifact_family: RECORDED_HISTORY_SCHEMA,
+        record_encoding_version: "json.v1",
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: workspace_id,
+    }
 }
 
-fn authenticate_recorded_history_payloads(payloads: &mut [BackupDerivedPayload], root: Option<&StoreAuthRoot>) -> Result<(), DomainError> {
-    for payload in payloads.iter_mut().filter(|p| p.report.kind == "recorded_history") {
-        let mut chunk: BackupRecordedHistory = serde_json::from_slice(&payload.bytes).map_err(work_history_error)?;
+fn authenticate_recorded_history_payloads(
+    payloads: &mut [BackupDerivedPayload],
+    root: Option<&StoreAuthRoot>,
+) -> Result<(), DomainError> {
+    for payload in payloads
+        .iter_mut()
+        .filter(|p| p.report.kind == "recorded_history")
+    {
+        let mut chunk: BackupRecordedHistory =
+            serde_json::from_slice(&payload.bytes).map_err(work_history_error)?;
         chunk.authentication = None;
         if let Some(root) = root {
-            let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
-            chunk.authentication = Some(authenticate_artifact(root, MacDomain::NativeImportRecordsRoot,
-                &recorded_history_auth_context(&chunk.workspace_id), &hash, 1).map_err(work_history_error)?);
+            let hash =
+                canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+            chunk.authentication = Some(
+                authenticate_artifact(
+                    root,
+                    MacDomain::NativeImportRecordsRoot,
+                    &recorded_history_auth_context(&chunk.workspace_id),
+                    &hash,
+                    1,
+                )
+                .map_err(work_history_error)?,
+            );
         }
         payload.bytes = serialized_payload_bytes(&chunk).map_err(work_history_error)?;
         if payload.bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES {
-            return Err(work_history_error("recorded-history chunk exceeds the restore asset byte limit"));
+            return Err(work_history_error(
+                "recorded-history chunk exceeds the restore asset byte limit",
+            ));
         }
         payload.report.hash = Some(hash_bytes(&payload.bytes));
         payload.report.byte_size = Some(payload.bytes.len() as u64);
@@ -8125,58 +8221,114 @@ fn authenticate_recorded_history_payloads(payloads: &mut [BackupDerivedPayload],
     Ok(())
 }
 
-fn restore_recorded_history(database: &Path, source_workspace: &Path, backup_id: &str,
-    assets: &[BackupRestoredDerivedAssetReport]) -> Result<BackupRecordedHistoryCounts, DomainError> {
-    let mut chunks = assets.iter().filter(|a| a.kind == "recorded_history")
-        .map(|a| serde_json::from_value::<BackupRecordedHistory>(read_restored_derived_json(a)?).map_err(work_history_error))
+fn restore_recorded_history(
+    database: &Path,
+    source_workspace: &Path,
+    backup_id: &str,
+    assets: &[BackupRestoredDerivedAssetReport],
+) -> Result<BackupRecordedHistoryCounts, DomainError> {
+    let mut chunks = assets
+        .iter()
+        .filter(|a| a.kind == "recorded_history")
+        .map(|a| {
+            serde_json::from_value::<BackupRecordedHistory>(read_restored_derived_json(a)?)
+                .map_err(work_history_error)
+        })
         .collect::<Result<Vec<_>, _>>()?;
-    if chunks.is_empty() { return Ok(BackupRecordedHistoryCounts::default()); }
-    let root = StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
+    if chunks.is_empty() {
+        return Ok(BackupRecordedHistoryCounts::default());
+    }
+    let root =
+        StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
     chunks.sort_by_key(|c| c.chunk_index);
     let source_id = chunks[0].workspace_id.clone();
     let count = chunks.len();
     for (index, chunk) in chunks.iter_mut().enumerate() {
-        if chunk.schema != RECORDED_HISTORY_SCHEMA || chunk.backup_id != backup_id
-            || chunk.workspace_id != source_id || chunk.chunk_index != index || chunk.chunk_count != count
-            || chunk.runs.len() > WORK_HISTORY_CHUNK_ROWS || chunk.events.len() > WORK_HISTORY_CHUNK_ROWS
-            || chunk.verification.len() > WORK_HISTORY_CHUNK_ROWS {
-            return Err(work_history_error("unsupported, incomplete, duplicate, or substituted recorded-history chunks"));
+        if chunk.schema != RECORDED_HISTORY_SCHEMA
+            || chunk.backup_id != backup_id
+            || chunk.workspace_id != source_id
+            || chunk.chunk_index != index
+            || chunk.chunk_count != count
+            || chunk.runs.len() > WORK_HISTORY_CHUNK_ROWS
+            || chunk.events.len() > WORK_HISTORY_CHUNK_ROWS
+            || chunk.verification.len() > WORK_HISTORY_CHUNK_ROWS
+        {
+            return Err(work_history_error(
+                "unsupported, incomplete, duplicate, or substituted recorded-history chunks",
+            ));
         }
-        let header = chunk.authentication.take().ok_or_else(|| work_history_error("recorded history requires source-store authentication"))?;
+        let header = chunk.authentication.take().ok_or_else(|| {
+            work_history_error("recorded history requires source-store authentication")
+        })?;
         let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
-        if !verify_artifact(&root, MacDomain::NativeImportRecordsRoot, &recorded_history_auth_context(&source_id),
-            &header, &hash, 1).map_err(work_history_error)?.is_authenticated() {
+        if !verify_artifact(
+            &root,
+            MacDomain::NativeImportRecordsRoot,
+            &recorded_history_auth_context(&source_id),
+            &header,
+            &hash,
+            1,
+        )
+        .map_err(work_history_error)?
+        .is_authenticated()
+        {
             return Err(work_history_error("recorded-history authentication failed"));
         }
     }
     let db = DbConnection::open_file(database).map_err(work_history_error)?;
-    let workspace_id = remap_restored_workspace_id(&db.list_workspaces().map_err(work_history_error)?,
-        Some(&source_id), "recorded history")?.ok_or_else(|| work_history_error("missing recorded-history workspace"))?;
-    let mut runs = Vec::new(); let mut events = Vec::new(); let mut verification = Vec::new();
-    for chunk in chunks { runs.extend(chunk.runs); events.extend(chunk.events); verification.extend(chunk.verification); }
+    let workspace_id = remap_restored_workspace_id(
+        &db.list_workspaces().map_err(work_history_error)?,
+        Some(&source_id),
+        "recorded history",
+    )?
+    .ok_or_else(|| work_history_error("missing recorded-history workspace"))?;
+    let mut runs = Vec::new();
+    let mut events = Vec::new();
+    let mut verification = Vec::new();
+    for chunk in chunks {
+        runs.extend(chunk.runs);
+        events.extend(chunk.events);
+        verification.extend(chunk.verification);
+    }
     let mut ids = BTreeSet::new();
     let mut abandoned = Vec::new();
     for run in &mut runs {
-        if run.workspace_id.as_deref().is_some_and(|id| id != source_id) || !ids.insert(run.run_id.clone()) {
-            return Err(work_history_error("foreign or duplicate recovered recorder run"));
+        if run
+            .workspace_id
+            .as_deref()
+            .is_some_and(|id| id != source_id)
+            || !ids.insert(run.run_id.clone())
+        {
+            return Err(work_history_error(
+                "foreign or duplicate recovered recorder run",
+            ));
         }
-        if run.workspace_id.is_some() { run.workspace_id = Some(workspace_id.clone()); }
+        if run.workspace_id.is_some() {
+            run.workspace_id = Some(workspace_id.clone());
+        }
         if run.status == "active" {
             abandoned.push(run.run_id.clone());
             run.status = "abandoned".to_owned();
         }
     }
-    let mut event_ids = BTreeSet::new(); let mut sequences = BTreeSet::new();
+    let mut event_ids = BTreeSet::new();
+    let mut sequences = BTreeSet::new();
     for event in &events {
-        if !ids.contains(&event.run_id) || !event_ids.insert(event.event_id.clone())
-            || !sequences.insert((event.run_id.clone(), event.sequence)) {
-            return Err(work_history_error("orphan or duplicate recovered recorder event"));
+        if !ids.contains(&event.run_id)
+            || !event_ids.insert(event.event_id.clone())
+            || !sequences.insert((event.run_id.clone(), event.sequence))
+        {
+            return Err(work_history_error(
+                "orphan or duplicate recovered recorder event",
+            ));
         }
     }
     let mut ids = BTreeSet::new();
     for entry in &mut verification {
         if entry.row.workspace_id != source_id || !ids.insert(entry.row.id.clone()) {
-            return Err(work_history_error("foreign or duplicate recovered verification run"));
+            return Err(work_history_error(
+                "foreign or duplicate recovered verification run",
+            ));
         }
         entry.row.workspace_id.clone_from(&workspace_id);
     }
@@ -8195,8 +8347,11 @@ fn restore_recorded_history(database: &Path, source_workspace: &Path, backup_id:
         })?;
         Ok(())
     }).map_err(work_history_error)?;
-    Ok(BackupRecordedHistoryCounts { runs: u32::try_from(runs.len()).unwrap_or(u32::MAX),
-        events: u32::try_from(events.len()).unwrap_or(u32::MAX), verification: u32::try_from(verification.len()).unwrap_or(u32::MAX) })
+    Ok(BackupRecordedHistoryCounts {
+        runs: u32::try_from(runs.len()).unwrap_or(u32::MAX),
+        events: u32::try_from(events.len()).unwrap_or(u32::MAX),
+        verification: u32::try_from(verification.len()).unwrap_or(u32::MAX),
+    })
 }
 
 fn learning_signal_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
@@ -16422,6 +16577,593 @@ mod tests {
             )?;
             db.close().map_err(|e| e.to_string())?;
         }
+        Ok(())
+    }
+
+    fn recovery_recording(workspace_id: &str, n: usize) -> StoredRecorderRun {
+        StoredRecorderRun {
+            run_id: format!("run_recovery_{n:04}"),
+            workspace_id: Some(workspace_id.to_owned()),
+            agent_id: "api_key=recorder-agent-canary".to_owned(),
+            session_id: None,
+            source_type: "live".to_owned(),
+            source_id: Some("api_key=recorder-source-canary".to_owned()),
+            status: "completed".to_owned(),
+            started_at: "2026-09-01T00:00:00Z".to_owned(),
+            ended_at: Some("2026-09-01T00:01:00Z".to_owned()),
+            event_count: 129,
+            redacted_count: 0,
+            payload_bytes: 1290,
+            chain_complete: false,
+            created_at: "2026-09-01T00:00:01Z".to_owned(),
+        }
+    }
+
+    fn recovery_recorded_event(run: &StoredRecorderRun, n: usize) -> StoredRecorderEvent {
+        StoredRecorderEvent {
+            event_id: format!("evt_recovery_{n:04}"),
+            run_id: run.run_id.clone(),
+            sequence: n as u64 + 1,
+            event_type: "tool_result".to_owned(),
+            timestamp: "2026-09-01T00:00:30Z".to_owned(),
+            payload_hash: Some(format!(
+                "blake3:{}",
+                blake3::hash(format!("payload-{n}").as_bytes()).to_hex()
+            )),
+            payload_bytes: 10,
+            redaction_status: "clean".to_owned(),
+            redacted_bytes: 0,
+            previous_event_hash: (n > 0).then(|| {
+                format!(
+                    "blake3:{}",
+                    blake3::hash(format!("event-{}", n - 1).as_bytes()).to_hex()
+                )
+            }),
+            event_hash: format!(
+                "blake3:{}",
+                blake3::hash(format!("event-{n}").as_bytes()).to_hex()
+            ),
+            chain_status: if n == 0 {
+                "root"
+            } else if n == 128 {
+                "broken"
+            } else {
+                "linked"
+            }
+            .to_owned(),
+            source_span_id: None,
+            source_line_start: Some(n as u32),
+            source_line_end: Some(n as u32),
+            created_at: "2026-09-01T00:00:31Z".to_owned(),
+        }
+    }
+
+    fn recovery_verification(workspace_id: &str, n: usize) -> StoredRchVerifyRun {
+        let command = format!("cargo test case_{n} api_key=verification-command-canary");
+        let command_hash = blake3::hash(command.as_bytes()).to_hex().to_string();
+        let source_hash = "a".repeat(64);
+        let status = if n == 0 {
+            "blocked"
+        } else if n == 1 {
+            "failed"
+        } else {
+            "passed"
+        };
+        let blocker = (n == 0).then(|| "worker-unavailable".to_owned());
+        StoredRchVerifyRun {
+            id: crate::db::rch_verify_run_id(
+                &command_hash,
+                &source_hash,
+                status,
+                blocker.as_deref(),
+            ),
+            workspace_id: workspace_id.to_owned(),
+            schema_id: "ee.rch.verify.v1".to_owned(),
+            command_text: Some(command),
+            command_hash,
+            command_kind: "test".to_owned(),
+            bead_id: Some("bd-recorded".to_owned()),
+            git_head: Some("b".repeat(40)),
+            git_tree: Some("c".repeat(40)),
+            source_state_hash: source_hash,
+            dirty_status_hash: None,
+            verification_attribution: "committed_tree".to_owned(),
+            remote_required: true,
+            worker_id: Some("hz2".to_owned()),
+            status: status.to_owned(),
+            exit_code: Some(if n < 2 { 1 } else { 0 }),
+            degraded_codes_json: Some(
+                if n == 0 {
+                    r#"["rch_verify_local_fallback_refused"]"#
+                } else {
+                    "[]"
+                }
+                .to_owned(),
+            ),
+            stdout_tail_hash: Some("d".repeat(64)),
+            stderr_tail_hash: Some("e".repeat(64)),
+            stdout_tail: Some("api_key=verification-stdout-canary".to_owned()),
+            stderr_tail: Some("api_key=verification-stderr-canary".to_owned()),
+            blocker_fingerprint: blocker,
+            remediation_bead: Some("bd-repair".to_owned()),
+            retry_after: (n == 0).then(|| "2099-01-01T00:00:00Z".to_owned()),
+            created_at: "2026-09-01T00:01:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn default_backup_restores_recorded_history_and_live_consumers() -> TestResult {
+        for redaction in [
+            RedactionLevel::None,
+            RedactionLevel::Standard,
+            RedactionLevel::Full,
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let run = recovery_recording(&workspace_id, 0);
+            let mut active = recovery_recording(&workspace_id, 1);
+            active.workspace_id = None;
+            active.status = "active".to_owned();
+            active.ended_at = None;
+            active.event_count = 0;
+            active.payload_bytes = 0;
+            active.chain_complete = true;
+            let events: Vec<_> = (0..129).map(|n| recovery_recorded_event(&run, n)).collect();
+            let mut verification: Vec<_> = (0..129)
+                .map(|n| recovery_verification(&workspace_id, n))
+                .collect();
+            verification.sort_by(|a, b| a.id.cmp(&b.id));
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            db.with_transaction(|| {
+                db.insert_recorder_run_for_recovery(&run)?;
+                db.insert_recorder_run_for_recovery(&active)?;
+                for row in &events {
+                    db.insert_recorder_event_for_recovery(row)?;
+                }
+                for row in &verification {
+                    db.insert_rch_verify_run_for_recovery(row)?;
+                }
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            for (table, count) in [
+                ("recorder_runs", 2),
+                ("recorder_events", 129),
+                ("rch_verify_runs", 129),
+            ] {
+                let entry = backup
+                    .recovery_inventory
+                    .entries
+                    .iter()
+                    .find(|e| e.table == table)
+                    .ok_or("missing recorded inventory")?;
+                ensure_equal(entry.row_count, count, "all recorded rows counted")?;
+                ensure(entry.snapshot_covered, "all recorded rows captured")?;
+            }
+            let assets: Vec<_> = backup
+                .derived
+                .iter()
+                .filter(|a| a.kind == "recorded_history")
+                .collect();
+            ensure_equal(
+                assets.len(),
+                2,
+                "events and verification cross chunk boundary",
+            )?;
+            let mut expected_runs = Vec::new();
+            let mut expected_verification = Vec::new();
+            for asset in assets {
+                let bytes = fs::read(Path::new(&backup.backup_path).join(&asset.path))
+                    .map_err(|e| e.to_string())?;
+                let chunk: BackupRecordedHistory =
+                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                ensure(
+                    chunk.authentication.is_some(),
+                    "recorded history authenticated",
+                )?;
+                for entry in &chunk.verification {
+                    let original = verification
+                        .iter()
+                        .find(|row| row.id == entry.row.id)
+                        .ok_or("unknown verification identity")?;
+                    ensure_equal(
+                        (
+                            &entry.row.command_hash,
+                            &entry.row.source_state_hash,
+                            &entry.row.stdout_tail_hash,
+                            &entry.row.stderr_tail_hash,
+                        ),
+                        (
+                            &original.command_hash,
+                            &original.source_state_hash,
+                            &original.stdout_tail_hash,
+                            &original.stderr_tail_hash,
+                        ),
+                        "original verification commitments retained",
+                    )?;
+                    if redaction == RedactionLevel::None {
+                        ensure_equal(&entry.row, original, "unredacted verification lossless")?;
+                        ensure(!entry.redacted, "unredacted row is not labeled redacted")?;
+                    } else {
+                        ensure(
+                            entry.redacted,
+                            "changed verification display is labeled redacted",
+                        )?;
+                    }
+                }
+                if redaction != RedactionLevel::None {
+                    ensure(
+                        !String::from_utf8_lossy(&bytes).contains("canary"),
+                        "recorded secrets absent",
+                    )?;
+                }
+                expected_runs.extend(chunk.runs);
+                expected_verification.extend(chunk.verification);
+            }
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: fs::canonicalize(tempdir.path())
+                    .map_err(|e| e.to_string())?
+                    .join("restored-recordings"),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                &restored.restored_recorded_history,
+                &BackupRecordedHistoryCounts {
+                    runs: 2,
+                    events: 129,
+                    verification: 129,
+                },
+                "restored recorded counts",
+            )?;
+            ensure_equal(
+                restored.data_json()["counts"]["recordedHistoryRestored"]["events"].as_u64(),
+                Some(129),
+                "JSON recorded counts",
+            )?;
+            ensure(
+                restored
+                    .human_summary()
+                    .contains("recorder runs/events/verification: 2/129/129"),
+                "human recorded counts",
+            )?;
+            let db = DbConnection::open_file(Path::new(&restored.restored_database_path))
+                .map_err(|e| e.to_string())?;
+            let restored_id = db
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .first()
+                .ok_or("missing restored workspace")?
+                .id
+                .clone();
+            for expected in &mut expected_runs {
+                if expected.workspace_id.is_some() {
+                    expected.workspace_id = Some(restored_id.clone());
+                }
+                if expected.status == "active" {
+                    expected.status = "abandoned".to_owned();
+                }
+            }
+            ensure_equal(
+                db.list_recorder_runs_for_recovery(&restored_id)
+                    .map_err(|e| e.to_string())?,
+                expected_runs,
+                "exact run metadata and interrupted status",
+            )?;
+            ensure_equal(
+                db.list_recorder_events(&run.run_id)
+                    .map_err(|e| e.to_string())?,
+                events.clone(),
+                "exact event hashes, broken chain and timestamps",
+            )?;
+            let listed = crate::core::recorder::list_recorder_events(
+                &db,
+                &crate::core::recorder::RecorderEventsListOptions {
+                    run_id: Some(run.run_id.clone()),
+                    since: None,
+                    source: Some("live".to_owned()),
+                    limit: 200,
+                },
+            )
+            .map_err(|e| e.message())?;
+            ensure_equal(listed.len(), 129, "normal recorder listing usable")?;
+            ensure_equal(
+                listed
+                    .last()
+                    .ok_or("missing last event")?
+                    .chain_status
+                    .as_str(),
+                "broken",
+                "normal listing retains broken chain",
+            )?;
+            let mut actual = db
+                .query_rch_verify_runs(&restored_id, None, None, "2026-09-02T00:00:00Z")
+                .map_err(|e| e.to_string())?;
+            actual.sort_by(|a, b| a.id.cmp(&b.id));
+            for entry in &mut expected_verification {
+                entry.row.workspace_id.clone_from(&restored_id);
+            }
+            ensure_equal(
+                actual,
+                expected_verification
+                    .iter()
+                    .map(|e| e.row.clone())
+                    .collect::<Vec<_>>(),
+                "exact recovered verification rows",
+            )?;
+            let listed = crate::core::verify_ledger::list_rch_verify_runs(
+                &db,
+                &restored_id,
+                Some("bd-recorded"),
+                None,
+                "2026-09-02T00:00:00Z",
+            )
+            .map_err(|e| e.to_string())?;
+            ensure_equal(
+                listed.run_count,
+                129,
+                "normal bead filter usable after redaction",
+            )?;
+            let status = crate::core::verify_ledger::summarize_rch_verify_ledger_status(
+                &db,
+                &restored_id,
+                "2026-09-02T00:00:00Z",
+            )
+            .map_err(|e| e.to_string())?;
+            ensure_equal(
+                status.active_blocker_count,
+                1,
+                "normal blocker consumer retains active blocker",
+            )?;
+            ensure(
+                status.local_fallback_refused,
+                "normal blocker classification survives all redaction modes",
+            )?;
+            let audit = db
+                .list_audit_entries(Some(&restored_id), None)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|a| a.action == "backup.recorded_history_restored")
+                .ok_or("missing recorded recovery audit")?;
+            ensure(
+                audit
+                    .details
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains(&active.run_id),
+                "interrupted recording audited",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                source
+                    .get_recorder_run(&active.run_id)
+                    .map_err(|e| e.to_string())?,
+                Some(active),
+                "source active run untouched",
+            )?;
+            ensure_equal(
+                source
+                    .list_recorder_events(&run.run_id)
+                    .map_err(|e| e.to_string())?,
+                events,
+                "source events untouched",
+            )?;
+            let mut source_rows = source
+                .query_rch_verify_runs(&workspace_id, None, None, "2026-09-02T00:00:00Z")
+                .map_err(|e| e.to_string())?;
+            source_rows.sort_by(|a, b| a.id.cmp(&b.id));
+            ensure_equal(source_rows, verification, "source verification untouched")?;
+            source.close().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_history_rejects_tampering_and_rolls_back() -> TestResult {
+        for defect in [
+            "tampered",
+            "unsigned",
+            "wrong_backup",
+            "missing_chunk",
+            "duplicate_chunk",
+            "oversized_chunk",
+            "foreign_run",
+            "duplicate_run",
+            "orphan_event",
+            "duplicate_event",
+            "duplicate_sequence",
+            "foreign_verification",
+            "duplicate_verification",
+            "late_constraint",
+            "existing_collision",
+            "duplicate_fingerprint",
+            "sequence_overflow",
+            "wrong_schema",
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let run = recovery_recording(&workspace_id, 0);
+            let existing = recovery_verification(&workspace_id, 999);
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            db.insert_rch_verify_run_for_recovery(&existing)
+                .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            let mut chunk = BackupRecordedHistory {
+                schema: RECORDED_HISTORY_SCHEMA.to_owned(),
+                backup_id: "backup-original".to_owned(),
+                workspace_id: workspace_id.clone(),
+                chunk_index: 0,
+                chunk_count: 1,
+                events: vec![recovery_recorded_event(&run, 0)],
+                runs: vec![run],
+                verification: vec![BackupVerificationRun {
+                    row: recovery_verification(&workspace_id, 0),
+                    redacted: false,
+                }],
+                authentication: None,
+            };
+            match defect {
+                "wrong_schema" => chunk.schema = "ee.backup.recorded_history.unknown".to_owned(),
+                "sequence_overflow" => chunk.events[0].sequence = u64::MAX,
+                "duplicate_fingerprint" => {
+                    let mut entry = chunk.verification[0].clone();
+                    entry.row.id = format!("rchverify_{}", "f".repeat(23));
+                    chunk.verification.push(entry);
+                }
+                "missing_chunk" => chunk.chunk_count = 2,
+                "oversized_chunk" => chunk.events = vec![chunk.events[0].clone(); 129],
+                "foreign_run" => chunk.runs[0].workspace_id = Some("foreign".to_owned()),
+                "duplicate_run" => chunk.runs.push(chunk.runs[0].clone()),
+                "orphan_event" => chunk.events[0].run_id = "run_missing".to_owned(),
+                "duplicate_event" => chunk.events.push(chunk.events[0].clone()),
+                "duplicate_sequence" => {
+                    let mut row = chunk.events[0].clone();
+                    row.event_id = "evt_another".to_owned();
+                    chunk.events.push(row);
+                }
+                "foreign_verification" => {
+                    chunk.verification[0].row.workspace_id = "foreign".to_owned()
+                }
+                "duplicate_verification" => chunk.verification.push(chunk.verification[0].clone()),
+                "late_constraint" => chunk.verification[0].row.status = "invalid".to_owned(),
+                "existing_collision" => chunk.verification.push(BackupVerificationRun {
+                    row: existing.clone(),
+                    redacted: false,
+                }),
+                _ => {}
+            }
+            let root = StoreAuthRoot::open_or_create(workspace_keys_dir(&workspace))
+                .map_err(|e| e.to_string())?;
+            let mut payloads = vec![derived_payload(
+                "derived/recorded-history/00000000.json".to_owned(),
+                "recorded_history",
+                "2026-09-01T00:00:00Z",
+                None,
+                serialized_payload_bytes(&chunk).map_err(|e| e.to_string())?,
+            )];
+            authenticate_recorded_history_payloads(&mut payloads, Some(&root))
+                .map_err(|e| e.message())?;
+            let mut signed: BackupRecordedHistory =
+                serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
+            if defect == "tampered" {
+                signed.runs[0].agent_id.push_str("-tampered");
+            }
+            if defect == "unsigned" {
+                signed.authentication = None;
+            }
+            let path = tempdir.path().join("recorded-history.json");
+            fs::write(
+                &path,
+                serialized_payload_bytes(&signed).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            let mut assets = vec![restored_cass_asset(&path, "recorded_history")];
+            if defect == "duplicate_chunk" {
+                assets.push(assets[0].clone());
+            }
+            let backup_id = if defect == "wrong_backup" {
+                "backup-wrong"
+            } else {
+                "backup-original"
+            };
+            ensure(
+                restore_recorded_history(&database, &workspace, backup_id, &assets).is_err(),
+                &format!("reject {defect}"),
+            )?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure(
+                db.list_recorder_runs_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "failure leaves no partial runs",
+            )?;
+            ensure(
+                db.list_recorder_events_filtered(None, None, None, 0)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "failure leaves no partial events",
+            )?;
+            ensure_equal(
+                db.query_rch_verify_runs(&workspace_id, None, None, "2026-09-02T00:00:00Z")
+                    .map_err(|e| e.to_string())?,
+                vec![existing],
+                "failure preserves existing verification",
+            )?;
+            ensure(
+                !db.list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|a| a.action == "backup.recorded_history_restored"),
+                "failure leaves no recovery audit",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_history_requires_keys_before_publication() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        db.insert_recorder_run_for_recovery(&recovery_recording(&workspace_id, 0))
+            .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        let output = fs::canonicalize(tempdir.path())
+            .map_err(|e| e.to_string())?
+            .join("unsigned-recorded-history");
+        let mut options = BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(output.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: true,
+        };
+        ensure(
+            create_backup(&options).map_err(|e| e.message())?.dry_run,
+            "keyless preview works",
+        )?;
+        let keys = workspace_keys_dir(&workspace);
+        ensure(
+            !keys.exists() && !output.exists(),
+            "preview creates no keys or output",
+        )?;
+        fs::write(&keys, b"obstructed keys").map_err(|e| e.to_string())?;
+        options.dry_run = false;
+        let error = create_backup(&options)
+            .err()
+            .ok_or("published unsigned recorded history")?;
+        ensure(
+            error
+                .message()
+                .contains("require source-store authentication"),
+            "recorded history requires keys",
+        )?;
+        ensure(!output.exists(), "no unauthenticated backup publication")?;
+        ensure_equal(
+            fs::read(&keys).map_err(|e| e.to_string())?,
+            b"obstructed keys".to_vec(),
+            "obstruction untouched",
+        )?;
         Ok(())
     }
 
