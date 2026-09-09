@@ -19014,25 +19014,25 @@ impl DbConnection {
     /// All queries are scoped to the same caller-owned read snapshot.
     pub fn learning_recovery_references(&self, workspace_id: &str) -> Result<BTreeSet<String>> {
         let mut ids = BTreeSet::new();
-        for table in [
-            "procedural_rules",
-            "procedures",
-            "sessions",
-            "evidence_spans",
-            "pack_records",
-            "curation_candidates",
-            "feedback_events",
-            "task_episodes",
-            "journal_entries",
-            "import_ledger",
+        for (table, key) in [
+            ("procedural_rules", "id"),
+            ("procedures", "id"),
+            ("sessions", "id"),
+            ("evidence_spans", "id"),
+            ("pack_records", "id"),
+            ("curation_candidates", "id"),
+            ("feedback_events", "id"),
+            ("task_episodes", "id"),
+            ("journal_entries", "entry_id"),
+            ("import_ledger", "id"),
         ] {
             let rows = self.query_for(
                 DbOperation::Query,
-                &format!("SELECT id FROM {table} WHERE workspace_id = ?1"),
+                &format!("SELECT {key} FROM {table} WHERE workspace_id = ?1"),
                 &[Value::Text(workspace_id.to_owned())],
             )?;
             for row in &rows {
-                ids.insert(required_text(row, 0, DbOperation::Query, "id")?.to_owned());
+                ids.insert(required_text(row, 0, DbOperation::Query, key)?.to_owned());
             }
         }
         Ok(ids)
