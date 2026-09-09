@@ -1042,6 +1042,33 @@ fn contains_secret_like_marker(value: &str) -> bool {
         return true;
     }
 
+    // Recognize credential assignments in shell, JSON, and configuration text,
+    // including whitespace and quoted keys. A bare mention of a key is safe.
+    for (offset, separator) in lowered.char_indices() {
+        if !matches!(separator, '=' | ':') {
+            continue;
+        }
+        let before = lowered[..offset]
+            .trim_end_matches(|ch: char| ch.is_ascii_whitespace() || matches!(ch, '\'' | '"'));
+        let key = before
+            .rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')))
+            .next()
+            .unwrap_or_default();
+        if [
+            "api_key", "api-key", "apikey", "password", "token", "secret",
+        ]
+        .iter()
+        .any(|name| {
+            key == *name
+                || key
+                    .strip_suffix(*name)
+                    .is_some_and(|prefix| prefix.ends_with('_') || prefix.ends_with('-'))
+        }) && !lowered[offset + 1..].trim().is_empty()
+        {
+            return true;
+        }
+    }
+
     value.split(secret_token_boundary).any(|token| {
         is_openai_key_like_token(token)
             || is_github_token_like_token(token)
@@ -2243,6 +2270,23 @@ mod tests {
             key_like.map_err(|error| error.kind),
             Err(RationaleTraceValidationErrorKind::SecretLikeContent)
         );
+
+        for assignment in [
+            "api_key=unsafe-secret-value",
+            "API_KEY = unsafe-secret-value",
+            "OPENAI_API_KEY = unsafe-secret-value",
+            "api-key: unsafe-secret-value",
+            r#"{"apikey": "unsafe-secret-value"}"#,
+            r#"{"password" : "unsafe-secret-value"}"#,
+            "token \n = unsafe-secret-value",
+            "secret : unsafe-secret-value",
+        ] {
+            assert_eq!(
+                validate_rationale_summary(assignment).map_err(|error| error.kind),
+                Err(RationaleTraceValidationErrorKind::SecretLikeContent),
+                "credential assignment was accepted: {assignment}",
+            );
+        }
     }
 
     #[test]
@@ -2252,6 +2296,8 @@ mod tests {
         )
         .map_err(|error| error.to_string())?;
         validate_rationale_summary("The literal sk- prefix was mentioned without a key body.")
+            .map_err(|error| error.to_string())?;
+        validate_rationale_summary("Rotate the API key and password after revoking the old token.")
             .map_err(|error| error.to_string())
     }
 
