@@ -16713,6 +16713,16 @@ mod tests {
                 .map(|n| recovery_verification(&workspace_id, n))
                 .collect();
             verification.sort_by(|a, b| a.id.cmp(&b.id));
+            let mut outcome = recovery_outcome(&workspace_id, 2);
+            outcome.run_id = Some(active.run_id.clone());
+            outcome.evidence_ref.clone_from(&verification[0].id);
+            outcome.provenance_hash = outcome.computed_provenance_hash();
+            let mut observation = recovery_observation(
+                &workspace_id,
+                &MemoryId::from_uuid(Uuid::from_u128(2)).to_string(),
+                0,
+            );
+            observation.source_id = Some(events[0].event_id.clone());
             let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
             db.with_transaction(|| {
                 db.insert_recorder_run_for_recovery(&run)?;
@@ -16723,6 +16733,8 @@ mod tests {
                 for row in &verification {
                     db.insert_rch_verify_run_for_recovery(row)?;
                 }
+                db.insert_outcome_evidence_for_recovery(&outcome)?;
+                db.insert_learning_observation_for_recovery(&observation)?;
                 Ok(())
             })
             .map_err(|e| e.to_string())?;
@@ -16895,6 +16907,40 @@ mod tests {
                 .query_rch_verify_runs(&restored_id, None, None, "2026-09-02T00:00:00Z")
                 .map_err(|e| e.to_string())?;
             actual.sort_by(|a, b| a.id.cmp(&b.id));
+            let recovered_outcomes = db
+                .list_outcome_evidence_for_recovery(&restored_id)
+                .map_err(|e| e.to_string())?;
+            let recovered_outcome = recovered_outcomes
+                .first()
+                .ok_or("lost recorder-linked outcome")?;
+            ensure_equal(recovered_outcomes.len(), 1, "one linked outcome recovered")?;
+            let observations = db
+                .list_learning_observations(&restored_id, None)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(
+                observations
+                    .first()
+                    .ok_or("lost recorder-linked observation")?
+                    .source_id
+                    .as_deref(),
+                observation.source_id.as_deref(),
+                "observation still points to recorder event",
+            )?;
+            ensure_equal(
+                &recovered_outcome.run_id,
+                &outcome.run_id,
+                "outcome still points to unscoped recorder run",
+            )?;
+            ensure_equal(
+                &recovered_outcome.evidence_ref,
+                &outcome.evidence_ref,
+                "outcome still points to verification evidence",
+            )?;
+            ensure_equal(
+                &recovered_outcome.provenance_hash,
+                &recovered_outcome.computed_provenance_hash(),
+                "linked outcome provenance validates",
+            )?;
             for entry in &mut expected_verification {
                 entry.row.workspace_id.clone_from(&restored_id);
             }

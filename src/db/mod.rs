@@ -19025,6 +19025,7 @@ impl DbConnection {
             ("task_episodes", "id"),
             ("journal_entries", "entry_id"),
             ("import_ledger", "id"),
+            ("rch_verify_runs", "id"),
         ] {
             let rows = self.query_for(
                 DbOperation::Query,
@@ -19034,6 +19035,20 @@ impl DbConnection {
             for row in &rows {
                 ids.insert(required_text(row, 0, DbOperation::Query, key)?.to_owned());
             }
+        }
+        // Unscoped runs are included by recorder recovery as well. Preserve
+        // these identities in outcome/observation references across full redaction.
+        for row in self.query_for(
+            DbOperation::Query,
+            "SELECT run_id FROM recorder_runs WHERE workspace_id = ?1 OR workspace_id IS NULL",
+            &[Value::Text(workspace_id.to_owned())],
+        )? {
+            ids.insert(required_text(&row, 0, DbOperation::Query, "run_id")?.to_owned());
+        }
+        for row in self.query_for(DbOperation::Query,
+            "SELECT e.event_id FROM recorder_events e JOIN recorder_runs r ON r.run_id = e.run_id WHERE r.workspace_id = ?1 OR r.workspace_id IS NULL",
+            &[Value::Text(workspace_id.to_owned())])? {
+            ids.insert(required_text(&row, 0, DbOperation::Query, "event_id")?.to_owned());
         }
         Ok(ids)
     }
