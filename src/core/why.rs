@@ -399,12 +399,14 @@ impl RationaleTraceSummary {
     /// Build a why-safe summary from a persisted rationale trace.
     #[must_use]
     pub fn from_trace(trace: &RationaleTrace) -> Option<Self> {
-        if !trace.visibility.is_storable() {
+        if trace.schema != crate::models::RATIONALE_TRACE_SCHEMA_V1
+            || !trace.visibility.is_storable()
+        {
             return None;
         }
 
         Some(Self {
-            schema: trace.schema,
+            schema: crate::models::RATIONALE_TRACE_SCHEMA_V1,
             trace_id: trace.trace_id.clone(),
             kind: trace.kind.as_str().to_string(),
             posture: trace.posture.as_str().to_string(),
@@ -5667,6 +5669,13 @@ mod tests {
             summary.linked_causal_trace_ids,
             vec!["causal_release".to_string()],
             "linked causal trace ids",
+        )?;
+        let mut unknown = trace;
+        unknown.schema = "ee.rationale_trace.v999".to_owned();
+        ensure(
+            RationaleTraceSummary::from_trace(&unknown).is_none(),
+            true,
+            "unknown rationale schema is not relabeled as supported",
         )
     }
 

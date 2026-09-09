@@ -839,7 +839,7 @@ impl std::error::Error for RationaleTraceValidationError {}
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RationaleTrace {
     #[serde(deserialize_with = "deserialize_rationale_schema")]
-    pub schema: &'static str,
+    pub schema: String,
     pub trace_id: String,
     pub kind: RationaleTraceKind,
     pub author: String,
@@ -859,7 +859,7 @@ pub struct RationaleTrace {
     pub created_at: String,
 }
 
-fn deserialize_rationale_schema<'de, D>(deserializer: D) -> Result<&'static str, D::Error>
+fn deserialize_rationale_schema<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -869,7 +869,7 @@ where
             "unsupported rationale trace schema",
         ));
     }
-    Ok(RATIONALE_TRACE_SCHEMA_V1)
+    Ok(schema)
 }
 
 impl RationaleTrace {
@@ -887,7 +887,7 @@ impl RationaleTrace {
         let summary = summary.into();
         validate_rationale_summary(&summary)?;
         Ok(Self {
-            schema: RATIONALE_TRACE_SCHEMA_V1,
+            schema: RATIONALE_TRACE_SCHEMA_V1.to_owned(),
             trace_id: trace_id.into(),
             kind,
             author: author.into(),
@@ -2173,7 +2173,7 @@ mod tests {
         .supersedes_trace("rat_000")
         .contradicted_by_trace("rat_009");
 
-        ensure(trace.schema, RATIONALE_TRACE_SCHEMA_V1, "schema")?;
+        ensure(trace.schema.as_str(), RATIONALE_TRACE_SCHEMA_V1, "schema")?;
         ensure(trace.kind, RationaleTraceKind::Hypothesis, "kind")?;
         ensure(trace.posture, RationaleTracePosture::Supported, "posture")?;
         ensure(

@@ -33634,7 +33634,7 @@ impl DbConnection {
 const RATIONALE_TRACE_SELECT_SQL: &str = "SELECT trace_id, workspace_id, schema, kind, author, summary, posture, confidence_basis_points, visibility, redaction_status, evidence_uris_json, linked_memory_ids_json, linked_context_pack_ids_json, linked_recorder_run_ids_json, linked_recorder_event_ids_json, linked_causal_trace_ids_json, supersedes_trace_ids_json, contradicted_by_trace_ids_json, created_at FROM rationale_traces";
 
 fn normalized_rationale_trace(trace: &RationaleTrace) -> Result<RationaleTrace> {
-    if !text_matches(trace.schema, RATIONALE_TRACE_SCHEMA_V1) {
+    if !text_matches(&trace.schema, RATIONALE_TRACE_SCHEMA_V1) {
         return Err(DbError::MalformedRow {
             operation: DbOperation::Execute,
             message: format!(
@@ -33790,7 +33790,7 @@ fn stored_rationale_trace_from_row(row: &Row) -> Result<StoredRationaleTrace> {
     Ok(StoredRationaleTrace {
         workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
         trace: RationaleTrace {
-            schema: RATIONALE_TRACE_SCHEMA_V1,
+            schema: RATIONALE_TRACE_SCHEMA_V1.to_owned(),
             trace_id: required_text(row, 0, DbOperation::Query, "trace_id")?.to_string(),
             kind: parse_rationale_trace_kind(required_text(row, 3, DbOperation::Query, "kind")?)?,
             author: required_text(row, 4, DbOperation::Query, "author")?.to_string(),
