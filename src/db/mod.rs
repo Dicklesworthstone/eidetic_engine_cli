@@ -11282,7 +11282,8 @@ pub struct CreateArtifactInput {
 }
 
 /// Stored coding artifact metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredArtifact {
     pub id: String,
     pub workspace_id: String,
@@ -11314,7 +11315,8 @@ pub struct CreateArtifactLinkInput {
 }
 
 /// Stored artifact link row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredArtifactLink {
     pub artifact_id: String,
     pub target_type: String,
@@ -11397,6 +11399,41 @@ impl DbConnection {
             ],
         )?;
 
+        Ok(())
+    }
+
+    /// Recover metadata without refreshing timestamps or overwriting an identity.
+    pub(crate) fn insert_artifact_for_recovery(&self, row: &StoredArtifact) -> Result<()> {
+        let size = i64::try_from(row.size_bytes).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "recovered artifact size exceeds SQLite integer storage".to_owned(),
+        })?;
+        self.execute_for(DbOperation::Execute,
+            "INSERT INTO artifacts (id, workspace_id, source_kind, artifact_type, original_path, canonical_path, external_ref, content_hash, media_type, size_bytes, redaction_status, snippet, snippet_hash, provenance_uri, metadata_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            &[
+                Value::Text(row.id.clone()), Value::Text(row.workspace_id.clone()),
+                Value::Text(row.source_kind.clone()), Value::Text(row.artifact_type.clone()),
+                row.original_path.clone().map_or(Value::Null, Value::Text),
+                row.canonical_path.clone().map_or(Value::Null, Value::Text),
+                row.external_ref.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.content_hash.clone()), Value::Text(row.media_type.clone()), Value::BigInt(size),
+                Value::Text(row.redaction_status.clone()), row.snippet.clone().map_or(Value::Null, Value::Text),
+                row.snippet_hash.clone().map_or(Value::Null, Value::Text),
+                row.provenance_uri.clone().map_or(Value::Null, Value::Text), Value::Text(row.metadata_json.clone()),
+                Value::Text(row.created_at.clone()), Value::Text(row.updated_at.clone()),
+            ])?;
+        Ok(())
+    }
+
+    /// Recovery must reject duplicate link identities instead of ignoring them.
+    pub(crate) fn insert_artifact_link_for_recovery(&self, row: &StoredArtifactLink) -> Result<()> {
+        self.execute_for(DbOperation::Execute,
+            "INSERT INTO artifact_links (artifact_id, target_type, target_id, relation, created_at, metadata_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            &[
+                Value::Text(row.artifact_id.clone()), Value::Text(row.target_type.clone()),
+                Value::Text(row.target_id.clone()), Value::Text(row.relation.clone()),
+                Value::Text(row.created_at.clone()), row.metadata_json.clone().map_or(Value::Null, Value::Text),
+            ])?;
         Ok(())
     }
 
@@ -19027,6 +19064,7 @@ impl DbConnection {
             ("import_ledger", "id"),
             ("rch_verify_runs", "id"),
             ("error_repair_links", "link_id"),
+            ("artifacts", "id"),
         ] {
             let rows = self.query_for(
                 DbOperation::Query,

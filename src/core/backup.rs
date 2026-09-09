@@ -27,14 +27,14 @@ use crate::db::shard::{
 use crate::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
     CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType,
-    MeshStorageStatus, StoredAuditEntry, StoredCurationCandidate, StoredCurationTtlPolicy,
-    StoredEpisodeAction, StoredErrorFingerprint, StoredErrorRepairLink, StoredEvidenceSpan,
-    StoredFeedbackEvent, StoredFeedbackQuarantine, StoredGraphAlgorithmResult,
-    StoredGraphAlgorithmWitness, StoredGraphSnapshot, StoredImportLedger, StoredJournalEntry,
-    StoredLearningObservation, StoredMemory, StoredMemoryLink, StoredOutcomeEvidence,
-    StoredPackHistory, StoredProceduralRule, StoredProcedure, StoredProcedureEvent,
-    StoredRchVerifyRun, StoredRecorderEvent, StoredRecorderRun, StoredSearchIndexJob,
-    StoredSession, StoredTaskEpisode, audit_actions,
+    MeshStorageStatus, StoredArtifact, StoredArtifactLink, StoredAuditEntry,
+    StoredCurationCandidate, StoredCurationTtlPolicy, StoredEpisodeAction, StoredErrorFingerprint,
+    StoredErrorRepairLink, StoredEvidenceSpan, StoredFeedbackEvent, StoredFeedbackQuarantine,
+    StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness, StoredGraphSnapshot,
+    StoredImportLedger, StoredJournalEntry, StoredLearningObservation, StoredMemory,
+    StoredMemoryLink, StoredOutcomeEvidence, StoredPackHistory, StoredProceduralRule,
+    StoredProcedure, StoredProcedureEvent, StoredRchVerifyRun, StoredRecorderEvent,
+    StoredRecorderRun, StoredSearchIndexJob, StoredSession, StoredTaskEpisode, audit_actions,
 };
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
@@ -69,6 +69,7 @@ const PROCEDURE_HISTORY_SCHEMA: &str = "ee.backup.procedure_history.v1";
 const LEARNING_SIGNALS_SCHEMA: &str = "ee.backup.learning_signals.v1";
 const RECORDED_HISTORY_SCHEMA: &str = "ee.backup.recorded_history.v1";
 const ERROR_RECALL_SCHEMA: &str = "ee.backup.error_recall.v1";
+const ARTIFACT_REGISTRY_SCHEMA: &str = "ee.backup.artifact_registry.v1";
 const MANIFEST_AUTH_FAMILY: &str = "ee.backup.manifest";
 const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
 const RECOVERY_KEYS_FILE: &str = "store-auth.recovery.json";
@@ -784,6 +785,7 @@ pub struct BackupRestoreReport {
     pub restored_learning_signals: BackupLearningSignalCounts,
     pub restored_recorded_history: BackupRecordedHistoryCounts,
     pub restored_error_recall: BackupErrorRecallCounts,
+    pub restored_artifact_registry: BackupArtifactRegistryCounts,
     pub restored_pack_history: BackupPackHistoryCounts,
     pub restored_graph_cache_count: u32,
     pub restored_derived: Vec<BackupRestoredDerivedAssetReport>,
@@ -830,6 +832,7 @@ impl BackupRestoreReport {
                 "learningSignalsRestored": self.restored_learning_signals,
                 "recordedHistoryRestored": self.restored_recorded_history,
                 "errorRecallRestored": self.restored_error_recall,
+                "artifactRegistryRestored": self.restored_artifact_registry,
                 "packHistoryRestored": self.restored_pack_history,
                 "graphCacheRowsRestored": self.restored_graph_cache_count,
                 "issues": self.issue_count,
@@ -877,6 +880,9 @@ impl BackupRestoreReport {
         ) + &format!(
             "  restored error fingerprints/repair links: {}/{}\n",
             self.restored_error_recall.fingerprints, self.restored_error_recall.links
+        ) + &format!(
+            "  restored artifacts/links: {}/{}\n",
+            self.restored_artifact_registry.artifacts, self.restored_artifact_registry.links
         )
     }
 
@@ -1562,6 +1568,35 @@ pub struct BackupErrorRecallCounts {
     pub links: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupArtifactRegistry {
+    schema: String,
+    backup_id: String,
+    workspace_id: String,
+    chunk_index: usize,
+    chunk_count: usize,
+    artifacts: Vec<BackupArtifact>,
+    links: Vec<StoredArtifactLink>,
+    authentication: Option<AuthenticatedHeader>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupArtifact {
+    row: StoredArtifact,
+    source_snippet_hash: Option<String>,
+    snippet_hash_verified: bool,
+    snippet_redacted: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupArtifactRegistryCounts {
+    pub artifacts: u32,
+    pub links: u32,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupPackHistoryCounts {
@@ -1695,13 +1730,12 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
             "derived_artifact_restore",
         ),
         "journal_entries" | "search_index_jobs" | "recorder_runs" | "recorder_events"
-        | "rch_verify_runs" | "error_fingerprints" | "error_repair_links" => {
-            BackupTablePolicy::new(
-                "maintain",
-                "export_restore_required",
-                "derived_artifact_restore",
-            )
-        }
+        | "rch_verify_runs" | "error_fingerprints" | "error_repair_links" | "artifacts"
+        | "artifact_links" => BackupTablePolicy::new(
+            "maintain",
+            "export_restore_required",
+            "derived_artifact_restore",
+        ),
         "procedural_rules" | "rule_source_memories" | "rule_tags" | "feedback_events" => {
             BackupTablePolicy::new(
                 "learn",
@@ -1712,8 +1746,6 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
 
         "agent_context_profiles"
         | "agents"
-        | "artifact_links"
-        | "artifacts"
         | "causal_evidence"
         | "certificates"
         | "debt_snapshots"
@@ -1912,6 +1944,14 @@ fn reconcile_derived_recovery_inventory(
     }
 
     for (table, captured_count) in [
+        (
+            "artifacts",
+            captured_derived_record_count(derived, "artifact_registry", "artifacts"),
+        ),
+        (
+            "artifact_links",
+            captured_derived_record_count(derived, "artifact_registry", "links"),
+        ),
         (
             "error_fingerprints",
             captured_derived_record_count(derived, "error_recall", "fingerprints"),
@@ -2179,6 +2219,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &memory_ids,
                 &mut payloads,
             )?;
+            collect_artifact_registry_payloads(
+                &connection,
+                workspace_id,
+                &backup_id,
+                &created_at,
+                options.redaction_level,
+                &memory_ids,
+                &mut payloads,
+            )?;
             collect_pack_history_payloads(
                 &connection,
                 workspace_id,
@@ -2232,13 +2281,14 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                     | "learning_signals"
                     | "recorded_history"
                     | "error_recall"
+                    | "artifact_registry"
             ) || (p.report.kind == "curation_history"
                 && serde_json::from_slice::<BackupCurationHistory>(&p.bytes)
                     .is_ok_and(|chunk| !chunk.candidates.is_empty()))
         })
     {
         return Err(work_history_error(
-            "learned rules, feedback, pack history, import checkpoints, curation history, procedures, learning signals, recorded history, and error recall require source-store authentication; repair the workspace key store before creating this backup",
+            "learned rules, feedback, pack history, import checkpoints, curation history, procedures, learning signals, recorded history, error recall, and artifact registry require source-store authentication; repair the workspace key store before creating this backup",
         ));
     }
     authenticate_learning_payloads(&mut derived_payloads, store_auth.as_ref())?;
@@ -2249,6 +2299,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     authenticate_learning_signal_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_recorded_history_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_error_recall_payloads(&mut derived_payloads, store_auth.as_ref())?;
+    authenticate_artifact_registry_payloads(&mut derived_payloads, store_auth.as_ref())?;
     let derived_reports = derived_payloads
         .iter()
         .map(|payload| payload.report.clone())
@@ -3190,6 +3241,7 @@ pub fn restore_backup_to_side_path(
             restored_learning_signals: BackupLearningSignalCounts::default(),
             restored_recorded_history: BackupRecordedHistoryCounts::default(),
             restored_error_recall: BackupErrorRecallCounts::default(),
+            restored_artifact_registry: BackupArtifactRegistryCounts::default(),
             restored_search_index_job_count: 0,
             restored_rule_count: 0,
             restored_rule_source_count: 0,
@@ -3362,6 +3414,12 @@ pub fn restore_backup_to_side_path(
         &inspect.backup_id,
         &restored_derived,
     )?;
+    let restored_artifact_registry = restore_artifact_registry(
+        &restored_database_path,
+        &workspace_path,
+        &inspect.backup_id,
+        &restored_derived,
+    )?;
     let graph_cache_restored_count = if options.restore_graph_cache {
         restore_graph_cache_assets(&restored_database_path, &restored_derived)?
     } else {
@@ -3454,6 +3512,7 @@ pub fn restore_backup_to_side_path(
         restored_learning_signals,
         restored_recorded_history,
         restored_error_recall,
+        restored_artifact_registry,
         restored_search_index_job_count,
         restored_rule_count,
         restored_rule_source_count,
@@ -7363,24 +7422,36 @@ fn redact_work_history_json(text: &str, level: RedactionLevel) -> Result<String,
     if level == RedactionLevel::None {
         return Ok(text.to_owned());
     }
-    fn redact_value(value: &mut JsonValue, level: RedactionLevel) {
+    fn redact_value(value: &mut JsonValue, level: RedactionLevel) -> Result<(), DomainError> {
         match value {
             JsonValue::String(text) => *text = redact_content(text, level),
             JsonValue::Array(values) => {
                 for child in values {
-                    redact_value(child, level);
+                    redact_value(child, level)?;
                 }
             }
             JsonValue::Object(fields) => {
-                for child in fields.values_mut() {
-                    redact_value(child, level);
+                // Metadata can contain arbitrary keys, including credentials.
+                // Keep ordinary structural keys under full redaction; secret
+                // keys receive distinct opaque names rather than one placeholder.
+                for (key, mut child) in std::mem::take(fields) {
+                    redact_value(&mut child, level)?;
+                    let safe_key = if redact_content(&key, RedactionLevel::Standard) == key {
+                        key
+                    } else {
+                        format!("backup-key:{}", blake3::hash(key.as_bytes()).to_hex())
+                    };
+                    if fields.insert(safe_key, child).is_some() {
+                        return Err(work_history_error("redacted metadata keys collide"));
+                    }
                 }
             }
             _ => {}
         }
+        Ok(())
     }
     let original = value.clone();
-    redact_value(&mut value, level);
+    redact_value(&mut value, level)?;
     if value == original {
         Ok(text.to_owned())
     } else {
@@ -8321,6 +8392,296 @@ fn collect_error_recall_payloads(
         ));
     }
     Ok(())
+}
+
+fn collect_artifact_registry_payloads(
+    connection: &DbConnection,
+    workspace_id: &str,
+    backup_id: &str,
+    captured_at: &str,
+    redaction: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) -> Result<(), DomainError> {
+    let rows = connection
+        .list_artifacts(workspace_id, None)
+        .map_err(work_history_error)?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let references = connection
+        .learning_recovery_references(workspace_id)
+        .map_err(work_history_error)?;
+    let reference = |s: &str| redact_learning_reference(s, redaction, memory_ids, &references);
+    let label_level = if redaction == RedactionLevel::Full {
+        RedactionLevel::Standard
+    } else {
+        redaction
+    };
+    let mut artifacts = Vec::with_capacity(rows.len());
+    let mut links = Vec::new();
+    for mut row in rows {
+        let source_snippet_hash = row.snippet_hash.clone();
+        let snippet_hash_verified = row.snippet.as_ref().is_some_and(|s| {
+            row.snippet_hash.as_deref() == Some(hash_bytes(s.as_bytes()).as_str())
+        });
+        let snippet = row.snippet.as_deref().map(|s| redact_content(s, redaction));
+        let snippet_redacted = snippet != row.snippet;
+        row.snippet = snippet;
+        if snippet_redacted {
+            row.redaction_status = "redacted".to_owned();
+            // A broken or absent source hash must not acquire proof through backup.
+            if snippet_hash_verified {
+                row.snippet_hash = row.snippet.as_ref().map(|s| hash_bytes(s.as_bytes()));
+            } else {
+                // Preserve the original claim in the audit, not as a hash of
+                // different bytes: it could coincidentally match the redaction.
+                row.snippet_hash = None;
+            }
+        }
+        for text in [
+            &mut row.original_path,
+            &mut row.canonical_path,
+            &mut row.external_ref,
+            &mut row.provenance_uri,
+        ] {
+            *text = text.as_deref().map(|s| redact_content(s, redaction));
+        }
+        row.artifact_type = redact_content(&row.artifact_type, label_level);
+        row.media_type = redact_content(&row.media_type, label_level);
+        row.metadata_json = redact_work_history_json(&row.metadata_json, redaction)?;
+        let mut children = connection
+            .list_artifact_links(&row.id)
+            .map_err(work_history_error)?;
+        for link in &mut children {
+            link.target_id = reference(&link.target_id);
+            // Relation participates in the key; redact without merging identities.
+            link.relation = redact_learning_reference(
+                &link.relation,
+                label_level,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+            );
+            link.metadata_json = link
+                .metadata_json
+                .as_deref()
+                .map(|s| redact_work_history_json(s, redaction))
+                .transpose()?;
+        }
+        links.extend(children);
+        artifacts.push(BackupArtifact {
+            row,
+            source_snippet_hash,
+            snippet_hash_verified,
+            snippet_redacted,
+        });
+    }
+    let count = artifacts
+        .len()
+        .max(links.len())
+        .div_ceil(WORK_HISTORY_CHUNK_ROWS);
+    for index in 0..count {
+        let start = index * WORK_HISTORY_CHUNK_ROWS;
+        let end = start + WORK_HISTORY_CHUNK_ROWS;
+        let chunk = BackupArtifactRegistry {
+            schema: ARTIFACT_REGISTRY_SCHEMA.to_owned(),
+            backup_id: backup_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            chunk_index: index,
+            chunk_count: count,
+            artifacts: artifacts[start.min(artifacts.len())..end.min(artifacts.len())].to_vec(),
+            links: links[start.min(links.len())..end.min(links.len())].to_vec(),
+            authentication: None,
+        };
+        payloads.push(derived_payload(
+            format!("derived/artifact-registry/{index:08}.json"),
+            "artifact_registry",
+            captured_at,
+            None,
+            serialized_payload_bytes(&chunk).map_err(work_history_error)?,
+        ));
+    }
+    Ok(())
+}
+
+fn artifact_registry_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
+    ArtifactContext {
+        artifact_family: ARTIFACT_REGISTRY_SCHEMA,
+        record_encoding_version: "json.v1",
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: workspace_id,
+    }
+}
+
+fn authenticate_artifact_registry_payloads(
+    payloads: &mut [BackupDerivedPayload],
+    root: Option<&StoreAuthRoot>,
+) -> Result<(), DomainError> {
+    for payload in payloads
+        .iter_mut()
+        .filter(|p| p.report.kind == "artifact_registry")
+    {
+        let mut chunk: BackupArtifactRegistry =
+            serde_json::from_slice(&payload.bytes).map_err(work_history_error)?;
+        chunk.authentication = None;
+        if let Some(root) = root {
+            let hash =
+                canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+            chunk.authentication = Some(
+                authenticate_artifact(
+                    root,
+                    MacDomain::NativeImportRecordsRoot,
+                    &artifact_registry_auth_context(&chunk.workspace_id),
+                    &hash,
+                    1,
+                )
+                .map_err(work_history_error)?,
+            );
+        }
+        payload.bytes = serialized_payload_bytes(&chunk).map_err(work_history_error)?;
+        if payload.bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES {
+            return Err(work_history_error(
+                "artifact-registry chunk exceeds the restore asset byte limit",
+            ));
+        }
+        payload.report.hash = Some(hash_bytes(&payload.bytes));
+        payload.report.byte_size = Some(payload.bytes.len() as u64);
+    }
+    Ok(())
+}
+
+fn restore_artifact_registry(
+    database: &Path,
+    source_workspace: &Path,
+    backup_id: &str,
+    assets: &[BackupRestoredDerivedAssetReport],
+) -> Result<BackupArtifactRegistryCounts, DomainError> {
+    let mut chunks = assets
+        .iter()
+        .filter(|a| a.kind == "artifact_registry")
+        .map(|a| {
+            serde_json::from_value::<BackupArtifactRegistry>(read_restored_derived_json(a)?)
+                .map_err(work_history_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if chunks.is_empty() {
+        return Ok(BackupArtifactRegistryCounts::default());
+    }
+    let root =
+        StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
+    chunks.sort_by_key(|c| c.chunk_index);
+    let source_id = chunks[0].workspace_id.clone();
+    let count = chunks.len();
+    for (index, chunk) in chunks.iter_mut().enumerate() {
+        if chunk.schema != ARTIFACT_REGISTRY_SCHEMA
+            || chunk.backup_id != backup_id
+            || chunk.workspace_id != source_id
+            || chunk.chunk_index != index
+            || chunk.chunk_count != count
+            || chunk.artifacts.len() > WORK_HISTORY_CHUNK_ROWS
+            || chunk.links.len() > WORK_HISTORY_CHUNK_ROWS
+        {
+            return Err(work_history_error(
+                "unsupported, incomplete, duplicate, or substituted artifact-registry chunks",
+            ));
+        }
+        let header = chunk.authentication.take().ok_or_else(|| {
+            work_history_error("artifact registry requires source-store authentication")
+        })?;
+        let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+        if !verify_artifact(
+            &root,
+            MacDomain::NativeImportRecordsRoot,
+            &artifact_registry_auth_context(&source_id),
+            &header,
+            &hash,
+            1,
+        )
+        .map_err(work_history_error)?
+        .is_authenticated()
+        {
+            return Err(work_history_error(
+                "artifact-registry authentication failed",
+            ));
+        }
+    }
+    let db = DbConnection::open_file(database).map_err(work_history_error)?;
+    let workspace_id = remap_restored_workspace_id(
+        &db.list_workspaces().map_err(work_history_error)?,
+        Some(&source_id),
+        "artifact registry",
+    )?
+    .ok_or_else(|| work_history_error("missing artifact-registry workspace"))?;
+    let mut artifacts = Vec::new();
+    let mut links = Vec::new();
+    for chunk in chunks {
+        artifacts.extend(chunk.artifacts);
+        links.extend(chunk.links);
+    }
+    let mut ids = BTreeSet::new();
+    for artifact in &mut artifacts {
+        let row = &mut artifact.row;
+        if row.workspace_id != source_id || !ids.insert(row.id.clone()) {
+            return Err(work_history_error(
+                "foreign or duplicate recovered artifact",
+            ));
+        }
+        if artifact.snippet_hash_verified
+            && (artifact.source_snippet_hash.is_none()
+                || row.snippet.as_ref().is_none_or(|s| {
+                    row.snippet_hash.as_deref() != Some(hash_bytes(s.as_bytes()).as_str())
+                }))
+        {
+            return Err(work_history_error(
+                "recovered artifact snippet hash does not match its authenticated body",
+            ));
+        }
+        if (!artifact.snippet_redacted && row.snippet_hash != artifact.source_snippet_hash)
+            || (artifact.snippet_redacted
+                && (row.snippet.is_none()
+                    || row.redaction_status != "redacted"
+                    || (!artifact.snippet_hash_verified && row.snippet_hash.is_some())))
+        {
+            return Err(work_history_error(
+                "inconsistent recovered artifact redaction or hash provenance",
+            ));
+        }
+        row.workspace_id.clone_from(&workspace_id);
+    }
+    let mut identities = BTreeSet::new();
+    for link in &links {
+        if !ids.contains(&link.artifact_id)
+            || !identities.insert((
+                link.artifact_id.clone(),
+                link.target_type.clone(),
+                link.target_id.clone(),
+                link.relation.clone(),
+            ))
+        {
+            return Err(work_history_error(
+                "orphan or duplicate recovered artifact link",
+            ));
+        }
+    }
+    db.with_transaction(|| {
+        for artifact in &artifacts { db.insert_artifact_for_recovery(&artifact.row)?; }
+        for link in &links { db.insert_artifact_link_for_recovery(link)?; }
+        db.insert_audit(&crate::models::AuditId::now().to_string(), &crate::db::CreateAuditInput {
+            workspace_id: Some(workspace_id.clone()), actor: Some("ee backup restore".to_owned()),
+            action: "backup.artifact_registry_restored".to_owned(), target_type: Some("backup".to_owned()), target_id: Some(backup_id.to_owned()),
+            details: Some(json!({"sourceWorkspaceId": source_id,
+                "snippetProvenance": artifacts.iter().map(|a| json!({"artifactId": a.row.id,
+                    "sourceSnippetHash": a.source_snippet_hash, "restoredSnippetHash": a.row.snippet_hash,
+                    "sourceHashVerified": a.snippet_hash_verified, "snippetRedacted": a.snippet_redacted})).collect::<Vec<_>>(),
+                "reason": "Recovered registry metadata and evidence links. Original content hashes and file locations describe external artifacts; raw files were not copied or verified. Only previously verified snippet hashes are rebound after redaction."
+            }).to_string()),
+        })?;
+        Ok(())
+    }).map_err(work_history_error)?;
+    Ok(BackupArtifactRegistryCounts {
+        artifacts: u32::try_from(artifacts.len()).unwrap_or(u32::MAX),
+        links: u32::try_from(links.len()).unwrap_or(u32::MAX),
+    })
 }
 
 fn error_recall_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
@@ -17477,6 +17838,645 @@ mod tests {
             )?;
             db.close().map_err(|e| e.to_string())?;
         }
+        Ok(())
+    }
+
+    fn recovery_artifact(workspace_id: &str, n: usize) -> StoredArtifact {
+        let snippet = "auroragate build evidence api_key=artifact-canary".to_owned();
+        StoredArtifact {
+            id: format!("art_{n:026x}"), workspace_id: workspace_id.to_owned(), source_kind: "file".to_owned(),
+            artifact_type: "auroragate".to_owned(), original_path: Some(format!("evidence-{n}.log")),
+            canonical_path: Some(format!("/historic/evidence-{n}.log")), external_ref: None,
+            content_hash: hash_bytes(format!("original artifact bytes {n}").as_bytes()), media_type: "text/plain".to_owned(),
+            size_bytes: 512, redaction_status: "checked".to_owned(), snippet_hash: Some(hash_bytes(snippet.as_bytes())), snippet: Some(snippet),
+            provenance_uri: Some("https://example.invalid/evidence?api_key=artifact-canary".to_owned()),
+            metadata_json: json!({"title":"auroragate evidence", "api_key=metadata-key-canary": {"note":"api_key=metadata-value-canary"}, "count":3}).to_string(),
+            created_at: "2026-09-01T00:00:00Z".to_owned(), updated_at: "2026-09-02T00:00:00Z".to_owned(),
+        }
+    }
+
+    fn recovery_artifact_link(artifact: &StoredArtifact, n: usize) -> StoredArtifactLink {
+        StoredArtifactLink {
+            artifact_id: artifact.id.clone(),
+            target_type: "other".to_owned(),
+            target_id: format!("api_key=artifact-reference-canary-{n}"),
+            relation: "supports".to_owned(),
+            created_at: artifact.created_at.clone(),
+            metadata_json: Some(json!({"note":"api_key=link-canary"}).to_string()),
+        }
+    }
+
+    #[test]
+    fn default_backup_restores_artifacts_and_live_search() -> TestResult {
+        use crate::core::artifact::{
+            ArtifactInspectOptions, ArtifactListOptions, inspect_artifact, list_artifacts,
+        };
+        use crate::core::search::{SearchDedupMode, SearchOptions, SearchSourceMode, run_search};
+        for redaction in [
+            RedactionLevel::None,
+            RedactionLevel::Standard,
+            RedactionLevel::Full,
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+            let mut rows: Vec<_> = (0..4)
+                .map(|n| recovery_artifact(&workspace_id, n))
+                .collect();
+            let source_file = workspace.join("evidence.log");
+            let raw = b"original raw evidence stays external";
+            fs::write(&source_file, raw).map_err(|e| e.to_string())?;
+            rows[0].canonical_path = Some(source_file.to_string_lossy().into_owned());
+            rows[0].content_hash = hash_bytes(raw);
+            rows[0].size_bytes = raw.len() as u64;
+            rows[1].snippet_hash = Some(hash_bytes(
+                redact_content(
+                    rows[1].snippet.as_deref().ok_or("missing source snippet")?,
+                    RedactionLevel::Full,
+                )
+                .as_bytes(),
+            ));
+            rows[2].source_kind = "external".to_owned();
+            rows[2].canonical_path = None;
+            rows[2].original_path = None;
+            rows[2].external_ref =
+                Some("https://example.invalid/artifact?api_key=external-canary".to_owned());
+            rows[2].snippet = None;
+            rows[2].snippet_hash = None;
+            rows[2].redaction_status = "external_reference".to_owned();
+            rows[3].snippet = None;
+            rows[3].snippet_hash = None;
+            rows[3].redaction_status = "not_text".to_owned();
+            rows[3].media_type = "application/octet-stream".to_owned();
+            let mut run = recovery_recording(&workspace_id, 0);
+            run.event_count = 0;
+            run.payload_bytes = 0;
+            let mut links: Vec<_> = (0..129)
+                .map(|n| recovery_artifact_link(&rows[0], n))
+                .collect();
+            links[0].target_type = "memory".to_owned();
+            links[0].target_id.clone_from(&memory_id);
+            links[1].target_type = "recorder".to_owned();
+            links[1].target_id.clone_from(&run.run_id);
+            let mut observation = recovery_observation(&workspace_id, &memory_id, 0);
+            observation.source_id = Some(rows[0].id.clone());
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            db.with_transaction(|| {
+                for row in &rows {
+                    db.insert_artifact_for_recovery(row)?;
+                }
+                for link in &links {
+                    db.insert_artifact_link_for_recovery(link)?;
+                }
+                db.insert_recorder_run_for_recovery(&run)?;
+                db.insert_learning_observation_for_recovery(&observation)?;
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?;
+            let source_links = db
+                .list_artifact_links(&rows[0].id)
+                .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            for (table, count) in [("artifacts", 4), ("artifact_links", 129)] {
+                let entry = backup
+                    .recovery_inventory
+                    .entries
+                    .iter()
+                    .find(|e| e.table == table)
+                    .ok_or("missing artifact inventory")?;
+                ensure_equal(entry.row_count, count, "artifact inventory rows")?;
+                ensure(entry.snapshot_covered, "artifact snapshot complete")?;
+            }
+            let assets: Vec<_> = backup
+                .derived
+                .iter()
+                .filter(|a| a.kind == "artifact_registry")
+                .collect();
+            ensure_equal(assets.len(), 2, "artifact links cross chunk boundary")?;
+            for asset in assets {
+                let bytes = fs::read(Path::new(&backup.backup_path).join(&asset.path))
+                    .map_err(|e| e.to_string())?;
+                if redaction != RedactionLevel::None {
+                    ensure(
+                        !String::from_utf8_lossy(&bytes).contains("canary"),
+                        "secrets absent from artifact strings and metadata keys",
+                    )?;
+                }
+            }
+            let side = fs::canonicalize(tempdir.path())
+                .map_err(|e| e.to_string())?
+                .join("restored-artifacts");
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: side.clone(),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                &restored.restored_artifact_registry,
+                &BackupArtifactRegistryCounts {
+                    artifacts: 4,
+                    links: 129,
+                },
+                "artifact restore counts",
+            )?;
+            ensure_equal(
+                restored.data_json()["counts"]["artifactRegistryRestored"]["links"].as_u64(),
+                Some(129),
+                "artifact JSON counts",
+            )?;
+            ensure(
+                restored
+                    .human_summary()
+                    .contains("restored artifacts/links: 4/129"),
+                "artifact human counts",
+            )?;
+            let restored_database = PathBuf::from(&restored.restored_database_path);
+            let db = DbConnection::open_file(&restored_database).map_err(|e| e.to_string())?;
+            let restored_id = db
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .first()
+                .ok_or("missing workspace")?
+                .id
+                .clone();
+            let restored_memory_id = db
+                .list_memories(&restored_id, None, false)
+                .map_err(|e| e.to_string())?
+                .first()
+                .ok_or("missing memory")?
+                .id
+                .clone();
+            let recovered = db
+                .list_artifacts(&restored_id, None)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(recovered.len(), 4, "artifact row count")?;
+            for row in &recovered {
+                let original = rows
+                    .iter()
+                    .find(|r| r.id == row.id)
+                    .ok_or("artifact identity changed")?;
+                ensure_equal(
+                    (
+                        &row.content_hash,
+                        row.size_bytes,
+                        &row.created_at,
+                        &row.updated_at,
+                    ),
+                    (
+                        &original.content_hash,
+                        original.size_bytes,
+                        &original.created_at,
+                        &original.updated_at,
+                    ),
+                    "original content commitments and history retained",
+                )?;
+                if redaction == RedactionLevel::None {
+                    let mut expected = original.clone();
+                    expected.workspace_id.clone_from(&restored_id);
+                    ensure_equal(row, &expected, "unredacted artifact lossless")?;
+                }
+            }
+            let valid = recovered
+                .iter()
+                .find(|r| r.id == rows[0].id)
+                .ok_or("missing valid artifact")?;
+            ensure_equal(
+                valid.snippet_hash.clone(),
+                valid.snippet.as_ref().map(|s| hash_bytes(s.as_bytes())),
+                "valid snippet commitment follows redaction",
+            )?;
+            let invalid = recovered
+                .iter()
+                .find(|r| r.id == rows[1].id)
+                .ok_or("missing invalid artifact")?;
+            if redaction == RedactionLevel::None {
+                ensure_equal(
+                    &invalid.snippet_hash,
+                    &rows[1].snippet_hash,
+                    "unredacted invalid hash remains historical",
+                )?;
+            } else {
+                ensure(
+                    invalid.snippet_hash.is_none(),
+                    "redacted invalid hash cannot become proof",
+                )?;
+            }
+            ensure(
+                invalid.snippet_hash != invalid.snippet.as_ref().map(|s| hash_bytes(s.as_bytes())),
+                "invalid remains invalid",
+            )?;
+            let restored_links = db
+                .list_artifact_links(&rows[0].id)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(restored_links.len(), 129, "all artifact links restored")?;
+            ensure(
+                restored_links
+                    .iter()
+                    .any(|l| l.target_type == "memory" && l.target_id == restored_memory_id),
+                "memory link remapped",
+            )?;
+            ensure(
+                restored_links
+                    .iter()
+                    .any(|l| l.target_type == "recorder" && l.target_id == run.run_id),
+                "recorder reference retained",
+            )?;
+            ensure_equal(
+                restored_links
+                    .iter()
+                    .filter(|l| l.target_type == "other")
+                    .map(|l| &l.target_id)
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                127,
+                "redacted external references stay distinct",
+            )?;
+            ensure(
+                restored_links
+                    .iter()
+                    .all(|l| l.created_at == links[0].created_at),
+                "link timestamps preserved",
+            )?;
+            ensure_equal(
+                db.list_learning_observations(&restored_id, None)
+                    .map_err(|e| e.to_string())?
+                    .first()
+                    .ok_or("missing observation")?
+                    .source_id
+                    .clone(),
+                Some(rows[0].id.clone()),
+                "learning evidence retains artifact identity",
+            )?;
+            db.insert_artifact_link(&crate::db::CreateArtifactLinkInput {
+                artifact_id: rows[0].id.clone(),
+                target_type: "memory".to_owned(),
+                target_id: restored_memory_id,
+                relation: "supports".to_owned(),
+                metadata_json: None,
+            })
+            .map_err(|e| e.to_string())?;
+            ensure_equal(
+                db.list_artifact_links(&rows[0].id)
+                    .map_err(|e| e.to_string())?,
+                restored_links,
+                "normal link insertion remains idempotent",
+            )?;
+            let audits = db
+                .list_audit_entries(Some(&restored_id), None)
+                .map_err(|e| e.to_string())?;
+            let audit = audits
+                .iter()
+                .find(|a| a.action == "backup.artifact_registry_restored")
+                .ok_or("missing artifact recovery audit")?;
+            let details: JsonValue =
+                serde_json::from_str(audit.details.as_deref().ok_or("missing audit details")?)
+                    .map_err(|e| e.to_string())?;
+            let provenance = details["snippetProvenance"]
+                .as_array()
+                .ok_or("missing snippet provenance")?;
+            ensure(
+                provenance.iter().any(|p| {
+                    p["artifactId"] == rows[1].id
+                        && p["sourceHashVerified"] == false
+                        && p["sourceSnippetHash"].as_str() == rows[1].snippet_hash.as_deref()
+                }),
+                "bad source hash disclosed in audit",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+            let inspected = inspect_artifact(&ArtifactInspectOptions {
+                workspace_path: &side,
+                database_path: Some(&restored_database),
+                artifact_id: &rows[0].id,
+            })
+            .map_err(|e| e.message())?;
+            ensure(
+                inspected.artifact.is_some(),
+                "normal artifact inspect finds recovered row",
+            )?;
+            let listed = list_artifacts(&ArtifactListOptions {
+                workspace_path: &side,
+                database_path: Some(&restored_database),
+                limit: None,
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                listed.total_count,
+                4,
+                "normal artifact list finds recovered registry",
+            )?;
+            let search = run_search(&SearchOptions {
+                workspace_path: side.clone(),
+                database_path: Some(restored_database),
+                index_dir: None,
+                query: "auroragate".to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Default,
+                explain: true,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: None,
+                dedup_mode: SearchDedupMode::DocId,
+                source_mode: SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Swarm,
+                strict_scope: false,
+            })
+            .map_err(|e| e.to_string())?;
+            ensure(
+                search.results.iter().any(|h| h.doc_id == rows[0].id),
+                "normal strict lexical search reads restored artifact index",
+            )?;
+            ensure_equal(
+                search.source_mode_applied,
+                SearchSourceMode::LexicalOnly,
+                "restored query uses the requested lexical source",
+            )?;
+            ensure(
+                !search.source_mode_fallback,
+                "restored search did not substitute another source",
+            )?;
+            ensure(
+                !side.join("evidence.log").exists(),
+                "registry recovery does not claim to copy raw files",
+            )?;
+            ensure_equal(
+                fs::read(&source_file).map_err(|e| e.to_string())?,
+                raw.to_vec(),
+                "external artifact untouched",
+            )?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                db.list_artifacts(&workspace_id, None)
+                    .map_err(|e| e.to_string())?,
+                rows,
+                "source artifact registry unchanged",
+            )?;
+            ensure_equal(
+                db.list_artifact_links(&source_links[0].artifact_id)
+                    .map_err(|e| e.to_string())?,
+                source_links,
+                "source artifact links unchanged",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_registry_rejects_tampering_and_rolls_back() -> TestResult {
+        for defect in [
+            "tampered",
+            "unsigned",
+            "wrong_backup",
+            "wrong_schema",
+            "missing_chunk",
+            "duplicate_chunk",
+            "oversized_chunk",
+            "foreign_artifact",
+            "duplicate_artifact",
+            "orphan_link",
+            "duplicate_link",
+            "late_constraint",
+            "existing_collision",
+            "size_overflow",
+            "invalid_snippet_hash",
+            "false_redaction",
+            "changed_unverified_hash",
+            "laundered_invalid_hash",
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let row = recovery_artifact(&workspace_id, 0);
+            let existing = recovery_artifact(&workspace_id, 999);
+            let existing_link = recovery_artifact_link(&existing, 999);
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            db.insert_artifact_for_recovery(&existing)
+                .map_err(|e| e.to_string())?;
+            db.insert_artifact_link_for_recovery(&existing_link)
+                .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            let mut chunk = BackupArtifactRegistry {
+                schema: ARTIFACT_REGISTRY_SCHEMA.to_owned(),
+                backup_id: "backup-original".to_owned(),
+                workspace_id: workspace_id.clone(),
+                chunk_index: 0,
+                chunk_count: 1,
+                links: vec![recovery_artifact_link(&row, 0)],
+                artifacts: vec![BackupArtifact {
+                    source_snippet_hash: row.snippet_hash.clone(),
+                    snippet_hash_verified: true,
+                    snippet_redacted: false,
+                    row,
+                }],
+                authentication: None,
+            };
+            match defect {
+                "wrong_schema" => chunk.schema = "unknown".to_owned(),
+                "missing_chunk" => chunk.chunk_count = 2,
+                "oversized_chunk" => chunk.links = vec![chunk.links[0].clone(); 129],
+                "foreign_artifact" => chunk.artifacts[0].row.workspace_id = "foreign".to_owned(),
+                "duplicate_artifact" => chunk.artifacts.push(chunk.artifacts[0].clone()),
+                "orphan_link" => chunk.links[0].artifact_id = existing.id.clone(),
+                "duplicate_link" => chunk.links.push(chunk.links[0].clone()),
+                "late_constraint" => chunk.links[0].target_type = "invalid".to_owned(),
+                "existing_collision" => chunk.artifacts.push(BackupArtifact {
+                    row: existing.clone(),
+                    source_snippet_hash: existing.snippet_hash.clone(),
+                    snippet_hash_verified: true,
+                    snippet_redacted: false,
+                }),
+                "size_overflow" => chunk.artifacts[0].row.size_bytes = u64::MAX,
+                "invalid_snippet_hash" => {
+                    chunk.artifacts[0].row.snippet = Some("changed body".to_owned())
+                }
+                "false_redaction" => chunk.artifacts[0].snippet_redacted = true,
+                "changed_unverified_hash" => {
+                    chunk.artifacts[0].snippet_hash_verified = false;
+                    chunk.artifacts[0].row.snippet_hash = None;
+                }
+                "laundered_invalid_hash" => {
+                    chunk.artifacts[0].snippet_hash_verified = false;
+                    chunk.artifacts[0].snippet_redacted = true;
+                    chunk.artifacts[0].row.redaction_status = "redacted".to_owned();
+                }
+                _ => {}
+            }
+            let root = StoreAuthRoot::open_or_create(workspace_keys_dir(&workspace))
+                .map_err(|e| e.to_string())?;
+            let mut payloads = vec![derived_payload(
+                "derived/artifact-registry/00000000.json".to_owned(),
+                "artifact_registry",
+                "2026-09-01T00:00:00Z",
+                None,
+                serialized_payload_bytes(&chunk).map_err(|e| e.to_string())?,
+            )];
+            authenticate_artifact_registry_payloads(&mut payloads, Some(&root))
+                .map_err(|e| e.message())?;
+            let mut signed: BackupArtifactRegistry =
+                serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
+            if defect == "tampered" {
+                signed.artifacts[0].row.artifact_type = "changed".to_owned();
+            }
+            if defect == "unsigned" {
+                signed.authentication = None;
+            }
+            let path = tempdir.path().join("artifact-registry.json");
+            fs::write(
+                &path,
+                serialized_payload_bytes(&signed).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            let mut assets = vec![restored_cass_asset(&path, "artifact_registry")];
+            if defect == "duplicate_chunk" {
+                assets.push(assets[0].clone());
+            }
+            let backup_id = if defect == "wrong_backup" {
+                "wrong"
+            } else {
+                "backup-original"
+            };
+            ensure(
+                restore_artifact_registry(&database, &workspace, backup_id, &assets).is_err(),
+                &format!("reject {defect}"),
+            )?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                db.list_artifacts(&workspace_id, None)
+                    .map_err(|e| e.to_string())?,
+                vec![existing.clone()],
+                "failure rolls back registry and preserves existing artifact",
+            )?;
+            ensure_equal(
+                db.list_artifact_links(&existing.id)
+                    .map_err(|e| e.to_string())?,
+                vec![existing_link],
+                "failure preserves existing artifact links",
+            )?;
+            ensure(
+                db.list_artifact_links(&format!("art_{:026x}", 0))
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "failure leaves no partial links",
+            )?;
+            ensure(
+                !db.list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|a| a.action == "backup.artifact_registry_restored"),
+                "failure leaves no recovery audit",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_registry_requires_keys_before_publication() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        db.insert_artifact_for_recovery(&recovery_artifact(&workspace_id, 0))
+            .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        let output = fs::canonicalize(tempdir.path())
+            .map_err(|e| e.to_string())?
+            .join("unsigned-artifacts");
+        let mut options = BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(output.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: true,
+        };
+        ensure(
+            create_backup(&options).map_err(|e| e.message())?.dry_run,
+            "keyless artifact preview works",
+        )?;
+        let keys = workspace_keys_dir(&workspace);
+        ensure(
+            !keys.exists() && !output.exists(),
+            "preview creates no keys or output",
+        )?;
+        fs::write(&keys, b"obstructed keys").map_err(|e| e.to_string())?;
+        options.dry_run = false;
+        let error = create_backup(&options)
+            .err()
+            .ok_or("published unsigned artifact registry")?;
+        ensure(
+            error
+                .message()
+                .contains("require source-store authentication"),
+            "artifact registry requires source keys",
+        )?;
+        ensure(!output.exists(), "no unsigned artifact publication")?;
+        ensure_equal(
+            fs::read(&keys).map_err(|e| e.to_string())?,
+            b"obstructed keys".to_vec(),
+            "key obstruction untouched",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn backup_metadata_redacts_secret_keys_without_losing_structure() -> TestResult {
+        let original = json!({"schema":"example.v1","items":[{"api_key=key-canary-one":"api_key=value-canary-one","api_key=key-canary-two":7}],"count":2});
+        for level in [RedactionLevel::Standard, RedactionLevel::Full] {
+            let redacted =
+                redact_work_history_json(&original.to_string(), level).map_err(|e| e.message())?;
+            ensure(
+                !redacted.contains("canary"),
+                "metadata secret keys and values absent",
+            )?;
+            let value: JsonValue = serde_json::from_str(&redacted).map_err(|e| e.to_string())?;
+            ensure_equal(
+                value["count"].as_u64(),
+                Some(2),
+                "numeric metadata retained",
+            )?;
+            let item = value["items"][0].as_object().ok_or("metadata shape lost")?;
+            ensure_equal(
+                item.len(),
+                2,
+                "distinct secret keys retained as distinct opaque fields",
+            )?;
+            ensure(
+                item.values().any(|v| v.as_u64() == Some(7)),
+                "metadata value remains linked to its opaque key",
+            )?;
+        }
+        let text = original.to_string();
+        ensure_equal(
+            redact_work_history_json(&text, RedactionLevel::None).map_err(|e| e.message())?,
+            text,
+            "unredacted metadata lossless",
+        )?;
+        let key = "api_key=collision-canary";
+        let replacement = format!("backup-key:{}", blake3::hash(key.as_bytes()).to_hex());
+        let collision = json!({key:1,replacement:2}).to_string();
+        ensure(
+            redact_work_history_json(&collision, RedactionLevel::Standard).is_err(),
+            "collision refuses backup instead of discarding metadata",
+        )?;
         Ok(())
     }
 

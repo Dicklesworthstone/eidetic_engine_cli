@@ -1521,6 +1521,15 @@ outcomes, and timestamps are preserved; free text follows the backup's redaction
 level. Ordinary error codes remain searchable under full redaction. Recovery
 does not execute repairs or claim that historical proofs were rerun.
 
+Artifact registry metadata, snippets, and evidence links are also recovered before
+the search index is rebuilt. Artifact inspection, listing, and lexical search work
+against the restored store. Original file hashes and timestamps are retained;
+valid snippet hashes follow redaction with an audit trail. Invalid hashes are
+retained in that audit and cleared from changed snippets, so redaction cannot
+turn a bad hash into apparent proof. Registry recovery preserves references to external files and does
+not copy or verify their raw bytes. Backup metadata redaction scans both JSON
+keys and values, preserving distinct fields or rejecting a collision.
+
 ### Diagnostics, eval, ops
 
 | Command | Purpose |
