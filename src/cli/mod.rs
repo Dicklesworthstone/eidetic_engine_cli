@@ -74836,6 +74836,8 @@ mod tests {
 
     #[test]
     fn backup_key_passphrase_reader_preserves_spaces_and_bounds_input() -> TestResult {
+        use super::read_backup_key_passphrase;
+
         for input in [
             "  twelve spaces matter  ",
             "  twelve spaces matter  \n",
