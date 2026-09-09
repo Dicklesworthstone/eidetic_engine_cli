@@ -47510,7 +47510,7 @@ mod tests {
         connection.migrate()?;
         setup_workspace(&connection)?;
         seed_memory(&connection, "mem_01234567890123456789012345")?;
-        let profile = StoredAgentContextProfile {
+        let profile = super::StoredAgentContextProfile {
             workspace_id: "wsp_01234567890123456789012345".to_owned(),
             agent_name: "RecoveredAgent".to_owned(),
             memory_id: "mem_01234567890123456789012345".to_owned(),
@@ -47545,22 +47545,23 @@ mod tests {
             &Some(profile.clone()),
             "existing profile untouched",
         )?;
-        let updated =
-            connection.upsert_agent_context_profile_event(&UpsertAgentContextProfileInput {
+        let updated = connection.upsert_agent_context_profile_event(
+            &super::UpsertAgentContextProfileInput {
                 workspace_id: profile.workspace_id.clone(),
                 agent_name: profile.agent_name.clone(),
                 memory_id: profile.memory_id.clone(),
                 counts_delta: AgentContextProfileCounts::new(1, 0, 0),
                 last_seen_at: Some("2026-09-02T01:02:03Z".to_owned()),
                 weight_cached: 0.05,
-            })?;
+            },
+        )?;
         ensure_equal(
             &updated.counts,
             &AgentContextProfileCounts::new(18, 3, 2),
             "ordinary learning continues once",
         )?;
         for weight in [f64::NAN, f64::INFINITY, 0.051, -0.051] {
-            let invalid = StoredAgentContextProfile {
+            let invalid = super::StoredAgentContextProfile {
                 agent_name: "InvalidAgent".to_owned(),
                 weight_cached: weight,
                 ..profile.clone()
