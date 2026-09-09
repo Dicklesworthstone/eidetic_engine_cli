@@ -114,6 +114,7 @@ pub mod read_fence;
 pub mod recall;
 pub mod recorder;
 pub mod rehearse;
+pub mod remote_embed;
 pub mod repro;
 pub mod resume;
 pub mod retrieval_affinity;

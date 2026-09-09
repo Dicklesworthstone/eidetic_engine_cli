@@ -18325,8 +18325,10 @@ mod tests {
     #[test]
     fn search_report_delayed_render_uses_captured_embed_backend() {
         let active_backend = crate::core::index::active_embed_backend();
+        // Any backend other than the ambient one works as the fixture; the
+        // assertion below is that the captured value survives the later render.
         let captured_backend = match active_backend {
-            EmbedBackend::NeuralLocal => EmbedBackend::HashFallback,
+            EmbedBackend::NeuralLocal | EmbedBackend::RemoteApi => EmbedBackend::HashFallback,
             EmbedBackend::HashFallback => EmbedBackend::NeuralLocal,
         };
         let mut report = rerank_test_report(Vec::new(), Vec::new(), false);

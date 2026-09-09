@@ -115,6 +115,8 @@ pub enum EnvVar {
     DoctorBlastRadius,
     /// `EE_E2E_RETENTION_MANIFEST`
     E2eRetentionManifest,
+    /// `EE_EMBED_BACKEND`
+    EmbedBackend,
     /// `EE_EMBED_DEDUP_COSINE_FLOOR`
     EmbedDedupCosineFloor,
     /// `EE_EMBED_DEDUP_ENABLED`
@@ -127,6 +129,14 @@ pub enum EnvVar {
     EmbedModelDir,
     /// `EE_EMBED_MODEL_PATH`
     EmbedModelPath,
+    /// `EE_EMBED_REMOTE_API_KEY`
+    EmbedRemoteApiKey,
+    /// `EE_EMBED_REMOTE_DIMENSION`
+    EmbedRemoteDimension,
+    /// `EE_EMBED_REMOTE_MODEL`
+    EmbedRemoteModel,
+    /// `EE_EMBED_REMOTE_URL`
+    EmbedRemoteUrl,
     /// `EE_EXPERIMENTAL_TRIAD`
     ExperimentalTriad,
     /// `EE_FLIGHT_RECORDER`
@@ -339,12 +349,17 @@ impl EnvVar {
             Self::DisableRememberSearchNeighbors,
             Self::DoctorBlastRadius,
             Self::E2eRetentionManifest,
+            Self::EmbedBackend,
             Self::EmbedDedupCosineFloor,
             Self::EmbedDedupEnabled,
             Self::EmbedDedupHammingK,
             Self::EmbedDownload,
             Self::EmbedModelDir,
             Self::EmbedModelPath,
+            Self::EmbedRemoteApiKey,
+            Self::EmbedRemoteDimension,
+            Self::EmbedRemoteModel,
+            Self::EmbedRemoteUrl,
             Self::ExperimentalTriad,
             Self::FlightRecorder,
             Self::FlightRecorderDir,
@@ -467,12 +482,17 @@ impl EnvVar {
             Self::DisableRememberSearchNeighbors => "EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS",
             Self::DoctorBlastRadius => "EE_DOCTOR_BLAST_RADIUS",
             Self::E2eRetentionManifest => "EE_E2E_RETENTION_MANIFEST",
+            Self::EmbedBackend => "EE_EMBED_BACKEND",
             Self::EmbedDedupCosineFloor => "EE_EMBED_DEDUP_COSINE_FLOOR",
             Self::EmbedDedupEnabled => "EE_EMBED_DEDUP_ENABLED",
             Self::EmbedDedupHammingK => "EE_EMBED_DEDUP_HAMMING_K",
             Self::EmbedDownload => "EE_EMBED_DOWNLOAD",
             Self::EmbedModelDir => "EE_EMBED_MODEL_DIR",
             Self::EmbedModelPath => "EE_EMBED_MODEL_PATH",
+            Self::EmbedRemoteApiKey => "EE_EMBED_REMOTE_API_KEY",
+            Self::EmbedRemoteDimension => "EE_EMBED_REMOTE_DIMENSION",
+            Self::EmbedRemoteModel => "EE_EMBED_REMOTE_MODEL",
+            Self::EmbedRemoteUrl => "EE_EMBED_REMOTE_URL",
             Self::ExperimentalTriad => "EE_EXPERIMENTAL_TRIAD",
             Self::FlightRecorder => "EE_FLIGHT_RECORDER",
             Self::FlightRecorderDir => "EE_FLIGHT_RECORDER_DIR",
@@ -649,6 +669,9 @@ impl EnvVar {
             Self::EmbedDedupCosineFloor => {
                 "Set the cosine-similarity floor for insert-time embedding dedup confirmation."
             }
+            Self::EmbedBackend => {
+                "Select the embedding backend: local for the bundled model, or remote for an OpenAI-compatible endpoint."
+            }
             Self::EmbedDedupEnabled => {
                 "Enable insert-time embedding deduplication after storage and write-path gates are wired."
             }
@@ -663,6 +686,18 @@ impl EnvVar {
             }
             Self::EmbedModelPath => {
                 "Fault-injection path used to simulate an unavailable search embedder; this does not load alternate models."
+            }
+            Self::EmbedRemoteApiKey => {
+                "Optional bearer token sent to the remote embedding endpoint; the value is never printed."
+            }
+            Self::EmbedRemoteDimension => {
+                "Pin the remote embedding dimension instead of discovering it from the first response."
+            }
+            Self::EmbedRemoteModel => {
+                "Model tag requested from the remote embedding endpoint, for example all-minilm."
+            }
+            Self::EmbedRemoteUrl => {
+                "Base URL or full endpoint of an OpenAI-compatible /v1/embeddings server."
             }
             Self::ExperimentalTriad => {
                 "Compatibility no-op for the promoted ee pack/note/why aliases."
@@ -889,6 +924,7 @@ impl EnvVar {
             Self::TailscalePeerProbeTimeoutMs => Some("750"),
             Self::TailscaleDiscoveryBudgetMs => Some("5000"),
             Self::TailscaleRespondMode => Some("service_tag"),
+            Self::EmbedBackend => Some("local"),
             Self::EmbedDedupCosineFloor => Some("0.97"),
             Self::EmbedDedupEnabled => Some("false"),
             Self::EmbedDedupHammingK => Some("12"),
@@ -942,7 +978,10 @@ impl EnvVar {
     /// Whether capabilities output may include this variable's current value.
     #[must_use]
     pub const fn exposes_value(self) -> bool {
-        !matches!(self, Self::ReflectionHmacKeyPath | Self::ServeToken)
+        !matches!(
+            self,
+            Self::EmbedRemoteApiKey | Self::ReflectionHmacKeyPath | Self::ServeToken
+        )
     }
 
     /// Broad documentation category for agent docs and env-var catalogs.
@@ -987,12 +1026,17 @@ impl EnvVar {
             | Self::TestLogLevel
             | Self::TestLogPath
             | Self::TestLogTestId => "diagnostics",
-            Self::EmbedDedupCosineFloor
+            Self::EmbedBackend
+            | Self::EmbedDedupCosineFloor
             | Self::EmbedDedupEnabled
             | Self::EmbedDedupHammingK
             | Self::EmbedDownload
             | Self::EmbedModelDir
-            | Self::EmbedModelPath => "embeddings",
+            | Self::EmbedModelPath
+            | Self::EmbedRemoteApiKey
+            | Self::EmbedRemoteDimension
+            | Self::EmbedRemoteModel
+            | Self::EmbedRemoteUrl => "embeddings",
             Self::JournalEnabled => "memory",
             Self::MeshEnabled
             | Self::MeshMode

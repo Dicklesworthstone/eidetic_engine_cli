@@ -30,9 +30,10 @@ use crate::db::{
     ModelRegistryUpsertOutcome, StoredModelRegistryEntry,
 };
 use crate::models::DomainError;
+use crate::models::EMBEDDING_POSTURE_MODE_NEURAL_REMOTE;
 use crate::models::model_registry::{
-    EmbeddingMetadataRecord, EmbeddingPooling, ModelDistanceMetric, ModelProvider, ModelPurpose,
-    ModelRegistryStatus,
+    EmbedBackend, EmbeddingMetadataRecord, EmbeddingPooling, ModelDistanceMetric, ModelProvider,
+    ModelPurpose, ModelRegistryStatus,
 };
 use frankensearch::Model2VecEmbedder;
 use frankensearch::embed::{
@@ -289,6 +290,11 @@ impl ModelRegistryEntryView {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelStatusActive {
     pub posture: EmbeddingPosture,
+    /// Which embedding backend is actually serving retrieval (GH #34).
+    ///
+    /// Derived from the posture rather than from process-global state so
+    /// `ee model status` describes the workspace it was pointed at.
+    pub backend: EmbedBackend,
     pub fast_model_id: String,
     pub fast_dimension: usize,
     pub quality_model_id: Option<String>,
@@ -299,12 +305,27 @@ pub struct ModelStatusActive {
     pub selected_registry_entry: Option<ModelRegistryEntryView>,
 }
 
+/// Map an embedding posture onto the small backend vocabulary.
+///
+/// A remote embedder is semantic too, so the remote mode has to be tested
+/// before the semantic flag or a remote endpoint would report as `neural_local`.
+fn backend_for_posture(posture: &EmbeddingPosture) -> EmbedBackend {
+    if posture.mode == EMBEDDING_POSTURE_MODE_NEURAL_REMOTE {
+        EmbedBackend::RemoteApi
+    } else if posture.semantic {
+        EmbedBackend::NeuralLocal
+    } else {
+        EmbedBackend::HashFallback
+    }
+}
+
 impl ModelStatusActive {
     fn from_embedding_posture(
         posture: EmbeddingPosture,
         selected_registry_entry: Option<ModelRegistryEntryView>,
     ) -> Self {
         Self {
+            backend: backend_for_posture(&posture),
             fast_model_id: posture.fast_model_id.clone(),
             fast_dimension: posture.fast_dimension,
             quality_model_id: posture.quality_model_id.clone(),
@@ -320,6 +341,7 @@ impl ModelStatusActive {
     fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
             "posture": self.posture.data_json(),
+            "backend": self.backend.as_str(),
             "fastModelId": self.fast_model_id,
             "fastDimension": self.fast_dimension,
             "qualityModelId": self.quality_model_id,
@@ -774,6 +796,7 @@ impl ModelStatusReport {
     #[must_use]
     pub fn human_summary(&self) -> String {
         let mut output = String::new();
+        output.push_str(&format!("Backend: {}\n", self.active.backend.as_str()));
         output.push_str(&format!(
             "Active embedder: {} (dim {}{}semantic={}, deterministic={})\n",
             self.active.fast_model_id,
@@ -5657,5 +5680,59 @@ mod tests {
             !same_embedder_identity("model2vec/", "model2vec/"),
             "prefix-only ids never match",
         )
+    }
+}
+
+#[cfg(test)]
+mod remote_backend_status_tests {
+    use super::*;
+    use crate::core::index::EmbeddingPosture;
+    use crate::models::{
+        EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH, EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
+        EMBEDDING_POSTURE_SCHEMA_V1,
+    };
+
+    fn posture(mode: &'static str, semantic: bool) -> EmbeddingPosture {
+        EmbeddingPosture {
+            schema: EMBEDDING_POSTURE_SCHEMA_V1,
+            mode,
+            semantic,
+            source: "test".to_owned(),
+            fast_model_id: "test-embedder".to_owned(),
+            fast_dimension: 384,
+            quality_model_id: None,
+            quality_dimension: None,
+            deterministic: true,
+            registered_model_count: 0,
+            available_model_count: 0,
+            selected_registry_model: None,
+            vector_coverage: crate::core::index::EmbeddingVectorCoverage::default(),
+        }
+    }
+
+    #[test]
+    fn a_remote_posture_reports_the_remote_backend() {
+        // The remote embedder is semantic too, so the mode must win over the
+        // semantic flag or this would report neural_local.
+        assert_eq!(
+            backend_for_posture(&posture(EMBEDDING_POSTURE_MODE_NEURAL_REMOTE, true)),
+            EmbedBackend::RemoteApi
+        );
+    }
+
+    #[test]
+    fn a_local_semantic_posture_still_reports_neural_local() {
+        assert_eq!(
+            backend_for_posture(&posture(EMBEDDING_POSTURE_MODE_NEURAL_LOCAL, true)),
+            EmbedBackend::NeuralLocal
+        );
+    }
+
+    #[test]
+    fn a_non_semantic_posture_reports_the_hash_fallback() {
+        assert_eq!(
+            backend_for_posture(&posture(EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH, false)),
+            EmbedBackend::HashFallback
+        );
     }
 }

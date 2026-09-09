@@ -14,6 +14,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
+use crate::core::remote_embed::{
+    EmbedBackendSelection, RemoteEmbedResolution, configured_embed_backend,
+    resolve_configured_remote_embedder,
+};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, CreateSearchIndexJobInput, DbConnection, DbError,
     DbOperation, EVIDENCE_CANONICAL_PROVENANCE_REVISION, EVIDENCE_SCREENING_VERSION,
@@ -28,7 +32,8 @@ use crate::models::model_registry::{
 use crate::models::{CorpusRevision, INDEX_INTAKE_FALLBACK_CORPUS_REVISION_MISMATCH, MemoryId};
 use crate::models::{
     EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH, EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
-    EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, EMBEDDING_POSTURE_SCHEMA_V1, EmbedBackend,
+    EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, EMBEDDING_POSTURE_MODE_NEURAL_REMOTE,
+    EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_UNAVAILABLE, EMBEDDING_POSTURE_SCHEMA_V1, EmbedBackend,
 };
 use crate::search::{
     ARTIFACT_INDEX_PROJECTION_SCHEMA_V1, CanonicalSearchDocument,
@@ -4168,6 +4173,11 @@ struct ParsedIndexMetadata {
     document_count: Option<u32>,
     document_counts: Option<IndexDocumentCounts>,
     tier_document_counts: Option<IndexTierDocumentCounts>,
+    /// Fast-tier embedder id stamped at publish time, when the index carries
+    /// vectors. Absent for a lexical/hash-tier index (GH #34).
+    stored_model_id: Option<String>,
+    /// Fast-tier vector dimension stamped at publish time (GH #34).
+    stored_dimension: Option<u32>,
 }
 
 fn parse_index_metadata(index_dir: &Path) -> Result<Option<ParsedIndexMetadata>, String> {
@@ -4240,7 +4250,70 @@ fn parse_index_metadata(index_dir: &Path) -> Result<Option<ParsedIndexMetadata>,
         document_count,
         document_counts,
         tier_document_counts,
+        stored_model_id: object
+            .get("storedModelId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        stored_dimension: object
+            .get("storedDimension")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|dimension| u32::try_from(dimension).ok()),
     }))
+}
+
+/// Semantic identity stamped into `meta.json`, when the index carries vectors.
+fn stored_semantic_identity(metadata: &ParsedIndexMetadata) -> Option<(&str, u32)> {
+    Some((
+        metadata.stored_model_id.as_deref()?,
+        metadata.stored_dimension?,
+    ))
+}
+
+/// Semantic identity of the embedder that has actually been resolved in this
+/// process, when one has.
+///
+/// Deliberately reads [`DEFAULT_SEARCH_EMBEDDER`] without forcing it: a plain
+/// metadata read must not trigger a model load, and for the remote backend it
+/// must not trigger a network probe. When nothing has been resolved there is no
+/// expectation to compare against, so the compatibility check stays silent.
+fn active_semantic_identity() -> Option<(String, u32)> {
+    let selection = DEFAULT_SEARCH_EMBEDDER.get()?;
+    let fast_embedder = selection.stack.fast();
+    if !fast_embedder.is_semantic() || !fast_embedder.is_ready() {
+        return None;
+    }
+    let dimension = u32::try_from(fast_embedder.dimension()).ok()?;
+    Some((fast_embedder.id().to_owned(), dimension))
+}
+
+/// GH #34: vectors from two different embedding spaces must never share one
+/// index.
+///
+/// Only compares when BOTH sides actually declare a semantic identity: a
+/// lexical/hash-tier index legitimately carries no fingerprint, and a process
+/// that has not resolved an embedder has nothing to expect. Dimension is
+/// checked before model id because the two usually change together and the
+/// dimension is the more precise diagnosis.
+fn embedding_space_compatibility_error(
+    metadata_path: &Path,
+    stored: Option<(&str, u32)>,
+    active: Option<(&str, u32)>,
+) -> Option<String> {
+    let (stored_model_id, stored_dimension) = stored?;
+    let (active_model_id, active_dimension) = active?;
+    if stored_dimension != active_dimension {
+        return Some(format!(
+            "index metadata '{}' was built at {stored_dimension}d by embedder '{stored_model_id}', but the active embedder '{active_model_id}' produces {active_dimension}d vectors; embedding dimensions cannot be mixed and a full index rebuild is required",
+            metadata_path.display()
+        ));
+    }
+    if stored_model_id != active_model_id {
+        return Some(format!(
+            "index metadata '{}' was built by embedder '{stored_model_id}', but the active embedder is '{active_model_id}'; vectors from different embedding backends cannot be mixed and a full index rebuild is required",
+            metadata_path.display()
+        ));
+    }
+    None
 }
 
 fn index_metadata_compatibility_error(
@@ -4261,6 +4334,16 @@ fn index_metadata_compatibility_error(
             metadata_path.display(),
             metadata.schema
         ));
+    }
+    let active_identity = active_semantic_identity();
+    if let Some(error) = embedding_space_compatibility_error(
+        metadata_path,
+        stored_semantic_identity(metadata),
+        active_identity
+            .as_ref()
+            .map(|(model_id, dimension)| (model_id.as_str(), *dimension)),
+    ) {
+        return Some(error);
     }
     if metadata.evidence_security_policy_epoch != Some(u64::from(EVIDENCE_SECURITY_POLICY_EPOCH)) {
         return Some(format!(
@@ -5223,6 +5306,7 @@ const EE_DOWNLOAD_STATE_PENDING: u8 = 0;
 const EE_DOWNLOAD_STATE_READY: u8 = 1;
 const EE_DOWNLOAD_STATE_FAILED: u8 = 2;
 static DEFAULT_SEARCH_EMBEDDER: OnceLock<DefaultSearchEmbedder> = OnceLock::new();
+static ACTIVE_REMOTE_EMBEDDER: OnceLock<ActiveRemoteEmbedder> = OnceLock::new();
 static REGISTERED_MODEL2VEC_CACHE: OnceLock<RegisteredModel2VecCache> = OnceLock::new();
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5265,6 +5349,81 @@ impl RegisteredModel2VecCache {
         });
         Some(embedder)
     }
+}
+
+/// Outcome of bringing up the operator-configured remote embedding backend.
+///
+/// Resolved once per process: the dimension probe costs an HTTP round trip, and
+/// every later caller must agree on the same answer or the index would record
+/// two different embedding spaces in one generation.
+enum ActiveRemoteEmbedder {
+    /// `EE_EMBED_BACKEND` is not `remote`.
+    NotConfigured,
+    /// A remote endpoint answered and its dimension is known.
+    Ready(Arc<dyn crate::search::Embedder>),
+    /// A remote endpoint was requested but could not be brought up. Never a
+    /// silent fallback: `ee model status` and `ee doctor` both name this.
+    Failed(RemoteEmbedResolution),
+}
+
+/// Resolve (once) the configured remote embedding backend.
+fn active_remote_embedder() -> &'static ActiveRemoteEmbedder {
+    ACTIVE_REMOTE_EMBEDDER.get_or_init(|| {
+        if configured_embed_backend() != EmbedBackendSelection::Remote {
+            return ActiveRemoteEmbedder::NotConfigured;
+        }
+        match resolve_configured_remote_embedder() {
+            Ok(Some(embedder)) => {
+                tracing::info!(
+                    target: "ee::index::embedder",
+                    endpoint = %embedder.settings().redacted_endpoint(),
+                    model = %embedder.settings().model,
+                    dimension = embedder.settings().dimension.unwrap_or_default(),
+                    "remote embedding backend active"
+                );
+                ActiveRemoteEmbedder::Ready(Arc::new(embedder) as Arc<dyn crate::search::Embedder>)
+            }
+            // `Ok(None)` cannot happen here: the backend check above already
+            // established that `remote` is configured. Treat it as a failure
+            // rather than pretending the local backend was requested.
+            Ok(None) => ActiveRemoteEmbedder::Failed(RemoteEmbedResolution::Config(
+                crate::core::remote_embed::RemoteEmbedConfigError::MissingUrl,
+            )),
+            Err(error) => {
+                tracing::error!(
+                    target: "ee::index::embedder",
+                    code = error.code(),
+                    "remote embedding backend was configured but could not be used"
+                );
+                ActiveRemoteEmbedder::Failed(error)
+            }
+        }
+    })
+}
+
+/// The remote backend failure, when one is configured and broken.
+pub(crate) fn active_remote_embed_failure() -> Option<&'static RemoteEmbedResolution> {
+    match active_remote_embedder() {
+        ActiveRemoteEmbedder::Failed(error) => Some(error),
+        ActiveRemoteEmbedder::NotConfigured | ActiveRemoteEmbedder::Ready(_) => None,
+    }
+}
+
+/// Descriptor for the active remote embedder, when one is serving.
+fn remote_embedder_descriptor() -> Option<EmbedderDescriptor> {
+    match active_remote_embedder() {
+        ActiveRemoteEmbedder::Ready(embedder) => {
+            Some(EmbedderDescriptor::from_embedder(embedder.as_ref()))
+        }
+        ActiveRemoteEmbedder::NotConfigured | ActiveRemoteEmbedder::Failed(_) => None,
+    }
+}
+
+/// Hash-tier descriptors marked as "the remote backend you asked for is down".
+fn remote_unavailable_descriptors() -> (EmbedderDescriptor, Option<EmbedderDescriptor>) {
+    let (mut fast, quality) = stack_descriptors(&hash_fallback_embedder_stack());
+    fast.remote_unavailable = true;
+    (fast, quality)
 }
 
 struct DefaultSearchEmbedder {
@@ -5356,6 +5515,25 @@ fn default_search_embedder_for_settings(settings: &EeEmbedderSettings) -> Defaul
         download_mode = ?settings.download_mode,
         "ee embedding model policy resolved"
     );
+
+    // An explicitly configured remote endpoint outranks local discovery: the
+    // operator asked for a specific embedding space, and quietly serving a
+    // different one would poison the index.
+    match active_remote_embedder() {
+        ActiveRemoteEmbedder::Ready(embedder) => {
+            return DefaultSearchEmbedder::ready(
+                EmbedderStack::from_parts(Arc::clone(embedder), None),
+                EmbedModelResolution::remote_ready(),
+            );
+        }
+        ActiveRemoteEmbedder::Failed(_) => {
+            return DefaultSearchEmbedder::ready(
+                hash_fallback_embedder_stack(),
+                EmbedModelResolution::remote_unavailable(),
+            );
+        }
+        ActiveRemoteEmbedder::NotConfigured => {}
+    }
 
     // The supported local stack has one pinned Model2Vec fast tier. Inspection
     // and execution share discovery; only execution constructs the real model.
@@ -5867,6 +6045,11 @@ pub(crate) fn potion_model_dir_verification(model_dir: &Path) -> Result<(), Sear
 #[must_use]
 pub(crate) fn active_embed_backend() -> EmbedBackend {
     if let Some(selection) = DEFAULT_SEARCH_EMBEDDER.get() {
+        // A remote embedder is also `is_semantic()`, so the backend must come
+        // from the recorded resolution rather than from semantic-ness alone.
+        if selection.model_resolution.source == EmbedModelSource::Remote {
+            return EmbedBackend::RemoteApi;
+        }
         return if selection.stack.fast().is_semantic() {
             EmbedBackend::NeuralLocal
         } else {
@@ -6580,6 +6763,11 @@ struct EmbedderDescriptor {
     semantic: bool,
     ready: bool,
     pending_download: bool,
+    /// A remote endpoint was configured but could not serve vectors, so this
+    /// descriptor describes the deterministic hash tier that ran instead.
+    /// Distinct from an ordinary hash fallback: the operator asked for a remote
+    /// backend and must be told it is not working.
+    remote_unavailable: bool,
 }
 
 impl EmbedderDescriptor {
@@ -6592,6 +6780,7 @@ impl EmbedderDescriptor {
             semantic: embedder.is_semantic(),
             ready: embedder.is_ready(),
             pending_download: embedder_reports_pending_model2vec_download(embedder),
+            remote_unavailable: false,
         }
     }
 
@@ -6604,6 +6793,7 @@ impl EmbedderDescriptor {
             semantic: true,
             ready: true,
             pending_download: false,
+            remote_unavailable: false,
         }
     }
 }
@@ -6627,6 +6817,13 @@ fn workspace_embedder_descriptors(
         .and_then(|overrides| overrides.get(workspace_id).cloned())
     {
         return Ok(stack_descriptors(&stack));
+    }
+    match active_remote_embedder() {
+        ActiveRemoteEmbedder::Ready(embedder) => {
+            return Ok((EmbedderDescriptor::from_embedder(embedder.as_ref()), None));
+        }
+        ActiveRemoteEmbedder::Failed(_) => return Ok(remote_unavailable_descriptors()),
+        ActiveRemoteEmbedder::NotConfigured => {}
     }
     if configured_embedder_model_root().is_none() {
         match resolve_registered_model2vec(db, workspace_id, |_| Ok(EmbedderDescriptor::potion()))?
@@ -6898,8 +7095,13 @@ fn embedding_posture_from_records(
         .count();
     let semantic =
         fast_embedder.semantic || quality_embedder.is_some_and(|embedder| embedder.semantic);
+    let remote_active = fast_embedder.category == ModelCategory::ApiEmbedder;
     let pending_local_download = !semantic && fast_embedder.pending_download;
-    let source = if semantic && selected_registry_model.is_some() {
+    let source = if remote_active {
+        "remote_endpoint"
+    } else if fast_embedder.remote_unavailable {
+        "remote_endpoint_unavailable"
+    } else if semantic && selected_registry_model.is_some() {
         "registry_observed"
     } else if semantic {
         "neural_local"
@@ -6908,7 +7110,11 @@ fn embedding_posture_from_records(
     } else {
         "frankensearch_hash_fallback"
     };
-    let mode = if semantic {
+    let mode = if remote_active {
+        EMBEDDING_POSTURE_MODE_NEURAL_REMOTE
+    } else if fast_embedder.remote_unavailable {
+        EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_UNAVAILABLE
+    } else if semantic {
         EMBEDDING_POSTURE_MODE_NEURAL_LOCAL
     } else if pending_local_download {
         EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING
@@ -6925,7 +7131,7 @@ fn embedding_posture_from_records(
         fast_dimension: fast_embedder.dimension,
         quality_model_id: quality_embedder.map(|embedder| embedder.id.clone()),
         quality_dimension: quality_embedder.map(|embedder| embedder.dimension),
-        deterministic: true,
+        deterministic: !remote_active,
         registered_model_count: records.len(),
         available_model_count,
         selected_registry_model,
@@ -16593,5 +16799,98 @@ mod tests {
             report.processed_jobs == 1,
             format!("workspace A's pending job must be processed: {report:?}"),
         )
+    }
+}
+
+#[cfg(test)]
+mod remote_embedding_space_tests {
+    use super::*;
+
+    fn metadata_path() -> PathBuf {
+        PathBuf::from("/tmp/ee-test-index/meta.json")
+    }
+
+    #[test]
+    fn compatible_identities_are_accepted() {
+        assert!(
+            embedding_space_compatibility_error(
+                &metadata_path(),
+                Some(("remote-api:all-minilm", 384)),
+                Some(("remote-api:all-minilm", 384)),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_dimension_change_is_refused_and_names_both_widths() {
+        let error = embedding_space_compatibility_error(
+            &metadata_path(),
+            Some(("remote-api:all-minilm", 384)),
+            Some(("potion-multilingual-128M", 256)),
+        )
+        .expect("dimension mismatch must be refused");
+        assert!(error.contains("384d"), "{error}");
+        assert!(error.contains("256d"), "{error}");
+        assert!(error.contains("cannot be mixed"), "{error}");
+        assert!(error.contains("rebuild"), "{error}");
+    }
+
+    #[test]
+    fn a_backend_change_at_the_same_width_is_still_refused() {
+        // 384d on both sides, but a different producer: the vectors are not
+        // comparable even though the widths line up.
+        let error = embedding_space_compatibility_error(
+            &metadata_path(),
+            Some(("remote-api:all-minilm", 384)),
+            Some(("remote-api:bge-small", 384)),
+        )
+        .expect("model change must be refused");
+        assert!(error.contains("remote-api:all-minilm"), "{error}");
+        assert!(error.contains("remote-api:bge-small"), "{error}");
+        assert!(error.contains("different embedding backends"), "{error}");
+    }
+
+    #[test]
+    fn a_missing_identity_on_either_side_stays_silent() {
+        // A lexical/hash index carries no fingerprint, and a process that has
+        // not resolved an embedder has no expectation. Neither is a conflict.
+        assert!(
+            embedding_space_compatibility_error(
+                &metadata_path(),
+                None,
+                Some(("potion-multilingual-128M", 256)),
+            )
+            .is_none()
+        );
+        assert!(
+            embedding_space_compatibility_error(
+                &metadata_path(),
+                Some(("potion-multilingual-128M", 256)),
+                None,
+            )
+            .is_none()
+        );
+        assert!(embedding_space_compatibility_error(&metadata_path(), None, None).is_none());
+    }
+
+    #[test]
+    fn parsed_metadata_recovers_the_stamped_identity() {
+        let metadata = ParsedIndexMetadata {
+            schema: None,
+            generation: None,
+            last_rebuild_at: None,
+            corpus_revision: None,
+            evidence_security_policy_epoch: None,
+            document_count: None,
+            document_counts: None,
+            tier_document_counts: None,
+            stored_model_id: Some("remote-api:all-minilm".to_owned()),
+            stored_dimension: Some(384),
+        };
+        assert_eq!(
+            stored_semantic_identity(&metadata),
+            Some(("remote-api:all-minilm", 384))
+        );
     }
 }

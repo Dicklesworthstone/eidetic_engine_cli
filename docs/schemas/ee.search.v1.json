@@ -29,7 +29,7 @@
       "additionalProperties": false,
       "properties": {
         "command": {"type": "string", "const": "search"},
-        "embed_backend": {"type": "string", "enum": ["neural_local", "hash_fallback"]},
+        "embed_backend": {"type": "string", "enum": ["neural_local", "remote_api", "hash_fallback"]},
         "query": {"type": "string"},
         "status": {"type": "string"},
         "request": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},

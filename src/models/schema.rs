@@ -107,6 +107,11 @@ pub const EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING: &str = "neural_local_pend
 pub const EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH: &str = "deterministic_hash";
 /// Embedding posture mode: a neural model exists but download/load policy blocked it.
 pub const EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_BLOCKED: &str = "neural_remote_blocked";
+/// Embedding posture mode: a configured remote embedding endpoint is serving vectors.
+pub const EMBEDDING_POSTURE_MODE_NEURAL_REMOTE: &str = "neural_remote";
+/// Embedding posture mode: a remote endpoint is configured but unusable, so the
+/// deterministic hash tier is active.
+pub const EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_UNAVAILABLE: &str = "neural_remote_unavailable";
 
 /// Schema identifier for the proactive ambient hook profile (bd-2vq2z.10).
 pub const AMBIENT_CONTEXT_SCHEMA_V1: &str = "ee.ambient_context.v1";

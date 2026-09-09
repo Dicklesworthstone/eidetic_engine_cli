@@ -28,6 +28,11 @@ pub const SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1: &str = "ee.semantic_model_admi
 #[serde(rename_all = "snake_case")]
 pub enum EmbedBackend {
     NeuralLocal,
+    /// An operator-configured OpenAI-compatible remote `/v1/embeddings`
+    /// endpoint (GH #34). Distinct from `NeuralLocal` because the vectors are
+    /// produced off-box by a model ee cannot verify, which changes both the
+    /// trust story and the failure modes callers must handle.
+    RemoteApi,
     #[default]
     HashFallback,
 }
@@ -46,6 +51,13 @@ pub enum EmbedModelSource {
     Configured,
     Cache,
     Downloaded,
+    /// An operator-configured remote embedding endpoint served this response.
+    Remote,
+    /// A remote endpoint was configured but could not serve a usable response,
+    /// so the deterministic hash tier ran instead. Kept distinct from
+    /// `DeterministicHash` so an unreachable endpoint is never mistaken for a
+    /// machine that was never configured for one.
+    RemoteUnavailable,
     #[default]
     DeterministicHash,
     RegistryRejected,
@@ -59,6 +71,8 @@ impl EmbedModelSource {
             Self::Configured => "configured",
             Self::Cache => "cache",
             Self::Downloaded => "downloaded",
+            Self::Remote => "remote",
+            Self::RemoteUnavailable => "remote_unavailable",
             Self::DeterministicHash => "deterministic_hash",
             Self::RegistryRejected => "registry_rejected",
         }
@@ -71,9 +85,11 @@ impl EmbedModelSource {
                 self,
                 Self::Registered | Self::Configured | Self::Cache | Self::Downloaded
             ),
-            EmbedBackend::HashFallback => {
-                matches!(self, Self::DeterministicHash | Self::RegistryRejected)
-            }
+            EmbedBackend::RemoteApi => matches!(self, Self::Remote),
+            EmbedBackend::HashFallback => matches!(
+                self,
+                Self::DeterministicHash | Self::RegistryRejected | Self::RemoteUnavailable
+            ),
         }
     }
 }
@@ -93,12 +109,14 @@ impl FromStr for EmbedModelSource {
             "configured" => Ok(Self::Configured),
             "cache" => Ok(Self::Cache),
             "downloaded" => Ok(Self::Downloaded),
+            "remote" => Ok(Self::Remote),
+            "remote_unavailable" => Ok(Self::RemoteUnavailable),
             "deterministic_hash" => Ok(Self::DeterministicHash),
             "registry_rejected" => Ok(Self::RegistryRejected),
             _ => Err(ParseModelRegistryValueError::new(
                 "embed_model_source",
                 input,
-                "registered, configured, cache, downloaded, deterministic_hash, registry_rejected",
+                "registered, configured, cache, downloaded, remote, remote_unavailable, deterministic_hash, registry_rejected",
             )),
         }
     }
@@ -231,6 +249,26 @@ impl EmbedModelResolution {
         }
     }
 
+    /// A configured remote endpoint served this response.
+    #[must_use]
+    pub const fn remote_ready() -> Self {
+        Self {
+            outcome: EmbedModelResolutionOutcome::Ready,
+            source: EmbedModelSource::Remote,
+            registry_rejection: None,
+        }
+    }
+
+    /// A remote endpoint was configured but unusable, so the hash tier ran.
+    #[must_use]
+    pub const fn remote_unavailable() -> Self {
+        Self {
+            outcome: EmbedModelResolutionOutcome::Fallback,
+            source: EmbedModelSource::RemoteUnavailable,
+            registry_rejection: None,
+        }
+    }
+
     #[must_use]
     pub const fn deterministic_hash() -> Self {
         Self {
@@ -263,13 +301,15 @@ impl EmbedModelResolution {
                 (
                     EmbedBackend::NeuralLocal,
                     EmbedModelResolutionOutcome::Ready
-                ) | (
-                    EmbedBackend::HashFallback,
-                    EmbedModelResolutionOutcome::Fallback
-                ) | (
-                    EmbedBackend::HashFallback,
-                    EmbedModelResolutionOutcome::Rejected
-                )
+                ) | (EmbedBackend::RemoteApi, EmbedModelResolutionOutcome::Ready)
+                    | (
+                        EmbedBackend::HashFallback,
+                        EmbedModelResolutionOutcome::Fallback
+                    )
+                    | (
+                        EmbedBackend::HashFallback,
+                        EmbedModelResolutionOutcome::Rejected
+                    )
             )
             && match (&self.registry_rejection, self.outcome) {
                 (
@@ -289,6 +329,7 @@ impl EmbedBackend {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NeuralLocal => "neural_local",
+            Self::RemoteApi => "remote_api",
             Self::HashFallback => "hash_fallback",
         }
     }
@@ -306,11 +347,12 @@ impl FromStr for EmbedBackend {
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         match normalized_model_registry_token(input).as_str() {
             "neural_local" => Ok(Self::NeuralLocal),
+            "remote_api" => Ok(Self::RemoteApi),
             "hash_fallback" => Ok(Self::HashFallback),
             _ => Err(ParseModelRegistryValueError::new(
                 "embed_backend",
                 input,
-                "neural_local, hash_fallback",
+                "neural_local, remote_api, hash_fallback",
             )),
         }
     }
@@ -2361,5 +2403,80 @@ mod tests {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod remote_backend_vocabulary_tests {
+    use super::*;
+
+    #[test]
+    fn embed_backend_wire_values_round_trip() {
+        for backend in [
+            EmbedBackend::NeuralLocal,
+            EmbedBackend::RemoteApi,
+            EmbedBackend::HashFallback,
+        ] {
+            assert_eq!(
+                backend.as_str().parse::<EmbedBackend>().expect("parses"),
+                backend
+            );
+        }
+        assert_eq!("remote_api".parse(), Ok(EmbedBackend::RemoteApi));
+    }
+
+    #[test]
+    fn embed_model_source_wire_values_round_trip() {
+        for source in [
+            EmbedModelSource::Registered,
+            EmbedModelSource::Configured,
+            EmbedModelSource::Cache,
+            EmbedModelSource::Downloaded,
+            EmbedModelSource::Remote,
+            EmbedModelSource::RemoteUnavailable,
+            EmbedModelSource::DeterministicHash,
+            EmbedModelSource::RegistryRejected,
+        ] {
+            assert_eq!(
+                source.as_str().parse::<EmbedModelSource>().expect("parses"),
+                source
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_remote_source_is_valid_for_the_remote_backend() {
+        assert!(EmbedModelSource::Remote.is_valid_for_backend(EmbedBackend::RemoteApi));
+        assert!(!EmbedModelSource::Remote.is_valid_for_backend(EmbedBackend::NeuralLocal));
+        assert!(!EmbedModelSource::Remote.is_valid_for_backend(EmbedBackend::HashFallback));
+        assert!(!EmbedModelSource::Cache.is_valid_for_backend(EmbedBackend::RemoteApi));
+    }
+
+    #[test]
+    fn an_unreachable_remote_endpoint_degrades_to_the_hash_backend() {
+        // A configured-but-broken endpoint is a hash-tier fallback, and must
+        // stay distinguishable from a machine that never configured one.
+        assert!(EmbedModelSource::RemoteUnavailable.is_valid_for_backend(EmbedBackend::HashFallback));
+        assert!(!EmbedModelSource::RemoteUnavailable.is_valid_for_backend(EmbedBackend::RemoteApi));
+        assert_ne!(
+            EmbedModelSource::RemoteUnavailable,
+            EmbedModelSource::DeterministicHash
+        );
+    }
+
+    #[test]
+    fn remote_resolutions_agree_with_their_backends() {
+        assert!(EmbedModelResolution::remote_ready().is_valid_for_backend(EmbedBackend::RemoteApi));
+        assert!(
+            !EmbedModelResolution::remote_ready().is_valid_for_backend(EmbedBackend::HashFallback)
+        );
+        assert!(
+            EmbedModelResolution::remote_unavailable()
+                .is_valid_for_backend(EmbedBackend::HashFallback)
+        );
+        assert!(
+            !EmbedModelResolution::remote_unavailable()
+                .is_valid_for_backend(EmbedBackend::RemoteApi)
+        );
     }
 }
