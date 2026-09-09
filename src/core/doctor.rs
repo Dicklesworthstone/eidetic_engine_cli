@@ -350,6 +350,7 @@ impl DoctorReport {
             check_runtime(),
             check_ee_install_path(),
             check_embedding_posture(workspace_path),
+            check_remote_embedding_endpoint(),
             check_reranker_posture(workspace_path),
             check_workspace(workspace_path),
             check_database(workspace_path),
@@ -2991,6 +2992,122 @@ fn check_embedding_posture(workspace_path: Option<&Path>) -> CheckResult {
         Err(error) => {
             embedding_posture_unavailable_check(&trap_present, &format!("index status: {error}"))
         }
+    }
+}
+
+/// Render the remote embedding endpoint check from already-resolved facts.
+///
+/// Pure and deterministic (no env, no network) so the rendering is unit
+/// testable; the caller injects the probe outcome.
+///
+/// Always [`CheckTier::Advisory`]: a broken remote endpoint degrades retrieval
+/// to the deterministic hash tier, which is the same "still works, worse"
+/// posture the embedding check reports, and must not flip top-line health.
+fn remote_embedding_endpoint_check_result(
+    outcome: &RemoteEndpointProbe,
+) -> CheckResult {
+    let check = match outcome {
+        RemoteEndpointProbe::NotConfigured => CheckResult::ok(
+            "remote_embedding_endpoint",
+            "Remote embedding endpoint: not configured (EE_EMBED_BACKEND=local). ee uses its bundled local embedder."
+                .to_owned(),
+        ),
+        RemoteEndpointProbe::Misconfigured { reason, repair } => CheckResult {
+            name: "remote_embedding_endpoint",
+            severity: CheckSeverity::Warning,
+            message: format!(
+                "Remote embedding endpoint: EE_EMBED_BACKEND=remote but the configuration is incomplete ({reason}). Retrieval runs on the deterministic-hash tier until this is fixed."
+            ),
+            error_code: None,
+            repair: Some(repair),
+            tier: CheckTier::Advisory,
+        },
+        RemoteEndpointProbe::Unreachable { endpoint, reason } => CheckResult {
+            name: "remote_embedding_endpoint",
+            severity: CheckSeverity::Warning,
+            message: format!(
+                "Remote embedding endpoint {endpoint} did not answer ({reason}). Retrieval runs on the deterministic-hash tier until it does."
+            ),
+            error_code: None,
+            repair: Some(
+                "Confirm the server is up and serving /v1/embeddings, e.g. `curl $EE_EMBED_REMOTE_URL/embeddings`; for Ollama, `ollama serve` plus `ollama pull <model>`.",
+            ),
+            tier: CheckTier::Advisory,
+        },
+        RemoteEndpointProbe::Ready {
+            endpoint,
+            model,
+            dimension,
+        } => CheckResult::ok(
+            "remote_embedding_endpoint",
+            format!(
+                "Remote embedding endpoint {endpoint} answered for model {model} ({dimension}d). Switching model or dimension needs `ee index rebuild`."
+            ),
+        ),
+    };
+    check.advisory()
+}
+
+/// Resolved facts about the configured remote embedding endpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RemoteEndpointProbe {
+    /// `EE_EMBED_BACKEND` is not `remote`; nothing to probe.
+    NotConfigured,
+    /// `remote` was requested but the URL/model/dimension is missing or bad.
+    Misconfigured {
+        reason: String,
+        repair: &'static str,
+    },
+    /// The endpoint is configured but did not serve a usable response.
+    Unreachable { endpoint: String, reason: String },
+    /// The endpoint answered and reported its dimension.
+    Ready {
+        endpoint: String,
+        model: String,
+        dimension: usize,
+    },
+}
+
+/// Advisory doctor check (GH #34): report and actively probe the configured
+/// OpenAI-compatible remote embedding endpoint.
+///
+/// The probe only runs when the operator actually selected the remote backend,
+/// so the default local install performs no network I/O in `ee doctor`.
+fn check_remote_embedding_endpoint() -> CheckResult {
+    remote_embedding_endpoint_check_result(&probe_remote_embedding_endpoint())
+}
+
+fn probe_remote_embedding_endpoint() -> RemoteEndpointProbe {
+    use crate::core::remote_embed::{
+        EmbedBackendSelection, RemoteEmbedSettings, configured_embed_backend,
+        probe_dimension_blocking,
+    };
+
+    if configured_embed_backend() != EmbedBackendSelection::Remote {
+        return RemoteEndpointProbe::NotConfigured;
+    }
+    let settings = match RemoteEmbedSettings::from_env() {
+        Ok(settings) => settings,
+        Err(error) => {
+            return RemoteEndpointProbe::Misconfigured {
+                reason: error.to_string(),
+                repair: error.repair(),
+            };
+        }
+    };
+    let endpoint = settings.redacted_endpoint();
+    // A configured dimension is a claim about the endpoint, not a substitute
+    // for reaching it, so doctor probes either way.
+    match probe_dimension_blocking(&settings) {
+        Ok(dimension) => RemoteEndpointProbe::Ready {
+            endpoint,
+            model: settings.model.clone(),
+            dimension,
+        },
+        Err(error) => RemoteEndpointProbe::Unreachable {
+            endpoint,
+            reason: error.to_string(),
+        },
     }
 }
 
