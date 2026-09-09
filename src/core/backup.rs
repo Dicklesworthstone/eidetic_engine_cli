@@ -21276,7 +21276,50 @@ mod tests {
             fs::read(&keys).map_err(|e| e.to_string())?,
             b"trust key obstruction".to_vec(),
             "key obstruction unchanged",
-        )
+        )?;
+
+        // A valid seal record paired with exposed memory content is an invalid
+        // source snapshot. Refuse it before publishing a backup that restore
+        // would reject, even when redaction could hide the inconsistency.
+        let (_exposed_tempdir, exposed_workspace, exposed_database) =
+            fixture_with_memory_content("unrevealed private experiment")
+                .map_err(|e| e.message())?;
+        let db = DbConnection::open_file(&exposed_database).map_err(|e| e.to_string())?;
+        db.insert_memory_seal_for_recovery(&chunk.seals[0])
+            .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        let before = fs::read(&exposed_database).map_err(|e| e.to_string())?;
+        let exposed_output = exposed_workspace.join("trust-backups");
+        for redaction in [RedactionLevel::None, RedactionLevel::Full] {
+            for dry_run in [true, false] {
+                let error = create_backup(&BackupCreateOptions {
+                    workspace_path: exposed_workspace.clone(),
+                    database_path: Some(exposed_database.clone()),
+                    output_dir: Some(exposed_output.clone()),
+                    label: None,
+                    redaction_level: redaction,
+                    include_derived: false,
+                    include_graph_cache: false,
+                    dry_run,
+                })
+                .err()
+                .ok_or("accepted exposed content before reveal")?;
+                ensure(
+                    error.message().contains("exposed content before reveal"),
+                    "inconsistent source seal rejected before export",
+                )?;
+                ensure(
+                    !exposed_output.exists() && !workspace_keys_dir(&exposed_workspace).exists(),
+                    "inconsistent source leaves output and keys absent",
+                )?;
+                ensure_equal(
+                    fs::read(&exposed_database).map_err(|e| e.to_string())?,
+                    before.clone(),
+                    "inconsistent source refusal leaves database unchanged",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     #[test]

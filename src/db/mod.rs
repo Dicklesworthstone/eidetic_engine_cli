@@ -22555,8 +22555,20 @@ impl DbConnection {
     /// Include sealed and revealed history, including tombstoned memories.
     pub fn list_memory_seals_for_recovery(&self, workspace_id: &str) -> Result<Vec<MemorySeal>> {
         self.query_for(DbOperation::Query,
-            "SELECT s.memory_id, s.content_commitment, s.sealed_at, s.revealed_at, s.reveal_verified FROM memory_seals s JOIN memories m ON m.id = s.memory_id WHERE m.workspace_id = ?1 ORDER BY s.memory_id",
-            &[Value::Text(workspace_id.to_owned())])?.iter().map(stored_memory_seal_from_row).collect()
+            "SELECT s.memory_id, s.content_commitment, s.sealed_at, s.revealed_at, s.reveal_verified, m.content FROM memory_seals s JOIN memories m ON m.id = s.memory_id WHERE m.workspace_id = ?1 ORDER BY s.memory_id",
+            &[Value::Text(workspace_id.to_owned())])?.iter().map(|row| {
+                let seal = stored_memory_seal_from_row(row)?;
+                if seal.is_sealed()
+                    && required_text(row, 5, DbOperation::Query, "content")?
+                        != crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+                {
+                    return Err(DbError::MalformedRow {
+                        operation: DbOperation::Query,
+                        message: "memory_seals recovery rejected exposed content before reveal".to_owned(),
+                    });
+                }
+                Ok(seal)
+            }).collect()
     }
 
     /// Restore public seal evidence without revealing content or replaying a reveal.
