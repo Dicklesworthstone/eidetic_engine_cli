@@ -7435,7 +7435,24 @@ fn redact_work_history_json(text: &str, level: RedactionLevel) -> Result<String,
                 // Keep ordinary structural keys under full redaction; secret
                 // keys receive distinct opaque names rather than one placeholder.
                 for (key, mut child) in std::mem::take(fields) {
-                    redact_value(&mut child, level)?;
+                    // A short credential can look harmless without its field
+                    // name. Probe the canonical detector with a non-secret value
+                    // so it classifies the field, not an unrelated nested value.
+                    // Matches inside the key itself do not classify its child.
+                    let field = serde_json::to_string(&key).map_err(work_history_error)?;
+                    let value_start = field.len() + 1;
+                    let probe = format!("{field}=backup-field-value");
+                    let secret_field = crate::policy::redact_secret_like_content(&probe)
+                        .matches
+                        .iter()
+                        .any(|m| m.start >= value_start);
+                    if secret_field && !child.is_null() {
+                        child = JsonValue::String(
+                            crate::output::jsonl_export::REDACTED_PLACEHOLDER.to_owned(),
+                        );
+                    } else {
+                        redact_value(&mut child, level)?;
+                    }
                     let safe_key = if redact_content(&key, RedactionLevel::Standard) == key {
                         key
                     } else {
@@ -17850,7 +17867,7 @@ mod tests {
             content_hash: hash_bytes(format!("original artifact bytes {n}").as_bytes()), media_type: "text/plain".to_owned(),
             size_bytes: 512, redaction_status: "checked".to_owned(), snippet_hash: Some(hash_bytes(snippet.as_bytes())), snippet: Some(snippet),
             provenance_uri: Some("https://example.invalid/evidence?api_key=artifact-canary".to_owned()),
-            metadata_json: json!({"title":"auroragate evidence", "api_key=metadata-key-canary": {"note":"api_key=metadata-value-canary"}, "count":3}).to_string(),
+            metadata_json: json!({"title":"auroragate evidence", "api_key=metadata-key-canary": {"note":"api_key=metadata-value-canary"}, "password":"short-canary", "count":3}).to_string(),
             created_at: "2026-09-01T00:00:00Z".to_owned(), updated_at: "2026-09-02T00:00:00Z".to_owned(),
         }
     }
@@ -18439,8 +18456,15 @@ mod tests {
 
     #[test]
     fn backup_metadata_redacts_secret_keys_without_losing_structure() -> TestResult {
-        let original = json!({"schema":"example.v1","items":[{"api_key=key-canary-one":"api_key=value-canary-one","api_key=key-canary-two":7}],"count":2});
-        for level in [RedactionLevel::Standard, RedactionLevel::Full] {
+        let original = json!({"schema":"example.v1","items":[{"api_key=key-canary-one":"api_key=value-canary-one","api_key=key-canary-two":7}],"count":2,
+            "nested":{"password":"lark","token":123456,"auth_token":["raven",8765],"note":"ordinary prose","author":"Ada","private_key":null}});
+        for level in [
+            RedactionLevel::Minimal,
+            RedactionLevel::Standard,
+            RedactionLevel::Strict,
+            RedactionLevel::Paranoid,
+            RedactionLevel::Full,
+        ] {
             let redacted =
                 redact_work_history_json(&original.to_string(), level).map_err(|e| e.message())?;
             ensure(
@@ -18463,6 +18487,34 @@ mod tests {
                 item.values().any(|v| v.as_u64() == Some(7)),
                 "metadata value remains linked to its opaque key",
             )?;
+            for secret in ["lark", "raven"] {
+                ensure(!redacted.contains(secret), "credential field value absent")?;
+            }
+            ensure_equal(
+                value["nested"]["token"].as_str(),
+                Some("[REDACTED]"),
+                "field context redacts numeric credentials",
+            )?;
+            let credential_key = format!("backup-key:{}", blake3::hash(b"auth_token").to_hex());
+            ensure_equal(
+                value["nested"][&credential_key].as_str(),
+                Some("[REDACTED]"),
+                "credential containers cannot expose string or numeric values",
+            )?;
+            ensure_equal(
+                value["nested"]["note"].as_str(),
+                Some(
+                    if matches!(level, RedactionLevel::Paranoid | RedactionLevel::Full) {
+                        "[REDACTED]"
+                    } else {
+                        "ordinary prose"
+                    },
+                ),
+                "ordinary metadata retains its requested redaction level",
+            )?;
+            let nested = value["nested"].as_object().ok_or("nested metadata lost")?;
+            ensure_equal(nested.len(), 6, "credential fields remain distinct")?;
+            ensure(nested.values().any(JsonValue::is_null), "null stays null")?;
         }
         let text = original.to_string();
         ensure_equal(

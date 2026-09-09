@@ -1528,7 +1528,8 @@ valid snippet hashes follow redaction with an audit trail. Invalid hashes are
 retained in that audit and cleared from changed snippets, so redaction cannot
 turn a bad hash into apparent proof. Registry recovery preserves references to external files and does
 not copy or verify their raw bytes. Backup metadata redaction scans both JSON
-keys and values, preserving distinct fields or rejecting a collision.
+keys and values, including short or numeric credentials identified by their field
+names, preserving distinct fields or rejecting a collision.
 
 ### Diagnostics, eval, ops
 
