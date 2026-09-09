@@ -16152,7 +16152,8 @@ pub struct CreateProcedureInput {
 }
 
 /// Stored reusable procedure row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredProcedure {
     pub id: String,
     pub workspace_id: String,
@@ -16189,7 +16190,8 @@ pub struct CreateProcedureEventInput {
 }
 
 /// Stored procedure history event.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredProcedureEvent {
     pub id: String,
     pub workspace_id: String,
@@ -19139,6 +19141,68 @@ impl DbConnection {
         )?;
 
         rows.iter().map(stored_procedure_from_row).collect()
+    }
+
+    /// Snapshot every procedure for recovery, without a UI listing limit.
+    pub fn list_procedures_for_recovery(&self, workspace_id: &str) -> Result<Vec<StoredProcedure>> {
+        self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, name, body, level, maturity, confidence, utility, importance, evidence_uris_json, helpful_count, harmful_count, created_at, updated_at, last_promoted_at, last_validated_at, retired_at, retire_reason FROM procedures WHERE workspace_id = ?1 ORDER BY id",
+            &[Value::Text(workspace_id.to_owned())],
+        )?.iter().map(stored_procedure_from_row).collect()
+    }
+
+    /// Read by workspace so an inconsistent parent link cannot silently lose an event.
+    pub fn list_procedure_events_for_recovery(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredProcedureEvent>> {
+        self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, procedure_id, event_type, from_maturity, to_maturity, reason, evidence_uris_json, actor, created_at FROM procedure_events WHERE workspace_id = ?1 ORDER BY id",
+            &[Value::Text(workspace_id.to_owned())],
+        )?.iter().map(stored_procedure_event_from_row).collect()
+    }
+
+    /// Restore the exact stored state. The recovery caller owns the transaction.
+    pub fn insert_procedure_for_recovery(&self, row: &StoredProcedure) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO procedures (id, workspace_id, name, body, level, maturity, confidence, utility, importance, evidence_uris_json, helpful_count, harmful_count, created_at, updated_at, last_promoted_at, last_validated_at, retired_at, retire_reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            &[
+                Value::Text(row.id.clone()), Value::Text(row.workspace_id.clone()),
+                Value::Text(row.name.clone()), Value::Text(row.body.clone()),
+                Value::Text(row.level.clone()), Value::Text(row.maturity.clone()),
+                Value::Float(row.confidence), Value::Float(row.utility), Value::Float(row.importance),
+                Value::Text(json_string_vec(&row.evidence_uris, "procedure evidence URIs")?),
+                Value::BigInt(i64::from(row.helpful_count)), Value::BigInt(i64::from(row.harmful_count)),
+                Value::Text(row.created_at.clone()), Value::Text(row.updated_at.clone()),
+                row.last_promoted_at.clone().map_or(Value::Null, Value::Text),
+                row.last_validated_at.clone().map_or(Value::Null, Value::Text),
+                row.retired_at.clone().map_or(Value::Null, Value::Text),
+                row.retire_reason.clone().map_or(Value::Null, Value::Text),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Restore history without applying its feedback to the already-restored counters.
+    pub fn insert_procedure_event_for_recovery(&self, row: &StoredProcedureEvent) -> Result<()> {
+        self.insert_procedure_event(
+            &row.id,
+            &CreateProcedureEventInput {
+                workspace_id: row.workspace_id.clone(),
+                procedure_id: row.procedure_id.clone(),
+                event_type: row.event_type.clone(),
+                from_maturity: row.from_maturity.clone(),
+                to_maturity: row.to_maturity.clone(),
+                reason: row.reason.clone(),
+                evidence_uris: row.evidence_uris.clone(),
+                actor: row.actor.clone(),
+                created_at: Some(row.created_at.clone()),
+            },
+        )?;
+        Ok(())
     }
 
     /// Get one procedure history event by ID.

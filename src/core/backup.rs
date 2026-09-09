@@ -30,8 +30,8 @@ use crate::db::{
     MeshStorageStatus, StoredAuditEntry, StoredCurationCandidate, StoredCurationTtlPolicy,
     StoredEpisodeAction, StoredEvidenceSpan, StoredFeedbackEvent, StoredGraphAlgorithmResult,
     StoredGraphAlgorithmWitness, StoredGraphSnapshot, StoredImportLedger, StoredJournalEntry,
-    StoredMemory, StoredMemoryLink, StoredPackHistory, StoredProceduralRule, StoredSearchIndexJob,
-    StoredSession, StoredTaskEpisode, audit_actions,
+    StoredMemory, StoredMemoryLink, StoredPackHistory, StoredProceduralRule, StoredProcedure,
+    StoredProcedureEvent, StoredSearchIndexJob, StoredSession, StoredTaskEpisode, audit_actions,
 };
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
@@ -62,6 +62,7 @@ const LEARNING_HISTORY_SCHEMA: &str = "ee.backup.learning_history.v1";
 const PACK_HISTORY_SCHEMA: &str = "ee.backup.pack_history.v1";
 const IMPORT_HISTORY_SCHEMA: &str = "ee.backup.import_history.v1";
 const CURATION_HISTORY_SCHEMA: &str = "ee.backup.curation_history.v1";
+const PROCEDURE_HISTORY_SCHEMA: &str = "ee.backup.procedure_history.v1";
 const MANIFEST_AUTH_FAMILY: &str = "ee.backup.manifest";
 const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
 const RECOVERY_KEYS_FILE: &str = "store-auth.recovery.json";
@@ -772,6 +773,8 @@ pub struct BackupRestoreReport {
     pub restored_import_ledger_count: u32,
     pub restored_curation_candidate_count: u32,
     pub restored_curation_policy_count: u32,
+    pub restored_procedure_count: u32,
+    pub restored_procedure_event_count: u32,
     pub restored_pack_history: BackupPackHistoryCounts,
     pub restored_graph_cache_count: u32,
     pub restored_derived: Vec<BackupRestoredDerivedAssetReport>,
@@ -813,6 +816,8 @@ impl BackupRestoreReport {
                 "importLedgersRestored": self.restored_import_ledger_count,
                 "curationCandidatesRestored": self.restored_curation_candidate_count,
                 "curationPoliciesRestored": self.restored_curation_policy_count,
+                "proceduresRestored": self.restored_procedure_count,
+                "procedureEventsRestored": self.restored_procedure_event_count,
                 "packHistoryRestored": self.restored_pack_history,
                 "graphCacheRowsRestored": self.restored_graph_cache_count,
                 "issues": self.issue_count,
@@ -827,7 +832,7 @@ impl BackupRestoreReport {
     pub fn human_summary(&self) -> String {
         let prefix = if self.dry_run { "DRY RUN: " } else { "" };
         format!(
-            "{prefix}backup restore {status}: {backup_id}\n  side path: {side_path}\n  restored db: {database}\n  imported memories: {imported} (duplicates: {duplicates})\n  restored task episodes: {episodes}\n  restored CASS sessions/evidence: {sessions}/{evidence}\n  restored import checkpoints: {checkpoints}\n  restored curation proposals/policies: {candidates}/{policies}\n  restored journal entries/index jobs: {journals}/{jobs}\n  restored rules/sources/tags/feedback: {rules}/{rule_sources}/{rule_tags}/{feedback}\n  restored packs: {packs}\n",
+            "{prefix}backup restore {status}: {backup_id}\n  side path: {side_path}\n  restored db: {database}\n  imported memories: {imported} (duplicates: {duplicates})\n  restored task episodes: {episodes}\n  restored CASS sessions/evidence: {sessions}/{evidence}\n  restored import checkpoints: {checkpoints}\n  restored curation proposals/policies: {candidates}/{policies}\n  restored procedures/events: {procedures}/{procedure_events}\n  restored journal entries/index jobs: {journals}/{jobs}\n  restored rules/sources/tags/feedback: {rules}/{rule_sources}/{rule_tags}/{feedback}\n  restored packs: {packs}\n",
             status = self.status,
             backup_id = self.backup_id,
             side_path = self.side_path,
@@ -840,6 +845,8 @@ impl BackupRestoreReport {
             checkpoints = self.restored_import_ledger_count,
             candidates = self.restored_curation_candidate_count,
             policies = self.restored_curation_policy_count,
+            procedures = self.restored_procedure_count,
+            procedure_events = self.restored_procedure_event_count,
             journals = self.restored_journal_entry_count,
             jobs = self.restored_search_index_job_count,
             rules = self.restored_rule_count,
@@ -1424,6 +1431,27 @@ struct BackupCurationCandidate {
     requires_fresh_review: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupProcedureHistory {
+    schema: String,
+    backup_id: String,
+    workspace_id: String,
+    chunk_index: usize,
+    chunk_count: usize,
+    procedures: Vec<BackupProcedure>,
+    events: Vec<StoredProcedureEvent>,
+    authentication: Option<AuthenticatedHeader>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupProcedure {
+    procedure: StoredProcedure,
+    /// Validation of original instructions does not validate a redacted copy.
+    requires_fresh_review: bool,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupPackHistoryCounts {
@@ -1612,17 +1640,17 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
             "export_restore_required",
             "derived_artifact_restore",
         ),
-        "curation_candidates" | "curation_ttl_policies" => BackupTablePolicy::new(
-            "learn",
-            "export_restore_required",
-            "derived_artifact_restore",
-        ),
+        "curation_candidates" | "curation_ttl_policies" | "procedures" | "procedure_events" => {
+            BackupTablePolicy::new(
+                "learn",
+                "export_restore_required",
+                "derived_artifact_restore",
+            )
+        }
         "feedback_quarantine"
         | "learning_observations"
         | "outcome_evidence_rows"
-        | "plan_recipes"
-        | "procedure_events"
-        | "procedures" => {
+        | "plan_recipes" => {
             BackupTablePolicy::new("learn", "export_restore_required", "not_implemented")
         }
         _ => BackupTablePolicy::new("maintain", "unclassified", "unclassified"),
@@ -1772,6 +1800,14 @@ fn reconcile_derived_recovery_inventory(
     }
 
     for (table, captured_count) in [
+        (
+            "procedures",
+            captured_derived_record_count(derived, "procedure_history", "procedures"),
+        ),
+        (
+            "procedure_events",
+            captured_derived_record_count(derived, "procedure_history", "events"),
+        ),
         ("pack_records", pack_counts.records),
         ("pack_items", pack_counts.items),
         ("pack_evidence_items", pack_counts.evidence_items),
@@ -1963,6 +1999,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &memory_ids,
                 &mut payloads,
             )?;
+            collect_procedure_history_payloads(
+                &connection,
+                workspace_id,
+                &backup_id,
+                &created_at,
+                options.redaction_level,
+                &memory_ids,
+                &mut payloads,
+            )?;
             collect_pack_history_payloads(
                 &connection,
                 workspace_id,
@@ -2009,20 +2054,21 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         && derived_payloads.iter().any(|p| {
             matches!(
                 p.report.kind.as_str(),
-                "learning_history" | "pack_history" | "import_history"
+                "learning_history" | "pack_history" | "import_history" | "procedure_history"
             ) || (p.report.kind == "curation_history"
                 && serde_json::from_slice::<BackupCurationHistory>(&p.bytes)
                     .is_ok_and(|chunk| !chunk.candidates.is_empty()))
         })
     {
         return Err(work_history_error(
-            "learned rules, feedback, pack history, import checkpoints, and curation history require source-store authentication; repair the workspace key store before creating this backup",
+            "learned rules, feedback, pack history, import checkpoints, curation history, and procedures require source-store authentication; repair the workspace key store before creating this backup",
         ));
     }
     authenticate_learning_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_pack_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_import_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_curation_payloads(&mut derived_payloads, store_auth.as_ref())?;
+    authenticate_procedure_payloads(&mut derived_payloads, store_auth.as_ref())?;
     let derived_reports = derived_payloads
         .iter()
         .map(|payload| payload.report.clone())
@@ -2959,6 +3005,8 @@ pub fn restore_backup_to_side_path(
             restored_import_ledger_count: 0,
             restored_curation_candidate_count: 0,
             restored_curation_policy_count: 0,
+            restored_procedure_count: 0,
+            restored_procedure_event_count: 0,
             restored_search_index_job_count: 0,
             restored_rule_count: 0,
             restored_rule_source_count: 0,
@@ -3094,6 +3142,12 @@ pub fn restore_backup_to_side_path(
         &inspect.backup_id,
         &restored_derived,
     )?;
+    let (restored_procedure_count, restored_procedure_event_count) = restore_procedure_history(
+        &restored_database_path,
+        &workspace_path,
+        &inspect.backup_id,
+        &restored_derived,
+    )?;
     let restored_pack_history = restore_pack_history(
         &restored_database_path,
         &workspace_path,
@@ -3194,6 +3248,8 @@ pub fn restore_backup_to_side_path(
         restored_import_ledger_count,
         restored_curation_candidate_count,
         restored_curation_policy_count,
+        restored_procedure_count,
+        restored_procedure_event_count,
         restored_search_index_job_count,
         restored_rule_count,
         restored_rule_source_count,
@@ -7299,7 +7355,13 @@ fn collect_learning_history_payloads(
             && let Some(id) = memory_ids.get(&event.target_id)
         {
             event.target_id.clone_from(id);
-        } else {
+        } else if !(event.target_type == "procedure"
+            && connection
+                .get_procedure(workspace_id, &event.target_id)
+                .map_err(work_history_error)?
+                .is_some())
+        {
+            // Known procedure IDs are relational keys, including under full redaction.
             event.target_id = redact_content(&event.target_id, redaction);
         }
         event.source_id = event
@@ -7345,6 +7407,304 @@ fn collect_learning_history_payloads(
         ));
     }
     Ok(())
+}
+
+/// Preserve only references resolved against this snapshot. Arbitrary evidence
+/// URIs may contain local paths or credentials and still need normal redaction.
+fn redact_procedure_uri(
+    uri: &str,
+    redaction: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
+    provenance_ids: &BTreeSet<String>,
+) -> String {
+    for prefix in ["memory://", "evidence://"] {
+        if let Some(id) = uri.strip_prefix(prefix)
+            && let Some(restored) = memory_ids.get(id)
+        {
+            return format!("{prefix}{restored}");
+        }
+    }
+    for prefix in ["cass-run://", "evidence://"] {
+        if let Some(id) = uri.strip_prefix(prefix)
+            && provenance_ids.contains(id)
+        {
+            return uri.to_owned();
+        }
+    }
+    redact_content(uri, redaction)
+}
+
+fn collect_procedure_history_payloads(
+    connection: &DbConnection,
+    workspace_id: &str,
+    backup_id: &str,
+    captured_at: &str,
+    redaction: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) -> Result<(), DomainError> {
+    let rows = connection
+        .list_procedures_for_recovery(workspace_id)
+        .map_err(work_history_error)?;
+    let mut events = connection
+        .list_procedure_events_for_recovery(workspace_id)
+        .map_err(work_history_error)?;
+    if rows.is_empty() && events.is_empty() {
+        return Ok(());
+    }
+    let ids: BTreeSet<_> = rows.iter().map(|row| row.id.as_str()).collect();
+    if events
+        .iter()
+        .any(|event| !ids.contains(event.procedure_id.as_str()))
+    {
+        return Err(work_history_error(
+            "procedure event parent is outside the recovered workspace",
+        ));
+    }
+    let provenance_ids: BTreeSet<_> = connection
+        .list_sessions(workspace_id)
+        .map_err(work_history_error)?
+        .into_iter()
+        .map(|row| row.id)
+        .chain(
+            connection
+                .list_evidence_spans_for_workspace(workspace_id)
+                .map_err(work_history_error)?
+                .into_iter()
+                .map(|row| row.id),
+        )
+        .collect();
+    let redact_uri = |uri: &str| redact_procedure_uri(uri, redaction, memory_ids, &provenance_ids);
+    let mut procedures = Vec::with_capacity(rows.len());
+    for mut row in rows {
+        let name = redact_content(&row.name, redaction);
+        let body = redact_content(&row.body, redaction);
+        let evidence_uris: Vec<_> = row
+            .evidence_uris
+            .iter()
+            .map(|uri| redact_uri(uri))
+            .collect();
+        let requires_fresh_review =
+            name != row.name || body != row.body || evidence_uris != row.evidence_uris;
+        row.name = name;
+        row.body = body;
+        row.evidence_uris = evidence_uris;
+        row.retire_reason = row
+            .retire_reason
+            .as_deref()
+            .map(|text| redact_content(text, redaction));
+        procedures.push(BackupProcedure {
+            procedure: row,
+            requires_fresh_review,
+        });
+    }
+    for event in &mut events {
+        event.reason = event
+            .reason
+            .as_deref()
+            .map(|text| redact_content(text, redaction));
+        event.actor = event
+            .actor
+            .as_deref()
+            .map(|text| redact_content(text, redaction));
+        event.evidence_uris = event
+            .evidence_uris
+            .iter()
+            .map(|uri| redact_uri(uri))
+            .collect();
+    }
+    let count = procedures
+        .len()
+        .max(events.len())
+        .div_ceil(WORK_HISTORY_CHUNK_ROWS);
+    for index in 0..count {
+        let start = index * WORK_HISTORY_CHUNK_ROWS;
+        let end = start + WORK_HISTORY_CHUNK_ROWS;
+        let chunk = BackupProcedureHistory {
+            schema: PROCEDURE_HISTORY_SCHEMA.to_owned(),
+            backup_id: backup_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            chunk_index: index,
+            chunk_count: count,
+            procedures: procedures[start.min(procedures.len())..end.min(procedures.len())].to_vec(),
+            events: events[start.min(events.len())..end.min(events.len())].to_vec(),
+            authentication: None,
+        };
+        payloads.push(derived_payload(
+            format!("derived/procedure-history/{index:08}.json"),
+            "procedure_history",
+            captured_at,
+            None,
+            serialized_payload_bytes(&chunk).map_err(work_history_error)?,
+        ));
+    }
+    Ok(())
+}
+
+fn procedure_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
+    ArtifactContext {
+        artifact_family: PROCEDURE_HISTORY_SCHEMA,
+        record_encoding_version: "json.v1",
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: workspace_id,
+    }
+}
+
+fn authenticate_procedure_payloads(
+    payloads: &mut [BackupDerivedPayload],
+    root: Option<&StoreAuthRoot>,
+) -> Result<(), DomainError> {
+    for payload in payloads
+        .iter_mut()
+        .filter(|p| p.report.kind == "procedure_history")
+    {
+        let mut chunk: BackupProcedureHistory =
+            serde_json::from_slice(&payload.bytes).map_err(work_history_error)?;
+        chunk.authentication = None;
+        if let Some(root) = root {
+            let hash =
+                canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+            chunk.authentication = Some(
+                authenticate_artifact(
+                    root,
+                    MacDomain::NativeImportRecordsRoot,
+                    &procedure_auth_context(&chunk.workspace_id),
+                    &hash,
+                    1,
+                )
+                .map_err(work_history_error)?,
+            );
+        }
+        payload.bytes = serialized_payload_bytes(&chunk).map_err(work_history_error)?;
+        if payload.bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES {
+            return Err(work_history_error(
+                "procedure-history chunk exceeds the restore asset byte limit",
+            ));
+        }
+        payload.report.hash = Some(hash_bytes(&payload.bytes));
+        payload.report.byte_size = Some(payload.bytes.len() as u64);
+    }
+    Ok(())
+}
+
+fn restore_procedure_history(
+    database: &Path,
+    source_workspace: &Path,
+    backup_id: &str,
+    assets: &[BackupRestoredDerivedAssetReport],
+) -> Result<(u32, u32), DomainError> {
+    let mut chunks = assets
+        .iter()
+        .filter(|asset| asset.kind == "procedure_history")
+        .map(|asset| {
+            serde_json::from_value::<BackupProcedureHistory>(read_restored_derived_json(asset)?)
+                .map_err(work_history_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if chunks.is_empty() {
+        return Ok((0, 0));
+    }
+    let root =
+        StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
+    chunks.sort_by_key(|chunk| chunk.chunk_index);
+    let source_id = chunks[0].workspace_id.clone();
+    let count = chunks.len();
+    for (index, chunk) in chunks.iter_mut().enumerate() {
+        if chunk.schema != PROCEDURE_HISTORY_SCHEMA
+            || chunk.backup_id != backup_id
+            || chunk.workspace_id != source_id
+            || chunk.chunk_index != index
+            || chunk.chunk_count != count
+            || chunk.procedures.len() > WORK_HISTORY_CHUNK_ROWS
+            || chunk.events.len() > WORK_HISTORY_CHUNK_ROWS
+        {
+            return Err(work_history_error(
+                "unsupported, incomplete, duplicate, or substituted procedure-history chunks",
+            ));
+        }
+        let header = chunk.authentication.take().ok_or_else(|| {
+            work_history_error("procedures require an authenticated source-store backup")
+        })?;
+        let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+        if !verify_artifact(
+            &root,
+            MacDomain::NativeImportRecordsRoot,
+            &procedure_auth_context(&source_id),
+            &header,
+            &hash,
+            1,
+        )
+        .map_err(work_history_error)?
+        .is_authenticated()
+        {
+            return Err(work_history_error(
+                "procedure-history authentication failed",
+            ));
+        }
+    }
+    let connection = DbConnection::open_file(database).map_err(work_history_error)?;
+    let workspace_id = remap_restored_workspace_id(
+        &connection.list_workspaces().map_err(work_history_error)?,
+        Some(&source_id),
+        "procedure history",
+    )?
+    .ok_or_else(|| work_history_error("missing procedure-history workspace"))?;
+    let mut procedures = Vec::new();
+    let mut events = Vec::new();
+    for chunk in chunks {
+        procedures.extend(chunk.procedures);
+        events.extend(chunk.events);
+    }
+    let mut ids = BTreeSet::new();
+    for entry in &mut procedures {
+        let row = &mut entry.procedure;
+        if row.workspace_id != source_id || !ids.insert(row.id.clone()) {
+            return Err(work_history_error(
+                "foreign or duplicate recovered procedure",
+            ));
+        }
+        row.workspace_id.clone_from(&workspace_id);
+    }
+    let mut event_ids = BTreeSet::new();
+    for event in &mut events {
+        if event.workspace_id != source_id
+            || !ids.contains(&event.procedure_id)
+            || !event_ids.insert(event.id.clone())
+        {
+            return Err(work_history_error(
+                "foreign, duplicate, or dangling recovered procedure event",
+            ));
+        }
+        event.workspace_id.clone_from(&workspace_id);
+    }
+    connection.with_transaction(|| {
+        for entry in &procedures {
+            let mut row = entry.procedure.clone();
+            if entry.requires_fresh_review {
+                let details = json!({ "backupId": backup_id, "originalMaturity": row.maturity,
+                    "originalLastPromotedAt": row.last_promoted_at,
+                    "originalLastValidatedAt": row.last_validated_at,
+                    "reason": "Backup redaction changed procedure instructions or evidence; validate the restored copy before promotion." });
+                // Retirement remains binding even when the retired text is redacted.
+                if row.maturity != "retired" { row.maturity = "provisional".to_owned(); }
+                row.last_validated_at = None;
+                row.last_promoted_at = None;
+                row.updated_at = Utc::now().to_rfc3339();
+                connection.insert_audit(&crate::models::AuditId::now().to_string(), &crate::db::CreateAuditInput {
+                    workspace_id: Some(workspace_id.clone()), actor: Some("ee backup restore".to_owned()),
+                    action: "procedure.backup_redaction_review_required".to_owned(), target_type: Some("procedure".to_owned()),
+                    target_id: Some(row.id.clone()), details: Some(details.to_string()),
+                })?;
+            }
+            connection.insert_procedure_for_recovery(&row)?;
+        }
+        for event in &events { connection.insert_procedure_event_for_recovery(event)?; }
+        Ok(())
+    }).map_err(work_history_error)?;
+    Ok((
+        u32::try_from(procedures.len()).unwrap_or(u32::MAX),
+        u32::try_from(events.len()).unwrap_or(u32::MAX),
+    ))
 }
 
 fn learning_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
@@ -14663,6 +15023,551 @@ mod tests {
             fs::read(&keys).map_err(|e| e.to_string())?,
             b"obstructed keys".to_vec(),
             "key obstruction remains intact",
+        )?;
+        Ok(())
+    }
+
+    fn recovery_procedure(workspace_id: &str, n: usize) -> StoredProcedure {
+        StoredProcedure {
+            id: format!("proc_recovery_{n:04}"),
+            workspace_id: workspace_id.to_owned(),
+            name: "Verify release artifacts".to_owned(),
+            body: "Check the signature.\nRecord the result.".to_owned(),
+            level: "procedural".to_owned(),
+            maturity: "mature".to_owned(),
+            confidence: 0.75,
+            utility: 0.5,
+            importance: 0.75,
+            evidence_uris: Vec::new(),
+            helpful_count: 7,
+            harmful_count: 2,
+            created_at: "2026-09-01T00:00:00Z".to_owned(),
+            updated_at: "2026-09-01T00:03:00Z".to_owned(),
+            last_promoted_at: Some("2026-09-01T00:02:00Z".to_owned()),
+            last_validated_at: Some("2026-09-01T00:01:00Z".to_owned()),
+            retired_at: None,
+            retire_reason: None,
+        }
+    }
+
+    fn recovery_procedure_event(
+        workspace_id: &str,
+        n: usize,
+        parent: usize,
+    ) -> StoredProcedureEvent {
+        StoredProcedureEvent {
+            id: format!("pevt_recovery_{n:04}"),
+            workspace_id: workspace_id.to_owned(),
+            procedure_id: recovery_procedure(workspace_id, parent).id,
+            event_type: "outcome_helpful".to_owned(),
+            from_maturity: Some("mature".to_owned()),
+            to_maturity: Some("mature".to_owned()),
+            reason: Some("Release verification passed".to_owned()),
+            evidence_uris: Vec::new(),
+            actor: Some("release reviewer".to_owned()),
+            created_at: "2026-09-01T00:03:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn default_backup_restores_procedures_and_live_retirement() -> TestResult {
+        for redaction in [
+            RedactionLevel::None,
+            RedactionLevel::Standard,
+            RedactionLevel::Full,
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+            let mut rows: Vec<_> = (0..129)
+                .map(|n| recovery_procedure(&workspace_id, n))
+                .collect();
+            rows[0].body = "api_key=procedure-secret-canary".to_owned();
+            rows[1].body = rows[0].body.clone();
+            rows[1].maturity = "retired".to_owned();
+            rows[1].retired_at = Some("2026-09-01T00:04:00Z".to_owned());
+            rows[1].retire_reason = Some("api_key=retirement-secret-canary".to_owned());
+            rows[2].evidence_uris = vec![format!("evidence://{memory_id}")];
+            let mut events: Vec<_> = (0..129)
+                .map(|n| recovery_procedure_event(&workspace_id, n, 128 - n))
+                .collect();
+            events[0].reason = Some("api_key=event-secret-canary".to_owned());
+            events[0].actor = Some("api_key=actor-secret-canary".to_owned());
+            events[0].evidence_uris =
+                vec!["evidence:///private/release.json?api_key=uri-secret-canary".to_owned()];
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            let mut feedback = recovery_feedback(&workspace_id, &memory_id, 0);
+            feedback.target_type = "procedure".to_owned();
+            feedback.target_id.clone_from(&rows[128].id);
+            source
+                .with_transaction(|| {
+                    for row in &rows {
+                        source.insert_procedure_for_recovery(row)?;
+                    }
+                    for event in &events {
+                        source.insert_procedure_event_for_recovery(event)?;
+                    }
+                    source.insert_feedback_event_for_recovery(&feedback)?;
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?;
+            source.close().map_err(|e| e.to_string())?;
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            for table in ["procedures", "procedure_events"] {
+                let entry = backup
+                    .recovery_inventory
+                    .entries
+                    .iter()
+                    .find(|e| e.table == table)
+                    .ok_or("missing procedure inventory")?;
+                ensure_equal(entry.row_count, 129, "all procedure rows counted")?;
+                ensure(entry.snapshot_covered, "all procedure rows captured")?;
+            }
+            let assets: Vec<_> = backup
+                .derived
+                .iter()
+                .filter(|a| a.kind == "procedure_history")
+                .collect();
+            ensure_equal(
+                assets.len(),
+                2,
+                "procedures and events cross chunk boundaries",
+            )?;
+            let mut expected_rows = Vec::new();
+            let mut expected_events = Vec::new();
+            for asset in assets {
+                let bytes = fs::read(Path::new(&backup.backup_path).join(&asset.path))
+                    .map_err(|e| e.to_string())?;
+                let chunk: BackupProcedureHistory =
+                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                ensure(
+                    chunk.authentication.is_some(),
+                    "procedure instructions authenticated",
+                )?;
+                for entry in &chunk.procedures {
+                    let original = rows
+                        .iter()
+                        .find(|row| row.id == entry.procedure.id)
+                        .ok_or("unknown exported procedure")?;
+                    if redaction == RedactionLevel::None {
+                        ensure_equal(
+                            &entry.procedure,
+                            original,
+                            "unredacted procedure snapshot is lossless",
+                        )?;
+                        ensure(
+                            !entry.requires_fresh_review,
+                            "unchanged procedure keeps validation",
+                        )?;
+                    } else if original.id == rows[0].id || original.id == rows[1].id {
+                        ensure(
+                            entry.requires_fresh_review,
+                            "changed instructions require fresh validation",
+                        )?;
+                    } else if original.id == rows[128].id {
+                        ensure_equal(
+                            entry.requires_fresh_review,
+                            redaction == RedactionLevel::Full,
+                            "unaffected procedure keeps validation",
+                        )?;
+                    }
+                }
+                if redaction != RedactionLevel::None {
+                    ensure(
+                        !String::from_utf8_lossy(&bytes).contains("secret-canary"),
+                        "procedure secrets absent from data backup",
+                    )?;
+                }
+                expected_rows.extend(chunk.procedures);
+                expected_events.extend(chunk.events);
+            }
+            let side_path = fs::canonicalize(tempdir.path())
+                .map_err(|e| e.to_string())?
+                .join("restored-procedures");
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: side_path.clone(),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                (
+                    restored.restored_procedure_count,
+                    restored.restored_procedure_event_count,
+                ),
+                (129, 129),
+                "procedure restore counts",
+            )?;
+            ensure_equal(
+                restored.data_json()["counts"]["procedureEventsRestored"].as_u64(),
+                Some(129),
+                "machine report counts",
+            )?;
+            let db = DbConnection::open_file(&restored.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let destination_id = db.list_workspaces().map_err(|e| e.to_string())?[0]
+                .id
+                .clone();
+            let restored_feedback = db
+                .list_feedback_events(&destination_id)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(
+                restored_feedback.len(),
+                1,
+                "procedure feedback restored once",
+            )?;
+            ensure_equal(
+                &restored_feedback[0].target_id,
+                &rows[128].id,
+                "procedure feedback target survives full redaction",
+            )?;
+            let restored_memory = db
+                .list_memories(&destination_id, None, true)
+                .map_err(|e| e.to_string())?[0]
+                .id
+                .clone();
+            for entry in expected_rows {
+                let mut expected = entry.procedure;
+                expected.workspace_id.clone_from(&destination_id);
+                let actual = db
+                    .get_procedure(&destination_id, &expected.id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("missing restored procedure")?;
+                if entry.requires_fresh_review {
+                    if expected.maturity != "retired" {
+                        expected.maturity = "provisional".to_owned();
+                    }
+                    expected.last_promoted_at = None;
+                    expected.last_validated_at = None;
+                    ensure(
+                        actual.updated_at != expected.updated_at,
+                        "review reset timestamp recorded",
+                    )?;
+                    expected.updated_at.clone_from(&actual.updated_at);
+                    let audits = db
+                        .list_audit_by_target("procedure", &expected.id, None)
+                        .map_err(|e| e.to_string())?;
+                    ensure(
+                        audits
+                            .iter()
+                            .any(|a| a.action == "procedure.backup_redaction_review_required"),
+                        "review reset audited",
+                    )?;
+                }
+                ensure_equal(
+                    actual,
+                    expected,
+                    "all procedure fields survive or explicitly reset",
+                )?;
+            }
+            ensure_equal(
+                db.get_procedure(&destination_id, &rows[2].id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("missing evidence procedure")?
+                    .evidence_uris,
+                vec![format!("evidence://{restored_memory}")],
+                "typed memory evidence rebound",
+            )?;
+            for mut event in expected_events {
+                event.workspace_id.clone_from(&destination_id);
+                ensure_equal(
+                    db.get_procedure_event(&event.id)
+                        .map_err(|e| e.to_string())?,
+                    Some(event),
+                    "event history preserved without duplicate feedback",
+                )?;
+            }
+            db.close().map_err(|e| e.to_string())?;
+            let shown = crate::core::procedure::show_procedure(
+                &crate::core::procedure::ProcedureShowOptions {
+                    workspace: side_path.clone(),
+                    procedure_id: rows[128].id.clone(),
+                    include_steps: true,
+                    include_verification: true,
+                },
+            )
+            .map_err(|e| e.message())?;
+            ensure_equal(shown.history.len(), 1, "normal show loads restored history")?;
+            ensure_equal(
+                shown.history[0].event_id.clone(),
+                events[0].id.clone(),
+                "cross-chunk parent preserved",
+            )?;
+            let retired = crate::core::procedure::retire_procedure(
+                &crate::core::procedure::ProcedureRetireOptions {
+                    workspace: side_path.clone(),
+                    procedure_id: rows[128].id.clone(),
+                    reason: "Superseded after recovery".to_owned(),
+                    actor: None,
+                },
+            )
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                retired.status.as_str(),
+                "retired",
+                "normal retirement works after recovery",
+            )?;
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                source
+                    .list_procedures_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                rows,
+                "source procedures unchanged",
+            )?;
+            ensure_equal(
+                source
+                    .list_procedure_events_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                events,
+                "source events unchanged",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn procedure_history_rejects_tampering_and_rolls_back() -> TestResult {
+        for defect in [
+            "tampered",
+            "unsigned",
+            "wrong_backup",
+            "missing_chunk",
+            "duplicate_chunk",
+            "oversized_chunk",
+            "foreign_procedure",
+            "duplicate_procedure",
+            "foreign_event",
+            "duplicate_event",
+            "dangling_event",
+            "bad_event",
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let existing = recovery_procedure(&workspace_id, 9);
+            let existing_event = recovery_procedure_event(&workspace_id, 9, 9);
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            db.insert_procedure_for_recovery(&existing)
+                .map_err(|e| e.to_string())?;
+            db.insert_procedure_event_for_recovery(&existing_event)
+                .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            let row = recovery_procedure(&workspace_id, 0);
+            let mut chunk = BackupProcedureHistory {
+                schema: PROCEDURE_HISTORY_SCHEMA.to_owned(),
+                backup_id: "backup-original".to_owned(),
+                workspace_id: workspace_id.clone(),
+                chunk_index: 0,
+                chunk_count: 1,
+                procedures: vec![BackupProcedure {
+                    procedure: row,
+                    requires_fresh_review: true,
+                }],
+                events: vec![recovery_procedure_event(&workspace_id, 0, 0)],
+                authentication: None,
+            };
+            match defect {
+                "missing_chunk" => chunk.chunk_count = 2,
+                "oversized_chunk" => chunk.events = vec![chunk.events[0].clone(); 129],
+                "foreign_procedure" => {
+                    chunk.procedures[0].procedure.workspace_id = "foreign".to_owned()
+                }
+                "duplicate_procedure" => chunk.procedures.push(chunk.procedures[0].clone()),
+                "foreign_event" => chunk.events[0].workspace_id = "foreign".to_owned(),
+                "duplicate_event" => chunk.events.push(chunk.events[0].clone()),
+                "dangling_event" => {
+                    chunk.events[0].procedure_id = recovery_procedure(&workspace_id, 9).id
+                }
+                "bad_event" => chunk.events[0].event_type = "invalid".to_owned(),
+                _ => {}
+            }
+            let root =
+                StoreAuthRoot::create(workspace_keys_dir(&workspace)).map_err(|e| e.to_string())?;
+            let mut payloads = vec![derived_payload(
+                "derived/procedure-history/00000000.json".to_owned(),
+                "procedure_history",
+                "2026-09-01T00:00:00Z",
+                None,
+                serialized_payload_bytes(&chunk).map_err(|e| e.to_string())?,
+            )];
+            authenticate_procedure_payloads(&mut payloads, Some(&root)).map_err(|e| e.message())?;
+            let mut signed: BackupProcedureHistory =
+                serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
+            if defect == "tampered" {
+                signed.procedures[0].procedure.body = "Tampered instructions".to_owned();
+            }
+            if defect == "unsigned" {
+                signed.authentication = None;
+            }
+            let path = tempdir.path().join("procedures.json");
+            fs::write(
+                &path,
+                serialized_payload_bytes(&signed).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            let mut assets = vec![restored_cass_asset(&path, "procedure_history")];
+            if defect == "duplicate_chunk" {
+                assets.push(assets[0].clone());
+            }
+            let backup_id = if defect == "wrong_backup" {
+                "backup-substituted"
+            } else {
+                "backup-original"
+            };
+            let error = restore_procedure_history(&database, &workspace, backup_id, &assets)
+                .err()
+                .ok_or_else(|| format!("accepted {defect}"))?;
+            let expected = match defect {
+                "tampered" => "authentication failed",
+                "unsigned" => "require an authenticated",
+                "wrong_backup" | "missing_chunk" | "duplicate_chunk" | "oversized_chunk" => {
+                    "procedure-history chunks"
+                }
+                "foreign_procedure" | "duplicate_procedure" => {
+                    "foreign or duplicate recovered procedure"
+                }
+                "foreign_event" | "duplicate_event" | "dangling_event" => {
+                    "recovered procedure event"
+                }
+                _ => "constraint",
+            };
+            ensure(
+                error.message().to_lowercase().contains(expected),
+                &format!("{defect} failed at intended boundary: {}", error.message()),
+            )?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                db.list_procedures_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                vec![existing],
+                "no partial procedures and existing procedure unchanged",
+            )?;
+            ensure_equal(
+                db.list_procedure_events_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                vec![existing_event],
+                "no partial events and existing history unchanged",
+            )?;
+            ensure(
+                db.list_audit_by_target(
+                    "procedure",
+                    &recovery_procedure(&workspace_id, 0).id,
+                    None,
+                )
+                .map_err(|e| e.to_string())?
+                .is_empty(),
+                "failed restore rolls back review-reset audit too",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn procedure_backup_rejects_foreign_event_parent() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let foreign_id = WorkspaceId::from_uuid(Uuid::from_u128(9)).to_string();
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        db.insert_workspace(
+            &foreign_id,
+            &CreateWorkspaceInput {
+                path: tempdir
+                    .path()
+                    .join("foreign-workspace")
+                    .to_string_lossy()
+                    .into_owned(),
+                name: None,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        db.insert_procedure_for_recovery(&recovery_procedure(&foreign_id, 0))
+            .map_err(|e| e.to_string())?;
+        db.insert_procedure_event_for_recovery(&recovery_procedure_event(&workspace_id, 0, 0))
+            .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        let output = fs::canonicalize(tempdir.path())
+            .map_err(|e| e.to_string())?
+            .join("foreign-event-backup");
+        let error = create_backup(&BackupCreateOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            output_dir: Some(output.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .err()
+        .ok_or("silently dropped foreign procedure event")?;
+        ensure(
+            error
+                .message()
+                .contains("procedure event parent is outside"),
+            "foreign event detected at snapshot boundary",
+        )?;
+        ensure(!output.exists(), "inconsistent snapshot never published")?;
+        Ok(())
+    }
+
+    #[test]
+    fn procedure_backup_requires_keys_before_publication() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        db.insert_procedure_for_recovery(&recovery_procedure(&workspace_id, 0))
+            .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        let output = fs::canonicalize(tempdir.path())
+            .map_err(|e| e.to_string())?
+            .join("unsigned-procedures");
+        let mut options = BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(output.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: true,
+        };
+        ensure(
+            create_backup(&options).map_err(|e| e.message())?.dry_run,
+            "preview works without keys",
+        )?;
+        let keys = workspace_keys_dir(&workspace);
+        ensure(
+            !keys.exists() && !output.exists(),
+            "preview creates neither keys nor output",
+        )?;
+        fs::write(&keys, b"obstructed keys").map_err(|e| e.to_string())?;
+        options.dry_run = false;
+        let error = create_backup(&options)
+            .err()
+            .ok_or("published unsigned procedures")?;
+        ensure(
+            error
+                .message()
+                .contains("require source-store authentication"),
+            "procedures require keys",
+        )?;
+        ensure(!output.exists(), "no unsigned procedure backup published")?;
+        ensure_equal(
+            fs::read(&keys).map_err(|e| e.to_string())?,
+            b"obstructed keys".to_vec(),
+            "key obstruction unchanged",
         )?;
         Ok(())
     }

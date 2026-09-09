@@ -1488,6 +1488,15 @@ with its automatic TTL policy cleared. Terminal decisions stay historical.
 Derived-source hashes retain their original values so normal curation validation
 can detect changed evidence. Curation recovery also requires the source keys.
 
+Reusable procedures and their lifecycle events are included by default, with
+their evidence URIs, feedback counters, retirement state, and timestamps.
+Restored procedures work with the normal `ee procedure show` and retirement
+commands. If redaction changes a procedure's instructions or evidence, restore
+audits the change and clears its validation and promotion timestamps; active
+procedures return to `provisional`, while retired procedures stay retired.
+This history requires the source authentication keys. External verification
+files referenced by evidence URIs must still be available for revalidation.
+
 ### Diagnostics, eval, ops
 
 | Command | Purpose |
