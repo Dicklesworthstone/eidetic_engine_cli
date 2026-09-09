@@ -1721,6 +1721,43 @@ pub enum BackupCommand {
     Restore(BackupRestoreArgs),
     /// Verify a backup's integrity.
     Verify(BackupVerifyArgs),
+    /// Export or recover encrypted store-authentication keys separately from data.
+    #[command(subcommand)]
+    Keys(BackupKeysCommand),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum BackupKeysCommand {
+    /// Seal current and retired authentication keys into a new output directory.
+    Export(BackupKeysExportArgs),
+    /// Recover authentication keys without replacing an existing key store.
+    Import(BackupKeysImportArgs),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct BackupKeysExportArgs {
+    /// New directory for store-auth.recovery.json; store it separately from the workspace.
+    #[arg(long, value_name = "PATH")]
+    pub output_dir: PathBuf,
+    /// Read a long, unique passphrase from stdin; never put it on the command line.
+    #[arg(long, required = true, action = ArgAction::SetTrue)]
+    pub passphrase_stdin: bool,
+    /// Validate source keys and destination without writing files.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct BackupKeysImportArgs {
+    /// Encrypted store-auth.recovery.json file.
+    #[arg(long, value_name = "PATH")]
+    pub input: PathBuf,
+    /// Read the recovery passphrase from stdin.
+    #[arg(long, required = true, action = ArgAction::SetTrue)]
+    pub passphrase_stdin: bool,
+    /// Authenticate the envelope and validate the destination without writing files.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Subcommands for `ee bootstrap`.
@@ -13101,6 +13138,9 @@ where
         Some(Command::Backup(BackupCommand::Verify(ref args))) => {
             handle_backup_verify(&cli, args, stdout, stderr)
         }
+        Some(Command::Backup(BackupCommand::Keys(ref args))) => {
+            handle_backup_keys(&cli, args, stdout, stderr)
+        }
         Some(Command::Bootstrap(ref bootstrap_cmd)) => {
             handle_bootstrap_command(&cli, bootstrap_cmd, stdout, stderr)
         }
@@ -18923,6 +18963,102 @@ where
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
         },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn read_backup_key_passphrase(
+    reader: impl std::io::Read,
+) -> Result<zeroize::Zeroizing<String>, DomainError> {
+    use crate::policy::store_auth::MAX_RECOVERY_PASSPHRASE_BYTES;
+    use std::io::Read as _;
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    reader
+        .take(MAX_RECOVERY_PASSPHRASE_BYTES as u64 + 3)
+        .read_to_end(&mut bytes)
+        .map_err(|_| DomainError::Usage {
+            message: "Could not read the recovery passphrase from stdin.".to_owned(),
+            repair: Some("provide one passphrase line on stdin".to_owned()),
+        })?;
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+    }
+    let passphrase = std::str::from_utf8(&bytes).map_err(|_| DomainError::Usage {
+        message: "Recovery passphrase must be valid UTF-8.".to_owned(),
+        repair: Some("provide one UTF-8 passphrase line on stdin".to_owned()),
+    })?;
+    crate::policy::store_auth::validate_recovery_passphrase(passphrase).map_err(|error| {
+        DomainError::Usage {
+            message: error.message(),
+            repair: Some(
+                "provide a long, unique passphrase of 12 to 1024 characters on stdin".to_owned(),
+            ),
+        }
+    })?;
+    Ok(zeroize::Zeroizing::new(passphrase.to_owned()))
+}
+
+fn handle_backup_keys<W: Write, E: Write>(
+    cli: &Cli,
+    args: &BackupKeysCommand,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode {
+    use crate::core::backup::{
+        BackupKeyRecoveryAction, BackupKeyRecoveryOptions, recover_backup_keys,
+    };
+    let (action, dry_run) = match args {
+        BackupKeysCommand::Export(args) => (
+            BackupKeyRecoveryAction::Export {
+                output_dir: args.output_dir.clone(),
+            },
+            args.dry_run,
+        ),
+        BackupKeysCommand::Import(args) => (
+            BackupKeyRecoveryAction::Import {
+                input: args.input.clone(),
+            },
+            args.dry_run,
+        ),
+    };
+    let passphrase = match read_backup_key_passphrase(std::io::stdin().lock()) {
+        Ok(bytes) => bytes,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let options = BackupKeyRecoveryOptions {
+        workspace_path: cli.resolve_workspace(),
+        action,
+        dry_run,
+    };
+    match recover_backup_keys(&options, &passphrase) {
+        Ok(report) => {
+            let data = serde_json::json!(report);
+            let json = response_v2_json_from_data(data);
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+                    stdout,
+                    &format!(
+                        "Authentication key {} {}\n  path: {}\n  keys: {}\n",
+                        report.action,
+                        if report.dry_run {
+                            "preview"
+                        } else {
+                            "complete"
+                        },
+                        report.path,
+                        report.key_ids.len(),
+                    ),
+                ),
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &(output::render_toon_from_json(&json.to_string()) + "\n"),
+                ),
+                _ => write_stdout(stdout, &(json.to_string() + "\n")),
+            }
+        }
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -66698,6 +66834,12 @@ impl NormalizedInvocation {
                     BackupCommand::Inspect(_) => "backup inspect".to_string(),
                     BackupCommand::Restore(_) => "backup restore".to_string(),
                     BackupCommand::Verify(_) => "backup verify".to_string(),
+                    BackupCommand::Keys(BackupKeysCommand::Export(_)) => {
+                        "backup keys export".to_string()
+                    }
+                    BackupCommand::Keys(BackupKeysCommand::Import(_)) => {
+                        "backup keys import".to_string()
+                    }
                 },
                 Command::Bootstrap(bootstrap) => match bootstrap {
                     BootstrapCommand::Docs(_) => "bootstrap docs".to_string(),
@@ -74690,6 +74832,97 @@ mod tests {
             &serde_json::json!(SESSION_BUDGET_PLAN_SCHEMA_V1),
             "plan schema",
         )
+    }
+
+    #[test]
+    fn backup_key_passphrase_reader_preserves_spaces_and_bounds_input() -> TestResult {
+        for input in [
+            "  twelve spaces matter  ",
+            "  twelve spaces matter  \n",
+            "  twelve spaces matter  \r\n",
+        ] {
+            let parsed = read_backup_key_passphrase(input.as_bytes())
+                .map_err(|error| format!("{error:?}"))?;
+            ensure_equal(
+                &parsed.as_str(),
+                &"  twelve spaces matter  ",
+                "preserve passphrase whitespace",
+            )?;
+        }
+        for input in [
+            b"short".as_slice(),
+            b"long enough but\nsecond line",
+            b"long enough but\0nul",
+            b"invalid UTF8 \xff password",
+        ] {
+            ensure(
+                read_backup_key_passphrase(input).is_err(),
+                "invalid passphrase accepted",
+            )?;
+        }
+        ensure(
+            read_backup_key_passphrase("x".repeat(1025).as_bytes()).is_err(),
+            "character limit",
+        )?;
+        let boundary = "🦀".repeat(1024);
+        let parsed = read_backup_key_passphrase(format!("{boundary}\r\n").as_bytes())
+            .map_err(|error| format!("{error:?}"))?;
+        ensure_equal(&parsed.as_str(), &boundary.as_str(), "UTF8 boundary")?;
+        let mut cursor = std::io::Cursor::new(vec![b'x'; 100_000]);
+        ensure(
+            read_backup_key_passphrase(&mut cursor).is_err(),
+            "oversized input accepted",
+        )?;
+        ensure_equal(&cursor.position(), &4099, "bounded stdin read")
+    }
+
+    #[test]
+    fn backup_key_parser_requires_explicit_stdin_and_destination() -> TestResult {
+        for (action, flag) in [("export", "--output-dir"), ("import", "--input")] {
+            let parsed = Cli::try_parse_from([
+                "ee",
+                "backup",
+                "keys",
+                action,
+                flag,
+                "keys",
+                "--passphrase-stdin",
+                "--dry-run",
+                "--json",
+            ])
+            .map_err(|error| error.to_string())?;
+            ensure(
+                matches!(
+                    parsed.command,
+                    Some(Command::Backup(BackupCommand::Keys(_)))
+                ),
+                "key command not routed",
+            )?;
+            ensure(
+                Cli::try_parse_from(["ee", "backup", "keys", action, flag, "keys"]).is_err(),
+                "stdin opt-in required",
+            )?;
+            ensure(
+                Cli::try_parse_from(["ee", "backup", "keys", action, "--passphrase-stdin"])
+                    .is_err(),
+                "destination required",
+            )?;
+            ensure(
+                Cli::try_parse_from([
+                    "ee",
+                    "backup",
+                    "keys",
+                    action,
+                    flag,
+                    "keys",
+                    "--passphrase",
+                    "secret",
+                ])
+                .is_err(),
+                "argv secrets refused",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

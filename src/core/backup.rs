@@ -64,7 +64,193 @@ const IMPORT_HISTORY_SCHEMA: &str = "ee.backup.import_history.v1";
 const CURATION_HISTORY_SCHEMA: &str = "ee.backup.curation_history.v1";
 const MANIFEST_AUTH_FAMILY: &str = "ee.backup.manifest";
 const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
+const RECOVERY_KEYS_FILE: &str = "store-auth.recovery.json";
 const CASS_SESSION_RESTORE_METADATA_SCHEMA_V1: &str = "ee.backup.restored_cass_session_metadata.v1";
+
+/// Explicit key recovery stays separate from ordinary redacted data backups.
+#[derive(Clone, Debug)]
+pub enum BackupKeyRecoveryAction {
+    Export { output_dir: PathBuf },
+    Import { input: PathBuf },
+}
+
+#[derive(Clone, Debug)]
+pub struct BackupKeyRecoveryOptions {
+    pub workspace_path: PathBuf,
+    pub action: BackupKeyRecoveryAction,
+    pub dry_run: bool,
+}
+
+/// Secret-free result; passphrases and plaintext keys never enter reports.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupKeyRecoveryReport {
+    pub schema: &'static str,
+    pub action: &'static str,
+    pub workspace_path: String,
+    pub path: String,
+    pub key_ids: Vec<String>,
+    pub dry_run: bool,
+    pub persisted: bool,
+}
+
+fn recovery_path(path: &Path) -> Result<PathBuf, DomainError> {
+    let absolute = std::path::absolute(path).map_err(key_recovery_error)?;
+    normalize_backup_input_path(&absolute)
+}
+
+fn key_recovery_error(error: impl std::fmt::Display) -> DomainError {
+    DomainError::Import {
+        message: format!("could not recover authentication keys: {error}"),
+        repair: Some(
+            "check the recovery file and passphrase; use a fresh destination without existing keys"
+                .to_owned(),
+        ),
+    }
+}
+
+fn recovery_parent_boundary(path: &Path) -> Result<PathBuf, DomainError> {
+    let mut parent = path.parent();
+    while let Some(candidate) = parent {
+        if candidate.is_dir() {
+            return Ok(candidate.to_path_buf());
+        }
+        parent = candidate.parent();
+    }
+    Err(DomainError::Usage {
+        message: "recovery destination needs an existing parent directory".to_owned(),
+        repair: Some("choose a destination beneath an existing directory".to_owned()),
+    })
+}
+
+/// Export an encrypted key window, or install a decrypted window in an absent
+/// key file. No database is opened and neither operation replaces an artifact.
+pub fn recover_backup_keys(
+    options: &BackupKeyRecoveryOptions,
+    passphrase: &str,
+) -> Result<BackupKeyRecoveryReport, DomainError> {
+    use crate::mesh::key_store::SecureLocalDir;
+    use crate::policy::store_auth::{
+        KEY_FILE_NAME, MAX_RECOVERY_BYTES, validate_recovery_passphrase,
+    };
+    use zeroize::Zeroizing;
+
+    validate_recovery_passphrase(passphrase).map_err(key_recovery_error)?;
+    let workspace = recovery_path(&options.workspace_path)?;
+    let keys_dir = workspace_keys_dir(&workspace);
+    let boundary = recovery_parent_boundary(&keys_dir)?;
+    let mut report = BackupKeyRecoveryReport {
+        schema: "ee.backup.keys.v1",
+        action: "",
+        workspace_path: workspace.to_string_lossy().into_owned(),
+        path: String::new(),
+        key_ids: Vec::new(),
+        dry_run: options.dry_run,
+        persisted: false,
+    };
+    match &options.action {
+        BackupKeyRecoveryAction::Export { output_dir } => {
+            let source = SecureLocalDir::open_existing(&boundary, &keys_dir)
+                .map_err(key_recovery_error)?
+                .ok_or_else(|| key_recovery_error("source authentication keys are absent"))?;
+            if !fs::symlink_metadata(keys_dir.join(KEY_FILE_NAME))
+                .map_err(key_recovery_error)?
+                .file_type()
+                .is_file()
+            {
+                return Err(key_recovery_error(
+                    "source authentication keys must be a regular file",
+                ));
+            }
+            let bytes = Zeroizing::new(
+                source
+                    .read(KEY_FILE_NAME)
+                    .map_err(key_recovery_error)?
+                    .ok_or_else(|| key_recovery_error("source authentication keys are absent"))?,
+            );
+            let root =
+                StoreAuthRoot::from_serialized(&keys_dir, &bytes).map_err(key_recovery_error)?;
+            let destination = recovery_path(output_dir)?;
+            if destination.try_exists().map_err(key_recovery_error)? {
+                return Err(key_recovery_error(
+                    "key export refuses to replace an existing output directory",
+                ));
+            }
+            report.action = "export";
+            report.path = destination
+                .join(RECOVERY_KEYS_FILE)
+                .to_string_lossy()
+                .into_owned();
+            report.key_ids = root.window_key_ids().iter().map(|id| id.to_hex()).collect();
+            if !options.dry_run {
+                let envelope = root
+                    .encrypted_recovery(passphrase)
+                    .map_err(key_recovery_error)?;
+                let parent = destination
+                    .parent()
+                    .ok_or_else(|| key_recovery_error("invalid key export directory"))?;
+                fs::create_dir_all(parent).map_err(key_recovery_error)?;
+                let staging = parent.join(format!(".ee-key-recovery-{}", uuid::Uuid::now_v7()));
+                fs::create_dir(&staging).map_err(key_recovery_error)?;
+                write_new_file(&staging.join(RECOVERY_KEYS_FILE), &envelope)?;
+                sync_restore_tree(&staging)?;
+                publish_restored_store(&staging, &destination)?;
+                report.persisted = true;
+            }
+        }
+        BackupKeyRecoveryAction::Import { input } => {
+            let input = recovery_path(input)?;
+            let mut read_options = OpenOptions::new();
+            read_options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                read_options.custom_flags(
+                    (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+                );
+            }
+            let file = read_options.open(&input).map_err(key_recovery_error)?;
+            let metadata = file.metadata().map_err(key_recovery_error)?;
+            if !metadata.is_file() || metadata.len() > MAX_RECOVERY_BYTES as u64 {
+                return Err(key_recovery_error(
+                    "recovery input must be a bounded regular file",
+                ));
+            }
+            let mut bytes = Vec::new();
+            file.take(MAX_RECOVERY_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(key_recovery_error)?;
+            let recovered =
+                StoreAuthRoot::decrypt_recovery(&bytes, passphrase).map_err(key_recovery_error)?;
+            if SecureLocalDir::open_existing(&boundary, &keys_dir)
+                .map_err(key_recovery_error)?
+                .is_some()
+            {
+                match fs::symlink_metadata(keys_dir.join(KEY_FILE_NAME)) {
+                    Ok(_) => {
+                        return Err(key_recovery_error(
+                            "key import refuses to replace an existing authentication root",
+                        ));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(key_recovery_error(error)),
+                }
+            }
+            report.action = "import";
+            report.path = keys_dir.join(KEY_FILE_NAME).to_string_lossy().into_owned();
+            report.key_ids = recovered.key_ids;
+            if !options.dry_run {
+                let destination = SecureLocalDir::open_or_create(&boundary, &keys_dir)
+                    .map_err(key_recovery_error)?;
+                destination
+                    .write_exclusive(KEY_FILE_NAME, &recovered.key_file)
+                    .map_err(key_recovery_error)?;
+                report.persisted = true;
+            }
+        }
+    }
+    Ok(report)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BackupTablePolicy {
@@ -8298,6 +8484,138 @@ mod tests {
     use uuid::Uuid;
 
     type TestResult = Result<(), String>;
+
+    #[test]
+    fn key_recovery_refusals_preserve_destinations_and_source() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = temp.path().canonicalize().expect("canonical base");
+        let source = base.join("source");
+        let keys = workspace_keys_dir(&source);
+        StoreAuthRoot::create(&keys).expect("source keys");
+        let source_bytes = fs::read(keys.join("store_auth_root.json")).expect("source bytes");
+        let before = directory_entry_names(&keys).expect("source entries");
+        let envelope_dir = base.join("exported");
+        let passphrase = "synthetic backup recovery passphrase";
+        let mut export = BackupKeyRecoveryOptions {
+            workspace_path: source,
+            action: BackupKeyRecoveryAction::Export {
+                output_dir: envelope_dir.clone(),
+            },
+            dry_run: true,
+        };
+        assert!(
+            !recover_backup_keys(&export, passphrase)
+                .expect("preview")
+                .persisted
+        );
+        assert!(!envelope_dir.exists());
+        assert_eq!(
+            before,
+            directory_entry_names(&keys).expect("unchanged entries")
+        );
+        export.dry_run = false;
+        recover_backup_keys(&export, passphrase).expect("export");
+        let envelope = envelope_dir.join(RECOVERY_KEYS_FILE);
+        let original_envelope = fs::read(&envelope).expect("envelope");
+        let mut tampered: JsonValue = serde_json::from_slice(&original_envelope).expect("json");
+        tampered["ciphertext"][0] = json!(tampered["ciphertext"][0].as_u64().expect("byte") ^ 1);
+        let tampered_path = base.join("tampered.json");
+        fs::write(
+            &tampered_path,
+            serde_json::to_vec(&tampered).expect("tamper"),
+        )
+        .expect("write tamper");
+        let target = base.join("not-created");
+        let mut import = BackupKeyRecoveryOptions {
+            workspace_path: target.clone(),
+            action: BackupKeyRecoveryAction::Import {
+                input: tampered_path,
+            },
+            dry_run: false,
+        };
+        assert!(recover_backup_keys(&import, passphrase).is_err());
+        assert!(
+            !target.exists(),
+            "authentication failure created destination"
+        );
+        import.action = BackupKeyRecoveryAction::Import { input: envelope };
+        let target_keys = workspace_keys_dir(&target);
+        let hardened = crate::mesh::key_store::SecureLocalDir::open_or_create(&base, &target_keys)
+            .expect("target dir");
+        hardened
+            .write_exclusive("store_auth_root.json", b"existing malformed keys")
+            .expect("existing file");
+        for dry_run in [true, false] {
+            import.dry_run = dry_run;
+            assert!(
+                recover_backup_keys(&import, passphrase).is_err(),
+                "existing malformed keys must not be replaced"
+            );
+            assert_eq!(
+                fs::read(target_keys.join("store_auth_root.json")).expect("preserved file"),
+                b"existing malformed keys"
+            );
+        }
+        assert_eq!(
+            fs::read(keys.join("store_auth_root.json")).expect("unchanged source"),
+            source_bytes
+        );
+        assert_eq!(
+            directory_entry_names(&keys).expect("source entries"),
+            before
+        );
+        assert_eq!(
+            fs::read(envelope_dir.join(RECOVERY_KEYS_FILE)).expect("unchanged envelope"),
+            original_envelope
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_recovery_rejects_symlink_destinations_and_fifo_inputs() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = temp.path().canonicalize().expect("canonical base");
+        let source = base.join("source");
+        let root = StoreAuthRoot::create(workspace_keys_dir(&source)).expect("keys");
+        let passphrase = "synthetic backup recovery passphrase";
+        let envelope = base.join("encrypted.json");
+        fs::write(
+            &envelope,
+            root.encrypted_recovery(passphrase).expect("encrypt"),
+        )
+        .expect("write");
+        let outside = base.join("outside");
+        fs::create_dir(&outside).expect("outside directory");
+        let target = base.join("target");
+        fs::create_dir(&target).expect("target directory");
+        symlink(&outside, target.join(".ee")).expect("redirected marker");
+        let mut options = BackupKeyRecoveryOptions {
+            workspace_path: target,
+            action: BackupKeyRecoveryAction::Import { input: envelope },
+            dry_run: false,
+        };
+        assert!(recover_backup_keys(&options, passphrase).is_err());
+        assert_eq!(
+            directory_entry_names(&outside).expect("outside entries"),
+            Vec::<String>::new()
+        );
+        let fifo = base.join("fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("mkfifo")
+                .success()
+        );
+        options.workspace_path = base.join("absent");
+        options.action = BackupKeyRecoveryAction::Import { input: fifo };
+        assert!(
+            recover_backup_keys(&options, passphrase).is_err(),
+            "non-regular input must reject without blocking"
+        );
+        assert!(!options.workspace_path.exists());
+    }
 
     fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
         if condition {

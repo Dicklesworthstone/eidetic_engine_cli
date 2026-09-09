@@ -6,8 +6,9 @@
 //! between the source workspace and the restored side-path.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use ee::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
@@ -74,6 +75,333 @@ fn run_ee_raw(args: &[&str]) -> Result<(JsonValue, Vec<u8>), String> {
 
 fn run_ee(args: &[&str]) -> Result<JsonValue, String> {
     run_ee_raw(args).map(|(json, _stdout)| json)
+}
+
+fn run_ee_with_passphrase(
+    args: &[&str],
+    passphrase: &str,
+    success: bool,
+) -> Result<JsonValue, String> {
+    let mut child = Command::new(ee_bin())
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "missing stdin pipe".to_owned())?
+        .write_all(format!("{passphrase}\n").as_bytes())
+        .map_err(|error| error.to_string())?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| error.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure(
+        !stdout.contains(passphrase) && !stderr.contains(passphrase),
+        "passphrase leaked into command output",
+    )?;
+    ensure(
+        output.status.success() == success,
+        format!(
+            "key command {args:?}: status {}\nstdout: {stdout}\nstderr: {stderr}",
+            output.status
+        ),
+    )?;
+    let json: JsonValue = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("key command JSON: {error}\n{stdout}"))?;
+    ensure_equal(
+        &json["schema"],
+        &serde_json::json!(if success {
+            "ee.response.v2"
+        } else {
+            "ee.error.v2"
+        }),
+        "key command envelope",
+    )?;
+    if success {
+        ensure_equal(
+            &json["success"],
+            &serde_json::json!(true),
+            "key command success",
+        )?;
+    }
+    Ok(json)
+}
+
+#[test]
+fn encrypted_key_recovery_restores_backup_without_source_workspace() -> TestResult {
+    use ee::policy::store_auth::{StoreAuthRoot, workspace_keys_dir};
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let base = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let source = base.join("source");
+    let auth = base.join("recovered-auth");
+    let restored = base.join("restored");
+    let exported = base.join("encrypted-keys");
+    let envelope_path = exported.join("store-auth.recovery.json");
+    let source_arg = source.to_string_lossy();
+    let auth_arg = auth.to_string_lossy();
+    let output_arg = exported.to_string_lossy();
+    let input_arg = envelope_path.to_string_lossy();
+    let passphrase = "synthetic portable keys passphrase 123";
+    let content =
+        "For the tangerine compass release, verify the signed artifact before deployment.";
+    fs::create_dir(&source).map_err(|error| error.to_string())?;
+    run_ee(&["init", "--workspace", &source_arg, "--json"])?;
+    let remembered = run_ee(&[
+        "remember",
+        content,
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--workspace",
+        &source_arg,
+        "--json",
+    ])?;
+    let original_id = json_str(&remembered, "/data/memory_id", "remember")?;
+    let backup = run_ee(&[
+        "backup",
+        "create",
+        "--output-dir",
+        &base.join("data-backup").to_string_lossy(),
+        "--redaction",
+        "none",
+        "--include-graph-cache=false",
+        "--workspace",
+        &source_arg,
+        "--json",
+    ])?;
+    let backup_path = json_str(&backup, "/data/backupPath", "backup")?;
+    // The backup's signing key must survive as a retired key in the envelope.
+    let mut root =
+        StoreAuthRoot::open(workspace_keys_dir(&source)).map_err(|error| error.to_string())?;
+    root.rotate().map_err(|error| error.to_string())?;
+    let key_ids: Vec<_> = root.window_key_ids().iter().map(|id| id.to_hex()).collect();
+    ensure_equal(&key_ids.len(), &2, "rotated window")?;
+    let source_keys = fs::read(workspace_keys_dir(&source).join("store_auth_root.json"))
+        .map_err(|error| error.to_string())?;
+    let preview = run_ee_with_passphrase(
+        &[
+            "backup",
+            "keys",
+            "export",
+            "--output-dir",
+            &output_arg,
+            "--passphrase-stdin",
+            "--dry-run",
+            "--workspace",
+            &source_arg,
+            "--json",
+        ],
+        passphrase,
+        true,
+    )?;
+    ensure_equal(
+        &preview["data"]["persisted"],
+        &serde_json::json!(false),
+        "export preview",
+    )?;
+    ensure(!exported.exists(), "export preview created its destination")?;
+    let exported_json = run_ee_with_passphrase(
+        &[
+            "backup",
+            "keys",
+            "export",
+            "--output-dir",
+            &output_arg,
+            "--passphrase-stdin",
+            "--workspace",
+            &source_arg,
+            "--json",
+        ],
+        passphrase,
+        true,
+    )?;
+    ensure_equal(
+        &exported_json["data"]["keyIds"],
+        &serde_json::json!(key_ids),
+        "export key window",
+    )?;
+    run_ee_with_passphrase(
+        &[
+            "backup",
+            "keys",
+            "export",
+            "--output-dir",
+            &output_arg,
+            "--passphrase-stdin",
+            "--workspace",
+            &source_arg,
+            "--json",
+        ],
+        passphrase,
+        false,
+    )?;
+    ensure_equal(
+        &fs::read(workspace_keys_dir(&source).join("store_auth_root.json"))
+            .map_err(|error| error.to_string())?,
+        &source_keys,
+        "export leaves keys unchanged",
+    )?;
+    let envelope = fs::read(&envelope_path).map_err(|error| error.to_string())?;
+    let key_doc: JsonValue =
+        serde_json::from_slice(&source_keys).map_err(|error| error.to_string())?;
+    let public_output = format!("{} {exported_json}", String::from_utf8_lossy(&envelope));
+    for key in ["/current/root", "/retired/0/root"] {
+        ensure(
+            !public_output.contains(json_str(&key_doc, key, "source key")?),
+            "plaintext key leaked into encrypted export or report",
+        )?;
+    }
+    ensure(
+        !public_output.contains(passphrase),
+        "passphrase leaked into envelope",
+    )?;
+    drop(root);
+    fs::rename(&source, base.join("offline-source")).map_err(|error| error.to_string())?;
+    let absent = Command::new(ee_bin())
+        .args([
+            "backup",
+            "verify",
+            backup_path,
+            "--workspace",
+            &auth_arg,
+            "--json",
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    ensure(
+        !absent.status.success(),
+        "backup verified without trusted keys",
+    )?;
+    ensure(
+        !auth.exists(),
+        "failed verification created recovery workspace",
+    )?;
+    let import_args = [
+        "backup",
+        "keys",
+        "import",
+        "--input",
+        &input_arg,
+        "--passphrase-stdin",
+        "--workspace",
+        &auth_arg,
+        "--json",
+    ];
+    run_ee_with_passphrase(&import_args, "incorrect portable keys passphrase", false)?;
+    ensure(!auth.exists(), "wrong passphrase mutated destination")?;
+    let mut preview_args = import_args.to_vec();
+    preview_args.push("--dry-run");
+    let preview = run_ee_with_passphrase(&preview_args, passphrase, true)?;
+    ensure_equal(
+        &preview["data"]["persisted"],
+        &serde_json::json!(false),
+        "import preview",
+    )?;
+    ensure(!auth.exists(), "import preview created destination")?;
+    let imported = run_ee_with_passphrase(&import_args, passphrase, true)?;
+    ensure_equal(
+        &imported["data"]["keyIds"],
+        &serde_json::json!(key_ids),
+        "import key window",
+    )?;
+    let key_path = workspace_keys_dir(&auth).join("store_auth_root.json");
+    ensure_equal(
+        &fs::read(&key_path).map_err(|error| error.to_string())?,
+        &source_keys,
+        "recovered exact authentication keys",
+    )?;
+    ensure(
+        !auth.join(".ee/ee.db").exists(),
+        "key recovery must not initialize a database",
+    )?;
+    run_ee_with_passphrase(&import_args, passphrase, false)?;
+    ensure_equal(
+        &fs::read(&key_path).map_err(|error| error.to_string())?,
+        &source_keys,
+        "repeated import preserves keys",
+    )?;
+    ensure_equal(
+        &fs::read(&envelope_path).map_err(|error| error.to_string())?,
+        &envelope,
+        "import preserves envelope",
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        ensure_equal(
+            &(fs::metadata(&key_path)
+                .map_err(|error| error.to_string())?
+                .permissions()
+                .mode()
+                & 0o777),
+            &0o600,
+            "key file mode",
+        )?;
+        ensure_equal(
+            &(fs::metadata(workspace_keys_dir(&auth))
+                .map_err(|error| error.to_string())?
+                .permissions()
+                .mode()
+                & 0o777),
+            &0o700,
+            "key directory mode",
+        )?;
+    }
+    run_ee(&[
+        "backup",
+        "verify",
+        backup_path,
+        "--workspace",
+        &auth_arg,
+        "--json",
+    ])?;
+    run_ee(&[
+        "backup",
+        "restore",
+        backup_path,
+        "--workspace",
+        &auth_arg,
+        "--side-path",
+        &restored.to_string_lossy(),
+        "--json",
+    ])?;
+    let search = run_ee(&[
+        "search",
+        "tangerine compass release",
+        "--source-mode",
+        "lexical_only",
+        "--strict-source-mode",
+        "--workspace",
+        &restored.to_string_lossy(),
+        "--json",
+    ])?;
+    ensure(
+        search
+            .pointer("/data/results")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|hits| hits.iter().any(|hit| hit["docId"] == original_id)),
+        format!("recovered memory not searchable (original memory {original_id}): {search}"),
+    )?;
+    let connection =
+        DbConnection::open_file(restored.join(".ee/ee.db")).map_err(|error| error.to_string())?;
+    let memory = connection
+        .get_memory(original_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "restored memory missing".to_owned())?;
+    ensure_equal(&memory.content.as_str(), &content, "restored content")?;
+    ensure(
+        !source.exists(),
+        "restoration unexpectedly recreated original workspace",
+    )
 }
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {

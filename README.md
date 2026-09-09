@@ -1456,13 +1456,16 @@ base retrieval signal dominant.
 | `ee backup create [--label <name>] [--include-graph-cache[=bool]]` | Create a hashed portable backup and report exact migrated-table recovery coverage; graph-cache derived assets are included by default |
 | `ee backup list` / `verify <id>` / `inspect <id>` | Audit artifact integrity and the manifest `recoveryInventory` |
 | `ee backup restore <backup-id> --side-path <path>` | Restore into an isolated side path |
+| `ee backup keys export --output-dir <new-dir> --passphrase-stdin` | Encrypt current and retired store-authentication keys into a separate recovery artifact |
+| `ee backup keys import --input <file> --passphrase-stdin` | Recover authentication keys into a workspace that has no existing keys |
 
 Backups include saved pack selections, direct evidence selections, omissions,
 impressions, and agent baselines even when optional caches are excluded. Restore
 preserves their historical scores and provenance, rebinds replay data to the
 destination workspace, and applies the backup's requested redaction. Packs that
 predate replay ledgers remain explicitly without one. Restoring pack history
-currently requires access to the source workspace's authentication keys; the
+requires the source workspace's authentication keys, available directly or
+recovered with `ee backup keys import`; the
 manifest's `recoveryInventory` still identifies other durable tables that are
 not yet covered.
 
@@ -2303,9 +2306,38 @@ individual issues in `data.issues`; warning-only verification stays exit-zero.
 Unsigned manifests, including older backups, cannot pass verification or be
 restored; recreate them with the source keys available. If authentication is
 unavailable, a memory-only emergency export remains visibly partial and
-unverified. Recovery still requires the source workspace keys: the backup does
-not currently provide portable key recovery. `recoveryInventory` separately
+unverified. Recovery requires the original signing keys, either from the source
+workspace or from an explicit encrypted key export. `recoveryInventory` separately
 states source coverage, so authenticated integrity does not imply completeness.
+
+Export authentication keys while the source workspace is still available. Keep
+the encrypted artifact separately from ordinary data backups and retain its
+long, unique passphrase in your password manager. Passphrases are accepted only
+on stdin (12–1024 characters); a terminal newline is removed, but spaces are
+preserved. For example, redirect a protected passphrase file into each command:
+
+```bash
+ee backup keys export --workspace /source/workspace \
+  --output-dir /safe/new-key-backup --passphrase-stdin --json < /private/passphrase
+
+# After losing the source, recover keys without initializing a new database.
+ee backup keys import --workspace /recovery-auth \
+  --input /safe/new-key-backup/store-auth.recovery.json \
+  --passphrase-stdin --json < /private/passphrase
+ee backup verify /safe/data-backup --workspace /recovery-auth --json
+ee backup restore /safe/data-backup --workspace /recovery-auth \
+  --side-path /recovered-workspace --json
+```
+
+Both key commands support `--dry-run` without creating files or directories.
+Export refuses an existing output directory; import refuses any existing key
+file. The envelope uses PBKDF2-HMAC-SHA256 (600,000 iterations) and
+ChaCha20-Poly1305 with random salt and nonce. It contains the current key and up
+to four retired keys; export again after rotation before relying on backups
+signed by a new key. It cannot recover keys already evicted from that window.
+Recovered keys are published with owner-only permissions. Ordinary redacted
+data backups contain neither plaintext keys nor the recovery envelope. Mesh
+enrollment credentials are a separate recovery concern.
 
 JSONL import and backup restore replay memory relationships with their weights,
 confidence, evidence counts, origin, metadata, and original timestamps. Redacted

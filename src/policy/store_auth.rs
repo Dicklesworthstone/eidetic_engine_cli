@@ -15,7 +15,9 @@
 //! file this module owns (`0700` directory / `0600` file, owner-only, no
 //! symlinked components). The `Secret` newtype has a redacted `Debug` and best-effort
 //! `Drop` zeroization, and no secret bytes are ever serialized except as the
-//! raw-root hex inside that one key file.
+//! raw-root hex inside that one key file. Explicit key recovery can also seal
+//! that document in a passphrase-encrypted envelope; ordinary data backups
+//! never carry plaintext keys or this recovery envelope.
 //!
 //! Availability failures (missing/corrupt/insecure key store, randomness
 //! failure, or a primitive self-test regression) all fail closed with
@@ -30,12 +32,14 @@
 //! closure (slice 3) consume this module without re-implementing any of it.
 
 use std::fmt;
+use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{Ordering, compiler_fence};
 
 use fs4::fs_std::FileExt as Fs4FileExt;
+use ring::{aead, pbkdf2};
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
 
 use super::hex_lower;
 
@@ -46,7 +50,7 @@ const MAC_LEN: usize = 32;
 /// Length of an opaque key identifier, in bytes.
 const KEY_ID_LEN: usize = 16;
 /// File name of the hardened key store inside the injected keys directory.
-const KEY_FILE_NAME: &str = "store_auth_root.json";
+pub(crate) const KEY_FILE_NAME: &str = "store_auth_root.json";
 /// Temp sibling used for atomic replace during rotation.
 const KEY_FILE_TMP_NAME: &str = "store_auth_root.json.tmp";
 /// Persistent advisory-lock sibling coordinating readers with key rotation.
@@ -57,6 +61,73 @@ const KEY_FILE_SCHEMA: &str = "ee.store_auth.keyfile.v1";
 const MAX_RETIRED_KEYS: usize = 4;
 /// Hard cap on the key-file size we will read (a valid file is well under 1 KiB).
 const MAX_KEY_FILE_BYTES: u64 = 64 * 1024;
+const RECOVERY_SCHEMA: &str = "ee.store_auth.recovery.v1";
+const RECOVERY_KDF: &str = "pbkdf2-hmac-sha256";
+// OWASP's PBKDF2-HMAC-SHA256 work factor; fixed in v1 to bound untrusted work.
+const RECOVERY_ITERATIONS: u32 = 600_000;
+pub(crate) const MAX_RECOVERY_BYTES: usize = 512 * 1024;
+pub(crate) const MAX_RECOVERY_PASSPHRASE_BYTES: usize = 4096;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoreAuthRecoveryEnvelope {
+    schema: String,
+    kdf: String,
+    iterations: u32,
+    salt: [u8; 32],
+    nonce: [u8; aead::NONCE_LEN],
+    ciphertext: Vec<u8>,
+}
+
+/// Validated plaintext, only for the core recovery path's hardened key-file
+/// publisher. Never render or place this value in ordinary backup records.
+pub(crate) struct RecoveredStoreAuth {
+    pub(crate) key_file: Zeroizing<Vec<u8>>,
+    pub(crate) key_ids: Vec<String>,
+}
+
+impl fmt::Debug for RecoveredStoreAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecoveredStoreAuth")
+            .field("key_ids", &self.key_ids)
+            .field("key_file", &"<redacted>")
+            .finish()
+    }
+}
+
+fn recovery_error(message: &str) -> StoreAuthError {
+    StoreAuthError::Malformed {
+        message: message.to_owned(),
+    }
+}
+
+pub(crate) fn validate_recovery_passphrase(passphrase: &str) -> Result<(), StoreAuthError> {
+    if passphrase.len() > MAX_RECOVERY_PASSPHRASE_BYTES
+        || !(12..=1024).contains(&passphrase.chars().count())
+        || passphrase.contains(['\r', '\n', '\0'])
+    {
+        return Err(recovery_error(
+            "recovery passphrase must contain 12 to 1024 characters on a single line",
+        ));
+    }
+    Ok(())
+}
+
+fn recovery_cipher(passphrase: &str, salt: &[u8]) -> Result<aead::LessSafeKey, StoreAuthError> {
+    let iterations = NonZeroU32::new(RECOVERY_ITERATIONS)
+        .ok_or_else(|| recovery_error("invalid recovery KDF work factor"))?;
+    let mut key = Zeroizing::new([0_u8; KEY_LEN]);
+    pbkdf2::derive(
+        pbkdf2::PBKDF2_HMAC_SHA256,
+        iterations,
+        salt,
+        passphrase.as_bytes(),
+        key.as_mut(),
+    );
+    aead::UnboundKey::new(&aead::CHACHA20_POLY1305, key.as_ref())
+        .map(aead::LessSafeKey::new)
+        .map_err(|_| recovery_error("could not initialize recovery encryption"))
+}
 
 /// Degraded code emitted whenever the store-local authentication root cannot be
 /// established or verified. Fail-closed: nothing is admitted at native trust.
@@ -353,13 +424,7 @@ pub enum KeyVerification {
     KeyOutsideWindow,
 }
 
-/// A 32-byte secret with a redacted `Debug` and best-effort `Drop` zeroization.
-///
-/// Zeroization is best-effort only: `#![forbid(unsafe_code)]` rules out a
-/// volatile write, so the `Drop` clears the bytes and inserts a compiler fence.
-/// This defeats accidental reuse and casual inspection but is not a hardware
-/// guarantee against a copying optimizer; a full `zeroize`-backed guarantee is
-/// deferred to avoid adding a dependency in this slice.
+/// A 32-byte secret with a redacted `Debug` and `zeroize`-backed `Drop`.
 struct Secret([u8; KEY_LEN]);
 
 impl Secret {
@@ -376,8 +441,7 @@ impl fmt::Debug for Secret {
 
 impl Drop for Secret {
     fn drop(&mut self) {
-        self.0.fill(0);
-        compiler_fence(Ordering::SeqCst);
+        self.0.zeroize();
     }
 }
 
@@ -543,9 +607,17 @@ impl StoreAuthRoot {
         enforce_owner_only_dir(keys_dir)?;
         enforce_owner_only_file(&path)?;
 
-        let bytes = read_key_file(&path)?;
+        let bytes = Zeroizing::new(read_key_file(&path)?);
+        Self::from_serialized(keys_dir, &bytes)
+    }
+
+    pub(crate) fn from_serialized(keys_dir: &Path, bytes: &[u8]) -> Result<Self, StoreAuthError> {
+        primitive_known_answer_check()?;
+        if bytes.len() as u64 > MAX_KEY_FILE_BYTES {
+            return Err(recovery_error("key file exceeds the size limit"));
+        }
         let doc: KeyFileDoc =
-            serde_json::from_slice(&bytes).map_err(|error| StoreAuthError::Malformed {
+            serde_json::from_slice(bytes).map_err(|error| StoreAuthError::Malformed {
                 message: format!("key file JSON: {error}"),
             })?;
         if doc.schema != KEY_FILE_SCHEMA {
@@ -579,7 +651,87 @@ impl StoreAuthRoot {
         if root.current.self_check() != expected {
             return Err(StoreAuthError::SelfCheckFailed);
         }
+        let ids = root.window_key_ids();
+        if ids
+            .iter()
+            .enumerate()
+            .any(|(index, id)| ids[..index].contains(id))
+        {
+            return Err(recovery_error(
+                "key file contains duplicate key identifiers",
+            ));
+        }
         Ok(root)
+    }
+
+    /// Seal the complete current/retired window without changing the source.
+    /// Each envelope gets independent OS-random salt and nonce values.
+    pub(crate) fn encrypted_recovery(&self, passphrase: &str) -> Result<Vec<u8>, StoreAuthError> {
+        validate_recovery_passphrase(passphrase)?;
+        let salt = random_bytes::<32>()?;
+        let nonce = random_bytes::<{ aead::NONCE_LEN }>()?;
+        let mut ciphertext = Zeroizing::new(self.serialize()?);
+        recovery_cipher(passphrase, &salt)?
+            .seal_in_place_append_tag(
+                aead::Nonce::assume_unique_for_key(nonce),
+                aead::Aad::from(RECOVERY_SCHEMA.as_bytes()),
+                &mut *ciphertext,
+            )
+            .map_err(|_| recovery_error("could not encrypt recovery keys"))?;
+        let envelope = StoreAuthRecoveryEnvelope {
+            schema: RECOVERY_SCHEMA.to_owned(),
+            kdf: RECOVERY_KDF.to_owned(),
+            iterations: RECOVERY_ITERATIONS,
+            salt,
+            nonce,
+            ciphertext: ciphertext.to_vec(),
+        };
+        serde_json::to_vec(&envelope)
+            .map_err(|_| recovery_error("could not serialize encrypted recovery keys"))
+    }
+
+    /// Authenticate and validate recovery material before the caller creates
+    /// any destination. KDF parameters are bounded before expensive work.
+    pub(crate) fn decrypt_recovery(
+        bytes: &[u8],
+        passphrase: &str,
+    ) -> Result<RecoveredStoreAuth, StoreAuthError> {
+        validate_recovery_passphrase(passphrase)?;
+        if bytes.len() > MAX_RECOVERY_BYTES {
+            return Err(recovery_error(
+                "encrypted recovery envelope exceeds the size limit",
+            ));
+        }
+        let envelope: StoreAuthRecoveryEnvelope = serde_json::from_slice(bytes)
+            .map_err(|_| recovery_error("invalid encrypted recovery envelope"))?;
+        if envelope.schema != RECOVERY_SCHEMA
+            || envelope.kdf != RECOVERY_KDF
+            || envelope.iterations != RECOVERY_ITERATIONS
+            || envelope.ciphertext.len() < aead::CHACHA20_POLY1305.tag_len()
+            || envelope.ciphertext.len() as u64
+                > MAX_KEY_FILE_BYTES + aead::CHACHA20_POLY1305.tag_len() as u64
+        {
+            return Err(recovery_error(
+                "unsupported or malformed encrypted recovery envelope",
+            ));
+        }
+        let cipher = recovery_cipher(passphrase, &envelope.salt)?;
+        let mut plaintext = Zeroizing::new(envelope.ciphertext);
+        let opened = cipher
+            .open_in_place(
+                aead::Nonce::assume_unique_for_key(envelope.nonce),
+                aead::Aad::from(RECOVERY_SCHEMA.as_bytes()),
+                plaintext.as_mut(),
+            )
+            .map_err(|_| {
+                recovery_error("recovery decryption failed: wrong passphrase or modified envelope")
+            })?;
+        let root = Self::from_serialized(Path::new("recovered-store-auth"), opened)
+            .map_err(|_| recovery_error("decrypted recovery key file is invalid"))?;
+        Ok(RecoveredStoreAuth {
+            key_file: Zeroizing::new(root.serialize()?),
+            key_ids: root.window_key_ids().iter().map(KeyId::to_hex).collect(),
+        })
     }
 
     /// Load the current root while holding the key store's shared advisory
@@ -720,11 +872,26 @@ struct KeyFileDoc {
     self_check: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct KeyFileEntry {
     key_id: String,
     root: String,
+}
+
+impl fmt::Debug for KeyFileEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeyFileEntry")
+            .field("key_id", &self.key_id)
+            .field("root", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for KeyFileEntry {
+    fn drop(&mut self) {
+        self.root.zeroize();
+    }
 }
 
 impl KeyFileEntry {
@@ -993,6 +1160,133 @@ mod tests {
 
     fn keys_dir() -> tempfile::TempDir {
         tempfile::TempDir::new().expect("tempdir")
+    }
+
+    #[test]
+    fn encrypted_recovery_preserves_the_complete_rotation_window() {
+        let dir = keys_dir();
+        let mut root = StoreAuthRoot::create(dir.path()).expect("create");
+        let message = b"portable backup evidence";
+        let mut signatures = Vec::new();
+        for index in 0..=MAX_RETIRED_KEYS {
+            signatures.push((
+                root.current_key_id(),
+                root.mac(MacDomain::NativeImportRecordsRoot, message)
+                    .expect("mac"),
+            ));
+            if index < MAX_RETIRED_KEYS {
+                root.rotate().expect("rotate");
+            }
+        }
+        let original = std::fs::read(dir.path().join(KEY_FILE_NAME)).expect("read source");
+        let passphrase = "synthetic recovery passphrase 123";
+        let encrypted = root.encrypted_recovery(passphrase).expect("encrypt");
+        let second = root.encrypted_recovery(passphrase).expect("encrypt again");
+        assert_ne!(encrypted, second, "independent salt and nonce");
+        let recovered = StoreAuthRoot::decrypt_recovery(&encrypted, passphrase).expect("decrypt");
+        let reopened =
+            StoreAuthRoot::from_serialized(dir.path(), &recovered.key_file).expect("parse");
+        assert_eq!(root.window_key_ids(), reopened.window_key_ids());
+        for (id, mac) in signatures {
+            assert!(matches!(
+                reopened
+                    .verify_with_key(id, MacDomain::NativeImportRecordsRoot, message, &mac)
+                    .expect("verify"),
+                KeyVerification::Match { .. }
+            ));
+        }
+        assert_eq!(
+            original,
+            std::fs::read(dir.path().join(KEY_FILE_NAME)).expect("read unchanged")
+        );
+        let doc: KeyFileDoc = serde_json::from_slice(&original).expect("key doc");
+        let public_output = format!(
+            "{} {recovered:?} {doc:?}",
+            String::from_utf8_lossy(&encrypted)
+        );
+        assert!(!public_output.contains(passphrase));
+        for entry in std::iter::once(&doc.current).chain(&doc.retired) {
+            assert!(!public_output.contains(&entry.root), "root secret leaked");
+        }
+    }
+
+    #[test]
+    fn encrypted_recovery_rejects_wrong_password_tampering_and_unbounded_work() {
+        let dir = keys_dir();
+        let root = StoreAuthRoot::create(dir.path()).expect("create");
+        let passphrase = "synthetic recovery passphrase 123";
+        let bytes = root.encrypted_recovery(passphrase).expect("encrypt");
+        assert!(StoreAuthRoot::decrypt_recovery(&bytes, "different synthetic passphrase").is_err());
+        let envelope: StoreAuthRecoveryEnvelope = serde_json::from_slice(&bytes).expect("envelope");
+        for field in [
+            "ciphertext",
+            "nonce",
+            "salt",
+            "schema",
+            "kdf",
+            "iterations",
+            "empty",
+        ] {
+            let mut changed = envelope.clone();
+            match field {
+                "ciphertext" => changed.ciphertext[0] ^= 1,
+                "nonce" => changed.nonce[0] ^= 1,
+                "salt" => changed.salt[0] ^= 1,
+                "schema" => changed.schema.push('x'),
+                "kdf" => changed.kdf.push('x'),
+                "iterations" => changed.iterations = u32::MAX,
+                _ => changed.ciphertext.clear(),
+            }
+            let changed = serde_json::to_vec(&changed).expect("changed envelope");
+            assert!(
+                StoreAuthRoot::decrypt_recovery(&changed, passphrase).is_err(),
+                "accepted changed {field}"
+            );
+        }
+        assert!(StoreAuthRoot::decrypt_recovery(&bytes[..bytes.len() / 2], passphrase).is_err());
+        assert!(
+            StoreAuthRoot::decrypt_recovery(&vec![b' '; MAX_RECOVERY_BYTES + 1], passphrase)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn encrypted_recovery_rejects_invalid_plaintext_and_passphrases() {
+        for passphrase in [
+            "",
+            "short",
+            "long enough but\nmultiline",
+            "long enough but\0nul",
+        ] {
+            assert!(validate_recovery_passphrase(passphrase).is_err());
+        }
+        assert!(validate_recovery_passphrase(&"x".repeat(1025)).is_err());
+        assert!(validate_recovery_passphrase(&"🦀".repeat(1024)).is_ok());
+        let dir = keys_dir();
+        let root = StoreAuthRoot::create(dir.path()).expect("create");
+        let mut doc: serde_json::Value =
+            serde_json::from_slice(&root.serialize().expect("serialize")).expect("json");
+        doc["retired"] = serde_json::json!([doc["current"].clone()]);
+        let passphrase = "synthetic recovery passphrase 123";
+        let mut envelope: StoreAuthRecoveryEnvelope =
+            serde_json::from_slice(&root.encrypted_recovery(passphrase).expect("encrypt"))
+                .expect("envelope");
+        envelope.nonce = random_bytes().expect("fresh nonce");
+        envelope.ciphertext = serde_json::to_vec(&doc).expect("duplicate key payload");
+        recovery_cipher(passphrase, &envelope.salt)
+            .expect("cipher")
+            .seal_in_place_append_tag(
+                aead::Nonce::assume_unique_for_key(envelope.nonce),
+                aead::Aad::from(RECOVERY_SCHEMA.as_bytes()),
+                &mut envelope.ciphertext,
+            )
+            .expect("seal");
+        let invalid = serde_json::to_vec(&envelope).expect("invalid envelope");
+        let error = StoreAuthRoot::decrypt_recovery(&invalid, passphrase)
+            .expect_err("duplicate identifiers rejected");
+        assert!(
+            matches!(error, StoreAuthError::Malformed { message } if message == "decrypted recovery key file is invalid")
+        );
     }
 
     #[test]
