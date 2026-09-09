@@ -1531,6 +1531,16 @@ not copy or verify their raw bytes. Backup metadata redaction scans both JSON
 keys and values, including short or numeric credentials identified by their field
 names, preserving distinct fields or rejecting a collision.
 
+Authenticated learning-history backups also retain per-agent context profiles:
+helpful, harmful, and ignored counts, cached weights, and last-seen timestamps.
+Restored packs use these learned counts immediately; recovery does not replay
+feedback. Agent keys use the same redaction mapping as pack baselines, with
+distinct opaque names when redacted. Full redaction changes those names, so a
+harness must use the restored identity to retrieve its profile. Conflicting
+identities or profile links outside the recovered workspace reject recovery.
+This uses learning-history format v2; recreate backups containing v1 learning
+history before relying on the new recovery path.
+
 ### Diagnostics, eval, ops
 
 | Command | Purpose |

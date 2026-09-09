@@ -27,12 +27,12 @@ use crate::db::shard::{
 use crate::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
     CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType,
-    MeshStorageStatus, StoredArtifact, StoredArtifactLink, StoredAuditEntry,
-    StoredCurationCandidate, StoredCurationTtlPolicy, StoredEpisodeAction, StoredErrorFingerprint,
-    StoredErrorRepairLink, StoredEvidenceSpan, StoredFeedbackEvent, StoredFeedbackQuarantine,
-    StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness, StoredGraphSnapshot,
-    StoredImportLedger, StoredJournalEntry, StoredLearningObservation, StoredMemory,
-    StoredMemoryLink, StoredOutcomeEvidence, StoredPackHistory, StoredProceduralRule,
+    MeshStorageStatus, StoredAgentContextProfile, StoredArtifact, StoredArtifactLink,
+    StoredAuditEntry, StoredCurationCandidate, StoredCurationTtlPolicy, StoredEpisodeAction,
+    StoredErrorFingerprint, StoredErrorRepairLink, StoredEvidenceSpan, StoredFeedbackEvent,
+    StoredFeedbackQuarantine, StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness,
+    StoredGraphSnapshot, StoredImportLedger, StoredJournalEntry, StoredLearningObservation,
+    StoredMemory, StoredMemoryLink, StoredOutcomeEvidence, StoredPackHistory, StoredProceduralRule,
     StoredProcedure, StoredProcedureEvent, StoredRchVerifyRun, StoredRecorderEvent,
     StoredRecorderRun, StoredSearchIndexJob, StoredSession, StoredTaskEpisode, audit_actions,
 };
@@ -61,7 +61,7 @@ const INIT_AND_MIGRATE_REPAIR_COMMAND: &str =
     "ee init --workspace . && ee migrate run --workspace . --json";
 const CASS_BACKUP_CHUNK_ROWS: usize = 128;
 const WORK_HISTORY_CHUNK_ROWS: usize = 128;
-const LEARNING_HISTORY_SCHEMA: &str = "ee.backup.learning_history.v1";
+const LEARNING_HISTORY_SCHEMA: &str = "ee.backup.learning_history.v2";
 const PACK_HISTORY_SCHEMA: &str = "ee.backup.pack_history.v1";
 const IMPORT_HISTORY_SCHEMA: &str = "ee.backup.import_history.v1";
 const CURATION_HISTORY_SCHEMA: &str = "ee.backup.curation_history.v1";
@@ -777,6 +777,7 @@ pub struct BackupRestoreReport {
     pub restored_rule_source_count: u32,
     pub restored_rule_tag_count: u32,
     pub restored_feedback_count: u32,
+    pub restored_agent_profile_count: u32,
     pub restored_import_ledger_count: u32,
     pub restored_curation_candidate_count: u32,
     pub restored_curation_policy_count: u32,
@@ -824,6 +825,7 @@ impl BackupRestoreReport {
                 "ruleSourcesRestored": self.restored_rule_source_count,
                 "ruleTagsRestored": self.restored_rule_tag_count,
                 "feedbackEventsRestored": self.restored_feedback_count,
+                "agentContextProfilesRestored": self.restored_agent_profile_count,
                 "importLedgersRestored": self.restored_import_ledger_count,
                 "curationCandidatesRestored": self.restored_curation_candidate_count,
                 "curationPoliciesRestored": self.restored_curation_policy_count,
@@ -883,6 +885,9 @@ impl BackupRestoreReport {
         ) + &format!(
             "  restored artifacts/links: {}/{}\n",
             self.restored_artifact_registry.artifacts, self.restored_artifact_registry.links
+        ) + &format!(
+            "  restored agent context profiles: {}\n",
+            self.restored_agent_profile_count
         )
     }
 
@@ -1404,6 +1409,7 @@ struct BackupLearningHistory {
     sources: Vec<BackupRuleSource>,
     tags: Vec<BackupRuleTag>,
     feedback: Vec<StoredFeedbackEvent>,
+    agent_profiles: Vec<StoredAgentContextProfile>,
     authentication: Option<AuthenticatedHeader>,
 }
 
@@ -1736,16 +1742,17 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
             "export_restore_required",
             "derived_artifact_restore",
         ),
-        "procedural_rules" | "rule_source_memories" | "rule_tags" | "feedback_events" => {
-            BackupTablePolicy::new(
-                "learn",
-                "export_restore_required",
-                "derived_artifact_restore",
-            )
-        }
+        "procedural_rules"
+        | "rule_source_memories"
+        | "rule_tags"
+        | "feedback_events"
+        | "agent_context_profiles" => BackupTablePolicy::new(
+            "learn",
+            "export_restore_required",
+            "derived_artifact_restore",
+        ),
 
-        "agent_context_profiles"
-        | "agents"
+        "agents"
         | "causal_evidence"
         | "certificates"
         | "debt_snapshots"
@@ -2037,6 +2044,10 @@ fn reconcile_derived_recovery_inventory(
             "feedback_events",
             captured_derived_record_count(derived, "learning_history", "feedback"),
         ),
+        (
+            "agent_context_profiles",
+            captured_derived_record_count(derived, "learning_history", "agentProfiles"),
+        ),
     ] {
         if let Some(entry) = inventory
             .entries
@@ -2288,7 +2299,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         })
     {
         return Err(work_history_error(
-            "learned rules, feedback, pack history, import checkpoints, curation history, procedures, learning signals, recorded history, error recall, and artifact registry require source-store authentication; repair the workspace key store before creating this backup",
+            "learned rules, feedback, agent profiles, pack history, import checkpoints, curation history, procedures, learning signals, recorded history, error recall, and artifact registry require source-store authentication; repair the workspace key store before creating this backup",
         ));
     }
     authenticate_learning_payloads(&mut derived_payloads, store_auth.as_ref())?;
@@ -3247,6 +3258,7 @@ pub fn restore_backup_to_side_path(
             restored_rule_source_count: 0,
             restored_rule_tag_count: 0,
             restored_feedback_count: 0,
+            restored_agent_profile_count: 0,
             restored_pack_history: BackupPackHistoryCounts::default(),
             restored_graph_cache_count: 0,
             restored_derived: Vec::new(),
@@ -3371,6 +3383,7 @@ pub fn restore_backup_to_side_path(
         restored_rule_source_count,
         restored_rule_tag_count,
         restored_feedback_count,
+        restored_agent_profile_count,
     ) = restore_learning_history(
         &restored_database_path,
         &workspace_path,
@@ -3510,6 +3523,7 @@ pub fn restore_backup_to_side_path(
         restored_procedure_count,
         restored_procedure_event_count,
         restored_learning_signals,
+        restored_agent_profile_count,
         restored_recorded_history,
         restored_error_recall,
         restored_artifact_registry,
@@ -7144,19 +7158,12 @@ fn collect_pack_history_payloads(
                 impression.memory_id.clone_from(id);
             }
         }
-        let redact_baseline_key = |key: &str| {
-            let redacted = redact_content(key, redaction);
-            if redacted == key {
-                redacted
-            } else {
-                // Baseline keys carry identity. Replacing every key with a
-                // prose placeholder merges distinct agents/tasks on restore.
-                format!("key_{}", blake3::hash(key.as_bytes()).to_hex())
-            }
-        };
         for baseline in &mut history.baselines {
-            baseline.agent_name = redact_baseline_key(&baseline.agent_name);
-            baseline.task_key = baseline.task_key.as_deref().map(redact_baseline_key);
+            baseline.agent_name = redact_recovery_identity(&baseline.agent_name, redaction);
+            baseline.task_key = baseline
+                .task_key
+                .as_deref()
+                .map(|key| redact_recovery_identity(key, redaction));
         }
         history.baselines.sort_by(|left, right| {
             (&left.agent_name, &left.task_key).cmp(&(&right.agent_name, &right.task_key))
@@ -7586,6 +7593,18 @@ fn restore_work_history(
     ))
 }
 
+/// Profiles and pack baselines share agent identities. Use the same opaque
+/// replacement when redaction changes a key, rather than merging identities
+/// into one prose placeholder.
+fn redact_recovery_identity(key: &str, redaction: RedactionLevel) -> String {
+    let redacted = redact_content(key, redaction);
+    if redacted == key {
+        redacted
+    } else {
+        format!("key_{}", blake3::hash(key.as_bytes()).to_hex())
+    }
+}
+
 fn collect_learning_history_payloads(
     connection: &DbConnection,
     workspace_id: &str,
@@ -7666,11 +7685,39 @@ fn collect_learning_history_payloads(
             .map(|s| redact_work_history_json(s, redaction))
             .transpose()?;
     }
-    let count = [rules.len(), sources.len(), tags.len(), feedback.len()]
-        .into_iter()
-        .max()
-        .unwrap_or(0)
-        .div_ceil(WORK_HISTORY_CHUNK_ROWS);
+    let mut agent_profiles = connection
+        .list_agent_context_profiles_for_recovery(workspace_id)
+        .map_err(work_history_error)?;
+    let mut identities = BTreeMap::new();
+    for profile in &mut agent_profiles {
+        let name = redact_recovery_identity(&profile.agent_name, redaction);
+        if identities
+            .insert(name.clone(), profile.agent_name.clone())
+            .is_some_and(|previous| previous != profile.agent_name)
+        {
+            return Err(work_history_error(
+                "redaction merges distinct agent identities",
+            ));
+        }
+        profile.agent_name = name;
+        profile.memory_id = memory_ids
+            .get(&profile.memory_id)
+            .ok_or_else(|| work_history_error("agent profile references a foreign memory"))?
+            .clone();
+    }
+    agent_profiles
+        .sort_by(|a, b| (&a.agent_name, &a.memory_id).cmp(&(&b.agent_name, &b.memory_id)));
+    let count = [
+        rules.len(),
+        sources.len(),
+        tags.len(),
+        feedback.len(),
+        agent_profiles.len(),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0)
+    .div_ceil(WORK_HISTORY_CHUNK_ROWS);
     for index in 0..count {
         let start = index * WORK_HISTORY_CHUNK_ROWS;
         let end = start + WORK_HISTORY_CHUNK_ROWS;
@@ -7684,6 +7731,9 @@ fn collect_learning_history_payloads(
             sources: sources[start.min(sources.len())..end.min(sources.len())].to_vec(),
             tags: tags[start.min(tags.len())..end.min(tags.len())].to_vec(),
             feedback: feedback[start.min(feedback.len())..end.min(feedback.len())].to_vec(),
+            agent_profiles: agent_profiles
+                [start.min(agent_profiles.len())..end.min(agent_profiles.len())]
+                .to_vec(),
             authentication: None,
         };
         payloads.push(derived_payload(
@@ -9338,7 +9388,7 @@ fn restore_learning_history(
     source_workspace: &Path,
     backup_id: &str,
     assets: &[BackupRestoredDerivedAssetReport],
-) -> Result<(u32, u32, u32, u32), DomainError> {
+) -> Result<(u32, u32, u32, u32, u32), DomainError> {
     let mut chunks = assets
         .iter()
         .filter(|asset| asset.kind == "learning_history")
@@ -9348,7 +9398,7 @@ fn restore_learning_history(
         })
         .collect::<Result<Vec<_>, _>>()?;
     if chunks.is_empty() {
-        return Ok((0, 0, 0, 0));
+        return Ok((0, 0, 0, 0, 0));
     }
     let root =
         StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
@@ -9366,6 +9416,7 @@ fn restore_learning_history(
                 chunk.sources.len(),
                 chunk.tags.len(),
                 chunk.feedback.len(),
+                chunk.agent_profiles.len(),
             ]
             .into_iter()
             .any(|len| len > WORK_HISTORY_CHUNK_ROWS)
@@ -9376,7 +9427,7 @@ fn restore_learning_history(
         }
         let header = chunk.authentication.take().ok_or_else(|| {
             work_history_error(
-                "learned rules and feedback require an authenticated source-store backup",
+                "learned rules, feedback, and agent profiles require an authenticated source-store backup",
             )
         })?;
         let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
@@ -9405,11 +9456,13 @@ fn restore_learning_history(
     let mut sources = Vec::new();
     let mut tags = Vec::new();
     let mut feedback = Vec::new();
+    let mut agent_profiles = Vec::new();
     for chunk in chunks {
         rules.extend(chunk.rules);
         sources.extend(chunk.sources);
         tags.extend(chunk.tags);
         feedback.extend(chunk.feedback);
+        agent_profiles.extend(chunk.agent_profiles);
     }
     let mut rule_ids = BTreeSet::new();
     for rule in &mut rules {
@@ -9436,6 +9489,18 @@ fn restore_learning_history(
         return Err(work_history_error(
             "rule relationship target is missing or outside the recovered workspace",
         ));
+    }
+    let mut profile_keys = BTreeSet::new();
+    for profile in &mut agent_profiles {
+        if profile.workspace_id != source_id
+            || !memory_ids.contains(&profile.memory_id)
+            || !profile_keys.insert((profile.agent_name.clone(), profile.memory_id.clone()))
+        {
+            return Err(work_history_error(
+                "foreign, orphan, or duplicate recovered agent profile",
+            ));
+        }
+        profile.workspace_id.clone_from(&workspace);
     }
     let sessions = connection
         .list_sessions(&workspace)
@@ -9476,6 +9541,18 @@ fn restore_learning_history(
             for event in &feedback {
                 connection.insert_feedback_event_for_recovery(event)?;
             }
+            for profile in &agent_profiles {
+                connection.insert_agent_context_profile_for_recovery(profile)?;
+            }
+            if !agent_profiles.is_empty() {
+                connection.insert_audit(&crate::models::AuditId::now().to_string(), &crate::db::CreateAuditInput {
+                    workspace_id: Some(workspace.clone()), actor: Some("ee backup restore".to_owned()),
+                    action: "backup.agent_profiles_restored".to_owned(), target_type: Some("backup".to_owned()),
+                    target_id: Some(backup_id.to_owned()),
+                    details: Some(json!({"sourceWorkspaceId": source_id, "profiles": agent_profiles.len(),
+                        "feedbackReplayed": false, "reason": "Recovered learned counts and timestamps; agent identities follow backup redaction, shared with pack baselines."}).to_string()),
+                })?;
+            }
             Ok(())
         })
         .map_err(work_history_error)?;
@@ -9484,6 +9561,7 @@ fn restore_learning_history(
         u32::try_from(sources.len()).unwrap_or(u32::MAX),
         u32::try_from(tags.len()).unwrap_or(u32::MAX),
         u32::try_from(feedback.len()).unwrap_or(u32::MAX),
+        u32::try_from(agent_profiles.len()).unwrap_or(u32::MAX),
     ))
 }
 
@@ -19642,6 +19720,475 @@ mod tests {
         Ok(())
     }
 
+    fn recovery_agent_profile(
+        workspace_id: &str,
+        memory_id: &str,
+        agent: &str,
+    ) -> StoredAgentContextProfile {
+        StoredAgentContextProfile {
+            workspace_id: workspace_id.to_owned(),
+            agent_name: agent.to_owned(),
+            memory_id: memory_id.to_owned(),
+            counts: crate::models::AgentContextProfileCounts::new(30, 2, 1),
+            last_seen_at: "2026-09-01T00:05:00Z".to_owned(),
+            weight_cached: 0.04,
+        }
+    }
+
+    #[test]
+    fn default_backup_restores_agent_profiles_and_live_pack() -> TestResult {
+        const AGENT: &str = "RecoveryAgent";
+        // A child gets the real process environment without mutating the
+        // environment of concurrently running Rust tests.
+        if crate::core::memory_scope::current_agent_name().as_deref() != Some(AGENT) {
+            let status =
+                std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+                    .args([
+                        "core::backup::tests::default_backup_restores_agent_profiles_and_live_pack",
+                        "--exact",
+                        "--test-threads=1",
+                        "--nocapture",
+                    ])
+                    .env("EE_AGENT_NAME", AGENT)
+                    .status()
+                    .map_err(|e| e.to_string())?;
+            return ensure(
+                status.success(),
+                "isolated live profile recovery test passed",
+            );
+        }
+        for redaction in [
+            RedactionLevel::None,
+            RedactionLevel::Standard,
+            RedactionLevel::Full,
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+            let mut profiles = (0..129)
+                .map(|n| {
+                    recovery_agent_profile(
+                        &workspace_id,
+                        &memory_id,
+                        &format!("DormantAgent{n:03}"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            profiles[0].agent_name = AGENT.to_owned();
+            profiles[1].agent_name = "api_key=profile-secret-one".to_owned();
+            profiles[2].agent_name = "api_key=profile-secret-two".to_owned();
+            profiles[3].counts = crate::models::AgentContextProfileCounts::default();
+            profiles[4].counts = crate::models::AgentContextProfileCounts::new(u32::MAX, 0, 0);
+            profiles.sort_by(|a, b| a.agent_name.cmp(&b.agent_name));
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            source
+                .with_transaction(|| {
+                    for profile in &profiles {
+                        source.insert_agent_context_profile_for_recovery(profile)?;
+                    }
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?;
+            source.close().map_err(|e| e.to_string())?;
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            let inventory = backup
+                .recovery_inventory
+                .entries
+                .iter()
+                .find(|e| e.table == "agent_context_profiles")
+                .ok_or("missing profile inventory")?;
+            ensure_equal(inventory.row_count, 129, "all profiles counted")?;
+            ensure(
+                inventory.schema_covered && inventory.snapshot_covered,
+                "profiles recoverable",
+            )?;
+            let assets = backup
+                .derived
+                .iter()
+                .filter(|a| a.kind == "learning_history")
+                .collect::<Vec<_>>();
+            ensure_equal(
+                assets.len(),
+                2,
+                "profile-only history crosses chunk boundary",
+            )?;
+            let mut secret_present = false;
+            for asset in assets {
+                let bytes = fs::read(Path::new(&backup.backup_path).join(&asset.path))
+                    .map_err(|e| e.to_string())?;
+                let chunk: BackupLearningHistory =
+                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                ensure(chunk.authentication.is_some(), "profiles authenticated")?;
+                secret_present |= String::from_utf8_lossy(&bytes).contains("profile-secret-");
+            }
+            ensure_equal(
+                secret_present,
+                redaction == RedactionLevel::None,
+                "agent keys obey privacy",
+            )?;
+            let side_path = tempdir.path().join("restored-profiles");
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: side_path.clone(),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                restored.restored_agent_profile_count,
+                129,
+                "restored profile count",
+            )?;
+            ensure_equal(
+                restored.data_json()["counts"]["agentContextProfilesRestored"].as_u64(),
+                Some(129),
+                "JSON profile count",
+            )?;
+            let db = DbConnection::open_file(&restored.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let restored_workspace = db
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .next()
+                .ok_or("restored workspace")?;
+            let memories = db
+                .list_memories(&restored_workspace.id, None, true)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(memories.len(), 1, "restored profile memory")?;
+            let actual = db
+                .list_agent_context_profiles_for_recovery(&restored_workspace.id)
+                .map_err(|e| e.to_string())?;
+            let mut expected = profiles.clone();
+            for profile in &mut expected {
+                profile.workspace_id.clone_from(&restored_workspace.id);
+                profile.memory_id.clone_from(&memories[0].id);
+                // Independent expected identity computation; do not use the exporter.
+                if redaction == RedactionLevel::Full
+                    || (redaction == RedactionLevel::Standard
+                        && profile.agent_name.starts_with("api_key="))
+                {
+                    profile.agent_name = format!(
+                        "key_{}",
+                        blake3::hash(profile.agent_name.as_bytes()).to_hex()
+                    );
+                }
+            }
+            expected.sort_by(|a, b| a.agent_name.cmp(&b.agent_name));
+            ensure_equal(
+                &actual,
+                &expected,
+                "exact counts, timestamps, weights, distinct identities and memory links",
+            )?;
+            ensure(
+                db.list_feedback_events(&restored_workspace.id)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "recovery does not synthesize feedback",
+            )?;
+            ensure(
+                db.list_audit_entries(Some(&restored_workspace.id), Some(100))
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|a| a.action == "backup.agent_profiles_restored"),
+                "profile recovery audited",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+            if redaction != RedactionLevel::Full {
+                let response = crate::core::context::run_context_pack(
+                    &crate::core::context::ContextPackOptions {
+                        workspace_path: side_path,
+                        database_path: Some(PathBuf::from(&restored.restored_database_path)),
+                        index_dir: None,
+                        query: "Authorization header".to_owned(),
+                        speed: crate::search::SpeedMode::Default,
+                        source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                        strict_source_mode: true,
+                        filters: Default::default(),
+                        profile: None,
+                        max_tokens: Some(2000),
+                        candidate_pool: Some(10),
+                        max_results: None,
+                        include_tombstoned: false,
+                        as_of: None,
+                        include_expired: false,
+                        include_future: false,
+                        include_stale: false,
+                        relevance_floor: None,
+                        redaction_level: RedactionLevel::Standard,
+                        memory_scope: crate::models::MemoryScope::Swarm,
+                        strict_scope: false,
+                        ppr_weight: Some(0.0),
+                        changed_symbols: Vec::new(),
+                        changed_symbols_from_git: false,
+                        pagination: None,
+                        coordination_snapshot_path: None,
+                        coordination_stale_after_ms:
+                            crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+                        task_lens: None,
+                        require_fresh_sentinels: false,
+                        output_options: Default::default(),
+                        persist_pack: true,
+                        baseline_write: None,
+                        no_lod: false,
+                    },
+                )
+                .map_err(|e| format!("live pack failed: {e:?}"))?;
+                let profile = response
+                    .data
+                    .agent_profile
+                    .ok_or("live pack omitted recovered profile")?;
+                ensure_equal(
+                    profile["memoryBiasApplied"].as_u64(),
+                    Some(1),
+                    "real pack applied learned bias",
+                )?;
+                ensure_equal(
+                    profile["helpfulCount"].as_u64(),
+                    Some(30),
+                    "pack sees exact agent counters",
+                )?;
+                ensure_equal(
+                    profile["coldStart"].as_bool(),
+                    Some(false),
+                    "restored learning avoids cold start",
+                )?;
+                ensure_equal(
+                    profile["topBiases"][0]["memoryId"].as_str(),
+                    Some(memories[0].id.as_str()),
+                    "bias targets recovered memory",
+                )?;
+                ensure(
+                    response
+                        .data
+                        .pack
+                        .items
+                        .iter()
+                        .any(|item| item.memory_id.to_string() == memories[0].id),
+                    "real pack includes recovered memory",
+                )?;
+            }
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                source
+                    .list_agent_context_profiles_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                profiles,
+                "source profiles unchanged",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn agent_profile_recovery_rejects_corruption_and_rolls_back() -> TestResult {
+        for defect in [
+            "tampered",
+            "unsigned",
+            "wrong_schema",
+            "foreign_profile",
+            "orphan_profile",
+            "duplicate_profile",
+            "oversized_chunk",
+            "missing_chunk",
+            "late_constraint",
+            "invalid_weight",
+            "existing_collision",
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+            let original = recovery_agent_profile(&workspace_id, &memory_id, "ExistingAgent");
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            db.insert_agent_context_profile_for_recovery(&original)
+                .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            let rule = recovery_rule(&workspace_id, 0);
+            let mut chunk = BackupLearningHistory {
+                schema: LEARNING_HISTORY_SCHEMA.to_owned(),
+                backup_id: "backup-profiles".to_owned(),
+                workspace_id: workspace_id.clone(),
+                chunk_index: 0,
+                chunk_count: 1,
+                rules: vec![rule],
+                sources: Vec::new(),
+                tags: Vec::new(),
+                feedback: vec![recovery_feedback(&workspace_id, &memory_id, 0)],
+                agent_profiles: vec![
+                    recovery_agent_profile(&workspace_id, &memory_id, "FirstAgent"),
+                    recovery_agent_profile(&workspace_id, &memory_id, "SecondAgent"),
+                ],
+                authentication: None,
+            };
+            match defect {
+                "wrong_schema" => chunk.schema = "ee.backup.learning_history.v1".to_owned(),
+                "foreign_profile" => chunk.agent_profiles[1].workspace_id = "foreign".to_owned(),
+                "orphan_profile" => {
+                    chunk.agent_profiles[1].memory_id =
+                        MemoryId::from_uuid(Uuid::from_u128(99)).to_string()
+                }
+                "duplicate_profile" => chunk.agent_profiles[1] = chunk.agent_profiles[0].clone(),
+                "oversized_chunk" => chunk
+                    .agent_profiles
+                    .resize(129, chunk.agent_profiles[0].clone()),
+                "missing_chunk" => chunk.chunk_count = 2,
+                "late_constraint" => chunk.agent_profiles[1].last_seen_at = "".to_owned(),
+                "invalid_weight" => chunk.agent_profiles[1].weight_cached = 0.051,
+                "existing_collision" => chunk.agent_profiles[1] = original.clone(),
+                _ => {}
+            }
+            let root =
+                StoreAuthRoot::create(workspace_keys_dir(&workspace)).map_err(|e| e.to_string())?;
+            let mut payloads = vec![derived_payload(
+                "derived/learning-history/00000000.json".to_owned(),
+                "learning_history",
+                "2026-09-01T00:00:00Z",
+                None,
+                serialized_payload_bytes(&chunk).map_err(|e| e.to_string())?,
+            )];
+            authenticate_learning_payloads(&mut payloads, Some(&root)).map_err(|e| e.message())?;
+            let mut signed: BackupLearningHistory =
+                serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
+            if defect == "tampered" {
+                signed.agent_profiles[0].counts.helpful_count += 1;
+            }
+            if defect == "unsigned" {
+                signed.authentication = None;
+            }
+            let path = tempdir.path().join("profile-history.json");
+            fs::write(
+                &path,
+                serialized_payload_bytes(&signed).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            let assets = vec![restored_cass_asset(&path, "learning_history")];
+            let error = restore_learning_history(&database, &workspace, "backup-profiles", &assets)
+                .err()
+                .ok_or_else(|| format!("accepted {defect}"))?;
+            let expected_error = match defect {
+                "tampered" => "authentication failed",
+                "unsigned" => "require an authenticated",
+                "wrong_schema" | "oversized_chunk" | "missing_chunk" => "learning-history chunks",
+                "foreign_profile" | "orphan_profile" | "duplicate_profile" => {
+                    "recovered agent profile"
+                }
+                "invalid_weight" => "invalid recovered agent context profile weight",
+                _ => "constraint",
+            };
+            ensure(
+                error.message().to_lowercase().contains(expected_error),
+                &format!("{defect}: wrong rejection boundary: {}", error.message()),
+            )?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                db.list_agent_context_profiles_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                vec![original],
+                &format!("{defect}: no partial or overwritten profiles"),
+            )?;
+            ensure(
+                db.list_procedural_rules(&workspace_id, None, None, true)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "earlier rules rolled back",
+            )?;
+            ensure(
+                db.list_feedback_events(&workspace_id)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "earlier feedback rolled back",
+            )?;
+            ensure(
+                !db.list_audit_entries(Some(&workspace_id), Some(100))
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|a| a.action == "backup.agent_profiles_restored"),
+                "no successful profile audit on failure",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn agent_profile_backup_rejects_identity_collisions_and_missing_keys() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        let secret = "api_key=profile-collision-canary";
+        let collision = format!("key_{}", blake3::hash(secret.as_bytes()).to_hex());
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        for name in [secret, &collision] {
+            db.insert_agent_context_profile_for_recovery(&recovery_agent_profile(
+                &workspace_id,
+                &memory_id,
+                name,
+            ))
+            .map_err(|e| e.to_string())?;
+        }
+        db.close().map_err(|e| e.to_string())?;
+        let output = workspace.join("profile-backups");
+        let mut options = BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(output.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        };
+        let error = create_backup(&options)
+            .err()
+            .ok_or("merged distinct agent identities")?;
+        ensure(
+            error
+                .message()
+                .contains("redaction merges distinct agent identities"),
+            "collision refused",
+        )?;
+        let keys = workspace_keys_dir(&workspace);
+        ensure(
+            !output.exists() && !keys.exists(),
+            "collision publishes neither backup nor keys",
+        )?;
+        options.redaction_level = RedactionLevel::None;
+        options.dry_run = true;
+        let preview = create_backup(&options).map_err(|e| e.message())?;
+        ensure(
+            preview.dry_run && !output.exists() && !keys.exists(),
+            "keyless preview leaves output and keys absent",
+        )?;
+        fs::write(&keys, b"profile key obstruction").map_err(|e| e.to_string())?;
+        options.dry_run = false;
+        let error = create_backup(&options)
+            .err()
+            .ok_or("published unsigned profiles")?;
+        ensure(
+            error
+                .message()
+                .contains("require source-store authentication"),
+            "profile-only history requires keys",
+        )?;
+        ensure(!output.exists(), "no unusable backup published")?;
+        ensure_equal(
+            fs::read(&keys).map_err(|e| e.to_string())?,
+            b"profile key obstruction".to_vec(),
+            "key obstruction untouched",
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn default_backup_restores_learning_history() -> TestResult {
         for redaction in [RedactionLevel::None, RedactionLevel::Standard] {
@@ -19942,6 +20489,7 @@ mod tests {
                     tag: "release".to_owned(),
                 }],
                 feedback: vec![recovery_feedback(&workspace_id, &memory_id, 0)],
+                agent_profiles: Vec::new(),
                 authentication: None,
             };
             match defect {

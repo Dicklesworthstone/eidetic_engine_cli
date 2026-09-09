@@ -15002,7 +15002,8 @@ pub struct UpsertAgentContextProfileInput {
 }
 
 /// Stored agent_context_profiles row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredAgentContextProfile {
     pub workspace_id: String,
     pub agent_name: String,
@@ -16400,6 +16401,57 @@ impl DbConnection {
             ],
         )?;
         Ok(())
+    }
+
+    /// Read every learned profile in a workspace, including inactive agents.
+    pub(crate) fn list_agent_context_profiles_for_recovery(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredAgentContextProfile>> {
+        self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, agent_name, memory_id, helpful_count, harmful_count,
+                    ignored_count, last_seen_at, weight_cached
+             FROM agent_context_profiles WHERE workspace_id = ?1
+             ORDER BY agent_name, memory_id",
+            &[Value::Text(workspace_id.to_owned())],
+        )?
+        .iter()
+        .map(stored_agent_context_profile_from_row)
+        .collect()
+    }
+
+    /// Restore exact learned counts without replaying events or merging rows.
+    /// The recovery caller owns the transaction and validates workspace links.
+    pub(crate) fn insert_agent_context_profile_for_recovery(
+        &self,
+        profile: &StoredAgentContextProfile,
+    ) -> Result<()> {
+        if !profile.weight_cached.is_finite()
+            || profile.weight_cached.abs() > AGENT_PROFILE_BIAS_CAP
+        {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "invalid recovered agent context profile weight".to_owned(),
+            });
+        }
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO agent_context_profiles (workspace_id, agent_name, memory_id,
+                helpful_count, harmful_count, ignored_count, last_seen_at, weight_cached)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            &[
+                Value::Text(profile.workspace_id.clone()),
+                Value::Text(profile.agent_name.clone()),
+                Value::Text(profile.memory_id.clone()),
+                Value::BigInt(i64::from(profile.counts.helpful_count)),
+                Value::BigInt(i64::from(profile.counts.harmful_count)),
+                Value::BigInt(i64::from(profile.counts.ignored_count)),
+                Value::Text(profile.last_seen_at.clone()),
+                Value::Double(profile.weight_cached),
+            ],
+        )?;
+        self.clear_agent_context_profile_pack_cache(DbOperation::Execute)
     }
 
     /// Insert or update one per-agent profile row for a memory.
@@ -47448,6 +47500,85 @@ mod tests {
         ensure_equal(&event.applied_at, &None, "applied_at is null initially")?;
         ensure(!event.created_at.is_empty(), "created_at is populated")?;
 
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn agent_context_profile_recovery_preserves_counts_and_invalidates_cache() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        seed_memory(&connection, "mem_01234567890123456789012345")?;
+        let profile = StoredAgentContextProfile {
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            agent_name: "RecoveredAgent".to_owned(),
+            memory_id: "mem_01234567890123456789012345".to_owned(),
+            counts: AgentContextProfileCounts::new(17, 3, 2),
+            last_seen_at: "2026-09-01T01:02:03Z".to_owned(),
+            weight_cached: -0.05,
+        };
+        ensure(
+            connection
+                .list_agent_context_profiles_for_pack(&profile.workspace_id, &profile.agent_name)?
+                .is_empty(),
+            "prime empty cache",
+        )?;
+        connection
+            .with_transaction(|| connection.insert_agent_context_profile_for_recovery(&profile))?;
+        let cached = connection
+            .list_agent_context_profiles_for_pack(&profile.workspace_id, &profile.agent_name)?;
+        ensure_equal(&cached.len(), &1, "recovery invalidates cache")?;
+        ensure_equal(&cached[0].counts, &profile.counts, "exact counts visible")?;
+        ensure(
+            connection
+                .insert_agent_context_profile_for_recovery(&profile)
+                .is_err(),
+            "duplicate recovery refuses merge",
+        )?;
+        ensure_equal(
+            &connection.get_agent_context_profile(
+                &profile.workspace_id,
+                &profile.agent_name,
+                &profile.memory_id,
+            )?,
+            &Some(profile.clone()),
+            "existing profile untouched",
+        )?;
+        let updated =
+            connection.upsert_agent_context_profile_event(&UpsertAgentContextProfileInput {
+                workspace_id: profile.workspace_id.clone(),
+                agent_name: profile.agent_name.clone(),
+                memory_id: profile.memory_id.clone(),
+                counts_delta: AgentContextProfileCounts::new(1, 0, 0),
+                last_seen_at: Some("2026-09-02T01:02:03Z".to_owned()),
+                weight_cached: 0.05,
+            })?;
+        ensure_equal(
+            &updated.counts,
+            &AgentContextProfileCounts::new(18, 3, 2),
+            "ordinary learning continues once",
+        )?;
+        for weight in [f64::NAN, f64::INFINITY, 0.051, -0.051] {
+            let invalid = StoredAgentContextProfile {
+                agent_name: "InvalidAgent".to_owned(),
+                weight_cached: weight,
+                ..profile.clone()
+            };
+            ensure(
+                connection
+                    .insert_agent_context_profile_for_recovery(&invalid)
+                    .is_err(),
+                "invalid recovery weights refused",
+            )?;
+        }
+        ensure_equal(
+            &connection
+                .list_agent_context_profiles_for_recovery(&profile.workspace_id)?
+                .len(),
+            &1,
+            "no invalid rows stored",
+        )?;
         connection.close()?;
         Ok(())
     }
