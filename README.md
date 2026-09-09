@@ -1497,6 +1497,14 @@ procedures return to `provisional`, while retired procedures stay retired.
 This history requires the source authentication keys. External verification
 files referenced by evidence URIs must still be available for revalidation.
 
+Learning observations, quarantined feedback, and outcome evidence are also
+included in authenticated backups. Restore preserves observation timestamps,
+review decisions, evidence weights, and distinct evidence references. Pending
+feedback remains reviewable through `ee outcome quarantine`; released or rejected
+entries stay reviewed. Valid payload hashes are rebound to the restored workspace
+and redacted data with an audit linking the original hash. Invalid quarantine
+payloads remain untrusted. Recovery does not reapply feedback or rerun scoring.
+
 ### Diagnostics, eval, ops
 
 | Command | Purpose |

@@ -28,10 +28,12 @@ use crate::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
     CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType,
     MeshStorageStatus, StoredAuditEntry, StoredCurationCandidate, StoredCurationTtlPolicy,
-    StoredEpisodeAction, StoredEvidenceSpan, StoredFeedbackEvent, StoredGraphAlgorithmResult,
-    StoredGraphAlgorithmWitness, StoredGraphSnapshot, StoredImportLedger, StoredJournalEntry,
-    StoredMemory, StoredMemoryLink, StoredPackHistory, StoredProceduralRule, StoredProcedure,
-    StoredProcedureEvent, StoredSearchIndexJob, StoredSession, StoredTaskEpisode, audit_actions,
+    StoredEpisodeAction, StoredEvidenceSpan, StoredFeedbackEvent, StoredFeedbackQuarantine,
+    StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness, StoredGraphSnapshot,
+    StoredImportLedger, StoredJournalEntry, StoredLearningObservation, StoredMemory,
+    StoredMemoryLink, StoredOutcomeEvidence, StoredPackHistory, StoredProceduralRule,
+    StoredProcedure, StoredProcedureEvent, StoredSearchIndexJob, StoredSession, StoredTaskEpisode,
+    audit_actions,
 };
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
@@ -63,6 +65,7 @@ const PACK_HISTORY_SCHEMA: &str = "ee.backup.pack_history.v1";
 const IMPORT_HISTORY_SCHEMA: &str = "ee.backup.import_history.v1";
 const CURATION_HISTORY_SCHEMA: &str = "ee.backup.curation_history.v1";
 const PROCEDURE_HISTORY_SCHEMA: &str = "ee.backup.procedure_history.v1";
+const LEARNING_SIGNALS_SCHEMA: &str = "ee.backup.learning_signals.v1";
 const MANIFEST_AUTH_FAMILY: &str = "ee.backup.manifest";
 const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
 const RECOVERY_KEYS_FILE: &str = "store-auth.recovery.json";
@@ -775,6 +778,7 @@ pub struct BackupRestoreReport {
     pub restored_curation_policy_count: u32,
     pub restored_procedure_count: u32,
     pub restored_procedure_event_count: u32,
+    pub restored_learning_signals: BackupLearningSignalCounts,
     pub restored_pack_history: BackupPackHistoryCounts,
     pub restored_graph_cache_count: u32,
     pub restored_derived: Vec<BackupRestoredDerivedAssetReport>,
@@ -818,6 +822,7 @@ impl BackupRestoreReport {
                 "curationPoliciesRestored": self.restored_curation_policy_count,
                 "proceduresRestored": self.restored_procedure_count,
                 "procedureEventsRestored": self.restored_procedure_event_count,
+                "learningSignalsRestored": self.restored_learning_signals,
                 "packHistoryRestored": self.restored_pack_history,
                 "graphCacheRowsRestored": self.restored_graph_cache_count,
                 "issues": self.issue_count,
@@ -832,7 +837,7 @@ impl BackupRestoreReport {
     pub fn human_summary(&self) -> String {
         let prefix = if self.dry_run { "DRY RUN: " } else { "" };
         format!(
-            "{prefix}backup restore {status}: {backup_id}\n  side path: {side_path}\n  restored db: {database}\n  imported memories: {imported} (duplicates: {duplicates})\n  restored task episodes: {episodes}\n  restored CASS sessions/evidence: {sessions}/{evidence}\n  restored import checkpoints: {checkpoints}\n  restored curation proposals/policies: {candidates}/{policies}\n  restored procedures/events: {procedures}/{procedure_events}\n  restored journal entries/index jobs: {journals}/{jobs}\n  restored rules/sources/tags/feedback: {rules}/{rule_sources}/{rule_tags}/{feedback}\n  restored packs: {packs}\n",
+            "{prefix}backup restore {status}: {backup_id}\n  side path: {side_path}\n  restored db: {database}\n  imported memories: {imported} (duplicates: {duplicates})\n  restored task episodes: {episodes}\n  restored CASS sessions/evidence: {sessions}/{evidence}\n  restored import checkpoints: {checkpoints}\n  restored curation proposals/policies: {candidates}/{policies}\n  restored procedures/events: {procedures}/{procedure_events}\n  restored learning observations/quarantine/outcome evidence: {observations}/{quarantine}/{outcomes}\n  restored journal entries/index jobs: {journals}/{jobs}\n  restored rules/sources/tags/feedback: {rules}/{rule_sources}/{rule_tags}/{feedback}\n  restored packs: {packs}\n",
             status = self.status,
             backup_id = self.backup_id,
             side_path = self.side_path,
@@ -847,6 +852,9 @@ impl BackupRestoreReport {
             policies = self.restored_curation_policy_count,
             procedures = self.restored_procedure_count,
             procedure_events = self.restored_procedure_event_count,
+            observations = self.restored_learning_signals.observations,
+            quarantine = self.restored_learning_signals.quarantine,
+            outcomes = self.restored_learning_signals.outcomes,
             journals = self.restored_journal_entry_count,
             jobs = self.restored_search_index_job_count,
             rules = self.restored_rule_count,
@@ -1452,6 +1460,43 @@ struct BackupProcedure {
     requires_fresh_review: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupLearningSignals {
+    schema: String,
+    backup_id: String,
+    workspace_id: String,
+    chunk_index: usize,
+    chunk_count: usize,
+    observations: Vec<StoredLearningObservation>,
+    quarantine: Vec<BackupFeedbackQuarantine>,
+    outcomes: Vec<BackupOutcomeEvidence>,
+    authentication: Option<AuthenticatedHeader>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupFeedbackQuarantine {
+    row: StoredFeedbackQuarantine,
+    /// Invalid source payloads must never become releasable through recovery.
+    payload_hash_verified: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupOutcomeEvidence {
+    row: StoredOutcomeEvidence,
+    source_provenance_hash: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupLearningSignalCounts {
+    pub observations: u32,
+    pub quarantine: u32,
+    pub outcomes: u32,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupPackHistoryCounts {
@@ -1647,10 +1692,14 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
                 "derived_artifact_restore",
             )
         }
-        "feedback_quarantine"
-        | "learning_observations"
-        | "outcome_evidence_rows"
-        | "plan_recipes" => {
+        "feedback_quarantine" | "learning_observations" | "outcome_evidence_rows" => {
+            BackupTablePolicy::new(
+                "learn",
+                "export_restore_required",
+                "derived_artifact_restore",
+            )
+        }
+        "plan_recipes" => {
             BackupTablePolicy::new("learn", "export_restore_required", "not_implemented")
         }
         _ => BackupTablePolicy::new("maintain", "unclassified", "unclassified"),
@@ -1800,6 +1849,18 @@ fn reconcile_derived_recovery_inventory(
     }
 
     for (table, captured_count) in [
+        (
+            "learning_observations",
+            captured_derived_record_count(derived, "learning_signals", "observations"),
+        ),
+        (
+            "feedback_quarantine",
+            captured_derived_record_count(derived, "learning_signals", "quarantine"),
+        ),
+        (
+            "outcome_evidence_rows",
+            captured_derived_record_count(derived, "learning_signals", "outcomes"),
+        ),
         (
             "procedures",
             captured_derived_record_count(derived, "procedure_history", "procedures"),
@@ -2008,6 +2069,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &memory_ids,
                 &mut payloads,
             )?;
+            collect_learning_signal_payloads(
+                &connection,
+                workspace_id,
+                &backup_id,
+                &created_at,
+                options.redaction_level,
+                &memory_ids,
+                &mut payloads,
+            )?;
             collect_pack_history_payloads(
                 &connection,
                 workspace_id,
@@ -2054,14 +2124,18 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         && derived_payloads.iter().any(|p| {
             matches!(
                 p.report.kind.as_str(),
-                "learning_history" | "pack_history" | "import_history" | "procedure_history"
+                "learning_history"
+                    | "pack_history"
+                    | "import_history"
+                    | "procedure_history"
+                    | "learning_signals"
             ) || (p.report.kind == "curation_history"
                 && serde_json::from_slice::<BackupCurationHistory>(&p.bytes)
                     .is_ok_and(|chunk| !chunk.candidates.is_empty()))
         })
     {
         return Err(work_history_error(
-            "learned rules, feedback, pack history, import checkpoints, curation history, and procedures require source-store authentication; repair the workspace key store before creating this backup",
+            "learned rules, feedback, pack history, import checkpoints, curation history, procedures, and learning signals require source-store authentication; repair the workspace key store before creating this backup",
         ));
     }
     authenticate_learning_payloads(&mut derived_payloads, store_auth.as_ref())?;
@@ -2069,6 +2143,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     authenticate_import_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_curation_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_procedure_payloads(&mut derived_payloads, store_auth.as_ref())?;
+    authenticate_learning_signal_payloads(&mut derived_payloads, store_auth.as_ref())?;
     let derived_reports = derived_payloads
         .iter()
         .map(|payload| payload.report.clone())
@@ -3007,6 +3082,7 @@ pub fn restore_backup_to_side_path(
             restored_curation_policy_count: 0,
             restored_procedure_count: 0,
             restored_procedure_event_count: 0,
+            restored_learning_signals: BackupLearningSignalCounts::default(),
             restored_search_index_job_count: 0,
             restored_rule_count: 0,
             restored_rule_source_count: 0,
@@ -3161,6 +3237,12 @@ pub fn restore_backup_to_side_path(
             &inspect.backup_id,
             &restored_derived,
         )?;
+    let restored_learning_signals = restore_learning_signals(
+        &restored_database_path,
+        &workspace_path,
+        &inspect.backup_id,
+        &restored_derived,
+    )?;
     let graph_cache_restored_count = if options.restore_graph_cache {
         restore_graph_cache_assets(&restored_database_path, &restored_derived)?
     } else {
@@ -3250,6 +3332,7 @@ pub fn restore_backup_to_side_path(
         restored_curation_policy_count,
         restored_procedure_count,
         restored_procedure_event_count,
+        restored_learning_signals,
         restored_search_index_job_count,
         restored_rule_count,
         restored_rule_source_count,
@@ -7707,6 +7790,464 @@ fn restore_procedure_history(
     ))
 }
 
+/// Redaction must not merge independent observation keys or evidence pointers.
+fn redact_learning_reference(
+    value: &str,
+    level: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
+    references: &BTreeSet<String>,
+) -> String {
+    if let Some(id) = memory_ids.get(value) {
+        return id.clone();
+    }
+    if references.contains(value) {
+        return value.to_owned();
+    }
+    let redacted = redact_content(value, level);
+    if redacted == value {
+        redacted
+    } else {
+        format!("backup-ref:{}", blake3::hash(value.as_bytes()).to_hex())
+    }
+}
+
+fn quarantine_payload_hash(row: &StoredFeedbackQuarantine) -> Result<Option<String>, DomainError> {
+    row.proposed_event_id
+        .as_deref()
+        .map(|id| {
+            crate::core::outcome::raw_feedback_event_hash(
+                id,
+                &crate::db::CreateFeedbackEventInput {
+                    workspace_id: row.workspace_id.clone(),
+                    target_type: row.target_type.clone(),
+                    target_id: row.target_id.clone(),
+                    signal: row.signal.clone(),
+                    weight: row.weight,
+                    source_type: row.source_type.clone(),
+                    source_id: Some(row.source_id.clone()),
+                    reason: row.event_reason.clone(),
+                    evidence_json: row.evidence_json.clone(),
+                    session_id: row.session_id.clone(),
+                },
+            )
+        })
+        .transpose()
+}
+
+fn validate_quarantine_references(
+    connection: &DbConnection,
+    row: &StoredFeedbackQuarantine,
+) -> Result<(), DomainError> {
+    if let Some(id) = &row.session_id
+        && !connection
+            .get_session(id)
+            .map_err(work_history_error)?
+            .is_some_and(|session| session.workspace_id == row.workspace_id)
+    {
+        return Err(work_history_error("foreign or missing quarantine session"));
+    }
+    if let Some(id) = &row.released_feedback_event_id
+        && !connection
+            .get_feedback_event(id)
+            .map_err(work_history_error)?
+            .is_some_and(|event| event.workspace_id == row.workspace_id)
+    {
+        return Err(work_history_error(
+            "foreign or missing quarantine feedback event",
+        ));
+    }
+    Ok(())
+}
+
+fn collect_learning_signal_payloads(
+    connection: &DbConnection,
+    workspace_id: &str,
+    backup_id: &str,
+    captured_at: &str,
+    redaction: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) -> Result<(), DomainError> {
+    let mut observations = connection
+        .list_learning_observations(workspace_id, None)
+        .map_err(work_history_error)?;
+    let rows = connection
+        .list_feedback_quarantine(workspace_id, None)
+        .map_err(work_history_error)?;
+    let evidence = connection
+        .list_outcome_evidence_for_recovery(workspace_id)
+        .map_err(work_history_error)?;
+    if observations.is_empty() && rows.is_empty() && evidence.is_empty() {
+        return Ok(());
+    }
+    let references = connection
+        .learning_recovery_references(workspace_id)
+        .map_err(work_history_error)?;
+    let reference =
+        |value: &str| redact_learning_reference(value, redaction, memory_ids, &references);
+    for row in &mut observations {
+        row.source_id = row.source_id.as_deref().map(reference);
+        row.target_id = reference(&row.target_id);
+        // These columns allow extensible categories, including caller-provided text.
+        for value in [&mut row.source_type, &mut row.target_type] {
+            if !matches!(
+                value.as_str(),
+                "memory"
+                    | "rule"
+                    | "procedure"
+                    | "candidate"
+                    | "session"
+                    | "source"
+                    | "pack"
+                    | "evidence"
+                    | "feedback_event"
+                    | "curation"
+                    | "cass"
+                    | "experiment"
+                    | "agent_inference"
+                    | "outcome_observed"
+                    | "automated_check"
+                    | "human_explicit"
+            ) {
+                *value = reference(value);
+            }
+        }
+        row.topic = row
+            .topic
+            .as_deref()
+            .map(|text| redact_content(text, redaction));
+        row.evidence_json = row
+            .evidence_json
+            .as_deref()
+            .map(|text| redact_work_history_json(text, redaction))
+            .transpose()?;
+    }
+    let mut quarantine = Vec::with_capacity(rows.len());
+    for mut row in rows {
+        validate_quarantine_references(connection, &row)?;
+        let payload_hash_verified =
+            quarantine_payload_hash(&row)?.as_deref() == Some(row.raw_event_hash.as_str());
+        row.source_id = reference(&row.source_id);
+        row.target_id = reference(&row.target_id);
+        row.reason = redact_content(&row.reason, redaction);
+        row.event_reason = row
+            .event_reason
+            .as_deref()
+            .map(|text| redact_content(text, redaction));
+        row.evidence_json = row
+            .evidence_json
+            .as_deref()
+            .map(|text| redact_work_history_json(text, redaction))
+            .transpose()?;
+        row.reviewed_by = row
+            .reviewed_by
+            .as_deref()
+            .map(|text| redact_content(text, redaction));
+        quarantine.push(BackupFeedbackQuarantine {
+            row,
+            payload_hash_verified,
+        });
+    }
+    let mut outcomes = Vec::with_capacity(evidence.len());
+    for mut row in evidence {
+        if row.provenance_hash != row.computed_provenance_hash()
+            || row.evidence_family != row.source.evidence_family()
+            || row.base_weight_milli != row.source.base_weight_milli()
+        {
+            return Err(work_history_error(
+                "outcome evidence provenance or taxonomy mismatch",
+            ));
+        }
+        let source_provenance_hash = row.provenance_hash.clone();
+        row.evidence_ref = reference(&row.evidence_ref);
+        row.agent_id = row.agent_id.as_deref().map(reference);
+        row.task_id = row.task_id.as_deref().map(reference);
+        row.run_id = row.run_id.as_deref().map(reference);
+        row.provenance_hash = row.computed_provenance_hash();
+        outcomes.push(BackupOutcomeEvidence {
+            row,
+            source_provenance_hash,
+        });
+    }
+    let count = observations
+        .len()
+        .max(quarantine.len())
+        .max(outcomes.len())
+        .div_ceil(WORK_HISTORY_CHUNK_ROWS);
+    for index in 0..count {
+        let start = index * WORK_HISTORY_CHUNK_ROWS;
+        let end = start + WORK_HISTORY_CHUNK_ROWS;
+        let chunk = BackupLearningSignals {
+            schema: LEARNING_SIGNALS_SCHEMA.to_owned(),
+            backup_id: backup_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            chunk_index: index,
+            chunk_count: count,
+            observations: observations[start.min(observations.len())..end.min(observations.len())]
+                .to_vec(),
+            quarantine: quarantine[start.min(quarantine.len())..end.min(quarantine.len())].to_vec(),
+            outcomes: outcomes[start.min(outcomes.len())..end.min(outcomes.len())].to_vec(),
+            authentication: None,
+        };
+        payloads.push(derived_payload(
+            format!("derived/learning-signals/{index:08}.json"),
+            "learning_signals",
+            captured_at,
+            None,
+            serialized_payload_bytes(&chunk).map_err(work_history_error)?,
+        ));
+    }
+    Ok(())
+}
+
+fn learning_signal_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
+    ArtifactContext {
+        artifact_family: LEARNING_SIGNALS_SCHEMA,
+        record_encoding_version: "json.v1",
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: workspace_id,
+    }
+}
+
+fn authenticate_learning_signal_payloads(
+    payloads: &mut [BackupDerivedPayload],
+    root: Option<&StoreAuthRoot>,
+) -> Result<(), DomainError> {
+    for payload in payloads
+        .iter_mut()
+        .filter(|p| p.report.kind == "learning_signals")
+    {
+        let mut chunk: BackupLearningSignals =
+            serde_json::from_slice(&payload.bytes).map_err(work_history_error)?;
+        chunk.authentication = None;
+        if let Some(root) = root {
+            let hash =
+                canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+            chunk.authentication = Some(
+                authenticate_artifact(
+                    root,
+                    MacDomain::NativeImportRecordsRoot,
+                    &learning_signal_auth_context(&chunk.workspace_id),
+                    &hash,
+                    1,
+                )
+                .map_err(work_history_error)?,
+            );
+        }
+        payload.bytes = serialized_payload_bytes(&chunk).map_err(work_history_error)?;
+        if payload.bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES {
+            return Err(work_history_error(
+                "learning-signals chunk exceeds the restore asset byte limit",
+            ));
+        }
+        payload.report.hash = Some(hash_bytes(&payload.bytes));
+        payload.report.byte_size = Some(payload.bytes.len() as u64);
+    }
+    Ok(())
+}
+
+fn restore_learning_signals(
+    database: &Path,
+    source_workspace: &Path,
+    backup_id: &str,
+    assets: &[BackupRestoredDerivedAssetReport],
+) -> Result<BackupLearningSignalCounts, DomainError> {
+    let mut chunks = assets
+        .iter()
+        .filter(|asset| asset.kind == "learning_signals")
+        .map(|asset| {
+            serde_json::from_value::<BackupLearningSignals>(read_restored_derived_json(asset)?)
+                .map_err(work_history_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if chunks.is_empty() {
+        return Ok(BackupLearningSignalCounts::default());
+    }
+    let root =
+        StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
+    chunks.sort_by_key(|chunk| chunk.chunk_index);
+    let source_id = chunks[0].workspace_id.clone();
+    let count = chunks.len();
+    for (index, chunk) in chunks.iter_mut().enumerate() {
+        if chunk.schema != LEARNING_SIGNALS_SCHEMA
+            || chunk.backup_id != backup_id
+            || chunk.workspace_id != source_id
+            || chunk.chunk_index != index
+            || chunk.chunk_count != count
+            || chunk.observations.len() > WORK_HISTORY_CHUNK_ROWS
+            || chunk.quarantine.len() > WORK_HISTORY_CHUNK_ROWS
+            || chunk.outcomes.len() > WORK_HISTORY_CHUNK_ROWS
+        {
+            return Err(work_history_error(
+                "unsupported, incomplete, duplicate, or substituted learning-signals chunks",
+            ));
+        }
+        let header = chunk.authentication.take().ok_or_else(|| {
+            work_history_error("learning signals require an authenticated source-store backup")
+        })?;
+        let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+        if !verify_artifact(
+            &root,
+            MacDomain::NativeImportRecordsRoot,
+            &learning_signal_auth_context(&source_id),
+            &header,
+            &hash,
+            1,
+        )
+        .map_err(work_history_error)?
+        .is_authenticated()
+        {
+            return Err(work_history_error("learning-signals authentication failed"));
+        }
+    }
+    let connection = DbConnection::open_file(database).map_err(work_history_error)?;
+    let workspace_id = remap_restored_workspace_id(
+        &connection.list_workspaces().map_err(work_history_error)?,
+        Some(&source_id),
+        "learning signals",
+    )?
+    .ok_or_else(|| work_history_error("missing learning-signals workspace"))?;
+    let mut observations = Vec::new();
+    let mut quarantine = Vec::new();
+    let mut outcomes = Vec::new();
+    for chunk in chunks {
+        observations.extend(chunk.observations);
+        quarantine.extend(chunk.quarantine);
+        outcomes.extend(chunk.outcomes);
+    }
+    let mut ids = BTreeSet::new();
+    for row in &mut observations {
+        if row.workspace_id != source_id || !ids.insert(row.id.clone()) {
+            return Err(work_history_error(
+                "foreign or duplicate recovered learning observation",
+            ));
+        }
+        row.workspace_id.clone_from(&workspace_id);
+    }
+    let mut ids = BTreeSet::new();
+    for entry in &mut quarantine {
+        let row = &mut entry.row;
+        if row.workspace_id != source_id || !ids.insert(row.id.clone()) {
+            return Err(work_history_error(
+                "foreign or duplicate recovered quarantine row",
+            ));
+        }
+        row.workspace_id.clone_from(&workspace_id);
+        validate_quarantine_references(&connection, row)?;
+        if entry.payload_hash_verified && row.proposed_event_id.is_none() {
+            return Err(work_history_error(
+                "verified quarantine row has no proposed event identity",
+            ));
+        }
+        if !entry.payload_hash_verified
+            && quarantine_payload_hash(row)?.as_deref() == Some(row.raw_event_hash.as_str())
+        {
+            return Err(work_history_error(
+                "invalid source quarantine payload would become trusted",
+            ));
+        }
+    }
+    let mut ids = BTreeSet::new();
+    for entry in &mut outcomes {
+        let row = &mut entry.row;
+        if row.workspace_id != source_id
+            || !ids.insert((
+                row.source.as_str(),
+                row.evidence_ref.clone(),
+                row.observed_at.clone(),
+            ))
+        {
+            return Err(work_history_error(
+                "foreign or duplicate recovered outcome evidence",
+            ));
+        }
+        if row.provenance_hash != row.computed_provenance_hash()
+            || row.evidence_family != row.source.evidence_family()
+            || row.base_weight_milli != row.source.base_weight_milli()
+        {
+            return Err(work_history_error(
+                "outcome evidence provenance or taxonomy mismatch",
+            ));
+        }
+        row.workspace_id.clone_from(&workspace_id);
+        row.provenance_hash = row.computed_provenance_hash();
+    }
+    // All rows and rebinding audits commit together. No counters or outcome
+    // joiners run here; replaying them would count the same evidence twice.
+    connection
+        .with_transaction(|| {
+            for row in &observations {
+                connection.insert_learning_observation_for_recovery(row)?;
+            }
+            for entry in &quarantine {
+                let mut row = entry.row.clone();
+                if entry.payload_hash_verified {
+                    // The hash computation serializes a fixed finite stored payload.
+                    let hash = quarantine_payload_hash(&row)
+                        .map_err(|error| crate::db::DbError::MalformedRow {
+                            operation: crate::db::DbOperation::Execute,
+                            message: error.message(),
+                        })?
+                        .ok_or_else(|| crate::db::DbError::MalformedRow {
+                            operation: crate::db::DbOperation::Execute,
+                            message: "missing proposed event".to_owned(),
+                        })?;
+                    if hash != row.raw_event_hash {
+                        insert_learning_rebinding_audit(
+                            &connection,
+                            &workspace_id,
+                            backup_id,
+                            "feedback_quarantine",
+                            &row.id,
+                            &row.raw_event_hash,
+                            &hash,
+                        )?;
+                        row.raw_event_hash = hash;
+                    }
+                }
+                connection.insert_feedback_quarantine_for_recovery(&row)?;
+            }
+            for entry in &outcomes {
+                if entry.source_provenance_hash != entry.row.provenance_hash {
+                    insert_learning_rebinding_audit(
+                        &connection,
+                        &workspace_id,
+                        backup_id,
+                        "outcome_evidence",
+                        &entry.row.evidence_ref,
+                        &entry.source_provenance_hash,
+                        &entry.row.provenance_hash,
+                    )?;
+                }
+                connection.insert_outcome_evidence_for_recovery(&entry.row)?;
+            }
+            Ok(())
+        })
+        .map_err(work_history_error)?;
+    Ok(BackupLearningSignalCounts {
+        observations: u32::try_from(observations.len()).unwrap_or(u32::MAX),
+        quarantine: u32::try_from(quarantine.len()).unwrap_or(u32::MAX),
+        outcomes: u32::try_from(outcomes.len()).unwrap_or(u32::MAX),
+    })
+}
+
+fn insert_learning_rebinding_audit(
+    connection: &DbConnection,
+    workspace_id: &str,
+    backup_id: &str,
+    target_type: &str,
+    target_id: &str,
+    source_hash: &str,
+    restored_hash: &str,
+) -> crate::db::Result<()> {
+    connection.insert_audit(&crate::models::AuditId::now().to_string(), &crate::db::CreateAuditInput {
+        workspace_id: Some(workspace_id.to_owned()), actor: Some("ee backup restore".to_owned()),
+        action: "learning.backup_provenance_rebound".to_owned(), target_type: Some(target_type.to_owned()), target_id: Some(target_id.to_owned()),
+        details: Some(json!({ "backupId": backup_id, "sourceHash": source_hash, "restoredHash": restored_hash,
+            "reason": "Authenticated recovery remapped workspace or redacted evidence; review state is unchanged and no feedback was reapplied." }).to_string()),
+    })
+}
+
 fn learning_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
     ArtifactContext {
         artifact_family: LEARNING_HISTORY_SCHEMA,
@@ -9403,8 +9944,8 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
-        // Curation is covered too; keep a separate, still-unsupported learning
-        // observation as the negative control for honest partial coverage.
+        // Curation and observations are covered; an agent registry row remains
+        // the negative control for honest partial coverage.
         connection
             .insert_curation_candidate(
                 "curate_01234567890123456789012345",
@@ -9431,7 +9972,7 @@ mod tests {
             .insert_learning_observation(
                 "lobs_backup_uncovered",
                 &crate::db::CreateLearningObservationInput {
-                    workspace_id,
+                    workspace_id: workspace_id.clone(),
                     observation_kind: "curation_apply".to_owned(),
                     source_type: "curation".to_owned(),
                     source_id: None,
@@ -9444,6 +9985,9 @@ mod tests {
                 },
             )
             .map_err(|e| e.to_string())?;
+        connection.execute_raw(&format!(
+            "INSERT INTO agents (id, workspace_id, name, created_at, last_seen_at) VALUES ('agt_00000000000000000000000000', '{workspace_id}', 'backup-agent', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')"
+        )).map_err(|e| e.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
 
         let report = create_backup(&BackupCreateOptions {
@@ -9466,7 +10010,7 @@ mod tests {
         )?;
         ensure(
             !report.recovery_inventory.snapshot_coverage_complete,
-            "nonempty uncovered learning observation must make snapshot coverage incomplete",
+            "nonempty uncovered agent registry must make snapshot coverage incomplete",
         )?;
         let session = report
             .recovery_inventory
@@ -9500,11 +10044,22 @@ mod tests {
             .ok_or("missing curation inventory")?;
         ensure_equal(candidate.row_count, 1, "captured curation row count")?;
         ensure(candidate.snapshot_covered, "curation review is covered")?;
+        let observation = report
+            .recovery_inventory
+            .entries
+            .iter()
+            .find(|entry| entry.table == "learning_observations")
+            .ok_or("missing observation inventory")?;
+        ensure_equal(observation.row_count, 1, "observation row counted")?;
+        ensure(
+            observation.snapshot_covered,
+            "observation ledger is now covered",
+        )?;
         ensure(
             report.degraded.iter().any(|entry| {
                 entry.code == "backup_source_rows_not_covered"
                     && entry.severity == "high"
-                    && entry.message.contains("learning_observations=1")
+                    && entry.message.contains("agents=1")
             }),
             format!(
                 "partial backup omitted high source-coverage degradation: {:?}",
@@ -15067,6 +15622,647 @@ mod tests {
             actor: Some("release reviewer".to_owned()),
             created_at: "2026-09-01T00:03:00Z".to_owned(),
         }
+    }
+
+    fn recovery_observation(
+        workspace_id: &str,
+        memory_id: &str,
+        n: usize,
+    ) -> StoredLearningObservation {
+        StoredLearningObservation {
+            id: format!("lobs_recovery_{n:04}"),
+            workspace_id: workspace_id.to_owned(),
+            observation_kind: "experiment_observe".to_owned(),
+            source_type: "experiment".to_owned(),
+            source_id: Some(format!("api_key=observation-{n}-secret-canary")),
+            target_type: "memory".to_owned(),
+            target_id: memory_id.to_owned(),
+            topic: Some("release".to_owned()),
+            signal: "helpful".to_owned(),
+            evidence_json: Some(json!({"note": "api_key=observation-secret-canary"}).to_string()),
+            observed_at: "2026-09-01T00:00:00Z".to_owned(),
+            created_at: "2026-09-01T00:01:00Z".to_owned(),
+        }
+    }
+
+    fn recovery_quarantine(
+        workspace_id: &str,
+        memory_id: &str,
+        n: usize,
+    ) -> Result<StoredFeedbackQuarantine, String> {
+        let mut row = StoredFeedbackQuarantine {
+            id: format!("fq_{n:026}"),
+            workspace_id: workspace_id.to_owned(),
+            source_id: "api_key=quarantine-source-secret-canary".to_owned(),
+            target_type: "memory".to_owned(),
+            target_id: memory_id.to_owned(),
+            signal: "harmful".to_owned(),
+            weight: 0.5,
+            source_type: "outcome_observed".to_owned(),
+            proposed_event_id: Some(format!("fb_{:026}", 1000 + n)),
+            recorded_at: "2026-09-01T00:02:00Z".to_owned(),
+            reason: "Source burst requires review".to_owned(),
+            event_reason: Some("api_key=quarantine-reason-secret-canary".to_owned()),
+            evidence_json: Some(
+                json!({"note": "api_key=quarantine-evidence-secret-canary"}).to_string(),
+            ),
+            session_id: None,
+            raw_event_hash: String::new(),
+            status: "pending".to_owned(),
+            reviewed_at: None,
+            reviewed_by: None,
+            released_feedback_event_id: None,
+        };
+        row.raw_event_hash = quarantine_payload_hash(&row)
+            .map_err(|e| e.message())?
+            .ok_or("no proposed event")?;
+        Ok(row)
+    }
+
+    fn recovery_outcome(workspace_id: &str, n: usize) -> StoredOutcomeEvidence {
+        let source = [
+            crate::db::OutcomeEvidenceSource::ExplicitHuman,
+            crate::db::OutcomeEvidenceSource::ExplicitAgent,
+            crate::db::OutcomeEvidenceSource::VerifierSuccess,
+            crate::db::OutcomeEvidenceSource::RevertedPatch,
+            crate::db::OutcomeEvidenceSource::TaskCloseWithoutProof,
+            crate::db::OutcomeEvidenceSource::ReopenedTask,
+        ][n % 6];
+        let mut row = StoredOutcomeEvidence {
+            workspace_id: workspace_id.to_owned(),
+            source,
+            evidence_family: source.evidence_family().to_owned(),
+            signal_direction: source.default_direction().unwrap_or("negative").to_owned(),
+            base_weight_milli: source.base_weight_milli(),
+            evidence_ref: format!("api_key=outcome-{n}-secret-canary"),
+            agent_id: Some("release-agent".to_owned()),
+            task_id: Some("release-task".to_owned()),
+            run_id: Some("release-run".to_owned()),
+            observed_at: "2026-09-01T00:00:00Z".to_owned(),
+            provenance_hash: String::new(),
+            created_at: "2026-09-01T00:01:00Z".to_owned(),
+        };
+        row.provenance_hash = row.computed_provenance_hash();
+        row
+    }
+
+    #[test]
+    fn default_backup_restores_learning_signals_and_live_review() -> TestResult {
+        for redaction in [
+            RedactionLevel::None,
+            RedactionLevel::Standard,
+            RedactionLevel::Full,
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+            let observations: Vec<_> = (0..129)
+                .map(|n| recovery_observation(&workspace_id, &memory_id, n))
+                .collect();
+            let outcomes: Vec<_> = (0..129)
+                .map(|n| recovery_outcome(&workspace_id, n))
+                .collect();
+            let mut quarantine = (0..4)
+                .map(|n| recovery_quarantine(&workspace_id, &memory_id, n))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut feedback = recovery_feedback(&workspace_id, &memory_id, 1);
+            feedback.id.clone_from(
+                quarantine[1]
+                    .proposed_event_id
+                    .as_ref()
+                    .ok_or("missing released identity")?,
+            );
+            feedback.signal.clone_from(&quarantine[1].signal);
+            feedback.source_type.clone_from(&quarantine[1].source_type);
+            feedback.source_id = Some(quarantine[1].source_id.clone());
+            feedback.reason.clone_from(&quarantine[1].event_reason);
+            feedback
+                .evidence_json
+                .clone_from(&quarantine[1].evidence_json);
+            quarantine[1].status = "released".to_owned();
+            quarantine[1].released_feedback_event_id = Some(feedback.id.clone());
+            quarantine[2].status = "rejected".to_owned();
+            for row in &mut quarantine[1..3] {
+                row.reviewed_at = Some("2026-09-01T00:03:00Z".to_owned());
+                row.reviewed_by = Some("api_key=reviewer-secret-canary".to_owned());
+            }
+            quarantine[3].raw_event_hash = format!("blake3:{}", "0".repeat(64));
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            db.with_transaction(|| {
+                db.insert_feedback_event_for_recovery(&feedback)?;
+                for row in &observations {
+                    db.insert_learning_observation_for_recovery(row)?;
+                }
+                for row in &outcomes {
+                    db.insert_outcome_evidence_for_recovery(row)?;
+                }
+                for row in &quarantine {
+                    db.insert_feedback_quarantine_for_recovery(row)?;
+                }
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            for (table, count) in [
+                ("learning_observations", 129),
+                ("feedback_quarantine", 4),
+                ("outcome_evidence_rows", 129),
+            ] {
+                let entry = backup
+                    .recovery_inventory
+                    .entries
+                    .iter()
+                    .find(|e| e.table == table)
+                    .ok_or("missing signal inventory")?;
+                ensure_equal(entry.row_count, count, "all signal rows counted")?;
+                ensure(entry.snapshot_covered, "all signal rows captured")?;
+            }
+            let assets: Vec<_> = backup
+                .derived
+                .iter()
+                .filter(|a| a.kind == "learning_signals")
+                .collect();
+            ensure_equal(
+                assets.len(),
+                2,
+                "observations and evidence cross chunk boundary",
+            )?;
+            let mut expected_observations = Vec::new();
+            let mut expected_quarantine = Vec::new();
+            let mut expected_outcomes = Vec::new();
+            for asset in assets {
+                let bytes = fs::read(Path::new(&backup.backup_path).join(&asset.path))
+                    .map_err(|e| e.to_string())?;
+                let chunk: BackupLearningSignals =
+                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                ensure(
+                    chunk.authentication.is_some(),
+                    "learning signals authenticated",
+                )?;
+                if redaction != RedactionLevel::None {
+                    ensure(
+                        !String::from_utf8_lossy(&bytes).contains("secret-canary"),
+                        "signal secrets absent",
+                    )?;
+                }
+                expected_observations.extend(chunk.observations);
+                expected_quarantine.extend(chunk.quarantine);
+                expected_outcomes.extend(chunk.outcomes);
+            }
+            if redaction == RedactionLevel::None {
+                ensure_equal(
+                    &expected_observations,
+                    &observations,
+                    "unredacted observations lossless",
+                )?;
+                ensure_equal(
+                    expected_quarantine
+                        .iter()
+                        .map(|q| &q.row)
+                        .collect::<Vec<_>>(),
+                    quarantine.iter().collect::<Vec<_>>(),
+                    "unredacted review state lossless",
+                )?;
+            }
+            let side_path = fs::canonicalize(tempdir.path())
+                .map_err(|e| e.to_string())?
+                .join("restored-signals");
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: side_path.clone(),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                &restored.restored_learning_signals,
+                &BackupLearningSignalCounts {
+                    observations: 129,
+                    quarantine: 4,
+                    outcomes: 129,
+                },
+                "all signals restored",
+            )?;
+            ensure_equal(
+                restored.data_json()["counts"]["learningSignalsRestored"].clone(),
+                json!({"observations": 129, "quarantine": 4, "outcomes": 129}),
+                "machine report counts",
+            )?;
+            let restored_db = PathBuf::from(&restored.restored_database_path);
+            let db = DbConnection::open_file(&restored_db).map_err(|e| e.to_string())?;
+            let destination_id = db.list_workspaces().map_err(|e| e.to_string())?[0]
+                .id
+                .clone();
+            let restored_memory = db
+                .list_memories(&destination_id, None, true)
+                .map_err(|e| e.to_string())?[0]
+                .id
+                .clone();
+            for row in &mut expected_observations {
+                row.workspace_id.clone_from(&destination_id);
+                ensure_equal(
+                    &row.target_id,
+                    &restored_memory,
+                    "observation targets restored memory",
+                )?;
+            }
+            ensure_equal(
+                db.list_learning_observations(&destination_id, None)
+                    .map_err(|e| e.to_string())?,
+                expected_observations,
+                "observation fields restored exactly",
+            )?;
+            for mut entry in expected_quarantine {
+                entry.row.workspace_id.clone_from(&destination_id);
+                if entry.payload_hash_verified {
+                    entry.row.raw_event_hash = quarantine_payload_hash(&entry.row)
+                        .map_err(|e| e.message())?
+                        .ok_or("missing hash")?;
+                }
+                ensure_equal(
+                    db.get_feedback_quarantine(&entry.row.id)
+                        .map_err(|e| e.to_string())?,
+                    Some(entry.row),
+                    "review states retained without replay",
+                )?;
+            }
+            let task_id = expected_outcomes[0]
+                .row
+                .task_id
+                .as_deref()
+                .ok_or("missing task lineage")?;
+            let task_rows = db
+                .list_outcome_evidence_for_task(task_id)
+                .map_err(|e| e.to_string())?;
+            for mut entry in expected_outcomes {
+                entry.row.workspace_id.clone_from(&destination_id);
+                entry.row.provenance_hash = entry.row.computed_provenance_hash();
+                ensure(
+                    task_rows.contains(&entry.row),
+                    "normal task reader sees exact recovered evidence",
+                )?;
+            }
+            ensure_equal(
+                db.list_outcome_evidence_in_window(
+                    &destination_id,
+                    "2026-09-01T00:00:00Z",
+                    "2026-09-02T00:00:00Z",
+                )
+                .map_err(|e| e.to_string())?
+                .len(),
+                129,
+                "distinct outcome evidence survives redaction",
+            )?;
+            ensure_equal(
+                db.list_feedback_events(&destination_id)
+                    .map_err(|e| e.to_string())?
+                    .len(),
+                1,
+                "recovery does not apply feedback",
+            )?;
+            ensure(
+                db.list_audit_entries(Some(&destination_id), None)
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|a| a.action == "learning.backup_provenance_rebound"),
+                "hash rebinding audited",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+            let summary =
+                crate::core::learn::show_summary(&crate::core::learn::LearnSummaryOptions {
+                    workspace: side_path.clone(),
+                    period: "all".to_owned(),
+                    since: None,
+                    detailed: true,
+                })
+                .map_err(|e| e.message())?;
+            ensure_equal(
+                summary.summary.observations_recorded,
+                129,
+                "normal learning summary consumes restored ledger",
+            )?;
+            for (n, expected) in [
+                (0, "released"),
+                (1, "already_reviewed"),
+                (2, "already_reviewed"),
+            ] {
+                let review = crate::core::outcome::review_feedback_quarantine(
+                    &crate::core::outcome::OutcomeQuarantineReviewOptions {
+                        workspace_path: &side_path,
+                        database_path: Some(&restored_db),
+                        quarantine_id: &quarantine[n].id,
+                        reject: false,
+                        actor: Some("restore reviewer"),
+                        dry_run: false,
+                    },
+                )
+                .map_err(|e| e.message())?;
+                ensure_equal(
+                    review.status.as_str(),
+                    expected,
+                    "live review respects restored state",
+                )?;
+            }
+            let options = crate::core::outcome::OutcomeQuarantineReviewOptions {
+                workspace_path: &side_path,
+                database_path: Some(&restored_db),
+                quarantine_id: &quarantine[3].id,
+                reject: false,
+                actor: None,
+                dry_run: false,
+            };
+            let error = crate::core::outcome::review_feedback_quarantine(&options)
+                .err()
+                .ok_or("corrupt quarantine released")?;
+            ensure(
+                error.message().contains("hash mismatch"),
+                "corrupt source payload remains untrusted",
+            )?;
+            let rejected = crate::core::outcome::review_feedback_quarantine(
+                &crate::core::outcome::OutcomeQuarantineReviewOptions {
+                    reject: true,
+                    ..options
+                },
+            )
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                rejected.status.as_str(),
+                "rejected",
+                "corrupt source entry remains rejectable",
+            )?;
+            let db = DbConnection::open_file(&restored_db).map_err(|e| e.to_string())?;
+            ensure_equal(
+                db.list_feedback_events(&destination_id)
+                    .map_err(|e| e.to_string())?
+                    .len(),
+                2,
+                "exactly one new live release",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                source
+                    .list_learning_observations(&workspace_id, None)
+                    .map_err(|e| e.to_string())?,
+                observations,
+                "source observations unchanged",
+            )?;
+            ensure_equal(
+                source
+                    .list_feedback_quarantine(&workspace_id, None)
+                    .map_err(|e| e.to_string())?,
+                quarantine,
+                "source quarantine unchanged",
+            )?;
+            let source_outcomes = source
+                .list_outcome_evidence_for_recovery(&workspace_id)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(
+                source_outcomes.len(),
+                outcomes.len(),
+                "source outcome count unchanged",
+            )?;
+            for row in outcomes {
+                ensure(
+                    source_outcomes.contains(&row),
+                    "source outcome fields unchanged",
+                )?;
+            }
+            source.close().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn learning_signals_reject_tampering_and_roll_back() -> TestResult {
+        for defect in [
+            "tampered",
+            "unsigned",
+            "wrong_backup",
+            "missing_chunk",
+            "duplicate_chunk",
+            "oversized_chunk",
+            "foreign_observation",
+            "duplicate_observation",
+            "observation_collision",
+            "foreign_quarantine",
+            "duplicate_quarantine",
+            "missing_session",
+            "missing_feedback",
+            "foreign_outcome",
+            "duplicate_outcome",
+            "bad_provenance",
+            "bad_outcome",
+            "rehabilitated_quarantine",
+        ] {
+            let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+            let existing = recovery_observation(&workspace_id, &memory_id, 999);
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            db.insert_learning_observation_for_recovery(&existing)
+                .map_err(|e| e.to_string())?;
+            db.close().map_err(|e| e.to_string())?;
+            let outcome = recovery_outcome(&workspace_id, 0);
+            let mut chunk = BackupLearningSignals {
+                schema: LEARNING_SIGNALS_SCHEMA.to_owned(),
+                backup_id: "backup-original".to_owned(),
+                workspace_id: workspace_id.clone(),
+                chunk_index: 0,
+                chunk_count: 1,
+                observations: vec![recovery_observation(&workspace_id, &memory_id, 0)],
+                quarantine: vec![BackupFeedbackQuarantine {
+                    row: recovery_quarantine(&workspace_id, &memory_id, 0)?,
+                    payload_hash_verified: true,
+                }],
+                outcomes: vec![BackupOutcomeEvidence {
+                    source_provenance_hash: outcome.provenance_hash.clone(),
+                    row: outcome,
+                }],
+                authentication: None,
+            };
+            match defect {
+                "missing_chunk" => chunk.chunk_count = 2,
+                "oversized_chunk" => chunk.observations = vec![chunk.observations[0].clone(); 129],
+                "foreign_observation" => chunk.observations[0].workspace_id = "foreign".to_owned(),
+                "duplicate_observation" => chunk.observations.push(chunk.observations[0].clone()),
+                "observation_collision" => {
+                    let mut row = chunk.observations[0].clone();
+                    row.id = "lobs_collision".to_owned();
+                    chunk.observations.push(row);
+                }
+                "foreign_quarantine" => chunk.quarantine[0].row.workspace_id = "foreign".to_owned(),
+                "duplicate_quarantine" => chunk.quarantine.push(chunk.quarantine[0].clone()),
+                "missing_session" => {
+                    chunk.quarantine[0].row.session_id = Some("sess_missing".to_owned())
+                }
+                "missing_feedback" => {
+                    chunk.quarantine[0].row.released_feedback_event_id =
+                        Some("fb_missing".to_owned())
+                }
+                "foreign_outcome" => chunk.outcomes[0].row.workspace_id = "foreign".to_owned(),
+                "duplicate_outcome" => chunk.outcomes.push(chunk.outcomes[0].clone()),
+                "bad_provenance" => chunk.outcomes[0].row.base_weight_milli = 1,
+                "bad_outcome" => {
+                    chunk.outcomes[0].row.signal_direction = "invalid".to_owned();
+                    chunk.outcomes[0].row.provenance_hash =
+                        chunk.outcomes[0].row.computed_provenance_hash();
+                }
+                "rehabilitated_quarantine" => chunk.quarantine[0].payload_hash_verified = false,
+                _ => {}
+            }
+            let root =
+                StoreAuthRoot::create(workspace_keys_dir(&workspace)).map_err(|e| e.to_string())?;
+            let mut payloads = vec![derived_payload(
+                "derived/learning-signals/00000000.json".to_owned(),
+                "learning_signals",
+                "2026-09-01T00:00:00Z",
+                None,
+                serialized_payload_bytes(&chunk).map_err(|e| e.to_string())?,
+            )];
+            authenticate_learning_signal_payloads(&mut payloads, Some(&root))
+                .map_err(|e| e.message())?;
+            let mut signed: BackupLearningSignals =
+                serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
+            if defect == "tampered" {
+                signed.observations[0].signal = "harmful".to_owned();
+            }
+            if defect == "unsigned" {
+                signed.authentication = None;
+            }
+            let path = tempdir.path().join("learning-signals.json");
+            fs::write(
+                &path,
+                serialized_payload_bytes(&signed).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            let mut assets = vec![restored_cass_asset(&path, "learning_signals")];
+            if defect == "duplicate_chunk" {
+                assets.push(assets[0].clone());
+            }
+            let backup_id = if defect == "wrong_backup" {
+                "backup-substituted"
+            } else {
+                "backup-original"
+            };
+            let error = restore_learning_signals(&database, &workspace, backup_id, &assets)
+                .err()
+                .ok_or_else(|| format!("accepted {defect}"))?;
+            let expected = match defect {
+                "tampered" => "authentication failed",
+                "unsigned" => "require an authenticated",
+                "wrong_backup" | "missing_chunk" | "duplicate_chunk" | "oversized_chunk" => {
+                    "learning-signals chunks"
+                }
+                "foreign_observation" | "duplicate_observation" => "recovered learning observation",
+                "foreign_quarantine" | "duplicate_quarantine" => "recovered quarantine row",
+                "missing_session" => "quarantine session",
+                "missing_feedback" => "quarantine feedback",
+                "foreign_outcome" | "duplicate_outcome" => "recovered outcome evidence",
+                "bad_provenance" => "provenance or taxonomy",
+                "rehabilitated_quarantine" => "would become trusted",
+                _ => "constraint",
+            };
+            ensure(
+                error.message().to_lowercase().contains(expected),
+                &format!("{defect} failed at expected boundary: {}", error.message()),
+            )?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                db.list_learning_observations(&workspace_id, None)
+                    .map_err(|e| e.to_string())?,
+                vec![existing],
+                "failed restore preserves existing rows without partial inserts",
+            )?;
+            ensure(
+                db.list_feedback_quarantine(&workspace_id, None)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "failed restore leaves no quarantine",
+            )?;
+            ensure(
+                db.list_outcome_evidence_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "failed restore leaves no evidence",
+            )?;
+            ensure(
+                !db.list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|a| a.action == "learning.backup_provenance_rebound"),
+                "failed restore leaves no rebinding audit",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn learning_signal_backup_requires_keys_before_publication() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        db.insert_learning_observation_for_recovery(&recovery_observation(
+            &workspace_id,
+            &memory_id,
+            0,
+        ))
+        .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        let output = fs::canonicalize(tempdir.path())
+            .map_err(|e| e.to_string())?
+            .join("unsigned-signals");
+        let mut options = BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(output.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: true,
+        };
+        ensure(
+            create_backup(&options).map_err(|e| e.message())?.dry_run,
+            "preview works without keys",
+        )?;
+        let keys = workspace_keys_dir(&workspace);
+        ensure(
+            !keys.exists() && !output.exists(),
+            "preview creates neither keys nor output",
+        )?;
+        fs::write(&keys, b"obstructed keys").map_err(|e| e.to_string())?;
+        options.dry_run = false;
+        let error = create_backup(&options)
+            .err()
+            .ok_or("published unsigned learning signals")?;
+        ensure(
+            error
+                .message()
+                .contains("require source-store authentication"),
+            "learning signals require keys",
+        )?;
+        ensure(!output.exists(), "no unsigned signal backup published")?;
+        ensure_equal(
+            fs::read(&keys).map_err(|e| e.to_string())?,
+            b"obstructed keys".to_vec(),
+            "existing key obstruction untouched",
+        )?;
+        Ok(())
     }
 
     #[test]

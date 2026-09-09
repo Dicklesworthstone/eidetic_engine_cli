@@ -3432,7 +3432,7 @@ fn feedback_quarantine_audit_details(
     .to_string()
 }
 
-fn raw_feedback_event_hash(
+pub(crate) fn raw_feedback_event_hash(
     event_id: &str,
     input: &CreateFeedbackEventInput,
 ) -> Result<String, DomainError> {

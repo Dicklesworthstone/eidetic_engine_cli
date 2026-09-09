@@ -16120,7 +16120,8 @@ pub struct CreateLearningObservationInput {
 }
 
 /// A stored learning_observations row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredLearningObservation {
     pub id: String,
     pub workspace_id: String,
@@ -16258,7 +16259,8 @@ pub struct CreateFeedbackQuarantineInput {
 }
 
 /// A stored feedback_quarantine row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredFeedbackQuarantine {
     pub id: String,
     pub workspace_id: String,
@@ -18989,6 +18991,53 @@ impl DbConnection {
         Ok(affected > 0)
     }
 
+    /// Restore exact ledger state without deduplication or regenerating timestamps.
+    pub fn insert_learning_observation_for_recovery(
+        &self,
+        row: &StoredLearningObservation,
+    ) -> Result<()> {
+        self.execute_for(DbOperation::Execute,
+            "INSERT INTO learning_observations (id, workspace_id, observation_kind, source_type, source_id, target_type, target_id, topic, signal, evidence_json, observed_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            &[
+                Value::Text(row.id.clone()), Value::Text(row.workspace_id.clone()),
+                Value::Text(row.observation_kind.clone()), Value::Text(row.source_type.clone()),
+                row.source_id.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.target_type.clone()), Value::Text(row.target_id.clone()),
+                row.topic.clone().map_or(Value::Null, Value::Text), Value::Text(row.signal.clone()),
+                row.evidence_json.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.observed_at.clone()), Value::Text(row.created_at.clone()),
+            ])?;
+        Ok(())
+    }
+
+    /// Relational identities that a learning backup may retain under redaction.
+    /// All queries are scoped to the same caller-owned read snapshot.
+    pub fn learning_recovery_references(&self, workspace_id: &str) -> Result<BTreeSet<String>> {
+        let mut ids = BTreeSet::new();
+        for table in [
+            "procedural_rules",
+            "procedures",
+            "sessions",
+            "evidence_spans",
+            "pack_records",
+            "curation_candidates",
+            "feedback_events",
+            "task_episodes",
+            "journal_entries",
+            "import_ledger",
+        ] {
+            let rows = self.query_for(
+                DbOperation::Query,
+                &format!("SELECT id FROM {table} WHERE workspace_id = ?1"),
+                &[Value::Text(workspace_id.to_owned())],
+            )?;
+            for row in &rows {
+                ids.insert(required_text(row, 0, DbOperation::Query, "id")?.to_owned());
+            }
+        }
+        Ok(ids)
+    }
+
     /// List learning observation rows for one workspace in deterministic order.
     pub fn list_learning_observations(
         &self,
@@ -19672,6 +19721,31 @@ impl DbConnection {
                 Value::Text(input.raw_event_hash.clone()),
             ],
         )?;
+        Ok(())
+    }
+
+    /// Restore the review state without releasing feedback or changing timestamps.
+    pub fn insert_feedback_quarantine_for_recovery(
+        &self,
+        row: &StoredFeedbackQuarantine,
+    ) -> Result<()> {
+        self.execute_for(DbOperation::Execute,
+            "INSERT INTO feedback_quarantine (id, workspace_id, source_id, target_type, target_id, signal, weight, source_type, proposed_event_id, recorded_at, reason, event_reason, evidence_json, session_id, raw_event_hash, status, reviewed_at, reviewed_by, released_feedback_event_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            &[
+                Value::Text(row.id.clone()), Value::Text(row.workspace_id.clone()),
+                Value::Text(row.source_id.clone()), Value::Text(row.target_type.clone()),
+                Value::Text(row.target_id.clone()), Value::Text(row.signal.clone()),
+                Value::Double(f64::from(row.weight)), Value::Text(row.source_type.clone()),
+                row.proposed_event_id.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.recorded_at.clone()), Value::Text(row.reason.clone()),
+                row.event_reason.clone().map_or(Value::Null, Value::Text),
+                row.evidence_json.clone().map_or(Value::Null, Value::Text),
+                row.session_id.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.raw_event_hash.clone()), Value::Text(row.status.clone()),
+                row.reviewed_at.clone().map_or(Value::Null, Value::Text),
+                row.reviewed_by.clone().map_or(Value::Null, Value::Text),
+                row.released_feedback_event_id.clone().map_or(Value::Null, Value::Text),
+            ])?;
         Ok(())
     }
 
@@ -29535,7 +29609,8 @@ fn recovered_pack_ledger_text(original: &PackLedgerTextRecord, text: &str) -> Pa
 /// verifier success > reverted patch > task close without proof > reopened
 /// task. The base weight is the prior a signal carries *before* the joiner's
 /// ≥2-corroboration gate and never-override-explicit invariant (bd-1n0np.2.4).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OutcomeEvidenceSource {
     ExplicitHuman,
     ExplicitAgent,
@@ -29636,7 +29711,8 @@ pub struct CreateOutcomeEvidenceInput {
 }
 
 /// A stored `outcome_evidence_rows` row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredOutcomeEvidence {
     pub workspace_id: String,
     pub source: OutcomeEvidenceSource,
@@ -29650,6 +29726,22 @@ pub struct StoredOutcomeEvidence {
     pub observed_at: String,
     pub provenance_hash: String,
     pub created_at: String,
+}
+
+impl StoredOutcomeEvidence {
+    /// Hash the current scope and evidence pointer using the ingestion contract.
+    pub(crate) fn computed_provenance_hash(&self) -> String {
+        outcome_evidence_provenance_hash(&CreateOutcomeEvidenceInput {
+            workspace_id: self.workspace_id.clone(),
+            source: self.source,
+            signal_direction: self.signal_direction.clone(),
+            evidence_ref: self.evidence_ref.clone(),
+            agent_id: self.agent_id.clone(),
+            task_id: self.task_id.clone(),
+            run_id: self.run_id.clone(),
+            observed_at: self.observed_at.clone(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -30940,6 +31032,31 @@ impl DbConnection {
             self.execute_for(DbOperation::Execute, &sql, &params)?;
         }
 
+        Ok(())
+    }
+
+    /// Capture every outcome evidence row, including records outside recent windows.
+    pub fn list_outcome_evidence_for_recovery(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredOutcomeEvidence>> {
+        self.query_for(DbOperation::Query,
+            "SELECT workspace_id, source_kind, evidence_family, signal_direction, base_weight_milli, evidence_ref, agent_id, task_id, run_id, observed_at, provenance_hash, created_at FROM outcome_evidence_rows WHERE workspace_id = ?1 ORDER BY observed_at, source_kind, evidence_ref",
+            &[Value::Text(workspace_id.to_owned())])?.iter().map(stored_outcome_evidence_from_row).collect()
+    }
+
+    /// Restore exact evidence without INSERT OR IGNORE hiding collisions.
+    pub fn insert_outcome_evidence_for_recovery(&self, row: &StoredOutcomeEvidence) -> Result<()> {
+        self.execute_for(DbOperation::Execute,
+            "INSERT INTO outcome_evidence_rows (workspace_id, source_kind, evidence_family, signal_direction, base_weight_milli, evidence_ref, agent_id, task_id, run_id, observed_at, provenance_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            &[
+                Value::Text(row.workspace_id.clone()), Value::Text(row.source.as_str().to_owned()),
+                Value::Text(row.evidence_family.clone()), Value::Text(row.signal_direction.clone()),
+                Value::BigInt(i64::from(row.base_weight_milli)), Value::Text(row.evidence_ref.clone()),
+                row.agent_id.clone().map_or(Value::Null, Value::Text), row.task_id.clone().map_or(Value::Null, Value::Text),
+                row.run_id.clone().map_or(Value::Null, Value::Text), Value::Text(row.observed_at.clone()),
+                Value::Text(row.provenance_hash.clone()), Value::Text(row.created_at.clone()),
+            ])?;
         Ok(())
     }
 
