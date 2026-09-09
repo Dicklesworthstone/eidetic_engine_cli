@@ -7433,24 +7433,20 @@ fn collect_learning_history_payloads(
         .list_feedback_events(workspace_id)
         .map_err(work_history_error)?;
     feedback.sort_by(|a, b| a.id.cmp(&b.id));
+    let references = if feedback.is_empty() {
+        BTreeSet::new()
+    } else {
+        connection
+            .learning_recovery_references(workspace_id)
+            .map_err(work_history_error)?
+    };
     for event in &mut feedback {
-        if event.target_type == "memory"
-            && let Some(id) = memory_ids.get(&event.target_id)
-        {
-            event.target_id.clone_from(id);
-        } else if !(event.target_type == "procedure"
-            && connection
-                .get_procedure(workspace_id, &event.target_id)
-                .map_err(work_history_error)?
-                .is_some())
-        {
-            // Known procedure IDs are relational keys, including under full redaction.
-            event.target_id = redact_content(&event.target_id, redaction);
-        }
+        event.target_id =
+            redact_learning_reference(&event.target_id, redaction, memory_ids, &references);
         event.source_id = event
             .source_id
             .as_deref()
-            .map(|s| redact_content(s, redaction));
+            .map(|s| redact_learning_reference(s, redaction, memory_ids, &references));
         event.reason = event
             .reason
             .as_deref()
@@ -15891,6 +15887,22 @@ mod tests {
                         .map_err(|e| e.message())?
                         .ok_or("missing hash")?;
                 }
+                if let Some(id) = &entry.row.released_feedback_event_id {
+                    let event = db
+                        .get_feedback_event(id)
+                        .map_err(|e| e.to_string())?
+                        .ok_or("missing released feedback")?;
+                    ensure_equal(
+                        event.source_id.as_deref(),
+                        Some(entry.row.source_id.as_str()),
+                        "review and feedback keep the same source identity",
+                    )?;
+                    ensure_equal(
+                        &event.target_id,
+                        &entry.row.target_id,
+                        "review and feedback keep the same target identity",
+                    )?;
+                }
                 ensure_equal(
                     db.get_feedback_quarantine(&entry.row.id)
                         .map_err(|e| e.to_string())?,
@@ -16931,7 +16943,10 @@ mod tests {
                 expected.target_id.clone_from(&memories[0].id);
                 if redaction == RedactionLevel::Standard {
                     expected.reason = Some("[REDACTED]".to_owned());
-                    expected.source_id = Some("[REDACTED]".to_owned());
+                    expected.source_id = Some(format!(
+                        "backup-ref:{}",
+                        blake3::hash(b"api_key=learning-secret-canary").to_hex()
+                    ));
                     expected.evidence_json = Some(
                         json!({"exitCode": 9, "stderrTail": "[REDACTED]", "paths": ["src/lib.rs"]})
                             .to_string(),
