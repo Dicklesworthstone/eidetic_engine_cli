@@ -3268,7 +3268,7 @@ mod tests {
             .map_err(|e| e.to_string())?;
             records.push(serde_json::json!({"id": id, "kind": "pack", "status": status, "workspaceId": workspace_id,
                 "issuedAt": "2026-09-01T00:00:00Z", "payloadHash": hash, "payloadSchema": schema,
-                "expiresAt": expiry, "assumptionsValid": assumptions, "payloadPath": "absent.json"}));
+                "expiresAt": expiry, "failedAssumptions": !assumptions, "payloadPath": "absent.json"}));
         }
         db.close().map_err(|e| e.to_string())?;
         let manifest = dir.path().join("certificates.json");
