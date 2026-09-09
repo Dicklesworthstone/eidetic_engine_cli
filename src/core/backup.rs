@@ -32,7 +32,8 @@ use crate::db::{
     StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness, StoredGraphSnapshot,
     StoredImportLedger, StoredJournalEntry, StoredLearningObservation, StoredMemory,
     StoredMemoryLink, StoredOutcomeEvidence, StoredPackHistory, StoredProceduralRule,
-    StoredProcedure, StoredProcedureEvent, StoredSearchIndexJob, StoredSession, StoredTaskEpisode,
+    StoredProcedure, StoredProcedureEvent, StoredRecorderRun, StoredRecorderEvent,
+    StoredRchVerifyRun, StoredSearchIndexJob, StoredSession, StoredTaskEpisode,
     audit_actions,
 };
 use crate::models::{
@@ -66,6 +67,7 @@ const IMPORT_HISTORY_SCHEMA: &str = "ee.backup.import_history.v1";
 const CURATION_HISTORY_SCHEMA: &str = "ee.backup.curation_history.v1";
 const PROCEDURE_HISTORY_SCHEMA: &str = "ee.backup.procedure_history.v1";
 const LEARNING_SIGNALS_SCHEMA: &str = "ee.backup.learning_signals.v1";
+const RECORDED_HISTORY_SCHEMA: &str = "ee.backup.recorded_history.v1";
 const MANIFEST_AUTH_FAMILY: &str = "ee.backup.manifest";
 const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
 const RECOVERY_KEYS_FILE: &str = "store-auth.recovery.json";
@@ -779,6 +781,7 @@ pub struct BackupRestoreReport {
     pub restored_procedure_count: u32,
     pub restored_procedure_event_count: u32,
     pub restored_learning_signals: BackupLearningSignalCounts,
+    pub restored_recorded_history: BackupRecordedHistoryCounts,
     pub restored_pack_history: BackupPackHistoryCounts,
     pub restored_graph_cache_count: u32,
     pub restored_derived: Vec<BackupRestoredDerivedAssetReport>,
@@ -823,6 +826,7 @@ impl BackupRestoreReport {
                 "proceduresRestored": self.restored_procedure_count,
                 "procedureEventsRestored": self.restored_procedure_event_count,
                 "learningSignalsRestored": self.restored_learning_signals,
+                "recordedHistoryRestored": self.restored_recorded_history,
                 "packHistoryRestored": self.restored_pack_history,
                 "graphCacheRowsRestored": self.restored_graph_cache_count,
                 "issues": self.issue_count,
@@ -1497,6 +1501,36 @@ pub struct BackupLearningSignalCounts {
     pub outcomes: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupRecordedHistory {
+    schema: String,
+    backup_id: String,
+    workspace_id: String,
+    chunk_index: usize,
+    chunk_count: usize,
+    runs: Vec<StoredRecorderRun>,
+    events: Vec<StoredRecorderEvent>,
+    verification: Vec<BackupVerificationRun>,
+    authentication: Option<AuthenticatedHeader>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupVerificationRun {
+    row: StoredRchVerifyRun,
+    /// Hashes still identify original evidence, not the redacted display text.
+    redacted: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupRecordedHistoryCounts {
+    pub runs: u32,
+    pub events: u32,
+    pub verification: u32,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupPackHistoryCounts {
@@ -1629,7 +1663,7 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
             "export_restore_required",
             "derived_artifact_restore",
         ),
-        "journal_entries" | "search_index_jobs" => BackupTablePolicy::new(
+        "journal_entries" | "search_index_jobs" | "recorder_runs" | "recorder_events" | "rch_verify_runs" => BackupTablePolicy::new(
             "maintain",
             "export_restore_required",
             "derived_artifact_restore",
@@ -1655,9 +1689,6 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
         | "memory_sentinel_specs"
         | "rationale_trace_links"
         | "rationale_traces"
-        | "rch_verify_runs"
-        | "recorder_events"
-        | "recorder_runs"
         | "reflection_request_ledger"
         | "situation_records"
         | "tripwire_check_events"
@@ -1849,6 +1880,9 @@ fn reconcile_derived_recovery_inventory(
     }
 
     for (table, captured_count) in [
+        ("recorder_runs", captured_derived_record_count(derived, "recorded_history", "runs")),
+        ("recorder_events", captured_derived_record_count(derived, "recorded_history", "events")),
+        ("rch_verify_runs", captured_derived_record_count(derived, "recorded_history", "verification")),
         (
             "learning_observations",
             captured_derived_record_count(derived, "learning_signals", "observations"),
@@ -2078,6 +2112,8 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &memory_ids,
                 &mut payloads,
             )?;
+            collect_recorded_history_payloads(&connection, workspace_id, &backup_id,
+                &created_at, options.redaction_level, &memory_ids, &mut payloads)?;
             collect_pack_history_payloads(
                 &connection,
                 workspace_id,
@@ -2129,13 +2165,14 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                     | "import_history"
                     | "procedure_history"
                     | "learning_signals"
+                    | "recorded_history"
             ) || (p.report.kind == "curation_history"
                 && serde_json::from_slice::<BackupCurationHistory>(&p.bytes)
                     .is_ok_and(|chunk| !chunk.candidates.is_empty()))
         })
     {
         return Err(work_history_error(
-            "learned rules, feedback, pack history, import checkpoints, curation history, procedures, and learning signals require source-store authentication; repair the workspace key store before creating this backup",
+            "learned rules, feedback, pack history, import checkpoints, curation history, procedures, learning signals, and recorded history require source-store authentication; repair the workspace key store before creating this backup",
         ));
     }
     authenticate_learning_payloads(&mut derived_payloads, store_auth.as_ref())?;
@@ -2144,6 +2181,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     authenticate_curation_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_procedure_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_learning_signal_payloads(&mut derived_payloads, store_auth.as_ref())?;
+    authenticate_recorded_history_payloads(&mut derived_payloads, store_auth.as_ref())?;
     let derived_reports = derived_payloads
         .iter()
         .map(|payload| payload.report.clone())
@@ -3083,6 +3121,7 @@ pub fn restore_backup_to_side_path(
             restored_procedure_count: 0,
             restored_procedure_event_count: 0,
             restored_learning_signals: BackupLearningSignalCounts::default(),
+            restored_recorded_history: BackupRecordedHistoryCounts::default(),
             restored_search_index_job_count: 0,
             restored_rule_count: 0,
             restored_rule_source_count: 0,
@@ -3243,6 +3282,9 @@ pub fn restore_backup_to_side_path(
         &inspect.backup_id,
         &restored_derived,
     )?;
+    let restored_recorded_history = restore_recorded_history(
+        &restored_database_path, &workspace_path, &inspect.backup_id, &restored_derived,
+    )?;
     let graph_cache_restored_count = if options.restore_graph_cache {
         restore_graph_cache_assets(&restored_database_path, &restored_derived)?
     } else {
@@ -3333,6 +3375,7 @@ pub fn restore_backup_to_side_path(
         restored_procedure_count,
         restored_procedure_event_count,
         restored_learning_signals,
+        restored_recorded_history,
         restored_search_index_job_count,
         restored_rule_count,
         restored_rule_source_count,
@@ -7994,6 +8037,160 @@ fn collect_learning_signal_payloads(
         ));
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_recorded_history_payloads(
+    connection: &DbConnection, workspace_id: &str, backup_id: &str, captured_at: &str,
+    redaction: RedactionLevel, memory_ids: &BTreeMap<String, String>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) -> Result<(), DomainError> {
+    let mut runs = connection.list_recorder_runs_for_recovery(workspace_id).map_err(work_history_error)?;
+    let mut verification = connection.query_rch_verify_runs(workspace_id, None, None, captured_at).map_err(work_history_error)?;
+    if runs.is_empty() && verification.is_empty() { return Ok(()); }
+    let references = connection.learning_recovery_references(workspace_id).map_err(work_history_error)?;
+    let reference = |value: &str| redact_learning_reference(value, redaction, memory_ids, &references);
+    let mut events = Vec::new();
+    for run in &mut runs {
+        events.extend(connection.list_recorder_events(&run.run_id).map_err(work_history_error)?);
+        run.agent_id = reference(&run.agent_id);
+        run.session_id = run.session_id.as_deref().map(reference);
+        run.source_id = run.source_id.as_deref().map(reference);
+    }
+    for event in &mut events {
+        // This reference is outside the event-chain commitment. All committed
+        // fields and even broken chains remain exact historical evidence.
+        event.source_span_id = event.source_span_id.as_deref().map(reference);
+    }
+    verification.sort_by(|a, b| a.id.cmp(&b.id));
+    let verification = verification.into_iter().map(|mut row| {
+        let original = row.clone();
+        for text in [&mut row.command_text, &mut row.stdout_tail, &mut row.stderr_tail] {
+            *text = text.as_deref().map(|s| redact_content(s, redaction));
+        }
+        for text in [&mut row.bead_id, &mut row.worker_id, &mut row.blocker_fingerprint, &mut row.remediation_bead] {
+            *text = text.as_deref().map(reference);
+        }
+        row.command_kind = reference(&row.command_kind);
+        row.verification_attribution = reference(&row.verification_attribution);
+        row.degraded_codes_json = row.degraded_codes_json.as_deref()
+            .map(|s| redact_work_history_json(s, redaction)).transpose()?;
+        Ok(BackupVerificationRun { redacted: original != row, row })
+    }).collect::<Result<Vec<_>, DomainError>>()?;
+    let count = runs.len().max(events.len()).max(verification.len()).div_ceil(WORK_HISTORY_CHUNK_ROWS);
+    for index in 0..count {
+        let start = index * WORK_HISTORY_CHUNK_ROWS;
+        let end = start + WORK_HISTORY_CHUNK_ROWS;
+        let chunk = BackupRecordedHistory {
+            schema: RECORDED_HISTORY_SCHEMA.to_owned(), backup_id: backup_id.to_owned(),
+            workspace_id: workspace_id.to_owned(), chunk_index: index, chunk_count: count,
+            runs: runs[start.min(runs.len())..end.min(runs.len())].to_vec(),
+            events: events[start.min(events.len())..end.min(events.len())].to_vec(),
+            verification: verification[start.min(verification.len())..end.min(verification.len())].to_vec(),
+            authentication: None,
+        };
+        payloads.push(derived_payload(format!("derived/recorded-history/{index:08}.json"),
+            "recorded_history", captured_at, None, serialized_payload_bytes(&chunk).map_err(work_history_error)?));
+    }
+    Ok(())
+}
+
+fn recorded_history_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
+    ArtifactContext { artifact_family: RECORDED_HISTORY_SCHEMA, record_encoding_version: "json.v1",
+        source_key_namespace: STORE_KEY_NAMESPACE_V1, workspace_scope: workspace_id }
+}
+
+fn authenticate_recorded_history_payloads(payloads: &mut [BackupDerivedPayload], root: Option<&StoreAuthRoot>) -> Result<(), DomainError> {
+    for payload in payloads.iter_mut().filter(|p| p.report.kind == "recorded_history") {
+        let mut chunk: BackupRecordedHistory = serde_json::from_slice(&payload.bytes).map_err(work_history_error)?;
+        chunk.authentication = None;
+        if let Some(root) = root {
+            let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+            chunk.authentication = Some(authenticate_artifact(root, MacDomain::NativeImportRecordsRoot,
+                &recorded_history_auth_context(&chunk.workspace_id), &hash, 1).map_err(work_history_error)?);
+        }
+        payload.bytes = serialized_payload_bytes(&chunk).map_err(work_history_error)?;
+        if payload.bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES {
+            return Err(work_history_error("recorded-history chunk exceeds the restore asset byte limit"));
+        }
+        payload.report.hash = Some(hash_bytes(&payload.bytes));
+        payload.report.byte_size = Some(payload.bytes.len() as u64);
+    }
+    Ok(())
+}
+
+fn restore_recorded_history(database: &Path, source_workspace: &Path, backup_id: &str,
+    assets: &[BackupRestoredDerivedAssetReport]) -> Result<BackupRecordedHistoryCounts, DomainError> {
+    let mut chunks = assets.iter().filter(|a| a.kind == "recorded_history")
+        .map(|a| serde_json::from_value::<BackupRecordedHistory>(read_restored_derived_json(a)?).map_err(work_history_error))
+        .collect::<Result<Vec<_>, _>>()?;
+    if chunks.is_empty() { return Ok(BackupRecordedHistoryCounts::default()); }
+    let root = StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
+    chunks.sort_by_key(|c| c.chunk_index);
+    let source_id = chunks[0].workspace_id.clone();
+    let count = chunks.len();
+    for (index, chunk) in chunks.iter_mut().enumerate() {
+        if chunk.schema != RECORDED_HISTORY_SCHEMA || chunk.backup_id != backup_id
+            || chunk.workspace_id != source_id || chunk.chunk_index != index || chunk.chunk_count != count
+            || chunk.runs.len() > WORK_HISTORY_CHUNK_ROWS || chunk.events.len() > WORK_HISTORY_CHUNK_ROWS
+            || chunk.verification.len() > WORK_HISTORY_CHUNK_ROWS {
+            return Err(work_history_error("unsupported, incomplete, duplicate, or substituted recorded-history chunks"));
+        }
+        let header = chunk.authentication.take().ok_or_else(|| work_history_error("recorded history requires source-store authentication"))?;
+        let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+        if !verify_artifact(&root, MacDomain::NativeImportRecordsRoot, &recorded_history_auth_context(&source_id),
+            &header, &hash, 1).map_err(work_history_error)?.is_authenticated() {
+            return Err(work_history_error("recorded-history authentication failed"));
+        }
+    }
+    let db = DbConnection::open_file(database).map_err(work_history_error)?;
+    let workspace_id = remap_restored_workspace_id(&db.list_workspaces().map_err(work_history_error)?,
+        Some(&source_id), "recorded history")?.ok_or_else(|| work_history_error("missing recorded-history workspace"))?;
+    let mut runs = Vec::new(); let mut events = Vec::new(); let mut verification = Vec::new();
+    for chunk in chunks { runs.extend(chunk.runs); events.extend(chunk.events); verification.extend(chunk.verification); }
+    let mut ids = BTreeSet::new();
+    let mut abandoned = Vec::new();
+    for run in &mut runs {
+        if run.workspace_id.as_deref().is_some_and(|id| id != source_id) || !ids.insert(run.run_id.clone()) {
+            return Err(work_history_error("foreign or duplicate recovered recorder run"));
+        }
+        if run.workspace_id.is_some() { run.workspace_id = Some(workspace_id.clone()); }
+        if run.status == "active" {
+            abandoned.push(run.run_id.clone());
+            run.status = "abandoned".to_owned();
+        }
+    }
+    let mut event_ids = BTreeSet::new(); let mut sequences = BTreeSet::new();
+    for event in &events {
+        if !ids.contains(&event.run_id) || !event_ids.insert(event.event_id.clone())
+            || !sequences.insert((event.run_id.clone(), event.sequence)) {
+            return Err(work_history_error("orphan or duplicate recovered recorder event"));
+        }
+    }
+    let mut ids = BTreeSet::new();
+    for entry in &mut verification {
+        if entry.row.workspace_id != source_id || !ids.insert(entry.row.id.clone()) {
+            return Err(work_history_error("foreign or duplicate recovered verification run"));
+        }
+        entry.row.workspace_id.clone_from(&workspace_id);
+    }
+    db.with_transaction(|| {
+        for run in &runs { db.insert_recorder_run_for_recovery(run)?; }
+        for event in &events { db.insert_recorder_event_for_recovery(event)?; }
+        for entry in &verification { db.insert_rch_verify_run_for_recovery(&entry.row)?; }
+        db.insert_audit(&crate::models::AuditId::now().to_string(), &crate::db::CreateAuditInput {
+            workspace_id: Some(workspace_id.clone()), actor: Some("ee backup restore".to_owned()),
+            action: "backup.recorded_history_restored".to_owned(), target_type: Some("backup".to_owned()),
+            target_id: Some(backup_id.to_owned()), details: Some(json!({
+                "sourceWorkspaceId": source_id, "abandonedRunIds": abandoned,
+                "redactedVerificationIds": verification.iter().filter(|e| e.redacted).map(|e| &e.row.id).collect::<Vec<_>>(),
+                "reason": "Historical event chains and verification hashes identify original evidence. Redacted text is a display copy. Recording processes are not restored; no verification or event replay was executed."
+            }).to_string()),
+        })?;
+        Ok(())
+    }).map_err(work_history_error)?;
+    Ok(BackupRecordedHistoryCounts { runs: u32::try_from(runs.len()).unwrap_or(u32::MAX),
+        events: u32::try_from(events.len()).unwrap_or(u32::MAX), verification: u32::try_from(verification.len()).unwrap_or(u32::MAX) })
 }
 
 fn learning_signal_auth_context(workspace_id: &str) -> ArtifactContext<'_> {
