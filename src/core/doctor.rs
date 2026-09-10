@@ -363,6 +363,7 @@ impl DoctorReport {
             check_rch_worker_pressure(&rch_worker_pressure).advisory(),
             check_rch_verify_ledger(&verification_ledger).advisory(),
             check_cass().advisory(),
+            check_wal_pressure(workspace_path).advisory(),
         ];
 
         let overall_healthy = checks.iter().all(CheckResult::is_topline_healthy);
@@ -3343,6 +3344,40 @@ fn check_search_index(workspace_path: Option<&Path>) -> CheckResult {
             error_codes::INDEX_NOT_FOUND,
         ),
     }
+}
+
+/// Flag a WAL sidecar that has outgrown the database it describes (GH #35).
+///
+/// Every connection open replays the WAL, so a sidecar larger than the main
+/// file means each command reads more than the database is worth before doing
+/// any work. A small store gets stuck there, because the automatic checkpoint
+/// threshold is a flat 64 MB it never reaches. Advisory: retrieval still
+/// returns correct results, it just pays for the replay every time.
+fn check_wal_pressure(workspace_path: Option<&Path>) -> CheckResult {
+    let Some(workspace_path) = workspace_path else {
+        return CheckResult::ok(
+            "wal_pressure",
+            "WAL pressure was not inspected without a workspace path.",
+        );
+    };
+    let wal = crate::core::status::WalStatusReport::gather(Some(workspace_path));
+    if !wal.exceeds_database_size() {
+        return CheckResult::ok(
+            "wal_pressure",
+            format!(
+                "WAL sidecar is {} bytes across {} frames against a {}-byte database.",
+                wal.bytes, wal.frames, wal.database_bytes
+            ),
+        );
+    }
+    CheckResult::warning(
+        "wal_pressure",
+        format!(
+            "WAL sidecar is {} bytes across {} frames, larger than the {}-byte database it describes; every connection open replays it.",
+            wal.bytes, wal.frames, wal.database_bytes
+        ),
+        error_codes::WAL_EXCEEDS_DATABASE,
+    )
 }
 
 fn check_lexical_ram_tier(workspace_path: Option<&Path>) -> CheckResult {

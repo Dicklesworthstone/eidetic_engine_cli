@@ -226,6 +226,24 @@ fn global_migration_and_workspace_scope_read_failures_remain_distinct() -> TestR
         "skipped_no_workspaces"
     );
     assert!(empty_repair["data"]["postMigrationIndexRebuild"]["auditId"].is_string());
+    // GH #35: migrations land a batch of frames in the WAL sidecar, and the
+    // automatic checkpoint threshold is a flat 64 MB that a small store never
+    // reaches. Left there, every later connection open replays them.
+    assert!(
+        empty_repair["data"]["walCheckpoint"].is_string(),
+        "migrate run must report what it did about the WAL: {:?}",
+        empty_repair["data"]["walCheckpoint"]
+    );
+    let wal_path = global.database_path.with_extension("db-wal");
+    let wal_bytes = std::fs::metadata(&wal_path).map_or(0, |meta| meta.len());
+    let db_bytes = std::fs::metadata(&global.database_path)
+        .map_err(|error| error.to_string())?
+        .len();
+    assert!(
+        wal_bytes <= db_bytes,
+        "migrate run left a WAL larger than the database it describes: \
+         wal={wal_bytes} db={db_bytes}"
+    );
     let connection = ee::db::DbConnection::open_file_read_only(&global.database_path)
         .map_err(|error| error.to_string())?;
     let audits = connection

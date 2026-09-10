@@ -527,9 +527,46 @@ pub const fn runtime_status() -> RuntimeStatus {
     }
 }
 
+/// Lower bound on the CLI blocking pool. Two threads, so a single long
+/// blocking task cannot starve every other offloaded call, and no more,
+/// because a command that never offloads should pay almost nothing.
+const CLI_BLOCKING_POOL_MIN_THREADS: usize = 0;
+const CLI_BLOCKING_POOL_FLOOR: usize = 2;
+
+/// Upper bound on the CLI blocking pool.
+///
+/// These tasks are blocking file I/O, not CPU work, so the useful ceiling is
+/// set by how many concurrent reads the storage layer can absorb rather than
+/// by core count. A 64-core build host should not open 64 blocking threads for
+/// a one-shot `ee doctor`.
+const CLI_BLOCKING_POOL_CEILING: usize = 16;
+
+/// Size the CLI blocking pool from the host's parallelism, clamped.
+///
+/// GH #35: with no pool installed, `asupersync`'s offload helper falls back to
+/// `spawn_blocking_on_thread`, which creates a fresh OS thread per call and
+/// never reuses it - bounded only in *concurrency*, not in total count. On a
+/// store whose WAL still holds its frames that means one thread per frame read,
+/// per connection open: ~19,400 short-lived threads to read a 5.5 MB file.
+/// A real pool makes thread creation O(cores) instead of O(reads).
+#[must_use]
+pub fn cli_blocking_pool_threads() -> (usize, usize) {
+    let parallelism =
+        std::thread::available_parallelism().map_or(CLI_BLOCKING_POOL_FLOOR, |n| n.get());
+    let max = parallelism.clamp(CLI_BLOCKING_POOL_FLOOR, CLI_BLOCKING_POOL_CEILING);
+    (CLI_BLOCKING_POOL_MIN_THREADS, max)
+}
+
 pub fn build_cli_runtime() -> RuntimeResult<asupersync::runtime::Runtime> {
+    // Every `ee` runtime is built here - this is the only `RuntimeBuilder` in
+    // the crate, and the daemon's write-owner runtime comes through it too - so
+    // installing the blocking pool at this one seam covers every entry point
+    // that opens a database. A pool present on one command and missing on
+    // another is exactly the shape of defect GH #35 reported.
+    let (min_blocking, max_blocking) = cli_blocking_pool_threads();
     asupersync::runtime::RuntimeBuilder::current_thread()
         .thread_name_prefix("ee-runtime")
+        .blocking_threads(min_blocking, max_blocking)
         .build()
         .map_err(Box::new)
 }
@@ -930,11 +967,13 @@ mod tests {
     use asupersync::{LabConfig, LabRuntime};
 
     use super::{
-        BUILD_TIMESTAMP_POLICY, RuntimeProfile, StorelessWorkspaceAssessment,
-        VERSION_PROVENANCE_SCHEMA_V1, VersionReport, build_features, build_info,
-        clean_build_metadata, db_migration_range, duration_millis_saturating, parse_build_bool,
-        run_cli_future, runtime_status, serialize_or_error, serialize_pretty_or_error,
-        shell_quote_repair_arg, storeless_workspace_candidate_retargets, supported_schemas,
+        BUILD_TIMESTAMP_POLICY, CLI_BLOCKING_POOL_CEILING, CLI_BLOCKING_POOL_FLOOR, RuntimeProfile,
+        StorelessWorkspaceAssessment, VERSION_PROVENANCE_SCHEMA_V1, VersionReport,
+        build_cli_runtime, build_features, build_info, clean_build_metadata,
+        cli_blocking_pool_threads, db_migration_range, duration_millis_saturating,
+        parse_build_bool, run_cli_future, runtime_status, serialize_or_error,
+        serialize_pretty_or_error, shell_quote_repair_arg, storeless_workspace_candidate_retargets,
+        supported_schemas,
     };
 
     type TestResult = Result<(), String>;
@@ -956,6 +995,62 @@ mod tests {
         } else {
             Err(format!("{context}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    // GH #35: with no blocking pool on the runtime, asupersync's offload helper
+    // falls back to `spawn_blocking_on_thread` - a fresh OS thread per call,
+    // never reused, bounded only in concurrency. On a store whose WAL still
+    // holds its frames that becomes one thread per frame read per connection
+    // open: ~19,400 short-lived threads to read a 5.5 MB file. These pin the
+    // seam that makes thread creation O(cores) instead of O(reads).
+
+    #[test]
+    fn every_cli_runtime_installs_a_blocking_pool() -> TestResult {
+        // `build_cli_runtime` is the only `RuntimeBuilder` in the crate, and the
+        // daemon's write-owner runtime is built through it too, so this single
+        // assertion covers every entry point that can open a database. If a
+        // second runtime construction is ever added, it must come through here
+        // or this guarantee silently stops holding.
+        let runtime = build_cli_runtime().map_err(|error| format!("build runtime: {error}"))?;
+        ensure(
+            runtime.blocking_handle().is_some(),
+            "the CLI runtime must carry a blocking pool, or every offloaded \
+             call spawns and discards its own OS thread",
+        )
+    }
+
+    #[test]
+    fn blocking_pool_is_bounded_and_never_eager() -> TestResult {
+        let (min, max) = cli_blocking_pool_threads();
+        ensure(max > 0, "a zero maximum disables the pool entirely")?;
+        ensure(
+            min == 0,
+            "the pool must not spawn threads eagerly; a command that never \
+             offloads should pay nothing for the pool existing",
+        )?;
+        ensure(
+            max >= CLI_BLOCKING_POOL_FLOOR,
+            "one long blocking task must not be able to starve every other \
+             offloaded call",
+        )?;
+        ensure(
+            max <= CLI_BLOCKING_POOL_CEILING,
+            "a 64-core host must not open 64 blocking threads for one-shot ee",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn blocking_pool_size_tracks_host_parallelism() -> TestResult {
+        let (_, max) = cli_blocking_pool_threads();
+        let parallelism =
+            std::thread::available_parallelism().map_or(CLI_BLOCKING_POOL_FLOOR, |n| n.get());
+        let expected = parallelism.clamp(CLI_BLOCKING_POOL_FLOOR, CLI_BLOCKING_POOL_CEILING);
+        ensure_equal(
+            &max,
+            &expected,
+            "pool ceiling is derived from available_parallelism, not hardcoded",
+        )
     }
 
     #[test]
