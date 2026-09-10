@@ -1914,7 +1914,7 @@ pub(crate) async fn recommend_from_catalog(
         if score < options.min_score {
             continue;
         }
-        let reasons = vec![
+        let mut reasons = vec![
             format!("Frankensearch text similarity {text:.6}; semantic similarity {semantic:.6}."),
             format!(
                 "Maturity {}; {} supporting evidence links (catalog self-references excluded); recency {recency:.6} against the recorded catalog anchor.",
@@ -1925,6 +1925,9 @@ pub(crate) async fn recommend_from_catalog(
                 evidence_count
             ),
         ];
+        if entry.source_kind == "procedural_rule" {
+            reasons.push(entry.recipe.description.clone());
+        }
         ranked.push((
             RecipeRecommendation {
                 recipe_id: entry.recipe.id,
@@ -2682,6 +2685,13 @@ mod tests {
         assert_eq!(native.source_kind, "procedural_rule");
         assert_eq!(native.maturity.as_deref(), Some("candidate"));
         assert_eq!(native.components.maturity_score, 0.3);
+        assert!(
+            native
+                .match_reasons
+                .iter()
+                .any(|reason| reason.contains("directory (src)")),
+            "recommendations must expose the scope restriction without another command"
+        );
         assert_eq!(native.evidence_uris, [format!("ee://memory/{memory_id}")]);
         assert_eq!(native.components.evidence_count, 0.5);
         let explanation = explain_recipe(directory.path(), Some(&database), &active_id)
