@@ -2395,7 +2395,7 @@ and its audit record together and never runs the supplied instructions.
 Learning proposals can use the same store after normal validation:
 
 ```bash
-ee learn propose --workspace . --json
+ee learn experiment propose --workspace . --json
 ee curate validate <candidate-id> --workspace . --json
 ee curate apply <candidate-id> --workspace . \
   --as-recipe "Release verification" --when "Preparing a release" --dry-run --json

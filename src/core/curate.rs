@@ -13303,6 +13303,14 @@ fn canonical_apply_tags(tags: &[String]) -> Vec<String> {
 
 fn source_memory_ids_for_rule_candidate(stored: &StoredCurationCandidate) -> Vec<String> {
     let mut ids = BTreeSet::new();
+    if let Ok(refs) = parse_derivation_source_refs(stored) {
+        for source in refs {
+            if source.kind == DerivationSourceKind::Memory && MemoryId::from_str(&source.id).is_ok()
+            {
+                ids.insert(source.id);
+            }
+        }
+    }
     if let Some(source_id) = stored.source_id.as_deref() {
         for raw in source_id
             .split(',')

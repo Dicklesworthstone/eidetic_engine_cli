@@ -3030,7 +3030,11 @@ pub fn propose_experiments(
     options: &LearnExperimentProposeOptions,
 ) -> Result<LearnExperimentProposalReport, DomainError> {
     let snapshot = load_learning_snapshot(&options.workspace)?;
-    let clusters = load_learning_clusters(&options.workspace, options.topic.as_deref())?;
+    let clusters = build_learning_clusters(
+        &snapshot,
+        options.topic.as_deref(),
+        &snapshot.feedback_events,
+    );
     let database_path = learning_database_path(None, &options.workspace);
     let connection =
         DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
@@ -3059,6 +3063,46 @@ pub fn propose_experiments(
             .is_some();
         if !already_exists {
             let uses_peer_evidence = source_ids.iter().any(|id| is_peer_evidence_source_ref(id));
+            // The trust validator accepts one canonical feedback-event ID,
+            // not a comma-separated sample. Keep the aggregate evidence in
+            // structured provenance instead of discarding it or weakening the
+            // namespace check.
+            let source_id = if uses_peer_evidence {
+                source_ids.join(",")
+            } else {
+                snapshot.feedback_events.iter()
+                    .filter(|event| cluster.sample_ids.contains(&event.id))
+                    .filter(|event| crate::policy::validate_trust_promotion_evidence(
+                        "agent_validated", "feedback_event", &event.id,
+                    ).is_ok())
+                    .map(|event| event.id.as_str()).min()
+                    .ok_or_else(|| DomainError::Usage {
+                        message: "Learning evidence changed or contains no canonical feedback event; refresh the proposal.".to_owned(),
+                        repair: Some("ee learn experiment propose --json".to_owned()),
+                    })?.to_owned()
+            };
+            let source_refs = cluster
+                .memory_ids
+                .iter()
+                .filter_map(|id| snapshot.memories.get(id))
+                .map(|memory| {
+                    crate::curate::DerivationSourceRef::new(
+                        crate::curate::DerivationSourceKind::Memory,
+                        &memory.id,
+                        format!(
+                            "blake3:{}",
+                            blake3::hash(memory.content.as_bytes()).to_hex()
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let source_refs_json = crate::curate::canonical_derivation_source_refs_json(
+                &source_refs,
+            )
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to preserve learning source references: {error}"),
+                repair: Some("ee learn experiment propose --json".to_owned()),
+            })?;
             let mut reason = cluster.proposal_reason();
             if uses_peer_evidence {
                 reason.push_str(
@@ -3087,14 +3131,20 @@ pub fn propose_experiments(
                         } else {
                             "feedback_event".to_string()
                         },
-                        source_id: Some(source_ids.join(",")),
+                        source_id: Some(source_id),
                         reason,
                         confidence: cluster.proposed_confidence(),
                         status: Some("pending".to_string()),
                         created_at: Some(stable_learning_generated_at()),
                         ttl_expires_at: None,
-                        derivation_source_refs_json: None,
-                        derivation_metadata_json: None,
+                        derivation_source_refs_json: Some(source_refs_json),
+                        derivation_metadata_json: Some(
+                            serde_json::json!({
+                                "learningEvidenceIds": cluster.sample_ids,
+                                "producer": "learn.experiment.propose",
+                            })
+                            .to_string(),
+                        ),
                     },
                 )
                 .map_err(|error| DomainError::Storage {
@@ -5786,6 +5836,36 @@ mod tests {
             .map_err(|error| error.to_string())?;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].source_type, "feedback_event");
+        assert!(
+            crate::policy::validate_trust_promotion_evidence(
+                "agent_validated",
+                &candidates[0].source_type,
+                candidates[0].source_id.as_deref().unwrap_or_default(),
+            )
+            .is_ok()
+        );
+        let source_refs: serde_json::Value = serde_json::from_str(
+            candidates[0]
+                .derivation_source_refs_json
+                .as_deref()
+                .unwrap_or_default(),
+        )
+        .map_err(|e| e.to_string())?;
+        assert_eq!(source_refs.as_array().map(Vec::len), Some(50));
+        let metadata: serde_json::Value = serde_json::from_str(
+            candidates[0]
+                .derivation_metadata_json
+                .as_deref()
+                .unwrap_or_default(),
+        )
+        .map_err(|e| e.to_string())?;
+        let evidence = metadata["learningEvidenceIds"]
+            .as_array()
+            .ok_or("learning evidence must be an array")?;
+        for index in 0..50 {
+            assert!(evidence.contains(&serde_json::json!(format!("fb_{index:026}"))));
+            assert_eq!(source_refs[index]["id"], format!("mem_{index:026}"));
+        }
         let candidate_id = candidates[0].id.clone();
         connection.close().map_err(|error| error.to_string())?;
         let validated = crate::core::curate::validate_curation_candidate(
@@ -5823,6 +5903,12 @@ mod tests {
             .map_err(|e| e.to_string())?;
         assert_eq!(recipes.len(), 1);
         assert!(recipes[0].evidence_uris_json.contains(&candidate_id));
+        let recipe_evidence: Vec<String> =
+            serde_json::from_str(&recipes[0].evidence_uris_json).map_err(|e| e.to_string())?;
+        assert_eq!(recipe_evidence.len(), 51);
+        for index in 0..50 {
+            assert!(recipe_evidence.contains(&format!("ee://memory/mem_{index:026}")));
+        }
         let explained =
             crate::core::plan::explain_recipe(dir.path(), Some(&database), &recipes[0].id)
                 .map_err(|e| e.message())?;
