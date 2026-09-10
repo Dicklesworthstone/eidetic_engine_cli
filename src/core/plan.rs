@@ -2601,7 +2601,10 @@ mod tests {
     fn native_rules_join_recipes_with_lifecycle_scope_and_provenance() -> TestResult {
         let (directory, database, workspace_id) = recipe_workspace()?;
         let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
-        let memory_id = "mem_0123456789ABCDEFGHJKMNPQRST".to_owned();
+        let memory_id = "mem_0123456789ABCDEFGHJKMNPQRS"
+            .parse::<crate::models::MemoryId>()
+            .map_err(|e| e.to_string())?
+            .to_string();
         db.insert_memory(
             &memory_id,
             &crate::db::CreateMemoryInput {
@@ -2760,7 +2763,7 @@ mod tests {
     #[test]
     fn recipe_evidence_preserves_typed_internal_ids_without_exempting_secrets() {
         for uri in [
-            "ee://memory/mem_0123456789ABCDEFGHJKMNPQRST",
+            "ee://memory/mem_0123456789ABCDEFGHJKMNPQRS",
             "ee://curation-candidate/curate_0123456789abcdefghijklmnop",
         ] {
             assert!(
@@ -2770,7 +2773,7 @@ mod tests {
             assert_eq!(recipe_evidence_text(uri), uri);
         }
         for uri in [
-            "ee://memory/mem_0123456789ABCDEFGHJKMNPQRST?api_key=recipe-link-canary",
+            "ee://memory/mem_0123456789ABCDEFGHJKMNPQRS?api_key=recipe-link-canary",
             "ee://curation-candidate/curate_password0123456789ABCDEFGH",
             "https://example.test/?api_key=recipe-link-canary",
             "file:///Users/private/recipe-evidence.txt",
