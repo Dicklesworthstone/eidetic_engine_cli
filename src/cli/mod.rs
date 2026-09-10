@@ -47406,6 +47406,38 @@ const DAEMON_SEARCH_FALLBACK_CODE: &str = "daemon_search_fallback";
 #[cfg(unix)]
 const DAEMON_SEARCH_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Resolve the bounded deadline a `--use-daemon` search gives the daemon before
+/// falling back to canonical in-process search.
+///
+/// GH #37: the default is deliberately short, because falling back is cheap
+/// *relative to blocking a human*. It is not cheap in absolute terms — the
+/// fallback reloads the tokenizer and the 512 MB embedding matrix in-process —
+/// so hosts with a slow disk or a loaded daemon need to be able to raise it
+/// rather than silently paying that cost on every invocation.
+#[cfg(unix)]
+fn daemon_search_attempt_timeout() -> std::time::Duration {
+    daemon_search_attempt_timeout_from_env_value(
+        crate::config::env_registry::read(
+            crate::config::env_registry::EnvVar::DaemonSearchTimeoutMs,
+        )
+        .as_deref(),
+    )
+}
+
+/// Pure policy seam for [`daemon_search_attempt_timeout`]. A missing, zero, or
+/// unparseable value keeps the registered default rather than disabling the
+/// deadline: an unbounded wait would hang the CLI on a wedged daemon.
+#[cfg(unix)]
+fn daemon_search_attempt_timeout_from_env_value(value: Option<&str>) -> std::time::Duration {
+    value
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map_or(
+            DAEMON_SEARCH_ATTEMPT_TIMEOUT,
+            std::time::Duration::from_millis,
+        )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DaemonSearchFallbackReason {
     UnsupportedCliOption(&'static str),
@@ -47414,6 +47446,8 @@ enum DaemonSearchFallbackReason {
     CapabilityProtocolDrift,
     CapabilityEnvelopeSchemaDrift,
     CapabilityMethodMissing,
+    /// The daemon advertises search but is still loading its search stack.
+    DaemonWarming,
     CapabilityAuthorizationDrift,
     CapabilityMethodSchemaDrift,
     RequestEncodingFailed,
@@ -47435,6 +47469,9 @@ impl DaemonSearchFallbackReason {
             Self::CapabilityProtocolDrift => "capability protocol drift",
             Self::CapabilityEnvelopeSchemaDrift => "capability envelope schema drift",
             Self::CapabilityMethodMissing => "search method not advertised",
+            Self::DaemonWarming => {
+                "daemon is still warming its search stack; retry once `ee daemon status` reports it ready"
+            }
             Self::CapabilityAuthorizationDrift => "search authorization drift",
             Self::CapabilityMethodSchemaDrift => "search method schema drift",
             Self::RequestEncodingFailed => "search request encoding failed",
@@ -47552,7 +47589,8 @@ fn search_via_daemon(
     let kind_filter = kind_filter.map(str::to_owned);
     let field_filters = args.field_filters.clone();
     let explain_performance = args.explain_performance;
-    let deadline = std::time::Instant::now() + DAEMON_SEARCH_ATTEMPT_TIMEOUT;
+    let attempt_timeout = daemon_search_attempt_timeout();
+    let deadline = std::time::Instant::now() + attempt_timeout;
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let result = search_via_daemon_before(
@@ -47566,7 +47604,7 @@ fn search_via_daemon(
         let _ = sender.send(result);
     });
     receiver
-        .recv_timeout(DAEMON_SEARCH_ATTEMPT_TIMEOUT)
+        .recv_timeout(attempt_timeout)
         .map_err(|_| DaemonSearchFallbackReason::DeadlineExceeded)?
 }
 
@@ -47608,6 +47646,19 @@ fn search_via_daemon_before(
         .as_ref()
         .ok_or(DaemonSearchFallbackReason::CapabilityMethodError)?;
     validate_daemon_search_capabilities(capabilities)?;
+    // GH #37: a daemon that is still loading its tokenizer and embedding matrix
+    // will not answer inside the bounded attempt window. Falling back straight
+    // away beats spending the whole deadline first and then reporting a bare
+    // "deadline exceeded" the operator cannot act on. A daemon with warm-up
+    // disabled reports `cold` and is still attempted normally, because it may
+    // well already be hot from earlier requests.
+    if capabilities
+        .pointer("/warm/posture")
+        .and_then(serde_json::Value::as_str)
+        == Some("warming")
+    {
+        return Err(DaemonSearchFallbackReason::DaemonWarming);
+    }
 
     let params = DaemonSearchParams::from_search_options(
         options,
@@ -87604,6 +87655,60 @@ mod tests {
             validate_daemon_search_capabilities(&schema_drift),
             Err(DaemonSearchFallbackReason::CapabilityMethodSchemaDrift)
         );
+    }
+
+    // GH #37: a cold daemon used to burn the whole attempt window and then
+    // report a bare "deadline exceeded", while the CLI reloaded the 512 MB
+    // embedding matrix in-process. These lock the honest-reason contract and
+    // the configurable deadline that replaced it.
+
+    #[test]
+    fn daemon_warming_fallback_reason_is_actionable() -> TestResult {
+        let degradation =
+            daemon_search_fallback_degradation(DaemonSearchFallbackReason::DaemonWarming);
+        ensure_equal(
+            &degradation.code,
+            &DAEMON_SEARCH_FALLBACK_CODE.to_owned(),
+            "daemon warming fallback code",
+        )?;
+        ensure_contains(
+            &degradation.message,
+            "still warming",
+            "daemon warming fallback reason",
+        )?;
+        ensure_contains(
+            &degradation.message,
+            "retry",
+            "daemon warming fallback tells the operator what to do",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_search_attempt_timeout_honours_the_env_override() -> TestResult {
+        use super::{DAEMON_SEARCH_ATTEMPT_TIMEOUT, daemon_search_attempt_timeout_from_env_value};
+
+        ensure_equal(
+            &daemon_search_attempt_timeout_from_env_value(None),
+            &DAEMON_SEARCH_ATTEMPT_TIMEOUT,
+            "absent override keeps the registered default",
+        )?;
+        ensure_equal(
+            &daemon_search_attempt_timeout_from_env_value(Some(" 7500 ")),
+            &std::time::Duration::from_millis(7_500),
+            "a whitespace-padded override is honoured",
+        )?;
+        // A zero or unparseable value must not disable the deadline: an
+        // unbounded wait would hang the CLI against a wedged daemon.
+        for rejected in ["0", "-1", "", "soon", "2s"] {
+            ensure_equal(
+                &daemon_search_attempt_timeout_from_env_value(Some(rejected)),
+                &DAEMON_SEARCH_ATTEMPT_TIMEOUT,
+                "rejected override falls back to the bounded default",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
