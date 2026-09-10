@@ -2359,7 +2359,7 @@ after recovery. The portable JSONL importer alone does not replay audit history.
 Backups created before audit-history capture must be recreated; verification
 rejects an archive that lacks this required asset.
 
-The signed manifest also carries the selected workspace's alias, original
+The signed manifest also carries the selected workspace's stored name, original
 timestamps, and repository/subproject scope. Restore preserves that metadata
 and binds the workspace ID to the new side path; `ee workspace resolve` reads
 the restored identity. Repository metadata describes the source checkout:
