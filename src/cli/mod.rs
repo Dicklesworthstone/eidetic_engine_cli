@@ -7799,6 +7799,10 @@ pub struct PlanExplainArgs {
     /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+
+    /// Recompute matching scores and alternatives for this task.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
 }
 
 /// Arguments for `ee plan recommend`.
@@ -10110,6 +10114,14 @@ pub struct CurateApplyArgs {
     /// Permit applying tombstone/retract candidates to load-bearing memories.
     #[arg(long = "allow-tombstone-load-bearing", action = ArgAction::SetTrue)]
     pub allow_tombstone_load_bearing: bool,
+
+    /// Save a validated rule/procedure proposal as a draft plan recipe.
+    #[arg(long, value_name = "NAME", requires = "when")]
+    pub as_recipe: Option<String>,
+
+    /// When to use the recipe created by --as-recipe.
+    #[arg(long, value_name = "TEXT", requires = "as_recipe")]
+    pub when: Option<String>,
 }
 
 /// Shared arguments for `ee curate accept` and `ee curate reject`.
@@ -10769,6 +10781,14 @@ pub struct WhyArgs {
     /// Memory ID or admitted evidence-span ID to explain.
     #[arg(value_name = "ENTITY_ID")]
     pub memory_id: String,
+
+    /// Recipe ID when using `ee why plan <RECIPE_ID>`.
+    #[arg(value_name = "RECIPE_ID")]
+    pub recipe_id: Option<String>,
+
+    /// Task for recipe matching scores and alternatives (`ee why plan`).
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -26088,10 +26108,14 @@ where
     W: Write,
     E: Write,
 {
-    use crate::core::plan::explain_recipe;
+    use crate::core::plan::{explain_recipe, explain_recipe_for_task};
 
     let (workspace, _) = resolve_local_workspace_for_cli(cli, None);
-    match explain_recipe(&workspace, args.database.as_deref(), &args.id) {
+    let report = match args.task.as_deref() {
+        Some(task) => explain_recipe_for_task(&workspace, args.database.as_deref(), &args.id, task),
+        None => explain_recipe(&workspace, args.database.as_deref(), &args.id),
+    };
+    match report {
         Ok(report) => write_plan_explain_report(cli, &report, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
@@ -52509,6 +52533,41 @@ where
     W: Write,
     E: Write,
 {
+    if args.memory_id == "plan"
+        && let Some(id) = &args.recipe_id
+    {
+        if args.causal_explain
+            || args.include_sentinel
+            || args.mesh_mode != MeshCommandMode::Off
+            || args.confidence_threshold != 0.5
+        {
+            return write_domain_error(
+                &DomainError::Usage {
+                    message: "Memory-only explanation options do not apply to recipes.".to_owned(),
+                    repair: Some("ee why plan <RECIPE_ID> --task <TASK> --json".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+        return handle_plan_explain(
+            cli,
+            &PlanExplainArgs {
+                id: id.clone(),
+                database: args.database.clone(),
+                task: args.task.clone(),
+            },
+            stdout,
+            stderr,
+        );
+    }
+    if args.memory_id == "plan" || args.recipe_id.is_some() || args.task.is_some() {
+        return write_domain_error(&DomainError::Usage {
+            message: "Use `ee why plan <RECIPE_ID> --task <TASK>` for recipes, or `ee why <ENTITY_ID>` for memories.".to_owned(),
+            repair: Some("ee why --help".to_owned()),
+        }, cli.wants_json(), stdout, stderr);
+    }
     if !args.confidence_threshold.is_finite() || !(0.0..=1.0).contains(&args.confidence_threshold) {
         let domain_error = DomainError::Usage {
             message: "confidence threshold must be a finite number between 0.0 and 1.0".to_string(),
@@ -56851,7 +56910,13 @@ where
         allow_tombstone_load_bearing: args.allow_tombstone_load_bearing,
     };
 
-    match apply_curation_candidate(&options) {
+    let result = match (&args.as_recipe, &args.when) {
+        (Some(name), Some(when_to_use)) => {
+            crate::core::curate::apply_curation_candidate_as_recipe(&options, name, when_to_use)
+        }
+        _ => apply_curation_candidate(&options),
+    };
+    match result {
         Ok(report) => write_curate_apply_report(cli, &report, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
@@ -93717,6 +93782,8 @@ demos:
             vec!["plan", "recipe", "list"],
             vec!["plan", "recipe", "show", recipe_id],
             vec!["plan", "explain", recipe_id],
+            vec!["why", "plan", recipe_id],
+            vec!["why", "plan", recipe_id, "--task", "tangerine release"],
         ] {
             let mut args = vec![
                 OsString::from("ee"),
@@ -93739,6 +93806,16 @@ demos:
             let parsed: serde_json::Value = serde_json::from_slice(&stdout)
                 .map_err(|e| format!("{e}: {}", String::from_utf8_lossy(&stdout)))?;
             ensure(parsed["success"] == true, "stored recipe response succeeds")?;
+            if command.contains(&"--task") {
+                ensure(
+                    parsed["data"]["taskEvaluation"]["matched"] == true,
+                    "task explanation uses the real matcher",
+                )?;
+                ensure(
+                    parsed["data"]["taskEvaluation"]["recommendation"]["recipeId"] == recipe_id,
+                    "task score belongs to the explained recipe",
+                )?;
+            }
             ensure(
                 String::from_utf8_lossy(&stdout).contains(recipe_id),
                 "the stored recipe reaches the CLI response",

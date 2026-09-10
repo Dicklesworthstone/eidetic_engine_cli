@@ -5786,7 +5786,50 @@ mod tests {
             .map_err(|error| error.to_string())?;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].source_type, "feedback_event");
-        connection.close().map_err(|error| error.to_string())
+        let candidate_id = candidates[0].id.clone();
+        connection.close().map_err(|error| error.to_string())?;
+        let validated = crate::core::curate::validate_curation_candidate(
+            &crate::core::curate::CurateValidateOptions {
+                workspace_path: dir.path(),
+                database_path: Some(&database),
+                candidate_id: &candidate_id,
+                actor: Some("learning-recipe-test"),
+                dry_run: false,
+            },
+        )
+        .map_err(|e| e.message())?;
+        assert!(
+            validated.validation.errors.is_empty(),
+            "{:?}",
+            validated.validation.errors
+        );
+        let applied = crate::core::curate::apply_curation_candidate_as_recipe(
+            &crate::core::curate::CurateApplyOptions {
+                workspace_path: dir.path(),
+                database_path: Some(&database),
+                candidate_id: &candidate_id,
+                actor: Some("learning-recipe-test"),
+                dry_run: false,
+                allow_tombstone_load_bearing: false,
+            },
+            "Shared Rust verification",
+            "Before closing shared Rust work",
+        )
+        .map_err(|e| e.message())?;
+        assert!(applied.durable_mutation, "{:?}", applied.application);
+        let connection = DbConnection::open_file_read_only(&database).map_err(|e| e.to_string())?;
+        let recipes = connection
+            .list_plan_recipes(&workspace_id)
+            .map_err(|e| e.to_string())?;
+        assert_eq!(recipes.len(), 1);
+        assert!(recipes[0].evidence_uris_json.contains(&candidate_id));
+        let explained =
+            crate::core::plan::explain_recipe(dir.path(), Some(&database), &recipes[0].id)
+                .map_err(|e| e.message())?;
+        assert!(explained.found);
+        assert!(explained.steps[0].contains("Cargo target directory"));
+        assert_eq!(explained.maturity.as_deref(), Some("draft"));
+        connection.close().map_err(|e| e.to_string())
     }
 
     #[test]

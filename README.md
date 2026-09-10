@@ -2372,7 +2372,11 @@ retrieval with maturity, recorded recency, and evidence components. JSON include
 scores and provenance; `--min-score` filters ranking scores, not calibrated
 confidence. Missing semantic models fall back to lexical retrieval with a
 degraded entry. Stored instructions have unknown effects and are never executed
-by recommendation. Creating recipes through curation promotion remains unfinished.
+by recommendation. Native procedural rules from the selected workspace also
+participate, with their recorded maturity, source memories, and scope. Deprecated,
+superseded, and tombstoned rules are excluded. Directory and file-pattern rules
+retain their scope restriction; a text match does not prove that the task's files
+fall within that scope.
 
 To save instructions explicitly, initialize the workspace and create a draft:
 
@@ -2387,6 +2391,27 @@ ee plan recommend "prepare a release" --workspace . --json
 `save --dry-run` previews redacted instructions without writing. A saved recipe
 starts at draft maturity with no earned confidence; saving commits the recipe
 and its audit record together and never runs the supplied instructions.
+
+Learning proposals can use the same store after normal validation:
+
+```bash
+ee learn propose --workspace . --json
+ee curate validate <candidate-id> --workspace . --json
+ee curate apply <candidate-id> --workspace . \
+  --as-recipe "Release verification" --when "Preparing a release" --dry-run --json
+ee curate apply <candidate-id> --workspace . \
+  --as-recipe "Release verification" --when "Preparing a release" --json
+ee why plan <recipe-id> --task "prepare a release" --workspace . --json
+```
+
+Recipe promotion accepts rule and procedure candidates. The proposal content
+becomes one instruction, retaining its source references. The recipe, candidate
+transition, and audit commit together; replay returns the existing recipe.
+Review does not establish execution success, so the recipe starts as a draft
+with zero earned confidence. `ee plan explain <id> --task "..."` uses the same
+explanation path: current matching score, rank, provenance, up to five ranked
+alternatives, and an explicit no-match result when applicable. Without `--task`,
+the explanation describes stored instructions and evidence only.
 
 By default, `ee backup create` also includes graph-cache derived assets: graph
 snapshots, graph algorithm witnesses, and graph algorithm result-cache rows.

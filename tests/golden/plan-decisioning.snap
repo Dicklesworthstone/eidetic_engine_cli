@@ -1,20 +1,6 @@
----
-source: src/core/plan.rs
-assertion: plan recommend and explain provide evidence-backed recipe selection
-schema:
-  recommend: ee.plan.recommend.v1
-  explain: ee.plan.explain.v1
-contracts:
-  - plan recommend matches recipes by task keyword alignment
-  - plan recommend returns ranked list with confidence scores
-  - plan recommend is deterministic for same task input
-  - plan explain returns recipe details with evidence URIs
-  - plan explain returns not-found for unknown recipe IDs
-  - plan goal redirects to plan recommend
-evidence:
-  - PlanRecommendReport.recommendations
-  - PlanRecommendReport.matchesFound
-  - RecipeRecommendation.confidence
-  - RecipeRecommendation.matchReasons
-  - PlanExplainReport.found
-  - PlanExplainReport.steps
+{
+  "empty": {"matchesFound": 0, "ranked": []},
+  "single": {"matchesFound": 1, "ranked": [{"recipeId": "plrec_a", "rank": 1, "sourceKind": "stored_plan_recipe", "maturity": "promoted"}]},
+  "tie": {"matchesFound": 2, "ranked": [{"recipeId": "plrec_a", "rank": 1, "sourceKind": "stored_plan_recipe", "maturity": "promoted"}, {"recipeId": "plrec_b", "rank": 2, "sourceKind": "stored_plan_recipe", "maturity": "promoted"}]},
+  "no_match": {"matchesFound": 0, "ranked": []}
+}

@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 
 use crate::core::task_frame::{TaskFrameRecord, TaskFrameShowOptions, show_task_frame};
-use crate::db::{DbConnection, StoredPlanRecipe};
+use crate::db::{DbConnection, StoredPlanRecipe, StoredProceduralRule};
 use crate::models::DomainError;
 
 pub const GOAL_PLAN_SCHEMA_V1: &str = "ee.plan.goal.v1";
@@ -1298,6 +1298,7 @@ pub const RECIPE_SEMANTIC_UNAVAILABLE: &str = "semantic_search_unavailable";
 
 /// A catalog recipe and its actual source metadata. Built-ins and stored
 /// procedures retain distinct provenance even when their text is identical.
+#[derive(Clone)]
 pub(crate) struct RecipeCatalogEntry {
     pub recipe: Recipe,
     pub source_kind: &'static str,
@@ -1324,7 +1325,7 @@ impl RecipeCatalogEntry {
             value["maturity"] = json!(maturity);
         }
         value["evidenceUris"] = json!(self.evidence_uris);
-        if self.source_kind == "stored_plan_recipe" {
+        if self.source_kind != "static_command_catalog" {
             value["catalogSource"] = JsonValue::Null;
             value["version"] = JsonValue::Null;
             value["decisionBoundary"] = json!("stored_instructions_only");
@@ -1357,11 +1358,11 @@ fn recipe_search_error(error: impl std::fmt::Display) -> DomainError {
     }
 }
 
-fn recipe_text(text: &str) -> String {
+pub(crate) fn recipe_text(text: &str) -> String {
     crate::output::jsonl_export::redact_content(text, crate::models::RedactionLevel::Standard)
 }
 
-fn recipe_searchable_text(text: &str) -> String {
+pub(crate) fn recipe_searchable_text(text: &str) -> String {
     use crate::output::jsonl_export::{
         REDACTED_ID_PLACEHOLDER, REDACTED_PATH_PLACEHOLDER, REDACTED_PLACEHOLDER,
     };
@@ -1482,10 +1483,83 @@ pub(crate) fn recipe_catalog(
         {
             catalog.push(stored_recipe_entry(recipe)?);
         }
+        for rule in db
+            .list_procedural_rules(&row.id, None, None, false)
+            .map_err(recipe_storage_error)?
+        {
+            if rule.superseded_by.is_some()
+                || !matches!(rule.maturity.as_str(), "draft" | "candidate" | "validated")
+            {
+                continue;
+            }
+            catalog.push(procedural_rule_entry(&db, &workspace, rule)?);
+        }
     }
     catalog.sort_by(|left, right| left.recipe.id.cmp(&right.recipe.id));
     db.commit_read_snapshot().map_err(recipe_storage_error)?;
     Ok(catalog)
+}
+
+fn procedural_rule_entry(
+    db: &DbConnection,
+    workspace: &Path,
+    rule: StoredProceduralRule,
+) -> Result<RecipeCatalogEntry, DomainError> {
+    let scope = rule
+        .scope
+        .parse::<crate::models::RuleScope>()
+        .map_err(recipe_storage_error)?;
+    let pattern = crate::search::normalize_rule_scope_pattern(
+        workspace,
+        scope,
+        rule.scope_pattern.as_deref(),
+    )
+    .map_err(recipe_storage_error)?;
+    let mut evidence = Vec::new();
+    for id in db
+        .get_rule_source_memory_ids(&rule.id)
+        .map_err(recipe_storage_error)?
+    {
+        // A foreign source is not permission to reveal its identity or body.
+        if db
+            .get_memory(&id)
+            .map_err(recipe_storage_error)?
+            .is_some_and(|memory| memory.workspace_id == rule.workspace_id)
+        {
+            evidence.push(format!("ee://memory/{id}"));
+        }
+    }
+    let applicability = match pattern {
+        Some(pattern) => format!(
+            "Scope: {} ({pattern}). Check this scope before using the rule.",
+            scope.as_str()
+        ),
+        None => format!("Scope: {}.", scope.as_str()),
+    };
+    let mut entry = stored_recipe_entry(StoredPlanRecipe {
+        id: rule.id.clone(),
+        workspace_id: rule.workspace_id.clone(),
+        name: recipe_text(&rule.content)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(120)
+            .collect(),
+        when_to_use: applicability,
+        steps_json: json!([rule.content]).to_string(),
+        evidence_uris_json: json!(evidence).to_string(),
+        maturity: rule.maturity,
+        confidence: f64::from(rule.confidence),
+        helpful_count: u64::from(rule.positive_feedback_count),
+        harmful_count: u64::from(rule.negative_feedback_count),
+        created_at: rule.created_at,
+        updated_at: rule.updated_at,
+        last_recommended_at: None,
+    })?;
+    entry.source_kind = "procedural_rule";
+    entry.source_id = format!("ee://workspace/{}/rule/{}", rule.workspace_id, rule.id);
+    Ok(entry)
 }
 
 pub(crate) fn find_recipe(
@@ -1705,6 +1779,13 @@ pub fn recommend_recipes(
     validate_recommend_options(options)?;
     // Finish the DB read before any optional model preparation or download.
     let catalog = recipe_catalog(&options.workspace_path, options.database_path.as_deref())?;
+    recommend_with_prepared_embedder(options, catalog)
+}
+
+fn recommend_with_prepared_embedder(
+    options: &PlanRecommendOptions,
+    catalog: Vec<RecipeCatalogEntry>,
+) -> Result<PlanRecommendReport, DomainError> {
     crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
         let database = options
             .database_path
@@ -1795,7 +1876,7 @@ pub(crate) async fn recommend_from_catalog(
             continue;
         }
         let maturity = match entry.maturity.as_deref() {
-            Some("draft") => 0.3,
+            Some("draft" | "candidate") => 0.3,
             Some("validated") => 0.6,
             Some("promoted") => 1.0,
             _ => 0.0, // Static catalog entries have no learned maturity.
@@ -1812,7 +1893,7 @@ pub(crate) async fn recommend_from_catalog(
             .evidence_uris
             .iter()
             .filter(|uri| {
-                entry.source_kind == "stored_plan_recipe"
+                entry.source_kind != "static_command_catalog"
                     && !uri.trim().is_empty()
                     && !uri.contains("[REDACTED")
             })
@@ -1919,6 +2000,7 @@ pub struct PlanExplainReport {
     pub evidence_uris: Vec<String>,
     pub source_kind: Option<String>,
     pub source_id: Option<String>,
+    pub task_evaluation: Option<PlanRecommendReport>,
 }
 
 impl PlanExplainReport {
@@ -1938,6 +2020,7 @@ impl PlanExplainReport {
             evidence_uris: Vec::new(),
             source_kind: None,
             source_id: None,
+            task_evaluation: None,
         }
     }
 }
@@ -1949,7 +2032,11 @@ pub fn explain_recipe(
     recipe_id: &str,
 ) -> Result<PlanExplainReport, DomainError> {
     let entry = find_recipe(workspace, database, recipe_id)?;
-    Ok(match entry {
+    Ok(explain_catalog_entry(recipe_id, entry))
+}
+
+fn explain_catalog_entry(recipe_id: &str, entry: Option<RecipeCatalogEntry>) -> PlanExplainReport {
+    match entry {
         Some(entry) => {
             let r = entry.recipe;
             PlanExplainReport {
@@ -1966,10 +2053,38 @@ pub fn explain_recipe(
                 evidence_uris: entry.evidence_uris,
                 source_kind: Some(entry.source_kind.to_owned()),
                 source_id: Some(entry.source_id),
+                task_evaluation: None,
             }
         }
         None => PlanExplainReport::not_found(recipe_id),
-    })
+    }
+}
+
+/// Explain a recipe against the same complete snapshot and scorer used for
+/// recommendations. No recommendation history or wall-clock rank is invented.
+pub fn explain_recipe_for_task(
+    workspace: &Path,
+    database: Option<&Path>,
+    recipe_id: &str,
+    task: &str,
+) -> Result<PlanExplainReport, DomainError> {
+    let options = PlanRecommendOptions {
+        workspace_path: workspace.to_path_buf(),
+        database_path: database.map(Path::to_path_buf),
+        task: task.to_owned(),
+        limit: u32::MAX,
+        min_score: 0.0,
+    };
+    validate_recommend_options(&options)?;
+    let catalog = recipe_catalog(workspace, database)?;
+    let mut report = explain_catalog_entry(
+        recipe_id,
+        catalog.iter().find(|e| e.recipe.id == recipe_id).cloned(),
+    );
+    if report.found {
+        report.task_evaluation = Some(recommend_with_prepared_embedder(&options, catalog)?);
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -2451,6 +2566,242 @@ mod tests {
                 .map_err(|e| e.message())?
                 .len(),
             builtin_recipes().len()
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn native_rules_join_recipes_with_lifecycle_scope_and_provenance() -> TestResult {
+        let (directory, database, workspace_id) = recipe_workspace()?;
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let memory_id = crate::models::MemoryId::now().to_string();
+        db.insert_memory(
+            &memory_id,
+            &crate::db::CreateMemoryInput {
+                workspace_id: workspace_id.clone(),
+                level: "procedural".to_owned(),
+                kind: "rule".to_owned(),
+                content: "Tangerine compass evidence".to_owned(),
+                workflow_id: None,
+                confidence: 0.5,
+                utility: 0.5,
+                importance: 0.5,
+                provenance_uri: None,
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        let mut active_id = String::new();
+        for maturity in [
+            "draft",
+            "candidate",
+            "validated",
+            "deprecated",
+            "superseded",
+        ] {
+            let id = crate::models::RuleId::now().to_string();
+            if maturity == "candidate" {
+                active_id = id.clone();
+            }
+            db.insert_procedural_rule(
+                &id,
+                &crate::db::CreateProceduralRuleInput {
+                    workspace_id: workspace_id.clone(),
+                    content: "Tangerine compass check api_key=native-rule-secret".to_owned(),
+                    confidence: 0.7,
+                    utility: 0.5,
+                    importance: 0.5,
+                    trust_class: "agent_assertion".to_owned(),
+                    scope: "directory".to_owned(),
+                    scope_pattern: Some("src".to_owned()),
+                    maturity: maturity.to_owned(),
+                    protected: false,
+                    source_memory_ids: vec![memory_id.clone()],
+                    tags: Vec::new(),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        for retired in ["tombstone", "supersession"] {
+            let id = crate::models::RuleId::now().to_string();
+            db.insert_procedural_rule(
+                &id,
+                &crate::db::CreateProceduralRuleInput {
+                    workspace_id: workspace_id.clone(),
+                    content: "Tangerine compass retired".to_owned(),
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    trust_class: "agent_assertion".to_owned(),
+                    scope: "workspace".to_owned(),
+                    scope_pattern: None,
+                    maturity: "validated".to_owned(),
+                    protected: false,
+                    source_memory_ids: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            let update = if retired == "tombstone" {
+                "tombstoned_at = '2026-09-01T00:00:00Z'".to_owned()
+            } else {
+                format!("superseded_by = '{active_id}'")
+            };
+            db.execute_raw(&format!(
+                "UPDATE procedural_rules SET {update} WHERE id = '{id}'"
+            ))
+            .map_err(|e| e.to_string())?;
+        }
+        db.insert_plan_recipe(&stored_recipe_fixture(
+            &workspace_id,
+            "plrec_native_alternative",
+        ))
+        .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        let before = std::fs::read(&database).map_err(|e| e.to_string())?;
+        let options = PlanRecommendOptions {
+            task: "tangerine compass".to_owned(),
+            limit: 20,
+            min_score: 0.0,
+            workspace_path: directory.path().to_path_buf(),
+            database_path: Some(database.clone()),
+        };
+        let ranked = lexical_recommend(&options)?;
+        assert_eq!(ranked.matches_found, 4);
+        assert_eq!(ranked.total_recipes_considered, builtin_recipes().len() + 4);
+        let native = ranked
+            .recommendations
+            .iter()
+            .find(|r| r.recipe_id == active_id)
+            .ok_or("native rule missing")?;
+        assert_eq!(native.source_kind, "procedural_rule");
+        assert_eq!(native.maturity.as_deref(), Some("candidate"));
+        assert_eq!(native.components.maturity_score, 0.3);
+        assert_eq!(native.evidence_uris, [format!("ee://memory/{memory_id}")]);
+        assert_eq!(native.components.evidence_count, 0.5);
+        let explanation = explain_recipe(directory.path(), Some(&database), &active_id)
+            .map_err(|e| e.message())?;
+        assert!(
+            explanation
+                .when_to_use
+                .as_deref()
+                .is_some_and(|text| text.contains("directory (src)"))
+        );
+        assert!(
+            !crate::output::render_plan_explain_json(&explanation).contains("native-rule-secret")
+        );
+        assert_eq!(
+            crate::output::render_plan_recommend_json(&ranked),
+            crate::output::render_plan_recommend_json(&lexical_recommend(&options)?)
+        );
+        assert_eq!(std::fs::read(&database).map_err(|e| e.to_string())?, before);
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn recipe_rank_cases_match_golden() -> TestResult {
+        let expected: JsonValue =
+            serde_json::from_str(include_str!("../../tests/golden/plan-decisioning.snap"))
+                .map_err(|e| e.to_string())?;
+        let (directory, database, workspace_id) = recipe_workspace()?;
+        let mut options = PlanRecommendOptions {
+            task: "tangerine compass".to_owned(),
+            limit: 10,
+            min_score: 0.0,
+            workspace_path: directory.path().to_path_buf(),
+            database_path: Some(database.clone()),
+        };
+        for (case, insert) in [
+            ("empty", None),
+            ("single", Some("plrec_a")),
+            ("tie", Some("plrec_b")),
+            ("no_match", None),
+        ] {
+            if let Some(id) = insert {
+                let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+                db.insert_plan_recipe(&stored_recipe_fixture(&workspace_id, id))
+                    .map_err(|e| e.to_string())?;
+                db.close().map_err(|e| e.to_string())?;
+            }
+            if case == "no_match" {
+                options.task = "zygomorphic quokka".to_owned();
+            }
+            let report = lexical_recommend(&options)?;
+            let output = crate::output::render_plan_recommend_json(&report);
+            assert_eq!(
+                output,
+                crate::output::render_plan_recommend_json(&lexical_recommend(&options)?)
+            );
+            let parsed: JsonValue = serde_json::from_str(&output).map_err(|e| e.to_string())?;
+            let ranked = parsed["data"]["recommendations"].as_array().ok_or("missing recommendations")?.iter().map(|r| {
+                json!({"recipeId":r["recipeId"], "rank":r["rank"], "sourceKind":r["sourceKind"], "maturity":r["maturity"]})
+            }).collect::<Vec<_>>();
+            assert_eq!(
+                json!({"matchesFound": parsed["data"]["matchesFound"], "ranked":ranked}),
+                expected[case],
+                "{case}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn task_explanation_uses_real_ranking_and_bounded_alternatives() -> TestResult {
+        let (directory, database, workspace_id) = recipe_workspace()?;
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        for index in 0..7 {
+            db.insert_plan_recipe(&stored_recipe_fixture(
+                &workspace_id,
+                &format!("plrec_{index}"),
+            ))
+            .map_err(|e| e.to_string())?;
+        }
+        db.close().map_err(|e| e.to_string())?;
+        let mut options = PlanRecommendOptions {
+            task: "tangerine compass".to_owned(),
+            limit: u32::MAX,
+            min_score: 0.0,
+            workspace_path: directory.path().to_path_buf(),
+            database_path: Some(database.clone()),
+        };
+        let mut explanation = explain_recipe(directory.path(), Some(&database), "plrec_0")
+            .map_err(|e| e.message())?;
+        explanation.task_evaluation = Some(lexical_recommend(&options)?);
+        let rendered: JsonValue =
+            serde_json::from_str(&crate::output::render_plan_explain_json(&explanation))
+                .map_err(|e| e.to_string())?;
+        let evaluation = &rendered["data"]["taskEvaluation"];
+        assert_eq!(evaluation["matched"], true);
+        assert_eq!(evaluation["recommendation"]["rank"], 1);
+        assert_eq!(evaluation["matchesFound"], 7);
+        assert_eq!(evaluation["alternativesTruncated"], true);
+        assert_eq!(
+            evaluation["alternativesConsidered"]
+                .as_array()
+                .ok_or("alternatives array missing")?
+                .iter()
+                .map(|r| r["recipeId"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            ["plrec_1", "plrec_2", "plrec_3", "plrec_4", "plrec_5"]
+        );
+        assert_eq!(rendered["degraded"][0]["code"], RECIPE_SEMANTIC_UNAVAILABLE);
+        options.task = "zygomorphic quokka".to_owned();
+        explanation.task_evaluation = Some(lexical_recommend(&options)?);
+        let rendered: JsonValue =
+            serde_json::from_str(&crate::output::render_plan_explain_json(&explanation))
+                .map_err(|e| e.to_string())?;
+        assert_eq!(rendered["data"]["taskEvaluation"]["matched"], false);
+        assert!(rendered["data"]["taskEvaluation"]["recommendation"].is_null());
+        assert_eq!(
+            rendered["data"]["taskEvaluation"]["alternativesConsidered"],
+            json!([])
         );
         Ok(())
     }

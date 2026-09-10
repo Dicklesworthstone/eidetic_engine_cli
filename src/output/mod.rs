@@ -16153,7 +16153,28 @@ pub fn render_certificate_verify_toon(report: &CertificateVerifyReport) -> Strin
 // EE-jfd9: Plan recommend and explain output renderers
 // ============================================================================
 
-use crate::core::plan::{PlanExplainReport, PlanRecommendReport};
+use crate::core::plan::{PlanExplainReport, PlanRecommendReport, RecipeRecommendation};
+
+fn write_recipe_recommendation(d: &mut JsonBuilder, rec: &RecipeRecommendation) {
+    d.field_str("recipeId", &rec.recipe_id);
+    d.field_str("recipeName", &rec.recipe_name);
+    d.field_str("category", rec.category.as_str());
+    d.field_raw("score", &rec.score.to_string());
+    d.field_raw("rank", &rec.rank.to_string());
+    d.field_raw("components", &serde_json::json!(rec.components).to_string());
+    d.field_str("sourceKind", rec.source_kind);
+    d.field_str("sourceId", &rec.source_id);
+    if let Some(maturity) = &rec.maturity {
+        d.field_str("maturity", maturity);
+    }
+    d.field_array_of_strings("evidenceUris", &rec.evidence_uris);
+    d.field_u32(
+        "stepsCount",
+        u32::try_from(rec.steps_count).unwrap_or(u32::MAX),
+    );
+    d.field_str("effectPosture", rec.effect_posture.as_str());
+    d.field_array_of_strings("matchReasons", &rec.match_reasons);
+}
 
 #[must_use]
 pub fn render_plan_recommend_json(report: &PlanRecommendReport) -> String {
@@ -16175,26 +16196,11 @@ pub fn render_plan_recommend_json(report: &PlanRecommendReport) -> String {
             "matchesFound",
             u32::try_from(report.matches_found).unwrap_or(u32::MAX),
         );
-        d.field_array_of_objects("recommendations", &report.recommendations, |d, rec| {
-            d.field_str("recipeId", &rec.recipe_id);
-            d.field_str("recipeName", &rec.recipe_name);
-            d.field_str("category", rec.category.as_str());
-            d.field_raw("score", &rec.score.to_string());
-            d.field_raw("rank", &rec.rank.to_string());
-            d.field_raw("components", &serde_json::json!(rec.components).to_string());
-            d.field_str("sourceKind", rec.source_kind);
-            d.field_str("sourceId", &rec.source_id);
-            if let Some(maturity) = &rec.maturity {
-                d.field_str("maturity", maturity);
-            }
-            d.field_array_of_strings("evidenceUris", &rec.evidence_uris);
-            d.field_u32(
-                "stepsCount",
-                u32::try_from(rec.steps_count).unwrap_or(u32::MAX),
-            );
-            d.field_str("effectPosture", rec.effect_posture.as_str());
-            d.field_array_of_strings("matchReasons", &rec.match_reasons);
-        });
+        d.field_array_of_objects(
+            "recommendations",
+            &report.recommendations,
+            write_recipe_recommendation,
+        );
     });
     b.field_raw("degraded", &serde_json::json!(report.degraded).to_string());
     b.finish()
@@ -16280,7 +16286,61 @@ pub fn render_plan_explain_json(report: &PlanExplainReport) -> String {
         if let Some(kind) = &report.source_kind {
             d.field_str("sourceKind", kind);
         }
+        if let Some(evaluation) = &report.task_evaluation {
+            d.field_object("taskEvaluation", |d| {
+                d.field_str("task", &evaluation.task);
+                d.field_raw(
+                    "recencyAnchor",
+                    &serde_json::json!(evaluation.recency_anchor).to_string(),
+                );
+                d.field_raw(
+                    "totalRecipesConsidered",
+                    &evaluation.total_recipes_considered.to_string(),
+                );
+                d.field_raw("matchesFound", &evaluation.matches_found.to_string());
+                let matched = evaluation
+                    .recommendations
+                    .iter()
+                    .find(|r| r.recipe_id == report.recipe_id);
+                d.field_bool("matched", matched.is_some());
+                if let Some(matched) = matched {
+                    d.field_object("recommendation", |d| {
+                        write_recipe_recommendation(d, matched)
+                    });
+                } else {
+                    d.field_str(
+                        "reason",
+                        "No text hit or semantic similarity of at least 0.5 for this task.",
+                    );
+                }
+                let alternatives = evaluation
+                    .recommendations
+                    .iter()
+                    .filter(|r| r.recipe_id != report.recipe_id)
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                d.field_bool(
+                    "alternativesTruncated",
+                    evaluation
+                        .matches_found
+                        .saturating_sub(usize::from(matched.is_some()))
+                        > alternatives.len(),
+                );
+                d.field_array_of_objects(
+                    "alternativesConsidered",
+                    &alternatives,
+                    write_recipe_recommendation,
+                );
+            });
+        }
     });
+    if let Some(evaluation) = &report.task_evaluation {
+        b.field_raw(
+            "degraded",
+            &serde_json::json!(evaluation.degraded).to_string(),
+        );
+    }
     b.finish()
 }
 
@@ -16322,6 +16382,40 @@ pub fn render_plan_explain_human(report: &PlanExplainReport) -> String {
         out.push_str("\nSteps:\n");
         for (i, step) in report.steps.iter().enumerate() {
             out.push_str(&format!("  {}. {}\n", i + 1, step));
+        }
+    }
+    if let Some(evaluation) = &report.task_evaluation {
+        out.push_str(&format!("\nTask: {}\n", evaluation.task));
+        if let Some(matched) = evaluation
+            .recommendations
+            .iter()
+            .find(|r| r.recipe_id == report.recipe_id)
+        {
+            out.push_str(&format!(
+                "Rank: {}; score: {:.6}\n",
+                matched.rank, matched.score
+            ));
+            for reason in &matched.match_reasons {
+                out.push_str(&format!("  {reason}\n"));
+            }
+        } else {
+            out.push_str("No retrieval match for this task.\n");
+        }
+        for alternative in evaluation
+            .recommendations
+            .iter()
+            .filter(|r| r.recipe_id != report.recipe_id)
+            .take(5)
+        {
+            out.push_str(&format!(
+                "Alternative: {} ({:.6})\n",
+                alternative.recipe_id, alternative.score
+            ));
+        }
+        for degraded in &evaluation.degraded {
+            if let Some(message) = degraded.get("message").and_then(serde_json::Value::as_str) {
+                out.push_str(&format!("Degraded: {message}\n"));
+            }
         }
     }
     out

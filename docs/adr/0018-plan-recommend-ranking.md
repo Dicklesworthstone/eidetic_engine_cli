@@ -7,9 +7,12 @@
 
 ## Context
 
-The `ee plan recommend <task>` command needs to recommend recipes from two sources:
+The `ee plan recommend <task>` command recommends recipes from three sources:
 1. Static builtin recipes (already implemented in `src/core/plan.rs`)
 2. User-defined plan recipes stored in the `plan_recipes` table
+3. Active native procedural rules stored in `procedural_rules`, with their
+   scope and source-memory references. Deprecated, superseded and tombstoned
+   rules are excluded; a text match does not establish file-scope applicability.
 
 The recommendation must be:
 - **Deterministic**: Same input, same database state → same ranking
@@ -35,7 +38,7 @@ score = w_text * text_similarity
 |-----------|--------|-----------|
 | text_similarity | 0.30 | BM25/FTS5 match against task description |
 | semantic_similarity | 0.25 | Vector similarity via Frankensearch |
-| maturity_score | 0.20 | draft=0.3, validated=0.6, promoted=1.0 |
+| maturity_score | 0.20 | draft/candidate=0.3, validated=0.6, promoted=1.0 |
 | recency_decay | 0.10 | Prefer recently updated recipes |
 | evidence_count | 0.15 | Recipes with more evidence_uris rank higher |
 
@@ -61,6 +64,18 @@ When scores are equal within epsilon (1e-6):
 To keep comparison transitive, first sort exact scores, then form consecutive
 epsilon groups relative to each group's highest score and apply these keys.
 `matchesFound` counts qualifying matches before the output limit.
+
+`ee why plan <id> --task <task>` (also `ee plan explain`) scores the complete
+catalog from one database read snapshot. It reports the target's current match
+and rank plus up to five other ranked matches, with a truncation flag. These are
+current alternatives, not reconstructed historical decisions. The target can
+exist without matching the task. The ordinary explanation without a task does
+not invent scores.
+
+`ee curate apply --as-recipe <name> --when <text>` reuses ordinary rule/procedure
+candidate validation and commits a draft recipe in the candidate/audit
+transaction. It does not create a second procedural rule or mutate its source
+memory. Applying a proposal earns no execution confidence or promoted maturity.
 
 ### Degraded Mode
 

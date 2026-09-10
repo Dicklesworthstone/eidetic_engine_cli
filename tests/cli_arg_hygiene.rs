@@ -230,3 +230,67 @@ fn ee_plan_goal_workspace_flag_uses_global_path() {
         }
     }
 }
+
+#[test]
+fn recipe_explanation_and_promotion_arguments_are_unambiguous() {
+    let cli = Cli::try_parse_from([
+        "ee",
+        "why",
+        "plan",
+        "plrec_example",
+        "--task",
+        "prepare release",
+        "--json",
+    ])
+    .expect("recipe explanation parses");
+    match cli.command {
+        Some(Command::Why(args)) => {
+            assert_eq!(args.memory_id, "plan");
+            assert_eq!(args.recipe_id.as_deref(), Some("plrec_example"));
+            assert_eq!(args.task.as_deref(), Some("prepare release"));
+        }
+        other => panic!("expected why, got {other:?}"),
+    }
+    assert!(
+        Cli::try_parse_from([
+            "ee",
+            "curate",
+            "apply",
+            "curate_example",
+            "--as-recipe",
+            "Release"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "ee",
+            "curate",
+            "apply",
+            "curate_example",
+            "--when",
+            "release"
+        ])
+        .is_err()
+    );
+    let cli = Cli::try_parse_from([
+        "ee",
+        "curate",
+        "apply",
+        "curate_example",
+        "--as-recipe",
+        "Release",
+        "--when",
+        "prepare release",
+        "--dry-run",
+    ])
+    .expect("recipe promotion parses");
+    match cli.command {
+        Some(Command::Curate(ee::cli::CurateCommand::Apply(args))) => {
+            assert_eq!(args.as_recipe.as_deref(), Some("Release"));
+            assert_eq!(args.when.as_deref(), Some("prepare release"));
+            assert!(args.dry_run);
+        }
+        other => panic!("expected curate apply, got {other:?}"),
+    }
+}

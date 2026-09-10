@@ -2225,6 +2225,7 @@ impl EffectManifest {
                 "curate apply",
                 vec![
                     "curation_candidates",
+                    "plan_recipes",
                     "memories",
                     "procedural_rules",
                     "rule_source_memories",

@@ -5547,6 +5547,39 @@ fn planned_application_from_decision(
 pub fn apply_curation_candidate(
     options: &CurateApplyOptions<'_>,
 ) -> Result<CurateApplyReport, DomainError> {
+    apply_curation_candidate_with_recipe(options, None)
+}
+
+/// Explicit recipe output for a validated rule/procedure candidate. Reuses the
+/// normal trust, status, target, transaction and audit checks.
+pub fn apply_curation_candidate_as_recipe(
+    options: &CurateApplyOptions<'_>,
+    name: &str,
+    when_to_use: &str,
+) -> Result<CurateApplyReport, DomainError> {
+    if [name, when_to_use].iter().any(|text| {
+        crate::core::plan::recipe_searchable_text(text)
+            .trim()
+            .is_empty()
+    }) {
+        return Err(DomainError::Usage {
+            message: "Recipe name and applicability must retain non-empty text after redaction."
+                .to_owned(),
+            repair: Some("ee curate apply <ID> --as-recipe <NAME> --when <TEXT>".to_owned()),
+        });
+    }
+    apply_curation_candidate_with_recipe(options, Some((name, when_to_use)))
+}
+
+fn candidate_recipe_id(stored: &StoredCurationCandidate) -> String {
+    let identity = format!("{}\n{}", stored.workspace_id, stored.id);
+    format!("plrec_{}", blake3::hash(identity.as_bytes()).to_hex())
+}
+
+fn apply_curation_candidate_with_recipe(
+    options: &CurateApplyOptions<'_>,
+    recipe_output: Option<(&str, &str)>,
+) -> Result<CurateApplyReport, DomainError> {
     let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let candidate_id = validate_curate_candidate_id(options.candidate_id)?;
     let applied_by = options
@@ -5556,7 +5589,46 @@ pub fn apply_curation_candidate(
         .unwrap_or("ee")
         .to_owned();
 
-    let connection = open_bound_curate_read(&mut prepared)?;
+    let connection = if recipe_output.is_some() && options.dry_run {
+        if !prepared.database_path.exists() {
+            return Err(crate::core::storeless_workspace_error(
+                &prepared.database_path,
+            ));
+        }
+        let connection =
+            DbConnection::open_file_read_only(&prepared.database_path).map_err(|error| {
+                DomainError::Storage {
+                    message: format!("Failed to open recipe preview: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                }
+            })?;
+        connection
+            .begin_read_snapshot()
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to read recipe preview snapshot: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        if connection
+            .needs_migration()
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to inspect recipe preview schema: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?
+        {
+            return Err(DomainError::MigrationRequired {
+                message: "Migrate the database before previewing recipe promotion.".to_owned(),
+                repair: Some("ee migrate run --workspace . --json".to_owned()),
+            });
+        }
+        prepared.workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+            &connection,
+            &prepared.workspace_id,
+            &[prepared.workspace_path.as_path()],
+        )?;
+        connection
+    } else {
+        open_bound_curate_read(&mut prepared)?
+    };
     let stored = connection
         .get_curation_candidate(&prepared.workspace_id, &candidate_id)
         .map_err(|error| DomainError::Storage {
@@ -5570,11 +5642,23 @@ pub fn apply_curation_candidate(
         })?;
     let now = Utc::now().to_rfc3339();
     let parsed_candidate_type = CandidateType::from_str(&stored.candidate_type);
+    if recipe_output.is_some()
+        && !matches!(
+            parsed_candidate_type,
+            Ok(CandidateType::Rule | CandidateType::Procedure)
+        )
+    {
+        return Err(DomainError::Usage {
+            message: "Only rule and procedure candidates can be applied as plan recipes."
+                .to_owned(),
+            repair: Some("ee curate show <ID> --json".to_owned()),
+        });
+    }
     let is_create_derived = matches!(
         &parsed_candidate_type,
         Ok(CandidateType::CreateDerivedMemory)
     );
-    let decision = match parsed_candidate_type {
+    let mut decision = match parsed_candidate_type {
         Ok(CandidateType::LinkProposal | CandidateType::ContradictionReview) => {
             evaluate_link_candidate_for_apply(&connection, &stored)
         }
@@ -5647,6 +5731,136 @@ pub fn apply_curation_candidate(
             decision
         }
     };
+    let existing_recipe = if decision.application.status == "already_applied" {
+        connection
+            .list_plan_recipes(&prepared.workspace_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to inspect applied recipe: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?
+            .into_iter()
+            .find(|recipe| recipe.id == candidate_recipe_id(&stored))
+    } else {
+        None
+    };
+    let recipe = if let Some((name, when_to_use)) = recipe_output {
+        let name = crate::core::plan::recipe_text(name.trim());
+        let when_to_use = crate::core::plan::recipe_text(when_to_use.trim());
+        if decision.application.status == "already_applied" {
+            let existing = existing_recipe.as_ref().ok_or_else(|| DomainError::Usage {
+                message: "This candidate was already applied with a different output; no recipe was created.".to_owned(),
+                repair: Some("ee curate show <ID> --json".to_owned()),
+            })?;
+            if existing.name != name || existing.when_to_use != when_to_use {
+                return Err(DomainError::Usage {
+                    message: "The existing recipe has different name or applicability. Replaying apply cannot rewrite it.".to_owned(),
+                    repair: Some(format!("ee plan recipe show {} --json", existing.id)),
+                });
+            }
+            None
+        } else if decision.should_persist {
+            let content = crate::core::plan::recipe_text(
+                stored
+                    .proposed_content
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim(),
+            );
+            if crate::core::plan::recipe_searchable_text(&content)
+                .trim()
+                .is_empty()
+            {
+                return Err(DomainError::Usage {
+                    message: "Candidate content has no usable recipe instruction after redaction."
+                        .to_owned(),
+                    repair: Some("ee curate show <ID> --json".to_owned()),
+                });
+            }
+            let mut evidence = Vec::new();
+            for id in source_memory_ids_for_rule_candidate(&stored) {
+                if connection
+                    .get_memory(&id)
+                    .map_err(|error| DomainError::Storage {
+                        message: format!("Failed to inspect recipe evidence: {error}"),
+                        repair: Some("ee doctor --json".to_owned()),
+                    })?
+                    .is_some_and(|memory| memory.workspace_id == prepared.workspace_id)
+                {
+                    evidence.push(format!("ee://memory/{id}"));
+                }
+            }
+            evidence.push(format!("ee://curation-candidate/{}", stored.id));
+            evidence.sort();
+            evidence.dedup();
+            let recipe = crate::db::StoredPlanRecipe {
+                id: candidate_recipe_id(&stored),
+                workspace_id: prepared.workspace_id.clone(),
+                name,
+                when_to_use,
+                steps_json: serde_json::json!([content]).to_string(),
+                evidence_uris_json: serde_json::json!(evidence).to_string(),
+                // Applying a reviewed proposal is not evidence of successful execution.
+                maturity: "draft".to_owned(),
+                confidence: 0.0,
+                helpful_count: 0,
+                harmful_count: 0,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                last_recommended_at: None,
+            };
+            decision.rule_create = None;
+            decision.procedure_create = None;
+            decision.target_after = decision.target_before.clone();
+            decision.application.decision = "create_plan_recipe".to_owned();
+            decision.application.changes.clear();
+            push_apply_change(
+                &mut decision.application.changes,
+                "recipeId",
+                None,
+                Some(recipe.id.clone()),
+            );
+            push_apply_change(
+                &mut decision.application.changes,
+                "recipeName",
+                None,
+                Some(recipe.name.clone()),
+            );
+            push_apply_change(
+                &mut decision.application.changes,
+                "recipeWhenToUse",
+                None,
+                Some(recipe.when_to_use.clone()),
+            );
+            push_apply_change(
+                &mut decision.application.changes,
+                "recipeSteps",
+                None,
+                Some(recipe.steps_json.clone()),
+            );
+            push_apply_change(
+                &mut decision.application.changes,
+                "recipeMaturity",
+                None,
+                Some(recipe.maturity.clone()),
+            );
+            Some(recipe)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(recipe) = recipe.as_ref().or(existing_recipe.as_ref()) {
+        decision.next_action = format!("ee plan explain {} --task <TASK> --json", recipe.id);
+        if existing_recipe.is_some() {
+            push_apply_change(
+                &mut decision.application.changes,
+                "recipeId",
+                Some(recipe.id.clone()),
+                Some(recipe.id.clone()),
+            );
+        }
+    }
     let from_status = stored.status.clone();
     let mut applied_at = None;
     let mut persisted = false;
@@ -5658,6 +5872,7 @@ pub fn apply_curation_candidate(
             &prepared.workspace_id,
             &stored,
             &decision,
+            recipe.as_ref(),
             &now,
             &applied_by,
         )?;
@@ -5702,6 +5917,8 @@ pub fn apply_curation_candidate(
         .collect();
 
     if !options.dry_run
+        && recipe_output.is_none()
+        && existing_recipe.is_none()
         && decision.application.errors.is_empty()
         && (persisted || decision.application.status == "already_applied")
         && matches!(
@@ -13763,6 +13980,7 @@ fn persist_candidate_application(
     workspace_id: &str,
     stored: &StoredCurationCandidate,
     decision: &ApplyDecision,
+    recipe: Option<&crate::db::StoredPlanRecipe>,
     applied_at: &str,
     applied_by: &str,
 ) -> Result<String, DomainError> {
@@ -13773,6 +13991,7 @@ fn persist_candidate_application(
             workspace_id,
             stored,
             decision,
+            recipe,
             applied_at,
             applied_by,
         ) {
@@ -13802,6 +14021,7 @@ fn persist_candidate_application_inner(
     workspace_id: &str,
     stored: &StoredCurationCandidate,
     decision: &ApplyDecision,
+    recipe: Option<&crate::db::StoredPlanRecipe>,
     applied_at: &str,
     applied_by: &str,
 ) -> Result<String, DomainError> {
@@ -13920,6 +14140,27 @@ fn persist_candidate_application_inner(
     };
     let mut created_rule_id = None;
     let mut created_procedure_id = None;
+    if let Some(recipe) = recipe {
+        let fresh = connection
+            .get_curation_candidate(workspace_id, &stored.id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to recheck recipe candidate: {error}"),
+                repair: Some("ee curate show <ID> --json".to_owned()),
+            })?;
+        if fresh.as_ref() != Some(stored) {
+            return Err(DomainError::Usage {
+                message: "Candidate changed during recipe preparation; inspect and retry."
+                    .to_owned(),
+                repair: Some("ee curate show <ID> --json".to_owned()),
+            });
+        }
+        connection
+            .insert_plan_recipe(recipe)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to create plan recipe: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+    }
     if let Some(rule_create) = &decision.rule_create {
         connection
             .insert_procedural_rule(&rule_create.rule_id, &rule_create.rule)
@@ -13983,7 +14224,11 @@ fn persist_candidate_application_inner(
                 repair: Some("ee memory history <memory-id> --json".to_owned()),
             })?;
     }
-    if !memory_changed && created_rule_id.is_none() && created_procedure_id.is_none() {
+    if !memory_changed
+        && created_rule_id.is_none()
+        && created_procedure_id.is_none()
+        && recipe.is_none()
+    {
         return Err(DomainError::Storage {
             message: format!(
                 "Curation candidate {} did not mutate target memory {} or create a rule/procedure.",
@@ -14018,10 +14263,13 @@ fn persist_candidate_application_inner(
         "decision": decision.application.decision.as_str(),
         "createdRuleId": created_rule_id.as_deref(),
         "createdProcedureId": created_procedure_id.as_deref(),
+        "createdRecipeId": recipe.map(|recipe| recipe.id.as_str()),
         "changes": &decision.application.changes,
     })
     .to_string();
-    let target_type = if created_rule_id.is_some() {
+    let target_type = if recipe.is_some() {
+        "plan_recipe"
+    } else if created_rule_id.is_some() {
         "rule"
     } else if created_procedure_id.is_some() {
         "procedure"
@@ -14031,6 +14279,7 @@ fn persist_candidate_application_inner(
     let target_id = created_rule_id
         .as_deref()
         .or(created_procedure_id.as_deref())
+        .or(recipe.map(|recipe| recipe.id.as_str()))
         .unwrap_or(target_memory_id);
     connection
         .insert_audit(
@@ -21587,6 +21836,155 @@ mod tests {
             .ok_or_else(|| "memory missing after low-evidence validation".to_owned())?;
         assert!((memory.confidence - 0.7).abs() < 0.001);
         assert_eq!(memory.trust_class, "human_explicit");
+        Ok(())
+    }
+
+    #[test]
+    fn recipe_promotion_preserves_validation_atomicity_and_replay() -> TestResult {
+        for (status, block_audit) in [("pending", false), ("approved", false), ("approved", true)] {
+            let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+            let workspace = dir.path();
+            let database = workspace.join("ee.db");
+            let workspace_id = test_workspace_id(workspace);
+            let memory_id = MemoryId::now().to_string();
+            let candidate_id = curate_id(0x6_790);
+            let connection = seed_candidate_database(
+                &database,
+                &workspace_id,
+                &memory_id,
+                &candidate_id,
+                "rule",
+                Some(status),
+                Some("Tangerine compass release: verify the signed artifact."),
+            )?;
+            let source_before = connection
+                .get_memory(&memory_id)
+                .map_err(|e| e.to_string())?;
+            let options = super::CurateApplyOptions {
+                workspace_path: workspace,
+                database_path: Some(&database),
+                candidate_id: &candidate_id,
+                actor: Some("recipe-test"),
+                dry_run: true,
+                allow_tombstone_load_bearing: false,
+            };
+            let before = fs::read(&database).map_err(|e| e.to_string())?;
+            let preview = super::apply_curation_candidate_as_recipe(
+                &options,
+                "Tangerine release",
+                "Prepare tangerine compass",
+            )
+            .map_err(|e| e.message())?;
+            assert!(!preview.durable_mutation);
+            assert_eq!(
+                preview.application.status,
+                if status == "pending" {
+                    "blocked"
+                } else {
+                    "would_apply"
+                }
+            );
+            assert_eq!(
+                fs::read(&database).map_err(|e| e.to_string())?,
+                before,
+                "preview must not mutate the DB"
+            );
+            if block_audit {
+                connection.execute_raw("CREATE TRIGGER block_recipe_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'recipe audit failure'); END").map_err(|e| e.to_string())?;
+            }
+            let options = super::CurateApplyOptions {
+                dry_run: false,
+                ..options
+            };
+            let applied = super::apply_curation_candidate_as_recipe(
+                &options,
+                "Tangerine release",
+                "Prepare tangerine compass",
+            );
+            let recipes = connection
+                .list_plan_recipes(&workspace_id)
+                .map_err(|e| e.to_string())?;
+            if block_audit {
+                assert!(applied.is_err());
+                assert!(recipes.is_empty(), "audit failure rolls back recipe insert");
+                assert_eq!(
+                    connection
+                        .get_curation_candidate(&workspace_id, &candidate_id)
+                        .map_err(|e| e.to_string())?
+                        .ok_or("missing candidate")?
+                        .status,
+                    "approved"
+                );
+            } else if status == "pending" {
+                assert_eq!(
+                    applied.map_err(|e| e.message())?.application.status,
+                    "blocked"
+                );
+                assert!(recipes.is_empty());
+            } else {
+                let applied = applied.map_err(|e| e.message())?;
+                assert!(applied.durable_mutation);
+                assert!(applied.degraded.is_empty());
+                assert_eq!(recipes.len(), 1);
+                assert_eq!(recipes[0].maturity, "draft");
+                assert_eq!(recipes[0].confidence, 0.0);
+                assert!(recipes[0].evidence_uris_json.contains(&candidate_id));
+                let before_replay = fs::read(&database).map_err(|e| e.to_string())?;
+                let replay = super::apply_curation_candidate_as_recipe(
+                    &options,
+                    "Tangerine release",
+                    "Prepare tangerine compass",
+                )
+                .map_err(|e| e.message())?;
+                assert_eq!(replay.application.status, "already_applied");
+                assert!(!replay.durable_mutation);
+                assert!(replay.degraded.is_empty());
+                assert!(
+                    super::apply_curation_candidate_as_recipe(
+                        &options,
+                        "Changed name",
+                        "Prepare tangerine compass"
+                    )
+                    .is_err()
+                );
+                let replay = apply_curation_candidate(&options).map_err(|e| e.message())?;
+                assert!(!replay.durable_mutation);
+                assert!(
+                    replay.degraded.is_empty(),
+                    "ordinary replay must not queue a nonexistent rule index job"
+                );
+                assert_eq!(
+                    fs::read(&database).map_err(|e| e.to_string())?,
+                    before_replay
+                );
+                let explained =
+                    crate::core::plan::explain_recipe(workspace, Some(&database), &recipes[0].id)
+                        .map_err(|e| e.message())?;
+                assert!(explained.found);
+                assert_eq!(
+                    explained.steps,
+                    ["Tangerine compass release: verify the signed artifact."]
+                );
+                assert!(
+                    connection
+                        .list_search_index_jobs(&workspace_id, None)
+                        .map_err(|e| e.to_string())?
+                        .is_empty()
+                );
+                assert!(
+                    connection
+                        .list_procedural_rules(&workspace_id, None, None, true)
+                        .map_err(|e| e.to_string())?
+                        .is_empty()
+                );
+            }
+            assert_eq!(
+                connection
+                    .get_memory(&memory_id)
+                    .map_err(|e| e.to_string())?,
+                source_before
+            );
+        }
         Ok(())
     }
 
