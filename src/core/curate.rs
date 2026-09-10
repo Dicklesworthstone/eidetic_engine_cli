@@ -5731,6 +5731,21 @@ fn apply_curation_candidate_with_recipe(
             decision
         }
     };
+    let source_memory_ids =
+        if decision.should_persist && (decision.rule_create.is_some() || recipe_output.is_some()) {
+            let ids = audited_source_memory_ids_for_rule_candidate(&connection, &stored)?;
+            if let Some(rule) = decision.rule_create.as_mut() {
+                rule.rule.source_memory_ids = ids.clone();
+                for change in &mut decision.application.changes {
+                    if change.field == "sourceMemoryCount" {
+                        change.after = Some(ids.len().to_string());
+                    }
+                }
+            }
+            ids
+        } else {
+            Vec::new()
+        };
     let existing_recipe = if decision.application.status == "already_applied" {
         connection
             .list_plan_recipes(&prepared.workspace_id)
@@ -5777,7 +5792,7 @@ fn apply_curation_candidate_with_recipe(
                 });
             }
             let mut evidence = Vec::new();
-            for id in source_memory_ids_for_rule_candidate(&stored) {
+            for id in source_memory_ids {
                 if connection
                     .get_memory(&id)
                     .map_err(|error| DomainError::Storage {
@@ -13303,14 +13318,6 @@ fn canonical_apply_tags(tags: &[String]) -> Vec<String> {
 
 fn source_memory_ids_for_rule_candidate(stored: &StoredCurationCandidate) -> Vec<String> {
     let mut ids = BTreeSet::new();
-    if let Ok(refs) = parse_derivation_source_refs(stored) {
-        for source in refs {
-            if source.kind == DerivationSourceKind::Memory && MemoryId::from_str(&source.id).is_ok()
-            {
-                ids.insert(source.id);
-            }
-        }
-    }
     if let Some(source_id) = stored.source_id.as_deref() {
         for raw in source_id
             .split(',')
@@ -13328,6 +13335,90 @@ fn source_memory_ids_for_rule_candidate(stored: &StoredCurationCandidate) -> Vec
         }
     }
     ids.into_iter().collect()
+}
+
+/// Learning clusters can cite more memories than fit in the singular trust
+/// evidence ID. Recover those references from the atomic creation audit,
+/// without treating the audit as new feedback or changing candidate trust.
+fn audited_source_memory_ids_for_rule_candidate(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+) -> Result<Vec<String>, DomainError> {
+    let invalid = |reason: &str| DomainError::Storage {
+        message: format!(
+            "Learning candidate {} has invalid creation provenance: {reason}",
+            stored.id
+        ),
+        repair: Some("ee doctor --json".to_owned()),
+    };
+    let mut ids: BTreeSet<_> = source_memory_ids_for_rule_candidate(stored)
+        .into_iter()
+        .collect();
+    let audits = connection
+        .list_audit_by_target("curation_candidate", &stored.id, None)
+        .map_err(|error| invalid(&error.to_string()))?;
+    for entry in audits.into_iter().filter(|entry| {
+        entry.action == audit_actions::CURATION_CANDIDATE_CREATE
+            && entry.actor.as_deref() == Some("learn.experiment.propose")
+    }) {
+        if entry.workspace_id.as_deref() != Some(stored.workspace_id.as_str())
+            || entry.this_row_hash.as_deref()
+                != Some(crate::db::compute_audit_row_hash(&entry).as_str())
+        {
+            return Err(invalid("workspace or audit row hash mismatch"));
+        }
+        let details: serde_json::Value =
+            serde_json::from_str(entry.details.as_deref().unwrap_or_default())
+                .map_err(|_| invalid("malformed audit details"))?;
+        if details["schema"] != "ee.audit.curation_candidate_create.v1"
+            || details["proposalSource"] != "learn.experiment.propose"
+            || details["workspaceId"] != stored.workspace_id
+            || details["candidateId"] != stored.id
+            || details["candidateType"] != stored.candidate_type
+            || details["sourceType"] != stored.source_type
+            || details["sourceId"] != serde_json::json!(stored.source_id)
+            || details["targetMemoryId"] != serde_json::json!(stored.target_memory_id)
+            || details["proposedContentHash"]
+                != blake3::hash(
+                    stored
+                        .proposed_content
+                        .as_deref()
+                        .unwrap_or_default()
+                        .as_bytes(),
+                )
+                .to_hex()
+                .as_str()
+        {
+            return Err(invalid("audit does not describe this proposal"));
+        }
+        let refs = details["sourceRefs"]
+            .as_array()
+            .filter(|refs| !refs.is_empty())
+            .ok_or_else(|| invalid("missing source memories"))?;
+        let mut sources = Vec::with_capacity(refs.len());
+        for reference in refs {
+            let id = reference["id"]
+                .as_str()
+                .ok_or_else(|| invalid("missing memory ID"))?;
+            if reference["kind"] != "memory" || MemoryId::from_str(id).is_err() {
+                return Err(invalid("invalid memory reference"));
+            }
+            sources.push(DerivationSourceRef::new(
+                DerivationSourceKind::Memory,
+                id,
+                reference["contentHash"].as_str().unwrap_or_default(),
+            ));
+            let memory = connection
+                .get_memory(id)
+                .map_err(|error| invalid(&error.to_string()))?;
+            if memory.is_some_and(|memory| memory.workspace_id == stored.workspace_id) {
+                ids.insert(id.to_owned());
+            }
+        }
+        canonical_derivation_source_refs_json(&sources)
+            .map_err(|error| invalid(&error.to_string()))?;
+    }
+    Ok(ids.into_iter().collect())
 }
 
 fn generate_rule_search_index_job_id() -> String {
@@ -14033,6 +14124,30 @@ fn persist_candidate_application_inner(
     applied_at: &str,
     applied_by: &str,
 ) -> Result<String, DomainError> {
+    if decision.rule_create.is_some() || recipe.is_some() {
+        let sources = audited_source_memory_ids_for_rule_candidate(connection, stored)?;
+        let sources_changed = if let Some(rule) = &decision.rule_create {
+            sources != rule.rule.source_memory_ids
+        } else if let Some(recipe) = recipe {
+            let mut evidence: Vec<String> = sources
+                .into_iter()
+                .map(|id| format!("ee://memory/{id}"))
+                .collect();
+            evidence.push(format!("ee://curation-candidate/{}", stored.id));
+            evidence.sort();
+            evidence.dedup();
+            serde_json::json!(evidence).to_string() != recipe.evidence_uris_json
+        } else {
+            false
+        };
+        if sources_changed {
+            return Err(DomainError::Usage {
+                message: "Candidate source memories changed during preparation; inspect and retry."
+                    .to_owned(),
+                repair: Some("ee curate show <ID> --json".to_owned()),
+            });
+        }
+    }
     if let Some(derived_create) = &decision.derived_create {
         return persist_create_derived_candidate_application_inner(
             connection,
@@ -26328,6 +26443,67 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn learning_creation_audit_binds_source_memories_to_proposal() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let database = dir.path().join("ee.db");
+        let workspace_id = test_workspace_id(dir.path());
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(31)).to_string();
+        let candidate_id = curate_id(32);
+        let connection = seed_candidate_database(
+            &database,
+            &workspace_id,
+            &memory_id,
+            &candidate_id,
+            "rule",
+            Some("approved"),
+            Some("Verify artifacts before release."),
+        )?;
+        let stored = connection
+            .get_curation_candidate(&workspace_id, &candidate_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("missing candidate")?;
+        connection.insert_audit(&crate::db::generate_audit_id(), &CreateAuditInput {
+            workspace_id: Some(workspace_id.clone()),
+            actor: Some("learn.experiment.propose".to_owned()),
+            action: audit_actions::CURATION_CANDIDATE_CREATE.to_owned(),
+            target_type: Some("curation_candidate".to_owned()),
+            target_id: Some(candidate_id.clone()),
+            details: Some(serde_json::json!({
+                "schema": "ee.audit.curation_candidate_create.v1",
+                "proposalSource": "learn.experiment.propose",
+                "workspaceId": workspace_id,
+                "candidateId": candidate_id,
+                "candidateType": stored.candidate_type,
+                "sourceType": stored.source_type,
+                "sourceId": stored.source_id,
+                "targetMemoryId": stored.target_memory_id,
+                "proposedContentHash": blake3::hash(stored.proposed_content.as_deref().unwrap_or_default().as_bytes()).to_hex().to_string(),
+                "sourceRefs": [{"kind": "memory", "id": memory_id, "contentHash": format!("blake3:{}", blake3::hash(b"source memory").to_hex())}],
+            }).to_string()),
+        }).map_err(|e| e.to_string())?;
+        assert_eq!(
+            super::audited_source_memory_ids_for_rule_candidate(&connection, &stored)
+                .map_err(|e| e.message())?,
+            [memory_id]
+        );
+        let mut changed = stored.clone();
+        changed.proposed_content = Some("Different instructions.".to_owned());
+        let error = super::audited_source_memory_ids_for_rule_candidate(&connection, &changed)
+            .expect_err("an audit for different instructions cannot establish provenance");
+        assert!(
+            error
+                .message()
+                .contains("audit does not describe this proposal")
+        );
+        changed = stored;
+        changed.source_id = Some("fb_00000000000000000000000099".to_owned());
+        assert!(
+            super::audited_source_memory_ids_for_rule_candidate(&connection, &changed).is_err()
+        );
+        connection.close().map_err(|e| e.to_string())
     }
 
     fn seed_candidate_database(

@@ -16,9 +16,9 @@ use crate::core::curate::{
 use crate::core::outcome::{OutcomeRecordOptions, OutcomeRecordReport, record_outcome};
 use crate::core::query_miss_cluster::KNOWLEDGE_GAP_MIN_CLUSTER_MISSES;
 use crate::db::{
-    CreateCurationCandidateInput, CreateLearningObservationInput, DbConnection, StoredAuditEntry,
-    StoredCurationCandidate, StoredFeedbackEvent, StoredLearningObservation, StoredMemory,
-    audit_actions,
+    CreateAuditInput, CreateCurationCandidateInput, CreateLearningObservationInput, DbConnection,
+    StoredAuditEntry, StoredCurationCandidate, StoredFeedbackEvent, StoredLearningObservation,
+    StoredMemory, audit_actions,
 };
 use crate::models::{
     DomainError, ExperimentOutcome, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
@@ -3109,46 +3109,80 @@ pub fn propose_experiments(
                     " Peer-origin evidence contributed to this proposal; the candidate is capped at agent_assertion until local review or outcome feedback validates it.",
                 );
             }
+            let input = CreateCurationCandidateInput {
+                workspace_id: snapshot.workspace_id.clone(),
+                candidate_type: "rule".to_string(),
+                target_memory_id: Some(target_memory_id.clone()),
+                proposed_content: Some(proposed_content),
+                proposed_confidence: Some(cluster.proposed_confidence()),
+                proposed_trust_class: Some(
+                    if uses_peer_evidence {
+                        "agent_assertion"
+                    } else {
+                        "agent_validated"
+                    }
+                    .to_string(),
+                ),
+                source_type: if uses_peer_evidence {
+                    "agent_inference".to_string()
+                } else {
+                    "feedback_event".to_string()
+                },
+                source_id: Some(source_id),
+                reason,
+                confidence: cluster.proposed_confidence(),
+                status: Some("pending".to_string()),
+                created_at: Some(stable_learning_generated_at()),
+                ttl_expires_at: None,
+                // These columns are reserved for create_derived_memory.
+                // A rule's complete proposal evidence belongs in its creation audit.
+                derivation_source_refs_json: None,
+                derivation_metadata_json: None,
+            };
+            let source_refs: serde_json::Value =
+                serde_json::from_str(&source_refs_json).map_err(|error| DomainError::Storage {
+                    message: format!("Failed to encode learning source references: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?;
+            let details = serde_json::json!({
+                "schema": "ee.audit.curation_candidate_create.v1",
+                "proposalSource": "learn.experiment.propose",
+                "workspaceId": input.workspace_id,
+                "candidateId": candidate_id,
+                "candidateType": input.candidate_type,
+                "sourceType": input.source_type,
+                "sourceId": input.source_id,
+                "targetMemoryId": input.target_memory_id,
+                "proposedContentHash": blake3::hash(input.proposed_content.as_deref().unwrap_or_default().as_bytes()).to_hex().to_string(),
+                "sourceRefs": source_refs,
+                "learningEvidenceIds": cluster.sample_ids,
+            });
             connection
-                .insert_curation_candidate(
-                    &candidate_id,
-                    &CreateCurationCandidateInput {
-                        workspace_id: snapshot.workspace_id.clone(),
-                        candidate_type: "rule".to_string(),
-                        target_memory_id: Some(target_memory_id.clone()),
-                        proposed_content: Some(proposed_content),
-                        proposed_confidence: Some(cluster.proposed_confidence()),
-                        proposed_trust_class: Some(
-                            if uses_peer_evidence {
-                                "agent_assertion"
-                            } else {
-                                "agent_validated"
-                            }
-                            .to_string(),
-                        ),
-                        source_type: if uses_peer_evidence {
-                            "agent_inference".to_string()
-                        } else {
-                            "feedback_event".to_string()
+                .with_transaction(|| {
+                    if connection
+                        .get_curation_candidate(&snapshot.workspace_id, &candidate_id)?
+                        .is_some()
+                    {
+                        return Ok(());
+                    }
+                    connection.insert_curation_candidate(&candidate_id, &input)?;
+                    connection.insert_audit(
+                        &crate::db::generate_audit_id(),
+                        &CreateAuditInput {
+                            workspace_id: Some(snapshot.workspace_id.clone()),
+                            actor: Some("learn.experiment.propose".to_owned()),
+                            action: audit_actions::CURATION_CANDIDATE_CREATE.to_owned(),
+                            target_type: Some("curation_candidate".to_owned()),
+                            target_id: Some(candidate_id.clone()),
+                            details: Some(details.to_string()),
                         },
-                        source_id: Some(source_id),
-                        reason,
-                        confidence: cluster.proposed_confidence(),
-                        status: Some("pending".to_string()),
-                        created_at: Some(stable_learning_generated_at()),
-                        ttl_expires_at: None,
-                        derivation_source_refs_json: Some(source_refs_json),
-                        derivation_metadata_json: Some(
-                            serde_json::json!({
-                                "learningEvidenceIds": cluster.sample_ids,
-                                "producer": "learn.experiment.propose",
-                            })
-                            .to_string(),
-                        ),
-                    },
-                )
+                    )?;
+                    Ok(())
+                })
                 .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to insert learning curation candidate: {error}"),
+                    message: format!(
+                        "Failed to persist learning candidate and evidence audit: {error}"
+                    ),
                     repair: Some("ee curate candidates --json".to_string()),
                 })?;
         }
@@ -5844,21 +5878,26 @@ mod tests {
             )
             .is_ok()
         );
-        let source_refs: serde_json::Value = serde_json::from_str(
-            candidates[0]
-                .derivation_source_refs_json
-                .as_deref()
-                .unwrap_or_default(),
-        )
-        .map_err(|e| e.to_string())?;
+        assert!(candidates[0].derivation_source_refs_json.is_none());
+        assert!(candidates[0].derivation_metadata_json.is_none());
+        let audits = connection
+            .list_audit_by_target("curation_candidate", &candidates[0].id, None)
+            .map_err(|e| e.to_string())?;
+        assert_eq!(
+            audits.len(),
+            1,
+            "repeated proposal must not duplicate its creation audit"
+        );
+        assert_eq!(audits[0].action, audit_actions::CURATION_CANDIDATE_CREATE);
+        assert_eq!(
+            audits[0].this_row_hash.as_deref(),
+            Some(crate::db::compute_audit_row_hash(&audits[0]).as_str())
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_str(audits[0].details.as_deref().unwrap_or_default())
+                .map_err(|e| e.to_string())?;
+        let source_refs = &metadata["sourceRefs"];
         assert_eq!(source_refs.as_array().map(Vec::len), Some(50));
-        let metadata: serde_json::Value = serde_json::from_str(
-            candidates[0]
-                .derivation_metadata_json
-                .as_deref()
-                .unwrap_or_default(),
-        )
-        .map_err(|e| e.to_string())?;
         let evidence = metadata["learningEvidenceIds"]
             .as_array()
             .ok_or("learning evidence must be an array")?;
@@ -5916,6 +5955,53 @@ mod tests {
         assert!(explained.steps[0].contains("Cargo target directory"));
         assert_eq!(explained.maturity.as_deref(), Some("draft"));
         assert_eq!(explained.evidence_uris, recipe_evidence);
+        connection.close().map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn learn_proposal_rolls_back_candidate_when_creation_audit_fails() -> TestResult {
+        let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-audit-rollback")?;
+        let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let memory_id = "mem_00000000000000000000000001";
+        seed_memory(
+            &connection,
+            &workspace_id,
+            memory_id,
+            "rollback_cluster",
+            "Review evidence before promoting a procedural rule.",
+        )?;
+        for index in 0..2 {
+            seed_feedback(
+                &connection,
+                &workspace_id,
+                &format!("fb_{index:026}"),
+                memory_id,
+                "confirmation",
+            )?;
+        }
+        connection.execute_raw("CREATE TRIGGER block_learning_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'learning audit failure'); END")
+            .map_err(|e| e.to_string())?;
+        let result = propose_experiments(&LearnExperimentProposeOptions {
+            workspace: dir.path().to_path_buf(),
+            limit: 5,
+            topic: Some("rollback_cluster".to_owned()),
+            min_expected_value: 0.0,
+            max_attention_tokens: 900,
+            max_runtime_seconds: 180,
+            safety_boundary: ExperimentSafetyBoundary::DryRunOnly,
+        });
+        let error = result.expect_err("audit failure must roll back the proposal");
+        assert!(
+            error.message().contains("learning audit failure"),
+            "{}",
+            error.message()
+        );
+        assert!(
+            connection
+                .list_curation_candidates(&workspace_id, Some("rule"), None, None)
+                .map_err(|e| e.to_string())?
+                .is_empty()
+        );
         connection.close().map_err(|e| e.to_string())
     }
 

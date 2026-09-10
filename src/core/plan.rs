@@ -1809,7 +1809,12 @@ fn recommend_with_prepared_embedder(
     options: &PlanRecommendOptions,
     catalog: Vec<RecipeCatalogEntry>,
 ) -> Result<PlanRecommendReport, DomainError> {
-    crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+    // Model preparation can load a large verified local artifact or perform
+    // the existing bounded first-use download. Start the retrieval deadline
+    // after that cold start, while keeping both phases under one parent Cx.
+    let query_timeout = Duration::from_secs(30);
+    let timeout = crate::core::index::EMBEDDING_DOWNLOAD_TIMEOUT + query_timeout;
+    crate::core::run_cli_with_cx(timeout, |cx| async move {
         let database = options
             .database_path
             .clone()
@@ -1821,15 +1826,33 @@ fn recommend_with_prepared_embedder(
         )
         .await;
         cx.checkpoint().map_err(recipe_search_error)?;
-        recommend_from_catalog(
+        recommend_with_query_budget(
             &cx,
-            options,
+            options.clone(),
             catalog,
-            preparation.as_ref().ok().map(|p| p.fast_embedder.as_ref()),
+            preparation.ok().map(|p| p.fast_embedder),
+            query_timeout,
         )
         .await
     })
     .map_err(recipe_search_error)?
+}
+
+async fn recommend_with_query_budget(
+    cx: &asupersync::Cx,
+    options: PlanRecommendOptions,
+    catalog: Vec<RecipeCatalogEntry>,
+    embedder: Option<std::sync::Arc<dyn crate::search::Embedder>>,
+    timeout: Duration,
+) -> Result<PlanRecommendReport, DomainError> {
+    cx.checkpoint().map_err(recipe_search_error)?;
+    let scope = cx.scope_with_budget(cx.budget_for_timeout(timeout));
+    let mut task = cx
+        .spawn_in(&scope, move |query_cx| async move {
+            recommend_from_catalog(&query_cx, &options, catalog, embedder.as_deref()).await
+        })
+        .map_err(recipe_search_error)?;
+    task.join(cx).await.map_err(recipe_search_error)?
 }
 
 pub(crate) async fn recommend_from_catalog(
@@ -2443,6 +2466,30 @@ mod tests {
         })
         .map_err(|e| e.to_string())?
         .map_err(|e| e.message())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn recipe_query_deadline_remains_bounded_after_model_preparation() -> TestResult {
+        let (workspace, database, _) = recipe_workspace()?;
+        let options = PlanRecommendOptions {
+            task: "initialize workspace".to_owned(),
+            limit: 5,
+            min_score: 0.0,
+            workspace_path: workspace.path().to_path_buf(),
+            database_path: Some(database),
+        };
+        let catalog = recipe_catalog(workspace.path(), options.database_path.as_deref())
+            .map_err(|e| e.message())?;
+        let result = crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            recommend_with_query_budget(&cx, options, catalog, None, Duration::ZERO).await
+        })
+        .map_err(|e| e.to_string())?;
+        assert!(
+            result.is_err(),
+            "an expired retrieval budget must not return recommendations"
+        );
+        Ok(())
     }
 
     #[cfg(feature = "lexical-bm25")]
