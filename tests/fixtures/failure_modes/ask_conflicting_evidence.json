@@ -9,10 +9,10 @@
     "description": "ee ask finds opposing top evidence clusters for a question and emits sides[] instead of flattening the conflict into one answer.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee remember 'Remote cache delta enabled Project Zephyr hz2 worker pool.' --workspace . --level episodic --kind observation --confidence 0.99",
-      "ee remember 'Zephyr hz2 workers cannot use cache delta.' --workspace . --level episodic --kind observation --confidence 0.99"
+      "ee remember 'Remote cache delta enabled Project Zephyr worker-g worker pool.' --workspace . --level episodic --kind observation --confidence 0.99",
+      "ee remember 'Zephyr worker-g workers cannot use cache delta.' --workspace . --level episodic --kind observation --confidence 0.99"
     ],
-    "invocation": "ee ask 'Remote cache delta enabled Project Zephyr hz2 worker pool' --workspace . --json"
+    "invocation": "ee ask 'Remote cache delta enabled Project Zephyr worker-g worker pool' --workspace . --json"
   },
   "expected_emission": {
     "code": "ask_conflicting_evidence",

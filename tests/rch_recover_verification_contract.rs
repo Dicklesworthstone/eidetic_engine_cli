@@ -101,7 +101,7 @@ fn stranded_active_job_with_artifact_is_not_pass_evidence() -> TestResult {
             r#"{
         "id": 123,
         "project_id": "eidetic_engine_cli-aaced065",
-        "worker_id": "csd",
+        "worker_id": "worker-b",
         "command": "cargo test --test e2e_retention_contract -- --nocapture",
         "started_at": "2026-05-13T20:04:38.322886+00:00",
         "last_heartbeat_at": null,
@@ -115,12 +115,12 @@ fn stranded_active_job_with_artifact_is_not_pass_evidence() -> TestResult {
     let artifacts = write_fixture(
         &dir,
         "artifacts.txt",
-        "/data/projects/eidetic_engine_cli/.rch-target-csd-job-123-abc/debug/deps/e2e_retention_contract-abc123\n",
+        "/data/projects/eidetic_engine_cli/.rch-target-worker-b-job-123-abc/debug/deps/e2e_retention_contract-abc123\n",
     )?;
     let log = write_fixture(
         &dir,
         "rch.log",
-        "CARGO_TARGET_DIR=/data/projects/eidetic_engine_cli/.rch-target-csd-job-123-abc cargo test\n",
+        "CARGO_TARGET_DIR=/data/projects/eidetic_engine_cli/.rch-target-worker-b-job-123-abc cargo test\n",
     )?;
 
     let report = run_report(&[
@@ -178,7 +178,7 @@ fn recent_zero_exit_job_is_explicit_pass_evidence() -> TestResult {
                 r#"{{
         "id": 130,
         "project_id": "eidetic_engine_cli-aaced065",
-        "worker_id": "css",
+        "worker_id": "worker-c",
         "command": "{command}",
         "started_at": "2026-05-13T20:00:00+00:00",
         "completed_at": "2026-05-13T20:01:00+00:00",
@@ -218,7 +218,7 @@ fn command_mismatch_blocks_recovery_confidence() -> TestResult {
             r#"{
         "id": 131,
         "project_id": "eidetic_engine_cli-aaced065",
-        "worker_id": "trj",
+        "worker_id": "worker-a",
         "command": "cargo test --lib recall --quiet",
         "started_at": "2026-05-13T20:00:00+00:00",
         "completed_at": "2026-05-13T20:02:00+00:00",

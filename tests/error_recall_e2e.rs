@@ -538,7 +538,7 @@ fn diagnose_error_records_and_recalls_through_the_real_binary() -> TestResult {
         "rch",
         None,
         None,
-        "remote hz1 failed to read /tmp/rch-sync/a/projects/frankensearch/Cargo.toml",
+        "remote worker-f failed to read /tmp/rch-sync/a/projects/frankensearch/Cargo.toml",
         true,
     )?;
     if rch_recorded.get("layer").and_then(Value::as_str) != Some("message_template") {

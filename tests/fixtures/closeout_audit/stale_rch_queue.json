@@ -8,7 +8,7 @@
       {
         "id": 52,
         "command": "env cargo test --quiet --test adr_0029_docs",
-        "worker_id": "css",
+        "worker_id": "worker-c",
         "project_id": "eidetic_engine_cli-aaced065",
         "started_at": "2026-05-14T04:58:00.532233+00:00",
         "last_heartbeat_at": null,
@@ -17,7 +17,7 @@
       {
         "id": 53,
         "command": "cargo test --test closeout_audit_runner_unit",
-        "worker_id": "csd",
+        "worker_id": "worker-b",
         "project_id": "eidetic_engine_cli-aaced065",
         "started_at": "2026-05-14T04:59:00.532233+00:00",
         "last_heartbeat_at": "2026-05-14T04:59:30.000000+00:00",

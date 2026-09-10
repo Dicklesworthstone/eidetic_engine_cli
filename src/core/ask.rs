@@ -1624,7 +1624,11 @@ mod tests {
                 "Project Zephyr release readiness gate is smoke gate alpha before deploy.",
                 0.99,
             ),
-            ("cache", "Zephyr hz2 workers cannot use cache delta.", 0.99),
+            (
+                "cache",
+                "Zephyr worker-g workers cannot use cache delta.",
+                0.99,
+            ),
         ]
         .into_iter()
         .map(|(id, content, confidence)| AskCandidate {
@@ -1670,12 +1674,12 @@ mod tests {
         let candidates = [
             (
                 "affirm",
-                "Remote cache delta is enabled for Project Zephyr on the hz2 worker pool.",
+                "Remote cache delta is enabled for Project Zephyr on the worker-g worker pool.",
                 0.89,
             ),
             (
                 "negate",
-                "Remote cache delta is not enabled for Project Zephyr on the hz2 worker pool.",
+                "Remote cache delta is not enabled for Project Zephyr on the worker-g worker pool.",
                 0.88,
             ),
         ]
@@ -1729,9 +1733,9 @@ mod tests {
     fn explicit_links_surface_paraphrased_and_same_polarity_conflicts() {
         for (question, first, second) in [
             (
-                "Remote cache delta enabled Project Zephyr hz2 worker pool",
-                "Remote cache delta enabled Project Zephyr hz2 worker pool.",
-                "Zephyr hz2 workers cannot use cache delta.",
+                "Remote cache delta enabled Project Zephyr worker-g worker pool",
+                "Remote cache delta enabled Project Zephyr worker-g worker pool.",
+                "Zephyr worker-g workers cannot use cache delta.",
             ),
             (
                 "What port does the database use?",

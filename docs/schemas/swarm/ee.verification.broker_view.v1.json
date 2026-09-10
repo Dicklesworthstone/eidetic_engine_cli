@@ -116,7 +116,7 @@
       "effectiveInputHash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
       "provenanceHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
       "executionSubstrate": "remote_artifact",
-      "rch": {"requiredRemote": true, "workerHost": "css", "jobId": null},
+      "rch": {"requiredRemote": true, "workerHost": "worker-c", "jobId": null},
       "exitCode": 0,
       "finishedAt": "2026-05-15T05:00:42Z",
       "compatibilityReasonCodes": [

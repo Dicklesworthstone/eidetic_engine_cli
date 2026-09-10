@@ -2325,7 +2325,7 @@ pub fn sample_verification_evidence_records() -> Vec<VerificationEvidenceRecord>
             finished_at: Some("2026-05-13T00:01:20Z"),
             duration_ms: Some(20000),
             environment: env.clone(),
-            offload: VerificationOffload::rch_required(Some("css")),
+            offload: VerificationOffload::rch_required(Some("worker-c")),
             output_summary: VerificationOutputSummary::redacted(Some(
                 "error: could not compile `ee` due to warnings",
             )),
@@ -2384,7 +2384,7 @@ pub fn sample_verification_evidence_records() -> Vec<VerificationEvidenceRecord>
             duration_ms: Some(45000),
             environment: env,
             offload: VerificationOffload::rch_fallback(
-                Some("css"),
+                Some("worker-c"),
                 Some("project path normalized outside canonical remote root"),
             ),
             output_summary: VerificationOutputSummary::redacted(Some(
@@ -2530,7 +2530,7 @@ pub fn sample_verification_run_records() -> Vec<VerificationRunRecord> {
         command_argv_hash: "blake3:rch-command-argv".to_owned(),
         cargo_target_dir_hash_or_class: Some("class:external_cargo_target".to_owned()),
         execution_substrate: "remote_artifact".to_owned(),
-        worker_host: Some("css".to_owned()),
+        worker_host: Some("worker-c".to_owned()),
         started_at: Some("2026-05-15T05:00:00Z".to_owned()),
         finished_at: Some("2026-05-15T05:00:42Z".to_owned()),
         exit_code: Some(0),
@@ -3814,7 +3814,7 @@ fn sample_verification_broker_records() -> Vec<VerificationRunRecord> {
         command_argv: &["cargo", "test", "failed"],
         cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/rch-target-failed"),
         execution_substrate: "rch",
-        worker_host: Some("css"),
+        worker_host: Some("worker-c"),
         started_at: Some("2026-05-15T05:02:00Z"),
         finished_at: Some("2026-05-15T05:02:42Z"),
         exit_code: Some(101),
@@ -3839,7 +3839,7 @@ fn sample_verification_broker_records() -> Vec<VerificationRunRecord> {
         command_argv: &["cargo", "test", "in-flight"],
         cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/rch-target-in-flight"),
         execution_substrate: "rch",
-        worker_host: Some("csd"),
+        worker_host: Some("worker-b"),
         started_at: Some("2026-05-15T05:03:00Z"),
         finished_at: None,
         exit_code: None,
@@ -4888,7 +4888,7 @@ mod tests {
             finished_at: Some("2026-05-13T01:01:00Z"),
             duration_ms: Some(60_000),
             environment: VerificationEnvironment::new(Some("repo:abc"), Some("/repo"), None),
-            offload: VerificationOffload::rch_required(Some("css")),
+            offload: VerificationOffload::rch_required(Some("worker-c")),
             output_summary: VerificationOutputSummary::empty(),
             artifacts: Vec::new(),
             producer,
@@ -5554,8 +5554,8 @@ mod tests {
                 "schema": "ee.rch.selector_admission_probe.v1",
                 "status": "selection_failed",
                 "required_runtime": "Rust",
-                "workers_reported": ["vmi1227854", "vmi1264463"],
-                "daemon_workers_reported": ["vmi1227854"],
+                "workers_reported": ["worker-06", "worker-07"],
+                "daemon_workers_reported": ["worker-06"],
                 "selected_worker": null,
                 "selection_failure_reason": "active_project_exclusion",
                 "workers_vs_selection_contradiction": false,
@@ -5569,7 +5569,7 @@ mod tests {
                     "active_build_id": 29879340221071365_u64,
                     "active_command_preview": "cargo test --test error_recall_e2e -- --nocapture",
                     "active_command_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-                    "worker_id": "trj",
+                    "worker_id": "worker-a",
                     "worker_posture": "progress_stale",
                     "heartbeat_age_secs": 4,
                     "progress_age_secs": 93,
@@ -5601,8 +5601,8 @@ mod tests {
             selector.selection_failure_reason.as_deref(),
             Some("active_project_exclusion")
         );
-        assert_eq!(selector.workers_reported, ["vmi1227854", "vmi1264463"]);
-        assert_eq!(selector.daemon_workers_reported, ["vmi1227854"]);
+        assert_eq!(selector.workers_reported, ["worker-06", "worker-07"]);
+        assert_eq!(selector.daemon_workers_reported, ["worker-06"]);
         assert!(!selector.workers_vs_selection_contradiction);
         assert!(selector.remote_required);
         assert!(selector.local_fallback_refused);
@@ -5617,7 +5617,7 @@ mod tests {
         );
         assert!(blocker.evidence.contains("progress=stale"));
         assert_eq!(blocker.active_build_id, Some(29879340221071365));
-        assert_eq!(blocker.worker_id.as_deref(), Some("trj"));
+        assert_eq!(blocker.worker_id.as_deref(), Some("worker-a"));
         assert_eq!(blocker.worker_posture.as_deref(), Some("progress_stale"));
         assert_eq!(blocker.heartbeat_age_secs, Some(4));
         assert_eq!(blocker.progress_age_secs, Some(93));
@@ -5642,7 +5642,7 @@ mod tests {
         assert!(summary.contains("selector_local_fallback_refused=true"));
         assert!(summary.contains("selector_blocker=active_project_exclusion"));
         assert!(summary.contains("selector_active_build_id=29879340221071365"));
-        assert!(summary.contains("selector_worker_id=trj"));
+        assert!(summary.contains("selector_worker_id=worker-a"));
         assert!(summary.contains("selector_worker_posture=progress_stale"));
         assert!(summary.contains("selector_progress_age_secs=93"));
         assert!(
@@ -5738,8 +5738,8 @@ mod tests {
                 "schema": "ee.rch.selector_admission_probe.v0",
                 "status": "selection_failed",
                 "required_runtime": "Rust",
-                "workers_reported": ["vmi1227854"],
-                "daemon_workers_reported": ["vmi1227854"],
+                "workers_reported": ["worker-06"],
+                "daemon_workers_reported": ["worker-06"],
                 "selected_worker": null,
                 "selection_failure_reason": "no_workers_with_rust_installed",
                 "workers_vs_selection_contradiction": true,

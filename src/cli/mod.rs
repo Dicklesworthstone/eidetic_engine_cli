@@ -76197,7 +76197,7 @@ mod tests {
             "success": false,
             "exit_code": 1,
             "remote_required": true,
-            "worker_id": "vmi1227854",
+            "worker_id": "worker-06",
             "degraded_codes": [
                 "rch_verify_topology_blocked",
                 "rch_verify_local_fallback_refused"
@@ -79477,7 +79477,7 @@ mod tests {
             command_argv_hash: "blake3:failed-command-argv".to_owned(),
             cargo_target_dir_hash_or_class: Some("class:external_cargo_target".to_owned()),
             execution_substrate: "rch".to_owned(),
-            worker_host: Some("css".to_owned()),
+            worker_host: Some("worker-c".to_owned()),
             started_at: Some("2026-05-15T05:02:00Z".to_owned()),
             finished_at: Some("2026-05-15T05:02:42Z".to_owned()),
             exit_code: Some(101),
@@ -79668,7 +79668,7 @@ mod tests {
         )?;
         ensure_equal(
             &value["data"]["closeoutCapsule"]["workerHost"],
-            &serde_json::json!("css"),
+            &serde_json::json!("worker-c"),
             "verify closeout capsule worker",
         )?;
         ensure_equal(

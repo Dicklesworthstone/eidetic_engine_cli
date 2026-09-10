@@ -15,7 +15,7 @@
     "effectiveInputHash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
     "provenanceHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
     "executionSubstrate": "remote_artifact",
-    "rch": {"requiredRemote": true, "workerHost": "css", "jobId": null},
+    "rch": {"requiredRemote": true, "workerHost": "worker-c", "jobId": null},
     "exitCode": 0,
     "finishedAt": "2026-05-15T05:00:42Z",
     "compatibilityReasonCodes": [
@@ -44,7 +44,7 @@
     "effectiveInputHash": null,
     "provenanceHash": null,
     "executionSubstrate": "rch",
-    "rch": {"requiredRemote": true, "workerHost": "css", "jobId": null},
+    "rch": {"requiredRemote": true, "workerHost": "worker-c", "jobId": null},
     "exitCode": 101,
     "finishedAt": "2026-05-15T05:02:42Z",
     "compatibilityReasonCodes": [
@@ -78,7 +78,7 @@
     "effectiveInputHash": null,
     "provenanceHash": null,
     "executionSubstrate": "rch",
-    "rch": {"requiredRemote": true, "workerHost": "csd", "jobId": null},
+    "rch": {"requiredRemote": true, "workerHost": "worker-b", "jobId": null},
     "exitCode": null,
     "finishedAt": null,
     "compatibilityReasonCodes": [
@@ -107,7 +107,7 @@
     "effectiveInputHash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
     "provenanceHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
     "executionSubstrate": "remote_artifact",
-    "rch": {"requiredRemote": true, "workerHost": "css", "jobId": null},
+    "rch": {"requiredRemote": true, "workerHost": "worker-c", "jobId": null},
     "exitCode": 0,
     "finishedAt": "2026-05-15T05:00:42Z",
     "compatibilityReasonCodes": ["command_match", "substrate_match"],

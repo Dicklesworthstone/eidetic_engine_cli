@@ -767,7 +767,7 @@ Frankensearch `0.4.0`, FrankenNetworkX `0.2.0`, Tru `0.2.4`, and agent detection
 remaining identity row stays open because historical command-output goldens,
 the current proof capsule, and release artifacts have not yet been regenerated
 and attested together. The exact focused RCH Frankensearch contract attempt did
-not execute: source sync to worker `hz3` timed out after 30 seconds and the
+not execute: source sync to worker `worker-h` timed out after 30 seconds and the
 required remote lane correctly refused local fallback. A concurrent exact-HEAD
 all-target check reached `eidetic-engine` compilation but the remote SSH command
 timed out at 900 seconds; neither infrastructure result is claimed as a green

@@ -14110,7 +14110,7 @@ mod tests {
                 r#"{
                     "status":"ready",
                     "workersHealthy":3,
-                    "selectedWorker":"css",
+                    "selectedWorker":"worker-c",
                     "canonicalProjectRoot":"/Users/jemanuel/projects",
                     "aliasProjectRoot":"/data/projects",
                     "queueDepth":0,
@@ -14126,7 +14126,7 @@ mod tests {
             .join("\n");
 
         assert!(messages.contains("rch remote posture: remote_ready"));
-        assert!(messages.contains("rch selected worker: css"));
+        assert!(messages.contains("rch selected worker: worker-c"));
         assert!(
             messages
                 .contains("rch topology roots: canonical=<path:projects>, alias=<path:projects>")
@@ -14146,7 +14146,7 @@ mod tests {
         }));
 
         let ready = require_ok(
-            parse_rch_status_json(r#"{"workers":[{"id":"css","status":" OK "}]}"#),
+            parse_rch_status_json(r#"{"workers":[{"id":"worker-c","status":" OK "}]}"#),
             "ready workers rch JSON",
         );
         assert!(ready.iter().any(|hint| {
@@ -14155,7 +14155,7 @@ mod tests {
 
         let unreachable = require_ok(
             parse_rch_status_json(
-                r#"{"workers":[{"id":"css","status":"unreachable"},{"id":"gpu","status":"offline"}]}"#,
+                r#"{"workers":[{"id":"worker-c","status":"unreachable"},{"id":"gpu","status":"offline"}]}"#,
             ),
             "unreachable workers rch JSON",
         );
@@ -14208,7 +14208,7 @@ mod tests {
                         "workerProbe":{
                             "data":{
                                 "summary":{"healthy":3,"failed":0},
-                                "results":[{"id":"css","status":"ok"}]
+                                "results":[{"id":"worker-c","status":"ok"}]
                             }
                         },
                         "diagnose":{
@@ -14663,7 +14663,7 @@ mod tests {
             .with_output(
                 "rch",
                 &["workers", "probe", "--all", "--json"],
-                r#"{"data":{"summary":{"healthy":2,"failed":0},"results":[{"id":"csd","status":"ok"}]}}"#,
+                r#"{"data":{"summary":{"healthy":2,"failed":0},"results":[{"id":"worker-b","status":"ok"}]}}"#,
             )
             .with_output(
                 "rch",
@@ -14752,7 +14752,7 @@ mod tests {
             status: Some(1),
             stdout: String::new(),
             stderr:
-                "RCH-E327: worker=css path topology could not map /Users/project to /data/project"
+                "RCH-E327: worker=worker-c path topology could not map /Users/project to /data/project"
                     .to_string(),
         };
         let degradation = rch_command_error_to_degradation(&error);
@@ -14760,7 +14760,7 @@ mod tests {
         assert_eq!(degradation.code, RCH_WORKER_TOPOLOGY_BLOCKED_CODE);
         assert_eq!(degradation.source, SwarmBriefSourceKind::Rch);
         assert!(degradation.message.contains("RCH-E327"));
-        assert!(degradation.message.contains("selected worker: css"));
+        assert!(degradation.message.contains("selected worker: worker-c"));
         assert!(degradation.message.contains("root metadata redacted"));
         assert!(!degradation.message.contains("/Users/project"));
         assert!(!degradation.message.contains("/data/project"));

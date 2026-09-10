@@ -115,11 +115,11 @@ Proof:
 
 ```text
 cargo test -p rch manifest_rewrite_rules --quiet -- --nocapture
-[RCH] remote vmi1264463 (513.9s)
+[RCH] remote worker-07 (513.9s)
 
 RCH_BUILD_TIMEOUT_SEC=1200 ... rch-manifestfix-20260605-5 exec -- \
   cargo check --lib --quiet
-[RCH] remote vmi1264463 (839.6s)
+[RCH] remote worker-07 (839.6s)
 ```
 
 The 1200s build timeout is intentional for large `cargo check` proofs. The
@@ -539,7 +539,7 @@ Concrete examples:
 RCH proof stored for bd-123:
 - command_hash: sha256:<hash>
 - status: passed
-- worker_id: trj
+- worker_id: worker-a
 - git_head: <commit>
 - git_tree: <tree>
 - source_state_hash: sha256:<hash>
@@ -743,7 +743,7 @@ the worker carries `pressure_state=telemetry_gap`,
 `pressure_reason_code=telemetry_unavailable`, `pressure_telemetry_fresh=false`,
 and recent stuck-detector cancellations. A capabilities refresh can also hang
 long enough to require bounded operator termination. Two recorded instances:
-the 2026-06-09 trj capabilities-refresh hang (~2 minutes) and the 2026-06-10
+the 2026-06-09 worker-a capabilities-refresh hang (~2 minutes) and the 2026-06-10
 daemon slot-accounting leak (`slots_available=0` with an empty queue;
 selector `queue_timeout` after 300s; cleared by an owner daemon restart).
 

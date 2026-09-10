@@ -914,7 +914,7 @@ mod tests {
             "command_text": "cargo check --lib",
             "command_kind": "cargo_check",
             "command_hash": "abc123",
-            "worker_id": "vmi1149989",
+            "worker_id": "worker-01",
             "exit_code": 0,
             "elapsed_ms": 11000,
             "status": "remote_pass",
@@ -932,7 +932,7 @@ mod tests {
         assert_eq!(evidence.command.as_deref(), Some("cargo check --lib"));
         assert_eq!(evidence.command_kind.as_deref(), Some("cargo_check"));
         assert_eq!(evidence.command_hash.as_deref(), Some("abc123"));
-        assert_eq!(evidence.worker_id.as_deref(), Some("vmi1149989"));
+        assert_eq!(evidence.worker_id.as_deref(), Some("worker-01"));
         assert_eq!(evidence.exit_code, Some(0));
         assert_eq!(evidence.elapsed_ms, Some(11000));
         assert!(evidence.degraded_codes.is_empty());
@@ -942,7 +942,7 @@ mod tests {
 
     #[test]
     fn parse_rch_verify_classifies_path_dep_version_skew_as_environment_blocked() {
-        // Real-world shape from worker vmi1149989 on bd-2mey5 RCH probe at
+        // Real-world shape from worker worker-01 on bd-2mey5 RCH probe at
         // 2026-05-19T03:03Z.
         let evidence = parse_rch_verify(&json!({
             "schema": "ee.rch.verify.v1",
@@ -950,7 +950,7 @@ mod tests {
             "command_text": "cargo check --lib",
             "command_kind": "cargo_check",
             "command_hash": "eae0cb5e0af81aca",
-            "worker_id": "vmi1149989",
+            "worker_id": "worker-01",
             "exit_code": 101,
             "elapsed_ms": 8229,
             "status": "rch_environment_failure",
@@ -1026,7 +1026,7 @@ mod tests {
             "command_text": "cargo test --lib ppr_proof -- --nocapture",
             "command_kind": "cargo_test",
             "command_hash": "abc123",
-            "worker_id": "trj",
+            "worker_id": "worker-a",
             "exit_code": 101,
             "elapsed_ms": 5000,
             "status": "remote_failure",
@@ -1093,7 +1093,7 @@ mod tests {
             "command_text": "cargo check --lib",
             "command_kind": "cargo_check",
             "command_hash": "deadbeef",
-            "worker_id": "css",
+            "worker_id": "worker-c",
             "exit_code": 101,
             "elapsed_ms": 8229,
             "status": "rch_environment_failure",

@@ -4,7 +4,7 @@
   "command_text": "cargo test --lib ppr_proof -- --nocapture",
   "command_kind": "cargo_test",
   "command_hash": "abc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd",
-  "worker_id": "trj",
+  "worker_id": "worker-a",
   "exit_code": 101,
   "elapsed_ms": 5000,
   "status": "remote_failure",

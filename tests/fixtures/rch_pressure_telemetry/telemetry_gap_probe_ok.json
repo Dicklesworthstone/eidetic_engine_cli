@@ -13,7 +13,7 @@
     },
     "workers": [
       {
-        "worker_id": "trj",
+        "worker_id": "worker-a",
         "status": "healthy",
         "circuit_state": "closed",
         "used_slots": 0,
@@ -29,7 +29,7 @@
     "queued_builds": [],
     "recent_cancellations": [],
     "worker_probe": {
-      "worker_id": "trj",
+      "worker_id": "worker-a",
       "result": "ok",
       "elapsed_ms": 1420
     }
@@ -39,7 +39,7 @@
     "detail_reason": null,
     "known_blocker_kind": "pressure_telemetry_gap",
     "posture": "remote_ready",
-    "worker_id": "trj",
+    "worker_id": "worker-a",
     "active_build_count": 0,
     "queued_build_count": 0,
     "worker_probe_status": "ok",

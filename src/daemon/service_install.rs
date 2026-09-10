@@ -661,8 +661,8 @@ mod tests {
         let plan = plan_daemon_service(
             "daemon install",
             DaemonServiceKind::WindowsUserTask,
-            Path::new(r"C:\Users\jeffr"),
-            Path::new(r"C:\Users\jeffr\ee.exe"),
+            Path::new(r"C:\Users\dev"),
+            Path::new(r"C:\Users\dev\ee.exe"),
             false,
         );
         let path = PathBuf::from(plan.unit_path.expect("path"));

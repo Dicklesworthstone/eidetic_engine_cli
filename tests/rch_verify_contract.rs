@@ -148,7 +148,7 @@ Caused by:
 
 Caused by:
   `workspace.package.license-file` was not defined
-[RCH] remote vmi1227854 failed (exit 101)
+[RCH] remote worker-06 failed (exit 101)
 "#
 }
 
@@ -890,8 +890,8 @@ fn dry_run_reports_worker_inventory_without_selector_failure() -> TestResult {
             "--lib",
         ],
         &[
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1149989"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "vmi1149989"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-01"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-01"),
         ],
     )?;
     if !status.success() {
@@ -902,8 +902,8 @@ fn dry_run_reports_worker_inventory_without_selector_failure() -> TestResult {
     }
     let report: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse dry-run inventory report: {error}"))?;
-    if report["configured_workers"] != serde_json::json!(["vmi1149989"])
-        || report["daemon_workers"] != serde_json::json!(["vmi1149989"])
+    if report["configured_workers"] != serde_json::json!(["worker-01"])
+        || report["daemon_workers"] != serde_json::json!(["worker-01"])
     {
         return Err(format!("dry-run proof lost worker inventory: {report}"));
     }
@@ -918,8 +918,8 @@ fn dry_run_reports_worker_inventory_without_selector_failure() -> TestResult {
             "dry-run selector probe should not report a real selection failure: {probe}"
         ));
     }
-    if !stdout.contains("configured_workers: `vmi1149989`")
-        || !stdout.contains("daemon_workers: `vmi1149989`")
+    if !stdout.contains("configured_workers: `worker-01`")
+        || !stdout.contains("daemon_workers: `worker-01`")
     {
         return Err(format!(
             "summary omitted dry-run worker inventory:\n{stdout}"
@@ -1001,7 +1001,7 @@ fn strict_clean_tree_refuses_tracked_dirty_source_before_rch() -> TestResult {
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
 printf 'REMOTE SHOULD NOT RUN\n'
-printf '[RCH] remote css (0.1s)\n'
+printf '[RCH] remote worker-c (0.1s)\n'
 "#,
     )?;
     let fake_rch_arg = fake_rch
@@ -1024,8 +1024,8 @@ printf '[RCH] remote css (0.1s)\n'
         ],
         &[
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
             (
                 "RCH_VERIFY_STATUS_JSON",
                 r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
@@ -1112,7 +1112,7 @@ fn dirty_checkout_remote_run_reports_unmaterialized_source() -> TestResult {
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
 printf 'remote command passed from configured checkout\n'
-printf '[RCH] remote trj (0.1s)\n'
+printf '[RCH] remote worker-a (0.1s)\n'
 "#,
     )?;
     let fake_rch_arg = fake_rch
@@ -1134,8 +1134,8 @@ printf '[RCH] remote trj (0.1s)\n'
         ],
         &[
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
             (
                 "RCH_VERIFY_STATUS_JSON",
                 r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
@@ -1385,7 +1385,7 @@ fn strict_clean_tree_fake_rch_invokes_once_and_preserves_clean_checkout() -> Tes
         r#"#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
-printf '[RCH] remote trj (0.1s)\n'
+printf '[RCH] remote worker-a (0.1s)\n'
 "#,
     )?;
     let fake_rch_arg = fake_rch
@@ -1408,8 +1408,8 @@ printf '[RCH] remote trj (0.1s)\n'
         ],
         &[
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
             (
                 "RCH_VERIFY_STATUS_JSON",
                 r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
@@ -1428,7 +1428,7 @@ printf '[RCH] remote trj (0.1s)\n'
         .map_err(|error| format!("parse strict clean fake RCH: {error}"))?;
     if report["status"] != "remote_pass"
         || report["verification_attribution"] != "strict_clean_tree"
-        || report["worker_id"] != "trj"
+        || report["worker_id"] != "worker-a"
     {
         return Err(format!("unexpected strict clean fake-RCH report: {report}"));
     }
@@ -1465,7 +1465,7 @@ fn event_log_records_source_state_and_fake_rch_invocation_count() -> TestResult 
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
 printf 'remote event-log ok\n'
-printf '[RCH] remote trj (0.1s)\n'
+printf '[RCH] remote worker-a (0.1s)\n'
 "#,
     )?;
     let fake_rch_arg = fake_rch
@@ -1495,8 +1495,8 @@ printf '[RCH] remote trj (0.1s)\n'
         ],
         &[
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
             (
                 "RCH_VERIFY_STATUS_JSON",
                 r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
@@ -1573,7 +1573,7 @@ fn event_log_records_source_refusal_without_fake_rch_invocation() -> TestResult 
         r#"#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
-printf '[RCH] remote trj (0.1s)\n'
+printf '[RCH] remote worker-a (0.1s)\n'
 "#,
     )?;
     let fake_rch_arg = fake_rch
@@ -1603,8 +1603,8 @@ printf '[RCH] remote trj (0.1s)\n'
         ],
         &[
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
             (
                 "RCH_VERIFY_STATUS_JSON",
                 r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
@@ -1713,7 +1713,7 @@ printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
 printf 'PWD=%s\n' "$PWD"
 printf 'tracked=%s\n' "$(cat tracked.txt)"
 test ! -e credential-note.txt
-printf '[RCH] remote trj (0.1s)\n'
+printf '[RCH] remote worker-a (0.1s)\n'
 "#,
     )?;
     let fake_rch_arg = fake_rch
@@ -1739,8 +1739,8 @@ printf '[RCH] remote trj (0.1s)\n'
         &args,
         &[
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
             (
                 "RCH_VERIFY_STATUS_JSON",
                 r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
@@ -1819,8 +1819,8 @@ printf '[RCH] remote trj (0.1s)\n'
         &args,
         &[
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
             (
                 "RCH_VERIFY_STATUS_JSON",
                 r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
@@ -1864,7 +1864,7 @@ fn cargo_config_provenance_refuses_external_patch_before_source_attested_locked_
         r#"#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
-printf '[RCH] remote trj (0.1s)\n'
+printf '[RCH] remote worker-a (0.1s)\n'
 "#,
     )?;
 
@@ -2174,7 +2174,7 @@ fn cargo_config_provenance_accepts_isolated_home_and_committed_project_patch() -
         r#"#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
-printf '[RCH] remote trj (0.1s)\n'
+printf '[RCH] remote worker-a (0.1s)\n'
 "#,
     )?;
 
@@ -2211,8 +2211,8 @@ printf '[RCH] remote trj (0.1s)\n'
             ("CARGO_HOME", cargo_home_arg),
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
             ("RCH_VERIFY_COMMITTED_TREE_BASE", export_base_arg),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
             (
                 "RCH_VERIFY_STATUS_JSON",
                 r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
@@ -2291,7 +2291,7 @@ fn cargo_config_provenance_observes_unattested_external_patch_without_blocking()
         r#"#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
-printf '[RCH] remote trj (0.1s)\n'
+printf '[RCH] remote worker-a (0.1s)\n'
 "#,
     )?;
     let cargo_home_arg = cargo_home
@@ -2320,8 +2320,8 @@ printf '[RCH] remote trj (0.1s)\n'
         &[
             ("CARGO_HOME", cargo_home_arg),
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
             (
                 "RCH_VERIFY_STATUS_JSON",
                 r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
@@ -2388,7 +2388,7 @@ set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
 printf 'tracked=%s\n' "$(cat tracked.txt)"
 test ! -e token-draft.txt
-printf '[RCH] remote trj (0.1s)\n'
+printf '[RCH] remote worker-a (0.1s)\n'
 "#,
     )?;
     let fake_rch_arg = fake_rch
@@ -2420,8 +2420,8 @@ printf '[RCH] remote trj (0.1s)\n'
         ],
         &[
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
             (
                 "RCH_VERIFY_STATUS_JSON",
                 r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
@@ -2898,7 +2898,7 @@ case " $* " in
     printf 'PWD=%s\n' "$PWD"
     ;;
 esac
-printf '[RCH] remote trj (0.1s)\n'
+printf '[RCH] remote worker-a (0.1s)\n'
 "#,
     )?;
     let fake_rch_arg = fake_rch
@@ -2936,8 +2936,8 @@ printf '[RCH] remote trj (0.1s)\n'
             ("EXPECTED_PINNED_EXPORT_BASE", expected_export_base_arg),
             ("CARGO_HOME", cargo_home_arg),
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
             (
                 "RCH_VERIFY_STATUS_JSON",
                 r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
@@ -3055,8 +3055,8 @@ printf '[RCH] remote trj (0.1s)\n'
             ("EXPECTED_PINNED_EXPORT_BASE", expected_export_base_arg),
             ("CARGO_HOME", cargo_home_arg),
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
             (
                 "RCH_VERIFY_STATUS_JSON",
                 r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
@@ -3107,7 +3107,7 @@ fn committed_tree_unresolved_ref_refuses_before_rch() -> TestResult {
         r#"#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
-printf '[RCH] remote trj (0.1s)\n'
+printf '[RCH] remote worker-a (0.1s)\n'
 "#,
     )?;
     let fake_rch_arg = fake_rch
@@ -3189,7 +3189,7 @@ printf 'RCH_CANONICAL_PROJECT_ROOT=%s\n' "${RCH_CANONICAL_PROJECT_ROOT:-}"
 printf 'RCH_ALIAS_PROJECT_ROOT=%s\n' "${RCH_ALIAS_PROJECT_ROOT:-}"
 printf 'CARGO_INCREMENTAL=%s\n' "${CARGO_INCREMENTAL:-}"
 printf 'RCH_ENV_ALLOWLIST=%s\n' "${RCH_ENV_ALLOWLIST:-}"
-printf '[RCH] remote trj (0.1s)\n'
+printf '[RCH] remote worker-a (0.1s)\n'
 "#,
     )?;
     let fake_rch_arg = fake_rch
@@ -3206,15 +3206,15 @@ printf '[RCH] remote trj (0.1s)\n'
             "graph::algorithms::run_with_budget_emits_algorithm_compute_telemetry",
         ],
         &[
-            ("RCH_WORKER", "trj"),
+            ("RCH_WORKER", "worker-a"),
             ("RCH_SOCKET_PATH", "/tmp/rch-alt-test.sock"),
             ("RCH_BUILD_TIMEOUT_SEC", "1200"),
             ("RCH_TEST_TIMEOUT_SEC", "1500"),
             ("RCH_CANONICAL_PROJECT_ROOT", "/data/projects"),
             ("RCH_ALIAS_PROJECT_ROOT", "/data"),
             ("RCH_ENV_ALLOWLIST", "RUST_BACKTRACE"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c,worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-c,worker-a,worker-b"),
         ],
     )?;
     if !status.success() {
@@ -3224,16 +3224,16 @@ printf '[RCH] remote trj (0.1s)\n'
     }
     let report: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse requested-workers proof: {error}"))?;
-    if report["worker_id"] != "trj" {
+    if report["worker_id"] != "worker-a" {
         return Err(format!("fake rch worker was not detected: {report}"));
     }
-    if report["requested_workers"] != serde_json::json!(["trj"]) {
+    if report["requested_workers"] != serde_json::json!(["worker-a"]) {
         return Err(format!("requested workers missing from proof: {report}"));
     }
     let stdout_tail = report["stdout_tail"]
         .as_str()
         .ok_or_else(|| "missing stdout_tail".to_owned())?;
-    if !stdout_tail.contains("RCH_WORKER=trj") {
+    if !stdout_tail.contains("RCH_WORKER=worker-a") {
         return Err(format!(
             "first invocation did not receive RCH_WORKER: {report}"
         ));
@@ -3291,7 +3291,7 @@ fn remote_compile_preserves_explicit_incremental_override() -> TestResult {
 set -euo pipefail
 printf 'CARGO_INCREMENTAL=%s\n' "${CARGO_INCREMENTAL:-}"
 printf 'RCH_ENV_ALLOWLIST=%s\n' "${RCH_ENV_ALLOWLIST:-}"
-printf '[RCH] remote trj (0.1s)\n'
+printf '[RCH] remote worker-a (0.1s)\n'
 "#,
     )?;
     let fake_rch_arg = fake_rch
@@ -3308,8 +3308,8 @@ printf '[RCH] remote trj (0.1s)\n'
         ],
         &[
             ("CARGO_INCREMENTAL", "1"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
         ],
     )?;
     if !status.success() {
@@ -3340,7 +3340,7 @@ fn remote_compile_defaults_to_long_build_timeout() -> TestResult {
 set -euo pipefail
 printf 'RCH_BUILD_TIMEOUT_SEC=%s\n' "${RCH_BUILD_TIMEOUT_SEC:-}"
 printf 'RCH_TEST_TIMEOUT_SEC=%s\n' "${RCH_TEST_TIMEOUT_SEC:-}"
-printf '[RCH] remote trj (0.1s)\n'
+printf '[RCH] remote worker-a (0.1s)\n'
 "#,
     )?;
     let fake_rch_arg = fake_rch
@@ -3356,8 +3356,8 @@ printf '[RCH] remote trj (0.1s)\n'
             "--all-targets",
         ],
         &[
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
         ],
     )?;
     if !status.success() {
@@ -3572,7 +3572,7 @@ fn synthetic_remote_transcript_extracts_worker_id() -> TestResult {
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=900\nremote test ok\n[RCH] remote trj (12.3s)\n",
+                "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=900\nremote test ok\n[RCH] remote worker-a (12.3s)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "123"),
@@ -3586,13 +3586,13 @@ fn synthetic_remote_transcript_extracts_worker_id() -> TestResult {
     }
     let report: Value =
         serde_json::from_str(&stdout).map_err(|error| format!("parse transcript: {error}"))?;
-    if report["worker_id"] != "trj" {
+    if report["worker_id"] != "worker-a" {
         return Err(format!("worker id was not extracted: {report}"));
     }
     let probe = selector_probe(&report)?;
     if probe["status"] != "selected"
         || probe["required_runtime"] != "Rust"
-        || probe["selected_worker"] != "trj"
+        || probe["selected_worker"] != "worker-a"
         || !probe["selection_failure_reason"].is_null()
         || probe["workers_vs_selection_contradiction"] != false
         || probe["local_fallback_refused"] != false
@@ -3633,7 +3633,7 @@ fn successful_test_name_does_not_trigger_active_project_exclusion() -> TestResul
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
                 "running 1 test\ntest selector_admission_probe_classifies_active_project_exclusion ... ok\n\n\
-                 test result: ok. 1 passed; 0 failed\n[RCH] remote trj (0.1s)\n",
+                 test result: ok. 1 passed; 0 failed\n[RCH] remote worker-a (0.1s)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "100"),
@@ -3660,7 +3660,7 @@ fn successful_test_name_does_not_trigger_active_project_exclusion() -> TestResul
     }
     let probe = selector_probe(&report)?;
     if probe["status"] != "selected"
-        || probe["selected_worker"] != "trj"
+        || probe["selected_worker"] != "worker-a"
         || !probe["selection_failure_reason"].is_null()
         || !probe["admission_blocker"].is_null()
     {
@@ -3690,7 +3690,7 @@ JSON
 fi
 if [ "${1:-}" = "exec" ]; then
   printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
-  printf '[RCH] remote trj (0.1s)\n'
+  printf '[RCH] remote worker-a (0.1s)\n'
   exit 0
 fi
 printf 'unexpected fake rch args: %s\n' "$*" >&2
@@ -3770,7 +3770,7 @@ fn build_admission_denial_refuses_before_rch() -> TestResult {
         r#"#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
-printf '[RCH] remote css (1.0s)\n'
+printf '[RCH] remote worker-c (1.0s)\n'
 "#,
     )?;
     let invocation_log = unique_tmp_path("rch-admission-denied-invocations");
@@ -3836,7 +3836,7 @@ fn build_admission_pass_is_recorded_and_allows_rch() -> TestResult {
         r#"#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
-printf '[RCH] remote css (1.0s)\n'
+printf '[RCH] remote worker-c (1.0s)\n'
 "#,
     )?;
     let invocation_log = unique_tmp_path("rch-admission-pass-invocations");
@@ -3865,8 +3865,8 @@ printf '[RCH] remote css (1.0s)\n'
         ],
         &[
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "css"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-c"),
         ],
     )?;
     if !status.success() {
@@ -3889,7 +3889,7 @@ printf '[RCH] remote css (1.0s)\n'
     let report: Value =
         serde_json::from_str(&stdout).map_err(|error| format!("parse admission pass: {error}"))?;
     if report["status"] != "remote_pass"
-        || report["worker_id"] != "css"
+        || report["worker_id"] != "worker-c"
         || report["build_admission"]["status"] != "passed"
         || report["build_admission"]["admitted"] != true
     {
@@ -3946,12 +3946,12 @@ fn summary_reports_local_cargo_process_fixture_without_using_local_cargo() -> Te
             ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", local_cargo_report),
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "Selected worker: css\n[RCH] remote css (0.1s)\n",
+                "Selected worker: worker-c\n[RCH] remote worker-c (0.1s)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "77"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "css"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-c"),
         ],
     )?;
     if !status.success() {
@@ -4002,7 +4002,7 @@ fn build_admission_auto_candidate_skips_empty_version_binary() -> TestResult {
         r#"#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
-printf '[RCH] remote css (1.0s)\n'
+printf '[RCH] remote worker-c (1.0s)\n'
 "#,
     )?;
     let invocation_log = unique_tmp_path("rch-admission-auto-candidate-invocations");
@@ -4033,8 +4033,8 @@ printf '[RCH] remote css (1.0s)\n'
         &[
             ("CARGO_TARGET_DIR", target_dir_arg),
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "css"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-c"),
         ],
     )?;
     if !status.success() {
@@ -4098,12 +4098,12 @@ fn proof_broker_dispatch_allowed_launches_single_remote_proof() -> TestResult {
             ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire),
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "Selected worker: trj\n[RCH] remote trj (0.1s)\n",
+                "Selected worker: worker-a\n[RCH] remote worker-a (0.1s)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "31"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
         ],
     )?;
     if !status.success() {
@@ -4114,7 +4114,7 @@ fn proof_broker_dispatch_allowed_launches_single_remote_proof() -> TestResult {
     let report: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse proof broker dispatch report: {error}"))?;
     if report["status"] != "remote_pass"
-        || report["worker_id"] != "trj"
+        || report["worker_id"] != "worker-a"
         || report["proof_broker"]["verdict"] != "dispatch_allowed"
         || report["proof_broker"]["remoteCargoLaunched"] != true
     {
@@ -4204,8 +4204,8 @@ fn proof_broker_exit_zero_without_remote_attestation_is_not_reusable() -> TestRe
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "19"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
         ],
     )?;
     if !status.success() {
@@ -4277,8 +4277,8 @@ fn proof_broker_transient_remote_failures_remain_retryable() -> TestResult {
         ),
         ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
         ("RCH_VERIFY_FAKE_ELAPSED_MS", "23"),
-        ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-        ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
     ];
 
     for attempt in 1..=2 {
@@ -4352,8 +4352,8 @@ fn proof_broker_transient_remote_failures_remain_retryable() -> TestResult {
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "103"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "29"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
         ],
     )?;
     if status.success() {
@@ -4429,11 +4429,11 @@ fn proof_broker_is_default_on_without_a_ledger_flag() -> TestResult {
             ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire),
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "Selected worker: css\n[RCH] remote css (0.1s)\n",
+                "Selected worker: worker-c\n[RCH] remote worker-c (0.1s)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "css"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-c"),
         ],
     )?;
     if !status.success() {
@@ -4476,7 +4476,7 @@ set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
 if [[ " $* " == *" exec -- "* ]]; then
   sleep 1
-  printf 'Selected worker: css\n[RCH] remote css (1.0s)\n'
+  printf 'Selected worker: worker-c\n[RCH] remote worker-c (1.0s)\n'
 else
   printf '{"client":{"version":"1.0.37"},"daemon":{"version":"0.1.3"}}\n'
 fi
@@ -4523,8 +4523,8 @@ fi
             .env("RCH_VERIFY_PROOF_BROKER_ENABLED", "0")
             .env("RCH_VERIFY_PROOF_BROKER_LEASE_SECONDS", "120")
             .env("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire)
-            .env("RCH_VERIFY_CONFIGURED_WORKERS", "css")
-            .env("RCH_VERIFY_DAEMON_WORKERS", "css")
+            .env("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c")
+            .env("RCH_VERIFY_DAEMON_WORKERS", "worker-c")
             .env("FAKE_PROOF_VERDICT", "dispatch_allowed")
             .env("FAKE_EE_INVOCATIONS", fake_ee_log_arg)
             .env("FAKE_RCH_INVOCATIONS", fake_rch_log_arg)
@@ -4780,11 +4780,11 @@ fn proof_broker_source_mismatch_reserves_and_dispatches_current_source() -> Test
             ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire),
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "Selected worker: css\n[RCH] remote css (0.1s)\n",
+                "Selected worker: worker-c\n[RCH] remote worker-c (0.1s)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "css"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-c"),
         ],
     )?;
     if !status.success() {
@@ -4795,7 +4795,7 @@ fn proof_broker_source_mismatch_reserves_and_dispatches_current_source() -> Test
     let report: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse proof broker source mismatch report: {error}"))?;
     if report["status"] != "remote_pass"
-        || report["worker_id"] != "css"
+        || report["worker_id"] != "worker-c"
         || report["proof_broker"]["originalVerdict"] != "source_state_mismatch"
         || report["proof_broker"]["verdict"] != "dispatch_allowed"
         || report["proof_broker"]["reservation"]["status"] != "acquired"
@@ -4996,11 +4996,11 @@ fn proof_broker_unknown_local_cargo_policy_fails_closed() -> TestResult {
         ("RCH_VERIFY_PROOF_BROKER_NATIVE", "1"),
         (
             "RCH_VERIFY_FAKE_OUTPUT",
-            "Selected worker: css\n[RCH] remote css (0.1s)\n",
+            "Selected worker: worker-c\n[RCH] remote worker-c (0.1s)\n",
         ),
         ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
-        ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
-        ("RCH_VERIFY_DAEMON_WORKERS", "css"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "worker-c"),
     ];
     let mut clean_env = common_remote_env.to_vec();
     clean_env.push(("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire));
@@ -5110,11 +5110,11 @@ fn proof_broker_informational_local_cargo_policies_remain_nonblocking() -> TestR
             ),
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "Selected worker: css\n[RCH] remote css (0.1s)\n",
+                "Selected worker: worker-c\n[RCH] remote worker-c (0.1s)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "css"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-c"),
         ],
     )?;
     if !status.success() {
@@ -5186,12 +5186,12 @@ fn proof_broker_explicit_bypass_runs_remote_and_records_reason() -> TestResult {
             ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire),
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "Selected worker: css\n[RCH] remote css (0.1s)\n",
+                "Selected worker: worker-c\n[RCH] remote worker-c (0.1s)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "19"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "css"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-c"),
         ],
     )?;
     if !status.success() {
@@ -5202,7 +5202,7 @@ fn proof_broker_explicit_bypass_runs_remote_and_records_reason() -> TestResult {
     let report: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse proof broker bypass report: {error}"))?;
     if report["status"] != "remote_pass"
-        || report["worker_id"] != "css"
+        || report["worker_id"] != "worker-c"
         || report["proof_broker"]["verdict"] != "wait_for_inflight"
         || report["proof_broker"]["remoteCargoLaunched"] != true
         || report["proof_broker"]["bypassReason"] != "human requested emergency rerun"
@@ -5282,8 +5282,8 @@ fn selector_admission_probe_flags_reported_workers_without_selection() -> TestRe
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "42"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854,vmi1264463"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-06,worker-07"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-06"),
         ],
     )?;
     if status.success() {
@@ -5317,9 +5317,9 @@ fn selector_admission_probe_flags_reported_workers_without_selection() -> TestRe
             "selector admission probe does not match conformance fixture:\nexpected={expected_probe}\nactual={probe}"
         ));
     }
-    if probe["workers_reported"][0] != "vmi1227854"
-        || probe["workers_reported"][1] != "vmi1264463"
-        || probe["daemon_workers_reported"][0] != "vmi1227854"
+    if probe["workers_reported"][0] != "worker-06"
+        || probe["workers_reported"][1] != "worker-07"
+        || probe["daemon_workers_reported"][0] != "worker-06"
     {
         return Err(format!(
             "selector admission probe did not preserve worker reports: {probe}"
@@ -5360,8 +5360,8 @@ fn selector_admission_probe_classifies_worker_health_threshold_block() -> TestRe
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "12"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1149989"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "vmi1149989"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-01"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-01"),
         ],
     )?;
     if status.success() {
@@ -5421,8 +5421,8 @@ fn selector_admission_probe_classifies_active_project_exclusion() -> TestResult 
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "21"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-a"),
             (
                 "RCH_VERIFY_FAKE_QUEUE_JSON",
                 r#"{
@@ -5453,7 +5453,7 @@ fn selector_admission_probe_classifies_active_project_exclusion() -> TestResult 
         "detector_slots_owned": 2,
         "heartbeat_age_secs": 3,
         "progress_age_secs": 7,
-        "worker_id": "trj"
+        "worker_id": "worker-a"
       }
     ],
     "slots_available": 2,
@@ -5523,7 +5523,7 @@ fn selector_admission_probe_classifies_active_project_exclusion() -> TestResult 
             .get("active_project_exclusion_count")
             .and_then(Value::as_u64)
             != Some(1)
-        || blocker.get("worker_id").and_then(Value::as_str) != Some("trj")
+        || blocker.get("worker_id").and_then(Value::as_str) != Some("worker-a")
         || blocker.get("worker_posture").and_then(Value::as_str) != Some("progress_stale")
         || blocker.get("heartbeat_age_secs").and_then(Value::as_u64) != Some(3)
         || blocker.get("progress_age_secs").and_then(Value::as_u64) != Some(7)
@@ -5577,7 +5577,7 @@ fn selector_admission_probe_classifies_active_project_exclusion() -> TestResult 
         .and_then(Value::as_u64)
         != Some(1)
         || known_active.get("active_build_id").and_then(Value::as_u64) != Some(29879340221071365)
-        || known_active.get("worker_id").and_then(Value::as_str) != Some("trj")
+        || known_active.get("worker_id").and_then(Value::as_str) != Some("worker-a")
         || known_active.get("worker_posture").and_then(Value::as_str) != Some("progress_stale")
         || known_active
             .get("progress_age_secs")
@@ -5602,7 +5602,7 @@ fn selector_admission_probe_classifies_active_project_exclusion() -> TestResult 
         "retry_guidance=`wait_for_active_build_or_coordinate_with_owner`",
         "active_project_exclusion_count=`1`",
         "active_build_id=`29879340221071365`",
-        "worker_id=`trj`",
+        "worker_id=`worker-a`",
         "worker_posture=`progress_stale`",
         "progress_age_secs=`7`",
         "next_action=`wait_for_active_build_or_contact_owner_before_retry`",
@@ -5628,8 +5628,8 @@ fn selector_admission_probe_classifies_explicit_worker_pressure() -> TestResult 
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "11"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1149989"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "vmi1149989"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-01"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-01"),
         ],
     )?;
     if status.success() {
@@ -5694,7 +5694,7 @@ fn active_project_known_blocker_refusal_keeps_selector_evidence() -> TestResult 
         "detector_slots_owned": 2,
         "heartbeat_age_secs": 2,
         "progress_age_secs": 391,
-        "worker_id": "vmi1152480"
+        "worker_id": "worker-02"
       }
     ],
     "slots_available": 0,
@@ -5717,8 +5717,8 @@ fn active_project_known_blocker_refusal_keeps_selector_evidence() -> TestResult 
         ("RCH_VERIFY_FAKE_OUTPUT", fake_output),
         ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
         ("RCH_VERIFY_FAKE_ELAPSED_MS", "17"),
-        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1156319,vmi1152480"),
-        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1156319,vmi1152480"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-04,worker-02"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "worker-04,worker-02"),
         ("RCH_VERIFY_FAKE_QUEUE_JSON", fake_queue),
     ];
 
@@ -5763,7 +5763,7 @@ fn active_project_known_blocker_refusal_keeps_selector_evidence() -> TestResult 
         "known_blocker_selector: `active_project_exclusion`",
         "active_project_exclusion_count=`2`",
         "active_build_id=`29882951164493986`",
-        "worker_id=`vmi1152480`",
+        "worker_id=`worker-02`",
         "worker_posture=`progress_stale`",
         "next_action=`wait_for_active_build_or_contact_owner_before_retry`",
     ] {
@@ -5879,8 +5879,8 @@ fn selector_admission_probe_preserves_daemon_unknown_variant_skew() -> TestResul
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "15"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1149989"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "vmi1149989"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-01"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-01"),
         ],
     )?;
     if status.success() {
@@ -5945,13 +5945,13 @@ fn synthetic_dependency_planner_ignores_requested_worker_reports_filter_ignored(
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "  2026-05-24T03:50:43.878558Z  WARN rch::hook: Dependency planner fail-open on vmi1227854 [RCH-E327]: refusing remote Cargo execution and falling back local (Path dependency topology policy failed.)\n[RCH] local (dependency preflight RCH-E327: Path dependency topology policy failed.)\n[RCH] remote required; refusing local fallback (dependency preflight failed)",
+                "  2026-05-24T03:50:43.878558Z  WARN rch::hook: Dependency planner fail-open on worker-06 [RCH-E327]: refusing remote Cargo execution and falling back local (Path dependency topology policy failed.)\n[RCH] local (dependency preflight RCH-E327: Path dependency topology policy failed.)\n[RCH] remote required; refusing local fallback (dependency preflight failed)",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "31080"),
-            ("RCH_WORKERS", "vmi1264463"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854,vmi1264463"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854,vmi1264463"),
+            ("RCH_WORKERS", "worker-07"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-06,worker-07"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-06,worker-07"),
         ],
     )?;
     if status.success() {
@@ -5982,8 +5982,8 @@ fn synthetic_dependency_planner_ignores_requested_worker_reports_filter_ignored(
             "planner mismatch should be listed as worker-state degradation: {report}"
         ));
     }
-    if report["requested_workers"] != serde_json::json!(["vmi1264463"])
-        || report["configured_workers"] != serde_json::json!(["vmi1227854", "vmi1264463"])
+    if report["requested_workers"] != serde_json::json!(["worker-07"])
+        || report["configured_workers"] != serde_json::json!(["worker-06", "worker-07"])
     {
         return Err(format!("worker inventory arrays missing: {report}"));
     }
@@ -6017,7 +6017,7 @@ fn synthetic_remote_test_failure_with_timeout_env_is_remote_failure() -> TestRes
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=900\nrunning 1 test\ntest cli::tests::why_toon_matches_json_contract ... FAILED\nError: \"expected Number(12), got Number(12.0)\"\n[RCH] remote trj failed (exit 101)\n",
+                "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=900\nrunning 1 test\ntest cli::tests::why_toon_matches_json_contract ... FAILED\nError: \"expected Number(12), got Number(12.0)\"\n[RCH] remote worker-a failed (exit 101)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "195544"),
@@ -6028,7 +6028,7 @@ fn synthetic_remote_test_failure_with_timeout_env_is_remote_failure() -> TestRes
     }
     let report: Value =
         serde_json::from_str(&stdout).map_err(|error| format!("parse remote failure: {error}"))?;
-    if report["worker_id"] != "trj" {
+    if report["worker_id"] != "worker-a" {
         return Err(format!("remote failure should retain worker id: {report}"));
     }
     if report["status"] != "remote_failure" {
@@ -6063,7 +6063,7 @@ fn selected_remote_failure_ignores_nested_selector_fixtures() -> TestResult {
                 "RCH_VERIFY_FAKE_OUTPUT",
                 "test selector_admission_probe_classifies_active_project_exclusion ... FAILED\n\
                  Error: \"fixture: {\\\"evidence\\\":\\\"[RCH] selection blocked: active_project_exclusion=1; [RCH] local (no admissible workers: critical_pressure=1)\\\"}\"\n\
-                 [RCH] remote trj failed (exit 101)\n",
+                 [RCH] remote worker-a failed (exit 101)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "200"),
@@ -6074,7 +6074,7 @@ fn selected_remote_failure_ignores_nested_selector_fixtures() -> TestResult {
     }
     let report: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse nested active-project fixture failure: {error}"))?;
-    if report["status"] != "remote_failure" || report["worker_id"] != "trj" {
+    if report["status"] != "remote_failure" || report["worker_id"] != "worker-a" {
         return Err(format!(
             "selected Rust failure was misclassified as worker capacity: {report}"
         ));
@@ -6086,7 +6086,7 @@ fn selected_remote_failure_ignores_nested_selector_fixtures() -> TestResult {
     }
     let probe = selector_probe(&report)?;
     if probe["status"] != "selected"
-        || probe["selected_worker"] != "trj"
+        || probe["selected_worker"] != "worker-a"
         || !probe["admission_blocker"].is_null()
     {
         return Err(format!(
@@ -6103,7 +6103,7 @@ fn synthetic_transport_failure_does_not_promote_warning_span_to_first_error() ->
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "warning: method `mesh_two_tier_budget` is never used\n  --> tests/../src/mesh/anti_entropy_protocol.rs:130:8\n[RCH] remote vmi1227854 failed [RCH-E104] SSH command timed out after 300s\n",
+                "warning: method `mesh_two_tier_budget` is never used\n  --> tests/../src/mesh/anti_entropy_protocol.rs:130:8\n[RCH] remote worker-06 failed [RCH-E104] SSH command timed out after 300s\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "321731"),
@@ -6166,7 +6166,7 @@ fn synthetic_pre_cargo_disk_full_extracts_selected_worker() -> TestResult {
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "2026-05-16T12:58:58Z INFO Selected worker: csd at ubuntu@csd (8 slots, speed 50.0)\nrsync: [receiver] mkstemp \"/data/projects/eidetic_engine_cli/.rchignore.XXXXXX\" failed: No space left on device (28)\n[RCH] remote required; refusing local fallback (remote pipeline failed)\n",
+                "2026-05-16T12:58:58Z INFO Selected worker: worker-b at ubuntu@worker-b (8 slots, speed 50.0)\nrsync: [receiver] mkstemp \"/data/projects/eidetic_engine_cli/.rchignore.XXXXXX\" failed: No space left on device (28)\n[RCH] remote required; refusing local fallback (remote pipeline failed)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "1998"),
@@ -6178,7 +6178,7 @@ fn synthetic_pre_cargo_disk_full_extracts_selected_worker() -> TestResult {
     }
     let report: Value =
         serde_json::from_str(&stdout).map_err(|error| format!("parse disk-full: {error}"))?;
-    if report["worker_id"] != "csd" {
+    if report["worker_id"] != "worker-b" {
         return Err(format!("selected worker was not extracted: {report}"));
     }
     if report["status"] != "rch_environment_failure" {
@@ -6210,14 +6210,14 @@ fn synthetic_disk_full_retry_stops_when_quarantine_is_ignored() -> TestResult {
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "INFO Selected worker: csd at ubuntu@csd (8 slots, speed 50.0)\nrsync: write failed on \"/data/projects/eidetic_engine_cli/.rchignore\": No space left on device (28)\n",
+                "INFO Selected worker: worker-b at ubuntu@worker-b (8 slots, speed 50.0)\nrsync: write failed on \"/data/projects/eidetic_engine_cli/.rchignore\": No space left on device (28)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "20"),
-            ("RCH_VERIFY_HEALTHY_WORKERS", "css,trj"),
+            ("RCH_VERIFY_HEALTHY_WORKERS", "worker-c,worker-a"),
             (
                 "RCH_VERIFY_FAKE_RETRY_OUTPUT",
-                "INFO Selected worker: csd at ubuntu@csd (8 slots, speed 50.0)\nrsync: write failed on \"/data/projects/eidetic_engine_cli/.rchignore\": No space left on device (28)\n",
+                "INFO Selected worker: worker-b at ubuntu@worker-b (8 slots, speed 50.0)\nrsync: write failed on \"/data/projects/eidetic_engine_cli/.rchignore\": No space left on device (28)\n",
             ),
             ("RCH_VERIFY_FAKE_RETRY_EXIT_CODE", "1"),
         ],
@@ -6227,7 +6227,7 @@ fn synthetic_disk_full_retry_stops_when_quarantine_is_ignored() -> TestResult {
     }
     let report: Value =
         serde_json::from_str(&stdout).map_err(|error| format!("parse retry: {error}"))?;
-    if report["worker_id"] != "csd" {
+    if report["worker_id"] != "worker-b" {
         return Err(format!(
             "retry worker should record ignored quarantine: {report}"
         ));
@@ -6244,7 +6244,7 @@ fn synthetic_disk_full_retry_stops_when_quarantine_is_ignored() -> TestResult {
     let stdout_tail = report["stdout_tail"]
         .as_str()
         .ok_or_else(|| "missing stdout_tail".to_owned())?;
-    if !stdout_tail.contains("retrying once with RCH_WORKERS=css,trj") {
+    if !stdout_tail.contains("retrying once with RCH_WORKERS=worker-c,worker-a") {
         return Err(format!("retry note missing from stdout tail: {report}"));
     }
     Ok(())
@@ -6257,32 +6257,32 @@ fn synthetic_disk_full_retry_respects_requested_workers() -> TestResult {
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "INFO Selected worker: css at ubuntu@css (8 slots, speed 50.0)\nrsync: write failed on \"/data/projects/eidetic_engine_cli/.beads/issues.jsonl\": No space left on device (28)\n",
+                "INFO Selected worker: worker-c at ubuntu@worker-c (8 slots, speed 50.0)\nrsync: write failed on \"/data/projects/eidetic_engine_cli/.beads/issues.jsonl\": No space left on device (28)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "20"),
-            ("RCH_VERIFY_HEALTHY_WORKERS", "css,trj,csd"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
-            ("RCH_WORKERS", "trj"),
+            ("RCH_VERIFY_HEALTHY_WORKERS", "worker-c,worker-a,worker-b"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c,worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-c,worker-a,worker-b"),
+            ("RCH_WORKERS", "worker-a"),
             (
                 "RCH_VERIFY_FAKE_RETRY_OUTPUT",
-                "INFO Selected worker: trj at ubuntu@trj (4 slots, speed 50.0)\nremote test ok\n[RCH] remote trj (1.0s)\n",
+                "INFO Selected worker: worker-a at ubuntu@worker-a (4 slots, speed 50.0)\nremote test ok\n[RCH] remote worker-a (1.0s)\n",
             ),
             ("RCH_VERIFY_FAKE_RETRY_EXIT_CODE", "0"),
         ],
     )?;
     if !status.success() {
         return Err(format!(
-            "requested-worker retry should succeed through trj\nstdout:\n{stdout}\n"
+            "requested-worker retry should succeed through worker-a\nstdout:\n{stdout}\n"
         ));
     }
     let report: Value =
         serde_json::from_str(&stdout).map_err(|error| format!("parse requested retry: {error}"))?;
-    if report["status"] != "remote_pass" || report["worker_id"] != "trj" {
+    if report["status"] != "remote_pass" || report["worker_id"] != "worker-a" {
         return Err(format!("unexpected requested retry report: {report}"));
     }
-    if report["requested_workers"] != serde_json::json!(["trj"]) {
+    if report["requested_workers"] != serde_json::json!(["worker-a"]) {
         return Err(format!("requested worker list was not preserved: {report}"));
     }
     for expected in [
@@ -6301,8 +6301,8 @@ fn synthetic_disk_full_retry_respects_requested_workers() -> TestResult {
     let stdout_tail = report["stdout_tail"]
         .as_str()
         .ok_or_else(|| "missing stdout_tail".to_owned())?;
-    if !stdout_tail.contains("retrying once with RCH_WORKERS=trj")
-        || stdout_tail.contains("RCH_WORKERS=trj,csd")
+    if !stdout_tail.contains("retrying once with RCH_WORKERS=worker-a")
+        || stdout_tail.contains("RCH_WORKERS=worker-a,worker-b")
     {
         return Err(format!(
             "retry note did not stay constrained to requested worker: {report}"
@@ -6328,14 +6328,14 @@ fn synthetic_worker_filter_ignored_reports_requested_and_configured_workers() ->
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "INFO Selected worker: csd at ubuntu@csd (8 slots, speed 50.0)\nrsync: write failed on \"/data/projects/eidetic_engine_cli/.rchignore\": No space left on device (28)\n",
+                "INFO Selected worker: worker-b at ubuntu@worker-b (8 slots, speed 50.0)\nrsync: write failed on \"/data/projects/eidetic_engine_cli/.rchignore\": No space left on device (28)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "44"),
             ("RCH_VERIFY_DISABLE_DISK_FULL_RETRY", "1"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
-            ("RCH_WORKERS", "css,trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c,worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-c,worker-a,worker-b"),
+            ("RCH_WORKERS", "worker-c,worker-a"),
         ],
     )?;
     if status.success() {
@@ -6343,7 +6343,7 @@ fn synthetic_worker_filter_ignored_reports_requested_and_configured_workers() ->
     }
     let report: Value =
         serde_json::from_str(&stdout).map_err(|error| format!("parse filter report: {error}"))?;
-    if report["status"] != "rch_environment_failure" || report["worker_id"] != "csd" {
+    if report["status"] != "rch_environment_failure" || report["worker_id"] != "worker-b" {
         return Err(format!("unexpected worker-filter status: {report}"));
     }
     for expected in [
@@ -6369,9 +6369,9 @@ fn synthetic_worker_filter_ignored_reports_requested_and_configured_workers() ->
             "generic remote failure should not be listed as worker-state: {report}"
         ));
     }
-    if report["requested_workers"] != serde_json::json!(["css", "trj"])
-        || report["configured_workers"] != serde_json::json!(["css", "trj"])
-        || report["daemon_workers"] != serde_json::json!(["css", "trj", "csd"])
+    if report["requested_workers"] != serde_json::json!(["worker-c", "worker-a"])
+        || report["configured_workers"] != serde_json::json!(["worker-c", "worker-a"])
+        || report["daemon_workers"] != serde_json::json!(["worker-c", "worker-a", "worker-b"])
     {
         return Err(format!(
             "worker inventory arrays were not emitted: {report}"
@@ -6381,9 +6381,9 @@ fn synthetic_worker_filter_ignored_reports_requested_and_configured_workers() ->
         .as_str()
         .ok_or_else(|| "summary missing".to_owned())?;
     for expected in [
-        "requested_workers: `css, trj`",
-        "configured_workers: `css, trj`",
-        "daemon_workers: `css, trj, csd`",
+        "requested_workers: `worker-c, worker-a`",
+        "configured_workers: `worker-c, worker-a`",
+        "daemon_workers: `worker-c, worker-a, worker-b`",
         "worker_state_degraded_codes: `rch_verify_worker_disk_full`, `rch_verify_worker_filter_ignored`",
     ] {
         if !summary.contains(expected) {
@@ -6406,12 +6406,12 @@ fn synthetic_stale_daemon_disk_full_preflight_does_not_run_cargo() -> TestResult
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "INFO Selected worker: css at ubuntu@css (8 slots, speed 50.0)\n[RCH] remote css (1.0s)\n",
+                "INFO Selected worker: worker-c at ubuntu@worker-c (8 slots, speed 50.0)\n[RCH] remote worker-c (1.0s)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
-            ("RCH_VERIFY_DISK_FULL_WORKERS", "csd"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c,worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-c,worker-a,worker-b"),
+            ("RCH_VERIFY_DISK_FULL_WORKERS", "worker-b"),
         ],
     )?;
     if status.success() {
@@ -6419,7 +6419,7 @@ fn synthetic_stale_daemon_disk_full_preflight_does_not_run_cargo() -> TestResult
     }
     let report: Value =
         serde_json::from_str(&stdout).map_err(|error| format!("parse preflight: {error}"))?;
-    if report["status"] != "rch_environment_failure" || report["worker_id"] != "csd" {
+    if report["status"] != "rch_environment_failure" || report["worker_id"] != "worker-b" {
         return Err(format!("unexpected preflight report: {report}"));
     }
     for expected in [
@@ -6434,7 +6434,9 @@ fn synthetic_stale_daemon_disk_full_preflight_does_not_run_cargo() -> TestResult
     let stdout_tail = report["stdout_tail"]
         .as_str()
         .ok_or_else(|| "missing stdout tail".to_owned())?;
-    if !stdout_tail.contains("stale daemon worker(s)") || stdout_tail.contains("[RCH] remote css") {
+    if !stdout_tail.contains("stale daemon worker(s)")
+        || stdout_tail.contains("[RCH] remote worker-c")
+    {
         return Err(format!(
             "preflight did not short-circuit fake Cargo run: {report}"
         ));
@@ -6453,8 +6455,8 @@ fn synthetic_recent_failure_outside_effective_candidates_does_not_block() -> Tes
         "data": {
             "daemon": {
                 "recent_builds": [
-                    {"worker_id": "csd", "exit_code": 1, "duration_ms": 2342},
-                    {"worker_id": "css", "exit_code": 101, "duration_ms": 188436}
+                    {"worker_id": "worker-b", "exit_code": 1, "duration_ms": 2342},
+                    {"worker_id": "worker-c", "exit_code": 101, "duration_ms": 188436}
                 ]
             }
         }
@@ -6475,11 +6477,11 @@ fn synthetic_recent_failure_outside_effective_candidates_does_not_block() -> Tes
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "INFO Selected worker: css at ubuntu@css (8 slots, speed 50.0)\n[RCH] remote css (1.0s)\n",
+                "INFO Selected worker: worker-c at ubuntu@worker-c (8 slots, speed 50.0)\n[RCH] remote worker-c (1.0s)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c,worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-c,worker-a,worker-b"),
             ("RCH_VERIFY_STATUS_JSON", status_json),
         ],
     )?;
@@ -6490,7 +6492,7 @@ fn synthetic_recent_failure_outside_effective_candidates_does_not_block() -> Tes
     }
     let report: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse recent failure preflight: {error}"))?;
-    if report["status"] != "remote_pass" || report["worker_id"] != "css" {
+    if report["status"] != "remote_pass" || report["worker_id"] != "worker-c" {
         return Err(format!("unexpected recent failure preflight: {report}"));
     }
     if degraded_contains(&report, "rch_verify_worker_filter_ignored")?
@@ -6503,7 +6505,9 @@ fn synthetic_recent_failure_outside_effective_candidates_does_not_block() -> Tes
     let stdout_tail = report["stdout_tail"]
         .as_str()
         .ok_or_else(|| "missing stdout tail".to_owned())?;
-    if !stdout_tail.contains("[RCH] remote css") || stdout_tail.contains("recently failed fast") {
+    if !stdout_tail.contains("[RCH] remote worker-c")
+        || stdout_tail.contains("recently failed fast")
+    {
         return Err(format!(
             "out-of-candidate failure should preserve the remote run: {report}"
         ));
@@ -6517,8 +6521,8 @@ fn synthetic_recent_failure_outside_requested_worker_does_not_block() -> TestRes
         "data": {
             "daemon": {
                 "recent_builds": [
-                    {"worker_id": "css", "exit_code": 101, "duration_ms": 52903},
-                    {"worker_id": "trj", "exit_code": 0, "duration_ms": 2000}
+                    {"worker_id": "worker-c", "exit_code": 101, "duration_ms": 52903},
+                    {"worker_id": "worker-a", "exit_code": 0, "duration_ms": 2000}
                 ]
             }
         }
@@ -6540,13 +6544,13 @@ fn synthetic_recent_failure_outside_requested_worker_does_not_block() -> TestRes
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "INFO Selected worker: trj at ubuntu@trj (4 slots, speed 50.0)\n[RCH] remote trj (1.0s)\n",
+                "INFO Selected worker: worker-a at ubuntu@worker-a (4 slots, speed 50.0)\n[RCH] remote worker-a (1.0s)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c,worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-c,worker-a,worker-b"),
             ("RCH_VERIFY_STATUS_JSON", status_json),
-            ("RCH_WORKERS", "trj"),
+            ("RCH_WORKERS", "worker-a"),
         ],
     )?;
     if !status.success() {
@@ -6556,12 +6560,12 @@ fn synthetic_recent_failure_outside_requested_worker_does_not_block() -> TestRes
     }
     let report: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse requested-worker preflight: {error}"))?;
-    if report["status"] != "remote_pass" || report["worker_id"] != "trj" {
+    if report["status"] != "remote_pass" || report["worker_id"] != "worker-a" {
         return Err(format!("unexpected requested-worker preflight: {report}"));
     }
-    if report["requested_workers"] != serde_json::json!(["trj"])
-        || report["configured_workers"] != serde_json::json!(["css", "trj"])
-        || report["daemon_workers"] != serde_json::json!(["css", "trj", "csd"])
+    if report["requested_workers"] != serde_json::json!(["worker-a"])
+        || report["configured_workers"] != serde_json::json!(["worker-c", "worker-a"])
+        || report["daemon_workers"] != serde_json::json!(["worker-c", "worker-a", "worker-b"])
     {
         return Err(format!(
             "worker inventory arrays were not preserved: {report}"
@@ -6577,7 +6581,9 @@ fn synthetic_recent_failure_outside_requested_worker_does_not_block() -> TestRes
     let stdout_tail = report["stdout_tail"]
         .as_str()
         .ok_or_else(|| "missing stdout tail".to_owned())?;
-    if !stdout_tail.contains("[RCH] remote trj") || stdout_tail.contains("recently failed fast") {
+    if !stdout_tail.contains("[RCH] remote worker-a")
+        || stdout_tail.contains("recently failed fast")
+    {
         return Err(format!(
             "requested worker should run despite an unrelated worker failure: {report}"
         ));
@@ -6585,9 +6591,9 @@ fn synthetic_recent_failure_outside_requested_worker_does_not_block() -> TestRes
     let summary = report["summary_markdown"]
         .as_str()
         .ok_or_else(|| "summary missing".to_owned())?;
-    if !summary.contains("requested_workers: `trj`")
-        || !summary.contains("configured_workers: `css, trj`")
-        || !summary.contains("daemon_workers: `css, trj, csd`")
+    if !summary.contains("requested_workers: `worker-a`")
+        || !summary.contains("configured_workers: `worker-c, worker-a`")
+        || !summary.contains("daemon_workers: `worker-c, worker-a, worker-b`")
     {
         return Err(format!("summary missing worker arrays: {summary}"));
     }
@@ -6600,8 +6606,8 @@ fn synthetic_recent_failure_of_only_requested_worker_fails_fast() -> TestResult 
         "data": {
             "daemon": {
                 "recent_builds": [
-                    {"worker_id": "trj", "exit_code": 1, "duration_ms": 52903},
-                    {"worker_id": "css", "exit_code": 0, "duration_ms": 2000}
+                    {"worker_id": "worker-a", "exit_code": 1, "duration_ms": 52903},
+                    {"worker_id": "worker-c", "exit_code": 0, "duration_ms": 2000}
                 ]
             }
         }
@@ -6611,13 +6617,13 @@ fn synthetic_recent_failure_of_only_requested_worker_fails_fast() -> TestResult 
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "INFO Selected worker: trj at ubuntu@trj (4 slots, speed 50.0)\n[RCH] remote trj (1.0s)\n",
+                "INFO Selected worker: worker-a at ubuntu@worker-a (4 slots, speed 50.0)\n[RCH] remote worker-a (1.0s)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
-            ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
-            ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-c,worker-a"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "worker-c,worker-a,worker-b"),
             ("RCH_VERIFY_STATUS_JSON", status_json),
-            ("RCH_WORKERS", "trj"),
+            ("RCH_WORKERS", "worker-a"),
         ],
     )?;
     if status.success() {
@@ -6625,7 +6631,7 @@ fn synthetic_recent_failure_of_only_requested_worker_fails_fast() -> TestResult 
     }
     let report: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse requested-worker refusal: {error}"))?;
-    if report["status"] != "rch_environment_failure" || report["worker_id"] != "trj" {
+    if report["status"] != "rch_environment_failure" || report["worker_id"] != "worker-a" {
         return Err(format!("unexpected requested-worker refusal: {report}"));
     }
     if !degraded_contains(&report, "rch_verify_worker_filter_ignored")? {
@@ -6635,7 +6641,7 @@ fn synthetic_recent_failure_of_only_requested_worker_fails_fast() -> TestResult 
         .as_str()
         .ok_or_else(|| "missing stdout tail".to_owned())?;
     if !stdout_tail.contains("every effective requested worker recently failed fast")
-        || stdout_tail.contains("[RCH] remote trj")
+        || stdout_tail.contains("[RCH] remote worker-a")
     {
         return Err(format!(
             "requested-worker refusal was not fail-fast: {report}"
@@ -6651,7 +6657,7 @@ fn synthetic_compile_error_is_not_worker_disk_full() -> TestResult {
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "error[E0277]: the trait bound `&str: Borrow<String>` is not satisfied\n  --> src/core/support_bundle.rs:1339:44\n[RCH] remote css failed (exit 101)\n",
+                "error[E0277]: the trait bound `&str: Borrow<String>` is not satisfied\n  --> src/core/support_bundle.rs:1339:44\n[RCH] remote worker-c failed (exit 101)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "3000"),
@@ -6696,7 +6702,7 @@ fn synthetic_cargo_workspace_inheritance_failure_is_worker_topology() -> TestRes
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "error: failed to load manifest for dependency `frankensearch`\n\nCaused by:\n  failed to parse manifest at `/data/projects/frankensearch/frankensearch/Cargo.toml`\n\nCaused by:\n  error inheriting `license-file` from workspace root manifest's `workspace.package.license-file`\n\nCaused by:\n  `workspace.package.license-file` was not defined\n[RCH] remote vmi1227854 failed (exit 101)\n",
+                "error: failed to load manifest for dependency `frankensearch`\n\nCaused by:\n  failed to parse manifest at `/data/projects/frankensearch/frankensearch/Cargo.toml`\n\nCaused by:\n  error inheriting `license-file` from workspace root manifest's `workspace.package.license-file`\n\nCaused by:\n  `workspace.package.license-file` was not defined\n[RCH] remote worker-06 failed (exit 101)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "2400"),
@@ -6712,7 +6718,7 @@ fn synthetic_cargo_workspace_inheritance_failure_is_worker_topology() -> TestRes
             "workspace inheritance should be routed as RCH environment failure: {report}"
         ));
     }
-    if report["worker_id"] != "vmi1227854" {
+    if report["worker_id"] != "worker-06" {
         return Err(format!("worker id should be preserved: {report}"));
     }
     for expected in [
@@ -6773,7 +6779,7 @@ Caused by:
 
 Caused by:
   `workspace.package.license-file` was not defined
-[RCH] remote vmi1227854 failed (exit 101)
+[RCH] remote worker-06 failed (exit 101)
 TRANSCRIPT
   exit 101
 fi
@@ -6808,8 +6814,8 @@ exit 2
     ];
     let envs = [
         ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
-        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-06"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "worker-06"),
     ];
 
     let (first_status, first_stdout, first_stderr) = run_script_with_env(&args, &envs)?;
@@ -6927,7 +6933,7 @@ Caused by:
 
 Caused by:
   `workspace.package.license-file` was not defined
-[RCH] remote vmi1227854 failed (exit 101)
+[RCH] remote worker-06 failed (exit 101)
 TRANSCRIPT
   exit 101
 fi
@@ -6957,14 +6963,14 @@ exit 2
     ];
     let first_envs = [
         ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
-        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-06"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "worker-06"),
         ("RCH_BUILD_TIMEOUT_SEC", "300"),
     ];
     let second_envs = [
         ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
-        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-06"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "worker-06"),
         ("RCH_BUILD_TIMEOUT_SEC", "900"),
     ];
 
@@ -7071,7 +7077,7 @@ Caused by:
 
 Caused by:
   `workspace.package.license-file` was not defined
-[RCH] remote vmi1227854 failed (exit 101)
+[RCH] remote worker-06 failed (exit 101)
 TRANSCRIPT
   exit 101
 fi
@@ -7107,8 +7113,8 @@ exit 2
     ];
     let envs = [
         ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
-        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-06"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "worker-06"),
     ];
 
     let (first_status, first_stdout, _first_stderr) = run_script_with_env(&args, &envs)?;
@@ -7199,7 +7205,7 @@ Caused by:
 
 Caused by:
   `workspace.package.license-file` was not defined
-[RCH] remote vmi1227854 failed (exit 101)
+[RCH] remote worker-06 failed (exit 101)
 TRANSCRIPT
   exit 101
 fi
@@ -7241,8 +7247,8 @@ exit 2
     ];
     let envs = [
         ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
-        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-06"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "worker-06"),
     ];
 
     let (first_status, first_stdout, _first_stderr) = run_script_with_env(&cargo_test_args, &envs)?;
@@ -7321,7 +7327,7 @@ Caused by:
 
 Caused by:
   `workspace.package.license-file` was not defined
-[RCH] remote vmi1227854 failed (exit 101)
+[RCH] remote worker-06 failed (exit 101)
 TRANSCRIPT
   exit 101
 fi
@@ -7372,8 +7378,8 @@ exit 2
     ];
     let envs = [
         ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
-        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-06"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "worker-06"),
     ];
 
     let (first_status, first_stdout, _first_stderr) = run_script_with_env(&live_args, &envs)?;
@@ -7455,7 +7461,7 @@ if [ "${1:-}" = "exec" ]; then
   printf 'error: failed to load manifest for dependency `frankensearch`\n'
   printf 'error inheriting `license-file` from workspace root manifest'\''s `workspace.package.license-file`\n'
   printf '`workspace.package.license-file` was not defined\n'
-  printf '[RCH] remote vmi1227854 failed (exit 101)\n'
+  printf '[RCH] remote worker-06 failed (exit 101)\n'
   exit 101
 fi
 printf 'unexpected fake rch args: %s\n' "$*" >&2
@@ -7485,8 +7491,8 @@ exit 2
     ];
     let envs = [
         ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
-        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-06"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "worker-06"),
     ];
 
     let (first_status, first_stdout, _first_stderr) = run_script_with_env(&base_args, &envs)?;
@@ -7622,7 +7628,7 @@ Caused by:
 
 Caused by:
   `workspace.package.license-file` was not defined
-[RCH] remote vmi1227854 failed (exit 101)
+[RCH] remote worker-06 failed (exit 101)
 TRANSCRIPT
   exit 101
 fi
@@ -7666,8 +7672,8 @@ exit 2
     ];
     let envs = [
         ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
-        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
-        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "worker-06"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "worker-06"),
     ];
 
     let (first_status, first_stdout, _first_stderr) = run_script_with_env(&base_args, &envs)?;
@@ -7918,7 +7924,7 @@ Caused by:
 Caused by:
   `workspace.package.license-file` was not defined
 diagnostic detail: token=fixture-token-value
-[RCH] remote vmi1227854 failed (exit 101)
+[RCH] remote worker-06 failed (exit 101)
 "#;
     let envs = [
         ("RCH_VERIFY_FAKE_OUTPUT", redaction_transcript),
@@ -8043,7 +8049,7 @@ fn synthetic_cargo_path_dependency_version_failure_is_worker_topology() -> TestR
 candidate versions found which didn't match: 0.1.2\n\
 location searched: /data/projects/franken_agent_detection\n\
 required by package `eidetic-engine v0.1.0 (/data/projects/eidetic_engine_cli)`\n\
-[RCH] remote vmi1149989 failed (exit 101)\n",
+[RCH] remote worker-01 failed (exit 101)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "2100"),
@@ -8059,7 +8065,7 @@ required by package `eidetic-engine v0.1.0 (/data/projects/eidetic_engine_cli)`\
             "path dependency version mismatch should route as RCH environment failure: {report}"
         ));
     }
-    if report["worker_id"] != "vmi1149989" {
+    if report["worker_id"] != "worker-01" {
         return Err(format!("worker id should be preserved: {report}"));
     }
     for expected in [
@@ -8105,7 +8111,7 @@ fn synthetic_sync_closure_root_count_is_structured() -> TestResult {
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
                 "2026-05-19T02:46:29Z INFO Prepared dependency sync manifest for 1 roots\n\
-[RCH] remote vmi1149989 failed (exit 101)\n",
+[RCH] remote worker-01 failed (exit 101)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "2100"),
@@ -8116,7 +8122,7 @@ fn synthetic_sync_closure_root_count_is_structured() -> TestResult {
     }
     let report: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse sync-closure report: {error}"))?;
-    if report["worker_id"] != "vmi1149989" {
+    if report["worker_id"] != "worker-01" {
         return Err(format!("worker id should be preserved: {report}"));
     }
     let sync_closure = &report["sync_closure"];
@@ -8144,7 +8150,7 @@ fn synthetic_e0583_for_tracked_module_is_remote_checkout_incomplete() -> TestRes
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "error[E0583]: file not found for module `cache`\n  --> src/lib.rs:4:1\n   |\n4  | pub mod cache;\n   | ^^^^^^^^^^^^^^\n   |\n   = help: to create the module `cache`, create file \"src/cache.rs\" or \"src/cache/mod.rs\"\n[RCH] remote css failed (exit 101)\n",
+                "error[E0583]: file not found for module `cache`\n  --> src/lib.rs:4:1\n   |\n4  | pub mod cache;\n   | ^^^^^^^^^^^^^^\n   |\n   = help: to create the module `cache`, create file \"src/cache.rs\" or \"src/cache/mod.rs\"\n[RCH] remote worker-c failed (exit 101)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "4000"),
@@ -8166,7 +8172,7 @@ fn synthetic_e0583_for_tracked_module_is_remote_checkout_incomplete() -> TestRes
             "tracked missing module should be environment failure: {report}"
         ));
     }
-    if report["worker_id"] != "css" {
+    if report["worker_id"] != "worker-c" {
         return Err(format!("worker id should be preserved: {report}"));
     }
     if !degraded_contains(&report, "rch_verify_remote_checkout_incomplete")? {
@@ -8188,7 +8194,7 @@ fn synthetic_e0583_for_untracked_module_remains_remote_failure() -> TestResult {
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "error[E0583]: file not found for module `phantom`\n  --> src/lib.rs:99:1\n   |\n99 | pub mod phantom;\n   | ^^^^^^^^^^^^^^^^\n   |\n   = help: to create the module `phantom`, create file \"src/phantom.rs\" or \"src/phantom/mod.rs\"\n[RCH] remote css failed (exit 101)\n",
+                "error[E0583]: file not found for module `phantom`\n  --> src/lib.rs:99:1\n   |\n99 | pub mod phantom;\n   | ^^^^^^^^^^^^^^^^\n   |\n   = help: to create the module `phantom`, create file \"src/phantom.rs\" or \"src/phantom/mod.rs\"\n[RCH] remote worker-c failed (exit 101)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "4000"),
@@ -8270,7 +8276,7 @@ fn synthetic_remote_transcript_writes_ledger_and_summary() -> TestResult {
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "error[E0425]: cannot find value `stderr` in this scope\n  --> tests/rch_verify_contract.rs:42:9\nremote test ok\n[RCH] remote css (1.0s)\n",
+                "error[E0425]: cannot find value `stderr` in this scope\n  --> tests/rch_verify_contract.rs:42:9\nremote test ok\n[RCH] remote worker-c (1.0s)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
             ("RCH_VERIFY_FAKE_ELAPSED_MS", "1000"),
@@ -8304,7 +8310,7 @@ fn synthetic_remote_transcript_writes_ledger_and_summary() -> TestResult {
     let summary = report["summary_markdown"]
         .as_str()
         .ok_or_else(|| "summary missing".to_owned())?;
-    if !summary.contains("worker_id: `css`")
+    if !summary.contains("worker_id: `worker-c`")
         || !summary.contains("bead_id: `bd-test`")
         || !summary.contains("first_error: `tests/rch_verify_contract.rs:42`")
     {
@@ -8321,7 +8327,7 @@ fn synthetic_remote_transcript_writes_ledger_and_summary() -> TestResult {
         serde_json::from_str(rows[0]).map_err(|error| format!("parse ledger row: {error}"))?;
     if row["schema"] != "ee.rch.verify.ledger.v1"
         || row["status"] != "remote_pass"
-        || row["worker_id"] != "css"
+        || row["worker_id"] != "worker-c"
         || row["first_error_file"] != "tests/rch_verify_contract.rs"
         || row["first_error_line"] != 42
     {

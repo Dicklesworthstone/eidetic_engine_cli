@@ -266,7 +266,7 @@ fn remote_mirror_origin_fixture_detects_and_rewrites_agent_roots() -> TestResult
 
     ensure(
         rewritten.ends_with(
-            "/remote_mirror/ssh-csd/home/agent/.claude/projects/eidetic_engine_cli/session.jsonl",
+            "/remote_mirror/ssh-worker-b/home/agent/.claude/projects/eidetic_engine_cli/session.jsonl",
         ),
         format!("unexpected rewritten path: {rewritten}"),
     )
@@ -463,8 +463,8 @@ fn tracked_fixture_roots_exist_for_default_detection_contract() -> TestResult {
         "claude/projects/.keep",
         "gemini/tmp/.keep",
         "cursor/.cursor/.keep",
-        "remote_mirror/ssh-csd/home/agent/.codex/sessions/.keep",
-        "remote_mirror/ssh-csd/home/agent/.claude/projects/.keep",
+        "remote_mirror/ssh-worker-b/home/agent/.codex/sessions/.keep",
+        "remote_mirror/ssh-worker-b/home/agent/.claude/projects/.keep",
     ] {
         let path = fixtures_path().join(Path::new(relative));
         ensure(

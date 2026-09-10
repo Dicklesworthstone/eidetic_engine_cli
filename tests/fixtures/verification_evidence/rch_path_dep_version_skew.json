@@ -4,7 +4,7 @@
   "command_text": "cargo check --lib",
   "command_kind": "cargo_check",
   "command_hash": "eae0cb5e0af81aca484ac22464070a7f17dc1021c11099dbbfa45d7f0939d261",
-  "worker_id": "vmi1149989",
+  "worker_id": "worker-01",
   "exit_code": 101,
   "elapsed_ms": 8229,
   "status": "rch_environment_failure",

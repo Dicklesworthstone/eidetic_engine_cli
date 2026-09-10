@@ -917,7 +917,7 @@
           "freshness": "fresh",
           "confidence": "high",
           "hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-          "boundedPreview": "active_project_exclusion on worker trj; command preview redacted"
+          "boundedPreview": "active_project_exclusion on worker worker-a; command preview redacted"
         }
       ],
       "redactionPosture": {

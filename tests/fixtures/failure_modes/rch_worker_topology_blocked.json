@@ -13,7 +13,7 @@
   "trigger": {
     "description": "Swarm brief collects RCH posture while the fleet is remote-ready but the selected worker cannot map this workspace path topology.",
     "setup_commands": [
-      "# status payload includes workersHealthy=3, selectedWorker=css, and absolute canonical/alias roots that must be redacted",
+      "# status payload includes workersHealthy=3, selectedWorker=worker-c, and absolute canonical/alias roots that must be redacted",
       "# run swarm brief --include-rch in a workspace whose path dependencies cannot be mapped onto the selected worker"
     ],
     "invocation": "ee swarm brief --include-rch --workspace . --json"

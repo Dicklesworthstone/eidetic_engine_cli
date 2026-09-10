@@ -230,7 +230,7 @@
             "status": "remote_pass",
             "commandHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
             "commandKind": "cargo_test",
-            "workerId": "vmi1227854",
+            "workerId": "worker-06",
             "remoteMarkerPresent": true,
             "cargoStarted": true,
             "localFallbackRefused": false,
@@ -240,7 +240,7 @@
             "selectorAdmission": {
               "status": "selected",
               "requiredRuntime": "Rust",
-              "selectedWorker": "vmi1227854",
+              "selectedWorker": "worker-06",
               "selectionFailureReason": null,
               "workersVsSelectionContradiction": false,
               "pathNormalizationWarning": null,

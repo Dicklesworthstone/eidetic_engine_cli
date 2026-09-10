@@ -127,7 +127,7 @@ now_ms = int(time.time() * 1000)
 FIXTURES = {
     "healthy": {
         "status": "healthy",
-        "selectedWorker": "trj",
+        "selectedWorker": "worker-a",
         "roots": {
             "dataProjects": {"status": "present", "resolves": True, "readable": True, "acceptedByPolicy": True, "outerWorkspaceHazard": False},
             "dp": {"status": "present", "resolves": True, "readable": True, "acceptedByPolicy": True, "outerWorkspaceHazard": False},
@@ -137,7 +137,7 @@ FIXTURES = {
     },
     "missing-root": {
         "status": "missing_root",
-        "selectedWorker": "trj",
+        "selectedWorker": "worker-a",
         "roots": {
             "dataProjects": {"status": "missing", "resolves": False, "readable": False, "acceptedByPolicy": False, "outerWorkspaceHazard": False},
             "dp": {"status": "present", "resolves": True, "readable": True, "acceptedByPolicy": True, "outerWorkspaceHazard": False},
@@ -147,7 +147,7 @@ FIXTURES = {
     },
     "outer-workspace-shadowed": {
         "status": "outer_workspace_shadowed",
-        "selectedWorker": "trj",
+        "selectedWorker": "worker-a",
         "roots": {
             "dataProjects": {"status": "present", "resolves": True, "readable": True, "acceptedByPolicy": False, "outerWorkspaceHazard": True},
             "dp": {"status": "present", "resolves": True, "readable": True, "acceptedByPolicy": True, "outerWorkspaceHazard": False},
@@ -167,7 +167,7 @@ FIXTURES = {
     },
     "permission-denied": {
         "status": "permission_denied",
-        "selectedWorker": "trj",
+        "selectedWorker": "worker-a",
         "roots": {
             "dataProjects": {"status": "permission_denied", "resolves": True, "readable": False, "acceptedByPolicy": False, "outerWorkspaceHazard": False},
             "dp": {"status": "present", "resolves": True, "readable": True, "acceptedByPolicy": True, "outerWorkspaceHazard": False},
