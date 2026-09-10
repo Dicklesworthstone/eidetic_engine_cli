@@ -26465,7 +26465,7 @@ mod tests {
             .get_curation_candidate(&workspace_id, &candidate_id)
             .map_err(|e| e.to_string())?
             .ok_or("missing candidate")?;
-        connection.insert_audit(&crate::db::generate_audit_id(), &CreateAuditInput {
+        connection.insert_audit(&crate::db::generate_audit_id(), &crate::db::CreateAuditInput {
             workspace_id: Some(workspace_id.clone()),
             actor: Some("learn.experiment.propose".to_owned()),
             action: audit_actions::CURATION_CANDIDATE_CREATE.to_owned(),
