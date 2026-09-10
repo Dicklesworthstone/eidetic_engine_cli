@@ -2727,13 +2727,10 @@ pub(crate) fn ensure_bound_workspace(
                 .map(|name| name.to_string_lossy().into_owned())
         }),
     };
+    let scope = workspace_scope_fields(&derive_workspace_scope(Path::new(&input.path)));
 
     connection
-        .upsert_workspace_with_scope(
-            requested_workspace_id,
-            &input,
-            &WorkspaceScopeFields::standalone(),
-        )
+        .upsert_workspace_with_scope(requested_workspace_id, &input, &scope)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to register workspace: {error}"),
             repair: Some("ee doctor".to_owned()),
@@ -3517,6 +3514,91 @@ mod tests {
             ))
             .as_deref()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn binding_persists_detected_scope_and_keeps_existing_metadata() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let repository = temp.path().join("repository");
+        fs::create_dir_all(&repository).map_err(|error| error.to_string())?;
+        let git = std::process::Command::new("git")
+            .args(["init", "--quiet", "--initial-branch=main"])
+            .current_dir(&repository)
+            .output()
+            .map_err(|error| error.to_string())?;
+        assert!(
+            git.status.success(),
+            "{}",
+            String::from_utf8_lossy(&git.stderr)
+        );
+        let repository = canonical_or_lexical(&repository);
+        for (path, kind, subproject) in [
+            (temp.path().join("standalone"), "standalone", None),
+            (repository.clone(), "repository", None),
+            (
+                repository.join("services/api"),
+                "subproject",
+                Some(Path::new("services/api")),
+            ),
+        ] {
+            fs::create_dir_all(path.join(WORKSPACE_MARKER)).map_err(|error| error.to_string())?;
+            let path = canonical_or_lexical(&path);
+            let db = DbConnection::open_file(path.join(WORKSPACE_MARKER).join("ee.db"))
+                .map_err(|error| error.to_string())?;
+            db.migrate().map_err(|error| error.to_string())?;
+            let id = stable_workspace_id(&path);
+            assert_eq!(
+                ensure_bound_workspace(&db, &id, &[&path]).map_err(|error| error.message())?,
+                id
+            );
+            db.update_workspace_name(&id, Some("preserved-name"))
+                .map_err(|error| error.to_string())?;
+            let before = db
+                .get_workspace(&id)
+                .map_err(|error| error.to_string())?
+                .ok_or("bound workspace missing")?;
+            assert_eq!(before.scope_kind, kind);
+            assert_eq!(before.subproject_path.as_deref().map(Path::new), subproject);
+            if kind == "standalone" {
+                assert!(before.repository_root.is_none());
+                assert!(before.repository_fingerprint.is_none());
+            } else {
+                assert_eq!(before.repository_root.as_deref(), repository.to_str());
+                assert!(
+                    before
+                        .repository_fingerprint
+                        .as_deref()
+                        .is_some_and(|value| value.starts_with("repo:"))
+                );
+            }
+            let unrelated_id = stable_workspace_id(&temp.path().join("unrelated"));
+            assert_eq!(
+                ensure_bound_workspace(&db, &unrelated_id, &[&path])
+                    .map_err(|error| error.message())?,
+                id
+            );
+            assert_eq!(
+                db.get_workspace(&id).map_err(|error| error.to_string())?,
+                Some(before.clone())
+            );
+            db.close().map_err(|error| error.to_string())?;
+            let resolved = resolve_workspace_report(&WorkspaceResolveOptions {
+                workspace_path: Some(path),
+                target: None,
+                registry_path: Some(temp.path().join("absent-registry.db")),
+            })
+            .map_err(|error| error.message())?;
+            assert_eq!(resolved.workspace_id, id);
+            assert_eq!(resolved.scope_kind, kind);
+            assert_eq!(resolved.repository_root, before.repository_root);
+            assert_eq!(
+                resolved.repository_fingerprint,
+                before.repository_fingerprint
+            );
+            assert_eq!(resolved.subproject_path, before.subproject_path);
+        }
+        assert!(!temp.path().join("absent-registry.db").exists());
         Ok(())
     }
 
