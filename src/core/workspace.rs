@@ -2184,7 +2184,29 @@ fn resolve_path_report(
         .join(WORKSPACE_MARKER)
         .join("ee.db");
     let stored = if registry_file_exists(&database)? {
-        let connection = open_registry_read_only(&database)?;
+        let database_error = |error: crate::db::DbError| DomainError::Storage {
+            message: format!(
+                "Failed to read workspace database '{}': {error}",
+                database.display()
+            ),
+            repair: Some(format!(
+                "ee doctor --workspace {} --json",
+                shell_quote_path_arg(&resolution.location.root)
+            )),
+        };
+        let connection = DbConnection::open_file_read_only(&database).map_err(database_error)?;
+        if connection.needs_migration().map_err(database_error)? {
+            return Err(DomainError::MigrationRequired {
+                message: format!(
+                    "Workspace database requires migration: {}",
+                    database.display()
+                ),
+                repair: Some(format!(
+                    "ee migrate run --workspace {}",
+                    shell_quote_path_arg(&resolution.location.root)
+                )),
+            });
+        }
         select_existing_workspace_row(
             &connection,
             &requested_id,
@@ -3514,6 +3536,43 @@ mod tests {
             ))
             .as_deref()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_reports_local_migration_without_mutating_the_store() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("workspace with 'quotes'");
+        let marker = workspace.join(WORKSPACE_MARKER);
+        fs::create_dir_all(&marker).map_err(|error| error.to_string())?;
+        let workspace = canonical_or_lexical(&workspace);
+        let database = marker.join("ee.db");
+        let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        db.close().map_err(|error| error.to_string())?;
+        let before = fs::read(&database).map_err(|error| error.to_string())?;
+        let registry = temp.path().join("absent-registry.db");
+        let error = resolve_workspace_report(&WorkspaceResolveOptions {
+            workspace_path: Some(workspace.clone()),
+            target: None,
+            registry_path: Some(registry.clone()),
+        })
+        .expect_err("unmigrated local store must request migration");
+        let DomainError::MigrationRequired { message, repair } = error else {
+            return Err(format!("unexpected error: {}", error.message()));
+        };
+        assert!(message.contains("Workspace database requires migration"));
+        assert_eq!(
+            repair,
+            Some(format!(
+                "ee migrate run --workspace {}",
+                shell_quote_path_arg(&workspace)
+            ))
+        );
+        assert_eq!(
+            fs::read(&database).map_err(|error| error.to_string())?,
+            before
+        );
+        assert!(!registry.exists());
         Ok(())
     }
 
