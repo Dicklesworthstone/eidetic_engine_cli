@@ -25,8 +25,8 @@
 //!   `Cargo.toml` patch paths, so it stays.
 //! * `fuzz/corpus/**` — libFuzzer-generated mutation noise that happens to
 //!   contain short byte sequences; it is machine-generated input, not prose.
-//! * Untracked `.beads` state (database, locks, `.br_history`, recovery
-//!   snapshots). Only the five files git tracks there are published.
+//! * `.beads/**` when git is unavailable — see `WALKED_DOT_DIRECTORIES`. In a
+//!   git checkout the tracked beads files are scanned like anything else.
 //!
 //! If a banned token ever becomes legitimate (for example `css` in an HTML
 //! output feature), add the specific file to `ALLOWLISTED_FILES` with a
@@ -53,20 +53,13 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
 const SKIPPED_PREFIXES: &[&str] = &["fuzz/corpus/"];
 
 /// Dot-directories the filesystem-walk fallback is allowed to descend into.
-/// Every other dot-directory holds local state (beads history and recovery
-/// snapshots, editor caches) that git does not publish; on a build worker the
-/// synced tree can still carry stale copies of it, so the walk must not look.
-const WALKED_DOT_DIRECTORIES: &[&str] = &[".beads", ".cargo", ".github"];
-
-/// The only `.beads` entries git tracks; the rest of that directory is local
-/// database, lock and history state (see `.beads/.gitignore`).
-const TRACKED_BEADS_FILES: &[&str] = &[
-    ".beads/.gitignore",
-    ".beads/config.yaml",
-    ".beads/deletions.jsonl",
-    ".beads/issues.jsonl",
-    ".beads/metadata.json",
-];
+///
+/// Every other dot-directory holds state git does not publish. `.beads` is
+/// excluded even though five of its files *are* tracked: `.rchignore` keeps
+/// that directory out of the remote build sync, so a worker's copy of it is
+/// whatever was there last time — stale by construction. It is covered by the
+/// git-tracked path instead, which is what CI and a local `cargo test` use.
+const WALKED_DOT_DIRECTORIES: &[&str] = &[".cargo", ".github"];
 
 /// Repository-relative files exempt from the scan, each with a reason.
 const ALLOWLISTED_FILES: &[(&str, &str)] = &[
@@ -286,15 +279,10 @@ fn is_skipped_directory(name: &str) -> bool {
 }
 
 fn is_skipped_path(relative: &str) -> bool {
-    if SKIPPED_PREFIXES
+    SKIPPED_PREFIXES
         .iter()
         .any(|prefix| relative.starts_with(prefix))
         || ALLOWLISTED_FILES.iter().any(|(path, _)| *path == relative)
-    {
-        return true;
-    }
-    // Untracked beads state, which the walk fallback would otherwise reach.
-    relative.starts_with(".beads/") && !TRACKED_BEADS_FILES.contains(&relative)
 }
 
 fn collect_files(root: &Path, directory: &Path, out: &mut Vec<PathBuf>) {
