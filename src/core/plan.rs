@@ -1340,14 +1340,17 @@ impl RecipeCatalogEntry {
 
 fn recipe_storage_error(error: impl std::fmt::Display) -> DomainError {
     DomainError::Storage {
-        message: format!("Cannot read the workspace recipe catalog: {error}"),
+        message: format!("Recipe storage failed: {}", recipe_text(&error.to_string())),
         repair: Some("ee doctor --workspace . --json".to_owned()),
     }
 }
 
 fn recipe_search_error(error: impl std::fmt::Display) -> DomainError {
     DomainError::SearchIndex {
-        message: format!("Recipe retrieval failed: {error}"),
+        message: format!(
+            "Recipe retrieval failed: {}",
+            recipe_text(&error.to_string())
+        ),
         repair: Some("ee doctor --workspace . --json".to_owned()),
     }
 }
@@ -2389,17 +2392,21 @@ mod tests {
         let (directory, database, id) = recipe_workspace()?;
         let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
         let mut malformed = stored_recipe_fixture(&id, "plrec_malformed");
-        malformed.steps_json = "{}".to_owned(); // Legal SQL JSON, wrong recipe shape.
+        malformed.steps_json = json!("api_key=recipe-shape-secret").to_string(); // Legal SQL JSON, wrong recipe shape.
         db.insert_maintenance_history_for_recovery(&crate::db::StoredMaintenanceHistory {
             recipes: vec![malformed],
             ..Default::default()
         })
         .map_err(|e| e.to_string())?;
         db.close().map_err(|e| e.to_string())?;
-        assert!(matches!(
-            recipe_catalog(directory.path(), Some(&database)),
-            Err(DomainError::Storage { .. })
-        ));
+        let error = recipe_catalog(directory.path(), Some(&database))
+            .err()
+            .ok_or("malformed recipe unexpectedly accepted")?;
+        assert!(matches!(&error, DomainError::Storage { .. }));
+        assert!(
+            !error.message().contains("recipe-shape-secret"),
+            "typed parse errors must not echo secret-bearing malformed values"
+        );
         let missing = directory.path().join("missing.db");
         assert!(recipe_catalog(directory.path(), Some(&missing)).is_err());
         assert!(!missing.exists());
