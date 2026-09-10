@@ -12521,8 +12521,20 @@ mod tests {
         connection.execute_raw(&format!(
             "INSERT INTO agents (id, workspace_id, name, created_at, last_seen_at) VALUES ('agt_00000000000000000000000000', '{workspace_id}', 'backup-agent', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')"
         )).map_err(|e| e.to_string())?;
+        // This table is now supported. A row belonging to a different
+        // workspace must still remain visibly uncovered by this scoped backup.
+        let other_workspace = WorkspaceId::from_uuid(Uuid::from_u128(99)).to_string();
+        connection
+            .insert_workspace(
+                &other_workspace,
+                &CreateWorkspaceInput {
+                    path: workspace.join("other-workspace").display().to_string(),
+                    name: Some("other".to_owned()),
+                },
+            )
+            .map_err(|e| e.to_string())?;
         connection.execute_raw(&format!(
-            "INSERT INTO debt_snapshots (workspace_id, snapshot_day, generation, report_hash, report_json, item_count, total_score, created_at) VALUES ('{workspace_id}', '2026-09-01', 1, 'blake3:debt-fixture', '{{}}', 0, 0.0, '2026-09-01T00:00:00Z')"
+            "INSERT INTO debt_snapshots (workspace_id, snapshot_day, generation, report_hash, report_json, item_count, total_score, created_at) VALUES ('{other_workspace}', '2026-09-01', 1, 'blake3:debt-fixture', '{{}}', 0, 0.0, '2026-09-01T00:00:00Z')"
         )).map_err(|e| e.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
 
@@ -12546,7 +12558,7 @@ mod tests {
         )?;
         ensure(
             !report.recovery_inventory.snapshot_coverage_complete,
-            "nonempty uncovered debt snapshot must make snapshot coverage incomplete",
+            "foreign-workspace debt snapshot must make whole-database snapshot coverage incomplete",
         )?;
         let session = report
             .recovery_inventory
@@ -21207,11 +21219,21 @@ mod tests {
         Ok(id)
     }
 
-    fn recovery_maintenance_rows(workspace_id: &str, memory_id: &str) -> Result<StoredMaintenanceHistory, String> {
+    fn recovery_maintenance_rows(
+        workspace_id: &str,
+        memory_id: &str,
+    ) -> Result<StoredMaintenanceHistory, String> {
         let timestamp = "2026-09-01T00:00:00Z";
         let hash = hash_bytes(b"maintenance report");
-        let spec = MemorySentinelSpec::from_raw(memory_id, "path_exists:Cargo.toml", crate::models::MemorySentinelPolarity::Gate,
-            None, "api_key=maintenance-secret-provenance", None).map_err(|e| e.to_string())?;
+        let spec = MemorySentinelSpec::from_raw(
+            memory_id,
+            "path_exists:Cargo.toml",
+            crate::models::MemorySentinelPolarity::Gate,
+            None,
+            "api_key=maintenance-secret-provenance",
+            None,
+        )
+        .map_err(|e| e.to_string())?;
         Ok(StoredMaintenanceHistory {
             debt_snapshots: vec![crate::db::StoredDebtSnapshot { workspace_id: workspace_id.to_owned(), snapshot_day: "2026-09-01".to_owned(),
                 generation: 7, report_hash: hash.clone(), report_json: json!({"api_key": "maintenance-secret-debt"}).to_string(),
@@ -21249,179 +21271,538 @@ mod tests {
 
     #[test]
     fn default_backup_restores_maintenance_and_live_consumers() -> TestResult {
-        for redaction in [RedactionLevel::None, RedactionLevel::Standard, RedactionLevel::Full] {
-            let (tempdir, workspace, database) = fixture_with_memory_content("tangerine compass release").map_err(|e| e.message())?;
+        for redaction in [
+            RedactionLevel::None,
+            RedactionLevel::Standard,
+            RedactionLevel::Full,
+        ] {
+            let (tempdir, workspace, database) =
+                fixture_with_memory_content("tangerine compass release")
+                    .map_err(|e| e.message())?;
             let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
             let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
             let mut original = recovery_maintenance_rows(&workspace_id, &memory_id)?;
-            original.tripwires = (0..129).map(|n| {
-                let mut row = original.tripwires[0].clone(); row.id = format!("tw_{n:03}"); row
-            }).collect();
+            original.tripwires = (0..129)
+                .map(|n| {
+                    let mut row = original.tripwires[0].clone();
+                    row.id = format!("tw_{n:03}");
+                    row
+                })
+                .collect();
             // The first check references a parent in the next chunk.
             original.tripwire_checks[0].tripwire_id = "tw_128".to_owned();
             if redaction == RedactionLevel::Full {
-                original.sentinel_specs.clear(); original.tripwires.clear(); original.tripwire_checks.clear();
+                original.sentinel_specs.clear();
+                original.tripwires.clear();
+                original.tripwire_checks.clear();
             }
             let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
             let candidate = format!("curate_{:026}", 9);
-            db.insert_curation_candidate(&candidate, &crate::db::CreateCurationCandidateInput {
-                workspace_id: workspace_id.clone(), candidate_type: "rule_proposal".to_owned(), target_memory_id: Some(memory_id.clone()),
-                proposed_content: Some("review the release".to_owned()), proposed_confidence: None,
-                proposed_trust_class: None, source_type: "human_request".to_owned(),
-                source_id: None, reason: "review".to_owned(), confidence: 0.75, status: None, created_at: None, ttl_expires_at: None,
-                derivation_source_refs_json: None, derivation_metadata_json: None,
-            }).map_err(|e| e.to_string())?;
+            db.insert_curation_candidate(
+                &candidate,
+                &crate::db::CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "rule_proposal".to_owned(),
+                    target_memory_id: Some(memory_id.clone()),
+                    proposed_content: Some("review the release".to_owned()),
+                    proposed_confidence: None,
+                    proposed_trust_class: None,
+                    source_type: "human_request".to_owned(),
+                    source_id: None,
+                    reason: "review".to_owned(),
+                    confidence: 0.75,
+                    status: None,
+                    created_at: None,
+                    ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
             let mut consumed = original.reflection_requests[0].clone();
-            consumed.request_id = "reflect_req_consumed".to_owned(); consumed.request_hash = hash_bytes(b"consumed request");
-            consumed.status = "consumed".to_owned(); consumed.consumed_candidate_id = Some(candidate.clone());
-            consumed.consumed_at = Some("2026-09-02T00:00:00Z".to_owned()); consumed.consumed_result_hash = Some(hash_bytes(b"accepted result"));
+            consumed.request_id = "reflect_req_consumed".to_owned();
+            consumed.request_hash = hash_bytes(b"consumed request");
+            consumed.status = "consumed".to_owned();
+            consumed.consumed_candidate_id = Some(candidate.clone());
+            consumed.consumed_at = Some("2026-09-02T00:00:00Z".to_owned());
+            consumed.consumed_result_hash = Some(hash_bytes(b"accepted result"));
             original.reflection_requests.insert(0, consumed);
-            db.with_transaction(|| db.insert_maintenance_history_for_recovery(&original)).map_err(|e| e.to_string())?;
-            ensure_equal(db.maintenance_history_for_recovery(&workspace_id).map_err(|e| e.to_string())?, original.clone(), "source row fidelity")?;
+            db.with_transaction(|| db.insert_maintenance_history_for_recovery(&original))
+                .map_err(|e| e.to_string())?;
+            ensure_equal(
+                db.maintenance_history_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                original.clone(),
+                "source row fidelity",
+            )?;
             db.close().map_err(|e| e.to_string())?;
-            let backup = create_backup(&BackupCreateOptions { workspace_path: workspace.clone(), database_path: Some(database.clone()),
-                output_dir: None, label: None, redaction_level: redaction, include_derived: false, include_graph_cache: false, dry_run: false }).map_err(|e| e.message())?;
-            for table in ["debt_snapshots", "memory_sentinel_specs", "reflection_request_ledger", "situation_records", "tripwires", "tripwire_check_events", "plan_recipes"] {
-                let entry = backup.recovery_inventory.entries.iter().find(|e| e.table == table).ok_or("missing maintenance inventory")?;
-                ensure(entry.schema_covered && entry.snapshot_covered, format!("{table} covered"))?;
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            for table in [
+                "debt_snapshots",
+                "memory_sentinel_specs",
+                "reflection_request_ledger",
+                "situation_records",
+                "tripwires",
+                "tripwire_check_events",
+                "plan_recipes",
+            ] {
+                let entry = backup
+                    .recovery_inventory
+                    .entries
+                    .iter()
+                    .find(|e| e.table == table)
+                    .ok_or("missing maintenance inventory")?;
+                ensure(
+                    entry.schema_covered && entry.snapshot_covered,
+                    format!("{table} covered"),
+                )?;
             }
-            let assets = backup.derived.iter().filter(|a| a.kind == "maintenance_history").collect::<Vec<_>>();
-            ensure_equal(assets.len(), if redaction == RedactionLevel::Full {1} else {2}, "maintenance chunks")?;
+            let assets = backup
+                .derived
+                .iter()
+                .filter(|a| a.kind == "maintenance_history")
+                .collect::<Vec<_>>();
+            ensure_equal(
+                assets.len(),
+                if redaction == RedactionLevel::Full {
+                    1
+                } else {
+                    2
+                },
+                "maintenance chunks",
+            )?;
             for asset in assets {
-                let bytes = fs::read(Path::new(&backup.backup_path).join(&asset.path)).map_err(|e| e.to_string())?;
-                let chunk: BackupMaintenanceHistory = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                let bytes = fs::read(Path::new(&backup.backup_path).join(&asset.path))
+                    .map_err(|e| e.to_string())?;
+                let chunk: BackupMaintenanceHistory =
+                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
                 ensure(chunk.authentication.is_some(), "maintenance authenticated")?;
-                if redaction != RedactionLevel::None { ensure(!String::from_utf8_lossy(&bytes).contains("maintenance-secret-"), "maintenance secrets redacted")?; }
+                if redaction != RedactionLevel::None {
+                    ensure(
+                        !String::from_utf8_lossy(&bytes).contains("maintenance-secret-"),
+                        "maintenance secrets redacted",
+                    )?;
+                }
             }
             let side = tempdir.path().join("maintenance-restored");
-            let restored = restore_backup_to_side_path(&BackupRestoreOptions { workspace_path: workspace.clone(), backup_path: PathBuf::from(&backup.backup_path),
-                side_path: side.clone(), restore_graph_cache: false, dry_run: false }).map_err(|e| e.message())?;
-            ensure_equal(restored.restored_maintenance_history.clone(), BackupMaintenanceHistoryCounts::from(&original), "maintenance restored counts")?;
-            ensure_equal(restored.data_json()["counts"]["maintenanceHistoryRestored"]["reflectionRequests"].as_u64(), Some(2), "JSON maintenance counts")?;
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: side.clone(),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            ensure_equal(
+                restored.restored_maintenance_history.clone(),
+                BackupMaintenanceHistoryCounts::from(&original),
+                "maintenance restored counts",
+            )?;
+            ensure_equal(
+                restored.data_json()["counts"]["maintenanceHistoryRestored"]["reflectionRequests"]
+                    .as_u64(),
+                Some(2),
+                "JSON maintenance counts",
+            )?;
             let restored_database = PathBuf::from(&restored.restored_database_path);
             let db = DbConnection::open_file(&restored_database).map_err(|e| e.to_string())?;
-            let target = db.list_workspaces().map_err(|e| e.to_string())?.into_iter().next().ok_or("restored workspace")?;
-            let rows = db.maintenance_history_for_recovery(&target.id).map_err(|e| e.to_string())?;
+            let target = db
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .next()
+                .ok_or("restored workspace")?;
+            let rows = db
+                .maintenance_history_for_recovery(&target.id)
+                .map_err(|e| e.to_string())?;
             if redaction == RedactionLevel::None {
                 let mut expected = original.clone();
-                for row in &mut expected.debt_snapshots {row.workspace_id.clone_from(&target.id);}
-                for row in &mut expected.reflection_requests {row.workspace_id.clone_from(&target.id);}
-                for row in &mut expected.situations {row.workspace_scope.clone_from(&target.id);}
-                for row in &mut expected.tripwires {row.workspace_id.clone_from(&target.id);}
-                for row in &mut expected.tripwire_checks {row.workspace_id.clone_from(&target.id);}
-                for row in &mut expected.recipes {row.workspace_id.clone_from(&target.id);}
-                ensure_equal(rows.clone(), expected, "all durable fields exactly recovered")?;
+                for row in &mut expected.debt_snapshots {
+                    row.workspace_id.clone_from(&target.id);
+                }
+                for row in &mut expected.reflection_requests {
+                    row.workspace_id.clone_from(&target.id);
+                }
+                for row in &mut expected.situations {
+                    row.workspace_scope.clone_from(&target.id);
+                }
+                for row in &mut expected.tripwires {
+                    row.workspace_id.clone_from(&target.id);
+                }
+                for row in &mut expected.tripwire_checks {
+                    row.workspace_id.clone_from(&target.id);
+                }
+                for row in &mut expected.recipes {
+                    row.workspace_id.clone_from(&target.id);
+                }
+                ensure_equal(
+                    rows.clone(),
+                    expected,
+                    "all durable fields exactly recovered",
+                )?;
             }
-            ensure_equal(db.reflection_request_replay_status(&target.id, "reflect_req_recovery", &hash_bytes(b"new result"), "2026-09-03T00:00:00Z").map_err(|e| e.to_string())?,
-                crate::db::ReflectionRequestReplayStatus::Pending, "pending reflection remains pending")?;
-            ensure_equal(db.reflection_request_replay_status(&target.id, "reflect_req_consumed", &hash_bytes(b"accepted result"), "2026-09-03T00:00:00Z").map_err(|e| e.to_string())?,
-                crate::db::ReflectionRequestReplayStatus::AcceptedReplay { candidate_id: candidate.clone() }, "consumed reflection replay remains idempotent")?;
-            ensure(matches!(db.reflection_request_replay_status(&target.id, "reflect_req_consumed", &hash_bytes(b"different result"), "2026-09-03T00:00:00Z").map_err(|e| e.to_string())?,
-                crate::db::ReflectionRequestReplayStatus::MismatchedReplay { .. }), "consumed reflection refuses substituted result")?;
-            let situation = crate::core::situation::get_situation_record_details(&db, "sit_recovery").map_err(|e| e.message())?.ok_or("restored situation consumer")?;
-            ensure_equal(situation.category, crate::models::SituationCategory::Release, "restored classification")?;
-            ensure_equal(db.list_debt_snapshots(&target.id, 10).map_err(|e| e.to_string())?[0].total_score, 0.75, "debt history usable")?;
-            ensure_equal(rows.recipes[0].helpful_count, 17, "recipe counters recovered")?;
-            ensure_equal(rows.recipes[0].last_recommended_at.as_deref(), Some("2026-09-01T00:00:00Z"), "recipe chronology recovered")?;
+            ensure_equal(
+                db.reflection_request_replay_status(
+                    &target.id,
+                    "reflect_req_recovery",
+                    &hash_bytes(b"new result"),
+                    "2026-09-03T00:00:00Z",
+                )
+                .map_err(|e| e.to_string())?,
+                crate::db::ReflectionRequestReplayStatus::Pending,
+                "pending reflection remains pending",
+            )?;
+            ensure_equal(
+                db.reflection_request_replay_status(
+                    &target.id,
+                    "reflect_req_consumed",
+                    &hash_bytes(b"accepted result"),
+                    "2026-09-03T00:00:00Z",
+                )
+                .map_err(|e| e.to_string())?,
+                crate::db::ReflectionRequestReplayStatus::AcceptedReplay {
+                    candidate_id: candidate.clone(),
+                },
+                "consumed reflection replay remains idempotent",
+            )?;
+            ensure(
+                matches!(
+                    db.reflection_request_replay_status(
+                        &target.id,
+                        "reflect_req_consumed",
+                        &hash_bytes(b"different result"),
+                        "2026-09-03T00:00:00Z"
+                    )
+                    .map_err(|e| e.to_string())?,
+                    crate::db::ReflectionRequestReplayStatus::MismatchedReplay { .. }
+                ),
+                "consumed reflection refuses substituted result",
+            )?;
+            let situation =
+                crate::core::situation::get_situation_record_details(&db, "sit_recovery")
+                    .map_err(|e| e.message())?
+                    .ok_or("restored situation consumer")?;
+            ensure_equal(
+                situation.category,
+                crate::models::SituationCategory::Release,
+                "restored classification",
+            )?;
+            ensure_equal(
+                db.list_debt_snapshots(&target.id, 10)
+                    .map_err(|e| e.to_string())?[0]
+                    .total_score,
+                0.75,
+                "debt history usable",
+            )?;
+            ensure_equal(
+                rows.recipes[0].helpful_count,
+                17,
+                "recipe counters recovered",
+            )?;
+            ensure_equal(
+                rows.recipes[0].last_recommended_at.as_deref(),
+                Some("2026-09-01T00:00:00Z"),
+                "recipe chronology recovered",
+            )?;
             if redaction != RedactionLevel::Full {
-                ensure(db.latest_memory_sentinel_result(&rows.sentinel_specs[0].spec_hash).map_err(|e| e.to_string())?.is_none(), "restore does not invent a fresh sentinel result")?;
-                let spec = recovered_sentinel_spec(&rows.sentinel_specs[0]).map_err(|e| e.message())?;
-                ensure_equal(crate::core::sentinel::check_sentinel_status(&spec, crate::core::sentinel::SentinelCheckContext::new(&side)), crate::models::MemorySentinelResultStatus::Fail, "missing restored file fails predicate")?;
-                fs::write(side.join("Cargo.toml"), b"[package]\nname = 'restored'\n").map_err(|e| e.to_string())?;
-                ensure_equal(crate::core::sentinel::check_sentinel_status(&spec, crate::core::sentinel::SentinelCheckContext::new(&side)), crate::models::MemorySentinelResultStatus::Pass, "restored predicate checks real file")?;
+                ensure(
+                    db.latest_memory_sentinel_result(&rows.sentinel_specs[0].spec_hash)
+                        .map_err(|e| e.to_string())?
+                        .is_none(),
+                    "restore does not invent a fresh sentinel result",
+                )?;
+                let spec =
+                    recovered_sentinel_spec(&rows.sentinel_specs[0]).map_err(|e| e.message())?;
+                ensure_equal(
+                    crate::core::sentinel::check_sentinel_status(
+                        &spec,
+                        crate::core::sentinel::SentinelCheckContext::new(&side),
+                    ),
+                    crate::models::MemorySentinelResultStatus::Fail,
+                    "missing restored file fails predicate",
+                )?;
+                fs::write(side.join("Cargo.toml"), b"[package]\nname = 'restored'\n")
+                    .map_err(|e| e.to_string())?;
+                ensure_equal(
+                    crate::core::sentinel::check_sentinel_status(
+                        &spec,
+                        crate::core::sentinel::SentinelCheckContext::new(&side),
+                    ),
+                    crate::models::MemorySentinelResultStatus::Pass,
+                    "restored predicate checks real file",
+                )?;
                 let pack_options = crate::core::context::ContextPackOptions {
-                    workspace_path: side.clone(), database_path: Some(restored_database.clone()), index_dir: None, query: "tangerine compass release".to_owned(),
-                    speed: crate::search::SpeedMode::Instant, source_mode: crate::core::search::SearchSourceMode::LexicalOnly, strict_source_mode: true,
-                    filters: Default::default(), profile: None, max_tokens: Some(2000), candidate_pool: Some(10), max_results: None, include_tombstoned: false,
-                    as_of: None, include_expired: false, include_future: false, include_stale: false, relevance_floor: Some(0.0), redaction_level: RedactionLevel::Standard,
-                    memory_scope: crate::models::MemoryScope::Workspace, strict_scope: false, ppr_weight: Some(0.0), changed_symbols: vec![], changed_symbols_from_git: false,
-                    pagination: None, coordination_snapshot_path: None, coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
-                    task_lens: None, require_fresh_sentinels: true, output_options: Default::default(), persist_pack: false, baseline_write: None, no_lod: false,
+                    workspace_path: side.clone(),
+                    database_path: Some(restored_database.clone()),
+                    index_dir: None,
+                    query: "tangerine compass release".to_owned(),
+                    speed: crate::search::SpeedMode::Instant,
+                    source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                    strict_source_mode: true,
+                    filters: Default::default(),
+                    profile: None,
+                    max_tokens: Some(2000),
+                    candidate_pool: Some(10),
+                    max_results: None,
+                    include_tombstoned: false,
+                    as_of: None,
+                    include_expired: false,
+                    include_future: false,
+                    include_stale: false,
+                    relevance_floor: Some(0.0),
+                    redaction_level: RedactionLevel::Standard,
+                    memory_scope: crate::models::MemoryScope::Workspace,
+                    strict_scope: false,
+                    ppr_weight: Some(0.0),
+                    changed_symbols: vec![],
+                    changed_symbols_from_git: false,
+                    pagination: None,
+                    coordination_snapshot_path: None,
+                    coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+                    task_lens: None,
+                    require_fresh_sentinels: true,
+                    output_options: Default::default(),
+                    persist_pack: false,
+                    baseline_write: None,
+                    no_lod: false,
                 };
-                let packed = crate::core::context::run_context_pack(&pack_options).map_err(|e| format!("unverified sentinel pack: {e:?}"))?;
-                ensure(packed.data.pack.items.is_empty(), "freshness-required pack withholds unchecked restored memory")?;
-                let result = crate::models::MemorySentinelResult::new(crate::models::MemorySentinelResultInput {
-                    spec_hash: spec.spec_hash, status: crate::models::MemorySentinelResultStatus::Pass, checked_at: Utc::now().to_rfc3339(),
-                    evidence_summary: "Cargo.toml exists in restored workspace".to_owned(), stale_threshold_seconds: None,
-                }).map_err(|e| e.to_string())?;
-                db.insert_memory_sentinel_result(&result).map_err(|e| e.to_string())?;
-                let packed = crate::core::context::run_context_pack(&pack_options).map_err(|e| format!("checked sentinel pack: {e:?}"))?;
-                ensure(packed.data.pack.items.iter().any(|item| item.content.contains("tangerine compass")), "fresh checked memory included in pack")?;
-                let check = crate::core::tripwire::check_tripwire(&crate::core::tripwire::CheckOptions {
-                    workspace: side.clone(), database_path: Some(restored_database.clone()), tripwire_id: "tw_128".to_owned(),
-                    event_payload: crate::core::tripwire::TripwireEventPayload::default().with_task_input("release"), dry_run: false, update_timestamp: true, task_outcome: None,
-                }).map_err(|e| e.message())?;
-                ensure_equal(check.result, crate::core::tripwire::CheckResult::Triggered, "restored tripwire evaluates live task")?;
+                let packed = crate::core::context::run_context_pack(&pack_options)
+                    .map_err(|e| format!("unverified sentinel pack: {e:?}"))?;
+                ensure(
+                    packed.data.pack.items.is_empty(),
+                    "freshness-required pack withholds unchecked restored memory",
+                )?;
+                let result = crate::models::MemorySentinelResult::new(
+                    crate::models::MemorySentinelResultInput {
+                        spec_hash: spec.spec_hash,
+                        status: crate::models::MemorySentinelResultStatus::Pass,
+                        checked_at: Utc::now().to_rfc3339(),
+                        evidence_summary: "Cargo.toml exists in restored workspace".to_owned(),
+                        stale_threshold_seconds: None,
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+                db.insert_memory_sentinel_result(&result)
+                    .map_err(|e| e.to_string())?;
+                let packed = crate::core::context::run_context_pack(&pack_options)
+                    .map_err(|e| format!("checked sentinel pack: {e:?}"))?;
+                ensure(
+                    packed
+                        .data
+                        .pack
+                        .items
+                        .iter()
+                        .any(|item| item.content.contains("tangerine compass")),
+                    "fresh checked memory included in pack",
+                )?;
+                let check =
+                    crate::core::tripwire::check_tripwire(&crate::core::tripwire::CheckOptions {
+                        workspace: side.clone(),
+                        database_path: Some(restored_database.clone()),
+                        tripwire_id: "tw_128".to_owned(),
+                        event_payload: crate::core::tripwire::TripwireEventPayload::default()
+                            .with_task_input("release"),
+                        dry_run: false,
+                        update_timestamp: true,
+                        task_outcome: None,
+                    })
+                    .map_err(|e| e.message())?;
+                ensure_equal(
+                    check.result,
+                    crate::core::tripwire::CheckResult::Triggered,
+                    "restored tripwire evaluates live task",
+                )?;
                 ensure(!check.should_halt, "warning tripwire remains advisory")?;
-                ensure_equal(db.list_tripwire_check_events("tw_128").map_err(|e| e.to_string())?.len(), 2, "historical and new check both retained")?;
+                ensure_equal(
+                    db.list_tripwire_check_events("tw_128")
+                        .map_err(|e| e.to_string())?
+                        .len(),
+                    2,
+                    "historical and new check both retained",
+                )?;
             }
             let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
-            ensure_equal(source.maintenance_history_for_recovery(&workspace_id).map_err(|e| e.to_string())?, original, "restore leaves source maintenance untouched")?;
+            ensure_equal(
+                source
+                    .maintenance_history_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                original,
+                "restore leaves source maintenance untouched",
+            )?;
         }
         Ok(())
     }
 
     #[test]
     fn maintenance_history_rejects_corruption_and_rolls_back() -> TestResult {
-        for defect in ["tampered", "unsigned", "schema", "backup", "missing_chunk", "duplicate_chunk", "oversize",
-            "foreign_row", "orphan_sentinel", "sentinel_hash", "sentinel_safety", "duplicate_sentinel", "orphan_candidate",
-            "duplicate_debt", "duplicate_request", "duplicate_situation", "orphan_tripwire", "wrong_preflight", "duplicate_recipe",
-            "invalid_json", "late_constraint", "existing_recipe"] {
+        for defect in [
+            "tampered",
+            "unsigned",
+            "schema",
+            "backup",
+            "missing_chunk",
+            "duplicate_chunk",
+            "oversize",
+            "foreign_row",
+            "orphan_sentinel",
+            "sentinel_hash",
+            "sentinel_safety",
+            "duplicate_sentinel",
+            "orphan_candidate",
+            "duplicate_debt",
+            "duplicate_request",
+            "duplicate_situation",
+            "orphan_tripwire",
+            "wrong_preflight",
+            "duplicate_recipe",
+            "invalid_json",
+            "late_constraint",
+            "existing_recipe",
+        ] {
             let (tempdir, workspace, database) = fixture().map_err(|e| e.message())?;
             let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
             let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
-            let mut chunk = BackupMaintenanceHistory { schema: MAINTENANCE_HISTORY_SCHEMA.to_owned(), backup_id: "backup-maintenance".to_owned(),
-                workspace_id: workspace_id.clone(), chunk_index: 0, chunk_count: 1, rows: recovery_maintenance_rows(&workspace_id, &memory_id)?, authentication: None };
+            let mut chunk = BackupMaintenanceHistory {
+                schema: MAINTENANCE_HISTORY_SCHEMA.to_owned(),
+                backup_id: "backup-maintenance".to_owned(),
+                workspace_id: workspace_id.clone(),
+                chunk_index: 0,
+                chunk_count: 1,
+                rows: recovery_maintenance_rows(&workspace_id, &memory_id)?,
+                authentication: None,
+            };
             let mut preserved = StoredMaintenanceHistory::default();
             let mut recipe = chunk.rows.recipes[0].clone();
-            if defect != "existing_recipe" { recipe.id = "plrec_original".to_owned(); }
+            if defect != "existing_recipe" {
+                recipe.id = "plrec_original".to_owned();
+            }
             preserved.recipes.push(recipe);
             let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
-            db.insert_maintenance_history_for_recovery(&preserved).map_err(|e| e.to_string())?;
+            db.insert_maintenance_history_for_recovery(&preserved)
+                .map_err(|e| e.to_string())?;
             db.close().map_err(|e| e.to_string())?;
             match defect {
                 "schema" => chunk.schema.push_str(".unsupported"),
                 "backup" => chunk.backup_id = "different-backup".to_owned(),
                 "missing_chunk" => chunk.chunk_count = 2,
-                "oversize" => chunk.rows.recipes.resize(129, chunk.rows.recipes[0].clone()),
+                "oversize" => chunk
+                    .rows
+                    .recipes
+                    .resize(129, chunk.rows.recipes[0].clone()),
                 "foreign_row" => chunk.rows.debt_snapshots[0].workspace_id = "foreign".to_owned(),
-                "orphan_sentinel" => chunk.rows.sentinel_specs[0].memory_id = MemoryId::from_uuid(Uuid::from_u128(99)).to_string(),
-                "sentinel_hash" => chunk.rows.sentinel_specs[0].spec_hash = hash_bytes(b"wrong sentinel"),
-                "sentinel_safety" => chunk.rows.sentinel_specs[0].safety_class = crate::models::MemorySentinelSafetyClass::AllowlistedIntrospection,
-                "duplicate_sentinel" => chunk.rows.sentinel_specs.push(chunk.rows.sentinel_specs[0].clone()),
-                "orphan_candidate" => chunk.rows.reflection_requests[0].consumed_candidate_id = Some(format!("curate_{:026}", 99)),
-                "duplicate_debt" => chunk.rows.debt_snapshots.push(chunk.rows.debt_snapshots[0].clone()),
-                "duplicate_request" => chunk.rows.reflection_requests.push(chunk.rows.reflection_requests[0].clone()),
-                "duplicate_situation" => chunk.rows.situations.push(chunk.rows.situations[0].clone()),
-                "orphan_tripwire" => chunk.rows.tripwire_checks[0].tripwire_id = "tw_missing".to_owned(),
-                "wrong_preflight" => chunk.rows.tripwire_checks[0].preflight_run_id = "different-run".to_owned(),
+                "orphan_sentinel" => {
+                    chunk.rows.sentinel_specs[0].memory_id =
+                        MemoryId::from_uuid(Uuid::from_u128(99)).to_string()
+                }
+                "sentinel_hash" => {
+                    chunk.rows.sentinel_specs[0].spec_hash = hash_bytes(b"wrong sentinel")
+                }
+                "sentinel_safety" => {
+                    chunk.rows.sentinel_specs[0].safety_class =
+                        crate::models::MemorySentinelSafetyClass::AllowlistedIntrospection
+                }
+                "duplicate_sentinel" => chunk
+                    .rows
+                    .sentinel_specs
+                    .push(chunk.rows.sentinel_specs[0].clone()),
+                "orphan_candidate" => {
+                    chunk.rows.reflection_requests[0].consumed_candidate_id =
+                        Some(format!("curate_{:026}", 99))
+                }
+                "duplicate_debt" => chunk
+                    .rows
+                    .debt_snapshots
+                    .push(chunk.rows.debt_snapshots[0].clone()),
+                "duplicate_request" => chunk
+                    .rows
+                    .reflection_requests
+                    .push(chunk.rows.reflection_requests[0].clone()),
+                "duplicate_situation" => {
+                    chunk.rows.situations.push(chunk.rows.situations[0].clone())
+                }
+                "orphan_tripwire" => {
+                    chunk.rows.tripwire_checks[0].tripwire_id = "tw_missing".to_owned()
+                }
+                "wrong_preflight" => {
+                    chunk.rows.tripwire_checks[0].preflight_run_id = "different-run".to_owned()
+                }
                 "duplicate_recipe" => chunk.rows.recipes.push(chunk.rows.recipes[0].clone()),
-                "invalid_json" => chunk.rows.situations[0].context_hints_json = "invalid-json".to_owned(),
+                "invalid_json" => {
+                    chunk.rows.situations[0].context_hints_json = "invalid-json".to_owned()
+                }
                 "late_constraint" => chunk.rows.recipes[0].maturity = "invalid".to_owned(),
                 _ => {}
             }
-            let root = StoreAuthRoot::create(workspace_keys_dir(&workspace)).map_err(|e| e.to_string())?;
-            let mut payloads = vec![derived_payload("derived/maintenance-history/00000000.json".to_owned(), "maintenance_history",
-                "2026-09-01T00:00:00Z", None, serialized_payload_bytes(&chunk).map_err(|e| e.to_string())?)];
-            authenticate_maintenance_history_payloads(&mut payloads, Some(&root)).map_err(|e| e.message())?;
-            let mut signed: BackupMaintenanceHistory = serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
-            if defect == "tampered" { signed.rows.recipes[0].helpful_count += 1; }
-            if defect == "unsigned" { signed.authentication = None; }
+            let root =
+                StoreAuthRoot::create(workspace_keys_dir(&workspace)).map_err(|e| e.to_string())?;
+            let mut payloads = vec![derived_payload(
+                "derived/maintenance-history/00000000.json".to_owned(),
+                "maintenance_history",
+                "2026-09-01T00:00:00Z",
+                None,
+                serialized_payload_bytes(&chunk).map_err(|e| e.to_string())?,
+            )];
+            authenticate_maintenance_history_payloads(&mut payloads, Some(&root))
+                .map_err(|e| e.message())?;
+            let mut signed: BackupMaintenanceHistory =
+                serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
+            if defect == "tampered" {
+                signed.rows.recipes[0].helpful_count += 1;
+            }
+            if defect == "unsigned" {
+                signed.authentication = None;
+            }
             let path = tempdir.path().join("maintenance-history.json");
-            fs::write(&path, serialized_payload_bytes(&signed).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            fs::write(
+                &path,
+                serialized_payload_bytes(&signed).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
             let mut assets = vec![restored_cass_asset(&path, "maintenance_history")];
-            if defect == "duplicate_chunk" { assets.push(restored_cass_asset(&path, "maintenance_history")); }
-            let error = restore_maintenance_history(&database, &workspace, "backup-maintenance", &assets).err().ok_or_else(|| format!("accepted {defect}"))?;
+            if defect == "duplicate_chunk" {
+                assets.push(restored_cass_asset(&path, "maintenance_history"));
+            }
+            let error =
+                restore_maintenance_history(&database, &workspace, "backup-maintenance", &assets)
+                    .err()
+                    .ok_or_else(|| format!("accepted {defect}"))?;
             let expected = match defect {
-                "tampered" => "authentication failed", "unsigned" => "requires source-store authentication",
-                "schema" | "backup" | "missing_chunk" | "duplicate_chunk" | "oversize" => "maintenance-history chunks",
+                "tampered" => "authentication failed",
+                "unsigned" => "requires source-store authentication",
+                "schema" | "backup" | "missing_chunk" | "duplicate_chunk" | "oversize" => {
+                    "maintenance-history chunks"
+                }
                 "late_constraint" | "existing_recipe" => "constraint",
                 _ => "invalid maintenance history",
             };
-            ensure(error.message().to_lowercase().contains(expected), format!("{defect}: wrong refusal: {}", error.message()))?;
+            ensure(
+                error.message().to_lowercase().contains(expected),
+                format!("{defect}: wrong refusal: {}", error.message()),
+            )?;
             let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
-            ensure_equal(db.maintenance_history_for_recovery(&workspace_id).map_err(|e| e.to_string())?, preserved, format!("{defect}: rollback retains only original rows").as_str())?;
-            ensure(!db.list_audit_entries(Some(&workspace_id), Some(100)).map_err(|e| e.to_string())?.iter().any(|a| a.action == "backup.maintenance_history_restored"), "failure writes no success audit")?;
+            ensure_equal(
+                db.maintenance_history_for_recovery(&workspace_id)
+                    .map_err(|e| e.to_string())?,
+                preserved,
+                format!("{defect}: rollback retains only original rows").as_str(),
+            )?;
+            ensure(
+                !db.list_audit_entries(Some(&workspace_id), Some(100))
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|a| a.action == "backup.maintenance_history_restored"),
+                "failure writes no success audit",
+            )?;
         }
         Ok(())
     }
@@ -21433,31 +21814,76 @@ mod tests {
         let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
         let rows = recovery_maintenance_rows(&workspace_id, &memory_id)?;
         let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
-        db.insert_maintenance_history_for_recovery(&rows).map_err(|e| e.to_string())?;
+        db.insert_maintenance_history_for_recovery(&rows)
+            .map_err(|e| e.to_string())?;
         db.close().map_err(|e| e.to_string())?;
         let before = fs::read(&database).map_err(|e| e.to_string())?;
         let output = workspace.join("maintenance-backups");
         let keys = workspace_keys_dir(&workspace);
-        let mut options = BackupCreateOptions { workspace_path: workspace.clone(), database_path: Some(database.clone()), output_dir: Some(output.clone()), label: None,
-            redaction_level: RedactionLevel::Standard, include_derived: false, include_graph_cache: false, dry_run: true };
+        let mut options = BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            output_dir: Some(output.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: true,
+        };
         let preview = create_backup(&options).map_err(|e| e.message())?;
-        ensure(preview.derived.iter().any(|a| a.kind == "maintenance_history"), "dry-run previews maintenance")?;
-        ensure(!output.exists() && !keys.exists(), "dry-run creates neither output nor keys")?;
-        ensure_equal(fs::read(&database).map_err(|e| e.to_string())?, before.clone(), "maintenance preview leaves DB bytes unchanged")?;
+        ensure(
+            preview
+                .derived
+                .iter()
+                .any(|a| a.kind == "maintenance_history"),
+            "dry-run previews maintenance",
+        )?;
+        ensure(
+            !output.exists() && !keys.exists(),
+            "dry-run creates neither output nor keys",
+        )?;
+        ensure_equal(
+            fs::read(&database).map_err(|e| e.to_string())?,
+            before.clone(),
+            "maintenance preview leaves DB bytes unchanged",
+        )?;
         options.redaction_level = RedactionLevel::Full;
         for dry_run in [true, false] {
             options.dry_run = dry_run;
-            let error = create_backup(&options).err().ok_or("published changed sentinel predicate")?;
-            ensure(error.message().contains("changes a sentinel predicate"), "explicit predicate refusal")?;
-            ensure(!output.exists() && !keys.exists(), "predicate refusal before output or keys")?;
-            ensure_equal(fs::read(&database).map_err(|e| e.to_string())?, before.clone(), "predicate refusal leaves DB unchanged")?;
+            let error = create_backup(&options)
+                .err()
+                .ok_or("published changed sentinel predicate")?;
+            ensure(
+                error.message().contains("changes a sentinel predicate"),
+                "explicit predicate refusal",
+            )?;
+            ensure(
+                !output.exists() && !keys.exists(),
+                "predicate refusal before output or keys",
+            )?;
+            ensure_equal(
+                fs::read(&database).map_err(|e| e.to_string())?,
+                before.clone(),
+                "predicate refusal leaves DB unchanged",
+            )?;
         }
         options.redaction_level = RedactionLevel::Standard;
         fs::write(&keys, b"maintenance key obstruction").map_err(|e| e.to_string())?;
-        let error = create_backup(&options).err().ok_or("published unsigned maintenance history")?;
-        ensure(error.message().contains("require source-store authentication"), "maintenance requires keys")?;
+        let error = create_backup(&options)
+            .err()
+            .ok_or("published unsigned maintenance history")?;
+        ensure(
+            error
+                .message()
+                .contains("require source-store authentication"),
+            "maintenance requires keys",
+        )?;
         ensure(!output.exists(), "no unsigned backup publication")?;
-        ensure_equal(fs::read(&keys).map_err(|e| e.to_string())?, b"maintenance key obstruction".to_vec(), "key obstruction preserved")?;
+        ensure_equal(
+            fs::read(&keys).map_err(|e| e.to_string())?,
+            b"maintenance key obstruction".to_vec(),
+            "key obstruction preserved",
+        )?;
         Ok(())
     }
 

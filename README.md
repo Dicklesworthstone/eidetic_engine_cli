@@ -2357,6 +2357,16 @@ verify its payload or signature. Referenced certificate files are not copied.
 Source quarantines retain their diagnostic and release state. Redaction that
 would merge distinct source identities is rejected rather than dropping history.
 
+Backups also preserve sentinel specifications, tripwires and their check history,
+reflection request replay state, adopted situations, debt snapshots, and stored
+plan recipes. Restore preserves consumed reflection requests without issuing new
+challenges or copying reflection keys. Sentinel results start cold: run fresh
+checks against the restored workspace before requesting a pack with
+`--require-fresh-sentinels`. A redaction level that would change an operational
+sentinel predicate or tripwire condition is refused before backup publication.
+Historical report hashes retain their original meaning after text redaction.
+Plan recipe rows are preserved; the recommendation path does not yet read them.
+
 By default, `ee backup create` also includes graph-cache derived assets: graph
 snapshots, graph algorithm witnesses, and graph algorithm result-cache rows.
 Use `--include-graph-cache=false` when those rebuildable assets are unnecessary,
