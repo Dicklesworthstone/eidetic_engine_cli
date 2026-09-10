@@ -1302,7 +1302,7 @@ pub(crate) struct RecipeCatalogEntry {
     pub recipe: Recipe,
     pub source_kind: &'static str,
     pub source_id: String,
-    pub maturity: String,
+    pub maturity: Option<String>,
     pub evidence_uris: Vec<String>,
     created_at: Option<DateTime<Utc>>,
     updated_at: Option<DateTime<Utc>>,
@@ -1320,7 +1320,9 @@ impl RecipeCatalogEntry {
     fn decorate(&self, mut value: JsonValue) -> JsonValue {
         value["sourceKind"] = json!(self.source_kind);
         value["sourceId"] = json!(self.source_id);
-        value["maturity"] = json!(self.maturity);
+        if let Some(maturity) = &self.maturity {
+            value["maturity"] = json!(maturity);
+        }
         value["evidenceUris"] = json!(self.evidence_uris);
         if self.source_kind == "stored_plan_recipe" {
             value["catalogSource"] = JsonValue::Null;
@@ -1400,7 +1402,7 @@ fn stored_recipe_entry(row: StoredPlanRecipe) -> Result<RecipeCatalogEntry, Doma
     Ok(RecipeCatalogEntry {
         source_kind: "stored_plan_recipe",
         source_id: format!("ee://workspace/{}/plan-recipe/{}", row.workspace_id, row.id),
-        maturity: row.maturity,
+        maturity: Some(row.maturity),
         evidence_uris,
         created_at: Some(created_at),
         updated_at: Some(updated_at),
@@ -1447,7 +1449,7 @@ pub(crate) fn recipe_catalog(
             evidence_uris: vec![format!("ee://plan/recipe/{}", recipe.id)],
             recipe,
             source_kind: "static_command_catalog",
-            maturity: "catalog".to_owned(),
+            maturity: None,
             created_at: None,
             updated_at: None,
         })
@@ -1648,7 +1650,7 @@ pub struct RecipeRecommendation {
     pub source_kind: &'static str,
     pub source_id: String,
     pub evidence_uris: Vec<String>,
-    pub maturity: String,
+    pub maturity: Option<String>,
     pub match_reasons: Vec<String>,
     pub steps_count: usize,
     pub effect_posture: EffectPosture,
@@ -1792,10 +1794,10 @@ pub(crate) async fn recommend_from_catalog(
         if text <= 0.0 && semantic < 0.5 {
             continue;
         }
-        let maturity = match entry.maturity.as_str() {
-            "draft" => 0.3,
-            "validated" => 0.6,
-            "promoted" => 1.0,
+        let maturity = match entry.maturity.as_deref() {
+            Some("draft") => 0.3,
+            Some("validated") => 0.6,
+            Some("promoted") => 1.0,
             _ => 0.0, // Static catalog entries have no learned maturity.
         };
         // Anchor decay to recorded data, never wall time. A 30-day half-life
@@ -1835,7 +1837,11 @@ pub(crate) async fn recommend_from_catalog(
             format!("Frankensearch text similarity {text:.6}; semantic similarity {semantic:.6}."),
             format!(
                 "Maturity {}; {} supporting evidence links (catalog self-references excluded); recency {recency:.6} against the recorded catalog anchor.",
-                entry.maturity, evidence_count
+                entry
+                    .maturity
+                    .as_deref()
+                    .unwrap_or("not learned (built-in catalog)"),
+                evidence_count
             ),
         ];
         ranked.push((
@@ -1956,7 +1962,7 @@ pub fn explain_recipe(
                 when_to_use: Some(r.description),
                 steps: r.steps.iter().map(|s| s.command.clone()).collect(),
                 effect_posture: Some(r.effect_posture.as_str().to_owned()),
-                maturity: Some(entry.maturity),
+                maturity: entry.maturity,
                 evidence_uris: entry.evidence_uris,
                 source_kind: Some(entry.source_kind.to_owned()),
                 source_id: Some(entry.source_id),
@@ -2142,7 +2148,37 @@ mod tests {
         assert!(exp.found);
         assert_eq!(exp.recipe_id, "init-workspace");
         assert_eq!(exp.evidence_uris, ["ee://plan/recipe/init-workspace"]);
-        assert_eq!(exp.maturity.as_deref(), Some("catalog"));
+        assert_eq!(exp.maturity, None);
+        let entry = find_recipe(workspace.path(), None, "init-workspace")
+            .map_err(|e| e.message())?
+            .ok_or("missing catalog recipe")?;
+        assert!(entry.data_json().get("maturity").is_none());
+        #[cfg(feature = "lexical-bm25")]
+        {
+            let report = lexical_recommend(&PlanRecommendOptions {
+                task: "initialize workspace".to_owned(),
+                limit: 5,
+                min_score: 0.0,
+                workspace_path: workspace.path().to_path_buf(),
+                database_path: None,
+            })?;
+            assert!(!report.recommendations.is_empty());
+            for recommendation in &report.recommendations {
+                assert!(recommendation.maturity.is_none());
+                assert_eq!(recommendation.components.maturity_score, 0.0);
+            }
+            let rendered = crate::output::render_plan_recommend_json(&report);
+            assert!(!rendered.contains("\"maturity\":"));
+            assert!(
+                crate::core::degraded_honesty::validate_no_unsupported_evidence_claims(
+                    "plan recommend",
+                    true,
+                    false,
+                    &rendered
+                )
+                .passed
+            );
+        }
         Ok(())
     }
 

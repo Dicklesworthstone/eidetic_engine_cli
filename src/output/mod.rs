@@ -16184,7 +16184,9 @@ pub fn render_plan_recommend_json(report: &PlanRecommendReport) -> String {
             d.field_raw("components", &serde_json::json!(rec.components).to_string());
             d.field_str("sourceKind", rec.source_kind);
             d.field_str("sourceId", &rec.source_id);
-            d.field_str("maturity", &rec.maturity);
+            if let Some(maturity) = &rec.maturity {
+                d.field_str("maturity", maturity);
+            }
             d.field_array_of_strings("evidenceUris", &rec.evidence_uris);
             d.field_u32(
                 "stepsCount",
@@ -16217,7 +16219,9 @@ pub fn render_plan_recommend_human(report: &PlanRecommendReport) -> String {
         out.push_str(&format!("   Category: {}\n", rec.category.as_str()));
         out.push_str(&format!("   Score: {:.6}\n", rec.score));
         out.push_str(&format!("   Source: {}\n", rec.source_id));
-        out.push_str(&format!("   Maturity: {}\n", rec.maturity));
+        if let Some(maturity) = &rec.maturity {
+            out.push_str(&format!("   Maturity: {maturity}\n"));
+        }
         out.push_str(&format!("   Steps: {}\n", rec.steps_count));
         out.push_str(&format!("   Effect: {}\n", rec.effect_posture.as_str()));
         if !rec.match_reasons.is_empty() {
