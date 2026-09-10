@@ -77,6 +77,7 @@ const ARTIFACT_REGISTRY_SCHEMA: &str = "ee.backup.artifact_registry.v1";
 const REASONING_HISTORY_SCHEMA: &str = "ee.backup.reasoning_history.v1";
 const TRUST_HISTORY_SCHEMA: &str = "ee.backup.trust_history.v1";
 const MAINTENANCE_HISTORY_SCHEMA: &str = "ee.backup.maintenance_history.v1";
+const AUDIT_HISTORY_SCHEMA: &str = "ee.backup.audit_history.v1";
 const MANIFEST_AUTH_FAMILY: &str = "ee.backup.manifest";
 const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
 const RECOVERY_KEYS_FILE: &str = "store-auth.recovery.json";
@@ -1501,6 +1502,29 @@ struct BackupCurationCandidate {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupAuditHistory {
+    schema: String,
+    backup_id: String,
+    workspace_id: String,
+    chunk_index: usize,
+    chunk_count: usize,
+    rows: Vec<BackupAuditEntry>,
+    authentication: Option<AuthenticatedHeader>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupAuditEntry {
+    row: StoredAuditEntry,
+    // Original chain hashes remain historical evidence when redaction changes
+    // the active row. The signed archive retains both source and restored hashes.
+    source_prev_row_hash: Option<String>,
+    source_row_hash: Option<String>,
+    transformed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BackupProcedureHistory {
     schema: String,
     backup_id: String,
@@ -1779,9 +1803,11 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
         "attempt_families" | "attempt_family_members" => {
             BackupTablePolicy::new("learn", "export_restore_required", "records_jsonl")
         }
-        "audit_log" => {
-            BackupTablePolicy::new("maintain", "export_restore_required", "records_jsonl")
-        }
+        "audit_log" => BackupTablePolicy::new(
+            "maintain",
+            "export_restore_required",
+            "derived_artifact_restore",
+        ),
 
         "graph_snapshots" | "graph_algorithm_witnesses" | "graph_algorithm_results" => {
             BackupTablePolicy::new(
@@ -2079,6 +2105,10 @@ fn reconcile_derived_recovery_inventory(
 
     for (table, captured_count) in [
         (
+            "audit_log",
+            captured_derived_record_count(derived, "audit_history", "rows"),
+        ),
+        (
             "debt_snapshots",
             captured_derived_record_count(derived, "maintenance_history", "rows.debtSnapshots"),
         ),
@@ -2373,6 +2403,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &memory_ids,
                 &mut payloads,
             )?;
+            collect_audit_history_payloads(
+                &connection,
+                workspace_id,
+                &backup_id,
+                &created_at,
+                options.redaction_level,
+                &memory_ids,
+                &mut payloads,
+            )?;
             collect_learning_history_payloads(
                 &connection,
                 workspace_id,
@@ -2532,6 +2571,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     authenticate_reasoning_history_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_trust_history_payloads(&mut derived_payloads, store_auth.as_ref())?;
     authenticate_maintenance_history_payloads(&mut derived_payloads, store_auth.as_ref())?;
+    authenticate_audit_history_payloads(&mut derived_payloads, store_auth.as_ref())?;
     let derived_reports = derived_payloads
         .iter()
         .map(|payload| payload.report.clone())
@@ -3117,6 +3157,16 @@ fn verify_backup_manifest(
     if let Err(issue) = verify_backup_manifest_authentication(workspace_path, manifest) {
         issues.push(issue);
     }
+    if !inspect
+        .derived
+        .iter()
+        .any(|asset| asset.kind == "audit_history")
+    {
+        issues.push(BackupVerificationIssue::error(
+            "derived_asset_missing",
+            "backup has no recoverable audit-history asset; recreate it with the current binary and source-store keys",
+        ));
+    }
     let mut paths = BTreeSet::new();
     for path in inspect
         .artifacts
@@ -3553,6 +3603,15 @@ pub fn restore_backup_to_side_path(
         &inspect,
     )?;
     restore_shard_fanout_assets(&staging_workspace, &restored_derived)?;
+
+    restore_audit_history(
+        &restored_database_path,
+        &side_path,
+        &workspace_path,
+        &inspect.backup_id,
+        inspect.workspace_id.as_deref(),
+        &restored_derived,
+    )?;
 
     let import_report = import_verified_backup_jsonl_records(&JsonlImportOptions {
         workspace_path: side_path.clone(),
@@ -6924,6 +6983,13 @@ fn collect_curation_history_payloads(
     {
         let mut row = original.clone();
         let mut referenced_memories = BTreeSet::new();
+        if original.candidate_type == "rule" {
+            referenced_memories.extend(
+                crate::core::curate::audited_source_memory_ids_for_rule_candidate(
+                    connection, &original,
+                )?,
+            );
+        }
         // Rule proposals can carry a comma-separated source-memory list.
         let source_memories = original
             .source_id
@@ -6942,7 +7008,15 @@ fn collect_curation_history_payloads(
             .as_deref()
             .map(|s| redact_content(s, redaction));
         row.source_id = row.source_id.as_deref().map(|id| {
-            if source_memories.is_some() {
+            if source_memories.is_some()
+                || (row.source_type == "feedback_event"
+                    && crate::policy::validate_trust_promotion_evidence(
+                        "agent_validated",
+                        &row.source_type,
+                        id,
+                    )
+                    .is_ok())
+            {
                 id.to_owned()
             } else {
                 redact_content(id, redaction)
@@ -7339,6 +7413,347 @@ fn restore_curation_history(
     ))
 }
 
+fn audit_history_auth_context(workspace: &str) -> ArtifactContext<'_> {
+    ArtifactContext {
+        artifact_family: AUDIT_HISTORY_SCHEMA,
+        record_encoding_version: "json.v1",
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: workspace,
+    }
+}
+
+fn collect_audit_history_payloads(
+    connection: &DbConnection,
+    workspace_id: &str,
+    backup_id: &str,
+    captured_at: &str,
+    redaction: RedactionLevel,
+    memory_ids: &BTreeMap<String, String>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) -> Result<(), DomainError> {
+    let mut originals = connection
+        .list_audit_entries(None, None)
+        .map_err(work_history_error)?;
+    originals.retain(|row| {
+        row.workspace_id
+            .as_deref()
+            .is_none_or(|id| id == workspace_id)
+    });
+    originals.sort_by(|a, b| {
+        (&a.timestamp, &a.workspace_id, &a.id).cmp(&(&b.timestamp, &b.workspace_id, &b.id))
+    });
+    let candidates = payloads
+        .iter()
+        .filter(|p| p.report.kind == "curation_history")
+        .map(|p| {
+            serde_json::from_slice::<BackupCurationHistory>(&p.bytes).map_err(work_history_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flat_map(|chunk| chunk.candidates)
+        .map(|entry| (entry.candidate.id.clone(), entry.candidate))
+        .collect::<BTreeMap<_, _>>();
+    let mut references = memory_ids.clone();
+    references.insert(workspace_id.to_owned(), workspace_id.to_owned());
+    for candidate in candidates.values() {
+        references.insert(candidate.id.clone(), candidate.id.clone());
+    }
+    let mut rows = Vec::with_capacity(originals.len());
+    for original in originals {
+        if original
+            .this_row_hash
+            .as_deref()
+            .is_some_and(|hash| hash != crate::db::compute_audit_row_hash(&original))
+        {
+            return Err(work_history_error(
+                "source audit row hash is invalid; repair source history before backup",
+            ));
+        }
+        let mut row = original.clone();
+        let protocol_redaction = if redaction == RedactionLevel::None {
+            redaction
+        } else {
+            RedactionLevel::Minimal
+        };
+        row.action = redact_content(&row.action, protocol_redaction);
+        row.surface = redact_content(&row.surface, protocol_redaction);
+        row.mutation_kind = redact_content(&row.mutation_kind, protocol_redaction);
+        row.target_type = row
+            .target_type
+            .as_deref()
+            .map(|s| redact_content(s, protocol_redaction));
+        row.before_hash = row
+            .before_hash
+            .as_deref()
+            .map(|s| redact_content(s, protocol_redaction));
+        row.after_hash = row
+            .after_hash
+            .as_deref()
+            .map(|s| redact_content(s, protocol_redaction));
+        row.actor = row.actor.as_deref().map(|s| redact_content(s, redaction));
+        row.target_id = row.target_id.as_deref().map(|s| {
+            references
+                .get(s)
+                .cloned()
+                .unwrap_or_else(|| redact_recovery_identity(s, redaction))
+        });
+        row.details = row
+            .details
+            .as_deref()
+            .map(|raw| {
+                if serde_json::from_str::<JsonValue>(raw).is_ok() {
+                    redact_work_history_json_with_references(raw, redaction, &references)
+                } else {
+                    Ok(redact_content(raw, redaction))
+                }
+            })
+            .transpose()?;
+        // Creation provenance is an operational, typed binding. Preserve its
+        // validated source hashes and translate IDs exactly as the candidate
+        // exporter did; unrelated audit prose still follows normal redaction.
+        if original.action == audit_actions::CURATION_CANDIDATE_CREATE
+            && original.actor.as_deref() == Some("learn.experiment.propose")
+            && let Some(candidate) = original
+                .target_id
+                .as_deref()
+                .and_then(|id| candidates.get(id))
+        {
+            let source: JsonValue =
+                serde_json::from_str(original.details.as_deref().unwrap_or_default())
+                    .map_err(work_history_error)?;
+            let mut details: JsonValue =
+                serde_json::from_str(row.details.as_deref().unwrap_or_default())
+                    .map_err(work_history_error)?;
+            details["schema"] = json!("ee.audit.curation_candidate_create.v1");
+            details["proposalSource"] = json!("learn.experiment.propose");
+            details["workspaceId"] = json!(workspace_id);
+            details["candidateId"] = json!(candidate.id);
+            details["candidateType"] = json!(candidate.candidate_type);
+            details["sourceType"] = json!(candidate.source_type);
+            details["sourceId"] = json!(candidate.source_id);
+            details["targetMemoryId"] = json!(candidate.target_memory_id);
+            details["proposedContentHash"] = json!(
+                blake3::hash(
+                    candidate
+                        .proposed_content
+                        .as_deref()
+                        .unwrap_or_default()
+                        .as_bytes()
+                )
+                .to_hex()
+                .to_string()
+            );
+            details["sourceRefs"] = serde_json::from_str(&redact_curation_json(
+                &source["sourceRefs"].to_string(),
+                "sources",
+                redaction,
+                memory_ids,
+            )?)
+            .map_err(work_history_error)?;
+            row.actor.clone_from(&original.actor);
+            row.details = if details == source {
+                original.details.clone()
+            } else {
+                Some(details.to_string())
+            };
+        }
+        let transformed = row != original;
+        rows.push(BackupAuditEntry {
+            row,
+            source_prev_row_hash: original.prev_row_hash,
+            source_row_hash: original.this_row_hash,
+            transformed,
+        });
+    }
+    // Redaction changes the hash commitment. Build an explicitly transformed
+    // local chain, retaining the original hashes separately in the signed asset.
+    // With no transformation every original byte and chain link is retained.
+    if rows.iter().any(|entry| entry.transformed) {
+        let mut hashes = BTreeMap::new();
+        for entry in &mut rows {
+            // Translate existing links, never repair an absent predecessor or
+            // a fork merely because privacy redaction changed the row bytes.
+            entry.row.prev_row_hash = entry
+                .source_prev_row_hash
+                .as_ref()
+                .map(|hash| hashes.get(hash).cloned().unwrap_or_else(|| hash.clone()));
+            entry.row.this_row_hash = entry
+                .source_row_hash
+                .as_ref()
+                .map(|_| crate::db::compute_audit_row_hash(&entry.row));
+            if let (Some(source), Some(restored)) =
+                (&entry.source_row_hash, &entry.row.this_row_hash)
+            {
+                hashes.insert(source.clone(), restored.clone());
+            }
+            entry.transformed = true;
+        }
+    }
+    let count = rows.len().div_ceil(WORK_HISTORY_CHUNK_ROWS).max(1);
+    for index in 0..count {
+        let chunk = BackupAuditHistory {
+            schema: AUDIT_HISTORY_SCHEMA.to_owned(),
+            backup_id: backup_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            chunk_index: index,
+            chunk_count: count,
+            rows: rows
+                .iter()
+                .skip(index * WORK_HISTORY_CHUNK_ROWS)
+                .take(WORK_HISTORY_CHUNK_ROWS)
+                .cloned()
+                .collect(),
+            authentication: None,
+        };
+        payloads.push(derived_payload(
+            format!("derived/audit-history/{index:08}.json"),
+            "audit_history",
+            captured_at,
+            None,
+            serialized_payload_bytes(&chunk).map_err(work_history_error)?,
+        ));
+    }
+    Ok(())
+}
+
+fn authenticate_audit_history_payloads(
+    payloads: &mut [BackupDerivedPayload],
+    root: Option<&StoreAuthRoot>,
+) -> Result<(), DomainError> {
+    for payload in payloads
+        .iter_mut()
+        .filter(|p| p.report.kind == "audit_history")
+    {
+        let mut chunk: BackupAuditHistory =
+            serde_json::from_slice(&payload.bytes).map_err(work_history_error)?;
+        chunk.authentication = None;
+        if let Some(root) = root {
+            let hash =
+                canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+            chunk.authentication = Some(
+                authenticate_artifact(
+                    root,
+                    MacDomain::NativeImportRecordsRoot,
+                    &audit_history_auth_context(&chunk.workspace_id),
+                    &hash,
+                    1,
+                )
+                .map_err(work_history_error)?,
+            );
+        }
+        payload.bytes = serialized_payload_bytes(&chunk).map_err(work_history_error)?;
+        if payload.bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES {
+            return Err(work_history_error(
+                "audit-history chunk exceeds restore asset byte limit",
+            ));
+        }
+        payload.report.hash = Some(hash_bytes(&payload.bytes));
+        payload.report.byte_size = Some(payload.bytes.len() as u64);
+    }
+    Ok(())
+}
+
+fn restore_audit_history(
+    database: &Path,
+    side_path: &Path,
+    source_workspace: &Path,
+    backup_id: &str,
+    expected_workspace: Option<&str>,
+    assets: &[BackupRestoredDerivedAssetReport],
+) -> Result<(), DomainError> {
+    let mut chunks = assets
+        .iter()
+        .filter(|asset| asset.kind == "audit_history")
+        .map(|asset| {
+            serde_json::from_value::<BackupAuditHistory>(read_restored_derived_json(asset)?)
+                .map_err(work_history_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if chunks.is_empty() {
+        return Err(work_history_error(
+            "backup has no recoverable audit history",
+        ));
+    }
+    chunks.sort_by_key(|chunk| chunk.chunk_index);
+    let source_id = chunks[0].workspace_id.clone();
+    let count = chunks.len();
+    let root =
+        StoreAuthRoot::open(workspace_keys_dir(source_workspace)).map_err(work_history_error)?;
+    let mut ids = BTreeSet::new();
+    let mut rows = Vec::new();
+    for (index, mut chunk) in chunks.into_iter().enumerate() {
+        if chunk.schema != AUDIT_HISTORY_SCHEMA
+            || chunk.backup_id != backup_id
+            || chunk.workspace_id != source_id
+            || expected_workspace != Some(source_id.as_str())
+            || chunk.chunk_index != index
+            || chunk.chunk_count != count
+            || chunk.rows.len() > WORK_HISTORY_CHUNK_ROWS
+            || (count > 1 && chunk.rows.is_empty())
+        {
+            return Err(work_history_error(
+                "unsupported, incomplete, duplicate, or substituted audit-history chunks",
+            ));
+        }
+        let header = chunk.authentication.take().ok_or_else(|| {
+            work_history_error("audit history requires source-store authentication")
+        })?;
+        let hash = canonical_record_hash(&serde_json::to_vec(&chunk).map_err(work_history_error)?);
+        if !verify_artifact(
+            &root,
+            MacDomain::NativeImportRecordsRoot,
+            &audit_history_auth_context(&source_id),
+            &header,
+            &hash,
+            1,
+        )
+        .map_err(work_history_error)?
+        .is_authenticated()
+        {
+            return Err(work_history_error("audit-history authentication failed"));
+        }
+        for entry in chunk.rows {
+            let row = entry.row;
+            if !ids.insert(row.id.clone())
+                || row
+                    .workspace_id
+                    .as_deref()
+                    .is_some_and(|id| id != source_id)
+                || row.id.is_empty()
+                || row.action.trim().is_empty()
+                || chrono::DateTime::parse_from_rfc3339(&row.timestamp).is_err()
+                || (row.target_type.is_none() && row.target_id.is_some())
+                || row
+                    .this_row_hash
+                    .as_deref()
+                    .is_some_and(|hash| hash != crate::db::compute_audit_row_hash(&row))
+                || (!entry.transformed
+                    && (row.prev_row_hash != entry.source_prev_row_hash
+                        || row.this_row_hash != entry.source_row_hash))
+            {
+                return Err(work_history_error(
+                    "foreign, duplicate, malformed, or hash-invalid recovered audit row",
+                ));
+            }
+            if rows.last().is_some_and(|previous: &StoredAuditEntry| {
+                (&previous.timestamp, &previous.workspace_id, &previous.id)
+                    >= (&row.timestamp, &row.workspace_id, &row.id)
+            }) {
+                return Err(work_history_error("reordered audit history"));
+            }
+            rows.push(row);
+        }
+    }
+    let db = DbConnection::open_file(database).map_err(work_history_error)?;
+    db.migrate().map_err(work_history_error)?;
+    // IDs identify durable state; the filesystem path is merely its new binding.
+    // Register before JSONL import so original audit hashes remain valid.
+    crate::core::workspace::ensure_bound_workspace(&db, &source_id, &[side_path])?;
+    db.restore_audit_entries(&rows)
+        .map_err(work_history_error)?;
+    db.close().map_err(work_history_error)
+}
+
 fn collect_pack_history_payloads(
     connection: &DbConnection,
     workspace_id: &str,
@@ -7670,16 +8085,33 @@ fn collect_work_history_payload(
 }
 
 fn redact_work_history_json(text: &str, level: RedactionLevel) -> Result<String, DomainError> {
+    redact_work_history_json_with_references(text, level, &BTreeMap::new())
+}
+
+fn redact_work_history_json_with_references(
+    text: &str,
+    level: RedactionLevel,
+    references: &BTreeMap<String, String>,
+) -> Result<String, DomainError> {
     let mut value: JsonValue = serde_json::from_str(text).map_err(work_history_error)?;
-    if level == RedactionLevel::None {
+    if level == RedactionLevel::None && references.iter().all(|(from, to)| from == to) {
         return Ok(text.to_owned());
     }
-    fn redact_value(value: &mut JsonValue, level: RedactionLevel) -> Result<(), DomainError> {
+    fn redact_value(
+        value: &mut JsonValue,
+        level: RedactionLevel,
+        references: &BTreeMap<String, String>,
+    ) -> Result<(), DomainError> {
         match value {
-            JsonValue::String(text) => *text = redact_content(text, level),
+            JsonValue::String(text) => {
+                *text = references
+                    .get(text)
+                    .cloned()
+                    .unwrap_or_else(|| redact_content(text, level))
+            }
             JsonValue::Array(values) => {
                 for child in values {
-                    redact_value(child, level)?;
+                    redact_value(child, level, references)?;
                 }
             }
             JsonValue::Object(fields) => {
@@ -7703,7 +8135,7 @@ fn redact_work_history_json(text: &str, level: RedactionLevel) -> Result<String,
                             crate::output::jsonl_export::REDACTED_PLACEHOLDER.to_owned(),
                         );
                     } else {
-                        redact_value(&mut child, level)?;
+                        redact_value(&mut child, level, references)?;
                     }
                     let safe_key = if redact_content(&key, RedactionLevel::Standard) == key {
                         key
@@ -7720,7 +8152,7 @@ fn redact_work_history_json(text: &str, level: RedactionLevel) -> Result<String,
         Ok(())
     }
     let original = value.clone();
-    redact_value(&mut value, level)?;
+    redact_value(&mut value, level, references)?;
     if value == original {
         Ok(text.to_owned())
     } else {
@@ -16304,6 +16736,240 @@ mod tests {
         connection
             .get_pack_history_for_recovery(&pack_id)
             .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn default_backup_restores_audit_rows_and_chain() -> TestResult {
+        for redaction in [RedactionLevel::None, RedactionLevel::Standard] {
+            let (temp, workspace, database) =
+                fixture_with_memory_content("Run cargo fmt --check before release.")
+                    .map_err(|e| e.message())?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            let source_id = db
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .remove(0)
+                .id;
+            let batch = (0..128).map(|index| (crate::db::generate_audit_id(), CreateAuditInput {
+                workspace_id: (index % 3 != 0).then(|| source_id.clone()),
+                actor: Some("recovery-reviewer".to_owned()), action: "db.check_integrity".to_owned(),
+                target_type: (index % 2 == 0).then(|| "database".to_owned()), target_id: None,
+                details: Some(json!({"result": "checked", "api_key": "audit-secret-canary", "memoryId": MemoryId::from_uuid(Uuid::from_u128(2)).to_string()}).to_string()),
+            })).collect::<Vec<_>>();
+            db.insert_audit_batch(&batch).map_err(|e| e.to_string())?;
+            let originals = db
+                .list_audit_entries(None, None)
+                .map_err(|e| e.to_string())?;
+            assert_eq!(originals.len(), 129);
+            db.close().map_err(|e| e.to_string())?;
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            let inventory = backup
+                .recovery_inventory
+                .entries
+                .iter()
+                .find(|e| e.table == "audit_log")
+                .ok_or("audit inventory")?;
+            assert_eq!(inventory.row_count, 129);
+            assert!(inventory.snapshot_covered);
+            let assets = backup
+                .derived
+                .iter()
+                .filter(|asset| asset.kind == "audit_history")
+                .collect::<Vec<_>>();
+            assert_eq!(assets.len(), 2, "audit history crosses a chunk boundary");
+            if redaction == RedactionLevel::Standard {
+                for asset in &assets {
+                    let raw = fs::read_to_string(Path::new(&backup.backup_path).join(&asset.path))
+                        .map_err(|e| e.to_string())?;
+                    assert!(!raw.contains("audit-secret-canary"));
+                    let chunk: BackupAuditHistory =
+                        serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+                    assert!(chunk.rows.iter().all(|entry| entry.transformed));
+                    assert!(
+                        chunk
+                            .rows
+                            .iter()
+                            .all(|entry| entry.source_row_hash.is_some())
+                    );
+                }
+            }
+            let side = temp.path().join("restored-audits");
+            let restore = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace.clone(),
+                backup_path: backup.backup_path.into(),
+                side_path: side.clone(),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            let db = DbConnection::open_file(&restore.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            assert_eq!(
+                db.list_workspaces()
+                    .map_err(|e| e.to_string())?
+                    .remove(0)
+                    .id,
+                source_id
+            );
+            for original in &originals {
+                let actual = db
+                    .get_audit(&original.id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("audit missing after restore")?;
+                if redaction == RedactionLevel::None {
+                    assert_eq!(actual, *original);
+                }
+                assert_eq!(actual.timestamp, original.timestamp);
+                assert_eq!(actual.target_type, original.target_type);
+                assert_eq!(actual.workspace_id, original.workspace_id);
+                assert_eq!(
+                    actual.this_row_hash.as_deref(),
+                    Some(crate::db::compute_audit_row_hash(&actual).as_str())
+                );
+            }
+            db.close().map_err(|e| e.to_string())?;
+            let verification =
+                crate::core::audit::verify_audit(&crate::core::audit::AuditVerifyOptions {
+                    workspace: side,
+                    database_path: None,
+                    since: None,
+                    until: None,
+                })
+                .map_err(|e| e.message())?;
+            assert!(verification.integrity_ok, "{:?}", verification.issues);
+            assert!(
+                verification.rows > 129,
+                "restoration appends new events after the original chain"
+            );
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            assert_eq!(
+                source
+                    .list_audit_entries(None, None)
+                    .map_err(|e| e.to_string())?,
+                originals,
+                "source history unchanged"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn audit_history_rejects_corruption_before_creating_destination() -> TestResult {
+        let (temp, workspace, database) = fixture().map_err(|e| e.message())?;
+        let backup = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: None,
+            label: None,
+            redaction_level: RedactionLevel::None,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        let asset = backup
+            .derived
+            .iter()
+            .find(|asset| asset.kind == "audit_history")
+            .ok_or("audit asset")?;
+        let bytes = fs::read(Path::new(&backup.backup_path).join(&asset.path))
+            .map_err(|e| e.to_string())?;
+        let original: BackupAuditHistory =
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let root =
+            StoreAuthRoot::open(workspace_keys_dir(&workspace)).map_err(|e| e.to_string())?;
+        for variant in [
+            "schema",
+            "backup",
+            "workspace",
+            "index",
+            "count",
+            "duplicate",
+            "foreign_row",
+            "hash",
+            "timestamp",
+            "target",
+            "unsigned",
+            "mac",
+            "missing",
+        ] {
+            let mut chunk = original.clone();
+            match variant {
+                "schema" => chunk.schema.push_str(".unknown"),
+                "backup" => chunk.backup_id.push_str("-other"),
+                "workspace" => chunk.workspace_id.push_str("-other"),
+                "index" => chunk.chunk_index += 1,
+                "count" => chunk.chunk_count += 1,
+                "duplicate" => chunk.rows.push(chunk.rows[0].clone()),
+                "foreign_row" => {
+                    chunk.rows[0].row.workspace_id = Some("foreign-workspace".to_owned())
+                }
+                "hash" => chunk.rows[0].row.details = Some("changed".to_owned()),
+                "timestamp" => chunk.rows[0].row.timestamp = "invalid".to_owned(),
+                "target" => {
+                    chunk.rows[0].row.target_type = None;
+                    chunk.rows[0].row.target_id = Some("orphan".to_owned());
+                }
+                "unsigned" | "mac" | "missing" => {}
+                _ => unreachable!(),
+            }
+            if variant != "mac" {
+                chunk.authentication = None;
+                if variant != "unsigned" {
+                    let hash = canonical_record_hash(
+                        &serde_json::to_vec(&chunk).map_err(|e| e.to_string())?,
+                    );
+                    chunk.authentication = Some(
+                        authenticate_artifact(
+                            &root,
+                            MacDomain::NativeImportRecordsRoot,
+                            &audit_history_auth_context(&chunk.workspace_id),
+                            &hash,
+                            1,
+                        )
+                        .map_err(|e| e.to_string())?,
+                    );
+                }
+            } else {
+                chunk.rows[0].row.actor = Some("substituted".to_owned());
+            }
+            let path = temp.path().join(format!("{variant}.json"));
+            fs::write(
+                &path,
+                serde_json::to_vec(&chunk).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            let destination = temp.path().join(format!("{variant}.db"));
+            let assets = if variant == "missing" {
+                Vec::new()
+            } else {
+                vec![restored_cass_asset(&path, "audit_history")]
+            };
+            let result = restore_audit_history(
+                &destination,
+                &temp.path().join(format!("side-{variant}")),
+                &workspace,
+                &backup.backup_id,
+                Some(&backup.workspace_id),
+                &assets,
+            );
+            assert!(result.is_err(), "accepted {variant}");
+            assert!(
+                !destination.exists(),
+                "{variant} mutated the destination before validation"
+            );
+        }
+        Ok(())
     }
 
     #[test]

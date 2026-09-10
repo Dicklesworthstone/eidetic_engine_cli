@@ -27248,7 +27248,8 @@ pub struct CreateAuditInput {
 }
 
 /// A stored audit log entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredAuditEntry {
     pub id: String,
     pub workspace_id: Option<String>,
@@ -27401,6 +27402,30 @@ fn push_audit_insert_params(
 }
 
 impl DbConnection {
+    /// Restore authenticated history into an empty audit log before local
+    /// import events are appended. The caller retains the signed source rows;
+    /// this method neither invents timestamps nor overwrites existing history.
+    pub(crate) fn restore_audit_entries(&self, entries: &[StoredAuditEntry]) -> Result<()> {
+        self.with_transaction(|| {
+            if self.count_table_rows("audit_log")? != 0 {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "audit recovery requires an empty destination log".to_owned(),
+                });
+            }
+            for entry in entries {
+                let mut params = Vec::with_capacity(AUDIT_INSERT_VALUE_COUNT);
+                push_audit_insert_params(&mut params, entry, "");
+                params[AUDIT_INSERT_VALUE_COUNT - 1] = entry
+                    .this_row_hash
+                    .as_ref()
+                    .map_or(Value::Null, |hash| Value::Text(hash.clone()));
+                self.execute_for(DbOperation::Execute, AUDIT_INSERT_SQL, &params)?;
+            }
+            Ok(())
+        })
+    }
+
     /// Insert a new audit log entry.
     pub fn insert_audit(&self, id: &str, input: &CreateAuditInput) -> Result<()> {
         self.insert_audit_internal(id, input, None)
@@ -51706,6 +51731,47 @@ mod tests {
         )?;
 
         connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn restore_audit_entries_is_atomic_and_preserves_nullable_history() -> TestResult {
+        let source = DbConnection::open_memory()?;
+        source.migrate()?;
+        let input = CreateAuditInput {
+            workspace_id: None,
+            actor: None,
+            action: "db.check_integrity".to_owned(),
+            target_type: None,
+            target_id: None,
+            details: None,
+        };
+        let id = generate_audit_id();
+        source.insert_audit(&id, &input)?;
+        let row = required_audit(&source, &id)?;
+        let destination = DbConnection::open_memory()?;
+        destination.migrate()?;
+        assert!(
+            destination
+                .restore_audit_entries(&[row.clone(), row.clone()])
+                .is_err()
+        );
+        assert_eq!(
+            destination.count_table_rows("audit_log")?,
+            0,
+            "late duplicate rolls back the whole history"
+        );
+        destination.restore_audit_entries(std::slice::from_ref(&row))?;
+        assert_eq!(required_audit(&destination, &id)?, row);
+        assert!(
+            destination
+                .restore_audit_entries(std::slice::from_ref(&row))
+                .is_err(),
+            "must never overwrite a nonempty log"
+        );
+        assert_eq!(required_audit(&destination, &id)?, row);
+        destination.insert_audit(&generate_audit_id(), &input)?;
+        assert_eq!(destination.count_table_rows("audit_log")?, 2);
         Ok(())
     }
 

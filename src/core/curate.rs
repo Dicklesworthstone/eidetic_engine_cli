@@ -13340,7 +13340,7 @@ fn source_memory_ids_for_rule_candidate(stored: &StoredCurationCandidate) -> Vec
 /// Learning clusters can cite more memories than fit in the singular trust
 /// evidence ID. Recover those references from the atomic creation audit,
 /// without treating the audit as new feedback or changing candidate trust.
-fn audited_source_memory_ids_for_rule_candidate(
+pub(crate) fn audited_source_memory_ids_for_rule_candidate(
     connection: &DbConnection,
     stored: &StoredCurationCandidate,
 ) -> Result<Vec<String>, DomainError> {

@@ -2348,6 +2348,17 @@ artifacts, creation returns `status: "partial"`, verification posture is
 `incomplete_source_coverage`, and `degraded[]` names the affected tables. Do
 not treat that artifact as a complete recovery point.
 
+New backups include authenticated audit-history chunks with all audit columns,
+including global events and nullable targets. Restore loads them before appending
+new import events and preserves the durable workspace ID while binding it to the
+side path. Unchanged rows retain their IDs, timestamps, and original chain hashes.
+Redaction produces a transformed local chain; the signed chunks retain the source
+hashes separately as historical evidence. Learning proposals retain their full
+source-memory references so normal validation and recipe promotion can continue
+after recovery. The portable JSONL importer alone does not replay audit history.
+Backups created before audit-history capture must be recreated; verification
+rejects an archive that lacks this required asset.
+
 Authenticated backup assets also preserve memory seals (including reveal
 history), source quarantine and release history, certificate records, and the
 durable agent registry. Restore retains their original chronology. Sealed

@@ -5821,6 +5821,182 @@ mod tests {
     }
 
     #[test]
+    fn learning_candidate_provenance_survives_backup_and_restore() -> TestResult {
+        use crate::core::backup::{
+            BackupCreateOptions, BackupRestoreOptions, create_backup, restore_backup_to_side_path,
+        };
+        use crate::core::curate::{
+            CurateApplyOptions, CurateValidateOptions, apply_curation_candidate_as_recipe,
+            validate_curation_candidate,
+        };
+        use crate::models::RedactionLevel;
+        for redaction in [RedactionLevel::None, RedactionLevel::Standard] {
+            let (dir, database, workspace_id) = seed_learning_workspace("ee-learning-recovery")?;
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            for index in 0..3 {
+                let id = format!("mem_{index:026}");
+                seed_memory(
+                    &db,
+                    &workspace_id,
+                    &id,
+                    "recovery_cluster",
+                    "Before publishing artifacts, run cargo fmt --check and cargo test.",
+                )?;
+                seed_feedback(
+                    &db,
+                    &workspace_id,
+                    &format!("fb_{index:026}"),
+                    &id,
+                    "confirmation",
+                )?;
+            }
+            db.close().map_err(|e| e.to_string())?;
+            let proposed = propose_experiments(&LearnExperimentProposeOptions {
+                workspace: dir.path().to_owned(),
+                limit: 5,
+                topic: Some("recovery_cluster".to_owned()),
+                min_expected_value: 0.0,
+                max_attention_tokens: 900,
+                max_runtime_seconds: 180,
+                safety_boundary: ExperimentSafetyBoundary::DryRunOnly,
+            })
+            .map_err(|e| e.message())?;
+            assert_eq!(proposed.proposals.len(), 1);
+            let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            let candidates = db
+                .list_curation_candidates(&workspace_id, Some("rule"), None, None)
+                .map_err(|e| e.to_string())?;
+            assert_eq!(candidates.len(), 1);
+            let candidate = &candidates[0];
+            db.close().map_err(|e| e.to_string())?;
+            let validation = validate_curation_candidate(&CurateValidateOptions {
+                workspace_path: dir.path(),
+                database_path: Some(&database),
+                candidate_id: &candidate.id,
+                actor: Some("recovery-reviewer"),
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            assert!(
+                validation.validation.errors.is_empty(),
+                "{:?}",
+                validation.validation
+            );
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: dir.path().to_owned(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            let side_root = tempfile::tempdir().map_err(|e| e.to_string())?;
+            let side = side_root.path().join("restored");
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: dir.path().to_owned(),
+                backup_path: backup.backup_path.into(),
+                side_path: side.clone(),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            let db = DbConnection::open_file(&restored.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let actual_workspace = db
+                .list_workspaces()
+                .map_err(|e| e.to_string())?
+                .remove(0)
+                .id;
+            assert_eq!(
+                actual_workspace, workspace_id,
+                "recovery preserves durable workspace identity"
+            );
+            let memories = db
+                .list_memories(&actual_workspace, None, false)
+                .map_err(|e| e.to_string())?;
+            assert_eq!(memories.len(), 3);
+            let row = db
+                .get_curation_candidate(&actual_workspace, &candidate.id)
+                .map_err(|e| e.to_string())?
+                .ok_or("candidate missing")?;
+            let sources =
+                crate::core::curate::audited_source_memory_ids_for_rule_candidate(&db, &row)
+                    .map_err(|e| e.message())?;
+            assert_eq!(
+                sources.len(),
+                3,
+                "recovery must retain every source, not just the target memory"
+            );
+            db.close().map_err(|e| e.to_string())?;
+            // Redaction may require an explicit fresh review; it never silently
+            // grants approval. Exercise the normal validator in either case.
+            let validation = validate_curation_candidate(&CurateValidateOptions {
+                workspace_path: &side,
+                database_path: None,
+                candidate_id: &candidate.id,
+                actor: Some("recovery-reviewer"),
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            assert!(
+                validation.validation.errors.is_empty(),
+                "{:?}",
+                validation.validation
+            );
+            let options = CurateApplyOptions {
+                workspace_path: &side,
+                database_path: None,
+                candidate_id: &candidate.id,
+                actor: Some("recovery-reviewer"),
+                dry_run: false,
+                allow_tombstone_load_bearing: false,
+            };
+            let applied = apply_curation_candidate_as_recipe(
+                &options,
+                "Recovered release",
+                "Preparing a release",
+            )
+            .map_err(|e| e.message())?;
+            assert!(applied.durable_mutation, "{:?}", applied.application);
+            let db = DbConnection::open_file(&restored.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let recipes = db
+                .list_plan_recipes(&actual_workspace)
+                .map_err(|e| e.to_string())?;
+            assert_eq!(recipes.len(), 1);
+            let evidence: Vec<String> =
+                serde_json::from_str(&recipes[0].evidence_uris_json).map_err(|e| e.to_string())?;
+            for memory in memories {
+                assert!(
+                    evidence.contains(&format!("ee://memory/{}", memory.id)),
+                    "{evidence:?}"
+                );
+            }
+            let replay = apply_curation_candidate_as_recipe(
+                &options,
+                "Recovered release",
+                "Preparing a release",
+            )
+            .map_err(|e| e.message())?;
+            assert!(!replay.durable_mutation);
+            assert_eq!(replay.application.status, "already_applied");
+            let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+            assert_eq!(
+                source
+                    .get_curation_candidate(&workspace_id, &candidate.id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("source candidate")?
+                    .status,
+                "approved"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn learn_experiment_proposals_persist_deterministic_rule_candidates() -> TestResult {
         let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-propose")?;
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
