@@ -8813,24 +8813,10 @@ fn validate_maintenance_history(
                 return Err(invalid());
             }
         }
-        for raw in [&row.source_refs_json, &row.source_content_hashes_json] {
-            if !serde_json::from_str::<JsonValue>(raw)
-                .map_err(|_| invalid())?
-                .is_array()
-            {
-                return Err(invalid());
-            }
-        }
-        let hashes: Vec<String> =
-            serde_json::from_str(&row.source_content_hashes_json).map_err(|_| invalid())?;
-        if hashes.is_empty()
-            || hashes
-                .iter()
-                .any(|h| !crate::db::is_canonical_blake3_hash(h))
-            || hashes.windows(2).any(|pair| pair[0] >= pair[1])
-        {
-            return Err(invalid());
-        }
+        crate::db::validate_reflection_source_refs_json(&row.source_refs_json)
+            .map_err(|_| invalid())?;
+        crate::db::validate_reflection_source_content_hashes_json(&row.source_content_hashes_json)
+            .map_err(|_| invalid())?;
     }
     let mut situations = BTreeSet::new();
     let mut fingerprints = BTreeSet::new();
@@ -8975,15 +8961,12 @@ fn collect_maintenance_history_payloads(
             .iter()
             .enumerate()
         {
-            let kind = source["kind"].as_str().unwrap_or_default();
-            let id = source["id"].as_str().unwrap_or_default();
-            let hash = source["contentHash"].as_str().unwrap_or_default();
-            if !matches!(kind, "memory" | "evidence_span")
-                || id.trim().is_empty()
-                || !crate::db::is_canonical_blake3_hash(hash)
-            {
-                return Err(work_history_error("invalid reflection source ref"));
-            }
+            // The database contract trims these fields and permits historical
+            // source IDs. Use that same interpretation when remapping links;
+            // a no-redaction backup still preserves the original JSON bytes.
+            let kind = source["kind"].as_str().unwrap_or_default().trim();
+            let id = source["id"].as_str().unwrap_or_default().trim();
+            let hash = source["contentHash"].as_str().unwrap_or_default().trim();
             redacted[index]["kind"] = json!(kind);
             redacted[index]["id"] = json!(redact_learning_reference(
                 id,
@@ -21285,8 +21268,11 @@ mod tests {
                 provenance: spec.provenance, stale_threshold_seconds: None, created_at: timestamp.to_owned(), updated_at: "2026-09-02T00:00:00Z".to_owned() }],
             reflection_requests: vec![crate::db::StoredReflectionRequestLedger { request_id: "reflect_req_recovery".to_owned(), request_hash: hash.clone(),
                 workspace_id: workspace_id.to_owned(), reflection_kind: "gaps".to_owned(), source_package_hash: hash.clone(),
-                source_refs_json: json!([{"kind":"memory", "id":memory_id, "contentHash":hash, "note":"api_key=maintenance-secret-reflection"}]).to_string(),
-                source_content_hashes_json: json!([hash]).to_string(), prompt_template_hash: hash.clone(), response_schema_hash: hash.clone(),
+                source_refs_json: json!([
+                    {"kind":" memory ", "id":format!(" {memory_id} "), "contentHash":format!(" {hash} "), "note":"api_key=maintenance-secret-reflection"},
+                    {"kind":"evidence_span", "id":"historical-evidence-id", "contentHash":hash}
+                ]).to_string(),
+                source_content_hashes_json: json!([format!(" {hash} ")]).to_string(), prompt_template_hash: hash.clone(), response_schema_hash: hash.clone(),
                 created_at: timestamp.to_owned(), expires_at: "2099-01-01T00:00:00Z".to_owned(), challenge_key_id: "reflect_key_historical".to_owned(),
                 challenge_hash: hash.clone(), status: "pending".to_owned(), consumed_candidate_id: None, consumed_at: None, consumed_result_hash: None }],
             situations: vec![crate::db::StoredSituationRecord { situation_id: "sit_recovery".to_owned(), workspace_scope: workspace_id.to_owned(),
@@ -21703,6 +21689,10 @@ mod tests {
             "orphan_candidate",
             "duplicate_debt",
             "duplicate_request",
+            "duplicate_source",
+            "empty_sources",
+            "invalid_source_hash",
+            "duplicate_source_hash",
             "duplicate_situation",
             "orphan_tripwire",
             "wrong_preflight",
@@ -21769,6 +21759,31 @@ mod tests {
                     .rows
                     .reflection_requests
                     .push(chunk.rows.reflection_requests[0].clone()),
+                "duplicate_source" => {
+                    let mut sources: Vec<JsonValue> =
+                        serde_json::from_str(&chunk.rows.reflection_requests[0].source_refs_json)
+                            .map_err(|e| e.to_string())?;
+                    let mut duplicate = sources[0].clone();
+                    duplicate["kind"] = json!("memory");
+                    duplicate["id"] = json!(memory_id);
+                    sources.push(duplicate);
+                    chunk.rows.reflection_requests[0].source_refs_json =
+                        serde_json::to_string(&sources).map_err(|e| e.to_string())?;
+                }
+                "empty_sources" => {
+                    chunk.rows.reflection_requests[0].source_refs_json = "[]".to_owned();
+                }
+                "invalid_source_hash" => {
+                    chunk.rows.reflection_requests[0].source_refs_json = json!([
+                        {"kind":"memory", "id":memory_id, "contentHash":"invalid"}
+                    ])
+                    .to_string();
+                }
+                "duplicate_source_hash" => {
+                    let hash = hash_bytes(b"maintenance report");
+                    chunk.rows.reflection_requests[0].source_content_hashes_json =
+                        json!([format!(" {hash} "), hash]).to_string();
+                }
                 "duplicate_situation" => {
                     chunk.rows.situations.push(chunk.rows.situations[0].clone())
                 }

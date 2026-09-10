@@ -37350,7 +37350,7 @@ fn validate_reflection_json_bounds(value: &str, field: &'static str, max_len: us
     Ok(())
 }
 
-fn validate_reflection_source_refs_json(raw: &str) -> Result<()> {
+pub(crate) fn validate_reflection_source_refs_json(raw: &str) -> Result<()> {
     let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
         malformed_reflection_request_ledger_input(&format!(
             "source_refs_json must be valid JSON: {error}"
@@ -37396,7 +37396,7 @@ fn validate_reflection_source_refs_json(raw: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_reflection_source_content_hashes_json(raw: &str) -> Result<()> {
+pub(crate) fn validate_reflection_source_content_hashes_json(raw: &str) -> Result<()> {
     let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
         malformed_reflection_request_ledger_input(&format!(
             "source_content_hashes_json must be valid JSON: {error}"
