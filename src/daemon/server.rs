@@ -30,7 +30,7 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -89,6 +89,57 @@ pub const DAEMON_SEARCH_PARAMS_INVALID_CODE: &str = "daemon_search_params_invali
 
 /// Error code returned when canonical search execution or response encoding fails.
 pub const DAEMON_SEARCH_EXECUTION_FAILED_CODE: &str = "daemon_search_execution_failed";
+
+/// Warm-up posture of the daemon's process-cached search stack (GH #37).
+///
+/// The semantic arm builds a ~500k-piece Unigram tokenizer and materialises a
+/// 512 MB F32 embedding matrix. Those live in process-global caches, so a warm
+/// `ee.daemon.search` measured 0.70s / 59 MB in the client against 3.30s /
+/// 1.58 GB for the same in-process search. A cold one does not: before this
+/// warm-up the daemon stayed cold until a client asked for a search, so
+/// every short-lived `ee search --use-daemon` raced a cold daemon,
+/// blew the client's bounded capability deadline, fell back, and then paid the
+/// full 1.6 GB in-process load itself — while the daemon loaded the same model
+/// concurrently. Warming at startup is what makes `--use-daemon` actually
+/// amortise the model load instead of duplicating it.
+mod warm_posture {
+    /// No warm-up has been attempted (unbound daemon, or warm-up disabled).
+    pub const COLD: u8 = 0;
+    /// A warm-up is in flight; the search stack is not resident yet.
+    pub const WARMING: u8 = 1;
+    /// The search stack is resident and `ee.daemon.search` is hot.
+    pub const READY: u8 = 2;
+    /// Warm-up ran and failed; the daemon still serves, just cold.
+    pub const FAILED: u8 = 3;
+}
+
+/// Process-global warm posture. One daemon per process, so a plain static is
+/// the whole state: [`start_daemon`] is the only writer that moves it off
+/// [`warm_posture::COLD`], and the warm thread is the only writer thereafter.
+static DAEMON_SEARCH_WARM_STATE: AtomicU8 = AtomicU8::new(warm_posture::COLD);
+
+/// Query used to drive the warm-up. Deliberately a fixed, content-free token:
+/// warm-up must never depend on, or leak, workspace content.
+const DAEMON_WARM_QUERY: &str = "ee daemon warmup";
+
+/// Wire label for the current warm posture, as advertised by
+/// `ee.daemon.capabilities` under `warm.posture`.
+#[must_use]
+pub fn daemon_search_warm_posture() -> &'static str {
+    warm_posture_label(DAEMON_SEARCH_WARM_STATE.load(Ordering::Acquire))
+}
+
+/// Pure state-to-wire-label mapping. Split out from
+/// [`daemon_search_warm_posture`] so it can be tested without touching the
+/// process-global state that a concurrently starting daemon also writes.
+const fn warm_posture_label(state: u8) -> &'static str {
+    match state {
+        warm_posture::WARMING => "warming",
+        warm_posture::READY => "ready",
+        warm_posture::FAILED => "failed",
+        _ => "cold",
+    }
+}
 
 /// Error code returned when `ee.daemon.context` params cannot be
 /// mapped to the canonical pack request shape.
@@ -486,6 +537,11 @@ pub struct DaemonServerHandle {
     /// daemon was started without a bound workspace (e.g. via the bare
     /// `start_server` entry point). The thread runs until `shutdown` fires.
     scheduler_thread: Option<SchedulerThreadHandle>,
+    /// Startup search-stack warm-up thread (GH #37). `None` when the daemon has
+    /// no bound workspace or `EE_DAEMON_WARM=off`. Detached (not joined) at
+    /// shutdown: a cold-cache warm can take tens of seconds and cannot be
+    /// interrupted mid-search, so joining it would stall teardown.
+    warm_thread: Option<JoinHandle<()>>,
     /// Once-guard for accept-loop and socket teardown. The first
     /// shutdown call stops the listener and unlinks the socket; later
     /// calls skip that irreversible section but may still wait for a
@@ -520,6 +576,7 @@ impl std::fmt::Debug for DaemonServerHandle {
             .field("socket_path", &self.socket_path)
             .field("accept_thread", &self.accept_thread.is_some())
             .field("scheduler_thread", &self.scheduler_thread.is_some())
+            .field("warm_thread", &self.warm_thread.is_some())
             .field("write_actor_hosted", &self.write_handle.is_some())
             .finish_non_exhaustive()
     }
@@ -559,6 +616,13 @@ impl DaemonServerHandle {
         }
 
         self.shutdown.store(true, Ordering::SeqCst);
+        // The warm-up is a pure optimisation running a single bounded search.
+        // It checks `shutdown` before it starts but cannot be interrupted once
+        // inside the search, and a cold-cache warm can take tens of seconds.
+        // Detach it rather than joining so shutdown stays prompt; the thread
+        // holds no socket, no listener and no write handle, and dies with the
+        // process.
+        drop(self.warm_thread.take());
         let first_teardown = !self.shutdown_done.swap(true, Ordering::AcqRel);
         let unlink_result = if first_teardown {
             // Wake the accept loop by connecting to the socket from the
@@ -1163,18 +1227,140 @@ fn start_server_with_dispatch_policy(
             Some(SchedulerThreadHandle { join, done_rx })
         });
 
+    // GH #37: warm the search stack once, at startup, for a workspace-bound
+    // daemon. Without this the daemon stays cold until the first client
+    // request, so the first `--use-daemon` search blows the client's bounded
+    // deadline, falls back, and pays the whole model load in-process while the
+    // daemon loads it too. `bound_workspace_id` is the canonical workspace
+    // path (see `DaemonSearchParams::into_search_parts`).
+    let warm_thread = dispatch_policy
+        .bound_workspace_id
+        .as_deref()
+        .and_then(|workspace| spawn_search_warm_thread(PathBuf::from(workspace), &shutdown));
+
     Ok(DaemonServerHandle {
         socket_path,
         shutdown,
         pool,
         accept_thread: Some(accept_thread),
         scheduler_thread,
+        warm_thread,
         shutdown_done: AtomicBool::new(false),
         workers_drained: AtomicBool::new(false),
         write_handle,
         write_owner_task,
         write_runtime,
     })
+}
+
+/// Whether startup warm-up is enabled (`EE_DAEMON_WARM`, default on).
+fn daemon_warm_enabled() -> bool {
+    daemon_warm_enabled_from_env_value(env_registry::read(EnvVar::DaemonWarm).as_deref())
+}
+
+/// Pure policy seam for [`daemon_warm_enabled`], so the opt-out is testable
+/// without mutating process environment from a parallel test.
+fn daemon_warm_enabled_from_env_value(value: Option<&str>) -> bool {
+    !value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "off" | "0" | "false" | "no"
+        )
+    })
+}
+
+/// Canonical warm-up: run one bounded search through the very same path
+/// `ee.daemon.search` uses, so every process-global cache the hot path depends
+/// on (embedder stack, tokenizer, embedding matrix, index reader, read pool) is
+/// resident before the first client request arrives.
+///
+/// Deliberately reuses [`run_search_with_performance_and_filters`] rather than
+/// reaching into the embedder internals: warming a *different* path than the
+/// one being served is how warm-ups silently stop warming anything.
+fn warm_daemon_search_stack(workspace_path: &Path) -> Result<(), crate::core::search::SearchError> {
+    let options = SearchOptions {
+        workspace_path: workspace_path.to_path_buf(),
+        database_path: None,
+        index_dir: None,
+        query: DAEMON_WARM_QUERY.to_owned(),
+        limit: 1,
+        speed: SpeedMode::default(),
+        explain: false,
+        as_of: None,
+        include_tombstoned: false,
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
+        relevance_floor: None,
+        dedup_mode: SearchDedupMode::default(),
+        source_mode: SearchSourceMode::default(),
+        strict_source_mode: false,
+        memory_scope: MemoryScope::default(),
+        strict_scope: false,
+    };
+    run_search_with_performance_and_filters(&options, None, &[]).map(|_| ())
+}
+
+/// Spawn the startup warm-up thread for a workspace-bound daemon.
+///
+/// Returns `None` when warm-up is disabled or the thread cannot be spawned;
+/// neither is fatal, because a cold daemon still serves correctly — just
+/// slowly, which is exactly the state this exists to avoid.
+fn spawn_search_warm_thread(
+    workspace_path: PathBuf,
+    shutdown: &Arc<AtomicBool>,
+) -> Option<JoinHandle<()>> {
+    if !daemon_warm_enabled() {
+        return None;
+    }
+    let shutdown = Arc::clone(shutdown);
+    DAEMON_SEARCH_WARM_STATE.store(warm_posture::WARMING, Ordering::Release);
+    let spawned = thread::Builder::new()
+        .name("ee-daemon-warm".to_owned())
+        .spawn(move || {
+            if shutdown.load(Ordering::SeqCst) {
+                DAEMON_SEARCH_WARM_STATE.store(warm_posture::COLD, Ordering::Release);
+                return;
+            }
+            let started = Instant::now();
+            // A panic in the warm path must not take the daemon down: it is a
+            // pure optimisation, and the accept loop is already serving.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                warm_daemon_search_stack(&workspace_path)
+            }));
+            match outcome {
+                Ok(Ok(())) => {
+                    DAEMON_SEARCH_WARM_STATE.store(warm_posture::READY, Ordering::Release);
+                    tracing::info!(
+                        target: "ee::daemon::warm",
+                        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        "daemon search stack warmed"
+                    );
+                }
+                Ok(Err(error)) => {
+                    DAEMON_SEARCH_WARM_STATE.store(warm_posture::FAILED, Ordering::Release);
+                    tracing::warn!(
+                        target: "ee::daemon::warm",
+                        error = %error,
+                        "daemon search warm-up failed; daemon still serves from a cold cache"
+                    );
+                }
+                Err(_) => {
+                    DAEMON_SEARCH_WARM_STATE.store(warm_posture::FAILED, Ordering::Release);
+                    tracing::warn!(
+                        target: "ee::daemon::warm",
+                        "daemon search warm-up panicked; daemon still serves from a cold cache"
+                    );
+                }
+            }
+        });
+    match spawned {
+        Ok(handle) => Some(handle),
+        Err(_) => {
+            DAEMON_SEARCH_WARM_STATE.store(warm_posture::COLD, Ordering::Release);
+            None
+        }
+    }
 }
 
 trait ConnectionWorkerSpawner {
@@ -5535,6 +5721,12 @@ fn daemon_capabilities_result() -> serde_json::Value {
                 "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V3
             }
         },
+        // GH #37: lets a client tell "this daemon is still loading its model"
+        // apart from "this daemon cannot serve search", so a bounded fallback
+        // can say something actionable instead of a bare deadline message.
+        "warm": {
+            "posture": daemon_search_warm_posture()
+        },
         "forward_compat": {
             "v1_unknown_fields": "rejected",
             "v1_unknown_methods": DAEMON_UNKNOWN_METHOD_CODE,
@@ -7467,6 +7659,65 @@ mod tests {
         assert!(response.degraded_codes.is_empty());
     }
 
+    // GH #37: the daemon amortises a ~500k-piece tokenizer build and a 512 MB
+    // embedding-matrix load across invocations, but only once its search stack
+    // is resident. These lock the warm-up contract that makes that possible.
+
+    #[test]
+    fn daemon_warm_posture_labels_every_state() {
+        // The label is a wire value read by the CLI fallback path, so drift
+        // here silently turns "still warming" back into a bare deadline.
+        assert_eq!(
+            warm_posture::COLD,
+            0,
+            "cold must stay the zero value so the static initialises to it"
+        );
+        assert_eq!(warm_posture_label(warm_posture::COLD), "cold");
+        assert_eq!(warm_posture_label(warm_posture::WARMING), "warming");
+        assert_eq!(warm_posture_label(warm_posture::READY), "ready");
+        assert_eq!(warm_posture_label(warm_posture::FAILED), "failed");
+        // An unknown state must read as cold rather than as capacity: a client
+        // that mistakes garbage for "ready" would wait out the whole deadline.
+        assert_eq!(warm_posture_label(u8::MAX), "cold");
+    }
+
+    #[test]
+    fn daemon_capabilities_advertise_the_warm_posture() {
+        let capabilities = daemon_capabilities_result();
+        let posture = capabilities
+            .pointer("/warm/posture")
+            .and_then(serde_json::Value::as_str)
+            .expect("capabilities must advertise /warm/posture for GH #37 clients");
+        assert!(
+            matches!(posture, "cold" | "warming" | "ready" | "failed"),
+            "unexpected warm posture label: {posture}"
+        );
+    }
+
+    #[test]
+    fn daemon_warm_is_enabled_unless_explicitly_switched_off() {
+        assert!(daemon_warm_enabled_from_env_value(None));
+        assert!(daemon_warm_enabled_from_env_value(Some("on")));
+        assert!(daemon_warm_enabled_from_env_value(Some("")));
+        assert!(
+            daemon_warm_enabled_from_env_value(Some("1")),
+            "an affirmative value must not be read as an opt-out"
+        );
+        for off in ["off", "OFF", " off ", "0", "false", "no"] {
+            assert!(
+                !daemon_warm_enabled_from_env_value(Some(off)),
+                "{off} must disable startup warm-up"
+            );
+        }
+    }
+
+    #[test]
+    fn warm_query_carries_no_workspace_content() {
+        // The warm-up runs a real search. Its query must be a fixed token so a
+        // warm-up can never depend on, or surface, workspace content.
+        assert_eq!(DAEMON_WARM_QUERY, "ee daemon warmup");
+    }
+
     #[test]
     fn dispatch_context_without_workspace_returns_method_unauthorized() {
         let request = DaemonRequest::new(
@@ -8336,6 +8587,7 @@ mod tests {
             pool,
             accept_thread: None,
             scheduler_thread: None,
+            warm_thread: None,
             shutdown_done: AtomicBool::new(false),
             workers_drained: AtomicBool::new(false),
             write_handle: None,
@@ -8391,6 +8643,7 @@ mod tests {
             pool: InflightPool::new(1),
             accept_thread: None,
             scheduler_thread: Some(SchedulerThreadHandle { join, done_rx }),
+            warm_thread: None,
             shutdown_done: AtomicBool::new(false),
             workers_drained: AtomicBool::new(false),
             write_handle: None,

@@ -99,6 +99,10 @@ pub enum EnvVar {
     DaemonEnableEcho,
     /// `EE_DAEMON_MAX_INFLIGHT`
     DaemonMaxInflight,
+    /// `EE_DAEMON_SEARCH_TIMEOUT_MS`
+    DaemonSearchTimeoutMs,
+    /// `EE_DAEMON_WARM`
+    DaemonWarm,
     /// `EE_DATABASE_PATH`
     DatabasePath,
     /// `EE_DEMO_EVIDENCE_ROOT`
@@ -341,6 +345,8 @@ impl EnvVar {
             Self::CurationDerivedPreviewLimit,
             Self::DaemonEnableEcho,
             Self::DaemonMaxInflight,
+            Self::DaemonSearchTimeoutMs,
+            Self::DaemonWarm,
             Self::DatabasePath,
             Self::DemoEvidenceRoot,
             Self::DiagForceCapabilityGap,
@@ -474,6 +480,8 @@ impl EnvVar {
             Self::CurationDerivedPreviewLimit => "EE_CURATION_DERIVED_PREVIEW_LIMIT",
             Self::DaemonEnableEcho => "EE_DAEMON_ENABLE_ECHO",
             Self::DaemonMaxInflight => "EE_DAEMON_MAX_INFLIGHT",
+            Self::DaemonSearchTimeoutMs => "EE_DAEMON_SEARCH_TIMEOUT_MS",
+            Self::DaemonWarm => "EE_DAEMON_WARM",
             Self::DatabasePath => "EE_DATABASE_PATH",
             Self::DemoEvidenceRoot => "EE_DEMO_EVIDENCE_ROOT",
             Self::DiagForceCapabilityGap => "EE_DIAG_FORCE_CAPABILITY_GAP",
@@ -647,6 +655,12 @@ impl EnvVar {
             Self::DaemonEnableEcho => "Enable the diagnostic `ee.daemon.echo` round-trip method.",
             Self::DaemonMaxInflight => {
                 "Override the cap on in-flight `ee daemon` worker threads; saturated accepts emit `daemon_overloaded`."
+            }
+            Self::DaemonSearchTimeoutMs => {
+                "Override the bounded deadline `ee search --use-daemon` gives the daemon before falling back to in-process search."
+            }
+            Self::DaemonWarm => {
+                "Set to `off` to stop a workspace-bound `ee daemon` from warming its search stack at startup."
             }
             Self::DatabasePath => "Override the configured storage database path.",
             Self::DemoEvidenceRoot => "Override the demo evidence storage root.",
@@ -969,6 +983,8 @@ impl EnvVar {
             Self::McpMaxRequestBytes => Some("16777216"),
             Self::DaemonEnableEcho => Some("false"),
             Self::DaemonMaxInflight => Some("32"),
+            Self::DaemonSearchTimeoutMs => Some("2000"),
+            Self::DaemonWarm => Some("on"),
             Self::DisableAdaptive => Some("false"),
             Self::CassTimeoutSecs => Some("30"),
             _ => None,
@@ -1008,6 +1024,7 @@ impl EnvVar {
             | Self::Workspace
             | Self::WorkspaceRegistry => "paths",
             Self::DaemonEnableEcho | Self::DiagForceCapabilityGap => "diagnostics",
+            Self::DaemonSearchTimeoutMs | Self::DaemonWarm => "performance",
             Self::AgentMode
             | Self::AgentName
             | Self::DisableToon
