@@ -7717,6 +7717,8 @@ pub enum PlanCommand {
 /// Subcommands for `ee plan recipe`.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum PlanRecipeCommand {
+    /// Save explicit instructions as an audited draft recipe; never executes steps.
+    Save(PlanRecipeSaveArgs),
     /// List available recipes.
     List(PlanRecipeListArgs),
     /// Show details of a specific recipe.
@@ -7749,6 +7751,34 @@ pub struct PlanRecipeListArgs {
     /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+}
+
+/// Arguments for saving a draft procedure supplied by a user or harness.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PlanRecipeSaveArgs {
+    /// Short recipe name.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    /// Task or situation for which these instructions apply.
+    #[arg(long = "when", value_name = "TEXT")]
+    pub when_to_use: String,
+
+    /// An instruction to retain, in order. Repeat for multiple steps.
+    #[arg(long = "step", value_name = "INSTRUCTION", required = true)]
+    pub steps: Vec<String>,
+
+    /// Supporting evidence URI. Repeat for multiple sources.
+    #[arg(long = "evidence-uri", value_name = "URI")]
+    pub evidence_uris: Vec<String>,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Preview redacted instructions without writing a recipe or audit row.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `ee plan recipe show`.
@@ -14338,6 +14368,9 @@ where
         }
         Some(Command::Plan(PlanCommand::Goal(ref args))) => {
             handle_plan_goal(&cli, args, stdout, stderr)
+        }
+        Some(Command::Plan(PlanCommand::Recipe(PlanRecipeCommand::Save(ref args)))) => {
+            handle_plan_recipe_save(&cli, args, stdout, stderr)
         }
         Some(Command::Plan(PlanCommand::Recipe(PlanRecipeCommand::List(ref args)))) => {
             handle_plan_recipe_list(&cli, args, stdout, stderr)
@@ -25813,6 +25846,47 @@ where
     match recommend_recipes(&options) {
         Ok(report) => write_plan_recommend_report(cli, &report, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_plan_recipe_save<W: Write, E: Write>(
+    cli: &Cli,
+    args: &PlanRecipeSaveArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode {
+    let (workspace_path, _) = resolve_local_workspace_for_cli(cli, None);
+    let result = crate::core::plan::save_recipe(&crate::core::plan::RecipeSaveOptions {
+        workspace_path,
+        database_path: args.database.clone(),
+        name: args.name.clone(),
+        when_to_use: args.when_to_use.clone(),
+        steps: args.steps.clone(),
+        evidence_uris: args.evidence_uris.clone(),
+        dry_run: args.dry_run,
+    });
+    match result {
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Ok(data) => {
+            let summary = if args.dry_run {
+                format!("Draft recipe preview (not saved): {}\n", data["recipe"])
+            } else {
+                format!(
+                    "Saved draft recipe {}. Steps were retained without execution.\n",
+                    data["recipe"]["id"].as_str().unwrap_or_default()
+                )
+            };
+            let json = workspace_response_json_v2(&data);
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &summary)
+                }
+                output::Renderer::Toon => {
+                    write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+                }
+                _ => write_stdout(stdout, &(json + "\n")),
+            }
+        }
     }
 }
 
@@ -66777,7 +66851,7 @@ const OUTCOME_QUARANTINE_SUBCOMMANDS: &[&str] = &["list", "release"];
 const PERF_SUBCOMMANDS: &[&str] = &["compare", "budget"];
 const PERF_BUDGET_SUBCOMMANDS: &[&str] = &["check"];
 const PLAN_SUBCOMMANDS: &[&str] = &["goal", "recipe", "explain"];
-const PLAN_RECIPE_SUBCOMMANDS: &[&str] = &["list", "show"];
+const PLAN_RECIPE_SUBCOMMANDS: &[&str] = &["list", "save", "show"];
 const PLAYBOOK_SUBCOMMANDS: &[&str] = &["extract", "list", "export", "import"];
 const PREFLIGHT_SUBCOMMANDS: &[&str] = &["run", "show", "close", "check", "guard"];
 const PROOF_SUBCOMMANDS: &[&str] = &["admit", "status"];
@@ -67265,6 +67339,9 @@ impl NormalizedInvocation {
                 },
                 Command::Plan(plan) => match plan {
                     PlanCommand::Goal(_) => "plan goal".to_string(),
+                    PlanCommand::Recipe(PlanRecipeCommand::Save(_)) => {
+                        "plan recipe save".to_string()
+                    }
                     PlanCommand::Recipe(PlanRecipeCommand::List(_)) => {
                         "plan recipe list".to_string()
                     }
@@ -80657,6 +80734,7 @@ mod tests {
             "plan explain",
             "plan goal",
             "plan recipe list",
+            "plan recipe save",
             "plan recipe show",
             "plan recommend",
             "playbook export",
@@ -93603,14 +93681,50 @@ demos:
             },
         )
         .map_err(|e| e.to_string())?;
-        db.execute_raw(&format!(
-            "INSERT INTO plan_recipes (id, workspace_id, name, when_to_use, steps_json, evidence_uris_json, maturity, confidence, created_at, updated_at) VALUES ('plrec_cli_release', '{workspace_id}', 'Tangerine release', 'Prepare the tangerine release', '[\"ee status --json\"]', '[\"ee://evidence/release\"]', 'validated', 0.75, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')"
-        )).map_err(|e| e.to_string())?;
         db.close().map_err(|e| e.to_string())?;
+        let mut save_args = ["ee", "--json", "--workspace"].map(OsString::from).to_vec();
+        save_args.push(workspace.as_os_str().to_owned());
+        save_args.extend(
+            [
+                "plan",
+                "recipe",
+                "save",
+                "Tangerine release",
+                "--when",
+                "Prepare the tangerine release",
+                "--step",
+                "ee status --json",
+                "--evidence-uri",
+                "ee://evidence/release",
+                "--database",
+            ]
+            .map(OsString::from),
+        );
+        save_args.push(database.as_os_str().to_owned());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        ensure_equal(
+            &run(save_args, &mut stdout, &mut stderr),
+            &ProcessExitCode::Success,
+            "CLI saves the draft recipe",
+        )?;
+        let saved: serde_json::Value =
+            serde_json::from_slice(&stdout).map_err(|e| e.to_string())?;
+        ensure(
+            saved["schema"] == "ee.response.v2",
+            "save uses the current response envelope",
+        )?;
+        ensure(
+            saved["data"]["persisted"] == true,
+            "CLI saved a durable recipe",
+        )?;
+        let recipe_id = saved["data"]["recipe"]["id"]
+            .as_str()
+            .ok_or("missing saved ID")?;
         for command in [
             vec!["plan", "recipe", "list"],
-            vec!["plan", "recipe", "show", "plrec_cli_release"],
-            vec!["plan", "explain", "plrec_cli_release"],
+            vec!["plan", "recipe", "show", recipe_id],
+            vec!["plan", "explain", recipe_id],
         ] {
             let mut args = vec![
                 OsString::from("ee"),
@@ -93634,7 +93748,7 @@ demos:
                 .map_err(|e| format!("{e}: {}", String::from_utf8_lossy(&stdout)))?;
             ensure(parsed["success"] == true, "stored recipe response succeeds")?;
             ensure(
-                String::from_utf8_lossy(&stdout).contains("plrec_cli_release"),
+                String::from_utf8_lossy(&stdout).contains(recipe_id),
                 "the stored recipe reaches the CLI response",
             )?;
             ensure(

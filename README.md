@@ -2374,6 +2374,20 @@ confidence. Missing semantic models fall back to lexical retrieval with a
 degraded entry. Stored instructions have unknown effects and are never executed
 by recommendation. Creating recipes through curation promotion remains unfinished.
 
+To save instructions explicitly, initialize the workspace and create a draft:
+
+```bash
+ee plan recipe save "Release verification" --workspace . \
+  --when "Preparing a release" \
+  --step "cargo fmt --check" --step "cargo test" \
+  --evidence-uri "ee://evidence/release-review" --json
+ee plan recommend "prepare a release" --workspace . --json
+```
+
+`save --dry-run` previews redacted instructions without writing. A saved recipe
+starts at draft maturity with no earned confidence; saving commits the recipe
+and its audit record together and never runs the supplied instructions.
+
 By default, `ee backup create` also includes graph-cache derived assets: graph
 snapshots, graph algorithm witnesses, and graph algorithm result-cache rows.
 Use `--include-graph-cache=false` when those rebuildable assets are unnecessary,

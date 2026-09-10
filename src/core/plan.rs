@@ -1459,6 +1459,7 @@ pub(crate) fn recipe_catalog(
         return Ok(catalog);
     }
     let db = DbConnection::open_file_read_only(&path).map_err(recipe_storage_error)?;
+    db.begin_read_snapshot().map_err(recipe_storage_error)?;
     if db.needs_migration().map_err(recipe_storage_error)? {
         return Err(DomainError::MigrationRequired {
             message: "The recipe store needs migration.".to_owned(),
@@ -1477,6 +1478,7 @@ pub(crate) fn recipe_catalog(
         }
     }
     catalog.sort_by(|left, right| left.recipe.id.cmp(&right.recipe.id));
+    db.commit_read_snapshot().map_err(recipe_storage_error)?;
     Ok(catalog)
 }
 
@@ -1488,6 +1490,126 @@ pub(crate) fn find_recipe(
     Ok(recipe_catalog(workspace, database)?
         .into_iter()
         .find(|entry| entry.recipe.id == id))
+}
+
+pub(crate) struct RecipeSaveOptions {
+    pub workspace_path: PathBuf,
+    pub database_path: Option<PathBuf>,
+    pub name: String,
+    pub when_to_use: String,
+    pub steps: Vec<String>,
+    pub evidence_uris: Vec<String>,
+    pub dry_run: bool,
+}
+
+/// Save user-supplied instructions as a draft, without evaluating or executing
+/// them. Recipe and audit commit together; a preview opens the store read-only.
+pub(crate) fn save_recipe(options: &RecipeSaveOptions) -> Result<JsonValue, DomainError> {
+    if [&options.name, &options.when_to_use]
+        .into_iter()
+        .chain(options.steps.iter())
+        .any(|text| recipe_searchable_text(text).trim().is_empty())
+        || options.steps.is_empty()
+    {
+        return Err(DomainError::Usage {
+            message: "Recipe name, applicability, and at least one step must retain non-empty text after redaction.".to_owned(),
+            repair: Some("ee plan recipe save --help".to_owned()),
+        });
+    }
+    let workspace = options
+        .workspace_path
+        .canonicalize()
+        .map_err(recipe_storage_error)?;
+    let database = options
+        .database_path
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee/ee.db"));
+    if !database.try_exists().map_err(recipe_storage_error)? {
+        return Err(crate::core::storeless_workspace_error(&database));
+    }
+    let db = if options.dry_run {
+        DbConnection::open_file_read_only(&database)
+    } else {
+        DbConnection::open_file(&database)
+    }
+    .map_err(recipe_storage_error)?;
+    if options.dry_run {
+        db.begin_read_snapshot().map_err(recipe_storage_error)?;
+    }
+    if db.needs_migration().map_err(recipe_storage_error)? {
+        return Err(DomainError::MigrationRequired {
+            message: "The recipe store needs migration.".to_owned(),
+            repair: Some("ee migrate run --workspace . --json".to_owned()),
+        });
+    }
+    let requested_id = crate::core::workspace::stable_workspace_id(&workspace);
+    let workspace =
+        crate::core::workspace::select_existing_workspace_row(&db, &requested_id, &[&workspace])?
+            .ok_or_else(|| DomainError::Usage {
+            message: "Initialize the selected workspace before saving a recipe.".to_owned(),
+            repair: Some("ee init --workspace . --json".to_owned()),
+        })?;
+    let timestamp = Utc::now().to_rfc3339();
+    let mut evidence = options
+        .evidence_uris
+        .iter()
+        .map(|uri| recipe_text(uri.trim()))
+        .filter(|uri| !uri.is_empty())
+        .collect::<Vec<_>>();
+    evidence.sort();
+    evidence.dedup();
+    let row = StoredPlanRecipe {
+        id: format!("plrec_{}", uuid::Uuid::now_v7().simple()),
+        workspace_id: workspace.id.clone(),
+        name: recipe_text(options.name.trim()),
+        when_to_use: recipe_text(options.when_to_use.trim()),
+        steps_json: json!(
+            options
+                .steps
+                .iter()
+                .map(|step| recipe_text(step.trim()))
+                .collect::<Vec<_>>()
+        )
+        .to_string(),
+        evidence_uris_json: json!(evidence).to_string(),
+        maturity: "draft".to_owned(),
+        confidence: 0.0,
+        helpful_count: 0,
+        harmful_count: 0,
+        created_at: timestamp.clone(),
+        updated_at: timestamp,
+        last_recommended_at: None,
+    };
+    let mut recipe = stored_recipe_entry(row.clone())?.data_json();
+    let audit_id = if options.dry_run {
+        db.commit_read_snapshot().map_err(recipe_storage_error)?;
+        recipe["id"] = JsonValue::Null;
+        recipe["sourceId"] = JsonValue::Null;
+        recipe["sourceKind"] = json!("recipe_draft_preview");
+        None
+    } else {
+        let id = crate::db::generate_audit_id();
+        db.with_transaction(|| {
+            db.insert_plan_recipe(&row)?;
+            db.insert_audit(
+                &id,
+                &crate::db::CreateAuditInput {
+                    workspace_id: Some(workspace.id.clone()),
+                    actor: Some("ee plan recipe save".to_owned()),
+                    action: crate::db::audit_actions::PLAN_RECIPE_SAVE.to_owned(),
+                    target_type: Some("plan_recipe".to_owned()),
+                    target_id: Some(row.id.clone()),
+                    details: Some(recipe.to_string()),
+                },
+            )
+        })
+        .map_err(recipe_storage_error)?;
+        Some(id)
+    };
+    Ok(
+        json!({ "command":"plan recipe save", "dryRun":options.dry_run, "persisted":!options.dry_run,
+        "recipe":recipe, "auditId":audit_id }),
+    )
 }
 
 /// Options for recommending recipes based on task description.
@@ -2336,6 +2458,101 @@ mod tests {
         assert!(report.recommendations.is_empty());
         assert!(report.recency_anchor.is_none());
         assert!(!directory.path().join(".ee").exists());
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn recipe_save_is_audited_retrievable_and_atomic() -> TestResult {
+        let (directory, database, workspace_id) = recipe_workspace()?;
+        let mut options = RecipeSaveOptions {
+            workspace_path: directory.path().to_path_buf(),
+            database_path: Some(database.clone()),
+            name: "Tangerine compass release".to_owned(),
+            when_to_use: "Prepare a tangerine compass release".to_owned(),
+            steps: vec!["ee status --json".to_owned(), "exit 73".to_owned()],
+            evidence_uris: vec![
+                "ee://evidence/release".to_owned(),
+                "api_key=recipe-save-secret".to_owned(),
+            ],
+            dry_run: true,
+        };
+        let before = std::fs::read(&database).map_err(|e| e.to_string())?;
+        let preview = save_recipe(&options).map_err(|e| e.message())?;
+        assert_eq!(preview["persisted"], false);
+        assert!(preview["recipe"]["id"].is_null());
+        assert!(preview["auditId"].is_null());
+        assert_eq!(
+            std::fs::read(&database).map_err(|e| e.to_string())?,
+            before,
+            "preview must not write"
+        );
+        options.dry_run = false;
+        let saved = save_recipe(&options).map_err(|e| e.message())?;
+        let id = saved["recipe"]["id"]
+            .as_str()
+            .ok_or("missing saved recipe ID")?;
+        let audit_id = saved["auditId"].as_str().ok_or("missing recipe audit ID")?;
+        assert_eq!(saved["persisted"], true);
+        assert_eq!(saved["recipe"]["maturity"], "draft");
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let rows = db
+            .list_plan_recipes(&workspace_id)
+            .map_err(|e| e.to_string())?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].confidence, 0.0);
+        assert_eq!(rows[0].helpful_count, 0);
+        assert!(rows[0].last_recommended_at.is_none());
+        assert!(!rows[0].evidence_uris_json.contains("recipe-save-secret"));
+        let audit = db
+            .get_audit(audit_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("recipe audit missing")?;
+        assert_eq!(audit.target_id.as_deref(), Some(id));
+        assert_eq!(audit.action, crate::db::audit_actions::PLAN_RECIPE_SAVE);
+        assert!(
+            !audit
+                .details
+                .as_deref()
+                .unwrap_or_default()
+                .contains("recipe-save-secret")
+        );
+        db.close().map_err(|e| e.to_string())?;
+        let recommendations = lexical_recommend(&PlanRecommendOptions {
+            task: "tangerine compass release".to_owned(),
+            limit: 5,
+            min_score: 0.0,
+            workspace_path: directory.path().to_path_buf(),
+            database_path: Some(database.clone()),
+        })?;
+        assert!(
+            recommendations
+                .recommendations
+                .iter()
+                .any(|recipe| recipe.recipe_id == id)
+        );
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        db.execute_raw("CREATE TRIGGER recipe_test_reject_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'recipe audit failure injection'); END").map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        assert!(
+            save_recipe(&options).is_err(),
+            "audit failure must prevent a successful save"
+        );
+        let db = DbConnection::open_file_read_only(&database).map_err(|e| e.to_string())?;
+        assert_eq!(
+            db.list_plan_recipes(&workspace_id)
+                .map_err(|e| e.to_string())?,
+            rows,
+            "failed audit rolls back recipe insertion"
+        );
+        db.close().map_err(|e| e.to_string())?;
+        options.steps.clear();
+        options.database_path = Some(directory.path().join("missing.db"));
+        assert!(matches!(
+            save_recipe(&options),
+            Err(DomainError::Usage { .. })
+        ));
+        assert!(!directory.path().join("missing.db").exists());
         Ok(())
     }
 }

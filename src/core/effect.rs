@@ -1621,8 +1621,14 @@ impl EffectManifest {
                 "perf snapshot",
                 "Emit one read-only performance snapshot for swarm observability",
             ),
-            CommandEffect::read_only("plan recipe list", "List static plan recipes"),
-            CommandEffect::read_only("plan recipe show", "Show static plan recipe"),
+            CommandEffect::read_only_db(
+                "plan recipe list",
+                "List built-in and stored workspace recipes",
+            ),
+            CommandEffect::read_only_db(
+                "plan recipe show",
+                "Show a built-in or stored workspace recipe",
+            ),
             CommandEffect::read_only(
                 "preflight show",
                 "Read a persisted preflight run from the workspace-local store",
@@ -1636,7 +1642,10 @@ impl EffectManifest {
                 "Alias for read-only advisory command-risk memory retrieval",
             ),
             CommandEffect::read_only("plan goal", "Recommends recipes for goals"),
-            CommandEffect::read_only("plan explain", "Explains recipe selection"),
+            CommandEffect::read_only_db(
+                "plan explain",
+                "Explains recipe provenance and applicability",
+            ),
             CommandEffect::read_only("plan recommend", "Recommends recipes for tasks"),
             CommandEffect::read_only_db("playbook list", "List procedural rules in playbook form"),
             CommandEffect::read_only_db(
@@ -2401,6 +2410,11 @@ impl EffectManifest {
                 "remember",
                 vec!["memories", "memory_tags", "audit_log"],
                 "Store a new memory with direct or audit-lane-backed audit_log provenance",
+            ),
+            CommandEffect::durable_write(
+                "plan recipe save",
+                vec!["plan_recipes", "audit_log"],
+                "Save explicit instructions as an audited draft recipe without execution",
             ),
             CommandEffect::durable_write(
                 "decide record",
@@ -3528,6 +3542,26 @@ mod tests {
     #[test]
     fn manifest_get_returns_correct_entry() -> TestResult {
         let manifest = EffectManifest::build();
+
+        let recipe = manifest
+            .get("plan recipe save")
+            .ok_or("recipe save effect missing")?;
+        ensure(
+            recipe.default_effect,
+            EffectClass::DurableMemoryWrite,
+            "recipe save writes durable state",
+        )?;
+        ensure(
+            recipe.dry_run_effect,
+            Some(EffectClass::ReadOnly),
+            "recipe preview is read-only",
+        )?;
+        ensure(recipe.requires_audit, true, "recipe save requires an audit")?;
+        ensure(
+            recipe.write_surfaces.db_tables.clone(),
+            vec!["plan_recipes", "audit_log"],
+            "recipe mutation surfaces",
+        )?;
 
         let status = manifest.get("status");
         ensure(status.is_some(), true, "status exists")?;

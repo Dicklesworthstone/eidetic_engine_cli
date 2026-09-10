@@ -70,6 +70,7 @@ pub const MESH_LANE_GRANT_TARGET_ADAPTER_SCHEMA_V1: &str = "ee.mesh.lane_grant_t
 
 /// Standard audit action types for memory operations (EE-070).
 pub mod audit_actions {
+    pub const PLAN_RECIPE_SAVE: &str = "plan.recipe.save";
     pub const ARTIFACT_REGISTER: &str = "artifact.register";
     pub const CERTIFICATE_UPSERT: &str = "certificate.upsert";
     pub const AGENT_PROFILE_UPDATE: &str = "agent_profile.update";
@@ -29334,6 +29335,18 @@ impl DbConnection {
             })).collect()
     }
 
+    /// Insert an explicit recipe. Callers own the transaction and audit record.
+    pub fn insert_plan_recipe(&self, row: &StoredPlanRecipe) -> Result<()> {
+        self.execute_for(DbOperation::Execute,
+            "INSERT INTO plan_recipes (id, workspace_id, name, when_to_use, steps_json, evidence_uris_json, maturity, confidence, helpful_count, harmful_count, created_at, updated_at, last_recommended_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)", &[
+                Value::Text(row.id.clone()), Value::Text(row.workspace_id.clone()), Value::Text(row.name.clone()), Value::Text(row.when_to_use.clone()),
+                Value::Text(row.steps_json.clone()), Value::Text(row.evidence_uris_json.clone()), Value::Text(row.maturity.clone()), Value::Double(row.confidence),
+                Value::BigInt(u64_to_i64(row.helpful_count, "helpful_count")?), Value::BigInt(u64_to_i64(row.harmful_count, "harmful_count")?),
+                Value::Text(row.created_at.clone()), Value::Text(row.updated_at.clone()), optional_text_value(row.last_recommended_at.as_deref()),
+            ])?;
+        Ok(())
+    }
+
     /// Read complete, workspace-scoped history without diagnostic/list limits.
     /// Call inside the same read transaction as the memories and inventory.
     pub fn maintenance_history_for_recovery(
@@ -29463,13 +29476,7 @@ impl DbConnection {
             )?;
         }
         for row in &history.recipes {
-            self.execute_for(DbOperation::Execute,
-                "INSERT INTO plan_recipes (id, workspace_id, name, when_to_use, steps_json, evidence_uris_json, maturity, confidence, helpful_count, harmful_count, created_at, updated_at, last_recommended_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)", &[
-                    Value::Text(row.id.clone()), Value::Text(row.workspace_id.clone()), Value::Text(row.name.clone()), Value::Text(row.when_to_use.clone()),
-                    Value::Text(row.steps_json.clone()), Value::Text(row.evidence_uris_json.clone()), Value::Text(row.maturity.clone()), Value::Double(row.confidence),
-                    Value::BigInt(u64_to_i64(row.helpful_count, "helpful_count")?), Value::BigInt(u64_to_i64(row.harmful_count, "harmful_count")?),
-                    Value::Text(row.created_at.clone()), Value::Text(row.updated_at.clone()), optional_text_value(row.last_recommended_at.as_deref()),
-                ])?;
+            self.insert_plan_recipe(row)?;
         }
         Ok(())
     }
