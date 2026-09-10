@@ -1528,6 +1528,11 @@ pub struct WalStatusReport {
     pub frames: u64,
     pub page_size: u32,
     pub checkpoint_threshold_bytes: u64,
+    /// Size of the main database file the WAL belongs to, or 0 when it could
+    /// not be measured. Used by [`WalStatusReport::warrants_checkpoint`] to
+    /// catch the small-store case the flat byte threshold structurally cannot
+    /// (GH #35).
+    pub database_bytes: u64,
 }
 
 impl WalStatusReport {
@@ -1557,7 +1562,9 @@ impl WalStatusReport {
         }
         if let Some(connection) = connection {
             return match connection.wal_status() {
-                Ok(status) => Self::from_wal_status(status, threshold),
+                Ok(status) => {
+                    Self::from_wal_status_with_database(status, threshold, &database_path)
+                }
                 Err(_) => Self {
                     checkpoint_threshold_bytes: threshold,
                     ..Self::default()
@@ -1571,7 +1578,7 @@ impl WalStatusReport {
             };
         };
         match connection.wal_status() {
-            Ok(status) => Self::from_wal_status(status, threshold),
+            Ok(status) => Self::from_wal_status_with_database(status, threshold, &database_path),
             Err(_) => Self {
                 checkpoint_threshold_bytes: threshold,
                 ..Self::default()
@@ -1580,18 +1587,62 @@ impl WalStatusReport {
     }
 
     #[must_use]
+    /// Build a report without the main database size.
+    ///
+    /// `database_bytes` is left at 0, which disables the size-ratio rule in
+    /// [`Self::exceeds_database_size`]. Prefer
+    /// [`Self::from_wal_status_with_database`] wherever the database path is
+    /// known, or a small store whose WAL has outgrown it will report that no
+    /// checkpoint is warranted.
     pub fn from_wal_status(status: WalStatus, checkpoint_threshold_bytes: u64) -> Self {
         Self {
             bytes: status.bytes,
             frames: status.frames,
             page_size: status.page_size,
             checkpoint_threshold_bytes,
+            database_bytes: 0,
+        }
+    }
+
+    /// [`Self::from_wal_status`] with the main database size attached, so the
+    /// size-ratio rule in [`Self::exceeds_database_size`] can apply.
+    #[must_use]
+    pub fn from_wal_status_with_database(
+        status: WalStatus,
+        checkpoint_threshold_bytes: u64,
+        database_path: &Path,
+    ) -> Self {
+        Self {
+            database_bytes: std::fs::metadata(database_path).map_or(0, |meta| meta.len()),
+            ..Self::from_wal_status(status, checkpoint_threshold_bytes)
         }
     }
 
     #[must_use]
     pub const fn exceeds_threshold(&self) -> bool {
         self.checkpoint_threshold_bytes > 0 && self.bytes > self.checkpoint_threshold_bytes
+    }
+
+    /// Whether the WAL has outgrown the database it describes (GH #35).
+    ///
+    /// A WAL bigger than the main file means every connection open replays
+    /// more bytes than simply reading the database would have cost, which is
+    /// the state a small store gets stuck in: `ee init` alone leaves ~5.6 MB
+    /// of schema in the WAL against a ~2.5 MB database, and the flat 64 MB
+    /// byte threshold means nothing ever folds it in.
+    #[must_use]
+    pub const fn exceeds_database_size(&self) -> bool {
+        self.database_bytes > 0 && self.bytes > self.database_bytes
+    }
+
+    /// Whether a checkpoint is warranted under either rule.
+    ///
+    /// The byte threshold protects large stores from unbounded WAL growth; the
+    /// size-ratio rule protects small ones, which never reach it. Neither
+    /// subsumes the other, so both are checked.
+    #[must_use]
+    pub const fn warrants_checkpoint(&self) -> bool {
+        self.exceeds_threshold() || self.exceeds_database_size()
     }
 }
 
@@ -6136,6 +6187,80 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    // GH #35: the flat 64 MB byte threshold is unreachable for a small store,
+    // so a workspace whose WAL had outgrown its own database was reported as
+    // needing nothing. Every connection open replayed that WAL.
+
+    fn wal_report(bytes: u64, database_bytes: u64, threshold: u64) -> WalStatusReport {
+        WalStatusReport {
+            bytes,
+            frames: bytes / 4096,
+            page_size: 4096,
+            checkpoint_threshold_bytes: threshold,
+            database_bytes,
+        }
+    }
+
+    #[test]
+    fn small_store_with_an_oversized_wal_warrants_a_checkpoint() -> TestResult {
+        // The measured shape straight out of `ee init`: 5.6 MB of WAL against a
+        // 2.5 MB database, nowhere near the 64 MB byte threshold.
+        let report = wal_report(5_632_072, 2_510_848, 67_108_864);
+        ensure(
+            report.exceeds_threshold(),
+            false,
+            "byte threshold not reached",
+        )?;
+        ensure(report.exceeds_database_size(), true, "WAL exceeds database")?;
+        ensure(
+            report.warrants_checkpoint(),
+            true,
+            "checkpoint is warranted",
+        )
+    }
+
+    #[test]
+    fn a_wal_smaller_than_its_database_warrants_nothing() -> TestResult {
+        let report = wal_report(32, 2_510_848, 67_108_864);
+        ensure(report.exceeds_database_size(), false, "WAL is small")?;
+        ensure(
+            report.warrants_checkpoint(),
+            false,
+            "no checkpoint warranted",
+        )
+    }
+
+    #[test]
+    fn the_byte_threshold_still_fires_on_a_large_store() -> TestResult {
+        // The size-ratio rule must not replace the byte rule: a huge database
+        // with a 100 MB WAL passes the ratio test and still needs folding in.
+        let report = wal_report(100_000_000, 900_000_000, 67_108_864);
+        ensure(
+            report.exceeds_database_size(),
+            false,
+            "WAL is below database size",
+        )?;
+        ensure(report.exceeds_threshold(), true, "byte threshold reached")?;
+        ensure(
+            report.warrants_checkpoint(),
+            true,
+            "checkpoint is warranted",
+        )
+    }
+
+    #[test]
+    fn an_unmeasurable_database_size_disables_only_the_ratio_rule() -> TestResult {
+        // `database_bytes == 0` means "could not measure", not "empty file".
+        // Treating it as empty would make every WAL look oversized.
+        let report = wal_report(5_632_072, 0, 67_108_864);
+        ensure(
+            report.exceeds_database_size(),
+            false,
+            "unmeasured size is not a trigger",
+        )?;
+        ensure(report.warrants_checkpoint(), false, "no false positive")
     }
 
     #[test]

@@ -58,6 +58,7 @@ fn base_input() -> ScaleEnvelopeCollectorInput {
             frames: 0,
             page_size: 4096,
             checkpoint_threshold_bytes: 64 * 1024 * 1024,
+            database_bytes: 0,
         },
         index_posture: ScaleEnvelopeIndexPosture::new(
             ScaleEnvelopeIndexSubsystem::new(

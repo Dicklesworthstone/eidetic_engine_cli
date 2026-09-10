@@ -2674,11 +2674,23 @@ pub struct HelpArgs {
 pub enum DaemonCommand {
     /// Report daemon supervisor status.
     Status(DaemonStatusArgs),
-    /// Start the optional hot-mode UDS RPC daemon (bd-oja31 skeleton).
-    /// The daemon is opt-in; every CLI command continues to work
-    /// without it. Binds a Unix-domain socket at
-    /// `${XDG_RUNTIME_DIR}/ee/daemon.sock` on Linux, falling back to
-    /// `${TMPDIR:-/tmp}/ee-daemon.sock` on macOS.
+    /// Start the optional hot-mode UDS RPC daemon. The daemon is opt-in;
+    /// every CLI command continues to work without it. Binds a
+    /// Unix-domain socket at `${XDG_RUNTIME_DIR}/ee/daemon.sock` on
+    /// Linux, falling back to `${TMPDIR:-/tmp}/ee-daemon.sock` on macOS.
+    ///
+    /// When bound to a workspace it serves `ee search --use-daemon` with
+    /// the embedding model resident, warming that stack at startup so the
+    /// first search does not pay the cold load. `EE_DAEMON_WARM=off`
+    /// disables the warm-up.
+    ///
+    /// Socket path constraints, checked at bind: the parent directory
+    /// must be owned by your uid and must not grant group or other
+    /// access (0700 or stricter), and every ancestor must be owned by
+    /// root or by you. A bare `/tmp` is therefore refused, because it is
+    /// root-owned and world-writable. Separately, the kernel caps a
+    /// Unix-domain socket path at 107 bytes; a longer `--socket` fails
+    /// the bind with an OS error rather than an `ee` diagnostic.
     Start(DaemonHotModeStartArgs),
     /// Stop a running hot-mode daemon by removing its UDS file. Best-
     /// effort: a daemon started in a separate process tree needs an
@@ -63182,7 +63194,9 @@ where
 
     if args.dry_run {
         let before = match connection.wal_status() {
-            Ok(status) => WalStatusReport::from_wal_status(status, threshold),
+            Ok(status) => {
+                WalStatusReport::from_wal_status_with_database(status, threshold, &database_path)
+            }
             Err(error) => {
                 let data = serde_json::json!({
                     "schema": MAINTENANCE_RUN_SCHEMA_V1,
@@ -63279,8 +63293,16 @@ where
             return write_maintenance_response(cli, stdout, false, data);
         }
     };
-    let before = WalStatusReport::from_wal_status(checkpoint.before.clone(), threshold);
-    let after = WalStatusReport::from_wal_status(checkpoint.after.clone(), threshold);
+    let before = WalStatusReport::from_wal_status_with_database(
+        checkpoint.before.clone(),
+        threshold,
+        &database_path,
+    );
+    let after = WalStatusReport::from_wal_status_with_database(
+        checkpoint.after.clone(),
+        threshold,
+        &database_path,
+    );
     let checkpoint_outcome = crate::db::read_pool::note_process_checkpoint_outcome(
         &crate::db::DatabaseConfig::file(database_path.clone()),
         checkpoint.busy,
@@ -63327,7 +63349,7 @@ where
         "checkpointBlockerVisibility": checkpoint_blocker_visibility,
         "before": wal_status_report_json(&before),
         "after": wal_status_report_json(&after),
-        "next": if after.exceeds_threshold() {
+        "next": if after.warrants_checkpoint() {
             "ee maintenance wal-checkpoint --workspace . --mode truncate --json"
         } else {
             "ee status --workspace . --json"
@@ -63343,6 +63365,9 @@ fn wal_status_report_json(report: &WalStatusReport) -> serde_json::Value {
         "pageSize": report.page_size,
         "checkpointThresholdBytes": report.checkpoint_threshold_bytes,
         "exceedsThreshold": report.exceeds_threshold(),
+        "databaseBytes": report.database_bytes,
+        "exceedsDatabaseSize": report.exceeds_database_size(),
+        "warrantsCheckpoint": report.warrants_checkpoint(),
     })
 }
 
