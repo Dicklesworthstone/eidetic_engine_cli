@@ -7476,13 +7476,6 @@ fn collect_audit_history_payloads(
         .map(|row| row.id)
         .chain(
             connection
-                .list_plan_recipes(workspace_id)
-                .map_err(work_history_error)?
-                .into_iter()
-                .map(|row| row.id),
-        )
-        .chain(
-            connection
                 .list_pack_record_ids_for_recovery(workspace_id)
                 .map_err(work_history_error)?,
         )
@@ -7491,6 +7484,11 @@ fn collect_audit_history_payloads(
             references.insert(id.clone(), id);
         }
     }
+    references.extend(backup_recipe_id_mapping(
+        connection,
+        workspace_id,
+        redaction,
+    )?);
     let mut rows = Vec::with_capacity(originals.len());
     for original in originals {
         if original
@@ -9365,6 +9363,34 @@ fn redact_maintenance_id(value: &str, prefix: &str, level: RedactionLevel) -> St
     }
 }
 
+fn backup_recipe_id_mapping(
+    connection: &DbConnection,
+    workspace_id: &str,
+    redaction: RedactionLevel,
+) -> Result<BTreeMap<String, String>, DomainError> {
+    let candidate_ids = connection
+        .list_curation_candidates(workspace_id, None, None, None)
+        .map_err(work_history_error)?
+        .iter()
+        .map(crate::core::curate::candidate_recipe_id)
+        .collect::<BTreeSet<_>>();
+    Ok(connection
+        .list_plan_recipes(workspace_id)
+        .map_err(work_history_error)?
+        .into_iter()
+        .map(|row| {
+            // Producer-derived identities must survive candidate replay.
+            // Other IDs and every reference to them share the same redaction.
+            let restored = if candidate_ids.contains(&row.id) {
+                row.id.clone()
+            } else {
+                redact_maintenance_id(&row.id, "plrec_", redaction)
+            };
+            (row.id, restored)
+        })
+        .collect())
+}
+
 fn collect_maintenance_history_payloads(
     connection: &DbConnection,
     workspace_id: &str,
@@ -9500,12 +9526,11 @@ fn collect_maintenance_history_payloads(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let mut candidate_recipe_ids = BTreeSet::new();
+    let recipe_ids = backup_recipe_id_mapping(connection, workspace_id, redaction)?;
     for candidate in connection
         .list_curation_candidates(workspace_id, None, None, None)
         .map_err(work_history_error)?
     {
-        candidate_recipe_ids.insert(crate::core::curate::candidate_recipe_id(&candidate));
         if crate::core::curate::validate_curate_candidate_id(&candidate.id)
             .is_ok_and(|id| id == candidate.id)
             && redact_content(&candidate.id, RedactionLevel::Minimal) == candidate.id
@@ -9515,11 +9540,10 @@ fn collect_maintenance_history_payloads(
         }
     }
     for row in &mut rows.recipes {
-        // A producer-derived ID is an addressable identity. Rehashing it as
-        // high-entropy prose would break replay of the recovered candidate.
-        if !candidate_recipe_ids.contains(&row.id) {
-            row.id = redact_maintenance_id(&row.id, "plrec_", redaction);
-        }
+        row.id = recipe_ids
+            .get(&row.id)
+            .cloned()
+            .ok_or_else(|| work_history_error("recipe missing from recovery identity mapping"))?;
         row.name = redact_content(&row.name, redaction);
         row.when_to_use = redact_content(&row.when_to_use, redaction);
         row.steps_json = redact_work_history_json(&row.steps_json, redaction)?;
@@ -16810,6 +16834,7 @@ mod tests {
 
     #[test]
     fn default_backup_restores_audit_rows_and_chain() -> TestResult {
+        let recipe_id = "plrec_0123456789abcdefABCDEFghijklmnopqrstuvwxyz9876543210";
         for redaction in [RedactionLevel::None, RedactionLevel::Standard] {
             let (temp, workspace, database) =
                 fixture_with_memory_content("Run cargo fmt --check before release.")
@@ -16820,11 +16845,29 @@ mod tests {
                 .map_err(|e| e.to_string())?
                 .remove(0)
                 .id;
+            db.insert_plan_recipe(&crate::db::StoredPlanRecipe {
+                id: recipe_id.to_owned(),
+                workspace_id: source_id.clone(),
+                name: "Manual release recipe".to_owned(),
+                when_to_use: "Preparing a release".to_owned(),
+                steps_json: json!(["Run cargo fmt --check."]).to_string(),
+                evidence_uris_json: "[]".to_owned(),
+                maturity: "draft".to_owned(),
+                confidence: 0.0,
+                helpful_count: 0,
+                harmful_count: 0,
+                created_at: "2026-09-01T00:00:00Z".to_owned(),
+                updated_at: "2026-09-01T00:00:00Z".to_owned(),
+                last_recommended_at: None,
+            })
+            .map_err(|e| e.to_string())?;
             let batch = (0..128).map(|index| (crate::db::generate_audit_id(), CreateAuditInput {
                 workspace_id: (index % 3 != 0).then(|| source_id.clone()),
-                actor: Some("recovery-reviewer".to_owned()), action: "db.check_integrity".to_owned(),
-                target_type: (index % 2 == 0).then(|| "database".to_owned()), target_id: None,
-                details: Some(json!({"result": "checked", "api_key": "audit-secret-canary", "memoryId": MemoryId::from_uuid(Uuid::from_u128(2)).to_string()}).to_string()),
+                actor: Some("recovery-reviewer".to_owned()),
+                action: if index == 0 { audit_actions::PLAN_RECIPE_SAVE.to_owned() } else { "db.check_integrity".to_owned() },
+                target_type: (index % 2 == 0).then(|| if index == 0 { "plan_recipe" } else { "database" }.to_owned()),
+                target_id: (index == 0).then(|| recipe_id.to_owned()),
+                details: Some(json!({"result": "checked", "api_key": "audit-secret-canary", "recipeId": recipe_id, "memoryId": MemoryId::from_uuid(Uuid::from_u128(2)).to_string()}).to_string()),
             })).collect::<Vec<_>>();
             db.insert_audit_batch(&batch).map_err(|e| e.to_string())?;
             let originals = db
@@ -16862,6 +16905,10 @@ mod tests {
                     let raw = fs::read_to_string(Path::new(&backup.backup_path).join(&asset.path))
                         .map_err(|e| e.to_string())?;
                     assert!(!raw.contains("audit-secret-canary"));
+                    assert!(
+                        !raw.contains(recipe_id),
+                        "audit references must follow recipe redaction"
+                    );
                     let chunk: BackupAuditHistory =
                         serde_json::from_str(&raw).map_err(|e| e.to_string())?;
                     assert!(chunk.rows.iter().all(|entry| entry.transformed));
@@ -16891,6 +16938,13 @@ mod tests {
                     .id,
                 source_id
             );
+            let recipes = db
+                .list_plan_recipes(&source_id)
+                .map_err(|e| e.to_string())?;
+            assert_eq!(recipes.len(), 1);
+            if redaction == RedactionLevel::Standard {
+                assert_ne!(recipes[0].id, recipe_id);
+            }
             for original in &originals {
                 let actual = db
                     .get_audit(&original.id)
@@ -16902,6 +16956,13 @@ mod tests {
                 assert_eq!(actual.timestamp, original.timestamp);
                 assert_eq!(actual.target_type, original.target_type);
                 assert_eq!(actual.workspace_id, original.workspace_id);
+                if original.target_id.as_deref() == Some(recipe_id) {
+                    assert_eq!(actual.target_id.as_deref(), Some(recipes[0].id.as_str()));
+                    let details: JsonValue =
+                        serde_json::from_str(actual.details.as_deref().ok_or("audit details")?)
+                            .map_err(|e| e.to_string())?;
+                    assert_eq!(details["recipeId"], recipes[0].id);
+                }
                 assert_eq!(
                     actual.this_row_hash.as_deref(),
                     Some(crate::db::compute_audit_row_hash(&actual).as_str())
