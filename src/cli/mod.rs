@@ -7745,6 +7745,10 @@ pub struct PlanRecipeListArgs {
     /// Filter by category.
     #[arg(long, value_name = "CATEGORY")]
     pub category: Option<String>,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee plan recipe show`.
@@ -7753,6 +7757,10 @@ pub struct PlanRecipeShowArgs {
     /// Recipe ID to show.
     #[arg(value_name = "RECIPE_ID")]
     pub recipe_id: String,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee plan explain`.
@@ -7761,6 +7769,10 @@ pub struct PlanExplainArgs {
     /// Recipe ID to explain.
     #[arg(value_name = "ID")]
     pub id: String,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee plan recommend`.
@@ -7774,13 +7786,17 @@ pub struct PlanRecommendArgs {
     #[arg(long, short = 'n', default_value_t = 5)]
     pub limit: u32,
 
-    /// Minimum confidence threshold for matches.
+    /// Minimum ranking score (0 to 1); not a calibrated confidence estimate.
     #[arg(long, default_value_t = 0.3)]
-    pub min_confidence: f64,
+    pub min_score: f64,
 
     /// Workspace to query for procedural rules.
     #[arg(long, value_name = "PATH")]
     pub workspace: Option<PathBuf>,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Subcommands for `ee playbook`.
@@ -25774,7 +25790,7 @@ fn handle_plan_goal<W, E>(
     cli: &Cli,
     args: &PlanGoalArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
@@ -25790,24 +25806,27 @@ where
     let options = PlanRecommendOptions {
         task: args.goal.clone(),
         limit: 5,
-        min_confidence: 0.3,
+        min_score: 0.3,
         workspace_path,
+        database_path: None,
     };
-    let report = recommend_recipes(&options);
-    write_plan_recommend_report(cli, &report, stdout)
+    match recommend_recipes(&options) {
+        Ok(report) => write_plan_recommend_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_plan_recipe_list<W, E>(
     cli: &Cli,
     args: &PlanRecipeListArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    use crate::core::plan::{GoalCategory, RECIPE_LIST_SCHEMA_V1, recipes_by_category};
+    use crate::core::plan::{GoalCategory, RECIPE_LIST_SCHEMA_V1, recipe_catalog};
 
     let category = args.category.as_ref().and_then(|c| {
         GoalCategory::all()
@@ -25816,12 +25835,21 @@ where
             .copied()
     });
 
-    let recipes = recipes_by_category(category);
+    let (workspace, _) = resolve_local_workspace_for_cli(cli, None);
+    let recipes = match recipe_catalog(&workspace, args.database.as_deref()) {
+        Ok(entries) => entries
+            .into_iter()
+            .filter(|entry| category.is_none_or(|c| entry.recipe.category == c))
+            .collect::<Vec<_>>(),
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
 
     let human_output = || {
         let mut out = String::from("Available Recipes\n=================\n\n");
-        for recipe in &recipes {
-            out.push_str(&format!("{} (v{})\n", recipe.id, recipe.version));
+        for entry in &recipes {
+            let recipe = &entry.recipe;
+            out.push_str(&format!("{}\n", recipe.id));
+            out.push_str(&format!("  Source:   {}\n", entry.source_id));
             out.push_str(&format!("  Category: {}\n", recipe.category.as_str()));
             out.push_str(&format!("  Effect:   {}\n", recipe.effect_posture.as_str()));
             out.push_str(&format!("  Steps:    {}\n\n", recipe.steps.len()));
@@ -25833,7 +25861,15 @@ where
     let toon_output = || {
         recipes
             .iter()
-            .map(|r| format!("RECIPE|{}|{}|{}", r.id, r.category.as_str(), r.steps.len()))
+            .map(|entry| {
+                format!(
+                    "RECIPE|{}|{}|{}|{}",
+                    entry.recipe.id,
+                    entry.recipe.category.as_str(),
+                    entry.recipe.steps.len(),
+                    entry.source_id
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n")
             + "\n"
@@ -25875,12 +25911,18 @@ where
     W: Write,
     E: Write,
 {
-    use crate::core::plan::{RECIPE_SHOW_SCHEMA_V1, get_recipe};
+    use crate::core::plan::{RECIPE_SHOW_SCHEMA_V1, find_recipe};
 
-    match get_recipe(&args.recipe_id) {
-        Some(recipe) => {
+    let (workspace, _) = resolve_local_workspace_for_cli(cli, None);
+    match find_recipe(&workspace, args.database.as_deref(), &args.recipe_id) {
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Ok(Some(entry)) => {
+            let recipe = &entry.recipe;
             let human_output = || {
-                let mut out = format!("Recipe: {} (v{})\n", recipe.id, recipe.version);
+                let mut out = format!(
+                    "Recipe: {}\nSource: {}\nMaturity: {}\n",
+                    recipe.id, entry.source_id, entry.maturity
+                );
                 out.push_str(&format!("{}\n\n", "=".repeat(40)));
                 out.push_str(&format!("Name:        {}\n", recipe.name));
                 out.push_str(&format!("Category:    {}\n", recipe.category.as_str()));
@@ -25893,7 +25935,9 @@ where
 
                 out.push_str("Steps:\n");
                 for step in &recipe.steps {
-                    let required = if step.required {
+                    let required = if entry.source_kind == "stored_plan_recipe" {
+                        "[stored instruction]"
+                    } else if step.required {
                         "[required]"
                     } else {
                         "[optional]"
@@ -25924,11 +25968,16 @@ where
 
             let toon_output = || {
                 format!(
-                    "RECIPE_DETAIL|{}|{}|{}|{}\n",
+                    "RECIPE_DETAIL|{}|{}|{}|{}|{}\n",
                     recipe.id,
-                    recipe.version,
+                    if entry.source_kind == "stored_plan_recipe" {
+                        "unknown".to_owned()
+                    } else {
+                        recipe.version.to_string()
+                    },
                     recipe.category.as_str(),
-                    recipe.steps.len()
+                    recipe.steps.len(),
+                    entry.source_id
                 )
             };
 
@@ -25936,7 +25985,7 @@ where
                 serde_json::json!({
                     "schema": RECIPE_SHOW_SCHEMA_V1,
                     "success": true,
-                    "data": recipe.data_json(),
+                    "data": entry.data_json(),
                 })
                 .to_string()
             };
@@ -25952,7 +26001,7 @@ where
                 | output::Renderer::Hook => write_stdout(stdout, &(json_output() + "\n")),
             }
         }
-        None => {
+        Ok(None) => {
             let domain_error = crate::models::DomainError::NotFound {
                 resource: "recipe".to_string(),
                 id: args.recipe_id.clone(),
@@ -25967,7 +26016,7 @@ fn handle_plan_explain<W, E>(
     cli: &Cli,
     args: &PlanExplainArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
@@ -25975,15 +26024,18 @@ where
 {
     use crate::core::plan::explain_recipe;
 
-    let report = explain_recipe(&args.id);
-    write_plan_explain_report(cli, &report, stdout)
+    let (workspace, _) = resolve_local_workspace_for_cli(cli, None);
+    match explain_recipe(&workspace, args.database.as_deref(), &args.id) {
+        Ok(report) => write_plan_explain_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn handle_plan_recommend<W, E>(
     cli: &Cli,
     args: &PlanRecommendArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
@@ -25995,11 +26047,14 @@ where
     let options = PlanRecommendOptions {
         task: args.task.clone(),
         limit: args.limit,
-        min_confidence: args.min_confidence,
+        min_score: args.min_score,
         workspace_path,
+        database_path: args.database.clone(),
     };
-    let report = recommend_recipes(&options);
-    write_plan_recommend_report(cli, &report, stdout)
+    match recommend_recipes(&options) {
+        Ok(report) => write_plan_recommend_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn write_plan_explain_report<W>(
@@ -93530,6 +93585,100 @@ demos:
             expanded == raw,
             format!("expected failed expansion to preserve raw path, got {expanded:?}"),
         )
+    }
+
+    #[test]
+    fn plan_stored_recipe_cli_reads_and_score_validation() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let workspace = directory.path().canonicalize().map_err(|e| e.to_string())?;
+        let database = workspace.join("recipes.db");
+        let workspace_id = crate::core::workspace::stable_workspace_id(&workspace);
+        let db = crate::db::DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        db.migrate().map_err(|e| e.to_string())?;
+        db.insert_workspace(
+            &workspace_id,
+            &crate::db::CreateWorkspaceInput {
+                path: workspace.display().to_string(),
+                name: None,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        db.execute_raw(&format!(
+            "INSERT INTO plan_recipes (id, workspace_id, name, when_to_use, steps_json, evidence_uris_json, maturity, confidence, created_at, updated_at) VALUES ('plrec_cli_release', '{workspace_id}', 'Tangerine release', 'Prepare the tangerine release', '[\"ee status --json\"]', '[\"ee://evidence/release\"]', 'validated', 0.75, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')"
+        )).map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        for command in [
+            vec!["plan", "recipe", "list"],
+            vec!["plan", "recipe", "show", "plrec_cli_release"],
+            vec!["plan", "explain", "plrec_cli_release"],
+        ] {
+            let mut args = vec![
+                OsString::from("ee"),
+                OsString::from("--json"),
+                OsString::from("--workspace"),
+                workspace.as_os_str().to_owned(),
+            ];
+            args.extend(command.iter().map(OsString::from));
+            args.extend([
+                OsString::from("--database"),
+                database.as_os_str().to_owned(),
+            ]);
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            ensure_equal(
+                &run(args, &mut stdout, &mut stderr),
+                &ProcessExitCode::Success,
+                "stored recipe CLI reads succeed",
+            )?;
+            let parsed: serde_json::Value = serde_json::from_slice(&stdout)
+                .map_err(|e| format!("{e}: {}", String::from_utf8_lossy(&stdout)))?;
+            ensure(parsed["success"] == true, "stored recipe response succeeds")?;
+            ensure(
+                String::from_utf8_lossy(&stdout).contains("plrec_cli_release"),
+                "the stored recipe reaches the CLI response",
+            )?;
+            ensure(
+                String::from_utf8_lossy(&stdout).contains("stored_plan_recipe"),
+                "actual source kind reaches the CLI response",
+            )?;
+            if command[1] == "explain" {
+                ensure(
+                    parsed["data"]["whenToUse"] == "Prepare the tangerine release",
+                    "explain uses stored applicability",
+                )?;
+                ensure(
+                    parsed["data"]["effectPosture"] == "unknown",
+                    "CLI does not claim stored commands are safe",
+                )?;
+            }
+        }
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run(
+            [
+                "ee",
+                "--json",
+                "plan",
+                "recommend",
+                "release",
+                "--min-score",
+                "NaN",
+            ]
+            .map(OsString::from),
+            &mut stdout,
+            &mut stderr,
+        );
+        ensure(
+            exit != ProcessExitCode::Success,
+            "invalid score must fail at the public boundary",
+        )?;
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&stdout).map_err(|e| e.to_string())?;
+        ensure(
+            parsed["error"]["code"] == "usage",
+            "invalid score yields a structured usage error",
+        )?;
+        Ok(())
     }
 
     // Note: EE_WORKSPACE env-var path is exercised by integration tests

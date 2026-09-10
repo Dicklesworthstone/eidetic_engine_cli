@@ -1972,6 +1972,95 @@ static SEARCH_CAPABILITIES: [SearchCapability; 8] = [
     ),
 ];
 
+/// Frankensearch scores for a small, ephemeral catalog. No workspace index or
+/// database is mutated, and hash embeddings never earn semantic credit.
+pub(crate) struct CatalogSearchScores {
+    pub lexical: BTreeMap<String, f64>,
+    pub semantic: BTreeMap<String, f64>,
+    pub semantic_available: bool,
+}
+
+pub(crate) async fn search_catalog(
+    cx: &asupersync::Cx,
+    documents: &[IndexableDocument],
+    query: &str,
+    embedder: Option<&dyn Embedder>,
+) -> Result<CatalogSearchScores, String> {
+    cx.checkpoint().map_err(|error| error.to_string())?;
+    #[cfg(feature = "lexical-bm25")]
+    let lexical = {
+        let index = TantivyIndex::in_memory().map_err(|error| error.to_string())?;
+        index
+            .index_documents(cx, documents)
+            .await
+            .map_err(|error| error.to_string())?;
+        index.commit(cx).await.map_err(|error| error.to_string())?;
+        index
+            .search(cx, query, documents.len())
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|hit| hit.score.is_finite() && hit.score > 0.0)
+            .map(|hit| {
+                let score = f64::from(hit.score);
+                (hit.doc_id.to_string(), score / (1.0 + score))
+            })
+            .collect()
+    };
+    #[cfg(not(feature = "lexical-bm25"))]
+    let lexical = BTreeMap::new();
+    cx.checkpoint().map_err(|error| error.to_string())?;
+    let mut scores = CatalogSearchScores {
+        lexical,
+        semantic: BTreeMap::new(),
+        semantic_available: false,
+    };
+    if let Some(embedder) = embedder.filter(|embedder| embedder.is_semantic()) {
+        let texts = std::iter::once(query)
+            .chain(documents.iter().map(|doc| doc.content.as_str()))
+            .collect::<Vec<_>>();
+        let embedded = embedder.embed_batch_bound(cx, &texts).await;
+        cx.checkpoint().map_err(|error| error.to_string())?;
+        if let Ok(vectors) = embedded
+            && vectors.len() == texts.len()
+            && embedder.is_semantic()
+            && let Some(query_vector) = vectors.first()
+            && vectors.iter().all(|vector| {
+                vector.identity == query_vector.identity
+                    && vector.validate().is_ok()
+                    && vector.values.iter().all(|value| value.is_finite())
+                    && vector.values.iter().any(|value| *value != 0.0)
+            })
+        {
+            scores.semantic = documents
+                .iter()
+                .zip(vectors.iter().skip(1))
+                .map(|(doc, vector)| {
+                    let score = frankensearch::core::traits::cosine_similarity(
+                        &query_vector.values,
+                        &vector.values,
+                    );
+                    (
+                        doc.id.clone(),
+                        if score.is_finite() {
+                            f64::from(score.clamp(0.0, 1.0))
+                        } else {
+                            0.0
+                        },
+                    )
+                })
+                .collect();
+            scores.semantic_available = true;
+        }
+    }
+    if !cfg!(feature = "lexical-bm25") && !scores.semantic_available {
+        return Err(
+            "recipe retrieval requires lexical-bm25 or an available semantic embedder".to_owned(),
+        );
+    }
+    Ok(scores)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SearchModuleReadiness {
     contract: &'static str,

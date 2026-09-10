@@ -1,15 +1,20 @@
-//! Static command recipe catalog (EE-PLAN-001).
+//! Command recipe catalog and workspace recipe retrieval (EE-PLAN-001).
 //!
 //! Deterministic, local, schema-validated catalog over known EE commands,
-//! capabilities, effect metadata, and degraded branches. Goal planning and recipe
-//! selection are intentionally unavailable at the CLI boundary until they are
-//! backed by explicit evidence rather than keyword reasoning.
+//! capabilities, effect metadata, and degraded branches. Retrieval includes
+//! stored workspace recipes with explicit provenance.
+//! Recommendations never execute steps or classify arbitrary commands as safe.
 
-use std::cmp::Reverse;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 
 use crate::core::task_frame::{TaskFrameRecord, TaskFrameShowOptions, show_task_frame};
+use crate::db::{DbConnection, StoredPlanRecipe};
+use crate::models::DomainError;
 
 pub const GOAL_PLAN_SCHEMA_V1: &str = "ee.plan.goal.v1";
 pub const RECIPE_LIST_SCHEMA_V1: &str = "ee.plan.recipe_list.v1";
@@ -330,6 +335,8 @@ pub struct GoalClassification {
 /// Effect posture for a recipe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EffectPosture {
+    /// Stored commands have not been evaluated for effects.
+    Unknown,
     /// Read-only, no mutations.
     ReadOnly,
     /// Writes to local workspace only.
@@ -342,6 +349,7 @@ impl EffectPosture {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Unknown => "unknown",
             Self::ReadOnly => "read_only",
             Self::LocalWrite => "local_write",
             Self::External => "external",
@@ -1285,14 +1293,221 @@ pub fn explain_recipe_selection(recipe_id: &str) -> Option<PlanExplanation> {
 // ============================================================================
 
 pub const PLAN_RECOMMEND_SCHEMA_V1: &str = "ee.plan.recommend.v1";
+pub const RECIPE_SEMANTIC_UNAVAILABLE: &str = "semantic_search_unavailable";
+
+/// A catalog recipe and its actual source metadata. Built-ins and stored
+/// procedures retain distinct provenance even when their text is identical.
+pub(crate) struct RecipeCatalogEntry {
+    pub recipe: Recipe,
+    pub source_kind: &'static str,
+    pub source_id: String,
+    pub maturity: String,
+    pub evidence_uris: Vec<String>,
+    created_at: Option<DateTime<Utc>>,
+    updated_at: Option<DateTime<Utc>>,
+}
+
+impl RecipeCatalogEntry {
+    pub fn data_json(&self) -> JsonValue {
+        self.decorate(self.recipe.data_json())
+    }
+
+    pub fn summary_json(&self) -> JsonValue {
+        self.decorate(self.recipe.summary_json())
+    }
+
+    fn decorate(&self, mut value: JsonValue) -> JsonValue {
+        value["sourceKind"] = json!(self.source_kind);
+        value["sourceId"] = json!(self.source_id);
+        value["maturity"] = json!(self.maturity);
+        value["evidenceUris"] = json!(self.evidence_uris);
+        if self.source_kind == "stored_plan_recipe" {
+            value["catalogSource"] = JsonValue::Null;
+            value["version"] = JsonValue::Null;
+            value["decisionBoundary"] = json!("stored_instructions_only");
+            if let Some(steps) = value.get_mut("steps").and_then(JsonValue::as_array_mut) {
+                for step in steps {
+                    for field in ["required", "stopOnFailure", "dryRunAvailable"] {
+                        step[field] = JsonValue::Null;
+                    }
+                }
+            }
+        }
+        value
+    }
+}
+
+fn recipe_storage_error(error: impl std::fmt::Display) -> DomainError {
+    DomainError::Storage {
+        message: format!("Cannot read the workspace recipe catalog: {error}"),
+        repair: Some("ee doctor --workspace . --json".to_owned()),
+    }
+}
+
+fn recipe_search_error(error: impl std::fmt::Display) -> DomainError {
+    DomainError::SearchIndex {
+        message: format!("Recipe retrieval failed: {error}"),
+        repair: Some("ee doctor --workspace . --json".to_owned()),
+    }
+}
+
+fn recipe_text(text: &str) -> String {
+    crate::output::jsonl_export::redact_content(text, crate::models::RedactionLevel::Standard)
+}
+
+fn recipe_searchable_text(text: &str) -> String {
+    use crate::output::jsonl_export::{
+        REDACTED_ID_PLACEHOLDER, REDACTED_PATH_PLACEHOLDER, REDACTED_PLACEHOLDER,
+    };
+    recipe_text(text)
+        .replace(REDACTED_PLACEHOLDER, " ")
+        .replace(REDACTED_PATH_PLACEHOLDER, " ")
+        .replace(REDACTED_ID_PLACEHOLDER, " ")
+}
+
+fn stored_recipe_entry(row: StoredPlanRecipe) -> Result<RecipeCatalogEntry, DomainError> {
+    // IDs are used verbatim for addressable provenance. Refuse secret-bearing
+    // identifiers instead of returning a secret or inventing a replacement ID.
+    for id in [&row.id, &row.workspace_id] {
+        if crate::output::jsonl_export::redact_content(id, crate::models::RedactionLevel::Minimal)
+            != *id
+        {
+            return Err(recipe_storage_error(
+                "a recipe identifier contains secret material",
+            ));
+        }
+    }
+    let steps: Vec<JsonValue> =
+        serde_json::from_str(&row.steps_json).map_err(recipe_storage_error)?;
+    let evidence: Vec<String> =
+        serde_json::from_str(&row.evidence_uris_json).map_err(recipe_storage_error)?;
+    let mut evidence_uris = evidence
+        .into_iter()
+        .map(|uri| recipe_text(&uri))
+        .collect::<Vec<_>>();
+    evidence_uris.sort();
+    evidence_uris.dedup();
+    let created_at = DateTime::parse_from_rfc3339(&row.created_at)
+        .map_err(recipe_storage_error)?
+        .with_timezone(&Utc);
+    let updated_at = DateTime::parse_from_rfc3339(&row.updated_at)
+        .map_err(recipe_storage_error)?
+        .with_timezone(&Utc);
+    Ok(RecipeCatalogEntry {
+        source_kind: "stored_plan_recipe",
+        source_id: format!("ee://workspace/{}/plan-recipe/{}", row.workspace_id, row.id),
+        maturity: row.maturity,
+        evidence_uris,
+        created_at: Some(created_at),
+        updated_at: Some(updated_at),
+        recipe: Recipe {
+            id: row.id,
+            version: 1, // JSON exposes no historical version for stored rows.
+            category: GoalCategory::Unknown,
+            name: recipe_text(&row.name),
+            description: recipe_text(&row.when_to_use),
+            effect_posture: EffectPosture::Unknown,
+            required_capabilities: Vec::new(),
+            steps: steps
+                .into_iter()
+                .enumerate()
+                .map(|(index, step)| CommandStep {
+                    order: u32::try_from(index + 1).unwrap_or(u32::MAX),
+                    command: recipe_text(
+                        step.as_str()
+                            .or_else(|| step.get("command").and_then(JsonValue::as_str))
+                            .map_or_else(|| step.to_string(), str::to_owned)
+                            .as_str(),
+                    ),
+                    description: "Stored instruction; effects have not been evaluated.".to_owned(),
+                    effect_class: EffectPosture::Unknown,
+                    dry_run_available: false,
+                    required: true,
+                    stop_on_failure: true,
+                })
+                .collect(),
+            degraded_branches: Vec::new(),
+            profiles: Vec::new(),
+        },
+    })
+}
+
+pub(crate) fn recipe_catalog(
+    workspace: &Path,
+    database: Option<&Path>,
+) -> Result<Vec<RecipeCatalogEntry>, DomainError> {
+    let mut catalog = builtin_recipes()
+        .into_iter()
+        .map(|recipe| RecipeCatalogEntry {
+            source_id: recipe_source_id(&recipe.id),
+            recipe,
+            source_kind: "static_command_catalog",
+            maturity: "catalog".to_owned(),
+            evidence_uris: Vec::new(),
+            created_at: None,
+            updated_at: None,
+        })
+        .collect::<Vec<_>>();
+    let workspace = workspace.canonicalize().map_err(recipe_storage_error)?;
+    let path = database
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace.join(".ee/ee.db"));
+    if !path.try_exists().map_err(recipe_storage_error)? {
+        if database.is_some() {
+            return Err(crate::core::storeless_workspace_error(&path));
+        }
+        return Ok(catalog);
+    }
+    let db = DbConnection::open_file_read_only(&path).map_err(recipe_storage_error)?;
+    if db.needs_migration().map_err(recipe_storage_error)? {
+        return Err(DomainError::MigrationRequired {
+            message: "The recipe store needs migration.".to_owned(),
+            repair: Some("ee migrate run --workspace . --json".to_owned()),
+        });
+    }
+    let requested_id = crate::core::workspace::stable_workspace_id(&workspace);
+    if let Some(row) =
+        crate::core::workspace::select_existing_workspace_row(&db, &requested_id, &[&workspace])?
+    {
+        for recipe in db
+            .list_plan_recipes(&row.id)
+            .map_err(recipe_storage_error)?
+        {
+            catalog.push(stored_recipe_entry(recipe)?);
+        }
+    }
+    catalog.sort_by(|left, right| left.recipe.id.cmp(&right.recipe.id));
+    Ok(catalog)
+}
+
+pub(crate) fn find_recipe(
+    workspace: &Path,
+    database: Option<&Path>,
+    id: &str,
+) -> Result<Option<RecipeCatalogEntry>, DomainError> {
+    Ok(recipe_catalog(workspace, database)?
+        .into_iter()
+        .find(|entry| entry.recipe.id == id))
+}
 
 /// Options for recommending recipes based on task description.
 #[derive(Clone, Debug)]
 pub struct PlanRecommendOptions {
     pub task: String,
     pub limit: u32,
-    pub min_confidence: f64,
-    pub workspace_path: std::path::PathBuf,
+    pub min_score: f64,
+    pub workspace_path: PathBuf,
+    pub database_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipeScoreComponents {
+    pub text_similarity: f64,
+    pub semantic_similarity: f64,
+    pub maturity_score: f64,
+    pub recency_decay: f64,
+    pub evidence_count: f64,
 }
 
 /// A ranked recipe recommendation.
@@ -1301,7 +1516,13 @@ pub struct RecipeRecommendation {
     pub recipe_id: String,
     pub recipe_name: String,
     pub category: GoalCategory,
-    pub confidence: f64,
+    pub score: f64,
+    pub components: RecipeScoreComponents,
+    pub rank: usize,
+    pub source_kind: &'static str,
+    pub source_id: String,
+    pub evidence_uris: Vec<String>,
+    pub maturity: String,
     pub match_reasons: Vec<String>,
     pub steps_count: usize,
     pub effect_posture: EffectPosture,
@@ -1315,6 +1536,8 @@ pub struct PlanRecommendReport {
     pub recommendations: Vec<RecipeRecommendation>,
     pub total_recipes_considered: usize,
     pub matches_found: usize,
+    pub recency_anchor: Option<String>,
+    pub degraded: Vec<JsonValue>,
 }
 
 impl PlanRecommendReport {
@@ -1326,111 +1549,218 @@ impl PlanRecommendReport {
             recommendations: Vec::new(),
             total_recipes_considered: 0,
             matches_found: 0,
+            recency_anchor: None,
+            degraded: Vec::new(),
         }
     }
 }
 
-/// Recommend recipes for a task based on keyword matching and category alignment.
-#[must_use]
-pub fn recommend_recipes(options: &PlanRecommendOptions) -> PlanRecommendReport {
-    let task_lower = options.task.to_lowercase();
-    let mut task_words: Vec<&str> = task_lower.split_whitespace().collect();
-    task_words.sort_unstable();
-    task_words.dedup();
-    let all_recipes = recipes_by_category(None);
-    let total_recipes_considered = all_recipes.len();
+fn validate_recommend_options(options: &PlanRecommendOptions) -> Result<(), DomainError> {
+    if options.task.trim().is_empty()
+        || recipe_searchable_text(&options.task).trim().is_empty()
+        || options.limit == 0
+        || !options.min_score.is_finite()
+        || !(0.0..=1.0).contains(&options.min_score)
+    {
+        return Err(DomainError::Usage {
+            message: "Recipe recommendation requires searchable task text after redaction, a positive limit, and a finite --min-score between 0 and 1.".to_owned(),
+            repair: Some("ee plan recommend --help".to_owned()),
+        });
+    }
+    Ok(())
+}
 
-    let mut scored: Vec<(RecipeRecommendation, f64)> = Vec::new();
+/// Retrieve stored and built-in recipes without modifying the store or indexes.
+pub fn recommend_recipes(
+    options: &PlanRecommendOptions,
+) -> Result<PlanRecommendReport, DomainError> {
+    validate_recommend_options(options)?;
+    // Finish the DB read before any optional model preparation or download.
+    let catalog = recipe_catalog(&options.workspace_path, options.database_path.as_deref())?;
+    crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+        let database = options
+            .database_path
+            .clone()
+            .unwrap_or_else(|| options.workspace_path.join(".ee/ee.db"));
+        let preparation = crate::core::index::prepare_search_embedder_for_workspace(
+            &cx,
+            &options.workspace_path,
+            &database,
+        )
+        .await;
+        cx.checkpoint().map_err(recipe_search_error)?;
+        recommend_from_catalog(
+            &cx,
+            options,
+            catalog,
+            preparation.as_ref().ok().map(|p| p.fast_embedder.as_ref()),
+        )
+        .await
+    })
+    .map_err(recipe_search_error)?
+}
 
-    for recipe in &all_recipes {
-        let mut score = 0.0;
-        let mut reasons = Vec::new();
-
-        let category_keywords = category_keywords(recipe.category);
-        for keyword in category_keywords {
-            if task_words.iter().any(|word| word.contains(keyword)) {
-                score += 0.3;
-                reasons.push(format!("Task mentions '{}' (category keyword)", keyword));
-            }
+pub(crate) async fn recommend_from_catalog(
+    cx: &asupersync::Cx,
+    options: &PlanRecommendOptions,
+    catalog: Vec<RecipeCatalogEntry>,
+    embedder: Option<&dyn crate::search::Embedder>,
+) -> Result<PlanRecommendReport, DomainError> {
+    validate_recommend_options(options)?;
+    let task = recipe_text(options.task.trim());
+    let documents = catalog
+        .iter()
+        .map(|entry| {
+            let recipe = &entry.recipe;
+            crate::search::IndexableDocument::new(
+                &recipe.id,
+                recipe_searchable_text(&format!(
+                    "{}\n{}\n{}",
+                    recipe.name,
+                    recipe.description,
+                    recipe
+                        .steps
+                        .iter()
+                        .map(|s| s.command.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )),
+            )
+        })
+        .collect::<Vec<_>>();
+    let query = recipe_searchable_text(&task);
+    let scores = crate::search::search_catalog(cx, &documents, &query, embedder)
+        .await
+        .map_err(recipe_search_error)?;
+    let anchor = catalog.iter().filter_map(|entry| entry.updated_at).max();
+    let mut report = PlanRecommendReport::empty(&task);
+    report.total_recipes_considered = catalog.len();
+    report.recency_anchor = anchor.map(|time| time.to_rfc3339());
+    if !scores.semantic_available {
+        report.degraded.push(json!({
+            "code": RECIPE_SEMANTIC_UNAVAILABLE,
+            "severity": "warning",
+            "message": "Recipe semantic search is unavailable; recommendations use Frankensearch lexical retrieval with redistributed weights."
+        }));
+    }
+    let text_weight = if scores.semantic_available {
+        0.30
+    } else {
+        0.55
+    };
+    let semantic_weight = if cfg!(feature = "lexical-bm25") {
+        0.25
+    } else {
+        0.55
+    };
+    let mut ranked = Vec::new();
+    for entry in catalog {
+        let text = scores.lexical.get(&entry.recipe.id).copied().unwrap_or(0.0);
+        let semantic = scores
+            .semantic
+            .get(&entry.recipe.id)
+            .copied()
+            .unwrap_or(0.0);
+        // Metadata alone must never recommend an unrelated procedure. Semantic
+        // only matches need at least 0.5 cosine similarity.
+        if text <= 0.0 && semantic < 0.5 {
+            continue;
         }
-
-        let recipe_name_lower = recipe.name.to_lowercase();
-        for word in &task_words {
-            if recipe_name_lower.contains(word) && word.len() > 2 {
-                score += 0.2;
-                reasons.push(format!("Recipe name matches task word '{}'", word));
+        let maturity = match entry.maturity.as_str() {
+            "draft" => 0.3,
+            "validated" => 0.6,
+            "promoted" => 1.0,
+            _ => 0.0, // Static catalog entries have no learned maturity.
+        };
+        // Anchor decay to recorded data, never wall time. A 30-day half-life
+        // preserves recency preference without changing identical reads.
+        let recency = match (anchor, entry.updated_at) {
+            (Some(anchor), Some(updated)) => {
+                2.0_f64.powf(-((anchor - updated).num_seconds().max(0) as f64) / (30.0 * 86400.0))
             }
+            _ => 0.0,
+        };
+        let evidence_count = entry
+            .evidence_uris
+            .iter()
+            .filter(|uri| !uri.trim().is_empty() && !uri.contains("[REDACTED"))
+            .count();
+        let evidence = evidence_count as f64 / (1.0 + evidence_count as f64);
+        let components = RecipeScoreComponents {
+            text_similarity: text,
+            semantic_similarity: semantic,
+            maturity_score: maturity,
+            recency_decay: recency,
+            evidence_count: evidence,
+        };
+        let score = text_weight * text
+            + semantic_weight * semantic
+            + 0.20 * maturity
+            + 0.10 * recency
+            + 0.15 * evidence;
+        if score < options.min_score {
+            continue;
         }
-
-        for step in &recipe.steps {
-            let step_lower = step.command.to_lowercase();
-            for word in &task_words {
-                if step_lower.contains(word) && word.len() > 2 {
-                    score += 0.1;
-                    reasons.push(format!("Step command contains '{}'", word));
-                    break;
-                }
-            }
-        }
-
-        if score >= options.min_confidence {
-            scored.push((
-                RecipeRecommendation {
-                    recipe_id: recipe.id.clone(),
-                    recipe_name: recipe.name.clone(),
-                    category: recipe.category,
-                    confidence: score.min(1.0),
-                    match_reasons: reasons,
-                    steps_count: recipe.steps.len(),
-                    effect_posture: recipe.effect_posture,
-                },
+        let reasons = vec![
+            format!("Frankensearch text similarity {text:.6}; semantic similarity {semantic:.6}."),
+            format!(
+                "Maturity {}; {} distinct evidence links; recency {recency:.6} against the recorded catalog anchor.",
+                entry.maturity, evidence_count
+            ),
+        ];
+        ranked.push((
+            RecipeRecommendation {
+                recipe_id: entry.recipe.id,
+                recipe_name: entry.recipe.name,
+                category: entry.recipe.category,
                 score,
-            ));
+                components,
+                rank: 0,
+                source_kind: entry.source_kind,
+                source_id: entry.source_id,
+                evidence_uris: entry.evidence_uris,
+                maturity: entry.maturity,
+                match_reasons: reasons,
+                steps_count: entry.recipe.steps.len(),
+                effect_posture: entry.recipe.effect_posture,
+            },
+            entry.created_at,
+        ));
+    }
+    ranked.sort_by(|a, b| {
+        b.0.score
+            .total_cmp(&a.0.score)
+            .then_with(|| a.0.recipe_id.cmp(&b.0.recipe_id))
+    });
+    // Epsilon in a pairwise comparator is non-transitive. Form deterministic
+    // groups relative to each group's highest score, then apply ADR tie keys.
+    let mut start = 0;
+    while start < ranked.len() {
+        let maximum = ranked[start].0.score;
+        let mut end = start + 1;
+        while end < ranked.len() && maximum - ranked[end].0.score <= 1e-6 {
+            end += 1;
         }
+        ranked[start..end].sort_by(|a, b| {
+            b.0.components
+                .maturity_score
+                .total_cmp(&a.0.components.maturity_score)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.0.recipe_id.cmp(&b.0.recipe_id))
+        });
+        start = end;
     }
-
-    // `total_cmp` over the previous `partial_cmp(...).unwrap_or(Equal)`
-    // matches the determinism hardening shipped at
-    // `src/core/conformal.rs:160` and `src/core/focus_suggest.rs:566`.
-    // Today the recipe `score` is a pure sum of finite positive
-    // constants (0.3 / 0.2 / 0.1) so partial_cmp returns `Some(...)`
-    // in every case, but the byte-identical JSON contract from
-    // AGENTS.md (same DB + indexes + config + query ⇒ stable JSON)
-    // requires a total ordering at every render-path sort site so
-    // future signals (e.g. confidence-weighted multipliers, log-
-    // scaled frequencies) cannot regress determinism silently.
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-    scored.truncate(options.limit as usize);
-
-    let matches_found = scored.len();
-    let recommendations: Vec<RecipeRecommendation> =
-        scored.into_iter().map(|(rec, _)| rec).collect();
-
-    PlanRecommendReport {
-        schema: PLAN_RECOMMEND_SCHEMA_V1.to_owned(),
-        task: options.task.clone(),
-        recommendations,
-        total_recipes_considered,
-        matches_found,
-    }
-}
-
-fn category_keywords(category: GoalCategory) -> &'static [&'static str] {
-    match category {
-        GoalCategory::Init => &["init", "initialize", "setup", "start", "new"],
-        GoalCategory::PreTaskBriefing => &["brief", "context", "prepare", "before", "pre"],
-        GoalCategory::InTaskRetrieval => &["search", "find", "retrieve", "look", "query"],
-        GoalCategory::DegradedRepair => &["repair", "fix", "degraded", "broken", "error"],
-        GoalCategory::OutcomeCapture => &["remember", "outcome", "capture", "record", "save"],
-        GoalCategory::SessionReview => &["review", "session", "curation", "curate"],
-        GoalCategory::Handoff => &["handoff", "resume", "continue", "transfer"],
-        GoalCategory::SupportBundle => &["support", "bundle", "debug", "diagnostic"],
-        GoalCategory::BackupExport => &["backup", "export", "archive", "restore"],
-        GoalCategory::Rehearsal => &["rehearse", "rehearsal", "practice", "dry-run"],
-        GoalCategory::AuditInspection => &["audit", "inspect", "timeline", "history"],
-        GoalCategory::Closeout => &["close", "closeout", "finish", "complete", "done"],
-        GoalCategory::Unknown => &[],
-    }
+    report.matches_found = ranked.len();
+    ranked.truncate(options.limit as usize);
+    report.recommendations = ranked
+        .into_iter()
+        .enumerate()
+        .map(|(index, (mut recommendation, _))| {
+            recommendation.rank = index + 1;
+            recommendation
+        })
+        .collect();
+    Ok(report)
 }
 
 // ============================================================================
@@ -1451,6 +1781,8 @@ pub struct PlanExplainReport {
     pub effect_posture: Option<String>,
     pub maturity: Option<String>,
     pub evidence_uris: Vec<String>,
+    pub source_kind: Option<String>,
+    pub source_id: Option<String>,
 }
 
 impl PlanExplainReport {
@@ -1468,35 +1800,40 @@ impl PlanExplainReport {
             effect_posture: None,
             maturity: None,
             evidence_uris: Vec::new(),
+            source_kind: None,
+            source_id: None,
         }
     }
 }
 
 /// Explain why a recipe exists and when to use it.
-#[must_use]
-pub fn explain_recipe(recipe_id: &str) -> PlanExplainReport {
-    let all_recipes = recipes_by_category(None);
-    let recipe = all_recipes.iter().find(|r| r.id == recipe_id);
-
-    match recipe {
-        Some(r) => PlanExplainReport {
-            schema: PLAN_EXPLAIN_SCHEMA_V1.to_owned(),
-            recipe_id: recipe_id.to_owned(),
-            found: true,
-            recipe_name: Some(r.name.clone()),
-            category: Some(r.category.as_str().to_owned()),
-            description: Some(r.category.description().to_owned()),
-            when_to_use: Some(format!(
-                "Use this recipe when your goal involves {} tasks.",
-                r.category.as_str()
-            )),
-            steps: r.steps.iter().map(|s| s.command.clone()).collect(),
-            effect_posture: Some(r.effect_posture.as_str().to_owned()),
-            maturity: Some("catalog".to_owned()),
-            evidence_uris: vec![format!("ee://plan/recipe/{}", r.id)],
-        },
+pub fn explain_recipe(
+    workspace: &Path,
+    database: Option<&Path>,
+    recipe_id: &str,
+) -> Result<PlanExplainReport, DomainError> {
+    let entry = find_recipe(workspace, database, recipe_id)?;
+    Ok(match entry {
+        Some(entry) => {
+            let r = entry.recipe;
+            PlanExplainReport {
+                schema: PLAN_EXPLAIN_SCHEMA_V1.to_owned(),
+                recipe_id: recipe_id.to_owned(),
+                found: true,
+                recipe_name: Some(r.name.clone()),
+                category: Some(r.category.as_str().to_owned()),
+                description: Some(r.description.clone()),
+                when_to_use: Some(r.description),
+                steps: r.steps.iter().map(|s| s.command.clone()).collect(),
+                effect_posture: Some(r.effect_posture.as_str().to_owned()),
+                maturity: Some(entry.maturity),
+                evidence_uris: entry.evidence_uris,
+                source_kind: Some(entry.source_kind.to_owned()),
+                source_id: Some(entry.source_id),
+            }
+        }
         None => PlanExplainReport::not_found(recipe_id),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1669,7 +2006,9 @@ mod tests {
 
     #[test]
     fn explain_recipe_exists() -> TestResult {
-        let exp = explain_recipe("init-workspace");
+        let workspace = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let exp =
+            explain_recipe(workspace.path(), None, "init-workspace").map_err(|e| e.message())?;
         assert!(exp.found);
         assert_eq!(exp.recipe_id, "init-workspace");
         Ok(())
@@ -1723,6 +2062,7 @@ mod tests {
 
     #[test]
     fn effect_posture_as_str() {
+        assert_eq!(EffectPosture::Unknown.as_str(), "unknown");
         assert_eq!(EffectPosture::ReadOnly.as_str(), "read_only");
         assert_eq!(EffectPosture::LocalWrite.as_str(), "local_write");
         assert_eq!(EffectPosture::External.as_str(), "external");
@@ -1739,5 +2079,263 @@ mod tests {
             Some(PlanProfile::Compact)
         );
         assert_eq!(PlanProfile::from_str("SAFE"), Some(PlanProfile::Safe));
+    }
+
+    fn stored_recipe_fixture(workspace_id: &str, id: &str) -> StoredPlanRecipe {
+        StoredPlanRecipe {
+            id: id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            name: "Tangerine compass release".to_owned(),
+            when_to_use: "Prepare the tangerine compass release".to_owned(),
+            steps_json: json!(["ee status --json", {"command":"api_key=recipe-secret-step"}])
+                .to_string(),
+            evidence_uris_json: json!([
+                "ee://evidence/release",
+                "ee://evidence/release",
+                "api_key=recipe-secret-uri"
+            ])
+            .to_string(),
+            maturity: "promoted".to_owned(),
+            confidence: 0.75,
+            helpful_count: 17,
+            harmful_count: 2,
+            created_at: "2026-09-01T00:00:00Z".to_owned(),
+            updated_at: "2026-09-02T00:00:00Z".to_owned(),
+            last_recommended_at: Some("2026-09-01T00:00:00Z".to_owned()),
+        }
+    }
+
+    fn recipe_workspace() -> Result<(tempfile::TempDir, PathBuf, String), String> {
+        let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let workspace = directory.path().canonicalize().map_err(|e| e.to_string())?;
+        let database = workspace.join("recipes.db");
+        let id = crate::core::workspace::stable_workspace_id(&workspace);
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        db.migrate().map_err(|e| e.to_string())?;
+        db.insert_workspace(
+            &id,
+            &crate::db::CreateWorkspaceInput {
+                path: workspace.display().to_string(),
+                name: Some("recipes".to_owned()),
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        Ok((directory, database, id))
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    fn lexical_recommend(options: &PlanRecommendOptions) -> Result<PlanRecommendReport, String> {
+        let catalog = recipe_catalog(&options.workspace_path, options.database_path.as_deref())
+            .map_err(|e| e.message())?;
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let embedder = crate::search::HashEmbedder::default_256();
+            recommend_from_catalog(&cx, options, catalog, Some(&embedder)).await
+        })
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.message())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn stored_recipes_rank_with_scope_provenance_and_no_mutation() -> TestResult {
+        let (directory, database, workspace_id) = recipe_workspace()?;
+        let workspace = directory.path();
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let other_path = workspace.join("other");
+        std::fs::create_dir(&other_path).map_err(|e| e.to_string())?;
+        let other_id = crate::core::workspace::stable_workspace_id(&other_path);
+        db.insert_workspace(
+            &other_id,
+            &crate::db::CreateWorkspaceInput {
+                path: other_path.display().to_string(),
+                name: None,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        let mut draft = stored_recipe_fixture(&workspace_id, "plrec_c_draft");
+        draft.maturity = "draft".to_owned();
+        let mut unrelated = stored_recipe_fixture(&workspace_id, "plrec_unrelated");
+        unrelated.name = "Zoological migration".to_owned();
+        unrelated.when_to_use = "Observe wildebeest migration".to_owned();
+        let history = crate::db::StoredMaintenanceHistory {
+            recipes: vec![
+                stored_recipe_fixture(&workspace_id, "plrec_b_release"),
+                stored_recipe_fixture(&workspace_id, "plrec_a_release"),
+                draft,
+                unrelated,
+                stored_recipe_fixture(&other_id, "plrec_other_workspace"),
+            ],
+            ..Default::default()
+        };
+        db.with_transaction(|| db.insert_maintenance_history_for_recovery(&history))
+            .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        let before = std::fs::read(&database).map_err(|e| e.to_string())?;
+        let options = PlanRecommendOptions {
+            task: "tangerine compass release".to_owned(),
+            limit: 2,
+            min_score: 0.0,
+            workspace_path: workspace.to_path_buf(),
+            database_path: Some(database.clone()),
+        };
+        let report = lexical_recommend(&options)?;
+        assert_eq!(
+            report.matches_found, 3,
+            "count before limit, excluding unrelated and other workspace rows"
+        );
+        assert_eq!(
+            report
+                .recommendations
+                .iter()
+                .map(|r| r.recipe_id.as_str())
+                .collect::<Vec<_>>(),
+            ["plrec_a_release", "plrec_b_release"]
+        );
+        assert_eq!(
+            report.recency_anchor.as_deref(),
+            Some("2026-09-02T00:00:00+00:00")
+        );
+        let first = &report.recommendations[0];
+        assert_eq!(first.rank, 1);
+        assert_eq!(
+            first.components.semantic_similarity, 0.0,
+            "hash vectors are not semantic evidence"
+        );
+        assert!(first.components.text_similarity > 0.0);
+        assert_eq!(first.components.maturity_score, 1.0);
+        assert_eq!(first.components.recency_decay, 1.0);
+        assert_eq!(
+            first.components.evidence_count, 0.5,
+            "duplicates and redacted secrets earn no evidence credit"
+        );
+        assert!(
+            (first.score - (0.55 * first.components.text_similarity + 0.20 + 0.10 + 0.075)).abs()
+                < 1e-12
+        );
+        assert_eq!(first.source_kind, "stored_plan_recipe");
+        assert!(first.source_id.contains(&workspace_id));
+        assert_eq!(first.effect_posture, EffectPosture::Unknown);
+        assert_eq!(report.degraded[0]["code"], RECIPE_SEMANTIC_UNAVAILABLE);
+        let rendered = crate::output::render_plan_recommend_json(&report);
+        assert_eq!(
+            rendered,
+            crate::output::render_plan_recommend_json(&lexical_recommend(&options)?)
+        );
+        assert!(!rendered.contains("recipe-secret"));
+        let shown = find_recipe(workspace, Some(&database), "plrec_a_release")
+            .map_err(|e| e.message())?
+            .ok_or("missing stored recipe")?
+            .data_json();
+        assert!(shown["version"].is_null());
+        assert!(shown["steps"][0]["required"].is_null());
+        assert_eq!(shown["effectPosture"], "unknown");
+        assert!(!shown.to_string().contains("recipe-secret"));
+        let explanation = explain_recipe(workspace, Some(&database), "plrec_a_release")
+            .map_err(|e| e.message())?;
+        assert_eq!(
+            explanation.when_to_use.as_deref(),
+            Some("Prepare the tangerine compass release")
+        );
+        assert_eq!(explanation.maturity.as_deref(), Some("promoted"));
+        assert_eq!(
+            explanation.source_id.as_deref(),
+            Some(first.source_id.as_str())
+        );
+        assert!(
+            !explain_recipe(workspace, Some(&database), "plrec_other_workspace")
+                .map_err(|e| e.message())?
+                .found
+        );
+        assert_eq!(
+            std::fs::read(&database).map_err(|e| e.to_string())?,
+            before,
+            "catalog, recommendations and explanations must not mutate the database"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recipe_reads_refuse_malformed_store_and_missing_explicit_database() -> TestResult {
+        let (directory, database, id) = recipe_workspace()?;
+        let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let mut malformed = stored_recipe_fixture(&id, "plrec_malformed");
+        malformed.steps_json = "{}".to_owned(); // Legal SQL JSON, wrong recipe shape.
+        db.insert_maintenance_history_for_recovery(&crate::db::StoredMaintenanceHistory {
+            recipes: vec![malformed],
+            ..Default::default()
+        })
+        .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        assert!(matches!(
+            recipe_catalog(directory.path(), Some(&database)),
+            Err(DomainError::Storage { .. })
+        ));
+        let missing = directory.path().join("missing.db");
+        assert!(recipe_catalog(directory.path(), Some(&missing)).is_err());
+        assert!(!missing.exists());
+        assert_eq!(
+            recipe_catalog(directory.path(), None)
+                .map_err(|e| e.message())?
+                .len(),
+            builtin_recipes().len()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recipe_recommend_rejects_invalid_requests_before_store_access() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let mut options = PlanRecommendOptions {
+            task: "release".to_owned(),
+            limit: 5,
+            min_score: 0.0,
+            workspace_path: directory.path().join("missing-workspace"),
+            database_path: None,
+        };
+        for score in [f64::NAN, f64::INFINITY, -0.01, 1.01] {
+            options.min_score = score;
+            assert!(matches!(
+                recommend_recipes(&options),
+                Err(DomainError::Usage { .. })
+            ));
+        }
+        options.min_score = 0.0;
+        options.task = "api_key=recipe-secret-query".to_owned();
+        assert!(matches!(
+            recommend_recipes(&options),
+            Err(DomainError::Usage { .. })
+        ));
+        options.task = " \n\t".to_owned();
+        assert!(matches!(
+            recommend_recipes(&options),
+            Err(DomainError::Usage { .. })
+        ));
+        options.task = "release".to_owned();
+        options.limit = 0;
+        assert!(matches!(
+            recommend_recipes(&options),
+            Err(DomainError::Usage { .. })
+        ));
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn recipe_recommend_no_match_does_not_return_metadata_only_candidates() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let options = PlanRecommendOptions {
+            task: "zygomorphicxylophagia".to_owned(),
+            limit: 5,
+            min_score: 0.0,
+            workspace_path: directory.path().to_path_buf(),
+            database_path: None,
+        };
+        let report = lexical_recommend(&options)?;
+        assert_eq!(report.matches_found, 0);
+        assert!(report.recommendations.is_empty());
+        assert!(report.recency_anchor.is_none());
+        assert!(!directory.path().join(".ee").exists());
+        Ok(())
     }
 }

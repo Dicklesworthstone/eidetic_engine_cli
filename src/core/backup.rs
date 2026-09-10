@@ -21290,7 +21290,7 @@ mod tests {
                 preflight_run_id: "pre_recovery".to_owned(), checked_at: timestamp.to_owned(), event_payload_hash: hash, condition_result: "unsatisfied".to_owned(),
                 check_result: "passed".to_owned(), should_halt: false, dry_run: true, durable_mutation: false, mutation_posture: "dry_run_no_mutation".to_owned(),
                 details: Some("api_key=maintenance-secret-check".to_owned()), schema: "ee.tripwire.check.v1".to_owned() }],
-            recipes: vec![crate::db::StoredPlanRecipe { id: "plrec_recovery".to_owned(), workspace_id: workspace_id.to_owned(), name: "api_key=maintenance-secret-recipe".to_owned(),
+            recipes: vec![crate::db::StoredPlanRecipe { id: "plrec_recovery".to_owned(), workspace_id: workspace_id.to_owned(), name: "Tangerine compass release".to_owned(),
                 when_to_use: "api_key=maintenance-secret-when".to_owned(), steps_json: json!(["api_key=maintenance-secret-step"]).to_string(),
                 evidence_uris_json: json!(["api_key=maintenance-secret-uri"]).to_string(), maturity: "promoted".to_owned(), confidence: 0.75,
                 helpful_count: 17, harmful_count: 2, created_at: timestamp.to_owned(), updated_at: "2026-09-02T00:00:00Z".to_owned(), last_recommended_at: Some(timestamp.to_owned()) }],
@@ -21543,6 +21543,77 @@ mod tests {
                 Some("2026-09-01T00:00:00Z"),
                 "recipe chronology recovered",
             )?;
+            let explanation = crate::core::plan::explain_recipe(
+                &side,
+                Some(&restored_database),
+                "plrec_recovery",
+            )
+            .map_err(|e| e.message())?;
+            ensure(
+                explanation.found,
+                "restored recipe is addressable through the ordinary explain consumer",
+            )?;
+            ensure_equal(
+                explanation.maturity.as_deref(),
+                Some("promoted"),
+                "stored maturity explained",
+            )?;
+            ensure_equal(
+                explanation.effect_posture.as_deref(),
+                Some("unknown"),
+                "arbitrary restored instructions have unknown effects",
+            )?;
+            ensure(
+                explanation
+                    .source_id
+                    .as_deref()
+                    .is_some_and(|source| source.contains(&target.id)),
+                "recipe provenance uses the restored workspace",
+            )?;
+            ensure(
+                !crate::output::render_plan_explain_json(&explanation)
+                    .contains("maintenance-secret"),
+                "explanation redacts even unredacted backups",
+            )?;
+            #[cfg(feature = "lexical-bm25")]
+            if redaction != RedactionLevel::Full {
+                let options = crate::core::plan::PlanRecommendOptions {
+                    task: "tangerine compass release".to_owned(),
+                    limit: 5,
+                    min_score: 0.0,
+                    workspace_path: side.clone(),
+                    database_path: Some(restored_database.clone()),
+                };
+                let catalog = crate::core::plan::recipe_catalog(&side, Some(&restored_database))
+                    .map_err(|e| e.message())?;
+                let recommendations = crate::core::run_cli_with_cx(
+                    std::time::Duration::from_secs(30),
+                    |cx| async move {
+                        let embedder = crate::search::HashEmbedder::default_256();
+                        crate::core::plan::recommend_from_catalog(
+                            &cx,
+                            &options,
+                            catalog,
+                            Some(&embedder),
+                        )
+                        .await
+                    },
+                )
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.message())?;
+                ensure(
+                    recommendations
+                        .recommendations
+                        .iter()
+                        .any(|recipe| recipe.recipe_id == "plrec_recovery"),
+                    "restored recipe participates in real Frankensearch retrieval",
+                )?;
+                ensure(
+                    !crate::output::render_plan_recommend_json(&recommendations)
+                        .contains("maintenance-secret"),
+                    "recommendation redaction",
+                )?;
+            }
             if redaction != RedactionLevel::Full {
                 ensure(
                     db.latest_memory_sentinel_result(&rows.sentinel_specs[0].spec_hash)

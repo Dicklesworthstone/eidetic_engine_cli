@@ -29279,8 +29279,7 @@ fn stored_debt_snapshot_from_row(row: &Row) -> Result<StoredDebtSnapshot> {
     })
 }
 
-/// Persisted recipe data. Recovery preserves this table even though the current
-/// recommendation surface does not yet read it.
+/// Persisted recipe data shared by recommendations and recovery.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredPlanRecipe {
@@ -29313,6 +29312,28 @@ pub struct StoredMaintenanceHistory {
 }
 
 impl DbConnection {
+    /// Complete, stable workspace-scoped recipe catalog. Reading it never
+    /// increments counters or changes recommendation chronology.
+    pub fn list_plan_recipes(&self, workspace_id: &str) -> Result<Vec<StoredPlanRecipe>> {
+        self.query_for(DbOperation::Query,
+            "SELECT id, workspace_id, name, when_to_use, steps_json, evidence_uris_json, maturity, confidence, helpful_count, harmful_count, created_at, updated_at, last_recommended_at FROM plan_recipes WHERE workspace_id = ?1 ORDER BY created_at, id", &[Value::Text(workspace_id.to_owned())])?
+            .iter().map(|row| Ok(StoredPlanRecipe {
+                id: required_text(row, 0, DbOperation::Query, "id")?.to_owned(),
+                workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_owned(),
+                name: required_text(row, 2, DbOperation::Query, "name")?.to_owned(),
+                when_to_use: required_text(row, 3, DbOperation::Query, "when_to_use")?.to_owned(),
+                steps_json: required_text(row, 4, DbOperation::Query, "steps_json")?.to_owned(),
+                evidence_uris_json: required_text(row, 5, DbOperation::Query, "evidence_uris_json")?.to_owned(),
+                maturity: required_text(row, 6, DbOperation::Query, "maturity")?.to_owned(),
+                confidence: required_f64(row, 7, DbOperation::Query, "confidence")?,
+                helpful_count: required_u64(row, 8, DbOperation::Query, "helpful_count")?,
+                harmful_count: required_u64(row, 9, DbOperation::Query, "harmful_count")?,
+                created_at: required_text(row, 10, DbOperation::Query, "created_at")?.to_owned(),
+                updated_at: required_text(row, 11, DbOperation::Query, "updated_at")?.to_owned(),
+                last_recommended_at: optional_text(row, 12)?.map(str::to_owned),
+            })).collect()
+    }
+
     /// Read complete, workspace-scoped history without diagnostic/list limits.
     /// Call inside the same read transaction as the memories and inventory.
     pub fn maintenance_history_for_recovery(
@@ -29336,23 +29357,7 @@ impl DbConnection {
         let tripwire_checks = self.query_for(DbOperation::Query,
             "SELECT id, workspace_id, tripwire_id, preflight_run_id, checked_at, event_payload_hash, condition_result, check_result, should_halt, dry_run, durable_mutation, mutation_posture, details, schema FROM tripwire_check_events WHERE workspace_id = ?1 ORDER BY checked_at, id", &params)?
             .iter().map(stored_tripwire_check_event_from_row).collect::<Result<Vec<_>>>()?;
-        let recipes = self.query_for(DbOperation::Query,
-            "SELECT id, workspace_id, name, when_to_use, steps_json, evidence_uris_json, maturity, confidence, helpful_count, harmful_count, created_at, updated_at, last_recommended_at FROM plan_recipes WHERE workspace_id = ?1 ORDER BY created_at, id", &params)?
-            .iter().map(|row| Ok(StoredPlanRecipe {
-                id: required_text(row, 0, DbOperation::Query, "id")?.to_owned(),
-                workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_owned(),
-                name: required_text(row, 2, DbOperation::Query, "name")?.to_owned(),
-                when_to_use: required_text(row, 3, DbOperation::Query, "when_to_use")?.to_owned(),
-                steps_json: required_text(row, 4, DbOperation::Query, "steps_json")?.to_owned(),
-                evidence_uris_json: required_text(row, 5, DbOperation::Query, "evidence_uris_json")?.to_owned(),
-                maturity: required_text(row, 6, DbOperation::Query, "maturity")?.to_owned(),
-                confidence: required_f64(row, 7, DbOperation::Query, "confidence")?,
-                helpful_count: required_u64(row, 8, DbOperation::Query, "helpful_count")?,
-                harmful_count: required_u64(row, 9, DbOperation::Query, "harmful_count")?,
-                created_at: required_text(row, 10, DbOperation::Query, "created_at")?.to_owned(),
-                updated_at: required_text(row, 11, DbOperation::Query, "updated_at")?.to_owned(),
-                last_recommended_at: optional_text(row, 12)?.map(str::to_owned),
-            })).collect::<Result<Vec<_>>>()?;
+        let recipes = self.list_plan_recipes(workspace_id)?;
         Ok(StoredMaintenanceHistory {
             debt_snapshots,
             sentinel_specs,

@@ -41,10 +41,24 @@ score = w_text * text_similarity
 
 ### Tie-Breaking
 
+Implementation details: Frankensearch BM25 scores are normalized as `s/(1+s)`;
+semantic similarity uses Frankensearch cosine similarity clamped to `[0,1]`.
+At least one text hit or semantic similarity of 0.5 is required before metadata
+can contribute. Static catalog entries have no learned maturity or recorded
+recency and receive zero for those components. Evidence is deduplicated after
+redaction and normalized as `n/(1+n)`; redacted links receive no evidence credit.
+Recency uses a 30-day half-life relative to the newest stored `updated_at`,
+reported as `recencyAnchor`, so unchanged reads do not drift with wall time.
+The score is a ranking value, not a calibrated confidence probability.
+
 When scores are equal within epsilon (1e-6):
 1. Sort by maturity descending (promoted > validated > draft)
 2. Sort by created_at ascending (older recipes first for stability)
 3. Sort by id lexicographically
+
+To keep comparison transitive, first sort exact scores, then form consecutive
+epsilon groups relative to each group's highest score and apply these keys.
+`matchesFound` counts qualifying matches before the output limit.
 
 ### Degraded Mode
 
@@ -52,6 +66,11 @@ If semantic search is unavailable:
 - Set `semantic_similarity = 0` for all candidates
 - Redistribute weight to `text_similarity` (0.30 → 0.55)
 - Include `degraded: ["semantic_search_unavailable"]` in response
+
+The wire form uses a structured degraded entry with code, warning severity,
+and message. When lexical retrieval is excluded from the build but a semantic
+model is usable, its weight moves to semantic similarity (0.25 → 0.55).
+If neither retrieval arm is usable, return a search error.
 
 ### Score Components in Response
 

@@ -2365,7 +2365,14 @@ checks against the restored workspace before requesting a pack with
 `--require-fresh-sentinels`. A redaction level that would change an operational
 sentinel predicate or tripwire condition is refused before backup publication.
 Historical report hashes retain their original meaning after text redaction.
-Plan recipe rows are preserved; the recommendation path does not yet read them.
+Stored plan recipes are available through `ee plan recipe list`, `ee plan recipe
+show <id>`, `ee plan explain <id>`, and `ee plan recommend "<task>"`, scoped to
+the selected workspace. Recommendations use Frankensearch text and semantic
+retrieval with maturity, recorded recency, and evidence components. JSON includes
+scores and provenance; `--min-score` filters ranking scores, not calibrated
+confidence. Missing semantic models fall back to lexical retrieval with a
+degraded entry. Stored instructions have unknown effects and are never executed
+by recommendation. Creating recipes through curation promotion remains unfinished.
 
 By default, `ee backup create` also includes graph-cache derived assets: graph
 snapshots, graph algorithm witnesses, and graph algorithm result-cache rows.

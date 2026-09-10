@@ -16163,6 +16163,10 @@ pub fn render_plan_recommend_json(report: &PlanRecommendReport) -> String {
     b.field_object("data", |d| {
         d.field_str("command", "plan recommend");
         d.field_str("task", &report.task);
+        d.field_raw(
+            "recencyAnchor",
+            &serde_json::json!(report.recency_anchor).to_string(),
+        );
         d.field_u32(
             "totalRecipesConsidered",
             u32::try_from(report.total_recipes_considered).unwrap_or(u32::MAX),
@@ -16175,7 +16179,13 @@ pub fn render_plan_recommend_json(report: &PlanRecommendReport) -> String {
             d.field_str("recipeId", &rec.recipe_id);
             d.field_str("recipeName", &rec.recipe_name);
             d.field_str("category", rec.category.as_str());
-            d.field_raw("confidence", &format!("{:.2}", rec.confidence));
+            d.field_raw("score", &rec.score.to_string());
+            d.field_raw("rank", &rec.rank.to_string());
+            d.field_raw("components", &serde_json::json!(rec.components).to_string());
+            d.field_str("sourceKind", rec.source_kind);
+            d.field_str("sourceId", &rec.source_id);
+            d.field_str("maturity", &rec.maturity);
+            d.field_array_of_strings("evidenceUris", &rec.evidence_uris);
             d.field_u32(
                 "stepsCount",
                 u32::try_from(rec.steps_count).unwrap_or(u32::MAX),
@@ -16184,6 +16194,7 @@ pub fn render_plan_recommend_json(report: &PlanRecommendReport) -> String {
             d.field_array_of_strings("matchReasons", &rec.match_reasons);
         });
     });
+    b.field_raw("degraded", &serde_json::json!(report.degraded).to_string());
     b.finish()
 }
 
@@ -16204,7 +16215,9 @@ pub fn render_plan_recommend_human(report: &PlanRecommendReport) -> String {
             rec.recipe_id
         ));
         out.push_str(&format!("   Category: {}\n", rec.category.as_str()));
-        out.push_str(&format!("   Confidence: {:.2}\n", rec.confidence));
+        out.push_str(&format!("   Score: {:.6}\n", rec.score));
+        out.push_str(&format!("   Source: {}\n", rec.source_id));
+        out.push_str(&format!("   Maturity: {}\n", rec.maturity));
         out.push_str(&format!("   Steps: {}\n", rec.steps_count));
         out.push_str(&format!("   Effect: {}\n", rec.effect_posture.as_str()));
         if !rec.match_reasons.is_empty() {
@@ -16214,6 +16227,11 @@ pub fn render_plan_recommend_human(report: &PlanRecommendReport) -> String {
             }
         }
         out.push('\n');
+    }
+    for degraded in &report.degraded {
+        if let Some(message) = degraded["message"].as_str() {
+            out.push_str(&format!("Degraded: {message}\n"));
+        }
     }
     out
 }
@@ -16252,6 +16270,12 @@ pub fn render_plan_explain_json(report: &PlanExplainReport) -> String {
             d.field_str("maturity", maturity);
         }
         d.field_array_of_strings("evidenceUris", &report.evidence_uris);
+        if let Some(source) = &report.source_id {
+            d.field_str("sourceId", source);
+        }
+        if let Some(kind) = &report.source_kind {
+            d.field_str("sourceKind", kind);
+        }
     });
     b.finish()
 }
@@ -16280,6 +16304,15 @@ pub fn render_plan_explain_human(report: &PlanExplainReport) -> String {
     }
     if let Some(ref posture) = report.effect_posture {
         out.push_str(&format!("Effect posture: {}\n", posture));
+    }
+    if let Some(source) = &report.source_id {
+        out.push_str(&format!("Source: {source}\n"));
+    }
+    if let Some(maturity) = &report.maturity {
+        out.push_str(&format!("Maturity: {maturity}\n"));
+    }
+    for uri in &report.evidence_uris {
+        out.push_str(&format!("Evidence: {uri}\n"));
     }
     if !report.steps.is_empty() {
         out.push_str("\nSteps:\n");

@@ -279,6 +279,11 @@ memory bodies in `sources[]`.
 
 ### `response_time` codes — stay in `degraded[]`
 
+#### Recipe retrieval
+| Code | Severity (canonical) | Bead |
+|------|----------------------|------|
+| `semantic_search_unavailable` | warning | bd-jfd9 — recipe scoring uses lexical retrieval when no usable semantic embedding batch is available |
+
 #### Team lane conflicts (2)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|

@@ -1,0 +1,18 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "semantic_search_unavailable",
+  "introduced_by": { "bead": "bd-jfd9", "epic_letter": "PLAN" },
+  "surfaces": ["plan recommend", "plan goal"],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "Recipe retrieval has no usable semantic model or a complete identity-consistent embedding batch. Hash embeddings earn no semantic credit; Frankensearch lexical scores receive the semantic weight.",
+    "setup_commands": ["ee init --workspace ."],
+    "invocation": "EE_EMBED_MODEL_PATH=/nonexistent/recipe-model ee plan recommend 'initialize workspace' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "semantic_search_unavailable",
+    "severity": "warning",
+    "message_contains": ["Recipe semantic search is unavailable", "Frankensearch lexical retrieval", "redistributed weights"]
+  }
+}
