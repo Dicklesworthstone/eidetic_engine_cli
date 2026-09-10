@@ -5,6 +5,7 @@
 //! stored workspace recipes with explicit provenance.
 //! Recommendations never execute steps or classify arbitrary commands as safe.
 
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
