@@ -9491,12 +9491,43 @@ fn collect_maintenance_history_payloads(
         row.mutation_posture = redact_content(&row.mutation_posture, redaction);
         row.details = row.details.as_deref().map(|v| redact_content(v, redaction));
     }
+    let mut recipe_references = memory_ids
+        .iter()
+        .map(|(source, restored)| {
+            (
+                format!("ee://memory/{source}"),
+                format!("ee://memory/{restored}"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut candidate_recipe_ids = BTreeSet::new();
+    for candidate in connection
+        .list_curation_candidates(workspace_id, None, None, None)
+        .map_err(work_history_error)?
+    {
+        candidate_recipe_ids.insert(crate::core::curate::candidate_recipe_id(&candidate));
+        if crate::core::curate::validate_curate_candidate_id(&candidate.id)
+            .is_ok_and(|id| id == candidate.id)
+            && redact_content(&candidate.id, RedactionLevel::Minimal) == candidate.id
+        {
+            let uri = format!("ee://curation-candidate/{}", candidate.id);
+            recipe_references.insert(uri.clone(), uri);
+        }
+    }
     for row in &mut rows.recipes {
-        row.id = redact_maintenance_id(&row.id, "plrec_", redaction);
+        // A producer-derived ID is an addressable identity. Rehashing it as
+        // high-entropy prose would break replay of the recovered candidate.
+        if !candidate_recipe_ids.contains(&row.id) {
+            row.id = redact_maintenance_id(&row.id, "plrec_", redaction);
+        }
         row.name = redact_content(&row.name, redaction);
         row.when_to_use = redact_content(&row.when_to_use, redaction);
         row.steps_json = redact_work_history_json(&row.steps_json, redaction)?;
-        row.evidence_uris_json = redact_work_history_json(&row.evidence_uris_json, redaction)?;
+        row.evidence_uris_json = redact_work_history_json_with_references(
+            &row.evidence_uris_json,
+            redaction,
+            &recipe_references,
+        )?;
     }
     validate_maintenance_history(
         &rows,

@@ -5987,7 +5987,7 @@ mod tests {
             assert_eq!(recipes.len(), 1);
             let evidence: Vec<String> =
                 serde_json::from_str(&recipes[0].evidence_uris_json).map_err(|e| e.to_string())?;
-            for memory in memories {
+            for memory in &memories {
                 assert!(
                     evidence.contains(&format!("ee://memory/{}", memory.id)),
                     "{evidence:?}"
@@ -6014,14 +6014,37 @@ mod tests {
             })
             .map_err(|e| e.message())?;
             let second_side = side_root.path().join("restored-again");
-            restore_backup_to_side_path(&BackupRestoreOptions {
+            let second_restore = restore_backup_to_side_path(&BackupRestoreOptions {
                 workspace_path: side.clone(),
                 backup_path: second_backup.backup_path.into(),
                 side_path: second_side.clone(),
                 restore_graph_cache: false,
                 dry_run: false,
             })
-            .map_err(|e| e.message())?;
+            .map_err(|e| format!("second restore ({redaction:?}): {}", e.message()))?;
+            let db = DbConnection::open_file(&second_restore.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let recovered_recipes = db
+                .list_plan_recipes(&actual_workspace)
+                .map_err(|e| e.to_string())?;
+            assert_eq!(recovered_recipes.len(), 1);
+            assert_eq!(
+                recovered_recipes[0].id, recipes[0].id,
+                "producer-derived recipe identity survives {redaction:?} recovery"
+            );
+            let recovered_evidence: Vec<String> =
+                serde_json::from_str(&recovered_recipes[0].evidence_uris_json)
+                    .map_err(|e| e.to_string())?;
+            for memory in db
+                .list_memories(&actual_workspace, None, false)
+                .map_err(|e| e.to_string())?
+            {
+                assert!(recovered_evidence.contains(&format!("ee://memory/{}", memory.id)));
+            }
+            assert!(
+                recovered_evidence.contains(&format!("ee://curation-candidate/{}", candidate.id))
+            );
+            db.close().map_err(|e| e.to_string())?;
             let replay = apply_curation_candidate_as_recipe(
                 &CurateApplyOptions {
                     workspace_path: &second_side,
@@ -6030,7 +6053,7 @@ mod tests {
                 "Recovered release",
                 "Preparing a release",
             )
-            .map_err(|e| e.message())?;
+            .map_err(|e| format!("recovered recipe replay ({redaction:?}): {}", e.message()))?;
             assert_eq!(
                 replay.application.status, "already_applied",
                 "recovered applied recipe retains its identity"

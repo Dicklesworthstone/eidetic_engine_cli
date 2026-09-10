@@ -5571,7 +5571,7 @@ pub fn apply_curation_candidate_as_recipe(
     apply_curation_candidate_with_recipe(options, Some((name, when_to_use)))
 }
 
-fn candidate_recipe_id(stored: &StoredCurationCandidate) -> String {
+pub(crate) fn candidate_recipe_id(stored: &StoredCurationCandidate) -> String {
     let identity = format!("{}\n{}", stored.workspace_id, stored.id);
     format!("plrec_{}", blake3::hash(identity.as_bytes()).to_hex())
 }
