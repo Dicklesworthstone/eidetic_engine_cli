@@ -5922,6 +5922,24 @@ mod tests {
                 .get_curation_candidate(&actual_workspace, &candidate.id)
                 .map_err(|e| e.to_string())?
                 .ok_or("candidate missing")?;
+            let creation = db
+                .list_audit_by_target("curation_candidate", &candidate.id, None)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|audit| audit.action == audit_actions::CURATION_CANDIDATE_CREATE)
+                .ok_or("creation audit missing")?;
+            let metadata: serde_json::Value =
+                serde_json::from_str(creation.details.as_deref().ok_or("creation details")?)
+                    .map_err(|e| e.to_string())?;
+            for index in 0..3 {
+                assert!(
+                    metadata["learningEvidenceIds"]
+                        .as_array()
+                        .ok_or("learning evidence IDs")?
+                        .contains(&serde_json::json!(format!("fb_{index:026}"))),
+                    "feedback provenance must survive recovery"
+                );
+            }
             let sources =
                 crate::core::curate::audited_source_memory_ids_for_rule_candidate(&db, &row)
                     .map_err(|e| e.message())?;
@@ -5983,6 +6001,41 @@ mod tests {
             .map_err(|e| e.message())?;
             assert!(!replay.durable_mutation);
             assert_eq!(replay.application.status, "already_applied");
+            db.close().map_err(|e| e.to_string())?;
+            let second_backup = create_backup(&BackupCreateOptions {
+                workspace_path: side.clone(),
+                database_path: None,
+                output_dir: None,
+                label: None,
+                redaction_level: redaction,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            let second_side = side_root.path().join("restored-again");
+            restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: side.clone(),
+                backup_path: second_backup.backup_path.into(),
+                side_path: second_side.clone(),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            let replay = apply_curation_candidate_as_recipe(
+                &CurateApplyOptions {
+                    workspace_path: &second_side,
+                    ..options
+                },
+                "Recovered release",
+                "Preparing a release",
+            )
+            .map_err(|e| e.message())?;
+            assert_eq!(
+                replay.application.status, "already_applied",
+                "recovered applied recipe retains its identity"
+            );
+            assert!(!replay.durable_mutation);
             let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
             assert_eq!(
                 source

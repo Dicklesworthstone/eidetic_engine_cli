@@ -3604,12 +3604,21 @@ pub fn restore_backup_to_side_path(
     )?;
     restore_shard_fanout_assets(&staging_workspace, &restored_derived)?;
 
+    let expected_audit_rows = manifest["recoveryInventory"]["tables"]
+        .as_array()
+        .and_then(|tables| {
+            tables
+                .iter()
+                .find(|table| table["table"] == "audit_log" && table["snapshotCovered"] == true)
+        })
+        .and_then(|table| table["rowCount"].as_u64());
     restore_audit_history(
         &restored_database_path,
         &side_path,
         &workspace_path,
         &inspect.backup_id,
         inspect.workspace_id.as_deref(),
+        expected_audit_rows,
         &restored_derived,
     )?;
 
@@ -7458,6 +7467,30 @@ fn collect_audit_history_payloads(
     for candidate in candidates.values() {
         references.insert(candidate.id.clone(), candidate.id.clone());
     }
+    // These identifiers are durable reference keys, shared with the typed
+    // history assets. Preserve them in audit JSON just as memory references.
+    for id in connection
+        .list_feedback_events(workspace_id)
+        .map_err(work_history_error)?
+        .into_iter()
+        .map(|row| row.id)
+        .chain(
+            connection
+                .list_plan_recipes(workspace_id)
+                .map_err(work_history_error)?
+                .into_iter()
+                .map(|row| row.id),
+        )
+        .chain(
+            connection
+                .list_pack_record_ids_for_recovery(workspace_id)
+                .map_err(work_history_error)?,
+        )
+    {
+        if redact_content(&id, RedactionLevel::Minimal) == id {
+            references.insert(id.clone(), id);
+        }
+    }
     let mut rows = Vec::with_capacity(originals.len());
     for original in originals {
         if original
@@ -7659,6 +7692,7 @@ fn restore_audit_history(
     source_workspace: &Path,
     backup_id: &str,
     expected_workspace: Option<&str>,
+    expected_row_count: Option<u64>,
     assets: &[BackupRestoredDerivedAssetReport],
 ) -> Result<(), DomainError> {
     let mut chunks = assets
@@ -7743,6 +7777,11 @@ fn restore_audit_history(
             }
             rows.push(row);
         }
+    }
+    if expected_row_count.is_some_and(|count| count != rows.len() as u64) {
+        return Err(work_history_error(
+            "audit history does not match the authenticated recovery inventory",
+        ));
     }
     let db = DbConnection::open_file(database).map_err(work_history_error)?;
     db.migrate().map_err(work_history_error)?;
@@ -16902,6 +16941,7 @@ mod tests {
             "unsigned",
             "mac",
             "missing",
+            "truncated",
         ] {
             let mut chunk = original.clone();
             match variant {
@@ -16911,6 +16951,7 @@ mod tests {
                 "index" => chunk.chunk_index += 1,
                 "count" => chunk.chunk_count += 1,
                 "duplicate" => chunk.rows.push(chunk.rows[0].clone()),
+                "truncated" => chunk.rows.clear(),
                 "foreign_row" => {
                     chunk.rows[0].row.workspace_id = Some("foreign-workspace".to_owned())
                 }
@@ -16961,6 +17002,7 @@ mod tests {
                 &workspace,
                 &backup.backup_id,
                 Some(&backup.workspace_id),
+                Some(original.rows.len() as u64),
                 &assets,
             );
             assert!(result.is_err(), "accepted {variant}");
