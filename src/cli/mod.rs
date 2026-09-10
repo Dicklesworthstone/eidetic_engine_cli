@@ -44121,6 +44121,25 @@ where
             Ok(report) => report,
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
+    // GH #35: migrations are the other place a large batch of frames lands in
+    // the WAL sidecar, and the automatic checkpoint threshold is a flat 64 MB
+    // that a small store never reaches. Left alone, every later connection open
+    // replays them. Fold them in here for the same reason `ee init` does.
+    //
+    // Best-effort: a checkpoint that reports `busy` because a concurrent reader
+    // holds a pin is not a migration failure, and reporting it as one would be
+    // both wrong and alarming right after a successful schema change.
+    let wal_checkpoint_status = if applied.is_empty() {
+        "skipped_no_migrations_applied"
+    } else {
+        match conn.wal_checkpoint(crate::db::WalCheckpointMode::Truncate) {
+            Ok(report) if report.busy => "busy",
+            Ok(report) if report.checkpointed_frames > 0 => "checkpointed",
+            Ok(_) => "empty",
+            Err(_) => "failed",
+        }
+    };
+
     let applied_count = applied.len();
     let skipped_count = skipped.len();
     let json = serde_json::json!({
@@ -44128,6 +44147,7 @@ where
         "success": true,
         "data": {
             "command": "migrate run",
+            "walCheckpoint": wal_checkpoint_status,
             "databasePath": database_path.display().to_string(),
             "dryRun": false,
             "applied": applied.clone(),
