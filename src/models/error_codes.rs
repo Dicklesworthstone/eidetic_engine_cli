@@ -164,6 +164,13 @@ pub const WORKSPACE_ROW_MISSING: ErrorCode = ErrorCode {
     default_repair: Some("ee init --workspace ."),
 };
 
+pub const WAL_EXCEEDS_DATABASE: ErrorCode = ErrorCode {
+    id: "EE-E205",
+    category: ErrorCategory::Storage,
+    description: "WAL sidecar is larger than the database, so every connection open replays it",
+    default_repair: Some("ee maintenance wal-checkpoint --mode truncate --workspace ."),
+};
+
 // Search index errors (EE-E300 - EE-E399)
 pub const INDEX_NOT_FOUND: ErrorCode = ErrorCode {
     id: "EE-E300",
@@ -335,6 +342,7 @@ pub const ALL_ERROR_CODES: &[ErrorCode] = &[
     DATABASE_CORRUPTED,
     WRITE_FAILED,
     WORKSPACE_ROW_MISSING,
+    WAL_EXCEEDS_DATABASE,
     // Search index
     INDEX_NOT_FOUND,
     INDEX_STALE,
