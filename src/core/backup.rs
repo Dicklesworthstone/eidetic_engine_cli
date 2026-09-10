@@ -21330,7 +21330,7 @@ mod tests {
                 &candidate,
                 &crate::db::CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
-                    candidate_type: "rule_proposal".to_owned(),
+                    candidate_type: crate::curate::CandidateType::Rule.as_str().to_owned(),
                     target_memory_id: Some(memory_id.clone()),
                     proposed_content: Some("review the release".to_owned()),
                     proposed_confidence: None,
