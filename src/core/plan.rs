@@ -1362,6 +1362,29 @@ pub(crate) fn recipe_text(text: &str) -> String {
     crate::output::jsonl_export::redact_content(text, crate::models::RedactionLevel::Standard)
 }
 
+fn recipe_evidence_text(uri: &str) -> String {
+    // Canonical internal references are addressable identifiers, not arbitrary
+    // high-entropy prose. Keep the secret-pattern guard and require the whole
+    // suffix to validate, so query strings and malformed IDs get normal redaction.
+    let no_secret =
+        crate::output::jsonl_export::redact_content(uri, crate::models::RedactionLevel::Minimal)
+            == uri;
+    let internal = uri
+        .strip_prefix("ee://memory/")
+        .is_some_and(|id| id.parse::<crate::models::MemoryId>().is_ok())
+        || uri
+            .strip_prefix("ee://curation-candidate/")
+            .is_some_and(|id| {
+                crate::core::curate::validate_curate_candidate_id(id)
+                    .is_ok_and(|canonical| canonical == id)
+            });
+    if no_secret && internal {
+        uri.to_owned()
+    } else {
+        recipe_text(uri)
+    }
+}
+
 pub(crate) fn recipe_searchable_text(text: &str) -> String {
     use crate::output::jsonl_export::{
         REDACTED_ID_PLACEHOLDER, REDACTED_PATH_PLACEHOLDER, REDACTED_PLACEHOLDER,
@@ -1390,7 +1413,7 @@ fn stored_recipe_entry(row: StoredPlanRecipe) -> Result<RecipeCatalogEntry, Doma
         serde_json::from_str(&row.evidence_uris_json).map_err(recipe_storage_error)?;
     let mut evidence_uris = evidence
         .into_iter()
-        .map(|uri| recipe_text(&uri))
+        .map(|uri| recipe_evidence_text(&uri))
         .collect::<Vec<_>>();
     evidence_uris.sort();
     evidence_uris.dedup();
@@ -1633,7 +1656,7 @@ pub(crate) fn save_recipe(options: &RecipeSaveOptions) -> Result<JsonValue, Doma
     let mut evidence = options
         .evidence_uris
         .iter()
-        .map(|uri| recipe_text(uri.trim()))
+        .map(|uri| recipe_evidence_text(uri.trim()))
         .filter(|uri| !uri.is_empty())
         .collect::<Vec<_>>();
     evidence.sort();
@@ -2578,7 +2601,7 @@ mod tests {
     fn native_rules_join_recipes_with_lifecycle_scope_and_provenance() -> TestResult {
         let (directory, database, workspace_id) = recipe_workspace()?;
         let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
-        let memory_id = crate::models::MemoryId::now().to_string();
+        let memory_id = "mem_0123456789ABCDEFGHJKMNPQRST".to_owned();
         db.insert_memory(
             &memory_id,
             &crate::db::CreateMemoryInput {
@@ -2600,22 +2623,31 @@ mod tests {
         )
         .map_err(|e| e.to_string())?;
         let mut active_id = String::new();
-        for maturity in [
-            "draft",
-            "candidate",
-            "validated",
-            "deprecated",
-            "superseded",
+        let mut redacted_id = String::new();
+        for (maturity, contains_secret) in [
+            ("draft", false),
+            ("candidate", false),
+            ("validated", false),
+            ("deprecated", false),
+            ("superseded", false),
+            ("candidate", true),
         ] {
             let id = crate::models::RuleId::now().to_string();
-            if maturity == "candidate" {
+            if contains_secret {
+                redacted_id = id.clone();
+            } else if maturity == "candidate" {
                 active_id = id.clone();
             }
             db.insert_procedural_rule(
                 &id,
                 &crate::db::CreateProceduralRuleInput {
                     workspace_id: workspace_id.clone(),
-                    content: "Tangerine compass check api_key=native-rule-secret".to_owned(),
+                    content: if contains_secret {
+                        "Tangerine compass check api_key=native-rule-secret"
+                    } else {
+                        "Tangerine compass check"
+                    }
+                    .to_owned(),
                     confidence: 0.7,
                     utility: 0.5,
                     importance: 0.5,
@@ -2676,7 +2708,14 @@ mod tests {
         };
         let ranked = lexical_recommend(&options)?;
         assert_eq!(ranked.matches_found, 4);
-        assert_eq!(ranked.total_recipes_considered, builtin_recipes().len() + 4);
+        assert_eq!(ranked.total_recipes_considered, builtin_recipes().len() + 5);
+        assert!(
+            ranked
+                .recommendations
+                .iter()
+                .all(|row| row.recipe_id != redacted_id),
+            "the existing whole-content secret redaction must prevent a match on hidden text"
+        );
         let native = ranked
             .recommendations
             .iter()
@@ -2705,12 +2744,40 @@ mod tests {
         assert!(
             !crate::output::render_plan_explain_json(&explanation).contains("native-rule-secret")
         );
+        let redacted = explain_recipe(directory.path(), Some(&database), &redacted_id)
+            .map_err(|e| e.message())?;
+        assert!(redacted.found);
+        assert_eq!(redacted.steps, ["[REDACTED]"]);
+        assert!(!crate::output::render_plan_explain_json(&redacted).contains("native-rule-secret"));
         assert_eq!(
             crate::output::render_plan_recommend_json(&ranked),
             crate::output::render_plan_recommend_json(&lexical_recommend(&options)?)
         );
         assert_eq!(std::fs::read(&database).map_err(|e| e.to_string())?, before);
         Ok(())
+    }
+
+    #[test]
+    fn recipe_evidence_preserves_typed_internal_ids_without_exempting_secrets() {
+        for uri in [
+            "ee://memory/mem_0123456789ABCDEFGHJKMNPQRST",
+            "ee://curation-candidate/curate_0123456789abcdefghijklmnop",
+        ] {
+            assert!(
+                recipe_text(uri).contains("[REDACTED]"),
+                "exercise the entropy false positive"
+            );
+            assert_eq!(recipe_evidence_text(uri), uri);
+        }
+        for uri in [
+            "ee://memory/mem_0123456789ABCDEFGHJKMNPQRST?api_key=recipe-link-canary",
+            "ee://curation-candidate/curate_password0123456789ABCDEFGH",
+            "https://example.test/?api_key=recipe-link-canary",
+            "file:///Users/private/recipe-evidence.txt",
+        ] {
+            assert_eq!(recipe_evidence_text(uri), recipe_text(uri));
+            assert_ne!(recipe_evidence_text(uri), uri);
+        }
     }
 
     #[cfg(feature = "lexical-bm25")]

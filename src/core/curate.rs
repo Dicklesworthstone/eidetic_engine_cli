@@ -16229,7 +16229,7 @@ fn load_merge_target_candidate(
         })
 }
 
-fn validate_curate_candidate_id(raw: &str) -> Result<String, DomainError> {
+pub(crate) fn validate_curate_candidate_id(raw: &str) -> Result<String, DomainError> {
     let candidate_id = raw.trim();
     let valid = candidate_id.starts_with("curate_")
         && candidate_id.len() == 33

@@ -5915,6 +5915,7 @@ mod tests {
         assert!(explained.found);
         assert!(explained.steps[0].contains("Cargo target directory"));
         assert_eq!(explained.maturity.as_deref(), Some("draft"));
+        assert_eq!(explained.evidence_uris, recipe_evidence);
         connection.close().map_err(|e| e.to_string())
     }
 
