@@ -932,6 +932,13 @@ fn import_jsonl_records_with_policy(
     let mut publication_memory_ids = Vec::new();
     let mut conflicting_memory_ids = BTreeSet::new();
     let mut skipped_duplicate = 0_u32;
+    // Backup recovery restores the original job ledger and rebuilds the whole
+    // staged corpus before publication. Synthesizing import jobs here would
+    // collide with recovered jobs when the source itself came from an import.
+    let publish_imported_memories = !matches!(
+        native_trust_policy,
+        NativeTrustPolicy::VerifiedBackupRestore
+    );
     connection.with_transaction(|| {
         let lineage_issues = destination_lineage_issues(&connection, &prepared.memories)?;
         if !lineage_issues.is_empty() {
@@ -1079,19 +1086,21 @@ fn import_jsonl_records_with_policy(
         // durable publication work. Reimports preserve an existing logical
         // job, while legacy duplicates that predate this lane receive their
         // missing deterministic job before the post-commit drain.
-        for memory_id in &publication_memory_ids {
-            let job_id = import_search_index_job_id(&workspace_id, memory_id);
-            if connection.get_search_index_job(&job_id)?.is_none() {
-                connection.insert_search_index_job(
-                    &job_id,
-                    &CreateSearchIndexJobInput {
-                        workspace_id: workspace_id.clone(),
-                        job_type: SearchIndexJobType::SingleDocument,
-                        document_source: Some("memory".to_owned()),
-                        document_id: Some(memory_id.clone()),
-                        documents_total: 1,
-                    },
-                )?;
+        if publish_imported_memories {
+            for memory_id in &publication_memory_ids {
+                let job_id = import_search_index_job_id(&workspace_id, memory_id);
+                if connection.get_search_index_job(&job_id)?.is_none() {
+                    connection.insert_search_index_job(
+                        &job_id,
+                        &CreateSearchIndexJobInput {
+                            workspace_id: workspace_id.clone(),
+                            job_type: SearchIndexJobType::SingleDocument,
+                            document_source: Some("memory".to_owned()),
+                            document_id: Some(memory_id.clone()),
+                            documents_total: 1,
+                        },
+                    )?;
+                }
             }
         }
         Ok(())
@@ -1108,15 +1117,9 @@ fn import_jsonl_records_with_policy(
         total.saturating_add(memory.tag_count)
     });
     report.imported_memory_ids = to_insert.into_iter().map(|memory| memory.id).collect();
-    // A verified backup restore is still assembling other durable families
-    // in a private store. Keep its jobs pending until that complete store is
-    // published; ordinary JSONL import retains immediate index convergence.
-    if !publication_memory_ids.is_empty()
-        && !matches!(
-            native_trust_policy,
-            NativeTrustPolicy::VerifiedBackupRestore
-        )
-    {
+    // Ordinary JSONL import retains immediate index convergence; backup
+    // recovery owns its full-corpus rebuild after restoring the job ledger.
+    if !publication_memory_ids.is_empty() && publish_imported_memories {
         // The rows above are durable; converge the derived index the same way
         // remember and batch remember do. Identical reimports also enter this
         // path so a prior failed deterministic job is requeued and retried.
@@ -4906,6 +4909,14 @@ mod tests {
             stored.trust_class.as_str(),
             "agent_validated",
             "verified backup trust cap",
+        )?;
+        ensure(
+            connection
+                .list_search_index_jobs(&stored.workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            true,
+            "backup record import leaves the job ledger to authenticated history recovery",
         )
     }
 
