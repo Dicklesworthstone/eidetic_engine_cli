@@ -16948,14 +16948,6 @@ mod tests {
 
     #[test]
     fn workspace_metadata_survives_repeated_restore_and_resolution() -> TestResult {
-        /// Render an optional string as a SQL literal, doubling embedded quotes.
-        fn sql_literal(value: Option<&str>) -> String {
-            value.map_or_else(
-                || "NULL".to_owned(),
-                |text| format!("'{}'", text.replace('\'', "''")),
-            )
-        }
-
         for scope in ["standalone", "repository", "subproject"] {
             for redaction in [RedactionLevel::None, RedactionLevel::Standard] {
                 let (temp, workspace, database) =
@@ -16981,19 +16973,19 @@ mod tests {
                     .as_ref()
                     .map(|_| "repo:0123456789abcdef01234567".to_owned());
                 let relative = (scope == "subproject").then(|| "workspace".to_owned());
+                let sql_text = |value: Option<&str>| {
+                    value.map_or_else(
+                        || "NULL".to_owned(),
+                        |s| format!("'{}'", s.replace('\'', "''")),
+                    )
+                };
                 db.execute_raw(&format!(
-                    "UPDATE workspaces SET name = {name_sql}, scope_kind = {scope_sql}, \
-                     repository_root = {root_sql}, repository_fingerprint = {fingerprint_sql}, \
-                     subproject_path = {relative_sql}, created_at = '2026-02-01T03:04:05Z', \
-                     updated_at = '2026-03-02T04:05:06Z' WHERE id = {id_sql}",
-                    name_sql = sql_literal(name.as_deref()),
-                    scope_sql = sql_literal(Some(scope)),
-                    root_sql = sql_literal(root.as_deref()),
-                    fingerprint_sql = sql_literal(fingerprint.as_deref()),
-                    relative_sql = sql_literal(relative.as_deref()),
-                    id_sql = sql_literal(Some(id.as_str())),
-                ))
-                .map_err(|e| e.to_string())?;
+                    "UPDATE workspaces SET name = {}, scope_kind = '{scope}', repository_root = {}, repository_fingerprint = {}, subproject_path = {}, created_at = '2026-02-01T03:04:05Z', updated_at = '2026-03-02T04:05:06Z' WHERE id = '{id}'",
+                    sql_text(name.as_deref()),
+                    sql_text(root.as_deref()),
+                    sql_text(fingerprint.as_deref()),
+                    sql_text(relative.as_deref()),
+                )).map_err(|e| e.to_string())?;
                 let source = db
                     .get_workspace(&id)
                     .map_err(|e| e.to_string())?
@@ -17035,7 +17027,13 @@ mod tests {
                         .ok_or("restored workspace")?;
                     let mut expected = source.clone();
                     expected.path = side.to_string_lossy().into_owned();
-                    expected.name = name.as_deref().map(|s| redact_content(s, redaction));
+                    if redaction == RedactionLevel::Standard {
+                        expected.repository_root =
+                            root.as_ref().map(|_| "[REDACTED_PATH]".to_owned());
+                        if scope == "subproject" {
+                            expected.name = Some("[REDACTED]".to_owned());
+                        }
+                    }
                     assert_eq!(actual, expected, "scope={scope}, generation={generation}");
                     assert_eq!(db.list_workspaces().map_err(|e| e.to_string())?.len(), 1);
                     assert_eq!(
