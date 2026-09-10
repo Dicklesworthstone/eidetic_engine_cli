@@ -21283,7 +21283,7 @@ mod tests {
                 created_at: timestamp.to_owned(), adopted_at: "2026-09-02T00:00:00Z".to_owned(), classifier_algorithm: "heuristic_v1".to_owned(),
                 classifier_version: "1".to_owned(), build_version: "0.2.0".to_owned() }],
             tripwires: vec![crate::db::StoredTripwire { id: "tw_recovery".to_owned(), workspace_id: workspace_id.to_owned(), preflight_run_id: "pre_recovery".to_owned(),
-                tripwire_type: "custom".to_owned(), condition: "task_contains_any(release)".to_owned(), action: "warn".to_owned(), state: "armed".to_owned(),
+                tripwire_type: "custom".to_owned(), condition: r#"task_contains_any("release")"#.to_owned(), action: "warn".to_owned(), state: "armed".to_owned(),
                 message: Some("api_key=maintenance-secret-tripwire".to_owned()), created_at: timestamp.to_owned(), last_checked_at: None, triggered_at: None,
                 updated_at: "2026-09-02T00:00:00Z".to_owned() }],
             tripwire_checks: vec![crate::db::StoredTripwireCheckEvent { id: "tchk_recovery".to_owned(), workspace_id: workspace_id.to_owned(), tripwire_id: "tw_recovery".to_owned(),
@@ -21304,6 +21304,7 @@ mod tests {
             RedactionLevel::Standard,
             RedactionLevel::Full,
         ] {
+            eprintln!("maintenance recovery: redaction={redaction:?}");
             let (tempdir, workspace, database) =
                 fixture_with_memory_content("tangerine compass release")
                     .map_err(|e| e.message())?;
@@ -21645,10 +21646,11 @@ mod tests {
                         task_outcome: None,
                     })
                     .map_err(|e| e.message())?;
+                let check_details = format!("restored tripwire evaluates live task: {check:?}");
                 ensure_equal(
                     check.result,
                     crate::core::tripwire::CheckResult::Triggered,
-                    "restored tripwire evaluates live task",
+                    &check_details,
                 )?;
                 ensure(!check.should_halt, "warning tripwire remains advisory")?;
                 ensure_equal(
