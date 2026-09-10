@@ -78,6 +78,7 @@ const REASONING_HISTORY_SCHEMA: &str = "ee.backup.reasoning_history.v1";
 const TRUST_HISTORY_SCHEMA: &str = "ee.backup.trust_history.v1";
 const MAINTENANCE_HISTORY_SCHEMA: &str = "ee.backup.maintenance_history.v1";
 const AUDIT_HISTORY_SCHEMA: &str = "ee.backup.audit_history.v1";
+const WORKSPACE_METADATA_SCHEMA: &str = "ee.backup.workspace.v1";
 const MANIFEST_AUTH_FAMILY: &str = "ee.backup.manifest";
 const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
 const RECOVERY_KEYS_FILE: &str = "store-auth.recovery.json";
@@ -1104,6 +1105,7 @@ fn backup_degraded_data_json(
 
 struct BackupExportData {
     workspace: ExportWorkspaceRecord,
+    workspace_row: crate::db::StoredWorkspace,
     memories: Vec<StoredMemory>,
     logical_ids_by_memory: BTreeMap<String, String>,
     tags_by_memory: BTreeMap<String, Vec<String>>,
@@ -1114,6 +1116,13 @@ struct BackupExportData {
     /// (pointer + own ledger slot + family origin) so restore can rebuild
     /// the family ledger without inference.
     attempt_families_by_memory: BTreeMap<String, crate::models::ExportAttemptFamilyRecord>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupWorkspaceMetadata {
+    schema: String,
+    row: crate::db::StoredWorkspace,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1794,9 +1803,11 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
     }
 
     match table {
-        "workspaces" => {
-            BackupTablePolicy::new("maintain", "export_restore_required", "records_jsonl")
-        }
+        "workspaces" => BackupTablePolicy::new(
+            "maintain",
+            "export_restore_required",
+            "authenticated_manifest",
+        ),
         "memories" | "memory_tags" | "memory_links" => {
             BackupTablePolicy::new("retrieve", "export_restore_required", "records_jsonl")
         }
@@ -2525,6 +2536,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         &export_data,
         options.redaction_level,
     ));
+    // The manifest contains exactly the selected workspace, not every row in a
+    // shared database. Do not claim that unexported workspace rows are covered.
+    if let Some(entry) = recovery_inventory
+        .entries
+        .iter_mut()
+        .find(|e| e.table == "workspaces")
+    {
+        entry.snapshot_covered = entry.row_count == 1;
+    }
     reconcile_derived_recovery_inventory(&mut recovery_inventory, &derived_payloads);
     degraded.extend(recovery_inventory_degradations(&recovery_inventory));
 
@@ -2648,6 +2668,25 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     };
 
     let mut manifest_json = manifest_json(&report, &created_at, None, &mesh);
+    let mut row = export_data.workspace_row;
+    row.path = redact_content(&row.path, options.redaction_level);
+    for text in [
+        &mut row.name,
+        &mut row.repository_root,
+        &mut row.repository_fingerprint,
+        &mut row.subproject_path,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        *text = redact_content(text, options.redaction_level);
+    }
+    manifest_json["workspace"]["metadata"] = serde_json::to_value(BackupWorkspaceMetadata {
+        schema: WORKSPACE_METADATA_SCHEMA.to_owned(),
+        row,
+    })
+    .map_err(work_history_error)?;
+    read_backup_workspace_metadata(&manifest_json)?;
     if options.dry_run {
         report.artifacts.push(BackupArtifactReport {
             path: MANIFEST_FILE.to_owned(),
@@ -3146,6 +3185,65 @@ pub fn verify_backup(options: &BackupVerifyOptions) -> Result<BackupVerifyReport
     )
 }
 
+fn read_backup_workspace_metadata(
+    manifest: &JsonValue,
+) -> Result<crate::db::StoredWorkspace, DomainError> {
+    let metadata: BackupWorkspaceMetadata = serde_json::from_value(
+        manifest
+            .pointer("/workspace/metadata")
+            .cloned()
+            .ok_or_else(|| {
+                work_history_error(
+                    "backup has no workspace metadata; recreate it with the current binary",
+                )
+            })?,
+    )
+    .map_err(work_history_error)?;
+    let row = metadata.row;
+    let nonblank = |value: &Option<String>| value.as_ref().is_some_and(|s| !s.trim().is_empty());
+    let scope_valid = match row.scope_kind.as_str() {
+        "standalone" => {
+            row.repository_root.is_none()
+                && row.repository_fingerprint.is_none()
+                && row.subproject_path.is_none()
+        }
+        "repository" => {
+            nonblank(&row.repository_root)
+                && nonblank(&row.repository_fingerprint)
+                && row.subproject_path.is_none()
+        }
+        "subproject" => {
+            nonblank(&row.repository_root)
+                && nonblank(&row.repository_fingerprint)
+                && row.subproject_path.as_deref().is_some_and(|relative| {
+                    !relative.is_empty()
+                        && relative
+                            .split(['/', '\\'])
+                            .all(|part| !matches!(part, "" | "." | ".."))
+                        && relative.as_bytes().get(1) != Some(&b':')
+                })
+        }
+        _ => false,
+    };
+    if metadata.schema != WORKSPACE_METADATA_SCHEMA
+        || manifest
+            .pointer("/workspace/id")
+            .and_then(JsonValue::as_str)
+            != Some(row.id.as_str())
+        || row.id.parse::<crate::models::WorkspaceId>().is_err()
+        || row.path.trim().is_empty()
+        || row.name.as_ref().is_some_and(|name| name.trim().is_empty())
+        || !scope_valid
+        || chrono::DateTime::parse_from_rfc3339(&row.created_at).is_err()
+        || chrono::DateTime::parse_from_rfc3339(&row.updated_at).is_err()
+    {
+        return Err(work_history_error(
+            "backup workspace metadata has an invalid schema, identity, scope, or chronology",
+        ));
+    }
+    Ok(row)
+}
+
 fn verify_backup_manifest(
     workspace_path: &Path,
     backup_path: &Path,
@@ -3156,6 +3254,12 @@ fn verify_backup_manifest(
     let mut issues = inspect.issues.clone();
     if let Err(issue) = verify_backup_manifest_authentication(workspace_path, manifest) {
         issues.push(issue);
+    }
+    if let Err(error) = read_backup_workspace_metadata(manifest) {
+        issues.push(BackupVerificationIssue::error(
+            "manifest_workspace_invalid",
+            error.message(),
+        ));
     }
     if !inspect
         .derived
@@ -3483,6 +3587,8 @@ pub fn restore_backup_to_side_path(
         });
     }
 
+    let mut restored_workspace = read_backup_workspace_metadata(&manifest)?;
+    restored_workspace.path = side_path.to_string_lossy().into_owned();
     let source_records_path = backup_artifact_path(&backup_path, &inspect, RECORDS_FILE)?;
     let source_manifest_path = backup_path.join(MANIFEST_FILE);
     let restore_artifact_dir = side_path
@@ -3603,6 +3709,12 @@ pub fn restore_backup_to_side_path(
         &inspect,
     )?;
     restore_shard_fanout_assets(&staging_workspace, &restored_derived)?;
+
+    let db = DbConnection::open_file(&restored_database_path).map_err(work_history_error)?;
+    db.migrate().map_err(work_history_error)?;
+    db.restore_workspace_row(&restored_workspace)
+        .map_err(work_history_error)?;
+    db.close().map_err(work_history_error)?;
 
     let expected_audit_rows = manifest["recoveryInventory"]["tables"]
         .as_array()
@@ -5409,6 +5521,7 @@ fn load_export_data_in_current_snapshot(
     let graph_fields_by_memory =
         export_memory_graph_fields_by_id(connection, &workspace.id, &memories, &links, &audits)?;
 
+    let workspace_row = workspace.clone();
     let mut workspace_builder = ExportWorkspaceRecord::builder()
         .workspace_id(workspace.id)
         .path(workspace.path)
@@ -5419,6 +5532,7 @@ fn load_export_data_in_current_snapshot(
     }
 
     Ok(BackupExportData {
+        workspace_row,
         workspace: workspace_builder
             .build()
             .map_err(export_build_error("build backup workspace record"))?,
@@ -16830,6 +16944,256 @@ mod tests {
         connection
             .get_pack_history_for_recovery(&pack_id)
             .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn workspace_metadata_survives_repeated_restore_and_resolution() -> TestResult {
+        use sqlmodel_core::Value;
+
+        for scope in ["standalone", "repository", "subproject"] {
+            for redaction in [RedactionLevel::None, RedactionLevel::Standard] {
+                let (temp, workspace, database) =
+                    fixture_with_memory_content("Run cargo fmt --check before release.")
+                        .map_err(|e| e.message())?;
+                let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+                let id = db
+                    .list_workspaces()
+                    .map_err(|e| e.to_string())?
+                    .remove(0)
+                    .id;
+                let name = match scope {
+                    "standalone" => None,
+                    "repository" => Some("Release workspace".to_owned()),
+                    _ => Some("api_key=workspace-secret-canary".to_owned()),
+                };
+                let root = match scope {
+                    "standalone" => None,
+                    "repository" => Some(workspace.to_string_lossy().into_owned()),
+                    _ => Some(temp.path().to_string_lossy().into_owned()),
+                };
+                let fingerprint = root
+                    .as_ref()
+                    .map(|_| "repo:0123456789abcdef01234567".to_owned());
+                let relative = (scope == "subproject").then(|| "workspace".to_owned());
+                db.execute(
+                    "UPDATE workspaces SET name = ?1, scope_kind = ?2, repository_root = ?3, repository_fingerprint = ?4, subproject_path = ?5, created_at = ?6, updated_at = ?7 WHERE id = ?8",
+                    &[
+                        name.clone().map_or(Value::Null, Value::Text),
+                        Value::Text(scope.to_owned()),
+                        root.map_or(Value::Null, Value::Text),
+                        fingerprint.map_or(Value::Null, Value::Text),
+                        relative.map_or(Value::Null, Value::Text),
+                        Value::Text("2026-02-01T03:04:05Z".to_owned()),
+                        Value::Text("2026-03-02T04:05:06Z".to_owned()),
+                        Value::Text(id.clone()),
+                    ],
+                ).map_err(|e| e.to_string())?;
+                let source = db
+                    .get_workspace(&id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("source workspace")?;
+                db.close().map_err(|e| e.to_string())?;
+                let mut current = workspace.clone();
+                for generation in 0..2 {
+                    let backup = create_backup(&BackupCreateOptions {
+                        workspace_path: current.clone(),
+                        database_path: None,
+                        output_dir: None,
+                        label: None,
+                        redaction_level: redaction,
+                        include_derived: false,
+                        include_graph_cache: false,
+                        dry_run: false,
+                    })
+                    .map_err(|e| e.message())?;
+                    assert_eq!(backup.status, "completed");
+                    let raw =
+                        fs::read_to_string(&backup.manifest_path).map_err(|e| e.to_string())?;
+                    if redaction == RedactionLevel::Standard {
+                        assert!(!raw.contains("workspace-secret-canary"));
+                    }
+                    let side = temp.path().join(format!("restored-{generation}"));
+                    let report = restore_backup_to_side_path(&BackupRestoreOptions {
+                        workspace_path: current,
+                        backup_path: backup.backup_path.into(),
+                        side_path: side.clone(),
+                        restore_graph_cache: false,
+                        dry_run: false,
+                    })
+                    .map_err(|e| e.message())?;
+                    let db = DbConnection::open_file(&report.restored_database_path)
+                        .map_err(|e| e.to_string())?;
+                    let actual = db
+                        .get_workspace(&id)
+                        .map_err(|e| e.to_string())?
+                        .ok_or("restored workspace")?;
+                    let mut expected = source.clone();
+                    expected.path = side.to_string_lossy().into_owned();
+                    expected.name = name.as_deref().map(|s| redact_content(s, redaction));
+                    assert_eq!(actual, expected, "scope={scope}, generation={generation}");
+                    assert_eq!(db.list_workspaces().map_err(|e| e.to_string())?.len(), 1);
+                    assert_eq!(
+                        db.count_live_memories_for_workspace(&id)
+                            .map_err(|e| e.to_string())?,
+                        1
+                    );
+                    let mut overwrite = actual.clone();
+                    overwrite.name = Some("must not overwrite".to_owned());
+                    assert!(db.restore_workspace_row(&overwrite).is_err());
+                    assert_eq!(
+                        db.get_workspace(&id).map_err(|e| e.to_string())?,
+                        Some(actual.clone())
+                    );
+                    db.close().map_err(|e| e.to_string())?;
+                    let resolved = crate::core::workspace::resolve_workspace_report(
+                        &crate::core::workspace::WorkspaceResolveOptions {
+                            workspace_path: Some(side.clone()),
+                            target: None,
+                            registry_path: Some(temp.path().join("unused-registry.db")),
+                        },
+                    )
+                    .map_err(|e| e.message())?;
+                    assert_eq!(resolved.workspace_id, id);
+                    assert_eq!(resolved.alias, actual.name);
+                    assert_eq!(resolved.scope_kind, actual.scope_kind);
+                    assert_eq!(resolved.repository_root, actual.repository_root);
+                    assert_eq!(
+                        resolved.repository_fingerprint,
+                        actual.repository_fingerprint
+                    );
+                    assert_eq!(resolved.subproject_path, actual.subproject_path);
+                    assert!(!temp.path().join("unused-registry.db").exists());
+                    current = side;
+                }
+                let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+                assert_eq!(
+                    db.get_workspace(&id).map_err(|e| e.to_string())?,
+                    Some(source)
+                );
+                db.insert_workspace(
+                    &WorkspaceId::from_uuid(Uuid::from_u128(99)).to_string(),
+                    &CreateWorkspaceInput {
+                        path: temp.path().join("foreign").to_string_lossy().into_owned(),
+                        name: None,
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+                db.close().map_err(|e| e.to_string())?;
+                let partial = create_backup(&BackupCreateOptions {
+                    workspace_path: workspace,
+                    database_path: None,
+                    output_dir: None,
+                    label: None,
+                    redaction_level: redaction,
+                    include_derived: false,
+                    include_graph_cache: false,
+                    dry_run: false,
+                })
+                .map_err(|e| e.message())?;
+                let coverage = partial
+                    .recovery_inventory
+                    .entries
+                    .iter()
+                    .find(|e| e.table == "workspaces")
+                    .ok_or("workspace coverage")?;
+                assert_eq!(coverage.row_count, 2);
+                assert!(!coverage.snapshot_covered);
+                assert_eq!(partial.status, "partial");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_metadata_rejects_invalid_or_unauthenticated_restore() -> TestResult {
+        let (temp, workspace, database) = fixture().map_err(|e| e.message())?;
+        let backup = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            output_dir: None,
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        let original: JsonValue =
+            serde_json::from_slice(&fs::read(&backup.manifest_path).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        let root =
+            StoreAuthRoot::open(workspace_keys_dir(&workspace)).map_err(|e| e.to_string())?;
+        for variant in 0..10 {
+            let mut manifest = original.clone();
+            match variant {
+                0 => manifest["workspace"]["metadata"] = JsonValue::Null,
+                1 => manifest["workspace"]["metadata"]["schema"] = json!("unknown"),
+                2 => {
+                    manifest["workspace"]["metadata"]["row"]["id"] =
+                        json!(WorkspaceId::from_uuid(Uuid::from_u128(99)).to_string())
+                }
+                3 => manifest["workspace"]["metadata"]["row"]["name"] = json!(" "),
+                4 => {
+                    manifest["workspace"]["metadata"]["row"]["createdAt"] = json!("not-a-timestamp")
+                }
+                5 => manifest["workspace"]["metadata"]["row"]["scopeKind"] = json!("unknown"),
+                6 => {
+                    manifest["workspace"]["metadata"]["row"]["scopeKind"] = json!("subproject");
+                    manifest["workspace"]["metadata"]["row"]["repositoryRoot"] = json!("/source");
+                    manifest["workspace"]["metadata"]["row"]["repositoryFingerprint"] =
+                        json!("repo:0123456789abcdef01234567");
+                    manifest["workspace"]["metadata"]["row"]["subprojectPath"] = json!("../outside")
+                }
+                7 => manifest["workspace"]["metadata"]["row"]["scopeKind"] = json!("repository"),
+                8 => manifest["workspace"]["metadata"]["row"]["path"] = json!(""),
+                _ => manifest["workspace"]["metadata"]["row"]["name"] = json!("unsigned change"),
+            }
+            if variant != 9 {
+                authenticate_backup_manifest(&mut manifest, &root).map_err(|e| e.message())?;
+            }
+            fs::write(
+                &backup.manifest_path,
+                serde_json::to_vec(&manifest).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            let verification = verify_backup(&BackupVerifyOptions {
+                workspace_path: workspace.clone(),
+                backup_path: backup.backup_path.clone().into(),
+            })
+            .map_err(|e| e.message())?;
+            assert_eq!(verification.status, "failed", "variant={variant}");
+            if variant != 9 {
+                assert!(
+                    verification
+                        .issues
+                        .iter()
+                        .any(|issue| issue.code == "manifest_workspace_invalid"),
+                    "variant={variant} did not reject invalid workspace metadata"
+                );
+            } else {
+                assert!(
+                    verification
+                        .issues
+                        .iter()
+                        .any(|issue| issue.code == "manifest_authentication_failed"),
+                    "unsigned workspace metadata was not rejected by authentication"
+                );
+            }
+            let side = temp.path().join(format!("rejected-{variant}"));
+            assert!(
+                restore_backup_to_side_path(&BackupRestoreOptions {
+                    workspace_path: workspace.clone(),
+                    backup_path: backup.backup_path.clone().into(),
+                    side_path: side.clone(),
+                    restore_graph_cache: false,
+                    dry_run: false,
+                })
+                .is_err(),
+                "variant={variant}"
+            );
+            assert!(!side.exists(), "variant={variant} published a destination");
+        }
+        Ok(())
     }
 
     #[test]

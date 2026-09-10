@@ -2359,6 +2359,14 @@ after recovery. The portable JSONL importer alone does not replay audit history.
 Backups created before audit-history capture must be recreated; verification
 rejects an archive that lacks this required asset.
 
+The signed manifest also carries the selected workspace's alias, original
+timestamps, and repository/subproject scope. Restore preserves that metadata
+and binds the workspace ID to the new side path; `ee workspace resolve` reads
+the restored identity. Repository metadata describes the source checkout:
+restoring memory does not recreate a Git checkout. Metadata follows the backup's
+redaction policy. Archives missing this metadata must be recreated. A backup of
+one workspace in a database containing additional workspace rows remains partial.
+
 Authenticated backup assets also preserve memory seals (including reveal
 history), source quarantine and release history, certificate records, and the
 durable agent registry. Restore retains their original chronology. Sealed

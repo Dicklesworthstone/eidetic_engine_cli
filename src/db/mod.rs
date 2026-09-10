@@ -10798,7 +10798,8 @@ impl WorkspaceScopeFields {
 }
 
 /// A stored workspace row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredWorkspace {
     pub id: String,
     pub path: String,
@@ -10812,6 +10813,26 @@ pub struct StoredWorkspace {
 }
 
 impl DbConnection {
+    /// Restore one authenticated workspace row without replacing existing state.
+    pub(crate) fn restore_workspace_row(&self, row: &StoredWorkspace) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO workspaces (id, path, name, scope_kind, repository_root, repository_fingerprint, subproject_path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            &[
+                Value::Text(row.id.clone()),
+                Value::Text(row.path.clone()),
+                row.name.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.scope_kind.clone()),
+                row.repository_root.clone().map_or(Value::Null, Value::Text),
+                row.repository_fingerprint.clone().map_or(Value::Null, Value::Text),
+                row.subproject_path.clone().map_or(Value::Null, Value::Text),
+                Value::Text(row.created_at.clone()),
+                Value::Text(row.updated_at.clone()),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Insert a new workspace.
     pub fn insert_workspace(&self, id: &str, input: &CreateWorkspaceInput) -> Result<()> {
         self.insert_workspace_with_scope(id, input, &WorkspaceScopeFields::standalone())

@@ -2176,8 +2176,34 @@ fn resolve_path_report(
         .into_iter()
         .map(WorkspaceDiagnosticEntry::from)
         .collect();
-    let alias = find_workspace_alias_read_only(registry_path, &resolution.location.root)?;
-    let workspace_id = stable_workspace_id(&resolution.canonical_root);
+    let registry_alias = find_workspace_alias_read_only(registry_path, &resolution.location.root)?;
+    let requested_id = stable_workspace_id(&resolution.canonical_root);
+    let database = resolution
+        .location
+        .root
+        .join(WORKSPACE_MARKER)
+        .join("ee.db");
+    let stored = if registry_file_exists(&database)? {
+        let connection = open_registry_read_only(&database)?;
+        select_existing_workspace_row(
+            &connection,
+            &requested_id,
+            &[&resolution.location.root, &resolution.canonical_root],
+        )?
+    } else {
+        None
+    };
+    let scope = stored.as_ref().map_or_else(
+        || workspace_scope_fields(&resolution.scope),
+        |row| WorkspaceScopeFields {
+            scope_kind: row.scope_kind.clone(),
+            repository_root: row.repository_root.clone(),
+            repository_fingerprint: row.repository_fingerprint.clone(),
+            subproject_path: row.subproject_path.clone(),
+        },
+    );
+    let workspace_id = stored.as_ref().map_or(requested_id, |row| row.id.clone());
+    let alias = registry_alias.or_else(|| stored.and_then(|row| row.name));
 
     Ok(WorkspaceResolveReport {
         schema: WORKSPACE_RESOLVE_SCHEMA_V1,
@@ -2189,18 +2215,10 @@ fn resolve_path_report(
         canonical_root: resolution.canonical_root.display().to_string(),
         marker_present: resolution.marker_present,
         alias,
-        scope_kind: resolution.scope.kind.as_str().to_string(),
-        repository_root: resolution
-            .scope
-            .repository_root
-            .as_ref()
-            .map(|path| path.display().to_string()),
-        repository_fingerprint: resolution.scope.repository_fingerprint.clone(),
-        subproject_path: resolution
-            .scope
-            .subproject_path
-            .as_ref()
-            .map(|path| path.display().to_string()),
+        scope_kind: scope.scope_kind,
+        repository_root: scope.repository_root,
+        repository_fingerprint: scope.repository_fingerprint,
+        subproject_path: scope.subproject_path,
         registry_path: registry_path.display().to_string(),
         diagnostics,
     })
