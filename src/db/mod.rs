@@ -21207,7 +21207,8 @@ pub struct CreateTripwireInput {
 }
 
 /// A stored tripwire row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredTripwire {
     pub id: String,
     pub workspace_id: String,
@@ -21242,7 +21243,8 @@ pub struct CreateTripwireCheckEventInput {
 }
 
 /// A stored tripwire check event row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredTripwireCheckEvent {
     pub id: String,
     pub workspace_id: String,
@@ -27958,7 +27960,8 @@ pub struct CreateSituationRecordInput {
 }
 
 /// A persisted situation record as stored in `situation_records`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredSituationRecord {
     pub situation_id: String,
     pub workspace_scope: String,
@@ -29205,7 +29208,8 @@ pub struct CreateDebtSnapshotInput {
 }
 
 /// A stored debt_snapshots row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredDebtSnapshot {
     pub workspace_id: String,
     pub snapshot_day: String,
@@ -29273,6 +29277,197 @@ fn stored_debt_snapshot_from_row(row: &Row) -> Result<StoredDebtSnapshot> {
         total_score: required_f64(row, 6, DbOperation::Query, "total_score")? as f32,
         created_at: required_text(row, 7, DbOperation::Query, "created_at")?.to_string(),
     })
+}
+
+/// Persisted recipe data. Recovery preserves this table even though the current
+/// recommendation surface does not yet read it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoredPlanRecipe {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub when_to_use: String,
+    pub steps_json: String,
+    pub evidence_uris_json: String,
+    pub maturity: String,
+    pub confidence: f64,
+    pub helpful_count: u64,
+    pub harmful_count: u64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_recommended_at: Option<String>,
+}
+
+/// Durable maintenance inputs and history, independent of derived check results.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoredMaintenanceHistory {
+    pub debt_snapshots: Vec<StoredDebtSnapshot>,
+    pub sentinel_specs: Vec<StoredMemorySentinelSpec>,
+    pub reflection_requests: Vec<StoredReflectionRequestLedger>,
+    pub situations: Vec<StoredSituationRecord>,
+    pub tripwires: Vec<StoredTripwire>,
+    pub tripwire_checks: Vec<StoredTripwireCheckEvent>,
+    pub recipes: Vec<StoredPlanRecipe>,
+}
+
+impl DbConnection {
+    /// Read complete, workspace-scoped history without diagnostic/list limits.
+    /// Call inside the same read transaction as the memories and inventory.
+    pub fn maintenance_history_for_recovery(
+        &self,
+        workspace_id: &str,
+    ) -> Result<StoredMaintenanceHistory> {
+        let params = [Value::Text(workspace_id.to_owned())];
+        let debt_snapshots = self.query_for(DbOperation::Query,
+            "SELECT workspace_id, snapshot_day, generation, report_hash, report_json, item_count, total_score, created_at FROM debt_snapshots WHERE workspace_id = ?1 ORDER BY snapshot_day, generation", &params)?
+            .iter().map(stored_debt_snapshot_from_row).collect::<Result<Vec<_>>>()?;
+        let sentinel_specs = self.query_for(DbOperation::Query,
+            "SELECT s.spec_hash, s.memory_id, s.sentinel_kind, s.target, s.expected_predicate, s.safety_class, s.provenance, s.stale_threshold_seconds, s.created_at, s.updated_at, s.polarity FROM memory_sentinel_specs s JOIN memories m ON m.id = s.memory_id WHERE m.workspace_id = ?1 ORDER BY s.memory_id, s.spec_hash", &params)?
+            .iter().map(stored_memory_sentinel_spec_from_row).collect::<Result<Vec<_>>>()?;
+        let reflection_requests = self.query_for(DbOperation::Query,
+            "SELECT request_id, request_hash, workspace_id, reflection_kind, source_package_hash, source_refs_json, source_content_hashes_json, prompt_template_hash, response_schema_hash, created_at, expires_at, challenge_key_id, challenge_hash, status, consumed_candidate_id, consumed_at, consumed_result_hash FROM reflection_request_ledger WHERE workspace_id = ?1 ORDER BY created_at, request_id", &params)?
+            .iter().map(stored_reflection_request_ledger_from_row).collect::<Result<Vec<_>>>()?;
+        let situations = self.query_for(DbOperation::Query,
+            &format!("SELECT {SITUATION_RECORD_COLUMNS} FROM situation_records WHERE workspace_scope = ?1 ORDER BY adopted_at, situation_id"), &params)?
+            .iter().map(stored_situation_record_from_row).collect::<Result<Vec<_>>>()?;
+        let tripwires = self.list_tripwires(workspace_id, None, None, None, true, None)?;
+        let tripwire_checks = self.query_for(DbOperation::Query,
+            "SELECT id, workspace_id, tripwire_id, preflight_run_id, checked_at, event_payload_hash, condition_result, check_result, should_halt, dry_run, durable_mutation, mutation_posture, details, schema FROM tripwire_check_events WHERE workspace_id = ?1 ORDER BY checked_at, id", &params)?
+            .iter().map(stored_tripwire_check_event_from_row).collect::<Result<Vec<_>>>()?;
+        let recipes = self.query_for(DbOperation::Query,
+            "SELECT id, workspace_id, name, when_to_use, steps_json, evidence_uris_json, maturity, confidence, helpful_count, harmful_count, created_at, updated_at, last_recommended_at FROM plan_recipes WHERE workspace_id = ?1 ORDER BY created_at, id", &params)?
+            .iter().map(|row| Ok(StoredPlanRecipe {
+                id: required_text(row, 0, DbOperation::Query, "id")?.to_owned(),
+                workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_owned(),
+                name: required_text(row, 2, DbOperation::Query, "name")?.to_owned(),
+                when_to_use: required_text(row, 3, DbOperation::Query, "when_to_use")?.to_owned(),
+                steps_json: required_text(row, 4, DbOperation::Query, "steps_json")?.to_owned(),
+                evidence_uris_json: required_text(row, 5, DbOperation::Query, "evidence_uris_json")?.to_owned(),
+                maturity: required_text(row, 6, DbOperation::Query, "maturity")?.to_owned(),
+                confidence: required_f64(row, 7, DbOperation::Query, "confidence")?,
+                helpful_count: required_u64(row, 8, DbOperation::Query, "helpful_count")?,
+                harmful_count: required_u64(row, 9, DbOperation::Query, "harmful_count")?,
+                created_at: required_text(row, 10, DbOperation::Query, "created_at")?.to_owned(),
+                updated_at: required_text(row, 11, DbOperation::Query, "updated_at")?.to_owned(),
+                last_recommended_at: optional_text(row, 12)?.map(str::to_owned),
+            })).collect::<Result<Vec<_>>>()?;
+        Ok(StoredMaintenanceHistory {
+            debt_snapshots,
+            sentinel_specs,
+            reflection_requests,
+            situations,
+            tripwires,
+            tripwire_checks,
+            recipes,
+        })
+    }
+
+    /// Strict inserts preserve original identity, chronology, and replay state.
+    /// The caller owns the transaction across chunks and the recovery audit.
+    /// No upserts, re-evaluation, challenge issuance, or recommendation occurs.
+    pub fn insert_maintenance_history_for_recovery(
+        &self,
+        history: &StoredMaintenanceHistory,
+    ) -> Result<()> {
+        for row in &history.debt_snapshots {
+            self.execute_for(DbOperation::Execute,
+                "INSERT INTO debt_snapshots (workspace_id, snapshot_day, generation, report_hash, report_json, item_count, total_score, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", &[
+                    Value::Text(row.workspace_id.clone()), Value::Text(row.snapshot_day.clone()),
+                    Value::BigInt(u64_to_i64(row.generation, "generation")?), Value::Text(row.report_hash.clone()),
+                    Value::Text(row.report_json.clone()), Value::BigInt(u64_to_i64(row.item_count, "item_count")?),
+                    Value::Float(row.total_score), Value::Text(row.created_at.clone()),
+                ])?;
+        }
+        for row in &history.sentinel_specs {
+            self.execute_for(DbOperation::Execute,
+                "INSERT INTO memory_sentinel_specs (spec_hash, memory_id, sentinel_kind, polarity, target, expected_predicate, safety_class, provenance, stale_threshold_seconds, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)", &[
+                    Value::Text(row.spec_hash.clone()), Value::Text(row.memory_id.clone()),
+                    Value::Text(row.sentinel_kind.as_str().to_owned()), Value::Text(row.polarity.as_str().to_owned()),
+                    Value::Text(row.target.clone()), Value::Text(row.expected_predicate.clone()),
+                    Value::Text(row.safety_class.as_str().to_owned()), Value::Text(row.provenance.clone()),
+                    optional_u64_value(row.stale_threshold_seconds, "stale_threshold_seconds")?,
+                    Value::Text(row.created_at.clone()), Value::Text(row.updated_at.clone()),
+                ])?;
+        }
+        for row in &history.reflection_requests {
+            self.execute_for(DbOperation::Execute,
+                "INSERT INTO reflection_request_ledger (request_id, request_hash, workspace_id, reflection_kind, source_package_hash, source_refs_json, source_content_hashes_json, prompt_template_hash, response_schema_hash, created_at, expires_at, challenge_key_id, challenge_hash, status, consumed_candidate_id, consumed_at, consumed_result_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)", &[
+                    Value::Text(row.request_id.clone()), Value::Text(row.request_hash.clone()), Value::Text(row.workspace_id.clone()),
+                    Value::Text(row.reflection_kind.clone()), Value::Text(row.source_package_hash.clone()),
+                    Value::Text(row.source_refs_json.clone()), Value::Text(row.source_content_hashes_json.clone()),
+                    Value::Text(row.prompt_template_hash.clone()), Value::Text(row.response_schema_hash.clone()),
+                    Value::Text(row.created_at.clone()), Value::Text(row.expires_at.clone()),
+                    Value::Text(row.challenge_key_id.clone()), Value::Text(row.challenge_hash.clone()),
+                    Value::Text(row.status.clone()), optional_text_value(row.consumed_candidate_id.as_deref()),
+                    optional_text_value(row.consumed_at.as_deref()), optional_text_value(row.consumed_result_hash.as_deref()),
+                ])?;
+        }
+        for row in &history.situations {
+            self.insert_situation_record(&CreateSituationRecordInput {
+                situation_id: row.situation_id.clone(),
+                workspace_scope: row.workspace_scope.clone(),
+                schema_version: row.schema_version.clone(),
+                input_hash: row.input_hash.clone(),
+                original_text_redacted: row.original_text_redacted.clone(),
+                category: row.category.clone(),
+                confidence: row.confidence.clone(),
+                confidence_score: row.confidence_score,
+                signals_json: row.signals_json.clone(),
+                alternative_categories_json: row.alternative_categories_json.clone(),
+                routing_decisions_json: row.routing_decisions_json.clone(),
+                context_hints_json: row.context_hints_json.clone(),
+                provenance_json: row.provenance_json.clone(),
+                adopted_by: row.adopted_by.clone(),
+                adoption_reason: row.adoption_reason.clone(),
+                created_at: row.created_at.clone(),
+                adopted_at: row.adopted_at.clone(),
+                classifier_algorithm: row.classifier_algorithm.clone(),
+                classifier_version: row.classifier_version.clone(),
+                build_version: row.build_version.clone(),
+            })?;
+        }
+        for row in &history.tripwires {
+            self.execute_for(DbOperation::Execute,
+                "INSERT INTO tripwires (id, workspace_id, preflight_run_id, tripwire_type, condition, action, state, message, created_at, last_checked_at, triggered_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)", &[
+                    Value::Text(row.id.clone()), Value::Text(row.workspace_id.clone()), Value::Text(row.preflight_run_id.clone()),
+                    Value::Text(row.tripwire_type.clone()), Value::Text(row.condition.clone()), Value::Text(row.action.clone()),
+                    Value::Text(row.state.clone()), optional_text_value(row.message.as_deref()), Value::Text(row.created_at.clone()),
+                    optional_text_value(row.last_checked_at.as_deref()), optional_text_value(row.triggered_at.as_deref()), Value::Text(row.updated_at.clone()),
+                ])?;
+        }
+        for row in &history.tripwire_checks {
+            self.insert_tripwire_check_event(
+                &row.id,
+                &CreateTripwireCheckEventInput {
+                    workspace_id: row.workspace_id.clone(),
+                    tripwire_id: row.tripwire_id.clone(),
+                    preflight_run_id: row.preflight_run_id.clone(),
+                    checked_at: row.checked_at.clone(),
+                    event_payload_hash: row.event_payload_hash.clone(),
+                    condition_result: row.condition_result.clone(),
+                    check_result: row.check_result.clone(),
+                    should_halt: row.should_halt,
+                    dry_run: row.dry_run,
+                    durable_mutation: row.durable_mutation,
+                    mutation_posture: row.mutation_posture.clone(),
+                    details: row.details.clone(),
+                    schema: row.schema.clone(),
+                },
+            )?;
+        }
+        for row in &history.recipes {
+            self.execute_for(DbOperation::Execute,
+                "INSERT INTO plan_recipes (id, workspace_id, name, when_to_use, steps_json, evidence_uris_json, maturity, confidence, helpful_count, harmful_count, created_at, updated_at, last_recommended_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)", &[
+                    Value::Text(row.id.clone()), Value::Text(row.workspace_id.clone()), Value::Text(row.name.clone()), Value::Text(row.when_to_use.clone()),
+                    Value::Text(row.steps_json.clone()), Value::Text(row.evidence_uris_json.clone()), Value::Text(row.maturity.clone()), Value::Double(row.confidence),
+                    Value::BigInt(u64_to_i64(row.helpful_count, "helpful_count")?), Value::BigInt(u64_to_i64(row.harmful_count, "harmful_count")?),
+                    Value::Text(row.created_at.clone()), Value::Text(row.updated_at.clone()), optional_text_value(row.last_recommended_at.as_deref()),
+                ])?;
+        }
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -36527,7 +36722,8 @@ pub struct CreateReflectionRequestLedgerInput {
 }
 
 /// One stored reflection request ledger row.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredReflectionRequestLedger {
     pub request_id: String,
     pub request_hash: String,

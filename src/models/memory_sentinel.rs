@@ -5,6 +5,7 @@
 //! classes, parser repair hints, and hash inputs; execution remains a later
 //! core concern.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
@@ -23,7 +24,8 @@ pub const MAX_MEMORY_SENTINEL_EVIDENCE_BYTES: usize = 4_096;
 const BLAKE3_PREFIX: &str = "blake3:";
 const BLAKE3_HEX_LEN: usize = 64;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemorySentinelKind {
     PathExists,
     FileHashOrMarker,
@@ -131,7 +133,8 @@ impl FromStr for MemorySentinelKind {
 /// predicate is expected to fail while the memory stays retired, and a pass
 /// signals the recorded blocker has cleared and the memory should resurface.
 /// Revive sentinels never gate serving.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemorySentinelPolarity {
     #[default]
     Gate,
@@ -163,7 +166,8 @@ impl fmt::Display for MemorySentinelPolarity {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemorySentinelSafetyClass {
     PurePredicate,
     AllowlistedIntrospection,
@@ -369,7 +373,8 @@ impl MemorySentinelSpec {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredMemorySentinelSpec {
     pub spec_hash: String,
     pub memory_id: String,
