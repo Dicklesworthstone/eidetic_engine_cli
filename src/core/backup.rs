@@ -16948,7 +16948,13 @@ mod tests {
 
     #[test]
     fn workspace_metadata_survives_repeated_restore_and_resolution() -> TestResult {
-        use sqlmodel_core::Value;
+        /// Render an optional string as a SQL literal, doubling embedded quotes.
+        fn sql_literal(value: Option<&str>) -> String {
+            value.map_or_else(
+                || "NULL".to_owned(),
+                |text| format!("'{}'", text.replace('\'', "''")),
+            )
+        }
 
         for scope in ["standalone", "repository", "subproject"] {
             for redaction in [RedactionLevel::None, RedactionLevel::Standard] {
@@ -16975,19 +16981,19 @@ mod tests {
                     .as_ref()
                     .map(|_| "repo:0123456789abcdef01234567".to_owned());
                 let relative = (scope == "subproject").then(|| "workspace".to_owned());
-                db.execute(
-                    "UPDATE workspaces SET name = ?1, scope_kind = ?2, repository_root = ?3, repository_fingerprint = ?4, subproject_path = ?5, created_at = ?6, updated_at = ?7 WHERE id = ?8",
-                    &[
-                        name.clone().map_or(Value::Null, Value::Text),
-                        Value::Text(scope.to_owned()),
-                        root.map_or(Value::Null, Value::Text),
-                        fingerprint.map_or(Value::Null, Value::Text),
-                        relative.map_or(Value::Null, Value::Text),
-                        Value::Text("2026-02-01T03:04:05Z".to_owned()),
-                        Value::Text("2026-03-02T04:05:06Z".to_owned()),
-                        Value::Text(id.clone()),
-                    ],
-                ).map_err(|e| e.to_string())?;
+                db.execute_raw(&format!(
+                    "UPDATE workspaces SET name = {name_sql}, scope_kind = {scope_sql}, \
+                     repository_root = {root_sql}, repository_fingerprint = {fingerprint_sql}, \
+                     subproject_path = {relative_sql}, created_at = '2026-02-01T03:04:05Z', \
+                     updated_at = '2026-03-02T04:05:06Z' WHERE id = {id_sql}",
+                    name_sql = sql_literal(name.as_deref()),
+                    scope_sql = sql_literal(Some(scope)),
+                    root_sql = sql_literal(root.as_deref()),
+                    fingerprint_sql = sql_literal(fingerprint.as_deref()),
+                    relative_sql = sql_literal(relative.as_deref()),
+                    id_sql = sql_literal(Some(id.as_str())),
+                ))
+                .map_err(|e| e.to_string())?;
                 let source = db
                     .get_workspace(&id)
                     .map_err(|e| e.to_string())?
@@ -20052,7 +20058,7 @@ mod tests {
             dirty_status_hash: None,
             verification_attribution: "committed_tree".to_owned(),
             remote_required: true,
-            worker_id: Some("hz2".to_owned()),
+            worker_id: Some("worker-g".to_owned()),
             status: status.to_owned(),
             exit_code: Some(if n < 2 { 1 } else { 0 }),
             degraded_codes_json: Some(
