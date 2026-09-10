@@ -161,9 +161,10 @@ fn contains_word(haystack: &str, needle: &str, ignore_case: bool) -> bool {
 }
 
 /// True when the line contains `vmi` followed by six or more digits, the shape
-/// of the fleet's VPS host names.
+/// of the fleet's VPS host names. Case-insensitive.
 fn contains_vps_hostname(line: &str) -> bool {
-    let bytes = line.as_bytes();
+    let folded = line.to_ascii_lowercase();
+    let bytes = folded.as_bytes();
     let mut index = 0usize;
     while index + 3 <= bytes.len() {
         if bytes[index..].starts_with(b"vmi") && (index == 0 || !is_word_byte(bytes[index - 1])) {
@@ -197,8 +198,9 @@ fn is_non_routable(octets: [u8; 4]) -> bool {
     }
 }
 
-/// Parse `text` as a dotted quad, rejecting empty, oversized or `0`-padded
-/// octets so that version strings do not parse as addresses.
+/// Parse `text` as a dotted quad, rejecting empty octets, octets longer than
+/// three digits and octets above 255, so that version strings such as
+/// `1.2.3.4444` do not parse as addresses.
 fn parse_dotted_quad(text: &str) -> Option<[u8; 4]> {
     let mut octets = [0u8; 4];
     let mut parts = text.split('.');
@@ -228,11 +230,16 @@ fn contains_public_ip(line: &str) -> Option<String> {
             index += 1;
             continue;
         }
-        let end = index
+        let span_end = index
             + bytes[index..]
                 .iter()
                 .take_while(|byte| byte.is_ascii_digit() || **byte == b'.')
                 .count();
+        // Sentence punctuation: `... on 203.0.113.5.` must still parse.
+        let mut end = span_end;
+        while end > index && bytes[end - 1] == b'.' {
+            end -= 1;
+        }
         let followed_ok = end == bytes.len() || !is_word_byte(bytes[end]);
         let candidate = &line[index..end];
         if followed_ok
@@ -244,7 +251,7 @@ fn contains_public_ip(line: &str) -> Option<String> {
         {
             return Some(candidate.to_owned());
         }
-        index = end.max(index + 1);
+        index = span_end.max(index + 1);
     }
     None
 }
@@ -413,10 +420,17 @@ fn no_private_fleet_identifiers_are_published() {
 #[test]
 fn guard_detects_each_banned_identifier_shape() {
     assert!(banned_token_in_line("worker_id = \"vmi1234567\"").is_some());
+    assert!(banned_token_in_line("WORKER VMI1234567 REPORTED").is_some());
     assert!(banned_token_in_line("selected worker: csd").is_some());
     assert!(banned_token_in_line("host = 209.145.1.2").is_some());
+    assert!(banned_token_in_line("the proof ran on 209.145.1.2.").is_some());
     assert!(banned_token_in_line("C:\\Users\\jeffr\\ee.exe").is_some());
     assert!(banned_token_in_line("mac-mini-old launchd unit").is_some());
+    // Host names are caught regardless of case...
+    assert!(banned_token_in_line("proof host: HZ1 lib gate").is_some());
+    assert!(banned_token_in_line("Isolated CSD pinned tree").is_some());
+    // ...but lower-case `css` is always the host, never the language.
+    assert!(banned_token_in_line("selected worker css").is_some());
 }
 
 #[test]
@@ -438,4 +452,6 @@ fn guard_does_not_flag_neutral_placeholders() {
     assert!(banned_token_in_line("bind 127.0.0.1:8080").is_none());
     assert!(banned_token_in_line("doc example 198.51.100.11").is_none());
     assert!(banned_token_in_line("resolver 8.8.8.8").is_none());
+    // ...except upper-case CSS, which is the stylesheet language, not the host.
+    assert!(banned_token_in_line("Frontend CSS tweaks are unrelated").is_none());
 }
