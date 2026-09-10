@@ -25985,10 +25985,10 @@ where
         Ok(Some(entry)) => {
             let recipe = &entry.recipe;
             let human_output = || {
-                let mut out = format!(
-                    "Recipe: {}\nSource: {}\nMaturity: {}\n",
-                    recipe.id, entry.source_id, entry.maturity
-                );
+                let mut out = format!("Recipe: {}\nSource: {}\n", recipe.id, entry.source_id);
+                if let Some(maturity) = &entry.maturity {
+                    out.push_str(&format!("Maturity: {maturity}\n"));
+                }
                 out.push_str(&format!("{}\n\n", "=".repeat(40)));
                 out.push_str(&format!("Name:        {}\n", recipe.name));
                 out.push_str(&format!("Category:    {}\n", recipe.category.as_str()));
