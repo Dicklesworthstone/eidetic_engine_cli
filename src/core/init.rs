@@ -18,7 +18,7 @@ use super::{
     },
     workspace::{ensure_bound_workspace, stable_workspace_id},
 };
-use crate::db::DbConnection;
+use crate::db::{DbConnection, WalCheckpointMode};
 use crate::policy::store_auth::{StoreAuthRoot, workspace_keys_dir};
 
 /// Status of the init operation.
@@ -878,6 +878,19 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
         }
     }
 
+    // GH #35: schema migrations leave the whole initial schema sitting in the
+    // WAL sidecar - measured at 5,632,072 bytes / 1,367 frames on a workspace
+    // with zero memories, larger than the 2.5 MB main database it describes.
+    // Nothing folds it in, because the automatic checkpoint threshold is 64 MB
+    // and a small store never reaches it. Every later connection open replays
+    // those frames: one `ee doctor` on such a store issued 34,921 WAL reads
+    // across ~25 replays, against 5,170 once checkpointed. Fold the WAL in here
+    // so a freshly initialised workspace does not start life paying that on
+    // every command.
+    if !options.dry_run && !options.repair_plan && database_path.exists() {
+        checkpoint_wal_after_schema_write(&database_path, &mut actions);
+    }
+
     let status = if any_failed {
         InitStatus::Failed
     } else if any_created {
@@ -899,6 +912,35 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
         action_errors,
         dry_run: false,
     }
+}
+
+/// Fold a freshly written schema out of the WAL sidecar and into the main
+/// database file (GH #35).
+///
+/// Deliberately best-effort and non-fatal: a workspace that is initialised
+/// correctly but cannot be checkpointed right now (a concurrent writer holds
+/// the gate, so the checkpoint reports `busy`) is still a working workspace.
+/// Failing `ee init` over a performance optimisation would be a far worse
+/// outcome than leaving the WAL for the next checkpoint to collect.
+fn checkpoint_wal_after_schema_write(database_path: &Path, actions: &mut Vec<InitAction>) {
+    let Ok(connection) = DbConnection::open_file(database_path) else {
+        return;
+    };
+    let status = match connection.wal_checkpoint(WalCheckpointMode::Truncate) {
+        Ok(report) => report,
+        Err(_) => return,
+    };
+    actions.push(InitAction {
+        action: "checkpoint_wal",
+        path: database_path.to_path_buf(),
+        status: if status.busy {
+            "busy"
+        } else if status.checkpointed_frames > 0 {
+            "checkpointed"
+        } else {
+            "empty"
+        },
+    });
 }
 
 fn initialize_database(
@@ -1340,6 +1382,82 @@ mod tests {
             false,
             "failed is not success",
         )
+    }
+
+    // GH #35: `ee init` left its whole schema in the WAL sidecar - measured at
+    // 5,632,072 bytes / 1,367 frames against a 2,510,848-byte database, on a
+    // workspace with zero memories. Nothing folded it in, because the automatic
+    // checkpoint threshold is 64 MB. Every later connection open replayed those
+    // frames: one `ee doctor` issued 34,921 WAL reads across ~25 replays,
+    // against 5,170 once checkpointed.
+
+    #[test]
+    fn init_leaves_the_wal_folded_into_the_database() -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let workspace = temp_dir.path().to_path_buf();
+        let report = init_workspace(&InitOptions {
+            workspace_path: workspace.clone(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        ensure(report.status.is_success(), true, "init succeeded")?;
+
+        let database_path = workspace.join(".ee").join("ee.db");
+        let wal_path = workspace.join(".ee").join("ee.db-wal");
+        let wal_bytes = std::fs::metadata(&wal_path).map_or(0, |meta| meta.len());
+        let db_bytes = std::fs::metadata(&database_path)
+            .map_err(|e| e.to_string())?
+            .len();
+
+        // The precise residue depends on page size, so assert the property that
+        // actually matters rather than a magic number: a freshly initialised
+        // workspace must not hand every later command a WAL to replay that is
+        // larger than the database it describes.
+        if wal_bytes > db_bytes {
+            return Err(format!(
+                "init left a WAL larger than the database: wal={wal_bytes} db={db_bytes}"
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn init_records_the_checkpoint_it_performed() -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let report = init_workspace(&InitOptions {
+            workspace_path: temp_dir.path().to_path_buf(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        let checkpointed = report
+            .actions
+            .iter()
+            .any(|action| action.action == "checkpoint_wal");
+        ensure(checkpointed, true, "init reports its WAL checkpoint action")
+    }
+
+    #[test]
+    fn dry_run_init_never_checkpoints() -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let report = init_workspace(&InitOptions {
+            workspace_path: temp_dir.path().to_path_buf(),
+            dry_run: true,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        let checkpointed = report
+            .actions
+            .iter()
+            .any(|action| action.action == "checkpoint_wal");
+        ensure(checkpointed, false, "dry run performs no checkpoint")
     }
 
     #[test]
