@@ -194,36 +194,39 @@ fn ee_primer_parses_and_accesses_without_panicking() {
     }
 }
 
-/// `ee plan goal --workspace <path>` has a local workspace-path flag whose
-/// public spelling intentionally matches the root global `--workspace`.
-/// Keep the Rust field id distinct from the global id so clap never registers
-/// the root `PathBuf` value and local subcommand value under the same id.
+/// The global workspace flag must work on either side of the subcommand.
+/// A second local flag with a different Rust id still collides by long name.
 #[test]
-fn ee_plan_goal_workspace_flag_stays_on_local_path_arg() {
-    let parsed = Cli::try_parse_from([
-        "ee",
-        "plan",
-        "goal",
-        "--goal",
-        "prepare release",
-        "--workspace",
-        ".",
-        "--json",
-    ])
-    .expect("plan goal local --workspace parses");
-
-    assert!(
-        parsed.workspace.is_none(),
-        "post-subcommand --workspace must not be consumed by the root global workspace arg"
-    );
-    match parsed.command {
-        Some(Command::Plan(PlanCommand::Goal(args))) => {
-            assert_eq!(
-                args.workspace_path.as_deref(),
-                Some(std::path::Path::new(".")),
-                "plan goal local --workspace should populate workspace_path"
-            );
+fn ee_plan_goal_workspace_flag_uses_global_path() {
+    for argv in [
+        vec![
+            "ee",
+            "plan",
+            "goal",
+            "--goal",
+            "prepare release",
+            "--workspace",
+            ".",
+            "--json",
+        ],
+        vec![
+            "ee",
+            "--workspace",
+            ".",
+            "plan",
+            "goal",
+            "--goal",
+            "prepare release",
+            "--json",
+        ],
+    ] {
+        let parsed = Cli::try_parse_from(argv).expect("plan goal --workspace parses");
+        assert_eq!(parsed.workspace.as_deref(), Some(std::path::Path::new(".")));
+        match parsed.command {
+            Some(Command::Plan(PlanCommand::Goal(args))) => {
+                assert_eq!(args.goal, "prepare release");
+            }
+            other => panic!("expected plan goal command, got {other:?}"),
         }
-        other => panic!("expected plan goal command, got {other:?}"),
     }
 }

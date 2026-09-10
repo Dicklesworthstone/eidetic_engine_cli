@@ -7732,10 +7732,6 @@ pub struct PlanGoalArgs {
     #[arg(long, value_name = "TEXT")]
     pub goal: String,
 
-    /// Workspace path to plan for.
-    #[arg(long = "workspace", value_name = "PATH")]
-    pub workspace_path: Option<PathBuf>,
-
     /// Output profile (compact, full, safe).
     #[arg(long, value_name = "PROFILE", default_value = "full")]
     pub profile: String,
@@ -25831,11 +25827,7 @@ where
 {
     use crate::core::plan::{PlanRecommendOptions, recommend_recipes};
 
-    let workspace_path = args
-        .workspace_path
-        .clone()
-        .or_else(|| cli.workspace.clone())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let (workspace_path, _) = resolve_local_workspace_for_cli(cli, None);
     let options = PlanRecommendOptions {
         task: args.goal.clone(),
         limit: 5,
