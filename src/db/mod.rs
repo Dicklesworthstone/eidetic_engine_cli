@@ -51738,7 +51738,7 @@ mod tests {
     fn restore_audit_entries_is_atomic_and_preserves_nullable_history() -> TestResult {
         let source = DbConnection::open_memory()?;
         source.migrate()?;
-        let input = CreateAuditInput {
+        let input = crate::db::CreateAuditInput {
             workspace_id: None,
             actor: None,
             action: "db.check_integrity".to_owned(),
@@ -51746,7 +51746,7 @@ mod tests {
             target_id: None,
             details: None,
         };
-        let id = generate_audit_id();
+        let id = crate::db::generate_audit_id();
         source.insert_audit(&id, &input)?;
         let row = required_audit(&source, &id)?;
         let destination = DbConnection::open_memory()?;
@@ -51770,7 +51770,7 @@ mod tests {
             "must never overwrite a nonempty log"
         );
         assert_eq!(required_audit(&destination, &id)?, row);
-        destination.insert_audit(&generate_audit_id(), &input)?;
+        destination.insert_audit(&crate::db::generate_audit_id(), &input)?;
         assert_eq!(destination.count_table_rows("audit_log")?, 2);
         Ok(())
     }
