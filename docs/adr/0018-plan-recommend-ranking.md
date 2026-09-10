@@ -47,6 +47,8 @@ At least one text hit or semantic similarity of 0.5 is required before metadata
 can contribute. Static catalog entries have no learned maturity or recorded
 recency and receive zero for those components. Evidence is deduplicated after
 redaction and normalized as `n/(1+n)`; redacted links receive no evidence credit.
+Built-in recipes retain their catalog URI for explanation, but that
+self-reference earns no supporting-evidence credit.
 Recency uses a 30-day half-life relative to the newest stored `updated_at`,
 reported as `recencyAnchor`, so unchanged reads do not drift with wall time.
 The score is a ranking value, not a calibrated confidence probability.

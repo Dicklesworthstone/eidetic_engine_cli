@@ -1440,10 +1440,10 @@ pub(crate) fn recipe_catalog(
         .into_iter()
         .map(|recipe| RecipeCatalogEntry {
             source_id: recipe_source_id(&recipe.id),
+            evidence_uris: vec![format!("ee://plan/recipe/{}", recipe.id)],
             recipe,
             source_kind: "static_command_catalog",
             maturity: "catalog".to_owned(),
-            evidence_uris: Vec::new(),
             created_at: None,
             updated_at: None,
         })
@@ -1805,7 +1805,11 @@ pub(crate) async fn recommend_from_catalog(
         let evidence_count = entry
             .evidence_uris
             .iter()
-            .filter(|uri| !uri.trim().is_empty() && !uri.contains("[REDACTED"))
+            .filter(|uri| {
+                entry.source_kind == "stored_plan_recipe"
+                    && !uri.trim().is_empty()
+                    && !uri.contains("[REDACTED")
+            })
             .count();
         let evidence = evidence_count as f64 / (1.0 + evidence_count as f64);
         let components = RecipeScoreComponents {
@@ -1826,7 +1830,7 @@ pub(crate) async fn recommend_from_catalog(
         let reasons = vec![
             format!("Frankensearch text similarity {text:.6}; semantic similarity {semantic:.6}."),
             format!(
-                "Maturity {}; {} distinct evidence links; recency {recency:.6} against the recorded catalog anchor.",
+                "Maturity {}; {} supporting evidence links (catalog self-references excluded); recency {recency:.6} against the recorded catalog anchor.",
                 entry.maturity, evidence_count
             ),
         ];
@@ -2133,6 +2137,8 @@ mod tests {
             explain_recipe(workspace.path(), None, "init-workspace").map_err(|e| e.message())?;
         assert!(exp.found);
         assert_eq!(exp.recipe_id, "init-workspace");
+        assert_eq!(exp.evidence_uris, ["ee://plan/recipe/init-workspace"]);
+        assert_eq!(exp.maturity.as_deref(), Some("catalog"));
         Ok(())
     }
 
