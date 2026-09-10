@@ -662,14 +662,14 @@ ee diag build-admission --workspace . --artifact-destination ./target/ee-e2e/syn
 
 ```bash
 ee init --workspace .
-ee remember 'Remote cache delta enabled Project Zephyr hz2 worker pool.' --workspace . --level episodic --kind observation --confidence 0.99
-ee remember 'Zephyr hz2 workers cannot use cache delta.' --workspace . --level episodic --kind observation --confidence 0.99
+ee remember 'Remote cache delta enabled Project Zephyr worker-g worker pool.' --workspace . --level episodic --kind observation --confidence 0.99
+ee remember 'Zephyr worker-g workers cannot use cache delta.' --workspace . --level episodic --kind observation --confidence 0.99
 ```
 
 **Invocation.**
 
 ```bash
-ee ask 'Remote cache delta enabled Project Zephyr hz2 worker pool' --workspace . --json
+ee ask 'Remote cache delta enabled Project Zephyr worker-g worker pool' --workspace . --json
 ```
 
 **Expected emission.** Message contains: `top evidence clusters oppose each other ... sides[] emitted`
@@ -13101,7 +13101,7 @@ ee doctor --full --json
 **Setup.**
 
 ```bash
-# status payload includes workersHealthy=3, selectedWorker=css, and absolute canonical/alias roots that must be redacted
+# status payload includes workersHealthy=3, selectedWorker=worker-c, and absolute canonical/alias roots that must be redacted
 # run swarm brief --include-rch in a workspace whose path dependencies cannot be mapped onto the selected worker
 ```
 

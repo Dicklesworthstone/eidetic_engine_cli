@@ -239,7 +239,7 @@ and daemon scheduled-task surfaces, encrypted mesh credential backup, and
 versioned `ee team port` migrate. Quorum, selective-sync, and vendor IdP
 are explicitly not built (TC-D19).
 
-Remote lib-test gate on trj (NVMe source + tmpfs target, `dd4547b6`):
+Remote lib-test gate on worker-a (NVMe source + tmpfs target, `dd4547b6`):
 `9089 passed; 131 failed; 2 ignored`. Failures are pre-existing host/index
 and CLI-subprocess issues, not the team-port or Windows-control work
 (`migrate_team_port_*` and `replace_endpoint_port_*` passed).

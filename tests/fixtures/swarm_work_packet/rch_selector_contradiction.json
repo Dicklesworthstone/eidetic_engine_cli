@@ -147,10 +147,10 @@
         "status": "selection_failed",
         "requiredRuntime": "Rust",
         "workersReported": [
-          "vmi1149989"
+          "worker-01"
         ],
         "daemonWorkersReported": [
-          "vmi1149989"
+          "worker-01"
         ],
         "workersReportedCount": 1,
         "daemonWorkersReportedCount": 1,

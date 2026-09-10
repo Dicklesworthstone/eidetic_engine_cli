@@ -102,7 +102,7 @@ fn rch_path_dep_version_skew_fixture_classifies_as_environment_blocked() -> Test
         evidence.command_hash.as_deref(),
         Some("eae0cb5e0af81aca484ac22464070a7f17dc1021c11099dbbfa45d7f0939d261")
     );
-    assert_eq!(evidence.worker_id.as_deref(), Some("vmi1149989"));
+    assert_eq!(evidence.worker_id.as_deref(), Some("worker-01"));
     // The same code should not appear twice after worker-state union:
     let occurrences = evidence
         .degraded_codes

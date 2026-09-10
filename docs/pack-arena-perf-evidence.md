@@ -151,7 +151,7 @@ registration pattern: bench fn → `scripts/bench.sh` runner →
 baseline).
 
 The RCH topology state at the time of this writeup
-(2026-05-24T21:21:01Z) is: remote worker `vmi1227854` accepts the
+(2026-05-24T21:21:01Z) is: remote worker `worker-06` accepts the
 build, but `cargo check --tests` fails with 101 pre-existing peer-WIP
 errors across `src/cli/mod.rs`, `src/core/curate.rs`, `src/curate/mod.rs`,
 `src/db/mod.rs`, `src/config/merge.rs`, `src/core/beads_integrity.rs`,

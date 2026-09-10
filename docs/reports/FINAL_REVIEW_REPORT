@@ -221,7 +221,7 @@ WHAT REMAINS OPEN
     a few cosmetic doc edits not yet committed; nothing load-bearing.
   - Pane 4 stuck-Flummoxing recovery deferred; orchestrator can
     smart-restart in a follow-on session.
-  - vmi1264463 RCH worker still unreachable from prior phase — no
+  - worker-07 RCH worker still unreachable from prior phase — no
     new rch verification ran remotely during review; closure-lint
     + cargo check + rustfmt served as the verification trio.
 

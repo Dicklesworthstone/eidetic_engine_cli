@@ -12833,8 +12833,8 @@ mod tests {
                 "schema": "ee.rch.selector_admission_probe.v1",
                 "status": "selection_failed",
                 "required_runtime": "Rust",
-                "workers_reported": ["vmi1149989"],
-                "daemon_workers_reported": ["vmi1149989"],
+                "workers_reported": ["worker-01"],
+                "daemon_workers_reported": ["worker-01"],
                 "workers_reported_count": 1,
                 "daemon_workers_reported_count": 1,
                 "selected_worker": null,
@@ -12908,8 +12908,8 @@ mod tests {
                 "schema": "ee.rch.selector_admission_probe.v1",
                 "status": "selection_failed",
                 "required_runtime": "Rust",
-                "workers_reported": ["trj"],
-                "daemon_workers_reported": ["trj"],
+                "workers_reported": ["worker-a"],
+                "daemon_workers_reported": ["worker-a"],
                 "workers_reported_count": 1,
                 "daemon_workers_reported_count": 1,
                 "selected_worker": null,
@@ -12925,7 +12925,7 @@ mod tests {
                     "active_build_id": 29879340221071367_u64,
                     "active_command_preview": "cargo test --test error_recall_e2e -- --nocapture",
                     "active_command_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-                    "worker_id": "trj",
+                    "worker_id": "worker-a",
                     "worker_posture": "active",
                     "progress_age_secs": 7,
                     "next_action": "wait_for_active_build_or_contact_owner_before_retry"
@@ -12946,7 +12946,7 @@ mod tests {
 
         assert_eq!(blocker.kind, "active_project_exclusion");
         assert_eq!(blocker.active_build_id, Some(29879340221071367));
-        assert_eq!(blocker.worker_id.as_deref(), Some("trj"));
+        assert_eq!(blocker.worker_id.as_deref(), Some("worker-a"));
         assert_eq!(blocker.worker_posture.as_deref(), Some("active"));
         assert_eq!(blocker.progress_age_secs, Some(7));
         assert_eq!(
@@ -15065,8 +15065,8 @@ mod tests {
                 "schema": "ee.rch.selector_admission_probe.v1",
                 "status": "selection_failed",
                 "required_runtime": "Rust",
-                "workers_reported": ["trj"],
-                "daemon_workers_reported": ["trj"],
+                "workers_reported": ["worker-a"],
+                "daemon_workers_reported": ["worker-a"],
                 "workers_reported_count": 1,
                 "daemon_workers_reported_count": 1,
                 "selected_worker": null,
@@ -15082,7 +15082,7 @@ mod tests {
                     "active_build_id": 29879340221071367_u64,
                     "active_command_preview": "cargo test --test error_recall_e2e -- --nocapture",
                     "active_command_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-                    "worker_id": "trj",
+                    "worker_id": "worker-a",
                     "worker_posture": "active",
                     "progress_age_secs": 7,
                     "next_action": "wait_for_active_build_or_contact_owner_before_retry"
@@ -15108,7 +15108,7 @@ mod tests {
                 .detail
                 .contains("active_build_id=29879340221071367")
         );
-        assert!(rch_evidence.detail.contains("worker_id=trj"));
+        assert!(rch_evidence.detail.contains("worker_id=worker-a"));
         assert!(rch_evidence.detail.contains("progress_age_secs=7"));
         assert!(
             rch_evidence

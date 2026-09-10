@@ -15,7 +15,7 @@
       "commandArgvHash": "blake3:all-targets-argv",
       "cargoTargetDirHashOrClass": "class:external_cargo_target",
       "executionSubstrate": "rch",
-      "workerHost": "css",
+      "workerHost": "worker-c",
       "startedAt": "2026-05-15T11:00:00Z",
       "finishedAt": "2026-05-15T11:03:00Z",
       "exitCode": 101,

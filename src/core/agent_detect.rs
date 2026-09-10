@@ -382,9 +382,9 @@ pub fn normalize_connector_slug(slug: &str) -> String {
 #[must_use]
 pub fn remote_mirror_origin_fixtures(fixtures_root: &Path) -> Vec<AgentSourceOriginFixture> {
     vec![AgentSourceOriginFixture {
-        origin_id: "fixture-ssh-csd".to_string(),
+        origin_id: "fixture-ssh-worker-b".to_string(),
         kind: "remote_mirror".to_string(),
-        host: "csd".to_string(),
+        host: "worker-b".to_string(),
         remote_root: "/home/agent".to_string(),
         local_root: remote_mirror_home(fixtures_root).display().to_string(),
         connector_slugs: vec!["claude".to_string(), "codex".to_string()],
@@ -400,7 +400,7 @@ pub fn remote_mirror_path_rewrites(fixtures_root: &Path) -> Vec<AgentPathRewrite
     let local_home = remote_mirror_home(fixtures_root);
     vec![
         AgentPathRewrite {
-            origin_id: "fixture-ssh-csd".to_string(),
+            origin_id: "fixture-ssh-worker-b".to_string(),
             connector_slug: "claude".to_string(),
             from: "/home/agent/.claude/projects".to_string(),
             to: local_home
@@ -410,7 +410,7 @@ pub fn remote_mirror_path_rewrites(fixtures_root: &Path) -> Vec<AgentPathRewrite
                 .to_string(),
         },
         AgentPathRewrite {
-            origin_id: "fixture-ssh-csd".to_string(),
+            origin_id: "fixture-ssh-worker-b".to_string(),
             connector_slug: "codex".to_string(),
             from: "/home/agent/.codex/sessions".to_string(),
             to: local_home
@@ -457,7 +457,7 @@ pub fn rewrite_agent_source_path(
 fn remote_mirror_home(fixtures_root: &Path) -> PathBuf {
     fixtures_root
         .join("remote_mirror")
-        .join("ssh-csd")
+        .join("ssh-worker-b")
         .join("home")
         .join("agent")
 }
@@ -714,8 +714,9 @@ mod tests {
         .ok_or_else(|| "codex path should rewrite".to_string())?;
 
         ensure(
-            rewritten
-                .ends_with("/remote_mirror/ssh-csd/home/agent/.codex/sessions/2026/session.jsonl"),
+            rewritten.ends_with(
+                "/remote_mirror/ssh-worker-b/home/agent/.codex/sessions/2026/session.jsonl",
+            ),
             format!("unexpected rewritten path: {rewritten}"),
         )?;
         ensure(

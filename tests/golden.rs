@@ -1380,7 +1380,7 @@ mod tests {
             swarm_source_unavailable(
                 SwarmBriefSourceKind::Rch,
                 "rch_worker_topology_blocked",
-                "RCH-E327 worker topology blocked remote-required verification; selected worker: css; root metadata redacted; remote workers may be visible but this workspace cannot be mapped.",
+                "RCH-E327 worker topology blocked remote-required verification; selected worker: worker-c; root metadata redacted; remote workers may be visible but this workspace cannot be mapped.",
                 "Inspect RCH worker path mapping; remote workers are visible but this workspace cannot be mapped.",
             ),
         );

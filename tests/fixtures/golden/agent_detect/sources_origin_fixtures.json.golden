@@ -17,11 +17,11 @@
     ],
     "originFixtures": [
       {
-        "originId": "fixture-ssh-csd",
+        "originId": "fixture-ssh-worker-b",
         "kind": "remote_mirror",
-        "host": "csd",
+        "host": "worker-b",
         "remoteRoot": "/home/agent",
-        "localRoot": "__FIXTURE_PATH__/remote_mirror/ssh-csd/home/agent",
+        "localRoot": "__FIXTURE_PATH__/remote_mirror/ssh-worker-b/home/agent",
         "connectorSlugs": [
           "codex"
         ],
@@ -30,10 +30,10 @@
     ],
     "pathRewrites": [
       {
-        "originId": "fixture-ssh-csd",
+        "originId": "fixture-ssh-worker-b",
         "connectorSlug": "codex",
         "from": "/home/agent/.codex/sessions",
-        "to": "__FIXTURE_PATH__/remote_mirror/ssh-csd/home/agent/.codex/sessions"
+        "to": "__FIXTURE_PATH__/remote_mirror/ssh-worker-b/home/agent/.codex/sessions"
       }
     ]
   },

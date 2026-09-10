@@ -236,11 +236,11 @@
       "status": "selection_failed",
       "required_runtime": "Rust",
       "workers_reported": [
-        "vmi1227854",
-        "vmi1264463"
+        "worker-06",
+        "worker-07"
       ],
       "daemon_workers_reported": [
-        "vmi1227854"
+        "worker-06"
       ],
       "workers_reported_count": 2,
       "daemon_workers_reported_count": 1,

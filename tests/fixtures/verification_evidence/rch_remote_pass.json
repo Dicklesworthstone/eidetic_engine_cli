@@ -4,7 +4,7 @@
   "command_text": "cargo check --all-targets",
   "command_kind": "cargo_check",
   "command_hash": "4ed11b46c00e5a94e50233152efb00566d43325cced13e855d255e037333b949",
-  "worker_id": "css",
+  "worker_id": "worker-c",
   "exit_code": 0,
   "elapsed_ms": 11000,
   "status": "remote_pass",
