@@ -17027,7 +17027,13 @@ mod tests {
                         .ok_or("restored workspace")?;
                     let mut expected = source.clone();
                     expected.path = side.to_string_lossy().into_owned();
-                    expected.name = name.as_deref().map(|s| redact_content(s, redaction));
+                    if redaction == RedactionLevel::Standard {
+                        expected.repository_root =
+                            root.as_ref().map(|_| "[REDACTED_PATH]".to_owned());
+                        if scope == "subproject" {
+                            expected.name = Some("[REDACTED]".to_owned());
+                        }
+                    }
                     assert_eq!(actual, expected, "scope={scope}, generation={generation}");
                     assert_eq!(db.list_workspaces().map_err(|e| e.to_string())?.len(), 1);
                     assert_eq!(
