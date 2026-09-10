@@ -2517,7 +2517,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         })
     {
         return Err(work_history_error(
-            "learned rules, feedback, agent profiles, pack history, import checkpoints, curation history, procedures, learning signals, recorded history, error recall, artifact registry, reasoning history, and trust history require source-store authentication; repair the workspace key store before creating this backup",
+            "durable learning, pack, import, curation, procedure, recorded, error, artifact, reasoning, trust, and maintenance histories require source-store authentication; repair the workspace key store before creating this backup",
         ));
     }
     authenticate_learning_payloads(&mut derived_payloads, store_auth.as_ref())?;
@@ -8821,6 +8821,16 @@ fn validate_maintenance_history(
                 return Err(invalid());
             }
         }
+        let hashes: Vec<String> =
+            serde_json::from_str(&row.source_content_hashes_json).map_err(|_| invalid())?;
+        if hashes.is_empty()
+            || hashes
+                .iter()
+                .any(|h| !crate::db::is_canonical_blake3_hash(h))
+            || hashes.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(invalid());
+        }
     }
     let mut situations = BTreeSet::new();
     let mut fingerprints = BTreeSet::new();
@@ -8954,8 +8964,40 @@ fn collect_maintenance_history_payloads(
         row.reflection_kind = redact_content(&row.reflection_kind, redaction);
         row.challenge_key_id =
             redact_maintenance_id(&row.challenge_key_id, "reflect_key_", redaction);
-        row.source_refs_json =
-            redact_curation_json(&row.source_refs_json, "sources", redaction, memory_ids)?;
+        let original: JsonValue =
+            serde_json::from_str(&row.source_refs_json).map_err(work_history_error)?;
+        let mut redacted: JsonValue =
+            serde_json::from_str(&redact_work_history_json(&row.source_refs_json, redaction)?)
+                .map_err(work_history_error)?;
+        for (index, source) in original
+            .as_array()
+            .ok_or_else(|| work_history_error("invalid reflection source refs"))?
+            .iter()
+            .enumerate()
+        {
+            let kind = source["kind"].as_str().unwrap_or_default();
+            let id = source["id"].as_str().unwrap_or_default();
+            let hash = source["contentHash"].as_str().unwrap_or_default();
+            if !matches!(kind, "memory" | "evidence_span")
+                || id.trim().is_empty()
+                || !crate::db::is_canonical_blake3_hash(hash)
+            {
+                return Err(work_history_error("invalid reflection source ref"));
+            }
+            redacted[index]["kind"] = json!(kind);
+            redacted[index]["id"] = json!(redact_learning_reference(
+                id,
+                redaction,
+                memory_ids,
+                &references
+            ));
+            redacted[index]["contentHash"] = json!(hash);
+        }
+        row.source_refs_json = if redaction == RedactionLevel::None {
+            row.source_refs_json.clone()
+        } else {
+            redacted.to_string()
+        };
         // Canonical hash arrays and consumed identities carry no raw key/token.
         // Never issue a new challenge or turn consumed history back into pending.
     }
