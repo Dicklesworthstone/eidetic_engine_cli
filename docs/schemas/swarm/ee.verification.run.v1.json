@@ -108,7 +108,7 @@
       "commandArgvHash": "blake3:rch-command-argv",
       "cargoTargetDirHashOrClass": "class:external_cargo_target",
       "executionSubstrate": "rch",
-      "workerHost": "css",
+      "workerHost": "worker-c",
       "startedAt": "2026-05-15T05:00:00Z",
       "finishedAt": "2026-05-15T05:00:42Z",
       "exitCode": 0,

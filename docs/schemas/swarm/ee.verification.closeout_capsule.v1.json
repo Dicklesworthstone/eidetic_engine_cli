@@ -167,7 +167,7 @@
       "sourceHash": "blake3:source",
       "commandHash": "blake3:rch-command",
       "executionSubstrate": "remote_artifact",
-      "workerHost": "css",
+      "workerHost": "worker-c",
       "result": "passed",
       "passedCount": 1,
       "failedCount": 0,

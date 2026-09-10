@@ -2091,7 +2091,7 @@ mod tests {
                 record(
                     "rch",
                     "remote build metadata",
-                    "rch job 159 on csd",
+                    "rch job 159 on worker-b",
                     EvidenceRecordStatus::Pass,
                     "direct",
                 ),
@@ -2367,7 +2367,7 @@ mod tests {
                 record(
                     "rch",
                     "remote build metadata",
-                    "rch job 162 on csd",
+                    "rch job 162 on worker-b",
                     EvidenceRecordStatus::Pass,
                     "direct",
                 ),
@@ -2526,7 +2526,7 @@ mod tests {
             records: vec![record(
                 "rch",
                 "remote build metadata",
-                "rch job 162 on csd",
+                "rch job 162 on worker-b",
                 EvidenceRecordStatus::Pass,
                 "direct",
             )],
@@ -2622,7 +2622,7 @@ mod tests {
                 record(
                     "remote_rch",
                     "cargo test --lib completion_audit",
-                    "rch job 162 on csd",
+                    "rch job 162 on worker-b",
                     EvidenceRecordStatus::Pass,
                     "direct",
                 ),
@@ -2719,7 +2719,7 @@ mod tests {
                 record(
                     "rch",
                     "remote build metadata",
-                    "rch job 162 on csd",
+                    "rch job 162 on worker-b",
                     EvidenceRecordStatus::Pass,
                     "direct",
                 ),
@@ -2752,7 +2752,7 @@ mod tests {
                 record(
                     "rch",
                     "remote build metadata",
-                    "rch job 162 on csd",
+                    "rch job 162 on worker-b",
                     EvidenceRecordStatus::Pass,
                     "direct",
                 ),
@@ -2857,7 +2857,7 @@ mod tests {
                 record(
                     "rch",
                     "remote build metadata",
-                    "rch job 162 on csd",
+                    "rch job 162 on worker-b",
                     EvidenceRecordStatus::Pass,
                     "direct",
                 ),

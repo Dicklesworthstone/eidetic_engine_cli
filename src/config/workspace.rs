@@ -1375,8 +1375,8 @@ mod tests {
 
     #[test]
     fn windows_verbatim_and_drive_paths_share_a_workspace_fingerprint() {
-        let drive = Path::new(r"C:\Users\jeffr\ee-tc-win-soak5");
-        let verbatim = Path::new(r"\\?\C:\Users\jeffr\ee-tc-win-soak5");
+        let drive = Path::new(r"C:\Users\dev\ee-tc-win-soak5");
+        let verbatim = Path::new(r"\\?\C:\Users\dev\ee-tc-win-soak5");
         assert_eq!(
             workspace_fingerprint(drive),
             workspace_fingerprint(verbatim)

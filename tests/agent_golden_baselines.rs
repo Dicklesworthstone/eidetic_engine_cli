@@ -3114,7 +3114,7 @@ fn golden_normalizers_preserve_public_container_and_leaf_types() -> TestResult {
 #[test]
 fn golden_normalizers_scrub_only_the_volatile_rch_target_root() -> TestResult {
     let rch_binary = format!(
-        "{}/.rch-target-vmi1152480-pool-fixture/debug/ee",
+        "{}/.rch-target-worker-02-pool-fixture/debug/ee",
         env!("CARGO_MANIFEST_DIR")
     );
     let mut value = json!({

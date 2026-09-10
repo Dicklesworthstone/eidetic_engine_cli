@@ -111,14 +111,14 @@ INFRASTRUCTURE OBSERVATIONS
   Disk pressure  — sustained ~12 GiB used / 73 GiB free on / through
                    the entire round; no DCG-blocked cleanups needed.
 
-  rch fleet      — degraded throughout Round 4: worker vmi1264463
-                   unreachable; vmi1227854 healthy and absorbed all
+  rch fleet      — degraded throughout Round 4: worker worker-07
+                   unreachable; worker-06 healthy and absorbed all
                    builds. One transient blocker affected cod_4's
                    bd-2bbtw verification when /data/projects/asupersync
                    failed to compile on the remote
                    (webtransport.rs:279); bd-2bbtw was nonetheless
                    shipped with static-check evidence + targeted
-                   sibling tests. Recommend reattaching vmi1264463
+                   sibling tests. Recommend reattaching worker-07
                    before any next swarm round.
 
   Cargo package  — bd-3o04p caught that the FINAL_AUDIT_REPORT file
@@ -163,7 +163,7 @@ NEXT ACTIONS
   2. bd-1idcb left open as the canonical Phase 2 follow-up; route
      to a fresh session with enough budget for the full CASS+graph
      wire-up.
-  3. Re-probe rch worker vmi1264463 before launching the next swarm
+  3. Re-probe rch worker worker-07 before launching the next swarm
      round; degraded fleet was tolerable for this round but doubled
      queue depth on every cod build.
   4. Recommend keeping closure-lint extended per bd-38mpa for the

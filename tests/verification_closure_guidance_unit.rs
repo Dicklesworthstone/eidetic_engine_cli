@@ -37,11 +37,11 @@ fn cargo_test_record(case: ClosureCase) -> Result<VerificationEvidenceRecord, St
     };
     record.offload = if case.fallback_detected {
         VerificationOffload::rch_fallback(
-            Some("css"),
+            Some("worker-c"),
             Some("project path normalized outside canonical remote root"),
         )
     } else if case.remote_evidence {
-        VerificationOffload::rch_required(Some("css"))
+        VerificationOffload::rch_required(Some("worker-c"))
     } else {
         VerificationOffload::local()
     };

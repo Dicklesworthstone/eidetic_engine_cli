@@ -3356,8 +3356,8 @@ mod tests {
 
     #[test]
     fn stable_workspace_id_ignores_windows_verbatim_prefix() {
-        let drive = Path::new(r"C:\Users\jeffr\ee-tc-win-soak6");
-        let verbatim = Path::new(r"\\?\C:\Users\jeffr\ee-tc-win-soak6");
+        let drive = Path::new(r"C:\Users\dev\ee-tc-win-soak6");
+        let verbatim = Path::new(r"\\?\C:\Users\dev\ee-tc-win-soak6");
         assert_eq!(stable_workspace_id(drive), stable_workspace_id(verbatim));
         assert!(stable_workspace_id(drive).starts_with("wsp_"));
     }

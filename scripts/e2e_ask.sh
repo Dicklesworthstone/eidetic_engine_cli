@@ -138,11 +138,11 @@ remember_memory "02-remember-release-primary" procedural rule 0.99 \
 release_primary_id="$LAST_MEMORY_ID"
 remember_memory "04-remember-conflict-affirm" episodic observation 0.99 \
     "manual://ask_e2e/remote-cache-affirm" \
-    "Remote cache delta enabled Project Zephyr hz2 worker pool."
+    "Remote cache delta enabled Project Zephyr worker-g worker pool."
 remote_affirm_id="$LAST_MEMORY_ID"
 remember_memory "05-remember-conflict-negate" episodic observation 0.99 \
     "manual://ask_e2e/remote-cache-negate" \
-    "Zephyr hz2 workers cannot use cache delta."
+    "Zephyr worker-g workers cannot use cache delta."
 remote_negate_id="$LAST_MEMORY_ID"
 remember_memory "06-remember-abstention-distractor" semantic fact 0.70 \
     "manual://ask_e2e/invoice-distractor" \
@@ -232,7 +232,7 @@ fi
 
 step "conflicting evidence emits sides and warning degraded code"
 run_json "12-ask-conflict" --workspace "$WS" --json ask \
-    "Remote cache delta enabled Project Zephyr hz2 worker pool"
+    "Remote cache delta enabled Project Zephyr worker-g worker pool"
 assert_rc 0 "conflict ask exits zero"
 assert_json_filter "$LAST_JSON" \
     '.success == true and .data.abstained == false and .data._conflictDetected == true and (.data.sides | length) == 2' \

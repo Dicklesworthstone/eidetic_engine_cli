@@ -20,7 +20,7 @@ a reviewed distillation or remember command promotes the evidence.
 Harness hooks should use the journal for ephemeral observations:
 
 ```bash
-ee journal append "RCH proof failed with artifact rsync timeout on worker vmi1156319." \
+ee journal append "RCH proof failed with artifact rsync timeout on worker worker-04." \
   --workspace . \
   --source hook \
   --session "$SESSION_ID" \

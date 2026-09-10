@@ -1903,10 +1903,10 @@ mod tests {
         let canonical = canonicalize_typed_memory_fields_json(
             &MemoryKind::Decision,
             &serde_json::json!({
-                "chosen": "RCH=remote/worker~hz2^prefix|safe",
+                "chosen": "RCH=remote/worker~worker-g^prefix|safe",
                 "rationale": max_value,
                 "supersedes": "mem_01234567890123456789012345",
-                "options": ["local Cargo", "RCH=remote/worker~hz2^prefix|safe"]
+                "options": ["local Cargo", "RCH=remote/worker~worker-g^prefix|safe"]
             })
             .to_string(),
         )
@@ -1916,7 +1916,7 @@ mod tests {
 
         assert_eq!(
             fields.get("chosen").and_then(serde_json::Value::as_str),
-            Some("RCH=remote/worker~hz2^prefix|safe")
+            Some("RCH=remote/worker~worker-g^prefix|safe")
         );
         assert_eq!(
             fields.get("rationale").and_then(serde_json::Value::as_str),

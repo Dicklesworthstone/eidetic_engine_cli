@@ -20056,7 +20056,7 @@ mod tests {
             dirty_status_hash: None,
             verification_attribution: "committed_tree".to_owned(),
             remote_required: true,
-            worker_id: Some("hz2".to_owned()),
+            worker_id: Some("worker-g".to_owned()),
             status: status.to_owned(),
             exit_code: Some(if n < 2 { 1 } else { 0 }),
             degraded_codes_json: Some(

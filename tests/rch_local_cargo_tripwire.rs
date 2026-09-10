@@ -443,7 +443,7 @@ fn process_probe_ignores_stable_rch_verify_shell_without_rch_exec_child() -> Tes
 #[test]
 fn process_probe_ignores_ssh_remote_cargo_payload_launcher() -> TestResult {
     let fixture = "\
- 90391 1694 00:51 ssh ssh -i /Users/jemanuel/.ssh/contabo_vps_ed25519 -o BatchMode=yes ubuntu@212.90.121.76 cd /data/projects/eidetic_engine_cli_manual_turquoise-20260607T152024Z && mkdir -p .manual-target-data && TMPDIR=/tmp CARGO_TARGET_DIR=/data/projects/eidetic_engine_cli_manual_turquoise-20260607T152024Z/.manual-target-data cargo test --lib global_memory_scope -- --nocapture
+ 90391 1694 00:51 ssh ssh -i /Users/jemanuel/.ssh/contabo_vps_ed25519 -o BatchMode=yes ubuntu@198.51.100.11 cd /data/projects/eidetic_engine_cli_manual_turquoise-20260607T152024Z && mkdir -p .manual-target-data && TMPDIR=/tmp CARGO_TARGET_DIR=/data/projects/eidetic_engine_cli_manual_turquoise-20260607T152024Z/.manual-target-data cargo test --lib global_memory_scope -- --nocapture
  990 1 00:03 cargo cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
 ";
     let (code, report) = probe_with_ps_fixture(fixture, "")?;

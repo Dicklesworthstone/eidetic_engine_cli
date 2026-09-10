@@ -464,13 +464,13 @@ exclude_patterns = [
 Proof signal from the unblock run:
 
 ```text
-[RCH] topology preflight ok on vmi1264463 (/dp -> /data/projects enforced)
+[RCH] topology preflight ok on worker-07 (/dp -> /data/projects enforced)
 cargo test -p rch manifest_rewrite_rules --quiet -- --nocapture
-[RCH] remote vmi1264463 (513.9s)
+[RCH] remote worker-07 (513.9s)
 
 RCH_BUILD_TIMEOUT_SEC=1200 ... rch-manifestfix-20260605-5 exec -- \
   env TMPDIR=/tmp CARGO_TARGET_DIR=/tmp/ee-rch-verify-target cargo check --lib --quiet
-[RCH] remote vmi1264463 (839.6s)
+[RCH] remote worker-07 (839.6s)
 ```
 
 The former next blocker is also resolved: the sidecar rewrites manifest-declared
@@ -490,7 +490,7 @@ metadata did not include them as used packages.
   than five minutes.
 - Raise the daemon timeouts to 900s (`RCH_DAEMON_*_TIMEOUT_SECS=900`).
 - Disable compression (`RCH_COMPRESSION=0`).
-- Pin a known-good worker: `RCH_WORKERS=trj` (or css/csd).
+- Pin a known-good worker: `RCH_WORKERS=worker-a` (or worker-c/worker-b).
 - Before retrying a recurrent topology proof, capture the read-only recurrence
   bundle:
 
@@ -527,14 +527,14 @@ for health-score decay:
 
 ```bash
 rch workers capabilities --refresh --json
-RCH_WORKERS=vmi1149989 \
+RCH_WORKERS=worker-01 \
 RCH_VERIFY_ATTEMPT_TIMEOUT_MS=1200000 \
 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --summary -- \
   cargo test --locked --lib blind_spots -- --nocapture
 ```
 
-The retry produced `status=remote_pass`, `worker_id=vmi1149989`, `exit_code=0`,
-local Cargo tripwire `count=0`, and `[RCH] remote vmi1149989 (874.9s)`. Treat
+The retry produced `status=remote_pass`, `worker_id=worker-01`, `exit_code=0`,
+local Cargo tripwire `count=0`, and `[RCH] remote worker-01 (874.9s)`. Treat
 the first timeout as a capacity/timeout proof, not a source failure; only the
 successful retry is source evidence.
 
@@ -650,7 +650,7 @@ before you spend a 3-hour attempt window.
 
 ### hz workers cannot faithfully run the ee lib suite (2026-08-11)
 
-A COMPLETED full-suite run on hz1 produced 398 reds of which the
+A COMPLETED full-suite run on worker-f produced 398 reds of which the
 overwhelming majority were worker-path artifacts, two mechanisms:
 
 1. On hz hosts `/Users/jemanuel/projects` is a path-mapping SYMLINK, so

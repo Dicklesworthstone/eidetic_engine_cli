@@ -4601,14 +4601,14 @@ mod tests {
     fn default_control_socket_on_windows_is_not_under_workspace_ee() {
         let path = default_responder_control_socket_path_with(
             |key| match key {
-                "LOCALAPPDATA" => Some(r"C:\Users\jeffr\AppData\Local".into()),
+                "LOCALAPPDATA" => Some(r"C:\Users\dev\AppData\Local".into()),
                 _ => None,
             },
             0,
         );
         assert_eq!(
             path,
-            PathBuf::from(r"C:\Users\jeffr\AppData\Local\eidetic-engine\mesh-responder.control")
+            PathBuf::from(r"C:\Users\dev\AppData\Local\eidetic-engine\mesh-responder.control")
         );
         assert!(!path.components().any(|part| part.as_os_str() == ".ee"));
     }

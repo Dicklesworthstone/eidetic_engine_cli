@@ -146,7 +146,7 @@ if [ "${FAKE_RCH_MODE:-pass}" = "committed-tree" ]; then
   printf 'tracked=%s\n' "$(cat tracked.txt)"
   test ! -e token-draft.txt
 fi
-printf '[RCH] remote css (0.1s)\n'
+printf '[RCH] remote worker-c (0.1s)\n'
 FAKERCH
     chmod +x "$path"
 }
@@ -179,7 +179,7 @@ Caused by:
 
 Caused by:
   `workspace.package.license-file` was not defined
-[RCH] remote css failed (exit 101)
+[RCH] remote worker-c failed (exit 101)
 TRANSCRIPT
   exit 101
 fi
@@ -257,8 +257,8 @@ if report.get("status") != "rch_environment_failure":
     raise SystemExit(f"expected rch_environment_failure: {report}")
 if report.get("command_kind") != "cargo_test":
     raise SystemExit(f"expected cargo_test command kind: {report}")
-if report.get("worker_id") != "css":
-    raise SystemExit(f"expected fake worker css: {report}")
+if report.get("worker_id") != "worker-c":
+    raise SystemExit(f"expected fake worker worker-c: {report}")
 if "rch_verify_cargo_workspace_inheritance_blocked" not in (report.get("degraded_codes") or []):
     raise SystemExit(f"missing workspace-inheritance degradation: {report}")
 blocker = report.get("known_blocker") or {}
@@ -590,8 +590,8 @@ if report.get("status") != "remote_pass":
     raise SystemExit(f"expected remote_pass: {report}")
 if report.get("verification_attribution") != "strict_clean_tree":
     raise SystemExit(f"expected strict_clean_tree attribution: {report}")
-if report.get("worker_id") != "css":
-    raise SystemExit(f"expected fake worker css: {report}")
+if report.get("worker_id") != "worker-c":
+    raise SystemExit(f"expected fake worker worker-c: {report}")
 if report.get("dirty_summary", {}).get("total") != 0:
     raise SystemExit(f"strict clean proof should have empty dirty summary: {report}")
 if report.get("source_state_degraded_codes") not in ([], None):
@@ -715,7 +715,7 @@ start="$(started_ms)"
 fake_pass_json="$WORK_DIR/fake-pass.json"
 RCH_BIN="${RCH_BIN:-rch}" \
 RCH_VERIFY_NOW="2026-05-16T06:40:01.000000Z" \
-RCH_VERIFY_FAKE_OUTPUT=$'running 1 test\ntest rch_control_plane ... ok\n[RCH] remote css (0.1s)\n' \
+RCH_VERIFY_FAKE_OUTPUT=$'running 1 test\ntest rch_control_plane ... ok\n[RCH] remote worker-c (0.1s)\n' \
 RCH_VERIFY_FAKE_EXIT_CODE=0 \
 RCH_VERIFY_FAKE_ELAPSED_MS=100 \
 bash "$RCH_VERIFY" \
@@ -723,13 +723,13 @@ bash "$RCH_VERIFY" \
     --summary \
     -- \
     cargo test --test rch_verify_control_plane -- --nocapture > "$fake_pass_json"
-pass_assert="$(assert_json "$fake_pass_json" "remote_pass" "css")"
+pass_assert="$(assert_json "$fake_pass_json" "remote_pass" "worker-c")"
 emit_event \
     "assert" \
     "fake_remote_pass_validated" \
     "$(elapsed_since "$start")" \
     "$(printf '%s' "$pass_assert" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command_hash"])')" \
-    "css" \
+    "worker-c" \
     "[]" \
     "remote proof and summary contract validated"
 
@@ -745,8 +745,8 @@ clean_event_log="$WORK_DIR/clean-checkout-events.jsonl"
 write_fake_rch "$clean_fake_rch"
 FAKE_RCH_INVOCATIONS="$clean_invocations" \
 RCH_VERIFY_NOW="2026-05-16T06:40:08.000000Z" \
-RCH_VERIFY_CONFIGURED_WORKERS="css" \
-RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_CONFIGURED_WORKERS="worker-c" \
+RCH_VERIFY_DAEMON_WORKERS="worker-c" \
 RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
 bash "$RCH_VERIFY" \
     --bead-id bd-9ygik.3 \
@@ -769,7 +769,7 @@ emit_event \
     "clean_checkout_strict_mode_validated" \
     "$(elapsed_since "$start")" \
     "$(printf '%s' "$clean_assert" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command_hash"])')" \
-    "css" \
+    "worker-c" \
     "$(printf '%s' "$clean_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
     "strict clean checkout proceeded through fake RCH with clean attribution" \
     "clean_checkout"
@@ -789,8 +789,8 @@ write_fake_rch "$strict_fake_rch"
 set +e
 FAKE_RCH_INVOCATIONS="$strict_invocations" \
 RCH_VERIFY_NOW="2026-05-16T06:40:02.000000Z" \
-RCH_VERIFY_CONFIGURED_WORKERS="css" \
-RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_CONFIGURED_WORKERS="worker-c" \
+RCH_VERIFY_DAEMON_WORKERS="worker-c" \
 RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
 bash "$RCH_VERIFY" \
     --bead-id bd-9ygik.3 \
@@ -809,8 +809,8 @@ fi
 set +e
 FAKE_RCH_INVOCATIONS="$strict_invocations" \
 RCH_VERIFY_NOW="2026-05-16T06:40:02.000000Z" \
-RCH_VERIFY_CONFIGURED_WORKERS="css" \
-RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_CONFIGURED_WORKERS="worker-c" \
+RCH_VERIFY_DAEMON_WORKERS="worker-c" \
 RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
 bash "$RCH_VERIFY" \
     --bead-id bd-9ygik.3 \
@@ -866,8 +866,8 @@ dirty_unknown_event_log="$WORK_DIR/dirty-source-unknown-events.jsonl"
 write_fake_rch "$dirty_unknown_fake_rch"
 FAKE_RCH_INVOCATIONS="$dirty_unknown_invocations" \
 RCH_VERIFY_NOW="2026-05-16T06:40:02.500000Z" \
-RCH_VERIFY_CONFIGURED_WORKERS="css" \
-RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_CONFIGURED_WORKERS="worker-c" \
+RCH_VERIFY_DAEMON_WORKERS="worker-c" \
 RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
 bash "$RCH_VERIFY" \
     --bead-id bd-9ygik.3 \
@@ -889,7 +889,7 @@ emit_event \
     "dirty_source_unmaterialized_validated" \
     "$(elapsed_since "$start")" \
     "$(printf '%s' "$dirty_unknown_assert" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command_hash"])')" \
-    "css" \
+    "worker-c" \
     "$(printf '%s' "$dirty_unknown_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
     "dirty ordinary fixture ran fake RCH but reported source was not materialized" \
     "dirty_source_unknown"
@@ -909,8 +909,8 @@ write_fake_rch "$staged_fake_rch"
 set +e
 FAKE_RCH_INVOCATIONS="$staged_invocations" \
 RCH_VERIFY_NOW="2026-05-16T06:40:05.000000Z" \
-RCH_VERIFY_CONFIGURED_WORKERS="css" \
-RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_CONFIGURED_WORKERS="worker-c" \
+RCH_VERIFY_DAEMON_WORKERS="worker-c" \
 RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
 bash "$RCH_VERIFY" \
     --bead-id bd-9ygik.3 \
@@ -967,8 +967,8 @@ write_fake_rch "$secret_fake_rch"
 set +e
 FAKE_RCH_INVOCATIONS="$secret_invocations" \
 RCH_VERIFY_NOW="2026-05-16T06:40:04.000000Z" \
-RCH_VERIFY_CONFIGURED_WORKERS="css" \
-RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_CONFIGURED_WORKERS="worker-c" \
+RCH_VERIFY_DAEMON_WORKERS="worker-c" \
 RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
 bash "$RCH_VERIFY" \
     --bead-id bd-9ygik.3 \
@@ -1025,8 +1025,8 @@ write_fake_rch "$beads_fake_rch"
 set +e
 FAKE_RCH_INVOCATIONS="$beads_invocations" \
 RCH_VERIFY_NOW="2026-05-16T06:40:06.000000Z" \
-RCH_VERIFY_CONFIGURED_WORKERS="css" \
-RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_CONFIGURED_WORKERS="worker-c" \
+RCH_VERIFY_DAEMON_WORKERS="worker-c" \
 RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
 bash "$RCH_VERIFY" \
     --bead-id bd-9ygik.3 \
@@ -1083,8 +1083,8 @@ write_fake_rch "$scratch_fake_rch"
 set +e
 FAKE_RCH_INVOCATIONS="$scratch_invocations" \
 RCH_VERIFY_NOW="2026-05-16T06:40:07.000000Z" \
-RCH_VERIFY_CONFIGURED_WORKERS="css" \
-RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_CONFIGURED_WORKERS="worker-c" \
+RCH_VERIFY_DAEMON_WORKERS="worker-c" \
 RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
 bash "$RCH_VERIFY" \
     --bead-id bd-9ygik.3 \
@@ -1141,8 +1141,8 @@ write_fake_rch "$committed_fake_rch"
 FAKE_RCH_INVOCATIONS="$committed_invocations" \
 FAKE_RCH_MODE="committed-tree" \
 RCH_VERIFY_NOW="2026-05-16T06:40:03.000000Z" \
-RCH_VERIFY_CONFIGURED_WORKERS="css" \
-RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_CONFIGURED_WORKERS="worker-c" \
+RCH_VERIFY_DAEMON_WORKERS="worker-c" \
 RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
 RCH_VERIFY_COMMITTED_TREE_BASE="$WORK_DIR/committed-tree-export" \
 bash "$RCH_VERIFY" \
@@ -1167,7 +1167,7 @@ emit_event \
     "committed_tree_export_validated" \
     "$(elapsed_since "$start")" \
     "$(printf '%s' "$committed_assert" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command_hash"])')" \
-    "css" \
+    "worker-c" \
     "$(printf '%s' "$committed_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
     "committed-tree mode ignored live dirty paths and ran fake RCH from export" \
     "committed_tree_ignores_dirty"
@@ -1196,8 +1196,8 @@ write_fake_rch "$path_dep_fake_rch"
 set +e
 FAKE_RCH_INVOCATIONS="$path_dep_invocations" \
 RCH_VERIFY_NOW="2026-05-16T06:40:09.000000Z" \
-RCH_VERIFY_CONFIGURED_WORKERS="css" \
-RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_CONFIGURED_WORKERS="worker-c" \
+RCH_VERIFY_DAEMON_WORKERS="worker-c" \
 RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
 RCH_VERIFY_COMMITTED_TREE_BASE="$WORK_DIR/path-dependency-export" \
 bash "$RCH_VERIFY" \
@@ -1250,8 +1250,8 @@ write_fake_rch_known_blocker "$known_blocker_fake_rch"
 set +e
 FAKE_RCH_INVOCATIONS="$known_blocker_first_invocations" \
 RCH_VERIFY_NOW="2026-05-16T06:40:10.000000Z" \
-RCH_VERIFY_CONFIGURED_WORKERS="css" \
-RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_CONFIGURED_WORKERS="worker-c" \
+RCH_VERIFY_DAEMON_WORKERS="worker-c" \
 bash "$RCH_VERIFY" \
     --bead-id bd-9ygik.6.3 \
     --skip-build-admission \
@@ -1283,8 +1283,8 @@ assert_event_log_json "$known_blocker_first_event_log" "rch_environment_failure"
 set +e
 FAKE_RCH_INVOCATIONS="$known_blocker_second_invocations" \
 RCH_VERIFY_NOW="2026-05-16T06:40:10.000000Z" \
-RCH_VERIFY_CONFIGURED_WORKERS="css" \
-RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_CONFIGURED_WORKERS="worker-c" \
+RCH_VERIFY_DAEMON_WORKERS="worker-c" \
 bash "$RCH_VERIFY" \
     --bead-id bd-9ygik.6.3 \
     --skip-build-admission \
@@ -1331,8 +1331,8 @@ write_fake_rch_worker_filter_ignored "$worker_filter_fake_rch"
 set +e
 FAKE_RCH_INVOCATIONS="$worker_filter_invocations" \
 RCH_VERIFY_NOW="2026-05-16T06:40:10.500000Z" \
-RCH_VERIFY_CONFIGURED_WORKERS="css" \
-RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_CONFIGURED_WORKERS="worker-c" \
+RCH_VERIFY_DAEMON_WORKERS="worker-c" \
 RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
 bash "$RCH_VERIFY" \
     --bead-id bd-12v87.4 \
@@ -1380,8 +1380,8 @@ set +e
 FAKE_RCH_INVOCATIONS="$timeout_invocations" \
 RCH_VERIFY_NOW="2026-05-16T06:40:11.000000Z" \
 RCH_VERIFY_ATTEMPT_TIMEOUT_MS=150 \
-RCH_VERIFY_CONFIGURED_WORKERS="css" \
-RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_CONFIGURED_WORKERS="worker-c" \
+RCH_VERIFY_DAEMON_WORKERS="worker-c" \
 RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
 bash "$RCH_VERIFY" \
     --bead-id bd-12v87.4 \

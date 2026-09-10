@@ -41,7 +41,7 @@ authenticated responder wrapper.
 
 ## Isolated-host measured proofs (2026-08-13)
 
-Host: `ubuntu@38.242.134.66`, isolated tree
+Host: `ubuntu@198.51.100.12`, isolated tree
 `/tmp/ee-mesh-verify/eidetic_engine_cli`, no Mac local Cargo.
 
 | Proof | Filter | Wall | Exit |

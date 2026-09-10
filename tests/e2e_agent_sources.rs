@@ -180,7 +180,7 @@ fn agent_sources_origin_fixture_filter_canonicalizes_codex_alias() -> TestResult
     )?;
     let fixture = &fixtures[0];
     ensure(
-        fixture["originId"].as_str() == Some("fixture-ssh-csd"),
+        fixture["originId"].as_str() == Some("fixture-ssh-worker-b"),
         format!("origin fixture id must remain stable; got {fixture}"),
     )?;
     ensure(

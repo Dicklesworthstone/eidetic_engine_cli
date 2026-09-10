@@ -30,9 +30,9 @@
           "slots_available": 0
         },
         "workers": [
-          {"id": "css", "status": "healthy"},
-          {"id": "csd", "status": "healthy"},
-          {"id": "trj", "status": "healthy"}
+          {"id": "worker-c", "status": "healthy"},
+          {"id": "worker-b", "status": "healthy"},
+          {"id": "worker-a", "status": "healthy"}
         ]
       }
     },
@@ -48,9 +48,9 @@
         "healthy": 0,
         "failed": 3,
         "workers": [
-          {"id": "css", "status": "failed", "errorCode": "ssh_connect_failed"},
-          {"id": "csd", "status": "failed", "errorCode": "ssh_connect_failed"},
-          {"id": "trj", "status": "failed", "errorCode": "ssh_connect_failed"}
+          {"id": "worker-c", "status": "failed", "errorCode": "ssh_connect_failed"},
+          {"id": "worker-b", "status": "failed", "errorCode": "ssh_connect_failed"},
+          {"id": "worker-a", "status": "failed", "errorCode": "ssh_connect_failed"}
         ]
       }
     }

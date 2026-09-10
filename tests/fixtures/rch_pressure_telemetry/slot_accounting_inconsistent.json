@@ -13,7 +13,7 @@
     },
     "workers": [
       {
-        "worker_id": "trj",
+        "worker_id": "worker-a",
         "status": "healthy",
         "circuit_state": "closed",
         "used_slots": 4,
@@ -34,7 +34,7 @@
     "detail_reason": "slot_accounting_inconsistent",
     "known_blocker_kind": "pressure_telemetry_gap",
     "posture": "remote_ready",
-    "worker_id": "trj",
+    "worker_id": "worker-a",
     "active_build_count": 0,
     "queued_build_count": 0,
     "worker_probe_status": "skipped",

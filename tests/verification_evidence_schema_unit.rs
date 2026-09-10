@@ -818,7 +818,7 @@ fn closeout_capsule_redacts_local_paths_and_raw_output_bytes() -> TestResult {
         .map_err(|error| error.to_string())?;
     assert!(!encoded.contains("/Volumes/USBNVME16TB"));
     assert!(!encoded.contains("/tmp/"));
-    assert!(!encoded.contains("remote worker css passed"));
+    assert!(!encoded.contains("remote worker worker-c passed"));
     assert!(!encoded.contains("stderr bytes"));
     assert!(encoded.contains("retained_log_path_hash:blake3:retained-log-path"));
     for capsule in sample_verification_closeout_capsules() {
@@ -895,8 +895,8 @@ fn closeout_capsule_emits_caveats_for_local_cargo_and_source_mismatch() -> TestR
 
 #[test]
 fn j1_artifact_manifest_import_builds_redacted_run_record() -> TestResult {
-    let jsonl = r#"{"schema":"ee.test_event.v1","ts":"2026-05-15T05:00:00Z","test_id":"focused_rch","kind":"command_end","command":"/data/ee","args":["/data/ee","--json"],"stdout_hash":"blake3:stdout","stderr_excerpt":"remote worker css passed","exit_code":0,"elapsed_ms":42.0}
-{"schema":"ee.test_event.v1","ts":"2026-05-15T05:00:01Z","test_id":"focused_rch","kind":"artifact_manifest","fields":{"manifest_schema":"ee.test_artifact_manifest.v1","phase":"command_end","binary_path":"/data/ee","binary_hash":"blake3:binary","source_hash":"blake3:source","command_hash":"blake3:manifest-command","command_arg_count":"2","execution_substrate":"rch","worker_host":"css","target_directory":"/Volumes/USBNVME16TB/temp_agent_space/rch-target-focused","log_path":"/tmp/ee-test-log.jsonl","artifact_manifest_hash":"blake3:manifest"}}"#;
+    let jsonl = r#"{"schema":"ee.test_event.v1","ts":"2026-05-15T05:00:00Z","test_id":"focused_rch","kind":"command_end","command":"/data/ee","args":["/data/ee","--json"],"stdout_hash":"blake3:stdout","stderr_excerpt":"remote worker worker-c passed","exit_code":0,"elapsed_ms":42.0}
+{"schema":"ee.test_event.v1","ts":"2026-05-15T05:00:01Z","test_id":"focused_rch","kind":"artifact_manifest","fields":{"manifest_schema":"ee.test_artifact_manifest.v1","phase":"command_end","binary_path":"/data/ee","binary_hash":"blake3:binary","source_hash":"blake3:source","command_hash":"blake3:manifest-command","command_arg_count":"2","execution_substrate":"rch","worker_host":"worker-c","target_directory":"/Volumes/USBNVME16TB/temp_agent_space/rch-target-focused","log_path":"/tmp/ee-test-log.jsonl","artifact_manifest_hash":"blake3:manifest"}}"#;
 
     let records = verification_run_records_from_j1_jsonl(jsonl)
         .map_err(|error| format!("import J1 records: {error}"))?;
@@ -913,12 +913,12 @@ fn j1_artifact_manifest_import_builds_redacted_run_record() -> TestResult {
         Some("class:external_cargo_target")
     );
     assert_eq!(record.execution_substrate, "rch");
-    assert_eq!(record.worker_host.as_deref(), Some("css"));
+    assert_eq!(record.worker_host.as_deref(), Some("worker-c"));
     assert_eq!(record.finished_at.as_deref(), Some("2026-05-15T05:00:00Z"));
     assert_eq!(record.exit_code, Some(0));
     assert_eq!(record.stdout_hash.as_deref(), Some("blake3:stdout"));
     assert!(record.stderr_excerpt_hash.as_deref().is_some_and(|hash| {
-        hash.starts_with("blake3:") && !hash.contains("remote worker css passed")
+        hash.starts_with("blake3:") && !hash.contains("remote worker worker-c passed")
     }));
     assert_eq!(
         record.artifact_manifest_hash.as_deref(),
@@ -939,7 +939,7 @@ fn j1_artifact_manifest_import_builds_redacted_run_record() -> TestResult {
         VerificationStatus::Unknown
     );
     let encoded = serde_json::to_string(record).map_err(|error| error.to_string())?;
-    assert!(!encoded.contains("remote worker css passed"));
+    assert!(!encoded.contains("remote worker worker-c passed"));
     assert!(!encoded.contains("/Volumes/USBNVME16TB"));
     assert!(!encoded.contains("/tmp/ee-test-log.jsonl"));
     Ok(())
@@ -987,7 +987,7 @@ fn reuse_advisory_reports_all_statuses() -> TestResult {
             command_argv: &["cargo", "test", "failed"],
             cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/rch-target-failed"),
             execution_substrate: "rch",
-            worker_host: Some("css"),
+            worker_host: Some("worker-c"),
             started_at: Some("2026-05-15T05:02:00Z"),
             finished_at: Some("2026-05-15T05:02:42Z"),
             exit_code: Some(101),
@@ -1007,7 +1007,7 @@ fn reuse_advisory_reports_all_statuses() -> TestResult {
             command_argv: &["cargo", "test", "in-flight"],
             cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/rch-target-in-flight"),
             execution_substrate: "rch",
-            worker_host: Some("css"),
+            worker_host: Some("worker-c"),
             started_at: Some("2026-05-15T05:03:00Z"),
             finished_at: None,
             exit_code: None,
@@ -1148,7 +1148,7 @@ fn compile_blocker_records() -> Vec<ee::models::VerificationRunRecord> {
             command_argv: &["cargo", "test", "--lib"],
             cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/rch-target"),
             execution_substrate: "rch",
-            worker_host: Some("css"),
+            worker_host: Some("worker-c"),
             started_at: Some("2026-05-15T21:00:00Z"),
             finished_at: Some("2026-05-15T21:05:00Z"),
             exit_code: Some(101),
@@ -1173,7 +1173,7 @@ fn compile_blocker_records() -> Vec<ee::models::VerificationRunRecord> {
             command_argv: &["cargo", "test", "--lib"],
             cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/rch-target"),
             execution_substrate: "rch",
-            worker_host: Some("css"),
+            worker_host: Some("worker-c"),
             started_at: Some("2026-05-15T21:06:00Z"),
             finished_at: None,
             exit_code: None,

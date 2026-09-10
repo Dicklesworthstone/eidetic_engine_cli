@@ -105,7 +105,7 @@
         "remote-cache",
         "conflict"
       ],
-      "content": "Remote cache delta is enabled for Project Zephyr on the hz2 worker pool.",
+      "content": "Remote cache delta is enabled for Project Zephyr on the worker-g worker pool.",
       "provenance_uri": "fixture://ask_v1/mem_ask_conflict_affirm",
       "expected_query_match": [
         "Is remote cache delta enabled for Project Zephyr?"
@@ -124,7 +124,7 @@
         "remote-cache",
         "conflict"
       ],
-      "content": "Remote cache delta is not enabled for Project Zephyr on the hz2 worker pool.",
+      "content": "Remote cache delta is not enabled for Project Zephyr on the worker-g worker pool.",
       "provenance_uri": "fixture://ask_v1/mem_ask_conflict_negate",
       "expected_query_match": [
         "Is remote cache delta enabled for Project Zephyr?"
