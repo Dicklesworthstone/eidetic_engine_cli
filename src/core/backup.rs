@@ -14288,11 +14288,14 @@ mod tests {
             records.contains("[REDACTED]"),
             "minimal redaction should redact secret-like memory content",
         )?;
-        let manifest =
-            fs::read_to_string(&report.manifest_path).map_err(|error| error.to_string())?;
-        ensure(
-            manifest.contains(BACKUP_MANIFEST_SCHEMA_V1),
-            "manifest schema must be present",
+        let manifest: JsonValue = serde_json::from_str(
+            &fs::read_to_string(&report.manifest_path).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            manifest.get("schema").and_then(JsonValue::as_str),
+            Some(BACKUP_MANIFEST_SCHEMA_V2),
+            "durable history payloads require the v2 manifest",
         )
     }
 
@@ -18829,7 +18832,7 @@ mod tests {
         ensure(
             error
                 .message()
-                .contains("curation history require source-store authentication"),
+                .contains("require source-store authentication"),
             error.message(),
         )?;
         ensure(
@@ -19689,12 +19692,15 @@ mod tests {
                 1,
                 "recovery does not apply feedback",
             )?;
-            ensure(
+            // Recovery now preserves the workspace identity. Unredacted
+            // evidence keeps its original hash and needs no rebinding audit.
+            ensure_equal(
                 db.list_audit_entries(Some(&destination_id), None)
                     .map_err(|e| e.to_string())?
                     .iter()
                     .any(|a| a.action == "learning.backup_provenance_rebound"),
-                "hash rebinding audited",
+                redaction != RedactionLevel::None,
+                "only changed evidence hashes need a rebinding audit",
             )?;
             db.close().map_err(|e| e.to_string())?;
             let summary =
