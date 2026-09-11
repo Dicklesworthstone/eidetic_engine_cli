@@ -8980,8 +8980,8 @@ pub struct SearchArgs {
     pub family: Option<String>,
 
     /// Opt in to the long-lived daemon search path. Capability negotiation
-    /// and search share one two-second attempt; timeout or schema failures
-    /// safely fall back to canonical in-process search.
+    /// and search share one bounded attempt (EE_DAEMON_SEARCH_TIMEOUT_MS);
+    /// timeout or schema failures safely fall back to canonical in-process search.
     #[arg(long = "use-daemon", action = ArgAction::SetTrue, conflicts_with = "family")]
     pub use_daemon: bool,
 
