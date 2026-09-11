@@ -4299,9 +4299,9 @@ mod tests {
         connection_a.migrate().expect("migrate database a");
         connection_a
             .append_mesh_origin_event(&crate::db::CreateMeshOriginEventInput {
-                event_id: "mesh_oevt_route_a_000000000001".to_owned(),
-                team_id: "team-a".to_owned(),
-                origin_node_id: "node-responder-a".to_owned(),
+                event_id: format!("mesh_oevt_{:026}", 1),
+                team_id: "team_route_a".to_owned(),
+                origin_node_id: "node_responder_a".to_owned(),
                 signing_key_generation: 1,
                 seq: 0,
                 prev_event_hash: None,
@@ -4316,13 +4316,14 @@ mod tests {
                 body_nonce_hex: None,
             })
             .expect("append route a event");
+        connection_a.close().expect("close database a writer");
         let connection_b = DbConnection::open_file(&database_b).expect("open database b");
         connection_b.migrate().expect("migrate database b");
         connection_b
             .append_mesh_origin_event(&crate::db::CreateMeshOriginEventInput {
-                event_id: "mesh_oevt_route_b_000000000001".to_owned(),
-                team_id: "team-b".to_owned(),
-                origin_node_id: "node-responder-b".to_owned(),
+                event_id: format!("mesh_oevt_{:026}", 2),
+                team_id: "team_route_b".to_owned(),
+                origin_node_id: "node_responder_b".to_owned(),
                 signing_key_generation: 1,
                 seq: 0,
                 prev_event_hash: None,
@@ -4337,15 +4338,17 @@ mod tests {
                 body_nonce_hex: None,
             })
             .expect("append route b event");
+        connection_b.close().expect("close database b writer");
 
         let mut route_a = route(workspace_a.path().to_path_buf(), 41888);
         route_a.database_path = Some(database_a);
-        route_a.expectations.responder_node_id = "node-responder-a".to_owned();
+        route_a.expectations.team_id = "team_route_a".to_owned();
+        route_a.expectations.responder_node_id = "node_responder_a".to_owned();
         route_a.expectations.responder_workspace_id = "workspace-a".to_owned();
         let mut route_b = route(workspace_b.path().to_path_buf(), 41888);
         route_b.database_path = Some(database_b);
-        route_b.expectations.team_id = "team-b".to_owned();
-        route_b.expectations.responder_node_id = "node-responder-b".to_owned();
+        route_b.expectations.team_id = "team_route_b".to_owned();
+        route_b.expectations.responder_node_id = "node_responder_b".to_owned();
         route_b.expectations.responder_workspace_id = "workspace-b".to_owned();
         let binding_b = authenticated_binding_for(&route_b);
         let registry =
@@ -4370,13 +4373,17 @@ mod tests {
     fn authenticated_route_b_cannot_apply_identity_attest_to_route_a() {
         let workspace_a = tempfile::tempdir().expect("workspace a");
         let workspace_b = tempfile::tempdir().expect("workspace b");
+        let workspace_id_a =
+            crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_u128(1)).to_string();
+        let workspace_id_b =
+            crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_u128(2)).to_string();
         let database_a = workspace_a.path().join("a.db");
         let database_b = workspace_b.path().join("b.db");
         let connection_a = DbConnection::open_file(&database_a).expect("open database a");
         connection_a.migrate().expect("migrate database a");
         connection_a
             .insert_workspace(
-                "workspace-a",
+                &workspace_id_a,
                 &crate::db::CreateWorkspaceInput {
                     path: workspace_a.path().display().to_string(),
                     name: Some("workspace a".to_owned()),
@@ -4385,7 +4392,7 @@ mod tests {
             .expect("insert workspace a");
         let created = crate::mesh::team::create_local_team(
             &connection_a,
-            "workspace-a",
+            &workspace_id_a,
             "Route A",
             "2026-09-01T00:00:00Z",
         )
@@ -4402,19 +4409,21 @@ mod tests {
                 .expect("load route a identity before attest")
                 .is_none()
         );
+        connection_a.close().expect("close database a writer");
         let connection_b = DbConnection::open_file(&database_b).expect("open database b");
         connection_b.migrate().expect("migrate database b");
+        connection_b.close().expect("close database b writer");
 
         let mut route_a = route(workspace_a.path().to_path_buf(), 41888);
-        route_a.database_path = Some(database_a);
+        route_a.database_path = Some(database_a.clone());
         route_a.expectations.team_id = created.team.team_id.clone();
         route_a.expectations.responder_node_id = created.team.origin_node_id;
-        route_a.expectations.responder_workspace_id = "workspace-a".to_owned();
+        route_a.expectations.responder_workspace_id = workspace_id_a;
         let mut route_b = route(workspace_b.path().to_path_buf(), 41888);
         route_b.database_path = Some(database_b);
-        route_b.expectations.team_id = "zzzz-team-b".to_owned();
-        route_b.expectations.responder_node_id = "node-responder-b".to_owned();
-        route_b.expectations.responder_workspace_id = "workspace-b".to_owned();
+        route_b.expectations.team_id = "team_route_b".to_owned();
+        route_b.expectations.responder_node_id = "node_responder_b".to_owned();
+        route_b.expectations.responder_workspace_id = workspace_id_b;
         let binding_b = authenticated_binding_for(&route_b);
         let registry =
             ResponderRouteRegistry::new([route_a, route_b]).expect("valid multi-route registry");
@@ -4437,6 +4446,7 @@ mod tests {
             &serde_json::to_value(frame).expect("serialize attest frame"),
         );
         assert_eq!(response.subject, "rejected");
+        let connection_a = DbConnection::open_file(&database_a).expect("reopen database a");
         assert!(
             connection_a
                 .get_team_member_identity(&member_a.member_id)
