@@ -171,12 +171,14 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             cross: false
+            glibc: '2.28'
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             cross: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            cross: true
+            cross: false
+            glibc: '2.28'
           - target: x86_64-apple-darwin
             os: macos-latest
             cross: false
@@ -232,13 +234,33 @@ jobs:
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
+      - name: Install GNU/Linux cross linker
+        if: matrix.glibc
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Pin both tools; do not inherit the runner's newest glibc (GH #38).
+          curl -fL --retry 3 https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz -o "$RUNNER_TEMP/zig.tar.xz"
+          echo "24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c  $RUNNER_TEMP/zig.tar.xz" | sha256sum --check
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-x86_64-linux-0.14.1" >> "$GITHUB_PATH"
+          cargo install cargo-zigbuild --version 0.23.0 --locked
+
       - name: Build (native)
-        if: ${{ !matrix.cross }}
-        run: cargo build --release --target ${{ matrix.target }}
+        if: ${{ !matrix.cross && !matrix.glibc }}
+        run: cargo build --release --bin ee --locked --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --bin ee --locked --target ${{ matrix.target }}
+
+      - name: Build (GNU/Linux baseline)
+        if: matrix.glibc
+        run: cargo zigbuild --release --bin ee --locked --target ${{ matrix.target }}.${{ matrix.glibc }}
+
+      - name: Verify GNU/Linux compatibility
+        if: matrix.glibc
+        run: bash scripts/check-glibc-baseline.sh target/${{ matrix.target }}/release/ee ${{ matrix.glibc }}
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
@@ -292,6 +314,7 @@ jobs:
           EE_RELEASE_RUNNER_OS: ${{ runner.os }}
           EE_RELEASE_RUNNER_IMAGE: ${{ matrix.os }}
           EE_RELEASE_CROSS: ${{ matrix.cross }}
+          EE_RELEASE_GLIBC: ${{ matrix.glibc }}
           EE_RELEASE_VERSION: ${{ needs.check-version.outputs.version }}
           EE_RELEASE_TAG: ${{ needs.tag.outputs.tag }}
           EE_RELEASE_REPOSITORY: ${{ github.repository }}
@@ -331,11 +354,10 @@ jobs:
           run_url = f"{server_url}/{repo}/actions/runs/{os.environ['EE_RELEASE_RUN_ID']}"
           target = os.environ["EE_RELEASE_TARGET"]
           cross = os.environ["EE_RELEASE_CROSS"] == "true"
-          cargo_command = (
-              f"cross build --release --target {target}"
-              if cross
-              else f"cargo build --release --target {target}"
-          )
+          glibc = os.environ.get("EE_RELEASE_GLIBC", "")
+          builder = "cargo zigbuild" if glibc else ("cross build" if cross else "cargo build")
+          build_target = f"{target}.{glibc}" if glibc else target
+          cargo_command = f"{builder} --release --bin ee --locked --target {build_target}"
           created_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
           provenance = {
               "_type": "https://in-toto.io/Statement/v1",
@@ -362,6 +384,7 @@ jobs:
                           "runnerOs": os.environ["EE_RELEASE_RUNNER_OS"],
                           "runnerImage": os.environ["EE_RELEASE_RUNNER_IMAGE"],
                           "cross": cross,
+                          "glibcBaseline": glibc or None,
                       },
                       "resolvedDependencies": [
                           {

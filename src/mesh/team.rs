@@ -9341,13 +9341,6 @@ mod tests {
         .expect("create");
         let team_id = created.team.team_id.clone();
         let origin_node = created.team.origin_node_id.clone();
-        let member_id = connection
-            .list_all_team_members()
-            .expect("members")
-            .into_iter()
-            .next()
-            .expect("self")
-            .member_id;
         let port = {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
             listener.local_addr().expect("addr").port()
@@ -9366,6 +9359,21 @@ mod tests {
             "wsp_joinworkspace0000000000001",
         )
         .expect("enroll");
+        let member_id = connection
+            .list_all_team_members()
+            .expect("members")
+            .into_iter()
+            .find(|member| member.origin_node_id == joiner_node)
+            .expect("authenticated joiner member")
+            .member_id;
+        record_member_tailnet_identity(
+            &connection,
+            &member_id,
+            "alice@acme.com",
+            Some("user-1"),
+            "2026-08-13T21:59:00Z",
+        )
+        .expect("locally verified joiner identity");
         persist_pair_key(
             &workspace,
             &team_id,
@@ -9387,6 +9395,7 @@ mod tests {
             &registrations,
         )
         .expect("api");
+        connection.close().expect("close fixture writer");
         let mut owner = crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| {
             let api = api.clone();
             let registrations = registrations.clone();
@@ -9475,6 +9484,7 @@ mod tests {
         };
         assert_eq!(applied.subject, "user-1");
         assert_eq!(applied.member_id, member_id);
+        let connection = crate::db::DbConnection::open_file(&database).expect("reopen");
         let identity = connection
             .get_team_member_identity(&member_id)
             .expect("load")

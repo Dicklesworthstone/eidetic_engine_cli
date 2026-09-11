@@ -8121,9 +8121,9 @@ mod tests {
 
     type TestResult = Result<(), String>;
 
-    const SCORE_WORKSPACE_ID: &str = "wsp_scoredecay0000000000000000";
-    const SCORE_MEMORY_A: &str = "mem_scoredecay0000000000000001";
-    const SCORE_MEMORY_B: &str = "mem_scoredecay0000000000000002";
+    const SCORE_WORKSPACE_ID: &str = "wsp_00000000000000000000009900";
+    const SCORE_MEMORY_A: &str = "mem_00000000000000000000009901";
+    const SCORE_MEMORY_B: &str = "mem_00000000000000000000009902";
 
     fn ensure<T: std::fmt::Debug + PartialEq>(actual: T, expected: T, ctx: &str) -> TestResult {
         if actual == expected {
@@ -12283,7 +12283,11 @@ mod tests {
         )?;
 
         let backup = runner.run_job_type(JobType::BackupExport, Some("cluster backup".to_owned()));
-        ensure(backup.outcome, RunOutcome::Success, "backup outcome")?;
+        ensure(
+            backup.outcome,
+            RunOutcome::Success,
+            &format!("backup outcome: {backup:?}"),
+        )?;
         let backup_details = backup
             .details
             .ok_or_else(|| "backup details missing".to_owned())?;

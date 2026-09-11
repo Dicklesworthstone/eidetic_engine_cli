@@ -2458,7 +2458,10 @@ fn sqlmodel_error_is_transient_sqlite_contention(error: &sqlmodel_core::Error) -
         sqlmodel_core::Error::Query(query) => match query.kind {
             sqlmodel_core::error::QueryErrorKind::Deadlock
             | sqlmodel_core::error::QueryErrorKind::Serialization => true,
-            sqlmodel_core::error::QueryErrorKind::Database => {
+            sqlmodel_core::error::QueryErrorKind::Database
+            | sqlmodel_core::error::QueryErrorKind::Timeout => {
+                // SQLModel maps FrankenSQLite Busy/BusyRecovery to Timeout.
+                // Only lock contention is retryable; actual deadlines are not.
                 sqlite_contention_message_is_retryable(&query.message)
             }
             sqlmodel_core::error::QueryErrorKind::Syntax
@@ -2466,7 +2469,6 @@ fn sqlmodel_error_is_transient_sqlite_contention(error: &sqlmodel_core::Error) -
             | sqlmodel_core::error::QueryErrorKind::NotFound
             | sqlmodel_core::error::QueryErrorKind::Permission
             | sqlmodel_core::error::QueryErrorKind::DataTruncation
-            | sqlmodel_core::error::QueryErrorKind::Timeout
             | sqlmodel_core::error::QueryErrorKind::Cancelled => false,
         },
         sqlmodel_core::Error::Type(_)
@@ -34494,14 +34496,14 @@ fn advisory_lock_error_is_retryable(error: &DbError) -> bool {
         sqlmodel_core::error::QueryErrorKind::Constraint
         | sqlmodel_core::error::QueryErrorKind::Deadlock
         | sqlmodel_core::error::QueryErrorKind::Serialization => true,
-        sqlmodel_core::error::QueryErrorKind::Database => {
+        sqlmodel_core::error::QueryErrorKind::Database
+        | sqlmodel_core::error::QueryErrorKind::Timeout => {
             sqlite_contention_message_is_retryable(&query.message)
         }
         sqlmodel_core::error::QueryErrorKind::Syntax
         | sqlmodel_core::error::QueryErrorKind::NotFound
         | sqlmodel_core::error::QueryErrorKind::Permission
         | sqlmodel_core::error::QueryErrorKind::DataTruncation
-        | sqlmodel_core::error::QueryErrorKind::Timeout
         | sqlmodel_core::error::QueryErrorKind::Cancelled => false,
     }
 }
@@ -42706,6 +42708,39 @@ mod tests {
             matches!(result, Err(DbError::InvalidMode { .. })),
             "schema-only memory connection must return InvalidMode",
         )
+    }
+
+    #[test]
+    fn sqlite_lock_wait_timeouts_retry_without_retrying_deadlines_or_cancellation() -> TestResult {
+        use sqlmodel_core::error::QueryErrorKind;
+
+        for (kind, message, expected) in [
+            (QueryErrorKind::Timeout, "database is busy", true),
+            (QueryErrorKind::Timeout, "database is busy recovering", true),
+            (QueryErrorKind::Timeout, "query deadline exceeded", false),
+            (QueryErrorKind::Cancelled, "database is busy", false),
+        ] {
+            let error = DbError::sqlmodel(
+                DbOperation::ConfigureDurabilityPragmas,
+                sqlmodel_query_error(kind, message),
+            );
+            ensure_equal(
+                &super::database_open_error_is_retryable(&error),
+                &expected,
+                &format!("open retry classification for {kind:?}: {message}"),
+            )?;
+            ensure_equal(
+                &super::db_error_is_transient_sqlite_contention(&error),
+                &expected,
+                &format!("query retry classification for {kind:?}: {message}"),
+            )?;
+            ensure_equal(
+                &super::advisory_lock_error_is_retryable(&error),
+                &expected,
+                &format!("advisory lock retry classification for {kind:?}: {message}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -58873,10 +58908,26 @@ mod tests {
 
     #[test]
     fn with_write_owner_fence_serializes_process_threads() -> TestResult {
+        // Use a private file gate: the shared in-memory gate can be occupied
+        // by unrelated migration tests for longer than this test's deadline.
+        let temp_dir =
+            tempfile::tempdir().map_err(|error| TestFailure::new(format!("tempdir: {error}")))?;
+        let database_path = temp_dir.path().join("write-owner-fence.db");
+        let (opened_tx, opened_rx) = mpsc::channel();
+        let outer_opened_tx = opened_tx.clone();
+        let outer_path = database_path.clone();
+        let (outer_start_tx, outer_start_rx) = mpsc::channel();
         let (outer_entered_tx, outer_entered_rx) = mpsc::channel();
         let (outer_release_tx, outer_release_rx) = mpsc::channel();
         let outer = thread::spawn(move || -> std::result::Result<(), String> {
-            let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            let connection =
+                DbConnection::open_file(&outer_path).map_err(|error| error.to_string())?;
+            outer_opened_tx
+                .send(())
+                .map_err(|error| format!("announce owner open: {error}"))?;
+            outer_start_rx
+                .recv()
+                .map_err(|error| format!("await owner start: {error}"))?;
             connection.with_write_owner_fence(
                 |error| error.to_string(),
                 || {
@@ -58890,13 +58941,19 @@ mod tests {
             )
         });
 
-        outer_entered_rx
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|error| TestFailure::new(format!("outer fence did not start: {error}")))?;
-
+        let (contender_start_tx, contender_start_rx) = mpsc::channel();
         let (contender_state_tx, contender_state_rx) = mpsc::channel();
         let contender = thread::spawn(move || -> std::result::Result<(), String> {
-            let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            // Both opens must finish before the owner takes its fence, since
+            // opening a writable file also acquires that same gate.
+            opened_tx
+                .send(())
+                .map_err(|error| format!("announce contender open: {error}"))?;
+            contender_start_rx
+                .recv()
+                .map_err(|error| format!("await fence attempt: {error}"))?;
             contender_state_tx
                 .send("attempting")
                 .map_err(|error| format!("announce fence attempt: {error}"))?;
@@ -58910,6 +58967,20 @@ mod tests {
             )
         });
 
+        for _ in 0..2 {
+            opened_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|error| TestFailure::new(format!("connection did not open: {error}")))?;
+        }
+        outer_start_tx
+            .send(())
+            .map_err(|error| TestFailure::new(format!("start owner: {error}")))?;
+        outer_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|error| TestFailure::new(format!("outer fence did not start: {error}")))?;
+        contender_start_tx
+            .send(())
+            .map_err(|error| TestFailure::new(format!("start contender: {error}")))?;
         ensure_equal(
             &contender_state_rx
                 .recv_timeout(Duration::from_secs(2))

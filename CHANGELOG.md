@@ -63,6 +63,27 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
+## [0.14.5] - Unreleased candidate
+
+- GNU/Linux release builds explicitly target glibc 2.28 on x86-64 and ARM64.
+  The release gate checks the binary's actual symbol requirements before
+  packaging, preventing a newer build host from raising the minimum glibc
+  version silently (#38).
+- Daemon startup warms the search stack before serving requests. Requests
+  arriving during warm-up fall back to the CLI path, and daemon capabilities
+  report warm-up state (#37).
+- CLI runtimes use bounded, lazy blocking pools. Initialization and migrations
+  checkpoint their writes; doctor reports excessive WAL growth (#35).
+- Concurrent migrations and CASS imports retry SQLite lock-wait timeouts while preserving
+  cancellation and actual query deadlines. Doctor's linked dependency versions
+  match the release lockfile.
+- Workspace recovery preserves authorization keys through encrypted key
+  backups, memory revision chains, relationship metadata, and tombstones.
+  Advisory preflight continues when optional risk-memory storage is unavailable.
+- The pinned stack uses Asupersync 0.4.10, FrankenSQLite 0.3.18, Frankensearch
+  0.5.0, and nightly-2026-08-31. The rustls-pemfile maintenance exception remains
+  necessary in Asupersync's TLS dependency graph (#22).
+
 ## [0.14.4] - 2026-08-29
 
 Agent-facing discovery and input-correctness patch release. This cut makes the

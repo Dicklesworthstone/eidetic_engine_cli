@@ -133,6 +133,7 @@ fn malformed_checksum_is_reported_before_file_verification() -> TestResult {
         .ok_or_else(|| "checksum fixture has no artifact".to_owned())?;
     artifact.checksum.value =
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned();
+    artifact.signature = None;
 
     let report = manifest.verify(Some(Path::new("/")));
     let codes = finding_codes(&report);
@@ -155,6 +156,7 @@ fn unsafe_artifact_path_is_reported_without_file_io() -> TestResult {
         .first_mut()
         .ok_or_else(|| "checksum fixture has no artifact".to_owned())?;
     artifact.file_name = "../escape.tar.xz".to_owned();
+    artifact.signature = None;
 
     let report = manifest.verify(Some(Path::new("/")));
     let codes = finding_codes(&report);

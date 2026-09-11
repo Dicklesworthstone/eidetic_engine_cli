@@ -337,6 +337,11 @@ Hard constraints. CI fails if any of them break.
 
 ### Release installer
 
+Starting with v0.14.5, the GNU/Linux release builds target glibc 2.28 or
+newer on x86-64 and ARM64. Build hosts verify the finished binary's glibc
+symbol requirements before packaging. The x86-64 musl archive is available
+for systems without glibc.
+
 ```bash
 f="$(mktemp)"
 curl -fsSL "https://cdn.jsdelivr.net/gh/Dicklesworthstone/eidetic_engine_cli@main/install.sh" -o "$f" \

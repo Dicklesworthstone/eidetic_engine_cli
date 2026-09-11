@@ -986,7 +986,11 @@ fn import_session_transaction_error_is_retryable(error: &DbError) -> bool {
         sqlmodel_core::Error::Query(query) => match query.kind {
             sqlmodel_core::error::QueryErrorKind::Deadlock
             | sqlmodel_core::error::QueryErrorKind::Serialization => true,
-            sqlmodel_core::error::QueryErrorKind::Database => {
+            // SQLModel maps FrankenSQLite Busy/BusyRecovery to Timeout.
+            // Only contention timeouts are retryable; an ordinary query
+            // deadline must still terminate the import.
+            sqlmodel_core::error::QueryErrorKind::Database
+            | sqlmodel_core::error::QueryErrorKind::Timeout => {
                 sqlite_contention_message_is_retryable(&query.message)
             }
             sqlmodel_core::error::QueryErrorKind::Syntax
@@ -994,7 +998,6 @@ fn import_session_transaction_error_is_retryable(error: &DbError) -> bool {
             | sqlmodel_core::error::QueryErrorKind::NotFound
             | sqlmodel_core::error::QueryErrorKind::Permission
             | sqlmodel_core::error::QueryErrorKind::DataTruncation
-            | sqlmodel_core::error::QueryErrorKind::Timeout
             | sqlmodel_core::error::QueryErrorKind::Cancelled => false,
         },
         sqlmodel_core::Error::Type(_)
@@ -4275,6 +4278,37 @@ mod tests {
             error.to_string().contains("not a regular file"),
             format!("unexpected error: {error}"),
         )
+    }
+
+    #[test]
+    fn import_retries_lock_wait_timeouts_but_preserves_deadlines_and_cancellation() {
+        use sqlmodel_core::error::{QueryError, QueryErrorKind};
+
+        for (kind, message, retryable) in [
+            (QueryErrorKind::Timeout, "database is busy", true),
+            (QueryErrorKind::Timeout, "database is busy recovering", true),
+            (QueryErrorKind::Timeout, "query deadline exceeded", false),
+            (QueryErrorKind::Cancelled, "database is busy", false),
+        ] {
+            let error = DbError::SqlModel {
+                operation: DbOperation::BeginTransaction,
+                source: Box::new(sqlmodel_core::Error::Query(QueryError {
+                    kind,
+                    sql: None,
+                    sqlstate: None,
+                    message: message.to_owned(),
+                    detail: None,
+                    hint: None,
+                    position: None,
+                    source: None,
+                })),
+            };
+            assert_eq!(
+                import_session_transaction_error_is_retryable(&error),
+                retryable,
+                "{message}",
+            );
+        }
     }
 
     #[cfg(unix)]
