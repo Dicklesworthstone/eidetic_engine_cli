@@ -1825,7 +1825,11 @@ mod tests {
 
     #[test]
     fn embed_backend_round_trips_as_the_stable_public_vocabulary() -> TestResult {
-        for backend in [EmbedBackend::NeuralLocal, EmbedBackend::HashFallback] {
+        for backend in [
+            EmbedBackend::NeuralLocal,
+            EmbedBackend::RemoteApi,
+            EmbedBackend::HashFallback,
+        ] {
             assert_eq!(EmbedBackend::from_str(backend.as_str())?, backend);
             assert_eq!(backend.to_string(), backend.as_str());
             assert_eq!(
@@ -1837,7 +1841,7 @@ mod tests {
             EmbedBackend::from_str(" Neural-Local ")?,
             EmbedBackend::NeuralLocal
         );
-        assert!(EmbedBackend::from_str("remote_api").is_err());
+        assert!(EmbedBackend::from_str("unknown_backend").is_err());
         Ok(())
     }
 

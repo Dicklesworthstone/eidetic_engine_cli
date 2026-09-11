@@ -820,7 +820,7 @@ pub fn minimum_os_assumptions(target_triple: &str) -> Vec<String> {
     } else if target_triple.contains("musl") {
         vec!["Linux kernel 4.19+ with musl-compatible userspace".to_owned()]
     } else {
-        vec!["Linux kernel 4.19+ with glibc 2.31+".to_owned()]
+        vec!["Linux kernel 4.19+ with glibc 2.28+".to_owned()]
     }
 }
 
