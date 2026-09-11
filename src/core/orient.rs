@@ -1816,7 +1816,7 @@ mod tests {
             index_dir: None,
             task: "verify release checksums",
             max_tokens: 4_000,
-            candidate_pool: 100,
+            candidate_pool: 20,
         });
         ensure(
             report.posture == "partial"
@@ -2265,7 +2265,7 @@ mod tests {
             index_dir: None,
             task: "quasar checksum sentinel",
             max_tokens: 4_000,
-            candidate_pool: 100,
+            candidate_pool: 20,
         });
         ensure(
             report.posture == "ready" && report.issues.is_empty(),

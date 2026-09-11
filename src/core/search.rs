@@ -17003,7 +17003,7 @@ mod tests {
             true,
             SearchSourceMode::Hybrid,
             &Deterministic::from_seed(123),
-            None,
+            Some(Arc::new(HashEmbedder::default_256())),
         )?;
 
         assert!(errors.is_empty(), "search returned errors: {errors:?}");
@@ -17182,7 +17182,7 @@ mod tests {
                 .results
                 .iter()
                 .any(|hit| hit.doc_id == evidence_id),
-            "live admission must resolve the actual canonical workspace row rather than synthesize its id"
+            "live admission must resolve the actual canonical workspace row rather than synthesize its id: {initially_admitted:?}"
         );
 
         let mutation_connection =
