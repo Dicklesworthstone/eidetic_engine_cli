@@ -406,6 +406,10 @@ name = "e2e_daemon_recovery"
 path = "tests/e2e_daemon_recovery.rs"
 
 [[test]]
+name = "e2e_graceful_degradation"
+path = "tests/e2e_graceful_degradation.rs"
+
+[[test]]
 name = "e2e_multi_agent_writers"
 path = "tests/e2e_multi_agent_writers.rs"
 
@@ -424,6 +428,10 @@ path = "tests/error_envelope_golden.rs"
 [[test]]
 name = "error_recovery_conformance_e2e"
 path = "tests/error_recovery_conformance_e2e.rs"
+
+[[test]]
+name = "failure_triage"
+path = "tests/failure_triage.rs"
 
 [[test]]
 name = "harness_hook_install_audit"
@@ -464,6 +472,10 @@ path = "tests/pack_quality_contracts.rs"
 [[test]]
 name = "perf_compare_golden"
 path = "tests/perf_compare_golden.rs"
+
+[[test]]
+name = "proof_verify_core"
+path = "tests/proof_verify_core.rs"
 
 [[test]]
 name = "renderer_parity_matrix"

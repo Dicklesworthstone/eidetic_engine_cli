@@ -58,8 +58,6 @@ mod e2e_doctor_robot_docs;
 mod e2e_doctor_robot_triage;
 #[path = "../e2e_economy_pin.rs"]
 mod e2e_economy_pin;
-#[path = "../e2e_graceful_degradation.rs"]
-mod e2e_graceful_degradation;
 #[path = "../e2e_graph_articulation.rs"]
 mod e2e_graph_articulation;
 #[path = "../e2e_graph_betweenness.rs"]
@@ -228,8 +226,6 @@ mod export_playbook_e2e;
 mod failure_mode_catalog_coverage;
 #[path = "../failure_mode_impact_runner.rs"]
 mod failure_mode_impact_runner;
-#[path = "../failure_triage.rs"]
-mod failure_triage;
 #[path = "../fake_tailscale_harness.rs"]
 mod fake_tailscale_harness;
 #[path = "../fanout_rollback.rs"]

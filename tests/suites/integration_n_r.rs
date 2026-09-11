@@ -74,8 +74,6 @@ mod procedure_distillation_skill;
 mod profile_config_golden_e2e;
 #[path = "../proof_check_schema.rs"]
 mod proof_check_schema;
-#[path = "../proof_verify_core.rs"]
-mod proof_verify_core;
 #[path = "../property_context_query_metamorphic.rs"]
 mod property_context_query_metamorphic;
 #[path = "../property_eql_query_parsing.rs"]

@@ -10,8 +10,8 @@ pub use installer::{
     HarnessConformanceSimulationOptions, HarnessConformanceSupport, HarnessConformanceTranscript,
     HarnessHookCapabilityGap, HarnessHookInstallAuditDocLink, HarnessHookInstallAuditFinding,
     HarnessHookInstallAuditRepair, HarnessHookInstallAuditReport, HarnessHookInstallOptions,
-    HarnessHookInstallReport, HarnessHookMarkers, HarnessHookPlanItem, HarnessHookSnippet,
-    HarnessHookTarget, check_git_hook_readiness, generate_harness_hook_install,
+    HarnessHookInstallReport, HarnessHookInvocation, HarnessHookMarkers, HarnessHookPlanItem,
+    HarnessHookSnippet, HarnessHookTarget, check_git_hook_readiness, generate_harness_hook_install,
     simulate_harness_conformance,
 };
 

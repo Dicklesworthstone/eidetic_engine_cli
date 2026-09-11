@@ -52,10 +52,10 @@ command or protocol boundary.
 ### Integration Test Targets
 
 Cargo autodiscovery is disabled with `autotests = false`. The 512 root test
-files remain in place: 484 compile as modules in five suite binaries, while
-28 remain separate targets. The three existing explicit targets under
+files remain in place: 481 compile as modules in five suite binaries, while
+31 remain separate targets. The three existing explicit targets under
 `tests/conformance/` and `tests/contracts/` also remain. This reduces the
-integration link count from 515 to 36 without dropping any test files.
+integration link count from 515 to 39 without dropping any test files.
 
 The suite names follow the first letter of the original file name:
 `integration_a_d`, `integration_e_f`, `integration_g_m`, `integration_n_r`,
@@ -74,9 +74,11 @@ scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --summary --no-write
 
 Standalone targets retain their original names. They include tests whose Insta
 snapshot names depend on the crate name, tests with process-global tracing or
-current-directory state, mesh tests that spawn themselves with `--exact`, and
+current-directory state, tests that spawn themselves with `--exact`, and
 focused platform/model/hook gates. `contracts` also stays separate to preserve
-its crate-relative helper imports.
+its crate-relative helper imports. `proof_verify_core` includes production
+source that requires its crate-root `models` module, and `failure_triage`
+retains the original public helper visibility of its standalone crate.
 
 When adding a root test file, register it in the corresponding suite or add an
 explicit `[[test]]` target when process isolation is needed. The inventory tests
