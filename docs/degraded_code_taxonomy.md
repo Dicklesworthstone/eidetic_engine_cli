@@ -145,6 +145,7 @@ Current conventions:
 | `perf_artifact_summary` | Normalized perf artifact summary degradation. |
 | `perf_budget_check` | `ee perf budget check` artifact-budget degradation. |
 | `perf_compare` | `ee perf compare` artifact comparison degradation. |
+| `perf_explain_latency` | `ee perf explain-latency` evidence and latency explanation degradation. |
 | `pack_coordination` | Context-pack embedded coordination snapshot degradation. |
 | `preflight_guard` | `ee preflight check --cmd` command-guard degradation. |
 | `preflight_run` | `ee preflight run` risk-evidence degradation. |
@@ -164,6 +165,7 @@ Current conventions:
 | `rule_show` | `ee rule show` procedural-rule read degradation. |
 | `rule_update` | `ee rule update` mutation degradation. |
 | `search` | Search, index, recall, filtering, or visibility degradation carried into context output. |
+| `shard_fanout` | Workspace shard resolution and fanout status degradation. |
 | `status` | Top-level `ee status` posture, capability, or subsystem degradation. |
 | `skyline` | `ee status --skyline` structural skyline degradation. |
 | `tripwire_check` | `ee tripwire check` deterministic condition-evaluation degradation. |
@@ -192,6 +194,8 @@ Current conventions:
 | `curate_untombstone` | `ee curate untombstone` memory-restoration degradation. |
 | `curate_validate` | `ee curate validate` candidate-validation degradation. |
 | `db_status` | `ee db status` migration or sidecar-file degradation. |
+| `daemon_stop` | `ee daemon stop` reports an absent daemon socket. |
+| `graph_centrality_refresh` | Centrality refresh skipped because the graph snapshot exceeds its memory cap. |
 | `dependency_contract` | `ee diag dependencies` dependency-contract degradation. |
 | `daemon_status` | `ee daemon status` foreground-supervisor capability degradation. |
 | `qos_registry` | QoS active-lane registry read or integrity degradation. |

@@ -440,7 +440,7 @@ mod tests {
         for index in 0..(DEGRADED_AGGREGATION_MAX_ENTRIES - 1) {
             let code = format!("kept_{index:02}");
             entries.push(DegradationAggregationInput::new(
-                "kept",
+                "search",
                 code,
                 "critical",
                 "kept msg",
@@ -449,21 +449,21 @@ mod tests {
         }
         entries.extend([
             DegradationAggregationInput::new(
-                "drop_high",
+                "pack",
                 "z_drop_high",
                 "high",
                 "high msg",
                 "high repair",
             ),
             DegradationAggregationInput::new(
-                "drop_medium",
+                "status",
                 "a_drop_medium",
                 "medium",
                 "medium msg",
                 "medium repair",
             ),
             DegradationAggregationInput::new(
-                "drop_low",
+                "insights",
                 "m_drop_low",
                 "low",
                 "low msg",
