@@ -14,7 +14,6 @@ use std::time::Duration;
 use blake3;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Value as JsonValue, json};
-use sqlmodel_core::IsolationLevel;
 use uuid::Uuid;
 
 use super::process::{CASS_STDOUT_LINE_MAX_BYTES, CassStreamError};
@@ -882,55 +881,15 @@ fn with_import_session_transaction<T>(
     let mut last_retryable_error = None;
 
     for attempt in 0..MAX_ATTEMPTS {
-        begin_import_session_transaction(connection)?;
-        match operation() {
-            Ok(result) => match connection.commit() {
-                Ok(()) => return Ok(result),
-                Err(error) if import_session_transaction_error_is_retryable(&error) => {
-                    if let Err(rollback_error) = connection.rollback() {
-                        tracing::error!(
-                            phase = "cass_import_commit_retryable",
-                            error = %error,
-                            rollback_error = %rollback_error,
-                            "failed to rollback import session transaction after commit failure"
-                        );
-                    }
-                    last_retryable_error = Some(error);
-                }
-                Err(error) => {
-                    if let Err(rollback_error) = connection.rollback() {
-                        tracing::error!(
-                            phase = "cass_import_commit",
-                            error = %error,
-                            rollback_error = %rollback_error,
-                            "failed to rollback import session transaction after commit failure"
-                        );
-                    }
-                    return Err(error);
-                }
-            },
+        // Keep the database writer fence for the entire read/check/write
+        // transaction. Locking individual statements lets a competing importer
+        // exhaust its busy retries while the first transaction is still open.
+        match connection.with_transaction(&mut operation) {
+            Ok(result) => return Ok(result),
             Err(error) if import_session_transaction_error_is_retryable(&error) => {
-                if let Err(rollback_error) = connection.rollback() {
-                    tracing::error!(
-                        phase = "cass_import_operation_retryable",
-                        error = %error,
-                        rollback_error = %rollback_error,
-                        "failed to rollback import session transaction after operation failure"
-                    );
-                }
                 last_retryable_error = Some(error);
             }
-            Err(error) => {
-                if let Err(rollback_error) = connection.rollback() {
-                    tracing::error!(
-                        phase = "cass_import_operation",
-                        error = %error,
-                        rollback_error = %rollback_error,
-                        "failed to rollback import session transaction after operation failure"
-                    );
-                }
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         }
 
         if attempt + 1 < MAX_ATTEMPTS {
@@ -945,29 +904,6 @@ fn with_import_session_transaction<T>(
             message: "import session transaction retry loop exhausted without a retryable error"
                 .to_string(),
         }),
-    }
-}
-
-fn begin_import_session_transaction(connection: &DbConnection) -> Result<(), DbError> {
-    const MAX_ATTEMPTS: usize = 16;
-    let mut last_retryable_error = None;
-
-    for attempt in 0..MAX_ATTEMPTS {
-        match connection.begin_transaction(IsolationLevel::RepeatableRead) {
-            Ok(()) => return Ok(()),
-            Err(error) if import_session_transaction_error_is_retryable(&error) => {
-                last_retryable_error = Some(error);
-                if attempt + 1 < MAX_ATTEMPTS {
-                    std::thread::sleep(import_session_transaction_retry_delay(attempt));
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    }
-
-    match last_retryable_error {
-        Some(error) => Err(error),
-        None => connection.begin_transaction(IsolationLevel::RepeatableRead),
     }
 }
 
