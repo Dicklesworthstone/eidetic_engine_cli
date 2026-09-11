@@ -2527,7 +2527,7 @@ fn harness_hook_snippets(target: HarnessHookTarget, ee_binary: &Path) -> Vec<Har
 fn python_hook_command(script: &str, ee_binary: &Path) -> String {
     let script = format!("{}\n{script}", python_invocation_recorder());
     format!(
-        "python3 -c {} {}",
+        "python3 -c {} {} 2>/dev/null || :",
         shell_quote_str(&script),
         shell_quote(ee_binary)
     )
@@ -4725,6 +4725,24 @@ mod tests {
                 assert_eq!(run_python_snippet_exit_code(script, event), Some(0));
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_hook_fails_open_when_python_is_unavailable() -> TestResult {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let output = Command::new("/bin/sh")
+            .args([
+                "-c",
+                &python_hook_command(session_start_python(), &temp.path().join("missing-ee")),
+            ])
+            .env("PATH", temp.path())
+            .output()
+            .map_err(|error| error.to_string())?;
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        Ok(())
     }
 
     fn run_python_hook_state_probe(
