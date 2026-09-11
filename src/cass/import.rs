@@ -4247,6 +4247,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn interrupted_import_transaction_rolls_back_before_reuse() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("CREATE TABLE import_rollback_probe (id INTEGER PRIMARY KEY)")
+            .map_err(|error| error.to_string())?;
+
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_import_session_transaction::<()>(&connection, || {
+                connection.execute_raw("INSERT INTO import_rollback_probe (id) VALUES (1)")?;
+                panic!("interrupt the importer before commit");
+            })
+        }));
+        ensure(interrupted.is_err(), "the import operation must unwind")?;
+
+        // Reusing the same primary key in a new transaction proves that both
+        // the unfinished row and the open transaction were rolled back.
+        with_import_session_transaction(&connection, || {
+            connection.execute_raw("INSERT INTO import_rollback_probe (id) VALUES (1)")
+        })
+        .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
     #[cfg(unix)]
     #[test]
     fn concurrent_session_import_persistence_is_idempotent() -> TestResult {
