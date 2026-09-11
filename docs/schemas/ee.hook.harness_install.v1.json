@@ -47,6 +47,23 @@
       "additionalProperties": false
     },
     "ambientContext": { "$ref": "ee.ambient_context.v1.json" },
+    "lastInvocations": {
+      "description": "Observed runtime outcomes for this workspace, separate from installation freshness. Empty means no recorded invocation, not a successful hook.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["surface", "outcome", "updatedAt", "durationMs", "emittedBytes", "degradedCodes"],
+        "additionalProperties": false,
+        "properties": {
+          "surface": { "enum": ["session_start_orient", "pre_edit_recall"] },
+          "outcome": { "enum": ["emitted", "duplicate", "empty", "timeout", "command_error", "invalid_response"] },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "durationMs": { "type": "integer", "minimum": 0 },
+          "emittedBytes": { "type": "integer", "minimum": 0 },
+          "degradedCodes": { "type": "array", "items": { "type": "string", "maxLength": 128, "pattern": "^[A-Za-z0-9_]*$" } }
+        }
+      }
+    },
     "snippets": {
       "type": "array",
       "items": {
@@ -176,7 +193,9 @@
                   "config_not_writable",
                   "harness_config_path_unavailable",
                   "harness_config_unreadable",
-                  "harness_config_invalid"
+                  "harness_config_invalid",
+                  "hook_invocation_failed",
+                  "hook_invocation_unreadable"
                 ]
               },
               "status": {
@@ -185,7 +204,9 @@
                   "stale_hook",
                   "unsupported_harness_version",
                   "config_not_writable",
-                  "fresh"
+                  "fresh",
+                  "invocation_failed",
+                  "unknown"
                 ]
               },
               "event": { "type": ["string", "null"] },

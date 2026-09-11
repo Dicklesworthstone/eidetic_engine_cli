@@ -75,6 +75,18 @@
       ]
     },
     "primer": { "$ref": "#/$defs/component" },
+    "ambientContext": {
+      "description": "Present with --fast --format hook. The token budget applies to text alone; the hook reserves its own header overhead.",
+      "type": "object",
+      "required": ["text", "budgetTokens", "usedTokens", "omittedBlocks"],
+      "additionalProperties": false,
+      "properties": {
+        "text": { "type": "string" },
+        "budgetTokens": { "type": "integer", "minimum": 0 },
+        "usedTokens": { "type": "integer", "minimum": 0 },
+        "omittedBlocks": { "type": "integer", "minimum": 0 }
+      }
+    },
     "decisions": { "$ref": "#/$defs/component" },
     "learnGaps": { "$ref": "#/$defs/component" },
     "revivals": { "$ref": "#/$defs/component" },

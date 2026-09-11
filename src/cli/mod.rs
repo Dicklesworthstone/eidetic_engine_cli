@@ -2699,6 +2699,8 @@ pub enum DaemonCommand {
     /// the (now-dead) daemon.
     Stop(DaemonHotModeStopArgs),
     /// Install a user-scoped launchd/systemd/Windows-task unit for the team steward.
+    /// This does not start the hot search RPC daemon; use `ee daemon start`
+    /// for resident embeddings and `ee hook <harness> --install` for harness hooks.
     Install(DaemonServiceInstallArgs),
     /// Quarantine the user-scoped launchd/systemd/Windows-task unit.
     Uninstall(DaemonServiceUninstallArgs),
@@ -3223,7 +3225,7 @@ pub struct OrientArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Maximum token budget for the embedded read-only context pack.
+    /// Maximum token budget for embedded context; also bounds ambientContext.text with --fast --format hook.
     #[arg(long, short = 't', default_value_t = 4000)]
     pub max_tokens: u32,
 
@@ -15128,6 +15130,7 @@ fn hook_status_response_json(report: &crate::hooks::HarnessHookInstallReport) ->
             "settingsPath": &report.settings_path,
             "ambientContext": &report.ambient_context,
             "installAudit": &report.install_audit,
+            "lastInvocations": &report.last_invocations,
             "snippets": report.snippets.iter().map(|snippet| {
                 serde_json::json!({
                     "id": &snippet.id,
@@ -15169,6 +15172,16 @@ fn render_hook_harness_human(report: &crate::hooks::HarnessHookInstallReport) ->
         out.push_str(&format!("  plan {}: {}\n", item.action, item.reason));
     }
     out.push_str(&render_ambient_context_summary(report));
+    for invocation in &report.last_invocations {
+        out.push_str(&format!(
+            "  last {}: {} at {} ({} ms, {} bytes)\n",
+            invocation.surface,
+            invocation.outcome,
+            invocation.updated_at,
+            invocation.duration_ms,
+            invocation.emitted_bytes
+        ));
+    }
     for snippet in &report.snippets {
         out.push_str(&format!(
             "\n[{}] {}{}\n{}\n",
@@ -15200,6 +15213,16 @@ fn render_hook_status_human(report: &crate::hooks::HarnessHookInstallReport) -> 
         report.install_audit.hook_missing_count
     ));
     out.push_str(&render_ambient_context_summary(report));
+    for invocation in &report.last_invocations {
+        out.push_str(&format!(
+            "  last {}: {} at {} ({} ms, {} bytes)\n",
+            invocation.surface,
+            invocation.outcome,
+            invocation.updated_at,
+            invocation.duration_ms,
+            invocation.emitted_bytes
+        ));
+    }
     for finding in &report.install_audit.findings {
         out.push_str(&format!(
             "  finding [{}]: {} Repair: {}\n",
@@ -40458,6 +40481,10 @@ where
         data.insert("storeDiscovery".to_owned(), store_discovery);
     }
 
+    if args.fast && matches!(cli.renderer(), output::Renderer::Hook) {
+        data["ambientContext"] = orient_ambient_context(&data, &degraded, args.max_tokens);
+    }
+
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &render_orient_human(&data, &degraded))
@@ -40494,6 +40521,119 @@ fn orient_component_data_from_envelope(raw: &str) -> serde_json::Value {
         .ok()
         .and_then(|value| value.get("data").cloned())
         .unwrap_or(serde_json::Value::Null)
+}
+
+/// Budget the prompt text, rather than the diagnostic JSON containing it. A
+/// session hook must not lose all useful context because unrelated posture
+/// metadata exceeds the envelope governor's minimum (GH #35, #39).
+fn orient_ambient_context(
+    data: &serde_json::Value,
+    degraded: &[serde_json::Value],
+    budget: u32,
+) -> serde_json::Value {
+    let mut text = String::new();
+    let mut omitted = 0_u32;
+    let mut append = |block: String| {
+        let candidate = format!("{text}{block}\n");
+        if crate::pack::estimate_tokens_default(&candidate) <= budget {
+            text = candidate;
+            true
+        } else {
+            omitted = omitted.saturating_add(1);
+            false
+        }
+    };
+    append("## ee orientation (read-only)".to_owned());
+    if let Some(workspace) = data.get("workspace").and_then(serde_json::Value::as_str) {
+        append(format!("Workspace: {workspace}"));
+    }
+    let codes = degraded
+        .iter()
+        .chain(
+            data.pointer("/primer/degraded")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .filter_map(|entry| entry.get("code").and_then(serde_json::Value::as_str))
+        .collect::<BTreeSet<_>>();
+    if !codes.is_empty() {
+        append(format!(
+            "Observations: {}. Details: ee orient \"session start\" --fast --json.",
+            codes.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let provenance = |item: &serde_json::Value, id: &str| {
+        let uris = item
+            .get("provenance")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.get("uri").and_then(serde_json::Value::as_str))
+            .collect::<BTreeSet<_>>();
+        if uris.is_empty() {
+            format!("ee-mem://{id}")
+        } else {
+            uris.into_iter().collect::<Vec<_>>().join(", ")
+        }
+    };
+    // JSON primer lines carry the body only. Budget their redacted provenance
+    // together with the body, preserving global-store and original source URIs.
+    for section in data
+        .pointer("/primer/sections")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let name = section
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("primer");
+        for item in section
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let (Some(id), Some(line)) = (
+                item.get("memory_id").and_then(serde_json::Value::as_str),
+                item.get("line").and_then(serde_json::Value::as_str),
+            ) && !seen.contains(id)
+                && append(format!("- {name}: {line} [{}]", provenance(item, id)))
+            {
+                seen.insert(id);
+            }
+        }
+    }
+    for section in ["relevant", "recent"] {
+        for item in data
+            .get("fastContent")
+            .and_then(|content| content.get(section))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let (Some(id), Some(snippet), Some(why)) = (
+                item.get("id").and_then(serde_json::Value::as_str),
+                item.get("snippet").and_then(serde_json::Value::as_str),
+                item.get("why").and_then(serde_json::Value::as_str),
+            ) && !seen.contains(id)
+                && append(format!(
+                    "- {snippet}\n  Source: {}. Why: {why}",
+                    provenance(item, id)
+                ))
+            {
+                seen.insert(id);
+            }
+        }
+    }
+    serde_json::json!({
+        "text": text,
+        "budgetTokens": budget,
+        "usedTokens": crate::pack::estimate_tokens_default(&text),
+        "omittedBlocks": omitted,
+    })
 }
 
 fn orient_learn_gaps_value(
@@ -47436,16 +47576,15 @@ where
 
 const DAEMON_SEARCH_FALLBACK_CODE: &str = "daemon_search_fallback";
 #[cfg(unix)]
-const DAEMON_SEARCH_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const DAEMON_SEARCH_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Resolve the bounded deadline a `--use-daemon` search gives the daemon before
 /// falling back to canonical in-process search.
 ///
-/// GH #37: the default is deliberately short, because falling back is cheap
-/// *relative to blocking a human*. It is not cheap in absolute terms — the
-/// fallback reloads the tokenizer and the 512 MB embedding matrix in-process —
-/// so hosts with a slow disk or a loaded daemon need to be able to raise it
-/// rather than silently paying that cost on every invocation.
+/// GH #37: warm searches take about two seconds on multiple hosts. Five seconds
+/// leaves headroom for the capability exchange without routinely reloading the
+/// tokenizer and 512 MB matrix in the client. Missing sockets and warming
+/// daemons still fall back immediately; stalled peers remain bounded.
 #[cfg(unix)]
 fn daemon_search_attempt_timeout() -> std::time::Duration {
     daemon_search_attempt_timeout_from_env_value(
@@ -87739,6 +87878,14 @@ mod tests {
             &DAEMON_SEARCH_ATTEMPT_TIMEOUT,
             "absent override keeps the registered default",
         )?;
+        let registered_default = crate::config::env_registry::EnvVar::DaemonSearchTimeoutMs
+            .default_value()
+            .ok_or("daemon deadline must have a registered default")?;
+        ensure_equal(
+            &daemon_search_attempt_timeout_from_env_value(Some(registered_default)),
+            &DAEMON_SEARCH_ATTEMPT_TIMEOUT,
+            "runtime and documented defaults must agree",
+        )?;
         ensure_equal(
             &daemon_search_attempt_timeout_from_env_value(Some(" 7500 ")),
             &std::time::Duration::from_millis(7_500),
@@ -87752,6 +87899,51 @@ mod tests {
                 &DAEMON_SEARCH_ATTEMPT_TIMEOUT,
                 "rejected override falls back to the bounded default",
             )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn orient_ambient_context_preserves_evidence_under_unicode_and_tiny_budgets() -> TestResult {
+        let data = serde_json::json!({
+            "workspace": "/workspace",
+            "fastContent": {
+                "recent": [
+                    {"id": "mem_release", "snippet": "Verify release checksums.", "why": "Recent admitted memory."},
+                    {"id": "mem_local", "snippet": "Validate artifacts.", "why": "Recent admitted memory.", "provenance": [{"uri": "file://release-notes.md"}]}
+                ],
+                "relevant": [{"id": "mem_unicode", "snippet": "記憶🦀".repeat(100), "why": "Lexical match."}]
+            },
+            "primer": {"sections": [{"name": "rules", "items": [
+                {"memory_id": "mem_release", "line": "Verify release checksums.", "provenance": [{"uri": "ee-mem://ws_global/mem_release"}]}
+            ]}]}
+        });
+        for budget in [0, 1, 32, 128, 1072] {
+            let rendered = super::orient_ambient_context(&data, &[], budget);
+            let text = rendered["text"].as_str().ok_or("ambient text missing")?;
+            ensure(
+                crate::pack::estimate_tokens_default(text) <= budget,
+                "ambient text exceeds budget",
+            )?;
+            ensure_equal(
+                &rendered["usedTokens"],
+                &serde_json::json!(crate::pack::estimate_tokens_default(text)),
+                "token accounting",
+            )?;
+            if budget == 1072 {
+                ensure_contains(text, "Verify release checksums.", "useful memory retained")?;
+                ensure_contains(
+                    text,
+                    "ee-mem://ws_global/mem_release",
+                    "global memory provenance retained",
+                )?;
+                ensure_contains(text, "file://release-notes.md", "original source retained")?;
+                ensure_equal(
+                    &text.matches("Verify release checksums.").count(),
+                    &1,
+                    "primer/recent deduplication",
+                )?;
+            }
         }
         Ok(())
     }

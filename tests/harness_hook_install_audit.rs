@@ -3,13 +3,188 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
+#[cfg(unix)]
+use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::{Command, Output, Stdio};
 
 use ee::hooks::{HarnessHookInstallOptions, HarnessHookTarget, generate_harness_hook_install};
 use serde_json::Value;
 use tempfile::TempDir;
 
 type TestResult = Result<(), String>;
+
+#[cfg(unix)]
+fn isolated_command(program: &str, root: &Path) -> Command {
+    let mut command = Command::new(program);
+    command
+        .current_dir(root)
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env("EE_EMBED_MODEL_DIR", root.join("no-model"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_CACHE_HOME", root.join("cache"))
+        .env("EE_AMBIENT_CONTEXT", "true")
+        .env("EE_AMBIENT_CONTEXT_VERBOSITY", "standard")
+        .env("EE_AMBIENT_CONTEXT_STATE_DIR", root.join(".ee/hook-state"))
+        .env("RUST_LOG", "off");
+    command
+}
+
+#[cfg(unix)]
+fn successful(output: Output) -> Result<Value, String> {
+    if !output.status.success() {
+        return Err(format!(
+            "command failed: {:?}\nstdout: {}\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        format!(
+            "invalid JSON: {error}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_session_hook_delivers_context_and_records_runtime_outcomes() -> TestResult {
+    let temp = TempDir::new().map_err(|error| error.to_string())?;
+    let root = temp.path();
+    let binary = env!("CARGO_BIN_EXE_ee");
+    successful(
+        isolated_command(binary, root)
+            .args(["init", "--workspace", ".", "--json"])
+            .output()
+            .map_err(|error| error.to_string())?,
+    )?;
+    for content in [
+        "Verify release checksums before publishing.",
+        "Run release tests on the target host.",
+        "Keep release artifacts reproducible.",
+    ] {
+        successful(
+            isolated_command(binary, root)
+                .args([
+                    "remember",
+                    content,
+                    "--workspace",
+                    ".",
+                    "--level",
+                    "procedural",
+                    "--kind",
+                    "rule",
+                    "--source",
+                    "file://release-notes.md",
+                    "--json",
+                ])
+                .output()
+                .map_err(|error| error.to_string())?,
+        )?;
+    }
+    let settings = root.join("hooks.json");
+    let mut install = options(HarnessHookTarget::Codex, &settings, true, false);
+    install.ee_binary_path = Some(PathBuf::from(binary));
+    let report = generate_harness_hook_install(&install).map_err(|error| error.message())?;
+    let snippet = report
+        .snippets
+        .iter()
+        .find(|snippet| snippet.event == "SessionStart")
+        .ok_or("SessionStart snippet missing")?;
+    let invoke = |command: &str, session: &str| -> Result<Output, String> {
+        let mut child = isolated_command("sh", root)
+            .args(["-c", command])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        let event = serde_json::json!({"cwd": root, "session_id": session, "task": "prepare release", "hook_event_name": "SessionStart"});
+        child
+            .stdin
+            .take()
+            .ok_or("missing stdin")?
+            .write_all(event.to_string().as_bytes())
+            .map_err(|error| error.to_string())?;
+        child.wait_with_output().map_err(|error| error.to_string())
+    };
+    let response = successful(invoke(&snippet.command, "first")?)?;
+    let context = response["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .ok_or("hook must inject context")?;
+    assert!(
+        context.contains("Verify release checksums"),
+        "actual stored rule must reach the hook: {context}"
+    );
+    assert!(
+        context.contains("file://release-notes.md"),
+        "context must preserve original source provenance"
+    );
+    assert!(
+        !context.contains("output_budget_unsatisfiable"),
+        "hook must not inject a withheld-payload diagnostic"
+    );
+    assert!(
+        ee::pack::estimate_tokens_default(context) <= 1200,
+        "full injected context, including header, must fit the installed budget"
+    );
+    let state_path = root.join(".ee/hook-state/session_start_orient.last.json");
+    let state: Value =
+        serde_json::from_slice(&fs::read(&state_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    assert_eq!(state["outcome"], "emitted");
+    assert_eq!(state["emittedBytes"], context.len());
+    let duplicate = invoke(&snippet.command, "first")?;
+    assert!(duplicate.status.success());
+    assert!(
+        duplicate.stdout.is_empty(),
+        "same-session context must be deduplicated"
+    );
+
+    // A real exec failure must remain fail-open but be visible even though
+    // the installed settings still contain the fresh, working snippet.
+    let mut broken = install.clone();
+    broken.install = false;
+    broken.ee_binary_path = Some(root.join("missing-ee"));
+    let broken_report = generate_harness_hook_install(&broken).map_err(|error| error.message())?;
+    let broken_command = &broken_report
+        .snippets
+        .iter()
+        .find(|snippet| snippet.event == "SessionStart")
+        .ok_or("broken test snippet missing")?
+        .command;
+    let failed = invoke(broken_command, "second")?;
+    assert!(
+        failed.status.success(),
+        "hook failures must leave the harness running"
+    );
+    assert!(failed.stdout.is_empty());
+    let audit = successful(
+        isolated_command(binary, root)
+            .args(["hook", "status", "--settings-path"])
+            .arg(&settings)
+            .args(["--ee-binary", binary, "--json"])
+            .output()
+            .map_err(|error| error.to_string())?,
+    )?;
+    assert_eq!(audit["data"]["installAudit"]["status"], "fresh");
+    assert!(
+        audit["data"]["installAudit"]["findings"]
+            .as_array()
+            .ok_or("missing findings")?
+            .iter()
+            .any(|finding| finding["code"] == "hook_invocation_failed")
+    );
+    assert_eq!(
+        audit["data"]["lastInvocations"][0]["outcome"],
+        "command_error"
+    );
+    Ok(())
+}
 
 fn options(
     target: HarnessHookTarget,

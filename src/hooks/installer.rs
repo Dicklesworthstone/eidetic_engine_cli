@@ -1391,6 +1391,19 @@ pub struct HarnessHookInstallAuditReport {
     pub docs: Vec<HarnessHookInstallAuditDocLink>,
 }
 
+/// Last observed invocation, distinct from whether the installed snippet is fresh.
+/// Contains no recalled content, commands, or subprocess stderr.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessHookInvocation {
+    pub surface: String,
+    pub outcome: String,
+    pub updated_at: String,
+    pub duration_ms: u64,
+    pub emitted_bytes: u64,
+    pub degraded_codes: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessHookInstallReport {
@@ -1410,6 +1423,8 @@ pub struct HarnessHookInstallReport {
     pub plan: Vec<HarnessHookPlanItem>,
     pub capability_gaps: Vec<HarnessHookCapabilityGap>,
     pub install_audit: HarnessHookInstallAuditReport,
+    #[serde(default)]
+    pub last_invocations: Vec<HarnessHookInvocation>,
     pub generated_at: String,
 }
 
@@ -1715,8 +1730,9 @@ pub fn generate_harness_hook_install(
         }
     }
 
-    let install_audit =
+    let mut install_audit =
         audit_harness_hook_install(options.target, settings_path.as_deref(), &snippets);
+    let last_invocations = read_harness_hook_invocations(&options.workspace, &mut install_audit);
 
     Ok(HarnessHookInstallReport {
         schema: HARNESS_HOOK_INSTALL_SCHEMA_V1.to_owned(),
@@ -1742,8 +1758,90 @@ pub fn generate_harness_hook_install(
         plan,
         capability_gaps,
         install_audit,
+        last_invocations,
         generated_at: Utc::now().to_rfc3339(),
     })
+}
+
+fn read_harness_hook_invocations(
+    workspace: &Path,
+    audit: &mut HarnessHookInstallAuditReport,
+) -> Vec<HarnessHookInvocation> {
+    let root = crate::config::env_registry::read_os(
+        crate::config::env_registry::EnvVar::AmbientContextStateDir,
+    )
+    .filter(|value| !value.is_empty())
+    .map(PathBuf::from)
+    .unwrap_or_else(|| PathBuf::from(".ee/hook-state"));
+    let root = if root.is_absolute() {
+        root
+    } else {
+        workspace.join(root)
+    };
+    let mut invocations = Vec::new();
+    for surface in ["session_start_orient", "pre_edit_recall"] {
+        let path = root.join(format!("{surface}.last.json"));
+        let read = || -> Option<HarnessHookInvocation> {
+            let metadata = fs::symlink_metadata(&path).ok()?;
+            if !metadata.is_file() || metadata.len() > 16_384 {
+                return None;
+            }
+            let mut bytes = Vec::new();
+            fs::File::open(&path)
+                .ok()?
+                .take(16_385)
+                .read_to_end(&mut bytes)
+                .ok()?;
+            let item: HarnessHookInvocation = serde_json::from_slice(&bytes).ok()?;
+            if item.surface != surface
+                || !matches!(
+                    item.outcome.as_str(),
+                    "emitted"
+                        | "duplicate"
+                        | "empty"
+                        | "timeout"
+                        | "command_error"
+                        | "invalid_response"
+                )
+                || chrono::DateTime::parse_from_rfc3339(&item.updated_at).is_err()
+                || item.degraded_codes.iter().any(|code| {
+                    code.len() > 128
+                        || !code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                })
+            {
+                return None;
+            }
+            Some(item)
+        };
+        if let Some(item) = read() {
+            if matches!(
+                item.outcome.as_str(),
+                "timeout" | "command_error" | "invalid_response"
+            ) {
+                audit.findings.push(HarnessHookInstallAuditFinding {
+                    code: "hook_invocation_failed".to_owned(),
+                    status: "invocation_failed".to_owned(),
+                    event: Some(surface.to_owned()),
+                    matcher: None,
+                    target_path: Some(path.display().to_string()),
+                    message: format!("Last {surface} invocation at {}: {} after {} ms; emitted {} bytes.", item.updated_at, item.outcome, item.duration_ms, item.emitted_bytes),
+                    repair: "Run the underlying recall/orient command in this workspace; inspect its JSON response and refresh stale hooks.".to_owned(),
+                });
+            }
+            invocations.push(item);
+        } else if path.exists() {
+            audit.findings.push(HarnessHookInstallAuditFinding {
+                code: "hook_invocation_unreadable".to_owned(),
+                status: "unknown".to_owned(),
+                event: Some(surface.to_owned()),
+                matcher: None,
+                target_path: Some(path.display().to_string()),
+                message: format!("Last {surface} invocation state is unreadable; installation freshness does not establish runtime health."),
+                repair: "Retry hook status after the current invocation finishes; inspect hook-state permissions if this persists.".to_owned(),
+            });
+        }
+    }
+    invocations
 }
 
 fn default_harness_settings_path(target: HarnessHookTarget, workspace: &Path) -> Option<PathBuf> {
@@ -2411,7 +2509,7 @@ fn harness_hook_snippets(target: HarnessHookTarget, ee_binary: &Path) -> Vec<Har
             timeout_seconds: 10,
             async_hook: false,
             installable: true,
-            purpose: "Inject a bounded SessionStart `ee orient \"session start\" --include-primer --fast --json` bundle with primer and swarm posture; suppress duplicate session output and quiet verbosity.".to_owned(),
+            purpose: "Inject token-bounded, provenance-bearing SessionStart orientation through `ee orient --include-primer --fast --format hook`; record invocation outcomes and suppress duplicate session output and quiet verbosity.".to_owned(),
         },
         HarnessHookSnippet {
             id: "ee-ambient-session-capture-suggest".to_owned(),
@@ -2427,11 +2525,31 @@ fn harness_hook_snippets(target: HarnessHookTarget, ee_binary: &Path) -> Vec<Har
 }
 
 fn python_hook_command(script: &str, ee_binary: &Path) -> String {
+    let script = format!("{}\n{script}", python_invocation_recorder());
     format!(
         "python3 -c {} {}",
-        shell_quote_str(script),
+        shell_quote_str(&script),
         shell_quote(ee_binary)
     )
+}
+
+fn python_invocation_recorder() -> &'static str {
+    r#"import datetime, json, os, time
+_ee_started = time.monotonic()
+def _ee_state_root():
+    cwd = data.get("cwd") or os.getcwd()
+    root = os.environ.get("EE_AMBIENT_CONTEXT_STATE_DIR") or os.path.join(".ee", "hook-state")
+    return root if os.path.isabs(root) else os.path.join(cwd, root)
+def _ee_record_invocation(outcome, emitted_bytes=0, degraded_codes=None):
+    try:
+        root = _ee_state_root()
+        os.makedirs(root, exist_ok=True)
+        record = {"surface": SURFACE, "outcome": outcome, "updatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(), "durationMs": int((time.monotonic() - _ee_started) * 1000), "emittedBytes": emitted_bytes, "degradedCodes": degraded_codes or []}
+        with open(os.path.join(root, SURFACE + ".last.json"), "w", encoding="utf-8") as f:
+            json.dump(record, f, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        pass
+"#
 }
 
 fn pre_edit_python() -> &'static str {
@@ -2449,6 +2567,8 @@ try:
     data = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
+if not isinstance(data, dict):
+    sys.exit(0)
 def ambient_enabled():
     value = os.environ.get("EE_AMBIENT_CONTEXT", "true").strip().lower()
     return value not in ("0", "false", "off", "no", "disable", "disabled")
@@ -2463,9 +2583,8 @@ VERBOSITY = ambient_verbosity()
 BUDGET = {"quiet": QUIET_BUDGET, "standard": DEFAULT_BUDGET, "verbose": VERBOSE_BUDGET}[VERBOSITY]
 MAX_PATHS = {"quiet": QUIET_MAX_PATHS, "standard": DEFAULT_MAX_PATHS, "verbose": VERBOSE_MAX_PATHS}[VERBOSITY]
 def state_path():
-    cwd = data.get("cwd") or os.getcwd()
-    root = os.environ.get("EE_AMBIENT_CONTEXT_STATE_DIR") or os.path.join(cwd, ".ee", "hook-state")
     try:
+        root = _ee_state_root()
         os.makedirs(root, exist_ok=True)
     except Exception:
         return None
@@ -2474,11 +2593,14 @@ def already_seen(text):
     path = state_path()
     if not path:
         return False
-    key = SURFACE + ":" + hashlib.blake2s(text.encode("utf-8"), digest_size=16).hexdigest()
+    session = str(data.get("session_id") or data.get("sessionId") or "default")
+    key = SURFACE + ":" + session + ":" + hashlib.blake2s(text.encode("utf-8"), digest_size=16).hexdigest()
     try:
         with open(path, "r", encoding="utf-8") as f:
             seen = json.load(f)
     except Exception:
+        seen = {}
+    if not isinstance(seen, dict):
         seen = {}
     if seen.get(key):
         return True
@@ -2491,10 +2613,12 @@ def already_seen(text):
     return False
 def emit(text):
     if already_seen(text):
+        _ee_record_invocation("duplicate")
         return
     header = f"<!-- ee ambient_context schema={SCHEMA} surface={SURFACE} budgetTokens={BUDGET} maxPaths={MAX_PATHS} verbosity={VERBOSITY} provenance=ee:{SCHEMA} -->"
     payload = {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name") or "PreToolUse", "additionalContext": header + "\n" + text}}
     print(json.dumps(payload, separators=(",", ":")))
+    _ee_record_invocation("emitted", len(payload["hookSpecificOutput"]["additionalContext"].encode("utf-8")))
 tool_input = data.get("tool_input") or {}
 if not isinstance(tool_input, dict):
     sys.exit(0)
@@ -2503,7 +2627,12 @@ for key in ("file_path", "path", "notebook_path"):
     value = tool_input.get(key)
     if isinstance(value, str) and value:
         paths.append(value)
-for edit in tool_input.get("edits") or []:
+edits = tool_input.get("edits")
+if edits is None:
+    edits = []
+if not isinstance(edits, list):
+    sys.exit(0)
+for edit in edits:
     if isinstance(edit, dict):
         value = edit.get("file_path") or edit.get("path")
         if isinstance(value, str) and value:
@@ -2519,11 +2648,16 @@ for path in seen[:MAX_PATHS]:
     cmd.extend(["--path", path])
 cmd.extend(["--budget-tokens", str(BUDGET), "--format", "markdown"])
 try:
-    result = subprocess.run(cmd, cwd=data.get("cwd") or None, text=True, capture_output=True, timeout=10)
+    result = subprocess.run(cmd, cwd=data.get("cwd") or None, text=True, capture_output=True, timeout=9)
+except subprocess.TimeoutExpired:
+    _ee_record_invocation("timeout")
+    sys.exit(0)
 except Exception:
+    _ee_record_invocation("command_error")
     sys.exit(0)
 text = result.stdout.strip()
 if result.returncode != 0 or not text:
+    _ee_record_invocation("command_error" if result.returncode != 0 else "empty")
     sys.exit(0)
 emit(text)
 "#
@@ -2540,6 +2674,8 @@ try:
     data = json.load(sys.stdin)
 except Exception:
     data = {}
+if not isinstance(data, dict):
+    sys.exit(0)
 def ambient_enabled():
     value = os.environ.get("EE_AMBIENT_CONTEXT", "true").strip().lower()
     return value not in ("0", "false", "off", "no", "disable", "disabled")
@@ -2555,9 +2691,8 @@ if VERBOSITY == "quiet":
     sys.exit(0)
 BUDGET = VERBOSE_BUDGET if VERBOSITY == "verbose" else DEFAULT_BUDGET
 def state_path():
-    cwd = data.get("cwd") or os.getcwd()
-    root = os.environ.get("EE_AMBIENT_CONTEXT_STATE_DIR") or os.path.join(cwd, ".ee", "hook-state")
     try:
+        root = _ee_state_root()
         os.makedirs(root, exist_ok=True)
     except Exception:
         return None
@@ -2574,6 +2709,8 @@ def already_seen(text):
             seen = json.load(f)
     except Exception:
         seen = {}
+    if not isinstance(seen, dict):
+        seen = {}
     if seen.get(key):
         return True
     seen[key] = True
@@ -2584,17 +2721,41 @@ def already_seen(text):
         pass
     return False
 task = str(data.get("task") or data.get("prompt") or "session start")[:240]
-cmd = [ee, "--max-output-tokens", str(BUDGET), "orient", task, "--workspace", ".", "--include-primer", "--fast", "--json"]
+# Budget the actual prompt, reserving room for the provenance header below.
+# The diagnostic envelope is parsed, never injected into the agent's context.
+cmd = [ee, "orient", task, "--workspace", ".", "--include-primer", "--fast", "--candidate-pool", "20", "--format", "hook", "--fields", "command,ambientContext", "--max-tokens", str(BUDGET - 128)]
 try:
-    result = subprocess.run(cmd, cwd=data.get("cwd") or None, text=True, capture_output=True, timeout=10)
+    result = subprocess.run(cmd, cwd=data.get("cwd") or None, text=True, capture_output=True, timeout=9)
+except subprocess.TimeoutExpired:
+    _ee_record_invocation("timeout")
+    sys.exit(0)
 except Exception:
+    _ee_record_invocation("command_error")
     sys.exit(0)
-text = result.stdout.strip()
-if result.returncode != 0 or not text or already_seen(text):
+if result.returncode != 0:
+    _ee_record_invocation("command_error")
     sys.exit(0)
-header = f"<!-- ee ambient_context schema={SCHEMA} surface={SURFACE} budgetTokens={BUDGET} verbosity={VERBOSITY} provenance=ee:{SCHEMA} -->"
+try:
+    response = json.loads(result.stdout)
+    if response.get("success") is not True:
+        raise ValueError("unsuccessful response")
+    context = response["data"]["ambientContext"]
+    text = context["text"].strip()
+    omitted = int(context["omittedBlocks"])
+    codes = sorted({entry["code"] for entry in response.get("degraded", []) if isinstance(entry.get("code"), str)})
+except Exception:
+    _ee_record_invocation("invalid_response")
+    sys.exit(0)
+if not text:
+    _ee_record_invocation("empty", degraded_codes=codes)
+    sys.exit(0)
+if already_seen(text):
+    _ee_record_invocation("duplicate", degraded_codes=codes)
+    sys.exit(0)
+header = f"<!-- ee ambient_context schema={SCHEMA} surface={SURFACE} budgetTokens={BUDGET} omittedBlocks={omitted} verbosity={VERBOSITY} provenance=ee:{SCHEMA} -->"
 payload = {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name") or "SessionStart", "additionalContext": header + "\n" + text}}
 print(json.dumps(payload, separators=(",", ":")))
+_ee_record_invocation("emitted", len(payload["hookSpecificOutput"]["additionalContext"].encode("utf-8")), codes)
 "#
 }
 
@@ -2608,6 +2769,8 @@ try:
     data = json.load(sys.stdin)
 except Exception:
     data = {}
+if not isinstance(data, dict):
+    sys.exit(0)
 def ambient_enabled():
     value = os.environ.get("EE_AMBIENT_CONTEXT", "true").strip().lower()
     return value not in ("0", "false", "off", "no", "disable", "disabled")
@@ -2619,9 +2782,8 @@ def ambient_verbosity():
 if not ambient_enabled() or ambient_verbosity() == "quiet":
     sys.exit(0)
 def state_path():
-    cwd = data.get("cwd") or os.getcwd()
-    root = os.environ.get("EE_AMBIENT_CONTEXT_STATE_DIR") or os.path.join(cwd, ".ee", "hook-state")
     try:
+        root = _ee_state_root()
         os.makedirs(root, exist_ok=True)
     except Exception:
         return None
@@ -2637,6 +2799,8 @@ def already_seen(text):
         with open(path, "r", encoding="utf-8") as f:
             seen = json.load(f)
     except Exception:
+        seen = {}
+    if not isinstance(seen, dict):
         seen = {}
     if seen.get(key):
         return True
@@ -4489,7 +4653,8 @@ mod tests {
         assert!(session_start.contains("EE_AMBIENT_CONTEXT"));
         assert!(session_start.contains("EE_AMBIENT_CONTEXT_VERBOSITY"));
         assert!(session_start.contains("if VERBOSITY == \"quiet\":"));
-        assert!(session_start.contains("--max-output-tokens"));
+        assert!(session_start.contains("--max-tokens"));
+        assert!(session_start.contains("command,ambientContext"));
         assert!(session_start.contains("--include-primer"));
         assert!(session_start.contains("already_seen(text)"));
         assert!(session_start.contains("provenance=ee:{SCHEMA}"));
@@ -4512,7 +4677,7 @@ mod tests {
     fn run_python_snippet_exit_code(script: &str, stdin_json: &str) -> Option<i32> {
         let mut child = Command::new("python3")
             .arg("-c")
-            .arg(script)
+            .arg(format!("{}\n{script}", python_invocation_recorder()))
             .arg("/nonexistent/ee-binary")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -4547,6 +4712,144 @@ mod tests {
         );
         // Guard text must be present so the fail-open path can't silently regress.
         assert!(pre_edit_python().contains("if not isinstance(tool_input, dict):"));
+    }
+
+    #[test]
+    fn ambient_hooks_fail_open_on_non_object_events() {
+        for script in [
+            pre_edit_python(),
+            session_start_python(),
+            session_end_capture_python(),
+        ] {
+            for event in ["[]", "null", "42", "\"unexpected\""] {
+                assert_eq!(run_python_snippet_exit_code(script, event), Some(0));
+            }
+        }
+    }
+
+    fn run_python_hook_state_probe(
+        script: &str,
+        event: &serde_json::Value,
+        launcher: &Path,
+    ) -> Result<std::process::Output, String> {
+        let mut child = Command::new("python3")
+            .arg("-c")
+            .arg(format!("{}\n{script}", python_invocation_recorder()))
+            .arg(launcher.join("missing-ee"))
+            .current_dir(launcher)
+            .env("EE_AMBIENT_CONTEXT", "true")
+            .env("EE_AMBIENT_CONTEXT_VERBOSITY", "standard")
+            .env("EE_AMBIENT_CONTEXT_STATE_DIR", "relative-state")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("spawn Python hook probe: {error}"))?;
+        child
+            .stdin
+            .take()
+            .ok_or("hook probe stdin missing")?
+            .write_all(event.to_string().as_bytes())
+            .map_err(|error| format!("write hook probe event: {error}"))?;
+        let output = child
+            .wait_with_output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "hook probe failed: {}\nstdout: {}\nstderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(output)
+    }
+
+    #[test]
+    fn pre_edit_hook_fails_open_on_malformed_edits() -> TestResult {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        for edits in [
+            serde_json::json!(1),
+            serde_json::json!("patch"),
+            serde_json::json!({}),
+        ] {
+            let event = serde_json::json!({"tool_input": {"edits": edits}});
+            let output = run_python_hook_state_probe(pre_edit_python(), &event, temp.path())?;
+            assert!(output.stdout.is_empty());
+            assert!(output.stderr.is_empty());
+            assert!(
+                !temp.path().join("relative-state").exists(),
+                "invalid edit events must return before attempting EE or writing invocation state"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ambient_hook_dedup_recovers_malformed_state_and_keeps_session_scope() -> TestResult {
+        for (script, stop_before) in [
+            (
+                pre_edit_python(),
+                "tool_input = data.get(\"tool_input\") or {}",
+            ),
+            (session_start_python(), "task = str(data.get(\"task\")"),
+            (session_end_capture_python(), "cmd = [ee, \"capture\""),
+        ] {
+            // Execute the actual helper definitions, stopping before the EE
+            // subprocess. This tests Python state handling, not recalled output.
+            let prefix = script
+                .split_once(stop_before)
+                .ok_or("hook probe boundary missing")?
+                .0;
+            let probe = format!(
+                "{prefix}\nassert already_seen('memory') is False\nassert already_seen('memory') is True\ndata['session_id'] = 'next-session'\nassert already_seen('memory') is False\n"
+            );
+            for malformed in ["[]", "null", "42", "\"unexpected\""] {
+                let temp = TempDir::new().map_err(|error| error.to_string())?;
+                let workspace = temp.path().join("workspace");
+                let state = workspace.join("relative-state");
+                fs::create_dir_all(&state).map_err(|error| error.to_string())?;
+                let seen_path = state.join("ambient_context_seen.json");
+                fs::write(&seen_path, malformed).map_err(|error| error.to_string())?;
+                let event = serde_json::json!({"cwd": workspace, "session_id": "first-session"});
+                let output = run_python_hook_state_probe(&probe, &event, temp.path())?;
+                assert!(output.stdout.is_empty());
+                assert!(output.stderr.is_empty());
+                let seen: serde_json::Value = serde_json::from_slice(
+                    &fs::read(&seen_path).map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| error.to_string())?;
+                assert_eq!(seen.as_object().map(|entries| entries.len()), Some(2));
+                assert!(
+                    !temp.path().join("relative-state").exists(),
+                    "dedup state must use the event workspace, not launcher cwd"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ambient_hook_invocation_relative_state_uses_event_workspace() -> TestResult {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let event = serde_json::json!({"cwd": workspace, "session_id": "probe"});
+        // The complete generated script attempts a genuinely absent binary.
+        // It must fail open while recording that failure at the audit reader's
+        // workspace-relative path, with no fabricated successful EE response.
+        let output = run_python_hook_state_probe(session_start_python(), &event, temp.path())?;
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        let state_path = workspace.join("relative-state/session_start_orient.last.json");
+        let state: HarnessHookInvocation =
+            serde_json::from_slice(&fs::read(&state_path).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        assert_eq!(state.surface, "session_start_orient");
+        assert_eq!(state.outcome, "command_error");
+        assert_eq!(state.emitted_bytes, 0);
+        assert!(!temp.path().join("relative-state").exists());
+        Ok(())
     }
 
     #[test]

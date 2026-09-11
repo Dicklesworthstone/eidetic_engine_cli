@@ -983,7 +983,7 @@ impl EnvVar {
             Self::McpMaxRequestBytes => Some("16777216"),
             Self::DaemonEnableEcho => Some("false"),
             Self::DaemonMaxInflight => Some("32"),
-            Self::DaemonSearchTimeoutMs => Some("2000"),
+            Self::DaemonSearchTimeoutMs => Some("5000"),
             Self::DaemonWarm => Some("on"),
             Self::DisableAdaptive => Some("false"),
             Self::CassTimeoutSecs => Some("30"),
