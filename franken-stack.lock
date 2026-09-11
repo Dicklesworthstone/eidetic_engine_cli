@@ -6,10 +6,12 @@
 # FrankenNetworkX 0.2.1, agent detection 0.2.3, SQLModel 0.4.3, and Tru 0.2.4.
 # Asupersync stays on the v0.4.10 release to satisfy ee's exact runtime pin.
 # Its local patch must remain selected instead of falling back to crates.io.
+# FrankenSQLite includes the minimal non-Unix identity accessor build fix,
+# backported onto the selected 0.3.18 snapshot without later storage changes.
 asupersync	997e8d116ae864789f2cb47be90bfd4be5985c4f
 franken_agent_detection	1b0a14e19550581300e813a8a424083171fd18d2
 franken_networkx	6809c573a99e79497a43aa5a7c77fb2b0f9e2fc8
 frankensearch	a792d88b5f7f1291593493d4dbed629edea14bef
-frankensqlite	429d89057d2e11b83d43470172a9039eb8473b4d
+frankensqlite	043cc64c02d87bf57be459e1793d2499ceb5acee
 sqlmodel_rust	80feaa267c0e52966da7c9197f57866e36b2a886
 toon_rust	ab5c29b372ba6d39baf0f3071d7247ca3c72bc9c
