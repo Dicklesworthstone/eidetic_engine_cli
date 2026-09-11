@@ -8,10 +8,12 @@
 # Its local patch must remain selected instead of falling back to crates.io.
 # FrankenSQLite includes the non-Unix identity accessor fix and bounded inline
 # Windows I/O, backported onto 0.3.18 without unrelated later storage changes.
+# Frankensearch embeds the 0.2.7 streamed/shared Model2Vec loader. Its producer
+# identity changed; existing strict semantic indexes may require rebuilding.
 asupersync	997e8d116ae864789f2cb47be90bfd4be5985c4f
 franken_agent_detection	1b0a14e19550581300e813a8a424083171fd18d2
 franken_networkx	6809c573a99e79497a43aa5a7c77fb2b0f9e2fc8
-frankensearch	a792d88b5f7f1291593493d4dbed629edea14bef
+frankensearch	4ea318c01c98d1e55fbd62bab8c660b434c176d7
 frankensqlite	3a59109d8327c4a1e92e07c286eb2bd4185b0f5a
 sqlmodel_rust	80feaa267c0e52966da7c9197f57866e36b2a886
 toon_rust	ab5c29b372ba6d39baf0f3071d7247ca3c72bc9c
