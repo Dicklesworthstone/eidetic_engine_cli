@@ -66,6 +66,23 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
+- SessionStart hooks inject token-bounded rule and memory text with provenance,
+  preserve session deduplication, and expose invocation outcomes separately from
+  installation freshness in `ee hook status`. Missing Python or EE processes
+  fail open (#35, #39). Reinstall managed hooks to update existing snippets.
+- The default daemon search attempt deadline is five seconds; the
+  `EE_DAEMON_SEARCH_TIMEOUT_MS` override and local fallback remain available
+  (#37).
+- The pinned Frankensearch Model2Vec loader streams weight decoding to avoid
+  retaining a second full weight-file buffer. **Run `ee index rebuild --workspace
+  .` after upgrading**: existing vector indexes bind the previous producer
+  identity and cannot be reused. Persistent tokenizer caching remains upstream
+  work (#37).
+- Integration tests use 39 executable targets instead of 515, preserving all
+  512 root test files and separate executables for process-isolated tests.
+  Grouped tests run through `cargo test --test integration_<range> <module>::`;
+  verification scripts and profile recipes use those targets (#28).
+
 ## [0.14.5] - 2026-09-11
 
 Published from `214f1ed009481a5e99824d2e16350aebd934a5f9`. All six archive
