@@ -16299,38 +16299,52 @@ mod tests {
         )
     }
 
+    fn artifact_verification_fixture()
+    -> Result<(TempDir, PathBuf, BackupCreateReport, JsonValue), String> {
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let report = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: None,
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let verified = verify_backup(&BackupVerifyOptions {
+            workspace_path: workspace.clone(),
+            backup_path: PathBuf::from(&report.backup_path),
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            verified.status.as_str(),
+            "verified",
+            "fixture verifies before mutation",
+        )?;
+        let manifest = serde_json::from_slice(
+            &fs::read(&report.manifest_path).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok((tempdir, workspace, report, manifest))
+    }
+
     #[test]
     fn verify_backup_fails_required_artifact_without_hash() -> TestResult {
-        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let backup_path = tempdir.path().join("backup");
-        fs::create_dir_all(&backup_path).map_err(|error| error.to_string())?;
-        let records_payload = b"{\"schema\":\"ee.export.header.v1\"}\n";
-        fs::write(backup_path.join(RECORDS_FILE), records_payload)
-            .map_err(|error| error.to_string())?;
-        let mut manifest = json!({
-            "schema": BACKUP_MANIFEST_SCHEMA_V1,
-            "backupId": BackupId::now().to_string(),
-            "workspace": { "id": WorkspaceId::now().to_string() },
-            "artifacts": [{
-                "path": RECORDS_FILE,
-                "kind": "jsonl_export",
-                "sizeBytes": records_payload.len(),
-                "required": true,
-            }],
-        });
-        // Reach the artifact check through a valid authenticated manifest;
-        // otherwise a missing MAC would reject before this test's subject.
-        let root = StoreAuthRoot::open_or_create(workspace_keys_dir(tempdir.path()))
-            .map_err(|error| error.message())?;
+        let (_tempdir, workspace, report, mut manifest) = artifact_verification_fixture()?;
+        manifest["artifacts"][0]["hash"] = JsonValue::Null;
+        // Re-sign to exercise the artifact check past the manifest-auth gate.
+        let root =
+            StoreAuthRoot::open(workspace_keys_dir(&workspace)).map_err(|error| error.message())?;
         authenticate_backup_manifest(&mut manifest, &root).map_err(|error| error.message())?;
         let manifest_bytes =
             serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
-        fs::write(backup_path.join(MANIFEST_FILE), manifest_bytes)
-            .map_err(|error| error.to_string())?;
+        fs::write(&report.manifest_path, manifest_bytes).map_err(|error| error.to_string())?;
 
         let verified = verify_backup(&BackupVerifyOptions {
-            workspace_path: tempdir.path().to_path_buf(),
-            backup_path,
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&report.backup_path),
         })
         .map_err(|error| error.message())?;
 
@@ -16345,45 +16359,22 @@ mod tests {
 
     #[test]
     fn verify_backup_fails_derived_asset_without_hash() -> TestResult {
-        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let backup_path = tempdir.path().join("backup");
-        let derived_path = "derived/wal_holds.json";
-        fs::create_dir_all(backup_path.join("derived")).map_err(|error| error.to_string())?;
-        let records_payload = b"{\"schema\":\"ee.export.header.v1\"}\n";
-        let derived_payload = b"{\"present\":false,\"rowCount\":0}\n";
-        fs::write(backup_path.join(RECORDS_FILE), records_payload)
-            .map_err(|error| error.to_string())?;
-        fs::write(backup_path.join(derived_path), derived_payload)
-            .map_err(|error| error.to_string())?;
-        let mut manifest = json!({
-            "schema": BACKUP_MANIFEST_SCHEMA_V2,
-            "backupId": BackupId::now().to_string(),
-            "workspace": { "id": WorkspaceId::now().to_string() },
-            "artifacts": [{
-                "path": RECORDS_FILE,
-                "kind": "jsonl_export",
-                "hash": hash_bytes(records_payload),
-                "sizeBytes": records_payload.len(),
-                "required": true,
-            }],
-            "derived": [{
-                "path": derived_path,
-                "kind": "wal_holds",
-                "byte_size": derived_payload.len(),
-                "captured_at": "2026-05-25T00:00:00Z",
-            }],
-        });
-        let root = StoreAuthRoot::open_or_create(workspace_keys_dir(tempdir.path()))
-            .map_err(|error| error.message())?;
+        let (_tempdir, workspace, report, mut manifest) = artifact_verification_fixture()?;
+        let derived_path = manifest["derived"][0]["path"]
+            .as_str()
+            .ok_or("fixture has no durable history asset")?
+            .to_owned();
+        manifest["derived"][0]["hash"] = JsonValue::Null;
+        let root =
+            StoreAuthRoot::open(workspace_keys_dir(&workspace)).map_err(|error| error.message())?;
         authenticate_backup_manifest(&mut manifest, &root).map_err(|error| error.message())?;
         let manifest_bytes =
             serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
-        fs::write(backup_path.join(MANIFEST_FILE), manifest_bytes)
-            .map_err(|error| error.to_string())?;
+        fs::write(&report.manifest_path, manifest_bytes).map_err(|error| error.to_string())?;
 
         let verified = verify_backup(&BackupVerifyOptions {
-            workspace_path: tempdir.path().to_path_buf(),
-            backup_path,
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&report.backup_path),
         })
         .map_err(|error| error.message())?;
 
@@ -16391,7 +16382,7 @@ mod tests {
         ensure(
             verified.issues.iter().any(|issue| {
                 issue.code == "derived_asset_hash_missing"
-                    && issue.path.as_deref() == Some(derived_path)
+                    && issue.path.as_deref() == Some(derived_path.as_str())
             }),
             "verify must fail closed when derived asset hash is absent",
         )
@@ -16554,37 +16545,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn verify_backup_rejects_symlink_artifact_path() -> TestResult {
-        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let backup_path = tempdir.path().join("backup");
-        fs::create_dir_all(&backup_path).map_err(|error| error.to_string())?;
+        let (tempdir, workspace, report, _manifest) = artifact_verification_fixture()?;
         let outside_records = tempdir.path().join("outside-records.jsonl");
-        let records_payload = b"{\"schema\":\"ee.export.header.v1\"}\n";
-        fs::write(&outside_records, records_payload).map_err(|error| error.to_string())?;
-        std::os::unix::fs::symlink(&outside_records, backup_path.join(RECORDS_FILE))
-            .map_err(|error| error.to_string())?;
-        let mut manifest = json!({
-            "schema": BACKUP_MANIFEST_SCHEMA_V1,
-            "backupId": BackupId::now().to_string(),
-            "workspace": { "id": WorkspaceId::now().to_string() },
-            "artifacts": [{
-                "path": RECORDS_FILE,
-                "kind": "jsonl_export",
-                "hash": hash_bytes(records_payload),
-                "sizeBytes": records_payload.len(),
-                "required": true,
-            }],
-        });
-        let root = StoreAuthRoot::open_or_create(workspace_keys_dir(tempdir.path()))
-            .map_err(|error| error.message())?;
-        authenticate_backup_manifest(&mut manifest, &root).map_err(|error| error.message())?;
-        let manifest_bytes =
-            serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
-        fs::write(backup_path.join(MANIFEST_FILE), manifest_bytes)
+        fs::rename(&report.records_path, &outside_records).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_records, &report.records_path)
             .map_err(|error| error.to_string())?;
 
         let verified = verify_backup(&BackupVerifyOptions {
-            workspace_path: tempdir.path().to_path_buf(),
-            backup_path,
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&report.backup_path),
         })
         .map_err(|error| error.message())?;
 
