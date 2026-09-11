@@ -4496,7 +4496,9 @@ mod tests {
                     && snippet.installable
                     && snippet.command.contains("orient")
                     && snippet.command.contains("--include-primer")
-                    && snippet.command.contains("--max-output-tokens")),
+                    && snippet.command.contains("--max-tokens")
+                    && snippet.command.contains("ambientContext")
+                    && snippet.command.contains("--format")),
             "SessionStart orientation snippet must be installed and bounded"
         );
         assert!(
