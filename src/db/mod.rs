@@ -58908,10 +58908,26 @@ mod tests {
 
     #[test]
     fn with_write_owner_fence_serializes_process_threads() -> TestResult {
+        // Use a private file gate: the shared in-memory gate can be occupied
+        // by unrelated migration tests for longer than this test's deadline.
+        let temp_dir =
+            tempfile::tempdir().map_err(|error| TestFailure::new(format!("tempdir: {error}")))?;
+        let database_path = temp_dir.path().join("write-owner-fence.db");
+        let (opened_tx, opened_rx) = mpsc::channel();
+        let outer_opened_tx = opened_tx.clone();
+        let outer_path = database_path.clone();
+        let (outer_start_tx, outer_start_rx) = mpsc::channel();
         let (outer_entered_tx, outer_entered_rx) = mpsc::channel();
         let (outer_release_tx, outer_release_rx) = mpsc::channel();
         let outer = thread::spawn(move || -> std::result::Result<(), String> {
-            let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            let connection =
+                DbConnection::open_file(&outer_path).map_err(|error| error.to_string())?;
+            outer_opened_tx
+                .send(())
+                .map_err(|error| format!("announce owner open: {error}"))?;
+            outer_start_rx
+                .recv()
+                .map_err(|error| format!("await owner start: {error}"))?;
             connection.with_write_owner_fence(
                 |error| error.to_string(),
                 || {
@@ -58925,13 +58941,19 @@ mod tests {
             )
         });
 
-        outer_entered_rx
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|error| TestFailure::new(format!("outer fence did not start: {error}")))?;
-
+        let (contender_start_tx, contender_start_rx) = mpsc::channel();
         let (contender_state_tx, contender_state_rx) = mpsc::channel();
         let contender = thread::spawn(move || -> std::result::Result<(), String> {
-            let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            // Both opens must finish before the owner takes its fence, since
+            // opening a writable file also acquires that same gate.
+            opened_tx
+                .send(())
+                .map_err(|error| format!("announce contender open: {error}"))?;
+            contender_start_rx
+                .recv()
+                .map_err(|error| format!("await fence attempt: {error}"))?;
             contender_state_tx
                 .send("attempting")
                 .map_err(|error| format!("announce fence attempt: {error}"))?;
@@ -58945,6 +58967,20 @@ mod tests {
             )
         });
 
+        for _ in 0..2 {
+            opened_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|error| TestFailure::new(format!("connection did not open: {error}")))?;
+        }
+        outer_start_tx
+            .send(())
+            .map_err(|error| TestFailure::new(format!("start owner: {error}")))?;
+        outer_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|error| TestFailure::new(format!("outer fence did not start: {error}")))?;
+        contender_start_tx
+            .send(())
+            .map_err(|error| TestFailure::new(format!("start contender: {error}")))?;
         ensure_equal(
             &contender_state_rx
                 .recv_timeout(Duration::from_secs(2))
