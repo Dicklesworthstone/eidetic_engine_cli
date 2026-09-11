@@ -304,11 +304,13 @@ fn validate_fixture(schema: &Value, row: &Value, label: &str) -> TestResult {
     }
 
     let serialized = serde_json::to_string(row).map_err(|error| error.to_string())?;
+    // Match complete JSON keys: the required privacy booleans
+    // `rawCommandStored` and `rawOutputStored` are not raw content.
     for forbidden in [
-        "rawCommand",
-        "rawOutput",
-        "memoryBody",
-        "mailBody",
+        "\"rawCommand\":",
+        "\"rawOutput\":",
+        "\"memoryBody\":",
+        "\"mailBody\":",
         "/Users/",
     ] {
         ensure(
@@ -321,6 +323,23 @@ fn validate_fixture(schema: &Value, row: &Value, label: &str) -> TestResult {
         reparsed == *row,
         format!("{label}: serialize/parse round trip changed fixture"),
     )
+}
+
+#[test]
+fn fixture_privacy_check_rejects_nested_raw_content() -> TestResult {
+    let schema = load_json(SCHEMA_REL)?;
+    let fixture = load_json(&format!("{FIXTURES_REL}/cheap_recall.json"))?;
+    validate_fixture(&schema, &fixture, "valid")?;
+    for key in ["rawCommand", "rawOutput", "memoryBody", "mailBody"] {
+        let mut leaked = fixture.clone();
+        leaked["privacy"][key] = Value::String("private content".to_owned());
+        ensure(
+            validate_fixture(&schema, &leaked, key)
+                .is_err_and(|error| error.contains("forbidden marker")),
+            format!("nested forbidden key {key} must be rejected"),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]
