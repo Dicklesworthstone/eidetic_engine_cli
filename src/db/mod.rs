@@ -42727,17 +42727,17 @@ mod tests {
             ensure_equal(
                 &super::database_open_error_is_retryable(&error),
                 &expected,
-                format!("open retry classification for {kind:?}: {message}"),
+                &format!("open retry classification for {kind:?}: {message}"),
             )?;
             ensure_equal(
                 &super::db_error_is_transient_sqlite_contention(&error),
                 &expected,
-                format!("query retry classification for {kind:?}: {message}"),
+                &format!("query retry classification for {kind:?}: {message}"),
             )?;
             ensure_equal(
                 &super::advisory_lock_error_is_retryable(&error),
                 &expected,
-                format!("advisory lock retry classification for {kind:?}: {message}"),
+                &format!("advisory lock retry classification for {kind:?}: {message}"),
             )?;
         }
         Ok(())
