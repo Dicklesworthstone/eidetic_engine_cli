@@ -3,10 +3,7 @@ use fnx_classes::Graph;
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
 
-#[path = "support/graph_generator.rs"]
-mod graph_generator;
-
-use graph_generator::deterministic_graph;
+use super::graph_generator::deterministic_graph;
 
 fn generated_graph(node_count: usize, density_percent: u8, seed: u64) -> Result<Graph, String> {
     deterministic_graph(node_count, f64::from(density_percent) / 100.0, seed)

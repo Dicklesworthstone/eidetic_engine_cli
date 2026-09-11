@@ -5,10 +5,7 @@ use proptest::test_runner::Config as ProptestConfig;
 
 use ee::graph::gomory_hu::{GOMORY_HU_WEIGHT_ATTR, build_gomory_hu_tree, query_min_cut};
 
-#[path = "support/graph_generator.rs"]
-mod graph_generator;
-
-use graph_generator::deterministic_graph;
+use super::graph_generator::deterministic_graph;
 
 fn generated_graph(node_count: usize, density_percent: u8, seed: u64) -> Result<Graph, String> {
     deterministic_graph(node_count, f64::from(density_percent) / 100.0, seed)

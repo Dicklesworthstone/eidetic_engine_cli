@@ -5,10 +5,7 @@ use fnx_classes::digraph::DiGraph;
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
 
-#[path = "support/graph_generator.rs"]
-mod graph_generator;
-
-use graph_generator::deterministic_digraph;
+use super::graph_generator::deterministic_digraph;
 
 fn generated_digraph(node_count: usize, density_percent: u8, seed: u64) -> Result<DiGraph, String> {
     deterministic_digraph(node_count, f64::from(density_percent) / 100.0, seed)

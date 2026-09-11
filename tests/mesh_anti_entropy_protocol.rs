@@ -1,10 +1,8 @@
 //! Executable SRR6.7 checks for the mesh anti-entropy protocol primitives.
 //!
-//! Imported by path while `src/mesh/mod.rs` is owned by adjacent mesh CLI work.
+//! Exercises the public protocol API shared by the production mesh layer.
 
-#[path = "../src/mesh/anti_entropy_protocol.rs"]
-#[allow(dead_code)]
-mod anti_entropy_protocol;
+use ee::mesh::anti_entropy_protocol;
 
 use std::collections::BTreeMap;
 

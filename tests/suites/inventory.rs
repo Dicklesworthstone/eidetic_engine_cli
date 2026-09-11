@@ -16,7 +16,10 @@ fn suite_modules(source: &str) -> Result<Vec<String>, String> {
             .strip_prefix("#[path = \"../")
             .and_then(|line| line.strip_suffix("\"]"))
             .ok_or_else(|| format!("unexpected suite declaration: {line}"))?;
-        let name = file
+        // Shared helpers are compiled once by a suite. They do not replace a
+        // root test registration, and only direct support/*.rs paths qualify.
+        let module_file = file.strip_prefix("support/").unwrap_or(file);
+        let name = module_file
             .strip_suffix(".rs")
             .filter(|name| {
                 name.chars()
@@ -27,7 +30,9 @@ fn suite_modules(source: &str) -> Result<Vec<String>, String> {
         if lines.next() != Some(declaration.as_str()) {
             return Err(format!("{file} must be followed by {declaration}"));
         }
-        modules.push(file.to_owned());
+        if module_file == file {
+            modules.push(file.to_owned());
+        }
     }
     Ok(modules)
 }
@@ -143,5 +148,24 @@ fn inventory_counts_compiled_declarations_instead_of_comments() -> TestResult {
     assert!(suite_modules("#[path = \"../omitted.rs\"]\n// mod omitted;\n").is_err());
     assert!(suite_modules("#[path = \"../wrong_name.rs\"]\nmod other;\n").is_err());
     assert!(suite_modules("#[cfg(any())]\n#[path = \"../hidden.rs\"]\nmod hidden;\n").is_err());
+    Ok(())
+}
+
+#[test]
+fn inventory_shared_helpers_cannot_hide_root_test_files() -> TestResult {
+    let source = "#[path = \"../support/graph_generator.rs\"]\nmod graph_generator;\n#[path = \"../present.rs\"]\nmod present;\n";
+    assert_eq!(suite_modules(source)?, ["present.rs"]);
+    assert!(suite_modules("#[path = \"../support/../hidden.rs\"]\nmod hidden;\n").is_err());
+    assert!(suite_modules("#[path = \"../support/helper.rs\"]\n// mod helper;\n").is_err());
+    let files = BTreeSet::from(["graph_generator.rs".to_owned()]);
+    let counts = suite_modules(source)?
+        .into_iter()
+        .map(|file| (file, 1))
+        .collect();
+    assert!(
+        coverage_errors(&files, &counts)
+            .iter()
+            .any(|error| error.contains("graph_generator.rs") && error.contains("found 0"))
+    );
     Ok(())
 }
