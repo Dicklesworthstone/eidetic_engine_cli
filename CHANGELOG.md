@@ -74,7 +74,7 @@ future changelog pass expands those rows into full capability sections.
   report warm-up state (#37).
 - CLI runtimes use bounded, lazy blocking pools. Initialization and migrations
   checkpoint their writes; doctor reports excessive WAL growth (#35).
-- Concurrent CASS imports retry SQLite lock-wait timeouts while preserving
+- Concurrent migrations and CASS imports retry SQLite lock-wait timeouts while preserving
   cancellation and actual query deadlines. Doctor's linked dependency versions
   match the release lockfile.
 - Workspace recovery preserves authorization keys through encrypted key

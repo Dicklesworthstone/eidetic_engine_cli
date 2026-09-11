@@ -2458,7 +2458,10 @@ fn sqlmodel_error_is_transient_sqlite_contention(error: &sqlmodel_core::Error) -
         sqlmodel_core::Error::Query(query) => match query.kind {
             sqlmodel_core::error::QueryErrorKind::Deadlock
             | sqlmodel_core::error::QueryErrorKind::Serialization => true,
-            sqlmodel_core::error::QueryErrorKind::Database => {
+            sqlmodel_core::error::QueryErrorKind::Database
+            | sqlmodel_core::error::QueryErrorKind::Timeout => {
+                // SQLModel maps FrankenSQLite Busy/BusyRecovery to Timeout.
+                // Only lock contention is retryable; actual deadlines are not.
                 sqlite_contention_message_is_retryable(&query.message)
             }
             sqlmodel_core::error::QueryErrorKind::Syntax
@@ -2466,7 +2469,6 @@ fn sqlmodel_error_is_transient_sqlite_contention(error: &sqlmodel_core::Error) -
             | sqlmodel_core::error::QueryErrorKind::NotFound
             | sqlmodel_core::error::QueryErrorKind::Permission
             | sqlmodel_core::error::QueryErrorKind::DataTruncation
-            | sqlmodel_core::error::QueryErrorKind::Timeout
             | sqlmodel_core::error::QueryErrorKind::Cancelled => false,
         },
         sqlmodel_core::Error::Type(_)
@@ -34494,14 +34496,14 @@ fn advisory_lock_error_is_retryable(error: &DbError) -> bool {
         sqlmodel_core::error::QueryErrorKind::Constraint
         | sqlmodel_core::error::QueryErrorKind::Deadlock
         | sqlmodel_core::error::QueryErrorKind::Serialization => true,
-        sqlmodel_core::error::QueryErrorKind::Database => {
+        sqlmodel_core::error::QueryErrorKind::Database
+        | sqlmodel_core::error::QueryErrorKind::Timeout => {
             sqlite_contention_message_is_retryable(&query.message)
         }
         sqlmodel_core::error::QueryErrorKind::Syntax
         | sqlmodel_core::error::QueryErrorKind::NotFound
         | sqlmodel_core::error::QueryErrorKind::Permission
         | sqlmodel_core::error::QueryErrorKind::DataTruncation
-        | sqlmodel_core::error::QueryErrorKind::Timeout
         | sqlmodel_core::error::QueryErrorKind::Cancelled => false,
     }
 }
@@ -42706,6 +42708,39 @@ mod tests {
             matches!(result, Err(DbError::InvalidMode { .. })),
             "schema-only memory connection must return InvalidMode",
         )
+    }
+
+    #[test]
+    fn sqlite_lock_wait_timeouts_retry_without_retrying_deadlines_or_cancellation() -> TestResult {
+        use sqlmodel_core::error::QueryErrorKind;
+
+        for (kind, message, expected) in [
+            (QueryErrorKind::Timeout, "database is busy", true),
+            (QueryErrorKind::Timeout, "database is busy recovering", true),
+            (QueryErrorKind::Timeout, "query deadline exceeded", false),
+            (QueryErrorKind::Cancelled, "database is busy", false),
+        ] {
+            let error = DbError::sqlmodel(
+                DbOperation::ConfigureDurabilityPragmas,
+                sqlmodel_query_error(kind, message),
+            );
+            ensure_equal(
+                &super::database_open_error_is_retryable(&error),
+                &expected,
+                format!("open retry classification for {kind:?}: {message}"),
+            )?;
+            ensure_equal(
+                &super::db_error_is_transient_sqlite_contention(&error),
+                &expected,
+                format!("query retry classification for {kind:?}: {message}"),
+            )?;
+            ensure_equal(
+                &super::advisory_lock_error_is_retryable(&error),
+                &expected,
+                format!("advisory lock retry classification for {kind:?}: {message}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
