@@ -3839,7 +3839,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_patch",
-            version: "0.3.16",
+            version: "0.3.18",
             path: "/data/projects/frankensqlite",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -3867,7 +3867,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_dependency",
-            version: "0.4.2",
+            version: "0.4.3",
             path: "/data/projects/sqlmodel_rust",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -3895,7 +3895,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_dependency",
-            version: "0.4.2",
+            version: "0.5.0",
             path: "/data/projects/frankensearch",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -3932,7 +3932,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_dependency",
-            version: "0.2.0",
+            version: "0.2.1",
             path: "/data/projects/franken_networkx",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -4052,7 +4052,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_dependency",
-            version: "0.2.2",
+            version: "0.2.3",
             path: "/data/projects/franken_agent_detection",
         },
         default_feature_profile: DependencyFeatureProfile {
