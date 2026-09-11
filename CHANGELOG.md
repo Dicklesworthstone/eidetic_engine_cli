@@ -19,24 +19,27 @@ checked-in Beads records. The durable research ledger is
 | 2026-08-18 → 2026-08-20 | **`0.14.2`** workspace-id bind campaign plus franken-stack refresh (asupersync 0.4.9, fsqlite 0.3.7). |
 | 2026-08-20 → 2026-08-27 | **`0.14.3`** retrieval correctness and deterministic contract hardening; tagged, but not published as a GitHub Release. |
 | 2026-08-27 → 2026-08-29 | **`0.14.4`** agent-facing capability discovery plus tag, policy, and provenance correctness. |
+| 2026-08-29 → 2026-09-11 | **`0.14.5`** portable GNU/Linux binaries, Windows storage I/O, recovery, and runtime resource use. |
 
-Release surface (as of 2026-08-29):
+Release surface (as of 2026-09-11):
 
-- Latest **published** GitHub Release before this cut: [`v0.14.2`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.14.2) (2026-08-20).
+- Latest **published** GitHub Release: [`v0.14.5`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.14.5) (2026-09-11), with six platform archives, checksums, a build manifest, and both installers.
 - `v0.14.3` is an annotated tag without a corresponding GitHub Release.
-- `Cargo.toml` carries `version = "0.14.4"` for this cut; prior tags remain
+- `Cargo.toml` carries `version = "0.14.5"` for this cut; prior tags remain
   unchanged.
 - Distribution paths: verified GitHub release installers and
   `brew install Dicklesworthstone/tap/ee` (the formula is bumped by hand and
-  served v0.14.2 as of 2026-09-02). `cargo install eidetic-engine` is **not**
-  available yet: the crate has never been published to crates.io, despite
-  earlier wording in this file that said otherwise.
+  serves v0.14.5 as of 2026-09-11). crates.io publication remains pending:
+  registry search returned no `eidetic-engine` package on 2026-09-11.
+- This release has SHA-256 checksums and a build manifest, without Sigstore
+  signatures or SLSA attestations. Its assets do not satisfy `--require-provenance`.
 
 ### Version timeline (tags and GitHub Releases)
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
-| [0.14.4](#0144---2026-08-29) | 2026-08-29 | this cut | Agent-facing capability discovery plus tag, policy, and provenance correctness |
+| [0.14.5](#0145---2026-09-11) | 2026-09-11 | yes | glibc 2.28 binaries, Windows storage I/O, recovery, and runtime resource use |
+| [0.14.4](#0144---2026-08-29) | 2026-08-29 | yes | Agent-facing capability discovery plus tag, policy, and provenance correctness |
 | [0.14.3](#0143---2026-08-27) | 2026-08-27 | tag only | Retrieval correctness, deterministic contract hardening, FrankenSQLite 0.3.9, and crates.io/Homebrew preparation |
 | [0.14.2](#0142---2026-08-20) | 2026-08-20 | yes | Workspace-id bind campaign plus franken-stack refresh: asupersync 0.4.9, FrankenSQLite 0.3.7, frankensearch 0.3.2 |
 | [0.14.1](#0141---2026-08-18) | 2026-08-18 | yes | Franken-stack refresh on the 0.14 product: asupersync 0.4.8, FrankenSQLite 0.3.5, crates.io `cargo update` |
@@ -63,7 +66,12 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
-## [0.14.5] - Unreleased candidate
+## [0.14.5] - 2026-09-11
+
+Published from `214f1ed009481a5e99824d2e16350aebd934a5f9`. All six archive
+binaries completed init → remember → search → pack; ARM Linux used QEMU and
+Intel Mac used Rosetta. See the [release notes](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.14.5)
+for the complete validation scope and remaining limits.
 
 - GNU/Linux release builds explicitly target glibc 2.28 on x86-64 and ARM64.
   The release gate checks the binary's actual symbol requirements before
@@ -77,12 +85,23 @@ future changelog pass expands those rows into full capability sections.
 - Concurrent migrations and CASS imports retry SQLite lock-wait timeouts while preserving
   cancellation and actual query deadlines. Doctor's linked dependency versions
   match the release lockfile.
+- CASS imports retain the database writer lock for the entire transaction and
+  roll back unfinished writes during unwinding.
+- Windows storage honors the dedicated database worker's existing permission
+  to perform I/O directly for transfers up to 64 KiB. Larger transfers retain
+  offload, and cancellation and tracked-write outcomes are preserved.
+- The pinned FrankenSQLite supports legacy V2 WAL certificate recovery (#27).
+  A controlled legacy-record fixture preserved stored memory through migration
+  checks and subsequent writes; the reporter's original database was unavailable.
 - Workspace recovery preserves authorization keys through encrypted key
   backups, memory revision chains, relationship metadata, and tombstones.
   Advisory preflight continues when optional risk-memory storage is unavailable.
 - The pinned stack uses Asupersync 0.4.10, FrankenSQLite 0.3.18, Frankensearch
   0.5.0, and nightly-2026-08-31. The rustls-pemfile maintenance exception remains
   necessary in Asupersync's TLS dependency graph (#22).
+- Hook output budgets and daemon RPC latency remain open (#35, #37, #39).
+  The original poisoned-snapshot and 128-thread test-crash reports remain
+  unresolved (#36, #29).
 
 ## [0.14.4] - 2026-08-29
 
@@ -1592,7 +1611,8 @@ Closed workstreams behind this changelog:
   workspace hygiene, QoS, flight recorder, mesh/Tailscale optionality, duplicate
   work detection, host profiles, and crowded-checkout ergonomics.
 
-[Unreleased]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.3.0...main
+[Unreleased]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.14.5...main
+[0.14.5]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.14.4...v0.14.5
 [0.3.0]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Dicklesworthstone/eidetic_engine_cli/tree/v0.1.0

@@ -331,8 +331,8 @@ Hard constraints. CI fails if any of them break.
 | Method | Status | Evidence |
 |---|---|---|
 | GitHub release installer | available | [latest release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest) |
-| Homebrew tap | available; the formula is refreshed by hand and currently serves v0.14.2, so it can lag the GitHub release | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
-| crates.io | not published yet (`cargo install eidetic-engine` returns "could not find"; checked 2026-09-02) | tracked in `PUBLISH_CHECKLIST.md` |
+| Homebrew tap | available; the formula serves v0.14.5 as of 2026-09-11 and is refreshed by hand | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
+| crates.io | publication pending; registry search returned no `eidetic-engine` package on 2026-09-11 | tracked in `PUBLISH_CHECKLIST.md` |
 | Source build | available now | this README |
 
 ### Release installer
@@ -2889,7 +2889,7 @@ Boundaries to know:
 | Retention model | Forgetting and decay are product features. Export JSONL into git when you need sealed long-term records. |
 | Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
-| Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) exists but is refreshed by hand (formula at v0.14.2 as of 2026-09-02). crates.io publication is still pending. Releases are currently cut outside GitHub Actions; `v0.14.4` ships checksums and a manifest but no Sigstore bundle or SLSA provenance, so `--require-provenance` fails against it by design. |
+| Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) is refreshed by hand and serves v0.14.5 as of 2026-09-11. crates.io publication is still pending. Releases are currently cut outside GitHub Actions; `v0.14.5` ships checksums and a manifest but no Sigstore bundle or SLSA provenance, so `--require-provenance` fails against it by design. |
 | Reserved adapters | `science-analytics` reports a capability gap until its adapter matures. The loopback-only `serve` adapter is compiled into every build; the `serve` Cargo feature flag only changes how `ee capabilities` reports it. |
 | Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |
 
@@ -2901,11 +2901,10 @@ Boundaries to know:
 No. It is the durable memory those harnesses call. The harness owns the loop; `ee` owns memory.
 
 **Does it phone home or call any external API?**
-`ee` itself does not call paid model APIs or remote embedding services. The
-default embedding path delegates to Frankensearch's local Model2Vec backend,
-which may perform one pinned, verified download into the local model cache; it
-runs from disk afterward. Configuring Frankensearch to use a remote model is an
-explicit operator choice.
+By default, `ee` uses Frankensearch's local Model2Vec backend. It may perform
+one pinned, verified download into the local model cache and runs from disk
+afterward. An OpenAI-compatible remote embedding backend is available only
+when explicitly configured; the normal memory workflow requires no paid API.
 
 **Why no Tokio?**
 The runtime is Asupersync, which gives us structured concurrency, capability narrowing, deterministic tests via `LabRuntime`, and an `Outcome` lattice. Tokio is forbidden in the dep tree, audited by CI.
