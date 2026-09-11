@@ -61,6 +61,17 @@ const SKIPPED_PREFIXES: &[&str] = &["fuzz/corpus/"];
 /// git-tracked path instead, which is what CI and a local `cargo test` use.
 const WALKED_DOT_DIRECTORIES: &[&str] = &[".cargo", ".github"];
 
+/// File extensions the walk fallback will read. Without git it cannot tell a
+/// tracked file from whatever else is sitting in the directory — a remote
+/// build worker's copy of the tree accumulates scratch dumps from previous
+/// runs — so it only reads things shaped like repository content. Files with
+/// no extension are accepted when the name is in the repository's SHOUTING
+/// report style (`FINAL_AUDIT_REPORT`, `LICENSE`); see `has_scannable_name`.
+const WALKED_EXTENSIONS: &[&str] = &[
+    "golden", "go", "html", "js", "json", "jsonl", "lock", "log", "md", "mjs", "ndjson", "ps1",
+    "py", "rs", "sh", "snap", "sql", "toml", "ts", "txt", "yaml", "yml",
+];
+
 /// Repository-relative files exempt from the scan, each with a reason.
 const ALLOWLISTED_FILES: &[(&str, &str)] = &[
     // This file necessarily spells the banned tokens out in order to ban them.
@@ -285,6 +296,21 @@ fn is_skipped_path(relative: &str) -> bool {
         || ALLOWLISTED_FILES.iter().any(|(path, _)| *path == relative)
 }
 
+/// Whether the walk fallback should read `name`: a known source extension, or
+/// an extensionless name written in the repository's upper-case report style.
+fn has_scannable_name(name: &str) -> bool {
+    match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => {
+            WALKED_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        }
+        // Extensionless names, and dotfiles such as `.gitignore`, which the
+        // fallback does not read (the git-tracked path covers them).
+        _ => name.trim_start_matches('.').chars().all(|character| {
+            character.is_ascii_uppercase() || matches!(character, '_' | '0'..='9')
+        }),
+    }
+}
+
 fn collect_files(root: &Path, directory: &Path, out: &mut Vec<PathBuf>) {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -311,7 +337,7 @@ fn collect_files(root: &Path, directory: &Path, out: &mut Vec<PathBuf>) {
                 .strip_prefix(root)
                 .map(|rest| rest.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
-            if is_skipped_path(&relative) {
+            if is_skipped_path(&relative) || !has_scannable_name(&name) {
                 continue;
             }
             out.push(path);
@@ -419,6 +445,18 @@ fn guard_detects_each_banned_identifier_shape() {
     assert!(banned_token_in_line("Isolated CSD pinned tree").is_some());
     // ...but lower-case `css` is always the host, never the language.
     assert!(banned_token_in_line("selected worker css").is_some());
+}
+
+#[test]
+fn walk_fallback_only_reads_repository_shaped_files() {
+    assert!(has_scannable_name("mod.rs"));
+    assert!(has_scannable_name("doctor_json.golden"));
+    assert!(has_scannable_name("FINAL_AUDIT_REPORT"));
+    assert!(has_scannable_name("LICENSE"));
+    // Scratch output left behind on a build worker is not repository content.
+    assert!(!has_scannable_name("clippy_out_dump"));
+    assert!(!has_scannable_name("core.12345"));
+    assert!(!has_scannable_name("ee.exe"));
 }
 
 #[test]
