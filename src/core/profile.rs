@@ -737,7 +737,7 @@ fn partition_gates_for_recipe(
             gate: VerificationGate::ForbiddenDeps,
             weight: "medium",
             reason: "quick recipe excludes forbidden deps check",
-            manual_command: "cargo test --test forbidden_deps",
+            manual_command: "cargo test --test integration_e_f forbidden_deps::",
         });
     }
 
@@ -756,7 +756,7 @@ fn partition_gates_for_recipe(
             gate: VerificationGate::GoldenSnapshots,
             weight: "standard",
             reason: "quick recipe excludes golden tests",
-            manual_command: "cargo test --test golden",
+            manual_command: "cargo test --test integration_g_m golden::",
         });
     }
 
@@ -764,13 +764,10 @@ fn partition_gates_for_recipe(
     let heavy_gates = [
         (
             VerificationGate::PropertyTests,
-            "cargo test --test property",
+            "cargo test --tests property",
         ),
-        (
-            VerificationGate::IntegrationTests,
-            "cargo test --test integration",
-        ),
-        (VerificationGate::E2eTests, "cargo test --test '*_e2e'"),
+        (VerificationGate::IntegrationTests, "cargo test --tests"),
+        (VerificationGate::E2eTests, "cargo test --tests"),
     ];
 
     match (recipe, heavy_strategy) {
@@ -786,13 +783,13 @@ fn partition_gates_for_recipe(
                 gate: VerificationGate::IntegrationTests,
                 weight: "heavy",
                 reason: "rch_preferred defers integration tests to CI",
-                manual_command: "rch exec -- cargo test --test integration",
+                manual_command: "rch exec -- cargo test --tests",
             });
             skipped.push(SkippedGate {
                 gate: VerificationGate::E2eTests,
                 weight: "heavy",
                 reason: "rch_preferred defers e2e tests to CI",
-                manual_command: "rch exec -- cargo test --test '*_e2e'",
+                manual_command: "rch exec -- cargo test --tests",
             });
         }
         _ => {
@@ -883,8 +880,8 @@ fn build_rch_commands(
 
     if gates.contains(&VerificationGate::E2eTests) && budget.heavy_strategy == "rch_default" {
         commands.push(RchCommand {
-            description: "Run E2E tests via RCH",
-            command: "rch exec -- cargo test --workspace --test '*_e2e'".to_string(),
+            description: "Run integration and E2E suites via RCH",
+            command: "rch exec -- cargo test --workspace --tests".to_string(),
             timeout_seconds: timeout,
             requires_rch: true,
         });
@@ -907,7 +904,7 @@ fn build_cargo_commands(gates: &[VerificationGate], timeout: u64) -> Vec<CargoCo
     if gates.contains(&VerificationGate::ForbiddenDeps) {
         commands.push(CargoCommand {
             description: "Verify no forbidden dependencies",
-            command: "cargo test --test forbidden_deps".to_string(),
+            command: "cargo test --test integration_e_f forbidden_deps::".to_string(),
             timeout_seconds: timeout / 4,
         });
     }
@@ -915,7 +912,7 @@ fn build_cargo_commands(gates: &[VerificationGate], timeout: u64) -> Vec<CargoCo
     if gates.contains(&VerificationGate::GoldenSnapshots) {
         commands.push(CargoCommand {
             description: "Verify golden snapshot tests",
-            command: "cargo test --test golden".to_string(),
+            command: "cargo test --test integration_g_m golden::".to_string(),
             timeout_seconds: timeout / 2,
         });
     }
@@ -5071,6 +5068,67 @@ Pages wired down:                             253184.
                 !skipped.manual_command.is_empty(),
                 &format!("skipped gate {} has manual command", skipped.gate.as_str()),
             )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn verification_recipe_targets_exist_after_suite_consolidation() -> TestResult {
+        let manifest = include_str!("../../Cargo.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| error.to_string())?;
+        let targets = manifest["test"]
+            .as_array_of_tables()
+            .ok_or_else(|| "missing integration test targets".to_owned())?;
+        let names: Vec<_> = targets
+            .iter()
+            .filter_map(|target| target["name"].as_str())
+            .collect();
+        for profile in [
+            OperatingProfile::Constrained,
+            OperatingProfile::Portable,
+            OperatingProfile::Workstation,
+            OperatingProfile::Swarm,
+        ] {
+            let recipe = VerificationRecipe::for_profile(profile);
+            let commands = recipe
+                .rch_commands
+                .iter()
+                .map(|entry| entry.command.as_str())
+                .chain(
+                    recipe
+                        .cargo_commands
+                        .iter()
+                        .map(|entry| entry.command.as_str()),
+                )
+                .chain(
+                    recipe
+                        .gates_skipped
+                        .iter()
+                        .map(|entry| entry.manual_command),
+                );
+            for command in commands {
+                let words: Vec<_> = command.split_whitespace().collect();
+                for pair in words.windows(2) {
+                    if pair[0] == "--test" {
+                        ensure_true(
+                            names.contains(&pair[1]),
+                            &format!("unknown test target in {command}"),
+                        )?;
+                    }
+                }
+            }
+            for skipped in &recipe.gates_skipped {
+                if matches!(
+                    skipped.gate,
+                    VerificationGate::IntegrationTests | VerificationGate::E2eTests
+                ) {
+                    ensure_true(
+                        skipped.manual_command.ends_with("--tests"),
+                        "integration/E2E recipes must include both standalone and consolidated targets",
+                    )?;
+                }
+            }
         }
         Ok(())
     }

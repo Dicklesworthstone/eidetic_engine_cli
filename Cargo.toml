@@ -33,6 +33,7 @@ readme = "README.md"
 keywords = ["memory", "agents", "cli", "local-first", "search"]
 categories = ["command-line-utilities", "database", "development-tools"]
 default-run = "ee"
+autotests = false
 publish = true
 include = [
     "/src/**",
@@ -344,6 +345,141 @@ harness = false
 [[bench]]
 name = "daemon_round_trip"
 harness = false
+
+# Integration modules share five links. Keep snapshot-name-sensitive tests,
+# process-global tracing/cwd tests, self-spawning tests, and focused platform
+# gates separate. tests/suites/inventory.rs rejects missing/duplicate root files.
+[[test]]
+name = "integration_a_d"
+path = "tests/suites/integration_a_d.rs"
+
+[[test]]
+name = "integration_e_f"
+path = "tests/suites/integration_e_f.rs"
+
+[[test]]
+name = "integration_g_m"
+path = "tests/suites/integration_g_m.rs"
+
+[[test]]
+name = "integration_n_r"
+path = "tests/suites/integration_n_r.rs"
+
+[[test]]
+name = "integration_s_z"
+path = "tests/suites/integration_s_z.rs"
+
+[[test]]
+name = "agent_profile_e2e"
+path = "tests/agent_profile_e2e.rs"
+
+[[test]]
+name = "cache_hotset_contract"
+path = "tests/cache_hotset_contract.rs"
+
+[[test]]
+name = "conformance"
+path = "tests/conformance.rs"
+
+[[test]]
+name = "context_stream"
+path = "tests/context_stream.rs"
+
+[[test]]
+name = "contracts"
+path = "tests/contracts.rs"
+
+[[test]]
+name = "cross_platform_determinism"
+path = "tests/cross_platform_determinism.rs"
+
+[[test]]
+name = "e2e_backup_restore_roundtrip"
+path = "tests/e2e_backup_restore_roundtrip.rs"
+
+[[test]]
+name = "e2e_core_workflow"
+path = "tests/e2e_core_workflow.rs"
+
+[[test]]
+name = "e2e_daemon_recovery"
+path = "tests/e2e_daemon_recovery.rs"
+
+[[test]]
+name = "e2e_multi_agent_writers"
+path = "tests/e2e_multi_agent_writers.rs"
+
+[[test]]
+name = "e2e_serve_localhost"
+path = "tests/e2e_serve_localhost.rs"
+
+[[test]]
+name = "e2e_windows_smoke"
+path = "tests/e2e_windows_smoke.rs"
+
+[[test]]
+name = "error_envelope_golden"
+path = "tests/error_envelope_golden.rs"
+
+[[test]]
+name = "error_recovery_conformance_e2e"
+path = "tests/error_recovery_conformance_e2e.rs"
+
+[[test]]
+name = "harness_hook_install_audit"
+path = "tests/harness_hook_install_audit.rs"
+
+[[test]]
+name = "json_contract_snapshots"
+path = "tests/json_contract_snapshots.rs"
+
+[[test]]
+name = "mcp_parity"
+path = "tests/mcp_parity.rs"
+
+[[test]]
+name = "mesh_responder_broker_loopback"
+path = "tests/mesh_responder_broker_loopback.rs"
+
+[[test]]
+name = "mesh_transport_session_loopback"
+path = "tests/mesh_transport_session_loopback.rs"
+
+[[test]]
+name = "model_bundled_embedding_cli_e2e"
+path = "tests/model_bundled_embedding_cli_e2e.rs"
+
+[[test]]
+name = "networkx_differential"
+path = "tests/networkx_differential.rs"
+
+[[test]]
+name = "ownership_snapshot"
+path = "tests/ownership_snapshot.rs"
+
+[[test]]
+name = "pack_quality_contracts"
+path = "tests/pack_quality_contracts.rs"
+
+[[test]]
+name = "perf_compare_golden"
+path = "tests/perf_compare_golden.rs"
+
+[[test]]
+name = "renderer_parity_matrix"
+path = "tests/renderer_parity_matrix.rs"
+
+[[test]]
+name = "search_conformal_e2e"
+path = "tests/search_conformal_e2e.rs"
+
+[[test]]
+name = "support_bundle_perf_compare"
+path = "tests/support_bundle_perf_compare.rs"
+
+[[test]]
+name = "test_tracing_support_smoke"
+path = "tests/test_tracing_support_smoke.rs"
 
 [[test]]
 name = "cass_contracts"

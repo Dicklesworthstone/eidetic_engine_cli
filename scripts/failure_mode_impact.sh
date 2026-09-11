@@ -252,7 +252,7 @@ REPORT_JSON="$(
                         {
                             id: "degraded_codes_doc_coverage",
                             kind: "cargo-test",
-                            command: "cargo test --test degraded_codes_doc_coverage -- --nocapture",
+                            command: "cargo test --test integration_a_d degraded_codes_doc_coverage:: -- --nocapture",
                             covers: "K3 degraded-code documentation section coverage",
                             coverage: (if ($docs_changed == "1") then "partial" else "supporting" end)
                         }
@@ -267,7 +267,7 @@ REPORT_JSON="$(
                     + (if ($taxonomy_changed == "1") then [{
                         id: "taxonomy_consistency",
                         kind: "cargo-test",
-                        command: "cargo test --test degraded_code_taxonomy_consistency_test -- --nocapture",
+                        command: "cargo test --test integration_a_d degraded_code_taxonomy_consistency_test:: -- --nocapture",
                         covers: "Degraded-code taxonomy consistency",
                         coverage: "partial"
                     }] else [] end)

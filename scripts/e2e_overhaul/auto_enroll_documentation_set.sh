@@ -74,4 +74,4 @@ require_text "README.md" "docs/agent-ux/auto_enrollment_onboarding.md"
 require_text "README.md" "docs/adr/0038-auto-enrollment-zero-touch.md"
 emit_event "readme_index" "pass" "README indexes auto-enrollment docs"
 
-emit_event "rch_command" "info" "rch exec -- cargo test --test auto_enroll_documentation_consistency"
+emit_event "rch_command" "info" "rch exec -- cargo test --test integration_a_d auto_enroll_documentation_consistency::"

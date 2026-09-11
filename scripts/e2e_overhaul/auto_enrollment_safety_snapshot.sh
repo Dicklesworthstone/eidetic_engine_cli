@@ -9,7 +9,7 @@
 #
 # Until SRR6.46.3 ships the user-facing `ee mesh auto-enroll` command,
 # this script invokes the safety-snapshot logic via the integration
-# test surface (`cargo test --test mesh_auto_enrollment_safety_audit`)
+# test surface (`cargo test --test integration_g_m mesh_auto_enrollment_safety_audit::`)
 # and asserts the per-test structured outcomes via `ee.test_event.v1`
 # JSON-lines. When SRR6.46.3 lands, this script will be extended to
 # also call the CLI directly.
@@ -153,7 +153,7 @@ fi
 # shape, back-fill, idempotent path).
 # ============================================================================
 INTEGRATION_TEST_OUT="$EVENT_DIR/integration_tests.log"
-if cargo test --quiet --test mesh_auto_enrollment_safety_audit --message-format=short \
+if cargo test --quiet --test integration_g_m mesh_auto_enrollment_safety_audit:: --message-format=short \
     >"$INTEGRATION_TEST_OUT" 2>&1; then
   emit_event "integration_tests" true \
     "tests/mesh_auto_enrollment_safety_audit.rs passed" \

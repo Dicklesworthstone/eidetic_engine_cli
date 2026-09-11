@@ -122,11 +122,11 @@ fi
 
 run_cargo_gate \
     "lint_determinism_exemption_audit" \
-    cargo test --test determinism_exemption_audit -- --nocapture || true
+    cargo test --test integration_a_d determinism_exemption_audit:: -- --nocapture || true
 
 if run_cargo_gate \
     "lint_determinism_known_violations_fixture" \
-    cargo test --test determinism_lint_catches_known_violations -- --nocapture; then
+    cargo test --test integration_a_d determinism_lint_catches_known_violations:: -- --nocapture; then
     if [ "$last_cargo_gate_skipped" -eq 0 ]; then
         ui_tests_passed=$((ui_tests_passed + 1))
     fi

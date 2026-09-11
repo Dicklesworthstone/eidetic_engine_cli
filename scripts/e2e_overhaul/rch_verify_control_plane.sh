@@ -700,7 +700,7 @@ bash "$RCH_VERIFY" \
     --bead-id bd-1h8ji.6 \
     --summary \
     -- \
-    cargo test --test rch_verify_contract -- --nocapture > "$dry_run_json"
+    cargo test --test integration_n_r rch_verify_contract:: -- --nocapture > "$dry_run_json"
 dry_assert="$(assert_json "$dry_run_json" "dry_run" "")"
 emit_event \
     "action" \
@@ -722,7 +722,7 @@ bash "$RCH_VERIFY" \
     --bead-id bd-1h8ji.6 \
     --summary \
     -- \
-    cargo test --test rch_verify_control_plane -- --nocapture > "$fake_pass_json"
+    cargo test --test integration_n_r rch_verify_control_plane:: -- --nocapture > "$fake_pass_json"
 pass_assert="$(assert_json "$fake_pass_json" "remote_pass" "worker-c")"
 emit_event \
     "assert" \

@@ -96,5 +96,5 @@ else
   emit_event "candidate_report" "info" "no EE_AUTO_ENROLL_PERF_REPORT supplied; static baseline contract only"
 fi
 
-emit_event "rch_command" "info" "rch exec -- env TMPDIR=/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target cargo test --test auto_enroll_perf_baseline"
+emit_event "rch_command" "info" "rch exec -- env TMPDIR=/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target cargo test --test integration_a_d auto_enroll_perf_baseline::"
 emit_event "complete" "pass" "auto-enroll performance gate contract is valid"

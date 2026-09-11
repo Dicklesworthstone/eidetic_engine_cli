@@ -85,7 +85,7 @@ step "plan with RCH-blocked proof row and cargo hint"
 append_fixture rch_blocked_proof
 run_plan "03-plan-rch-blocked" \
     --degraded-sources rch \
-    --task-hint "cargo test --test session_budget_plan_golden"
+    --task-hint "cargo test --test integration_s_z session_budget_plan_golden::"
 assert_success "rch blocked plan"
 assert_jq "$LAST_JSON" '.data.refusals | length == 1' \
     "rch blocked plan refuses local cargo"

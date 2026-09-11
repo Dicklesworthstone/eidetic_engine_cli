@@ -114,29 +114,29 @@ fi
 run_cargo_gate \
     "determinism_proptest_regression_preflight" \
     0 \
-    cargo test --test property_query_and_pack \
-        determinism_regression_fixtures_replay_before_sampling \
+    cargo test --test integration_n_r \
+        property_query_and_pack::determinism_regression_fixtures_replay_before_sampling \
         -- --exact --nocapture || true
 
 run_cargo_gate \
     "determinism_proptest_seeded_pack_1024_cases" \
     1024 \
-    cargo test --test property_query_and_pack \
-        seeded_pack_assembly_replays_byte_identical_output \
+    cargo test --test integration_n_r \
+        property_query_and_pack::seeded_pack_assembly_replays_byte_identical_output \
         -- --exact --nocapture || true
 
 run_cargo_gate \
     "determinism_proptest_context_copied_store_16_cases" \
     16 \
-    cargo test --test property_query_and_pack \
-        context_pack_json_replays_across_copied_store_tuple \
+    cargo test --test integration_n_r \
+        property_query_and_pack::context_pack_json_replays_across_copied_store_tuple \
         -- --exact --nocapture || true
 
 if [ "${EE_PROPTEST_LONG:-0}" = "1" ]; then
     run_cargo_gate \
         "determinism_proptest_full_property_query_and_pack" \
         0 \
-        cargo test --test property_query_and_pack -- --nocapture || true
+        cargo test --test integration_n_r property_query_and_pack:: -- --nocapture || true
 fi
 
 exit "$run_status"

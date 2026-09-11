@@ -49,6 +49,47 @@ export, or evaluation behavior also requires at least one contract, integration,
 golden, or evaluation test that exercises the visible surface through a real
 command or protocol boundary.
 
+### Integration Test Targets
+
+Cargo autodiscovery is disabled with `autotests = false`. The 512 root test
+files remain in place: 484 compile as modules in five suite binaries, while
+28 remain separate targets. The three existing explicit targets under
+`tests/conformance/` and `tests/contracts/` also remain. This reduces the
+integration link count from 515 to 36 without dropping any test files.
+
+The suite names follow the first letter of the original file name:
+`integration_a_d`, `integration_e_f`, `integration_g_m`, `integration_n_r`,
+and `integration_s_z`. For a focused run, pass the original file stem as a
+module filter. An exact test filter now includes that module prefix:
+
+```bash
+# Run all tests originally in tests/mesh_cache.rs.
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --summary --no-write -- \
+  cargo test --locked --test integration_g_m mesh_cache:: -- --nocapture
+
+# List all tests in one suite before selecting an exact test name.
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --summary --no-write -- \
+  cargo test --locked --test integration_n_r -- --list
+```
+
+Standalone targets retain their original names. They include tests whose Insta
+snapshot names depend on the crate name, tests with process-global tracing or
+current-directory state, mesh tests that spawn themselves with `--exact`, and
+focused platform/model/hook gates. `contracts` also stays separate to preserve
+its crate-relative helper imports.
+
+When adding a root test file, register it in the corresponding suite or add an
+explicit `[[test]]` target when process isolation is needed. The inventory tests
+in `tests/suites/inventory.rs` run with `integration_a_d` and fail on omitted,
+duplicate, or stale root registrations, unregistered suites, and non-compiling
+module declarations hidden behind comments or suite-level conditionals.
+Feature and platform conditions remain inside the original test modules.
+
+The full gate still runs `cargo test --workspace --lib --bins --tests --examples`.
+Benchmarks remain an explicit `scripts/verify.sh --include-bench` gate. Reduced
+link count is a structural improvement; measured build time and full-suite
+runtime must be reported separately from target discovery or `--no-run` checks.
+
 ## Fixture Taxonomy
 
 Fixture names are stable handles. A future agent should be able to search for a

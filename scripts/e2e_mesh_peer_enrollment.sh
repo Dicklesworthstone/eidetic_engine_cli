@@ -32,4 +32,4 @@ if [[ ! -x scripts/rch_verify.sh ]]; then
 fi
 
 mesh_e2e_run_with_outcomes "$surface" "${scenarios[@]}" -- \
-  env RCH_REQUIRE_REMOTE=1 scripts/rch_verify.sh --bead-id bd-1x87h --summary --no-write -- cargo test --test mesh_peer_enrollment -- --nocapture
+  env RCH_REQUIRE_REMOTE=1 scripts/rch_verify.sh --bead-id bd-1x87h --summary --no-write -- cargo test --test integration_g_m mesh_peer_enrollment:: -- --nocapture

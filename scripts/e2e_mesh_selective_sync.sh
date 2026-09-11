@@ -26,4 +26,4 @@ jq -c --arg surface "$surface" '
 ' "$fixture"
 
 RCH_REQUIRE_REMOTE=1 scripts/rch_verify.sh --bead-id bd-53cus --summary --no-write -- \
-  cargo test --test mesh_foreground_cli selective_sync_profile_preview_matches_golden_fixture -- --nocapture
+  cargo test --test integration_g_m mesh_foreground_cli::selective_sync_profile_preview_matches_golden_fixture -- --nocapture

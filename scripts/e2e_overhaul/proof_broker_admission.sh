@@ -14,8 +14,8 @@
 #   RCH_VERIFY_TAIL_BYTES=12000 \
 #   TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp \
 #   scripts/rch_verify.sh --skip-known-blocker --env RUSTFLAGS=-Awarnings -- \
-#     cargo test --test rch_verify_contract \
-#       proof_broker_environment_blocked_refuses_before_remote_dispatch \
+#     cargo test --test integration_n_r \
+#       rch_verify_contract::proof_broker_environment_blocked_refuses_before_remote_dispatch \
 #       -- --exact --nocapture
 #
 # Expected artifacts are reported by the ee.rch.verify.v1 `artifacts[]` block,

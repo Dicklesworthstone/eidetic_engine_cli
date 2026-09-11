@@ -46,4 +46,4 @@ if ! command -v "$rch_bin" >/dev/null 2>&1; then
 fi
 
 mesh_e2e_run_with_outcomes "$surface" "${scenarios[@]}" -- \
-  env RCH_REQUIRE_REMOTE=1 "$rch_bin" exec -- cargo test --test mesh_cache -- --nocapture
+  env RCH_REQUIRE_REMOTE=1 "$rch_bin" exec -- cargo test --test integration_g_m mesh_cache:: -- --nocapture
