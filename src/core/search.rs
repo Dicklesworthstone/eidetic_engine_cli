@@ -17239,10 +17239,14 @@ mod tests {
         );
 
         let assist = run_search(&SearchOptions {
-            relevance_floor: Some(f32::MAX),
+            relevance_floor: Some(1.0),
             ..base_options.clone()
         })
         .map_err(|error| format!("post-denial query-assist search failed: {error}"))?;
+        assert!(
+            assist.query_assist.is_some(),
+            "the strict valid relevance floor must exercise query assistance"
+        );
         let assist_json = assist.data_json().to_string();
         assert!(!assist_json.contains(&evidence_id));
         assert!(!assist_json.contains(denied_phrase));
