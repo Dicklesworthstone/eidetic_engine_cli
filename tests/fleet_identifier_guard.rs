@@ -3,7 +3,10 @@
 //! This repository is public. Host names, tailnet addresses and operator
 //! account names from the maintainer's private build fleet must never appear
 //! in tracked files — not in source, not in docs, not in published JSON
-//! schemas, and not in test fixtures or golden files. Fixtures should use
+//! schemas, not in test fixtures or golden files, and not in path names
+//! either (a fixture directory named after a worker leaks just as much, and
+//! content-only scrubbing leaves the code pointing at a path that no longer
+//! exists). Fixtures should use
 //! neutral placeholders instead: `worker-01` / `worker-a` / `windows-host-1`
 //! for hosts, RFC 5737 documentation addresses (`198.51.100.x`) for public
 //! addresses, and the CGNAT range (`100.64.0.x`) for tailnet peers.
@@ -385,19 +388,31 @@ fn scan(root: &Path) -> Vec<Violation> {
 
     let mut violations = Vec::new();
     for path in files {
+        // Names count too: a fixture directory called after a worker leaks the
+        // same information as a line of prose, and content-only scrubbing
+        // silently leaves the code pointing at a path that no longer exists.
+        let relative_path = path
+            .strip_prefix(root)
+            .map(|rest| rest.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+        if let Some(token) = banned_token_in_line(&relative_path) {
+            violations.push(Violation {
+                path: relative_path.clone(),
+                line: 0,
+                token,
+                excerpt: "(in the path itself)".to_owned(),
+            });
+        }
+
         // Binary blobs (databases, images, compiled artefacts) are not prose;
         // anything that is not valid UTF-8 is skipped rather than guessed at.
         let Ok(contents) = fs::read_to_string(&path) else {
             continue;
         };
-        let relative = path
-            .strip_prefix(root)
-            .map(|rest| rest.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|_| path.to_string_lossy().into_owned());
         for (index, line) in contents.lines().enumerate() {
             if let Some(token) = banned_token_in_line(line) {
                 violations.push(Violation {
-                    path: relative.clone(),
+                    path: relative_path.clone(),
                     line: index + 1,
                     token,
                     excerpt: line.chars().take(160).collect(),
@@ -422,10 +437,17 @@ fn no_private_fleet_identifiers_are_published() {
         violations.len(),
         violations
             .iter()
-            .map(|violation| format!(
-                "  {}:{}: [{}] {}",
-                violation.path, violation.line, violation.token, violation.excerpt
-            ))
+            .map(|violation| {
+                let line = if violation.line == 0 {
+                    "path".to_owned()
+                } else {
+                    violation.line.to_string()
+                };
+                format!(
+                    "  {}:{}: [{}] {}",
+                    violation.path, line, violation.token, violation.excerpt
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n")
     );
