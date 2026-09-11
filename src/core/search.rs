@@ -15097,11 +15097,19 @@ mod tests {
     #[test]
     fn source_mode_resolution_honors_semantic_only_without_lexical() -> TestResult {
         let options = source_mode_test_options(SearchSourceMode::SemanticOnly, true);
-        let index_dir = options.resolve_index_dir();
         let mut degraded = Vec::new();
 
-        let resolution = resolve_source_mode(&options, &index_dir, &mut degraded, None)
-            .map_err(|error| error.to_string())?;
+        let resolution = resolve_source_mode_with_tiers(
+            &options,
+            &mut degraded,
+            SearchTierState {
+                lexical_available: false,
+                embed_model_unavailable: None,
+                semantic_embedder_pending: None,
+                semantic_embedder_degraded: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
 
         assert_eq!(resolution.applied, SearchSourceMode::SemanticOnly);
         assert!(!resolution.fallback_applied);
@@ -15113,11 +15121,19 @@ mod tests {
     #[test]
     fn source_mode_resolution_falls_back_for_default_hybrid_without_lexical() -> TestResult {
         let options = source_mode_test_options(SearchSourceMode::Hybrid, false);
-        let index_dir = options.resolve_index_dir();
         let mut degraded = Vec::new();
 
-        let resolution = resolve_source_mode(&options, &index_dir, &mut degraded, None)
-            .map_err(|error| error.to_string())?;
+        let resolution = resolve_source_mode_with_tiers(
+            &options,
+            &mut degraded,
+            SearchTierState {
+                lexical_available: false,
+                embed_model_unavailable: None,
+                semantic_embedder_pending: None,
+                semantic_embedder_degraded: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
 
         assert_eq!(resolution.applied, SearchSourceMode::SemanticOnly);
         assert!(resolution.fallback_applied);
