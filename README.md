@@ -336,12 +336,12 @@ Hard constraints. CI fails if any of them break.
 
 | Method | Status | Evidence |
 |---|---|---|
-| GitHub release installer | v0.15.0 available for six targets; public assets verified | [v0.15.0 release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.15.0) |
-| Homebrew tap | v0.15.0 available for Apple Silicon, Intel Mac, Linux ARM64 and Linux x86-64 | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
-| crates.io | v0.15.1 publication in progress; requires nightly Rust | [publication progress](UPGRADE_LOG.md#cratesio-publication-follow-through) |
+| GitHub release installer | Six targets; the release page identifies the current published version | [latest release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest) |
+| Homebrew tap | Apple Silicon, Intel Mac, Linux ARM64 and Linux x86-64; updated after release asset verification | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
+| crates.io | Registry-only packages require nightly Rust; use 0.15.2 or newer | [published versions](https://crates.io/crates/eidetic-engine/versions) |
 | Source build | available now | this README |
 
-For v0.15.0, rebuild each workspace's semantic index with
+When upgrading from a version earlier than 0.15.0, rebuild each workspace's semantic index with
 `ee index rebuild --workspace .` and reinstall managed hooks for the new snippets.
 Inspect Claude Code settings before and after reinstalling: existing EE hooks
 without `eeManaged` metadata can be duplicated, and `ee hook status` does not
@@ -441,14 +441,16 @@ brew install Dicklesworthstone/tap/ee
 
 ### Cargo
 
-Install the `ee` binary using nightly Rust and the published lockfile:
+Use nightly Rust and the published lockfile. Version 0.15.1 has a read-only
+storage regression affecting native reranking and concurrent writes; use the
+corrected 0.15.2 package or a newer version from the registry:
 
 ```bash
-cargo +nightly install eidetic-engine --version 0.15.1 --locked
+cargo +nightly install eidetic-engine --version 0.15.2 --locked
 ```
 
-Version 0.15.1 is the first registry-only release. Its publication status is
-recorded in the installation table above and in `UPGRADE_LOG.md`.
+The links above identify published versions; `UPGRADE_LOG.md` records the
+dependency changes and qualification results.
 
 ### From source
 

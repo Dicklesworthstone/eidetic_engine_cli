@@ -1841,9 +1841,9 @@ dependencies = [
 
 [[package]]
 name = "fsqlite"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d119c5e541892931d86b8a895addab18fc8545324f3aabe47174d45e0edcbef"
+checksum = "1b34f23d9be2b5f58d2fea8d7911d65f0896e39259098daeaacbb16034e93cb4"
 dependencies = [
  "asupersync",
  "fsqlite-core",
@@ -1887,9 +1887,9 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-core"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0958adc5af4f027d783b9175ee79573f8da3b81ee1a95eae29a16eb491de5397"
+checksum = "37ac3e047cf05619870bf9ab17559da943987d2f56f94de48b692e464dfda5da"
 dependencies = [
  "asupersync",
  "blake3",
@@ -2009,9 +2009,9 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-pager"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e8f5f200865b978bb4e81b2211da4bea559d058404fc3657c0c0b6d09c30219"
+checksum = "9644cd55be53bc73362ba47bdeccd10bc6c8216c09553e0f18ccf9a8c4d8abca"
 dependencies = [
  "argon2",
  "asupersync",

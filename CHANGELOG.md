@@ -70,12 +70,19 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
-- Prepare the first crates.io `eidetic-engine` package at version 0.15.1.
+- Prepare the corrected `eidetic-engine` package at version 0.15.2.
+  The 0.15.1 crate was published before final runtime qualification exposed
+  read-only storage and concurrent-write regressions. Its GitHub and Homebrew
+  release was withheld; the verified binary release remains 0.15.0.
+- Preserve the original fusion results and report a transient
+  `rerank_model_unavailable` degradation when reranking cannot read document
+  storage. Missing or out-of-scope documents remain normal omissions.
+- Require FrankenSQLite 0.4.1 with the read-only WAL admission correction.
   All normal dependencies resolve from the registry; sibling repository paths
   and root Cargo patches are removed. Source installers use `--locked`, and
   their dependency checkout helpers skip cloning for registry-only manifests.
-- Align the dependency graph with published Asupersync 0.5.0, FrankenSQLite
-  0.4.0, SQLModel 0.5.0, Frankensearch 0.6.0 and FrankenNetworkX 0.3.0.
+- Align the dependency graph with Asupersync 0.5.0, FrankenSQLite
+  0.4.1, SQLModel 0.5.0, Frankensearch 0.6.0 and FrankenNetworkX 0.3.0.
   Doctor reports the linked registry versions and their crates.io sources.
 - Frankensearch's optional shadow comparisons use the caller's blocking pool.
   Without one they report degradation; synchronous shadow work no longer delays

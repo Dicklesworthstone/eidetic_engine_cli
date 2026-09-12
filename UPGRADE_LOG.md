@@ -242,12 +242,57 @@ the following checks may be inferred from the existing binary release.
     using the optimized profile. Original assertions and budgets are unchanged.
     Publish rerank `0.4.0`, fusion `0.3.0` and the facade `0.6.0` from the same
     tagged source. The ten search package uploads are complete.
-- [ ] Package EE 0.15.1 and compile its registry-only dependency graph remotely,
+- [x] Package EE 0.15.1 and compile its registry-only dependency graph remotely,
   with no sibling paths or Cargo patches and no duplicate Asupersync runtime.
-- [ ] Publish `eidetic-engine`, verify a fresh registry installation and run
+- [x] Publish `eidetic-engine` 0.15.1, verify a fresh registry installation and run
   its memory/search/pack loop.
-- [ ] Publish and verify matching 0.15.1 DSR binaries and Homebrew metadata;
-  preserve the existing v0.15.0 tag and assets.
+- [ ] Publish and verify corrected 0.15.2 DSR binaries and Homebrew metadata;
+  preserve the existing v0.15.0 tag and assets. The 0.15.1 binary release is
+  withheld after runtime qualification found a storage regression.
+
+### Corrected 0.15.2 qualification
+
+The 0.15.1 crate passed compiler checks, strict Clippy, 54 selected tests, and
+a fresh Cargo installation with the seven-command memory workflow. All six
+DSR binaries compiled. Final real-model reranking then returned only fusion
+scores because strict read-only connections failed while a peer pinned a WAL
+read transaction. The concurrent-write probe also failed nine of 30 journal
+appends; all 30 explicit memories persisted. These failures were not treated
+as a successful release. The registry rejected the attempted 0.15.1 yank
+because the supplied token lacks yank permission; that version remains public.
+
+- [x] Reproduce read-only WAL admission failure in FrankenSQLite. The first
+  patch passes that reproducer but fails checkpointed databases without a WAL;
+  the corrected patch adopts WAL mode only after its backend is installed.
+- [x] Qualify the correction, including checkpointed databases without a WAL
+  sidecar; publish only pager, core and facade 0.4.1 in dependency order.
+- [x] Make EE surface rerank document-storage failures and preserve the full
+  original fusion order, even when only part of the text batch was readable.
+- [ ] Compile and test EE against the public corrected storage packages.
+- [ ] Pass the original native-model rerank and 60-operation writer probes
+  before publishing EE 0.15.2.
+- [ ] Qualify all six final binaries, publish and verify the crate and assets,
+  and update the four-platform Homebrew formula.
+
+The dependency diagnostics report the FrankenSQLite facade version. Helper
+crates can have independent patch versions, so the contract now compares the
+facade with its own Cargo.lock entry instead of requiring unchanged helper
+crates such as fsqlite-error to share the same patch version.
+
+FrankenSQLite 0.4.1 is published from `fsqlite-v0.4.1` at `a8b76fb810ff`.
+All 46 selected storage regressions and the merged async-context test passed,
+as did full-workspace all-target check, strict Clippy and formatting. Public
+archives match their registry checksums, publisher candidates, original
+manifests and all 64 packaged source files. Only pager, core and facade were
+republished; the other storage libraries remain at 0.4.0. EE's lock update
+changes only those three versions and checksums, preserving all dependency
+edges and the single Asupersync 0.5.0 runtime.
+
+EE's preregistry source passed all-target check, strict Clippy, four focused
+regressions and the existing real-model inference/deadline/cancellation test.
+That test ran its original assertions and budgets in 1.27 seconds. These
+checks used a private frozen source graph; final public-registry and release
+binary checks remain separate gates.
 
 The EE lockfile now has 573 packages: EE itself and 572 checksum-pinned
 crates.io packages, with no path/git dependencies or Cargo patches. The final

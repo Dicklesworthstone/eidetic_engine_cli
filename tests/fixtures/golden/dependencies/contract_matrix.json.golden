@@ -74,7 +74,7 @@
       "enabled_by_default": true,
       "source": {
         "kind": "registry",
-        "version": "0.4.0",
+        "version": "0.4.1",
         "path": "https://crates.io/crates/fsqlite"
       },
       "default_feature_profile": {

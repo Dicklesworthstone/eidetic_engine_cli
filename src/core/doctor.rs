@@ -3843,7 +3843,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "registry",
-            version: "0.4.0",
+            version: "0.4.1",
             path: "https://crates.io/crates/fsqlite",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -5869,11 +5869,11 @@ mod tests {
     fn linked_dependency_diagnostic_versions_match_cargo_lock() -> TestResult {
         let report = DependencyDiagnosticsReport::gather();
 
+        // FrankenSQLite reports the facade version. Its helper packages can
+        // receive independent patch releases; the lockfile records each one.
         for (entry_name, package_name) in [
             ("asupersync", "asupersync"),
             ("frankensqlite", "fsqlite"),
-            ("frankensqlite", "fsqlite-core"),
-            ("frankensqlite", "fsqlite-error"),
             ("sqlmodel_rust", "sqlmodel-core"),
             ("sqlmodel_rust", "sqlmodel-frankensqlite"),
             ("frankensearch", "frankensearch"),

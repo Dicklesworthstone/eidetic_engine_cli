@@ -121,7 +121,7 @@ frankensearch = { version = "0.6.0", default-features = false, features = ["hash
 # EE's schema uses json_valid() in unconditional CHECK constraints. SQLModel
 # intentionally disables FrankenSQLite's default extension set, so unify the
 # JSON feature explicitly instead of depending on a transitive default.
-fsqlite = { version = "0.4.0", default-features = false, features = ["json"] }
+fsqlite = { version = "0.4.1", default-features = false, features = ["json"] }
 # MSRV-compatible, safe advisory file locking for doctor fix/undo coordination.
 # Keep async features disabled: Tokio/async-std/smol are forbidden here.
 fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
