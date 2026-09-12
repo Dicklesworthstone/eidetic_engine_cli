@@ -30,13 +30,21 @@ const FORBIDDEN_SUFFIX_PATTERNS: &[&str] = &["__OPUS", "_improved", "_enhanced",
 /// either (a) names an open tracking bead expected to remove the entry,
 /// or (b) explains why the suffix is a load-bearing fixture label rather
 /// than a duplicated source file.
-const FORBIDDEN_SUFFIX_ALLOWLIST: &[(&str, &str)] = &[(
-    "tests/snapshots/perf_compare_golden__perf_compare_improved.snap",
-    "permanent: insta golden snapshot for the `perf_compare_improved` test \
+const FORBIDDEN_SUFFIX_ALLOWLIST: &[(&str, &str)] = &[
+    (
+        "tests/snapshots/perf_compare_golden__perf_compare_improved.snap",
+        "permanent: insta golden snapshot for the `perf_compare_improved` test \
          scenario in tests/perf_compare_golden.rs. The 'improved' substring is a \
          scenario label describing a perf comparison where a later run improved \
          over a baseline; it is not a duplicated-file pattern.",
-)];
+    ),
+    (
+        "tests/fixtures/failure_modes/pack_bin_version_too_new.json",
+        "permanent: failure-mode fixture named after the canonical \
+         pack_bin_version_too_new diagnostic for unsupported pack versions; \
+         this is a format-boundary scenario, not a replacement file.",
+    ),
+];
 
 const PRUNE_DIRS: &[&str] = &[
     ".git",
@@ -45,6 +53,8 @@ const PRUNE_DIRS: &[&str] = &[
     "node_modules",
     ".cargo",
     ".rust-cache",
+    // RCH's generated Cargo registry cache contains third-party source examples.
+    ".rch-tmp",
 ];
 
 fn manifest_dir() -> PathBuf {
@@ -287,6 +297,7 @@ mod unit_tests {
         assert_eq!(matches_forbidden("foo_improved.rs"), Some("_improved"));
         assert_eq!(matches_forbidden("foo_enhanced.rs"), Some("_enhanced"));
         assert_eq!(matches_forbidden("foo_alt.rs"), Some("_alt"));
+        assert_eq!(matches_forbidden("handler_new.rs"), Some("_new"));
     }
 
     #[test]
@@ -305,9 +316,13 @@ mod unit_tests {
         assert!(is_pruned(Path::new(".git/objects/aa/bb")));
         assert!(is_pruned(Path::new("./.beads/issues.jsonl")));
         assert!(is_pruned(Path::new(
+            ".rch-tmp/registry/examples/parser_alt.rs"
+        )));
+        assert!(is_pruned(Path::new(
             "./.beads.recovery_20260514T045635Z/foo"
         )));
         assert!(!is_pruned(Path::new("src/main.rs")));
+        assert!(!is_pruned(Path::new("src/cache/handler_new.rs")));
         assert!(!is_pruned(Path::new("./tests/no_forbidden_suffixes.rs")));
     }
 

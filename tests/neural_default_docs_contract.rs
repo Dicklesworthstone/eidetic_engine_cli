@@ -129,7 +129,7 @@ fn env_and_dependency_docs_match_the_manifest_feature_shape() -> TestResult {
     )?;
     ensure(
         DEP_MATRIX,
-        "`hash`, `storage`, `model2vec`, `download`, `lexical`, `fts5`, and `rerank`",
+        "`hash`, `storage`, `model2vec`, `download`, `lexical-tantivy`, `fts5`, `rerank`, and `native`",
         "dependency contract matrix",
     )?;
     ensure(
