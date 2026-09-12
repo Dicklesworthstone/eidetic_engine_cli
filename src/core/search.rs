@@ -7746,7 +7746,7 @@ async fn apply_search_rerank_with_budget(
     query: &str,
     candidates: &mut [crate::search::ScoredResult],
     reranker: Arc<dyn Reranker>,
-    text_fn: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    text_fn: impl Fn(&str) -> Result<Option<String>, SearchDegradation> + Send + Sync + 'static,
     top_k: usize,
     timeout: Duration,
 ) -> Option<SearchDegradation> {
@@ -7757,16 +7757,23 @@ async fn apply_search_rerank_with_budget(
     let query = query.to_owned();
     let mut reranked = candidates.to_vec();
     let task = cx.spawn_in(&scope, move |child| async move {
-        apply_search_rerank(
+        let storage_failure = OnceLock::new();
+        let result = apply_search_rerank(
             &child,
             &query,
             &mut reranked,
             reranker.as_ref(),
-            text_fn,
+            |doc_id| match text_fn(doc_id) {
+                Ok(text) => text,
+                Err(degradation) => {
+                    storage_failure.get_or_init(|| degradation);
+                    None
+                }
+            },
             top_k,
         )
-        .await
-        .map(|()| reranked)
+        .await;
+        (storage_failure.into_inner(), result.map(|()| reranked))
     });
     let mut task = match task {
         Ok(task) => task,
@@ -7778,10 +7785,11 @@ async fn apply_search_rerank_with_budget(
         }
     };
     match task.join(cx).await {
-        Ok(Ok(reranked)) => {
+        Ok((None, Ok(reranked))) => {
             candidates.clone_from_slice(&reranked);
             None
         }
+        Ok((Some(degradation), _)) => Some(degradation),
         result => {
             tracing::warn!(?result, "Optional rerank task did not complete");
             // The caller checks its own cancellation immediately after this
@@ -7862,6 +7870,7 @@ struct SearchRerankTextProvider {
     database_path: PathBuf,
     scope_context: MemoryScopeContext,
     cache: Arc<Mutex<HashMap<String, Option<String>>>>,
+    storage_failure: Arc<OnceLock<SearchDegradation>>,
 }
 
 impl SearchRerankTextProvider {
@@ -7874,6 +7883,7 @@ impl SearchRerankTextProvider {
                 options.strict_scope,
             ),
             cache: Arc::new(Mutex::new(HashMap::new())),
+            storage_failure: Arc::new(OnceLock::new()),
         }
     }
 
@@ -7894,11 +7904,53 @@ impl SearchRerankTextProvider {
         resolved
     }
 
+    fn text_for_rerank(&self, doc_id: &str) -> Result<Option<String>, SearchDegradation> {
+        if let Some(degradation) = self.storage_failure.get() {
+            return Err(degradation.clone());
+        }
+        let text = self.text_for_doc(doc_id);
+        match self.storage_failure.get() {
+            Some(degradation) => Err(degradation.clone()),
+            None => Ok(text),
+        }
+    }
+
+    fn record_storage_failure(&self, reason: &'static str) {
+        // Record only the first failure across the collection and rerank
+        // closures. Fixed reasons keep database paths and SQL out of output.
+        self.storage_failure
+            .get_or_init(|| SearchDegradation::rerank_model_unavailable(reason));
+    }
+
     fn load_scoped_memory_text(&self, doc_id: &str) -> Option<String> {
-        let connection = DbConnection::open_file_read_only(&self.database_path).ok()?;
-        let memory = connection.get_memory(doc_id).ok().flatten()?;
+        let connection = match DbConnection::open_file_read_only(&self.database_path) {
+            Ok(connection) => connection,
+            Err(_) => {
+                self.record_storage_failure(
+                    "Document storage could not be opened for reranking; retry the query or inspect database health.",
+                );
+                return None;
+            }
+        };
+        let memory = match connection.get_memory(doc_id) {
+            Ok(memory) => memory?,
+            Err(_) => {
+                self.record_storage_failure(
+                    "Memory text could not be read for reranking; retry the query or inspect database health.",
+                );
+                return None;
+            }
+        };
         let tags = if matches!(self.scope_context.scope, MemoryScope::Global) {
-            connection.get_memory_tags(doc_id).unwrap_or_default()
+            match connection.get_memory_tags(doc_id) {
+                Ok(tags) => tags,
+                Err(_) => {
+                    self.record_storage_failure(
+                        "Memory scope tags could not be read for reranking; retry the query or inspect database health.",
+                    );
+                    return None;
+                }
+            }
         } else {
             Vec::new()
         };
@@ -11406,16 +11458,21 @@ async fn search_sync_with_performance(
                     rerank_runtime_owned.text_provider.clone(),
                 ) {
                     let rerank_start = Instant::now();
-                    let degradation = apply_search_rerank_with_budget(
-                        &cx,
-                        &query_owned,
-                        &mut results,
-                        reranker,
-                        move |doc_id| text_provider.text_for_doc(doc_id),
-                        rerank_runtime_owned.top_k,
-                        SEARCH_RERANK_TIMEOUT,
-                    )
-                    .await;
+                    let degradation = match text_provider.storage_failure.get().cloned() {
+                        Some(degradation) => Some(degradation),
+                        None => {
+                            apply_search_rerank_with_budget(
+                                &cx,
+                                &query_owned,
+                                &mut results,
+                                reranker,
+                                move |doc_id| text_provider.text_for_rerank(doc_id),
+                                rerank_runtime_owned.top_k,
+                                SEARCH_RERANK_TIMEOUT,
+                            )
+                            .await
+                        }
+                    };
                     push_search_performance_timing(
                         &async_timings,
                         "searchSync::rerank",
@@ -20844,6 +20901,198 @@ mod tests {
     }
 
     #[test]
+    fn rerank_text_storage_failures_and_absence_preserve_fusion() -> TestResult {
+        struct MustNotRerank;
+        impl frankensearch::SyncRerank for MustNotRerank {
+            fn rerank_sync(
+                &self,
+                _query: &str,
+                _documents: &[frankensearch::RerankDocument],
+            ) -> frankensearch::SearchResult<Vec<frankensearch::RerankScore>> {
+                panic!("failed document storage must not invoke inference");
+            }
+            fn id(&self) -> &str {
+                "must-not-rerank"
+            }
+            fn model_name(&self) -> &str {
+                "must-not-rerank"
+            }
+        }
+
+        for (create_database, migrate, reason) in [
+            (false, false, Some("Document storage could not be opened")),
+            (true, false, Some("Memory text could not be read")),
+            (true, true, None),
+        ] {
+            let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let database_path = root.path().join("private-rerank-storage.db");
+            if create_database {
+                // A real, readable database without the memories schema fails
+                // its query rather than its file-open operation.
+                let connection =
+                    DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+                if migrate {
+                    connection.migrate().map_err(|error| error.to_string())?;
+                }
+                connection.close().map_err(|error| error.to_string())?;
+            }
+            let options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+            let provider =
+                SearchRerankTextProvider::new(database_path.clone(), root.path(), &options);
+            let mut candidates: Vec<crate::search::ScoredResult> = (0..5)
+                .map(|index| crate::search::ScoredResult {
+                    doc_id: format!("mem_{index:026}").into(),
+                    score: 0.03,
+                    source: crate::search::ScoreSource::Hybrid,
+                    index: None,
+                    fast_score: None,
+                    quality_score: None,
+                    lexical_score: Some(0.03),
+                    rerank_score: None,
+                    explanation: None,
+                    metadata: None,
+                })
+                .collect();
+            let fusion = serde_json::to_value(&candidates).map_err(|error| error.to_string())?;
+            let provider_for_task = provider.clone();
+            let (degradation, returned) =
+                crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+                    let degradation = apply_search_rerank_with_budget(
+                        &cx,
+                        "release",
+                        &mut candidates,
+                        Arc::new(frankensearch::SyncRerankerAdapter(MustNotRerank)),
+                        move |id| provider_for_task.text_for_rerank(id),
+                        5,
+                        SEARCH_RERANK_TIMEOUT,
+                    )
+                    .await;
+                    (degradation, candidates)
+                })
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                serde_json::to_value(&returned).map_err(|error| error.to_string())?,
+                fusion,
+                "unavailable text must preserve every fusion result field"
+            );
+            let Some(reason) = reason else {
+                assert!(
+                    degradation.is_none(),
+                    "missing memories are not storage errors"
+                );
+                assert!(provider.storage_failure.get().is_none());
+                let report = rerank_test_report(
+                    vec![synthetic_hybrid_hit("mem_fusion", 0.03)],
+                    Vec::new(),
+                    true,
+                );
+                let json =
+                    report.data_json_with_advisory_session(&mut SearchAdvisorySession::default());
+                assert_eq!(json["rerank"]["mode"], "fusion_only");
+                assert!(json["rerank"]["advisory"].is_null());
+                continue;
+            };
+            let degradation = degradation.ok_or("storage failure must be observable")?;
+            assert!(degradation.message.contains(reason), "{degradation:?}");
+            assert_eq!(degradation.code, "rerank_model_unavailable");
+            assert!(!degradation.is_permanent());
+            assert!(!degradation.message.contains("private-rerank-storage"));
+            assert!(
+                !degradation
+                    .message
+                    .contains(root.path().to_string_lossy().as_ref())
+            );
+            // Collection and rerank own clones of this provider. A later
+            // different storage failure must not replace the first reason.
+            let mut later = provider.clone();
+            later.database_path = root.path().join("another-missing.db");
+            assert!(later.text_for_doc("mem_another").is_none());
+            assert_eq!(
+                later
+                    .text_for_rerank("mem_another")
+                    .expect_err("first failure retained"),
+                degradation
+            );
+
+            let report = rerank_test_report(
+                vec![synthetic_hybrid_hit("mem_fusion", 0.03)],
+                vec![degradation],
+                true,
+            );
+            let json =
+                report.data_json_with_advisory_session(&mut SearchAdvisorySession::default());
+            assert_eq!(json["rerank"]["mode"], "fusion_only_degraded");
+            assert_eq!(json["rerank"]["rerankScoreCount"], 0);
+            assert_eq!(json["rerank"]["advisory"]["permanent"], false);
+            assert_eq!(json["degraded"][0]["code"], "rerank_model_unavailable");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rerank_text_storage_distinguishes_absent_scoped_text_from_read_errors() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = root.path().join("rerank-text.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_012345678901234567890123rt";
+        let memory_id = "mem_012345678901234567890123rt";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: root.path().to_string_lossy().into_owned(),
+                    name: Some("rerank text storage".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                memory_id,
+                &test_memory_input(workspace_id, "Verify release checksums."),
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let mut options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+        let provider = SearchRerankTextProvider::new(database_path.clone(), root.path(), &options);
+        assert_eq!(
+            provider.text_for_rerank(memory_id),
+            Ok(Some("Verify release checksums.".to_owned()))
+        );
+        assert_eq!(provider.text_for_rerank("mem_absent"), Ok(None));
+        assert_eq!(provider.text_for_rerank("ses_not_a_memory"), Ok(None));
+        assert!(provider.storage_failure.get().is_none());
+
+        options.memory_scope = MemoryScope::Global;
+        let global = SearchRerankTextProvider::new(database_path.clone(), root.path(), &options);
+        assert_eq!(global.text_for_rerank(memory_id), Ok(None));
+        assert!(
+            global.storage_failure.get().is_none(),
+            "untagged memory is legitimately out of global scope"
+        );
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("ALTER TABLE memory_tags RENAME TO unavailable_memory_tags")
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let broken_scope = SearchRerankTextProvider::new(database_path, root.path(), &options);
+        let degradation = broken_scope
+            .text_for_rerank(memory_id)
+            .expect_err("failed scope lookup is not an out-of-scope memory");
+        assert!(
+            degradation
+                .message
+                .contains("Memory scope tags could not be read")
+        );
+        assert_eq!(degradation.code, "rerank_model_unavailable");
+        Ok(())
+    }
+
+    #[test]
     #[allow(clippy::cast_precision_loss)]
     fn rerank_step_reorders_top_k_when_reranker_available() -> TestResult {
         // bd-2vq2z.29 / bd-1nl13.13: positive-path proof that EE's production
@@ -20856,13 +21105,15 @@ mod tests {
         // unit-domain floor, so only promotion of the final rerank score keeps
         // the reranked winner visible. A real cross-encoder model fixture is
         // exercised by scripts/e2e_rerank.sh, not unit tests.
-        struct StubReverseReranker;
+        struct StubReverseReranker(Arc<std::sync::atomic::AtomicUsize>);
         impl frankensearch::SyncRerank for StubReverseReranker {
             fn rerank_sync(
                 &self,
                 _query: &str,
                 documents: &[frankensearch::RerankDocument],
             ) -> frankensearch::SearchResult<Vec<frankensearch::RerankScore>> {
+                self.0
+                    .store(documents.len(), std::sync::atomic::Ordering::SeqCst);
                 // Later candidates score higher -> the reranker reverses order.
                 Ok(documents
                     .iter()
@@ -20906,9 +21157,12 @@ mod tests {
             .map(|hit| hit.doc_id.to_string())
             .collect();
         let candidate_count = candidates.len();
+        let fusion_candidates = candidates.clone();
+        let scored_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-        let reranker: Arc<dyn Reranker> =
-            Arc::new(frankensearch::SyncRerankerAdapter(StubReverseReranker));
+        let reranker: Arc<dyn Reranker> = Arc::new(frankensearch::SyncRerankerAdapter(
+            StubReverseReranker(Arc::clone(&scored_count)),
+        ));
 
         let (reranked_order, top_candidate) =
             crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
@@ -20917,7 +21171,7 @@ mod tests {
                     "release format checklist",
                     &mut candidates,
                     reranker,
-                    |doc_id: &str| Some(format!("text body for {doc_id}")),
+                    |doc_id: &str| Ok(Some(format!("text body for {doc_id}"))),
                     candidate_count,
                     SEARCH_RERANK_TIMEOUT,
                 )
@@ -20974,6 +21228,62 @@ mod tests {
         assert!(
             search_hit_meets_relevance_floor(&top_hit, None),
             "the reranked winner must survive EE's default relevance floor"
+        );
+        assert_eq!(
+            scored_count.load(std::sync::atomic::Ordering::SeqCst),
+            candidate_count
+        );
+
+        // Five available texts still make Frankensearch invoke the same
+        // deterministic scorer. A real open failure on the sixth lookup must
+        // discard those partial mutations, including reordering and metadata.
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+        let provider = SearchRerankTextProvider::new(
+            root.path().join("missing-rerank-text.db"),
+            root.path(),
+            &options,
+        );
+        let original =
+            serde_json::to_value(&fusion_candidates).map_err(|error| error.to_string())?;
+        scored_count.store(0, std::sync::atomic::Ordering::SeqCst);
+        let reranker: Arc<dyn Reranker> = Arc::new(frankensearch::SyncRerankerAdapter(
+            StubReverseReranker(Arc::clone(&scored_count)),
+        ));
+        let (degradation, returned) =
+            crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+                let mut partial = fusion_candidates;
+                let degradation = apply_search_rerank_with_budget(
+                    &cx,
+                    "release format checklist",
+                    &mut partial,
+                    reranker,
+                    move |doc_id| {
+                        if doc_id == "mem_0005" {
+                            provider.text_for_rerank(doc_id)
+                        } else {
+                            Ok(Some(format!("text body for {doc_id}")))
+                        }
+                    },
+                    candidate_count,
+                    SEARCH_RERANK_TIMEOUT,
+                )
+                .await;
+                (degradation, partial)
+            })
+            .map_err(|error| error.to_string())?;
+        assert_eq!(scored_count.load(std::sync::atomic::Ordering::SeqCst), 5);
+        let degradation = degradation.ok_or("partial text failure must be observable")?;
+        assert_eq!(degradation.code, "rerank_model_unavailable");
+        assert!(
+            degradation
+                .message
+                .contains("Document storage could not be opened")
+        );
+        assert_eq!(
+            serde_json::to_value(&returned).map_err(|error| error.to_string())?,
+            original,
+            "partial inference must not change any original fusion field"
         );
         Ok(())
     }
@@ -21048,7 +21358,7 @@ mod tests {
                     "release checksums",
                     &mut candidates,
                     Arc::clone(&reranker),
-                    move |id| positive_texts.get(id).cloned(),
+                    move |id| Ok(positive_texts.get(id).cloned()),
                     5,
                     SEARCH_RERANK_TIMEOUT,
                 )
@@ -21062,7 +21372,7 @@ mod tests {
                 "release checksums",
                 &mut expired,
                 Arc::clone(&reranker),
-                move |id| texts.get(id).cloned(),
+                move |id| Ok(texts.get(id).cloned()),
                 5,
                 Duration::ZERO,
             )
