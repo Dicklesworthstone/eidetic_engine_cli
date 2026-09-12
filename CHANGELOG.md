@@ -79,6 +79,8 @@ future changelog pass expands those rows into full capability sections.
   `ee orient --fast --format hook --fields command,ambientContext` response.
   Both commands retain local fallback when the daemon is unavailable.
   Anchored recall works without loading an embedding model.
+- macOS daemon clients drain replies already buffered when the server closes
+  the connection, avoiding a timeout-update race that broke retrieval and stop.
 - Native reranking uses the request's inherited blocking pool and cancellation
   budget. Optional rerank exhaustion preserves fusion results with an explicit
   degraded signal; snapshot cleanup preserves the original search error (#36).

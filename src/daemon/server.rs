@@ -5930,12 +5930,21 @@ fn ensure_client_deadline(deadline: Instant) -> Result<Duration, ClientError> {
 
 fn set_client_deadline(stream: &UnixStream, deadline: Instant) -> Result<(), ClientError> {
     let remaining = ensure_client_deadline(deadline)?;
-    stream
+    let result = stream
         .set_read_timeout(Some(remaining))
-        .map_err(ClientError::Io)?;
-    stream
-        .set_write_timeout(Some(remaining))
-        .map_err(ClientError::Io)
+        .and_then(|()| stream.set_write_timeout(Some(remaining)));
+    // Darwin rejects SO_RCVTIMEO/SO_SNDTIMEO with EINVAL after the peer
+    // closes, even while its complete reply is buffered. Drain that reply
+    // without blocking instead of discarding it as a timeout-setting error.
+    // Nonblocking mode also preserves bounded I/O if EINVAL has another cause.
+    #[cfg(target_vendor = "apple")]
+    if result
+        .as_ref()
+        .is_err_and(|error| error.raw_os_error() == Some(libc::EINVAL))
+    {
+        return stream.set_nonblocking(true).map_err(ClientError::Io);
+    }
+    result.map_err(ClientError::Io)
 }
 
 fn client_io_error(error: io::Error, deadline: Instant) -> ClientError {
@@ -7569,6 +7578,32 @@ mod tests {
         let mut body = vec![0_u8; announced];
         stream.read_exact(&mut body).expect("body must arrive");
         serde_json::from_slice(&body).expect("body must parse as daemon response")
+    }
+
+    #[test]
+    fn client_deadline_preserves_buffered_response_after_peer_closes() {
+        use std::io::Read;
+
+        let (mut server, mut client) = UnixStream::pair().expect("socketpair");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        set_client_deadline(&client, deadline).expect("install initial deadline");
+        let response = DaemonResponse::ok(
+            "req-buffered-reply",
+            TEST_AGENT_ID,
+            None,
+            serde_json::json!({"reply": "complete before peer close"}),
+        );
+        write_response(&mut server, &response).expect("write complete response");
+        drop(server);
+
+        set_client_deadline(&client, deadline).expect("refresh after peer close");
+        assert_eq!(read_framed_daemon_response(&mut client), response);
+        set_client_deadline(&client, deadline).expect("refresh at EOF");
+        assert_eq!(client.read(&mut [0_u8; 1]).expect("read EOF"), 0);
+        assert!(matches!(
+            set_client_deadline(&client, Instant::now()),
+            Err(ClientError::DeadlineExceeded)
+        ));
     }
 
     fn client_round_trip_against_single_response(

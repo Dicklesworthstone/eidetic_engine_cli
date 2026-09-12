@@ -4680,7 +4680,10 @@ mod tests {
         assert!(pre_edit.contains("VERBOSE_MAX_PATHS = 12"));
         assert!(pre_edit.contains("already_seen(text)"));
         assert!(pre_edit.contains("if not seen:"));
-        assert!(pre_edit.contains("if result.returncode != 0 or not text:"));
+        assert!(pre_edit.contains("if result.returncode != 0:"));
+        assert!(pre_edit.contains("if not text:"));
+        assert!(pre_edit.contains("_ee_record_invocation(\"command_error\")"));
+        assert!(pre_edit.contains("_ee_record_invocation(\"empty\", degraded_codes=codes)"));
         assert!(pre_edit.contains("provenance=ee:{SCHEMA}"));
 
         let session_start = session_start_python();
