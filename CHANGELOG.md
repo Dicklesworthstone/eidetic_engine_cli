@@ -66,6 +66,12 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
+- Windows doctor runs preserve and replace their existing `latest` pointer
+  instead of rejecting it as a redirected lifecycle directory on the second
+  invocation. Parent-directory checks and regular-file preservation remain.
+- Updated crossbeam-queue, base64, fs4, UUID, zeroize, zstd and toml_edit.
+  Explicit lock-contention handling and allocated secret-buffer zeroization
+  remain in place with the updated APIs.
 - Workspace daemons serve anchored `ee recall` and the bounded
   `ee orient --fast --format hook --fields command,ambientContext` response.
   Both commands retain local fallback when the daemon is unavailable.

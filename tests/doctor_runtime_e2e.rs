@@ -430,7 +430,12 @@ fn backup_refuses_nested_symlink_without_touching_external_destination() {
     );
 }
 
-#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+))]
 #[test]
 fn finish_refuses_regular_latest_without_overwriting_or_removing_it() {
     let ws = fresh_workspace();
@@ -472,9 +477,14 @@ fn finish_refuses_regular_latest_without_overwriting_or_removing_it() {
     assert_persistent_doctor_lock_released(ws.path());
 }
 
-#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+))]
 #[test]
-fn finish_atomically_replaces_symlink_latest_and_preserves_prior_pointer() {
+fn finish_replaces_symlink_latest_and_preserves_prior_pointer() {
     let ws = fresh_workspace();
     let first = start_test_run(ws.path());
     let first_run_id = first.run_id().to_owned();
@@ -500,7 +510,7 @@ fn finish_atomically_replaces_symlink_latest_and_preserves_prior_pointer() {
         fs::read_link(second_run_dir.join("previous-latest"))
             .expect("read preserved prior pointer"),
         first_target,
-        "latest exchange must retain the old symlink as a run artifact"
+        "latest replacement must retain the old symlink as a run artifact"
     );
 }
 

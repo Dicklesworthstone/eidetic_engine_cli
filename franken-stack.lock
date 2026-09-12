@@ -4,13 +4,14 @@
 # ee's Cargo.lock closes over. Refreshed 2026-09-09 after the locked dependency
 # update: Asupersync 0.4.11, FrankenSQLite 0.3.18, Frankensearch 0.5.0,
 # FrankenNetworkX 0.2.1, agent detection 0.2.3, SQLModel 0.4.3, and Tru 0.2.4.
-# Asupersync includes the maintained rustls-pki-types PEM parser migration.
+# Asupersync includes the maintained rustls-pki-types PEM parser migration and
+# guards its Unix-only UDP readiness import so the Windows build stays valid.
 # Its local patch must remain selected instead of falling back to crates.io.
 # FrankenSQLite includes the non-Unix identity accessor fix and bounded inline
 # Windows I/O, backported onto 0.3.18 without unrelated later storage changes.
 # Frankensearch embeds the 0.2.7 streamed/shared Model2Vec loader. Its producer
 # identity changed; existing strict semantic indexes may require rebuilding.
-asupersync	d69851f4bb6b9eaa2a9a7e4d1829b0617124114b
+asupersync	ba3342249f2c8bd292494feacf786a4397873c18
 franken_agent_detection	1b0a14e19550581300e813a8a424083171fd18d2
 franken_networkx	6809c573a99e79497a43aa5a7c77fb2b0f9e2fc8
 frankensearch	4ea318c01c98d1e55fbd62bab8c660b434c176d7

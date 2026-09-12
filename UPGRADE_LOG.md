@@ -265,9 +265,25 @@ passed all 44 selected compression/cache/ledger tests and all eight pack
 metamorphic integration tests, including the corrected timing comparisons.
 There were no failures or ignored tests in either selected run.
 
-The toml_edit 0.25.15 upgrade is now applied with its official registry
-checksum. Config parsing, safe config writes and profile application tests
-are the next validation step; their result is pending.
+The toml_edit 0.25.15 upgrade uses its official registry checksum. All 75
+config parsing, safe config-write and profile-application tests passed on the
+compiled RCH executable from 9e8e72b5c, with no failures or ignores. All-target
+Clippy with `-D warnings` also passed on that source. The full 9,523-test library
+run remains active; these selected results do not replace its outcome.
+
+The Asupersync pin now includes ba3342249, whose only change from d69851f4 is
+guarding the Unix-only UDP readiness import with `cfg(unix)`. This preserves
+the Linux implementation and corrects Windows compilation. The exact updated
+archive is staged on both release builders; final Windows compilation remains
+pending.
+
+Native qualification preparation also found a Windows doctor defect in the
+published 0.14.5 binary: the first `doctor --fix` succeeds, but the next fails
+at finish with `doctor_run_root_symlink_refused` on its own `latest` pointer.
+The fix validates parent directories while inspecting the leaf without
+following it. Existing pointer-preservation and regular-file-refusal tests
+now include Windows. The final native probe must demonstrate lock contention,
+release and two completed runs with the prior pointer preserved.
 
 ## Existing release gates
 

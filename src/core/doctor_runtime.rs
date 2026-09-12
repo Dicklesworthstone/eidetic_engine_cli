@@ -3385,7 +3385,10 @@ fn publish_doctor_latest(
     run_dir: &Path,
     latest_link: &Path,
 ) -> Result<(), DoctorRuntimeError> {
-    validate_doctor_lifecycle_paths([run_dir, latest_link])?;
+    // The parent directories must be real, but the latest leaf is itself a
+    // symlink after a successful run. Inspect that leaf without following it
+    // below so a second run can preserve and replace the prior pointer.
+    validate_doctor_lifecycle_paths([run_dir, latest_link.parent().unwrap_or(latest_link)])?;
 
     match fs::symlink_metadata(latest_link) {
         Ok(metadata) if !metadata.file_type().is_symlink() => {
