@@ -144,6 +144,7 @@ fn redaction_level_vocabulary_is_canonical_five() -> TestResult {
 fn redaction_level_behavior_matrix_matches_docs() -> TestResult {
     let secret = api_key_fixture()?;
     let long_body = "memory body fixture ".repeat(20);
+    let body_hash = format!("blake3:{}", blake3::hash(long_body.as_bytes()).to_hex());
 
     for level in RedactionLevel::all() {
         let redacted_secret = redact_content(&secret, *level);
@@ -202,12 +203,12 @@ fn redaction_level_behavior_matrix_matches_docs() -> TestResult {
                 )?;
                 let redacted_long = redact_memory_record(memory_record(&long_body)?, *level);
                 ensure(
-                    redacted_long.content.chars().count() == 200,
+                    redacted_long.content == long_body.chars().take(200).collect::<String>(),
                     "strict should truncate non-secret memory bodies to 200 chars",
                 )?;
                 ensure(
-                    redacted_long.content_hash.is_some(),
-                    "strict should hash the original full body",
+                    redacted_long.content_hash.as_deref() == Some(body_hash.as_str()),
+                    "strict should hash the original full body including its trailing whitespace",
                 )?;
                 assert_tag(&redacted_tag, |tag| {
                     ensure(tag == "customer-secret-tag", "strict should preserve tags")
@@ -224,8 +225,8 @@ fn redaction_level_behavior_matrix_matches_docs() -> TestResult {
                     "paranoid should replace memory content",
                 )?;
                 ensure(
-                    redacted_memory.content_hash.is_some(),
-                    "paranoid should hash the original full body",
+                    redacted_memory.content_hash.as_deref() == Some(body_hash.as_str()),
+                    "paranoid should hash the original full body including its trailing whitespace",
                 )?;
                 assert_tag(&redacted_tag, |tag| {
                     ensure(

@@ -1288,7 +1288,12 @@ impl ExportMemoryRecordBuilder {
             )?,
             level: required_string(ExportRecordType::Memory, "level", self.level)?,
             kind: required_string(ExportRecordType::Memory, "kind", self.kind)?,
-            content: required_string(ExportRecordType::Memory, "content", self.content)?,
+            // Bodies are evidence, not identifiers: retain their exact bytes
+            // for lossless export/import and content-hash verification.
+            content: self
+                .content
+                .filter(|content| !content.trim().is_empty())
+                .ok_or_else(|| missing_required(ExportRecordType::Memory, "content"))?,
             content_hash: self.content_hash,
             importance: self.importance,
             confidence: self.confidence,
@@ -2426,6 +2431,28 @@ mod tests {
     }
 
     #[test]
+    fn export_memory_builder_preserves_body_whitespace_and_normalizes_identifiers() {
+        let content = "\u{2003}  indented evidence\n\tsecond line\r\n";
+        let memory = ExportMemoryRecord::builder()
+            .memory_id(" mem-001\n")
+            .workspace_id(" ws-123 ")
+            .level("procedural")
+            .kind("rule")
+            .content(content)
+            .created_at("2026-04-30T12:00:00Z")
+            .build()
+            .expect("memory has required fields");
+
+        assert_eq!(memory.memory_id, "mem-001");
+        assert_eq!(memory.workspace_id, "ws-123");
+        assert_eq!(memory.content, content);
+        let encoded = serde_json::to_string(&memory).expect("memory serializes");
+        let decoded: ExportMemoryRecord =
+            serde_json::from_str(&encoded).expect("memory deserializes");
+        assert_eq!(decoded.content, content);
+    }
+
+    #[test]
     fn export_artifact_record_builder() {
         let artifact = ExportArtifactRecord::builder()
             .artifact_id("art_01234567890123456789012345")
@@ -2744,6 +2771,21 @@ mod tests {
             "content",
             "memory missing content",
         )?;
+        for content in ["", " \t\r\n", "\u{2003}"] {
+            ensure_build_error(
+                ExportMemoryRecord::builder()
+                    .memory_id("mem-001")
+                    .workspace_id("ws-123")
+                    .level("procedural")
+                    .kind("rule")
+                    .content(content)
+                    .created_at("2026-04-30T12:00:00Z")
+                    .build(),
+                ExportRecordType::Memory,
+                "content",
+                "memory blank content",
+            )?;
+        }
         ensure_build_error(
             ExportArtifactRecord::builder()
                 .artifact_id("art-001")

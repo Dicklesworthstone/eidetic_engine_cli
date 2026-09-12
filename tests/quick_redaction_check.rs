@@ -6,9 +6,16 @@ use ee::policy::{
 
 #[test]
 fn test_redaction() {
-    let report =
-        redact_secret_like_content("Document redacted sample sk-FAKEabc123def456ghi789jkl012.");
-    assert!(report.redacted, "It was NOT redacted!");
+    // A legacy raw OpenAI key has 48 characters after the prefix. Keep this
+    // synthetic value low-entropy so only the provider-key detector can match.
+    let raw_token = format!("sk-{}", "A".repeat(48));
+    let report = redact_secret_like_content(&format!("Document redacted sample {raw_token}."));
+    assert!(report.redacted, "legacy API key must be redacted");
+    assert!(report.redacted_reasons.contains(&"openai_api_key"));
+    assert_eq!(
+        report.content,
+        "Document redacted sample [REDACTED:openai_api_key]."
+    );
 }
 
 #[test]
