@@ -840,7 +840,12 @@ pub fn run_recall(
     // Path and symbol recall only reads the anchor index. Missing embeddings
     // do not affect these results and must not trigger model loading or an
     // unrelated per-response degradation (including during daemon warm-up).
-    Ok(evaluate_recall(query, &rows, index_generation, db_generation))
+    Ok(evaluate_recall(
+        query,
+        &rows,
+        index_generation,
+        db_generation,
+    ))
 }
 
 // ---------------------------------------------------------------------------

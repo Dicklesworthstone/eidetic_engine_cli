@@ -4,6 +4,8 @@
 //! printable form. Retrieval engines may still interpret the resulting terms
 //! differently, but this boundary gives property and fuzz tests a narrow target
 //! for query normalization.
+//! Bare terms accept `\-` and `\\` at the start to preserve a literal leading
+//! exclusion marker or backslash. These escapes apply only at the start of a term.
 
 use std::fmt;
 use std::iter::Peekable;
@@ -54,11 +56,11 @@ pub enum SearchQueryClause {
 impl fmt::Display for SearchQueryClause {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Term(term) => write_printable_unquoted(term, formatter),
+            Self::Term(term) => write_printable_unquoted(term, true, formatter),
             Self::Phrase(phrase) => write_quoted(phrase, formatter),
             Self::ExcludedTerm(term) => {
                 formatter.write_str("-")?;
-                write_printable_unquoted(term, formatter)
+                write_printable_unquoted(term, false, formatter)
             }
             Self::ExcludedPhrase(phrase) => {
                 formatter.write_str("-")?;
@@ -144,6 +146,18 @@ fn skip_separators(chars: &mut Peekable<Chars<'_>>) {
 
 fn parse_bare(chars: &mut Peekable<Chars<'_>>) -> String {
     let mut value = String::new();
+    // A leading escape keeps a literal exclusion marker (or the escape itself)
+    // from acquiring syntax when a parsed term is printed and parsed again.
+    if matches!(chars.peek(), Some('\\')) {
+        let mut lookahead = chars.clone();
+        lookahead.next();
+        if matches!(lookahead.peek(), Some('-' | '\\')) {
+            chars.next();
+            if let Some(escaped) = chars.next() {
+                value.push(escaped);
+            }
+        }
+    }
     while let Some(next) = chars.peek().copied() {
         if is_query_separator(next) || next == '"' {
             break;
@@ -265,7 +279,17 @@ fn write_quoted(value: &str, formatter: &mut fmt::Formatter<'_>) -> fmt::Result 
     formatter.write_str("\"")
 }
 
-fn write_printable_unquoted(value: &str, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+fn write_printable_unquoted(
+    value: &str,
+    escape_exclusion: bool,
+    formatter: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    if (escape_exclusion && value.starts_with('-') && value != "-")
+        || value.starts_with("\\-")
+        || value.starts_with("\\\\")
+    {
+        formatter.write_str("\\")?;
+    }
     let mut last_was_normalized_space = false;
     for character in value.chars() {
         if character.is_control() {
@@ -354,6 +378,64 @@ mod tests {
             ]
         );
         assert_eq!(query.to_string(), "alpha - beta -");
+        assert_eq!(parse_search_query(&query.to_string()), query);
+    }
+
+    #[test]
+    fn search_query_parser_roundtrips_literal_exclusion_after_unclosed_quotes() {
+        let input = String::from_utf8(vec![34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 45, 33])
+            .expect("regression input is ASCII");
+        let query = parse_search_query(&input);
+
+        assert_eq!(query.clauses(), &[SearchQueryClause::Term("-!".into())]);
+        assert_eq!(query.to_string(), r"\-!");
+        assert_eq!(parse_search_query(&query.to_string()), query);
+
+        let query = parse_search_query("\"-! alpha -beta");
+        assert_eq!(
+            query.clauses(),
+            &[
+                SearchQueryClause::Term("-!".into()),
+                SearchQueryClause::Term("alpha".into()),
+                SearchQueryClause::ExcludedTerm("beta".into()),
+            ]
+        );
+        assert_eq!(query.to_string(), r"\-! alpha -beta");
+        assert_eq!(parse_search_query(&query.to_string()), query);
+    }
+
+    #[test]
+    fn search_query_parser_roundtrips_leading_bare_escapes() {
+        for value in [
+            "-",
+            "-!",
+            "--flag",
+            r"\",
+            r"\-!",
+            r"\\server",
+            r"path:\name",
+        ] {
+            for clause in [
+                SearchQueryClause::Term(value.into()),
+                SearchQueryClause::ExcludedTerm(value.into()),
+            ] {
+                let printed = clause.to_string();
+                let query = parse_search_query(&printed);
+                assert_eq!(query.clauses(), &[clause], "printed: {printed:?}");
+                assert_eq!(query.to_string(), printed);
+            }
+        }
+
+        let query = parse_search_query(r"\-! -\-! \\-! -\\-!");
+        assert_eq!(
+            query.clauses(),
+            &[
+                SearchQueryClause::Term("-!".into()),
+                SearchQueryClause::ExcludedTerm("-!".into()),
+                SearchQueryClause::Term(r"\-!".into()),
+                SearchQueryClause::ExcludedTerm(r"\-!".into()),
+            ]
+        );
         assert_eq!(parse_search_query(&query.to_string()), query);
     }
 
