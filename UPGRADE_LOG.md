@@ -180,9 +180,11 @@ inputs. Upgrades are applied and tested individually before the next upgrade.
 - [x] uuid 1.24.1 → 1.26.1: 34 identifier and runtime tests passed.
 - [x] zeroize 1.8.2 → 1.9.0: five backup/recovery tests passed.
 - [x] zstd 0.13.3 → 0.14.0: 44 compression/cache and eight integration tests passed.
-- [ ] toml_edit 0.25.13 → 0.25.15: applied; config-editing tests pending.
-- [ ] Run final check, Clippy, formatting, tests and dependency audit.
-- [ ] Qualify six DSR artifacts, publish release and update Homebrew.
+- [x] toml_edit 0.25.13 → 0.25.15: 75 configuration/profile tests passed.
+- [x] Run final check, Clippy, formatting, tests and dependency audit; results
+  below distinguish passing gates from retained test and advisory failures.
+- [x] Qualify six DSR artifacts, publish v0.15.0, verify all 16 public assets,
+  and publish/read back the four-platform Homebrew formula.
 - [x] Check crates.io eligibility: six unpublished versions and a missing
   published runtime API prevent registry publication of this source graph.
 
@@ -220,7 +222,8 @@ its separate fs4 0.13.1 requirement. Pinned RCH tests at c1e15d265 passed
 all 78 selected doctor-lock and secret-store tests on vmi1152480, with no
 failures or ignored tests. The same compiled test artifact also passed three
 CLI checks for contention, audited mutation failure and undoable finish failure.
-Separate integration and Windows checks remain in the final release gate.
+Final Windows qualification also passed real byte-lock contention followed by
+two successful doctor repairs with the previous pointer preserved.
 
 ## uuid 1.26.1
 
@@ -243,7 +246,7 @@ backup/recovery tests in 215 seconds, with no failures or ignores. The same
 source passed the PPR duplicate-degradation regression and all-targets Clippy
 with `-D warnings` on a separate remote worker.
 
-## Remaining upgrades researched
+## Compression and configuration upgrades
 
 - **zstd 0.14.0:** the [release notes](https://github.com/gyscos/zstd-rs/releases/tag/v0.14.0)
   tighten prepared-dictionary lifetimes and fix decoder frame completion.
@@ -251,12 +254,12 @@ with `-D warnings` on a separate remote worker.
   dictionaries, so these changes require no call-site migration. zstd-safe
   moves to 8.0.0; Tantivy still requires the 0.13/7.x pair. zstd-sys 2.1.0
   removes inappropriate MSVC visibility flags. The new BSD-3-Clause license
-  is already allowed. Tests will cover dictionary training, compressed cache
+  is already allowed. Passing tests cover dictionary training, compressed cache
   round-trips, corrupt inputs and compressed replay ledgers.
 - **toml_edit 0.25.15:** the [changelog](https://github.com/toml-rs/toml/blob/8e1d5a85c361ac012957441bb4788ae82f5dc9c8/crates/toml_edit/CHANGELOG.md)
   lists allocation and rendering improvements in 0.25.14–0.25.15, with no
   public API migration. The `+spec-1.1.0` suffix is build metadata, not a
-  prerelease. Config editing and profile-application tests remain the gate.
+  prerelease. All 75 selected configuration/profile tests passed.
 
 The zstd upgrade is now applied with registry-verified checksums for zstd
 0.14.0, zstd-safe 8.0.0 and zstd-sys 2.1.0. The separate Tantivy zstd 0.13.3
@@ -268,30 +271,34 @@ There were no failures or ignored tests in either selected run.
 The toml_edit 0.25.15 upgrade uses its official registry checksum. All 75
 config parsing, safe config-write and profile-application tests passed on the
 compiled RCH executable from 9e8e72b5c, with no failures or ignores. All-target
-Clippy with `-D warnings` also passed on that source. The full 9,523-test library
-run remains active; these selected results do not replace its outcome.
+Clippy with `-D warnings` also passed on that source. The 9,523 library cases
+were accounted for across the original invocation and exact continuation
+selections; their results and subsequent fixes are recorded below.
 
 The Asupersync pin now includes ba3342249, whose only change from d69851f4 is
 guarding the Unix-only UDP readiness import with `cfg(unix)`. This preserves
 the Linux implementation and corrects Windows compilation. The exact updated
-archive is staged on both release builders; final Windows compilation remains
-pending.
+archive was staged on both release builders; the final Windows binary compiled
+successfully and passed native qualification.
 
 Native qualification preparation also found a Windows doctor defect in the
 published 0.14.5 binary: the first `doctor --fix` succeeds, but the next fails
 at finish with `doctor_run_root_symlink_refused` on its own `latest` pointer.
 The fix validates parent directories while inspecting the leaf without
 following it. Existing pointer-preservation and regular-file-refusal tests
-now include Windows. The final native probe must demonstrate lock contention,
-release and two completed runs with the prior pointer preserved.
+now include Windows. The final native probe passed eight commands, including
+actual byte-lock contention, release and two completed doctor runs with the
+prior pointer preserved.
 
 ## Existing release gates
 
 The preceding issue-fix candidate had an E0308 in the optional-reranking
 degradation return type; commit daba50a03 fixes that mismatch. A fresh remote
 all-targets check passed on daba50a03. The preceding broad integration run had 758
-passes and 71 failures; those results predate these upgrades and still require
-classification or fixes. No new version or release is published yet.
+passes and 71 failures; those results predate these upgrades. Rechecks passed
+41 previously failing cases. The other 30 retain fixture, performance,
+environment, verification-input and product limitations; they are not claimed
+fixed by this release.
 
 The subsequent hash-embedder integration run at 2f43ef0cb completed with 784
 passes, seven failures and 39 filtered cases. Its PPR duplicate-warning failure
@@ -320,7 +327,8 @@ advisory. This explains the limited impact in EE's pinned use; it does not
 turn the audit into a pass or establish that the dependency is free of other
 defects. Tantivy 0.26.2, published September 8, retains the same affected
 requirement. Clean remediation needs a 0.26.x backport of upstream's LRU
-dependency update. This remains an explicit upstream release finding.
+dependency update. This remains an explicit upstream release finding tracked
+in [#40](https://github.com/Dicklesworthstone/eidetic_engine_cli/issues/40).
 
 The all-features dependency tree at f0b610734 contains none of the 13 forbidden
 runtime, storage, graph or HTTP crates. This is a separate passing gate.
@@ -339,7 +347,70 @@ Six exact versions are unavailable: `ee-determinism 0.1.0`,
 `fnx-algorithms`, `fnx-cgse`, `fnx-classes`, and `fnx-runtime` at `0.2.1`,
 and `frankensearch-embed 0.2.7`. Additionally, published Asupersync 0.4.11
 comes from `9b114c1f` and has a crate-private `blocking_pool_handle`; EE's
-pinned `d69851f4` exposes the capability-checked API required by reranking.
+pinned `ba3342249` exposes the capability-checked API required by reranking.
 Publishing this EE manifest against the registry would therefore fail.
 Crates.io publication needs upstream version releases; binary releases
 and Homebrew can consume the exact pinned sources.
+
+## Final v0.15.0 results
+
+Published [v0.15.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.15.0)
+on 2026-09-12 from `d09edf26a0adf8d39897de615610b7d67430bb81`. All-target
+check, Clippy with `-D warnings`, formatting and the all-features forbidden
+dependency gate passed. RCH check/Clippy receipts retain the authorized
+build-admission exception and a proof-broker source-state-mismatch diagnostic;
+they are compiler passes, not clean infrastructure attestations.
+
+The 9,523-case library selection at `9e8e72b5c` was accounted for across the
+original invocation and exact continuation selections: 9,517 passed, two failed
+and four were ignored. The original combined build/test invocation reached its
+7,200-second timeout; continuation results do not turn it into a successful
+single run. The failures exposed stale doctor dependency metadata and a stale
+hook-template assertion. After correcting both and fixing the real macOS
+buffered-reply race, the three focused regressions passed on final source:
+three passed, zero failed, zero ignored, 9,521 filtered out. Two ignored
+real-model cases passed separately on an earlier candidate; two explicit
+microbenchmarks were not run. The original high-concurrency SIGSEGV (#29) and
+the broader integration baseline remain unresolved.
+
+DSR built six targets without GitHub Actions, using nightly-2026-08-31 and
+the seven exact sibling revisions in `franken-stack.lock`. Every final binary
+passed memory workflows with source/target/version and binary hashes checked.
+Windows and Apple Silicon ran natively; Intel Mac used Rosetta and GNU ARM64
+used QEMU on Debian 10. GNU x86-64 and musl x86-64 also ran on Debian 10.
+Both GNU binaries require at most glibc 2.28; musl has no ELF interpreter or
+dynamic-library dependencies. Windows additionally passed actual byte-lock
+contention and successive doctor repairs preserving the previous pointer.
+
+The final GNU binary passed six concurrent writers making 60 interleaved
+memory/journal writes, with all eight persistence/index assertions passing in
+32.273 seconds. A final real-Model2Vec Linux fixture passed 20 CLI/hook commands
+while five capabilities observations demonstrated automatic warming followed by
+readiness. SessionStart took 0.817 seconds and PreToolUse 0.266 seconds in two
+one-rule workspaces; these are fixture measurements, not general guarantees.
+The final native Mac fixture passed 17 commands with warming disabled, including
+installed hooks, workspace isolation, fallback, deduplication and shutdown.
+
+On the immediately preceding candidate, three real-model semantic scenarios
+passed. A 300-memory reranking fixture requested 160 candidates and scored all
+96 allowed by the selected portable profile in 15.319 seconds. No profile ceiling
+or timeout was raised. Mac boundary migration passed 8/8. The original reporter
+also confirmed #36 resolved in v0.14.5 on the original 549-memory workspace;
+that confirmation supports closing the report without claiming a bisected cause.
+
+The unchanged shell installer passed a checksum-verified offline installation
+and executable self-test in a fresh retained container. Process-local cleanup
+suppression preserved temporary files; cleanup and same-host upgrade behavior
+were not qualified. All 16 public release downloads then matched the prepared
+hashes, and all six archive members matched the qualified binaries. The Homebrew
+formula was published in
+[`bbaad4e7414a`](https://github.com/Dicklesworthstone/homebrew-tap/commit/bbaad4e7414a11ea3d77113406caa0da798ff31e)
+and read back byte for byte with all four archive URLs/hashes checked. An actual
+`brew install` was not run. No crates were published; the registry blockers above
+remain. Assets are unsigned and do not satisfy `--require-provenance`.
+
+A late report (#41) reproduced on the final binary: intact Claude Code managed
+entries reinstall byte-identically, but entries missing `eeManaged` metadata
+duplicate on reinstall while status still reports four fresh hooks. The fixture
+deliberately removed metadata and does not establish how the original settings
+lost it. This issue remains open and is disclosed in the upgrade notes.

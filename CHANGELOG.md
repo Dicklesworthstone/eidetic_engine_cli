@@ -22,16 +22,17 @@ checked-in Beads records. The durable research ledger is
 | 2026-08-29 → 2026-09-11 | **`0.14.5`** portable GNU/Linux binaries, Windows storage I/O, recovery, and runtime resource use. |
 | 2026-09-11 → 2026-09-12 | **`0.15.0`** daemon retrieval, hook context, reranking, Windows doctor, and dependency updates. |
 
-Release surface (as of 2026-09-11):
+Release surface (as of 2026-09-12):
 
-- Latest **published** GitHub Release: [`v0.14.5`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.14.5) (2026-09-11), with six platform archives, checksums, a build manifest, and both installers.
+- Latest **published** GitHub Release: [`v0.15.0`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.15.0) (2026-09-12), with six platform archives, checksums, a build manifest, and both installers. All 16 public asset downloads were verified.
 - `v0.14.3` is an annotated tag without a corresponding GitHub Release.
-- `Cargo.toml` carries `version = "0.15.0"` for the next cut; publication and
-  platform validation are recorded on its GitHub Release page.
+- `Cargo.toml` carries `version = "0.15.0"`; release binaries were built from
+  `d09edf26a0adf8d39897de615610b7d67430bb81` through DSR without GitHub Actions.
 - Distribution paths: verified GitHub release installers and
   `brew install Dicklesworthstone/tap/ee` (the formula is bumped by hand and
-  serves v0.14.5 as of 2026-09-11). crates.io publication remains pending:
-  registry search returned no `eidetic-engine` package on 2026-09-11.
+  serves v0.15.0 as of 2026-09-12). crates.io publication remains blocked by
+  six unpublished dependency versions and an unavailable published runtime API;
+  see [the dependency update record](UPGRADE_LOG.md#publication-prerequisites-checked).
 - This release has SHA-256 checksums and a build manifest, without Sigstore
   signatures or SLSA attestations. Its assets do not satisfy `--require-provenance`.
 
@@ -39,6 +40,7 @@ Release surface (as of 2026-09-11):
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
+| [0.15.0](#0150---2026-09-12) | 2026-09-12 | yes | Daemon retrieval, hook context, native reranking, Windows doctor and dependency updates |
 | [0.14.5](#0145---2026-09-11) | 2026-09-11 | yes | glibc 2.28 binaries, Windows storage I/O, recovery, and runtime resource use |
 | [0.14.4](#0144---2026-08-29) | 2026-08-29 | yes | Agent-facing capability discovery plus tag, policy, and provenance correctness |
 | [0.14.3](#0143---2026-08-27) | 2026-08-27 | tag only | Retrieval correctness, deterministic contract hardening, FrankenSQLite 0.3.9, and crates.io/Homebrew preparation |
@@ -68,6 +70,18 @@ future changelog pass expands those rows into full capability sections.
 ## [Unreleased]
 
 ## [0.15.0] - 2026-09-12
+
+All six binaries passed memory workflows. Windows and Apple Silicon ran
+natively; Intel Mac used Rosetta and Linux ARM64 used QEMU. GNU binaries
+require at most glibc 2.28. The final source also passed check, Clippy, three
+focused regressions, strict concurrent writes and actual Model2Vec daemon
+warming with installed hooks. The broader test suite and RustSec audit retain
+known failures; [release notes](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.15.0)
+record the exact results and limits.
+
+Claude Code hook entries without `eeManaged` metadata can still duplicate on
+reinstall while status reports fresh (#41). This late report was reproduced on
+the release binary and remains open; intact managed entries reinstall unchanged.
 
 - Windows doctor runs preserve and replace their existing `latest` pointer
   instead of rejecting it as a redirected lifecycle directory on the second

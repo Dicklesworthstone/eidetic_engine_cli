@@ -336,10 +336,16 @@ Hard constraints. CI fails if any of them break.
 
 | Method | Status | Evidence |
 |---|---|---|
-| GitHub release installer | available | [latest release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest) |
-| Homebrew tap | available; the formula is refreshed by hand after release assets are verified | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
-| crates.io | publication pending; registry search returned no `eidetic-engine` package on 2026-09-11 | tracked in `PUBLISH_CHECKLIST.md` |
+| GitHub release installer | v0.15.0 available for six targets; public assets verified | [v0.15.0 release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.15.0) |
+| Homebrew tap | v0.15.0 available for Apple Silicon, Intel Mac, Linux ARM64 and Linux x86-64 | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
+| crates.io | blocked as of 2026-09-12 by six unpublished dependency versions and an unavailable published Asupersync API | [dependency publication findings](UPGRADE_LOG.md#publication-prerequisites-checked) |
 | Source build | available now | this README |
+
+For v0.15.0, rebuild each workspace's semantic index with
+`ee index rebuild --workspace .` and reinstall managed hooks for the new snippets.
+Inspect Claude Code settings before and after reinstalling: existing EE hooks
+without `eeManaged` metadata can be duplicated, and `ee hook status` does not
+detect those duplicates ([#41](https://github.com/Dicklesworthstone/eidetic_engine_cli/issues/41)).
 
 ### Release installer
 
