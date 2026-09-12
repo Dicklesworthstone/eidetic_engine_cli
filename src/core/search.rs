@@ -20933,6 +20933,10 @@ mod tests {
                     DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
                 if migrate {
                     connection.migrate().map_err(|error| error.to_string())?;
+                } else {
+                    connection
+                        .execute_raw("CREATE TABLE unrelated (id INTEGER PRIMARY KEY)")
+                        .map_err(|error| error.to_string())?;
                 }
                 connection.close().map_err(|error| error.to_string())?;
             }
