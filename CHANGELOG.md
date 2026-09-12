@@ -66,6 +66,20 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
+- Workspace daemons serve anchored `ee recall` and the bounded
+  `ee orient --fast --format hook --fields command,ambientContext` response.
+  Both commands retain local fallback when the daemon is unavailable.
+  Anchored recall works without loading an embedding model.
+- Native reranking uses the request's inherited blocking pool and cancellation
+  budget. Optional rerank exhaustion preserves fusion results with an explicit
+  degraded signal; snapshot cleanup preserves the original search error (#36).
+- Verified Model2Vec instances share their loaded weights across callers.
+  The pinned runtime parses PEM through `rustls_pki_types::PemObject`, removing
+  `rustls-pemfile` from EE's dependency graph (#22).
+- Backup exports preserve the original memory body, including leading and
+  trailing whitespace. Query normalization preserves literal leading exclusion
+  markers, and deterministic UUID generation preserves its explicit sequence
+  without drawing ambient randomness.
 - SessionStart hooks inject token-bounded rule and memory text with provenance,
   preserve session deduplication, and expose invocation outcomes separately from
   installation freshness in `ee hook status`. Missing Python or EE processes
