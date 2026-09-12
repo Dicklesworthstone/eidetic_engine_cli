@@ -21,18 +21,20 @@ checked-in Beads records. The durable research ledger is
 | 2026-08-27 → 2026-08-29 | **`0.14.4`** agent-facing capability discovery plus tag, policy, and provenance correctness. |
 | 2026-08-29 → 2026-09-11 | **`0.14.5`** portable GNU/Linux binaries, Windows storage I/O, recovery, and runtime resource use. |
 | 2026-09-11 → 2026-09-12 | **`0.15.0`** daemon retrieval, hook context, reranking, Windows doctor, and dependency updates. |
+| 2026-09-12 | **`0.15.2`** complete registry publication, read-only WAL correction and rerank storage-failure handling. |
 
 Release surface (as of 2026-09-12):
 
-- Latest **published** GitHub Release: [`v0.15.0`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.15.0) (2026-09-12), with six platform archives, checksums, a build manifest, and both installers. All 16 public asset downloads were verified.
+- Latest **published** GitHub Release: [`v0.15.2`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.15.2) (2026-09-12), with six platform archives, checksums, a build manifest, and both installers. All 16 public asset downloads were verified.
 - `v0.14.3` is an annotated tag without a corresponding GitHub Release.
-- `Cargo.toml` carries the `0.15.1` registry publication candidate. The existing
-  v0.15.0 binaries were built from `d09edf26a0adf8d39897de615610b7d67430bb81`
-  through DSR without GitHub Actions.
+- [`eidetic-engine 0.15.2`](https://crates.io/crates/eidetic-engine/0.15.2)
+  is published on crates.io from tagged source
+  `1478b2f3b0a912d5302808f6dc6de9e56e589c05`. Its complete dependency graph
+  resolves from the registry without sibling checkouts or Cargo patches.
 - Distribution paths: verified GitHub release installers and
   `brew install Dicklesworthstone/tap/ee` (the formula is bumped by hand and
-  serves v0.15.0 as of 2026-09-12). Publication of the missing dependency chain
-  and the first registry-only EE package is in progress; see
+  serves v0.15.2 as of 2026-09-12). Cargo users should install 0.15.2 or newer;
+  the 0.15.1 crate has a read-only WAL regression. See
   [the dependency update record](UPGRADE_LOG.md#cratesio-publication-follow-through).
 - This release has SHA-256 checksums and a build manifest, without Sigstore
   signatures or SLSA attestations. Its assets do not satisfy `--require-provenance`.
@@ -41,6 +43,8 @@ Release surface (as of 2026-09-12):
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
+| [0.15.2](#0152---2026-09-12) | 2026-09-12 | yes | Registry-only Cargo installation, read-only WAL correction and rerank storage-failure handling |
+| 0.15.1 | 2026-09-12 | withheld | Crate published; superseded by 0.15.2 after runtime qualification exposed a storage regression |
 | [0.15.0](#0150---2026-09-12) | 2026-09-12 | yes | Daemon retrieval, hook context, native reranking, Windows doctor and dependency updates |
 | [0.14.5](#0145---2026-09-11) | 2026-09-11 | yes | glibc 2.28 binaries, Windows storage I/O, recovery, and runtime resource use |
 | [0.14.4](#0144---2026-08-29) | 2026-08-29 | yes | Agent-facing capability discovery plus tag, policy, and provenance correctness |
@@ -70,10 +74,13 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
-- Prepare the corrected `eidetic-engine` package at version 0.15.2.
+## [0.15.2] - 2026-09-12
+
+- Publish the corrected `eidetic-engine` package at version 0.15.2 and all
+  required runtime, storage, ORM, search and graph dependencies.
   The 0.15.1 crate was published before final runtime qualification exposed
   read-only storage and concurrent-write regressions. Its GitHub and Homebrew
-  release was withheld; the verified binary release remains 0.15.0.
+  release was withheld; Cargo users should install 0.15.2 or newer.
 - Preserve the original fusion results and report a transient
   `rerank_model_unavailable` degradation when reranking cannot read document
   storage. Missing or out-of-scope documents remain normal omissions.
@@ -90,6 +97,23 @@ future changelog pass expands those rows into full capability sections.
   that accept that cost, including deterministic test runtimes.
 - The transitive `lru 0.16.4` RustSec warning remains open (#40). Registry
   publication does not claim to resolve the existing broader test failures.
+
+Linux all-target check, strict Clippy, formatting, extracted-package compilation
+and 58 selected tests passed. The public crate matches its qualified archive
+byte for byte; a fresh Cargo installation passed all seven core workflow checks.
+The original 60-write contention test passed all eight assertions in 27.79
+seconds. Real-model reranking, three Model2Vec retrieval scenarios and installed
+hooks with daemon model warming also passed. The test-only installer source-pin
+correction is excluded from the crate and does not change release production
+code. See [the qualification record](UPGRADE_LOG.md#corrected-0152-qualification)
+for exact scope and retained failures.
+
+DSR built all six release binaries without GitHub Actions. Every platform
+passed memory workflows; Windows additionally passed lock contention and doctor
+recovery. Intel Mac used Rosetta and GNU/Linux ARM64 used QEMU. All 16 public
+assets and six archive payloads matched their qualified inputs. The four-platform
+Homebrew formula was published and read back with matching URLs/checksums;
+an actual Homebrew installation was not run.
 
 ## [0.15.0] - 2026-09-12
 
@@ -1691,7 +1715,8 @@ Closed workstreams behind this changelog:
   workspace hygiene, QoS, flight recorder, mesh/Tailscale optionality, duplicate
   work detection, host profiles, and crowded-checkout ergonomics.
 
-[Unreleased]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.15.0...main
+[Unreleased]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.15.2...main
+[0.15.2]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.15.0...v0.15.2
 [0.15.0]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.14.5...v0.15.0
 [0.14.5]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.14.4...v0.14.5
 [0.3.0]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.2.0...v0.3.0
