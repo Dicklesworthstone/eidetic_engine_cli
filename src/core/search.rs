@@ -7896,6 +7896,9 @@ impl SearchRerankTextProvider {
         {
             return cached.clone();
         }
+        if self.storage_failure.get().is_some() {
+            return None;
+        }
 
         let resolved = self.load_scoped_memory_text(doc_id);
         if let Ok(mut cache) = self.cache.lock() {
