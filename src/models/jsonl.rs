@@ -1288,8 +1288,8 @@ impl ExportMemoryRecordBuilder {
             )?,
             level: required_string(ExportRecordType::Memory, "level", self.level)?,
             kind: required_string(ExportRecordType::Memory, "kind", self.kind)?,
-            // Bodies are evidence, not identifiers: retain their exact bytes
-            // for lossless export/import and content-hash verification.
+            // Preserve the stored body's exact bytes for export and
+            // content-hash verification; import validates content separately.
             content: self
                 .content
                 .filter(|content| !content.trim().is_empty())
