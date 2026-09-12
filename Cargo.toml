@@ -158,7 +158,7 @@ uuid = { version = "1.26.1", features = ["v7"] }
 # Direct dependency for deterministic pack-compression dictionary training.
 # The default zstd features include zdict_builder; no forbidden async or HTTP
 # stack is introduced.
-zstd = { version = "0.13.3" }
+zstd = { version = "0.14.0" }
 # Pure-Rust tar extraction to unpack the reranker model artifact (.tar.zst) into a
 # loadable model dir during `ee model fetch`. default-features off drops the
 # unix-only xattr extra so it cross-compiles to windows-msvc cleanly.

@@ -178,8 +178,8 @@ inputs. Upgrades are applied and tested individually before the next upgrade.
 - [x] base64 0.22.1 → 0.23.1: 151 selected regression tests passed.
 - [x] fs4 0.13.1 → 1.1.0: 78 lock and secret-store tests passed.
 - [x] uuid 1.24.1 → 1.26.1: 34 identifier and runtime tests passed.
-- [ ] zeroize 1.8.2 → 1.9.0: applied; encrypted backup tests pending.
-- [ ] zstd 0.13.3 → 0.14.0: research and test pack/model compression.
+- [x] zeroize 1.8.2 → 1.9.0: five backup/recovery tests passed.
+- [ ] zstd 0.13.3 → 0.14.0: applied; compression tests pending.
 - [ ] toml_edit 0.25.13 → 0.25.15: research and test config editing.
 - [ ] Run final check, Clippy, formatting, tests and dependency audit.
 - [ ] Qualify six DSR artifacts, publish release and update Homebrew.
@@ -238,8 +238,30 @@ The [upstream documentation](https://docs.rs/zeroize/1.9.0/zeroize/)
 retains the `Zeroize` and `Zeroizing` APIs. EE explicitly enables `alloc`
 for its secret-bearing vectors and strings, instead of relying on feature
 unification through another dependency. The exact version and checksum match
-the official sparse index. Encrypted key recovery and backup round-trip tests
-are pending on the committed source.
+the official sparse index. Pinned RCH tests at b25703f47 passed all five
+backup/recovery tests in 215 seconds, with no failures or ignores. The same
+source passed the PPR duplicate-degradation regression and all-targets Clippy
+with `-D warnings` on a separate remote worker.
+
+## Remaining upgrades researched
+
+- **zstd 0.14.0:** the [release notes](https://github.com/gyscos/zstd-rs/releases/tag/v0.14.0)
+  tighten prepared-dictionary lifetimes and fix decoder frame completion.
+  EE uses owned bulk dictionaries and stream decoding without prepared
+  dictionaries, so these changes require no call-site migration. zstd-safe
+  moves to 8.0.0; Tantivy still requires the 0.13/7.x pair. zstd-sys 2.1.0
+  removes inappropriate MSVC visibility flags. The new BSD-3-Clause license
+  is already allowed. Tests will cover dictionary training, compressed cache
+  round-trips, corrupt inputs and compressed replay ledgers.
+- **toml_edit 0.25.15:** the [changelog](https://github.com/toml-rs/toml/blob/8e1d5a85c361ac012957441bb4788ae82f5dc9c8/crates/toml_edit/CHANGELOG.md)
+  lists allocation and rendering improvements in 0.25.14–0.25.15, with no
+  public API migration. The `+spec-1.1.0` suffix is build metadata, not a
+  prerelease. Config editing and profile-application tests remain the gate.
+
+The zstd upgrade is now applied with registry-verified checksums for zstd
+0.14.0, zstd-safe 8.0.0 and zstd-sys 2.1.0. The separate Tantivy zstd 0.13.3
+and zstd-safe 7.2.4 entries remain explicit. Runtime compression checks are
+pending; no passing result is inferred from the unchanged call sites.
 
 ## Existing release gates
 
