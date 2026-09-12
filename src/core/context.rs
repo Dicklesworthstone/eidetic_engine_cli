@@ -1870,10 +1870,13 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
         pack_dna
             .degraded
             .push(graph_ppr_upstream_unavailable_pack_dna_degradation());
-        push_graph_ppr_upstream_unavailable_degradation(&mut response.data.degraded);
     }
 
     for degradation in &pack_dna.degraded {
+        if degradation.code == GRAPH_PPR_UPSTREAM_UNAVAILABLE_CODE {
+            push_graph_ppr_upstream_unavailable_degradation(&mut response.data.degraded);
+            continue;
+        }
         push_degradation(
             &mut response.data.degraded,
             &degradation.code,
