@@ -167,6 +167,155 @@ impl OrientFastContentReport {
     }
 }
 
+/// The bounded SessionStart payload shared by direct CLI and daemon callers.
+/// Only the requested memory context is collected; diagnostic-only probes are
+/// available through the full orientation command.
+pub fn orient_hook_response(
+    options: &OrientFastContentOptions<'_>,
+    include_primer: bool,
+) -> Result<JsonValue, DomainError> {
+    let database_path = options.database_path.map_or_else(
+        || resolved_addressed_database_path(options.workspace_path),
+        Path::to_path_buf,
+    );
+    if !database_path.exists() {
+        return Err(super::storeless_workspace_error(&database_path));
+    }
+    let content = orient_fast_content(options);
+    let mut degraded = content.issues.iter().map(|issue| json!({
+        "code": issue.code, "severity": issue.severity,
+        "message": issue.message, "repair": issue.repair,
+    })).collect::<Vec<_>>();
+    let primer = if include_primer {
+        orient_primer_value(options.workspace_path, &database_path, &mut degraded)
+    } else {
+        JsonValue::Null
+    };
+    let data = json!({
+        "workspace": options.workspace_path.display().to_string(),
+        "fastContent": content.data_json(),
+        "primer": primer,
+    });
+    Ok(json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": {"command": "orient", "ambientContext": orient_ambient_context(&data, &degraded, options.max_tokens)},
+        "degraded": degraded,
+    }))
+}
+
+/// Budget complete context blocks together with their redacted provenance.
+#[must_use]
+pub fn orient_ambient_context(data: &JsonValue, degraded: &[JsonValue], budget: u32) -> JsonValue {
+    let mut text = String::new();
+    let mut omitted = 0_u32;
+    let mut append = |block: String| {
+        let candidate = format!("{text}{block}\n");
+        if crate::pack::estimate_tokens_default(&candidate) <= budget {
+            text = candidate;
+            true
+        } else {
+            omitted = omitted.saturating_add(1);
+            false
+        }
+    };
+    append("## ee orientation (read-only)".to_owned());
+    if let Some(workspace) = data.get("workspace").and_then(JsonValue::as_str) {
+        append(format!("Workspace: {workspace}"));
+    }
+    let codes = degraded.iter().chain(
+        data.pointer("/primer/degraded").and_then(JsonValue::as_array).into_iter().flatten(),
+    ).filter_map(|entry| entry.get("code").and_then(JsonValue::as_str)).collect::<BTreeSet<_>>();
+    if !codes.is_empty() {
+        append(format!(
+            "Observations: {}. Details: ee orient \"session start\" --fast --json.",
+            codes.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let provenance = |item: &JsonValue, id: &str| {
+        let uris = item.get("provenance").and_then(JsonValue::as_array)
+            .into_iter().flatten()
+            .filter_map(|entry| entry.get("uri").and_then(JsonValue::as_str))
+            .collect::<BTreeSet<_>>();
+        if uris.is_empty() {
+            format!("ee-mem://{id}")
+        } else {
+            uris.into_iter().collect::<Vec<_>>().join(", ")
+        }
+    };
+    for section in data.pointer("/primer/sections").and_then(JsonValue::as_array).into_iter().flatten() {
+        let name = section.get("name").and_then(JsonValue::as_str).unwrap_or("primer");
+        for item in section.get("items").and_then(JsonValue::as_array).into_iter().flatten() {
+            if let (Some(id), Some(line)) = (
+                item.get("memory_id").and_then(JsonValue::as_str),
+                item.get("line").and_then(JsonValue::as_str),
+            ) && !seen.contains(id)
+                && append(format!("- {name}: {line} [{}]", provenance(item, id)))
+            {
+                seen.insert(id);
+            }
+        }
+    }
+    for section in ["relevant", "recent"] {
+        for item in data.get("fastContent").and_then(|content| content.get(section))
+            .and_then(JsonValue::as_array).into_iter().flatten()
+        {
+            if let (Some(id), Some(snippet), Some(why)) = (
+                item.get("id").and_then(JsonValue::as_str),
+                item.get("snippet").and_then(JsonValue::as_str),
+                item.get("why").and_then(JsonValue::as_str),
+            ) && !seen.contains(id)
+                && append(format!("- {snippet}\n  Source: {}. Why: {why}", provenance(item, id)))
+            {
+                seen.insert(id);
+            }
+        }
+    }
+    json!({
+        "text": text,
+        "budgetTokens": budget,
+        "usedTokens": crate::pack::estimate_tokens_default(&text),
+        "omittedBlocks": omitted,
+    })
+}
+
+/// Read the primer from the same addressed store as the rest of orientation.
+pub fn orient_primer_value(
+    workspace_path: &Path,
+    database_path: &Path,
+    degraded: &mut Vec<JsonValue>,
+) -> JsonValue {
+    let unavailable = |message: String, degraded: &mut Vec<JsonValue>| {
+        degraded.push(json!({
+            "code": "orient_primer_unavailable", "severity": "info", "message": message,
+            "repair": "Run `ee primer --json` to isolate primer assembly.",
+        }));
+        JsonValue::Null
+    };
+    if !database_path.exists() {
+        return unavailable("Primer skipped: workspace database is missing.".to_owned(), degraded);
+    }
+    let connection = match DbConnection::open_file(database_path) {
+        Ok(connection) => connection,
+        Err(error) => return unavailable(format!("Primer skipped: database open failed: {error}"), degraded),
+    };
+    let canonical = workspace_path.canonicalize().unwrap_or_else(|_| workspace_path.to_path_buf());
+    let workspace_id = match super::workspace::bound_workspace_id_or_hash(
+        &connection, &super::workspace::stable_workspace_id(&canonical), &[workspace_path, canonical.as_path()],
+    ) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) => return unavailable(format!("Primer skipped: workspace lookup failed: {error}"), degraded),
+    };
+    let settings = super::primer::primer_settings_from_workspace(
+        workspace_path, super::primer::PrimerFormat::Markdown, None,
+    );
+    match super::primer::run_primer_with_persistence(&connection, &workspace_id, &settings, false, false) {
+        Ok(report) => serde_json::to_value(&report).unwrap_or(JsonValue::Null),
+        Err(error) => unavailable(format!("Primer skipped: assembly failed: {error}"), degraded),
+    }
+}
+
 /// Assemble bounded fast-mode content without persisting a pack or bypassing
 /// context admission. Recent and relevant remain separate by contract, even
 /// when the same memory is useful in both sections.
