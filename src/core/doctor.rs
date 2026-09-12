@@ -3806,9 +3806,9 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         status: "accepted_default",
         enabled_by_default: true,
         source: DependencySource {
-            kind: "registry",
-            version: "0.4.10",
-            path: "/dp/asupersync/asupersync",
+            kind: "path_patch",
+            version: "0.4.11",
+            path: "/dp/asupersync",
         },
         default_feature_profile: DependencyFeatureProfile {
             default_features: false,
@@ -3833,7 +3833,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
             "runtime.async_boundary",
         ],
         diagnostic_command: "ee status --json",
-        release_pin_decision: "Registry version 0.4.10 is accepted; /dp/asupersync remains the local source reference for API checks.",
+        release_pin_decision: "Version 0.4.11 uses the exact source revision in franken-stack.lock; the published registry version lacks the required blocking-pool API.",
     },
     DependencyContractEntry {
         name: "frankensqlite",
