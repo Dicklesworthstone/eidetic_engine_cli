@@ -1722,6 +1722,9 @@ fn determinism_regression_fixture_loader_rejects_raw_input_hash_drift() -> Resul
     assert_eq!(fixture.input["raw"], "raw-hash");
     assert_eq!(fixture.input["raw_hex"], hex_encode(b"raw-hash"));
 
+    // Keep the preview consistent with the changed bytes so validation reaches
+    // the recorded input hash instead of rejecting the preview first.
+    fixture.input["raw"] = serde_json::json!("tampered");
     fixture.input["raw_hex"] = serde_json::json!(hex_encode(b"tampered"));
     let hash_error = parse_regression_fixture_entries(vec![(
         file_name.clone(),
@@ -1817,20 +1820,28 @@ fn determinism_regression_fixture_loader_rejects_malformed_raw_payload() -> Resu
     .expect_err("raw_hex must be a string when present");
     assert!(raw_hex_type_error.contains("raw regression input raw_hex must be a string"));
 
-    fixture.input = serde_json::json!({
-        "raw": "raw-malformed",
-        "raw_hex": "not-hex",
-    });
-    let input_bytes = serde_json::to_vec(&fixture.input).map_err(|error| error.to_string())?;
-    fixture.input_hash = hash_bytes(&input_bytes);
-    let raw_hex_value_file_name = regression_fixture_file_name(&fixture.input_hash)?;
-    let raw_hex_value_error = parse_regression_fixture_entries(vec![(
-        raw_hex_value_file_name,
-        serialize_regression_fixture(&fixture)?,
-    )])
-    .expect_err("raw_hex must contain valid hex bytes");
-    assert!(raw_hex_value_error.contains("invalid raw_hex"));
-    assert!(raw_hex_value_error.contains("contains non-hex digit"));
+    for (raw_hex, expected_error) in [
+        ("not-hex", "has odd length"),
+        ("not-hex!", "contains non-hex digit"),
+    ] {
+        fixture.input = serde_json::json!({
+            "raw": "raw-malformed",
+            "raw_hex": raw_hex,
+        });
+        let input_bytes = serde_json::to_vec(&fixture.input).map_err(|error| error.to_string())?;
+        fixture.input_hash = hash_bytes(&input_bytes);
+        let raw_hex_value_file_name = regression_fixture_file_name(&fixture.input_hash)?;
+        let raw_hex_value_error = parse_regression_fixture_entries(vec![(
+            raw_hex_value_file_name,
+            serialize_regression_fixture(&fixture)?,
+        )])
+        .expect_err("raw_hex must contain valid hex bytes");
+        assert!(raw_hex_value_error.contains("invalid raw_hex"));
+        assert!(
+            raw_hex_value_error.contains(expected_error),
+            "{raw_hex_value_error}"
+        );
+    }
     Ok(())
 }
 
@@ -1965,8 +1976,13 @@ fn determinism_regression_fixture_loader_rejects_symlinked_fixture_file() -> Res
     let error = load_regression_fixtures(tempdir.path())
         .expect_err("symlinked fixture files should not be followed");
 
-    assert!(error.contains("regression fixture path is a symlink"));
-    assert!(error.contains(&symlink_path.display().to_string()));
+    assert!(
+        error.contains(&format!(
+            "regression fixture path traverses symlinked component {}",
+            symlink_path.display()
+        )),
+        "{error}"
+    );
     Ok(())
 }
 
@@ -1984,8 +2000,13 @@ fn determinism_regression_fixture_loader_rejects_symlinked_fixture_dir() -> Resu
     let error = load_regression_fixtures(&symlink_dir)
         .expect_err("symlinked fixture directories should not be followed");
 
-    assert!(error.contains("regression fixture directory is a symlink"));
-    assert!(error.contains(&symlink_dir.display().to_string()));
+    assert!(
+        error.contains(&format!(
+            "regression fixture path traverses symlinked component {}",
+            symlink_dir.display()
+        )),
+        "{error}"
+    );
     Ok(())
 }
 
@@ -2091,8 +2112,19 @@ fn determinism_regression_fixture_persist_rejects_symlinked_fixture_dir() -> Res
     let error = persist_regression_fixture(&symlink_dir, &fixture)
         .expect_err("persist should reject symlinked fixture directories");
 
-    assert!(error.contains("regression fixture directory is a symlink"));
-    assert!(error.contains(&symlink_dir.display().to_string()));
+    assert!(
+        error.contains(&format!(
+            "regression fixture path traverses symlinked component {}",
+            symlink_dir.display()
+        )),
+        "{error}"
+    );
+    assert!(
+        !real_dir
+            .join(regression_fixture_file_name(&fixture.input_hash)?)
+            .exists(),
+        "persist must not write a fixture through the symlinked directory"
+    );
     Ok(())
 }
 
@@ -2142,8 +2174,18 @@ fn determinism_regression_fixture_persist_rejects_symlinked_fixture_file() -> Re
     let error = persist_regression_fixture(tempdir.path(), &fixture)
         .expect_err("persist should reject symlinked fixture files");
 
-    assert!(error.contains("regression fixture path is a symlink"));
-    assert!(error.contains(&symlink_path.display().to_string()));
+    assert!(
+        error.contains(&format!(
+            "regression fixture path traverses symlinked component {}",
+            symlink_path.display()
+        )),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read_to_string(&outside).map_err(|error| error.to_string())?,
+        "{}\n",
+        "persist must not overwrite the symlink target"
+    );
     Ok(())
 }
 

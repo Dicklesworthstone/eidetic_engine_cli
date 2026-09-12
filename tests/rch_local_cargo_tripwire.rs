@@ -46,7 +46,7 @@ fn script_path() -> PathBuf {
 fn classify(command: &str) -> Result<(i32, Value), String> {
     let started = Instant::now();
     trace_local_cargo_tripwire("input", 0, &[]);
-    let output = Command::new("sh")
+    let output = Command::new("bash")
         .arg(script_path())
         .arg("--cmd")
         .arg(command)
@@ -75,7 +75,7 @@ fn probe_with_ps_fixture(
         ps_fixture.len()
     ));
     fs::write(&fixture_path, ps_fixture).map_err(|e| format!("write ps fixture: {e}"))?;
-    let output = Command::new("sh")
+    let output = Command::new("bash")
         .arg(script_path())
         .arg("--probe-processes")
         .arg("--ps-file")
@@ -465,7 +465,7 @@ fn process_probe_ignores_ssh_remote_cargo_payload_launcher() -> TestResult {
 
 #[test]
 fn self_test_subcommand_exits_zero_with_passed_marker() -> TestResult {
-    let output = Command::new("sh")
+    let output = Command::new("bash")
         .arg(script_path())
         .arg("--self-test")
         .output()
