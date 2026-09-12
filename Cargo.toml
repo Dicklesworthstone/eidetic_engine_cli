@@ -108,7 +108,7 @@ asupersync = { version = "=0.4.11", default-features = false, features = ["traci
 arc-swap = { version = "=1.9.2" }
 base64 = { version = "0.22.1" }
 blake3 = { version = "1.5" }
-crossbeam-queue = { version = "0.3" }
+crossbeam-queue = { version = "0.3.14" }
 determinism = { package = "ee-determinism", version = "0.1.0", path = "crates/determinism" }
 franken-agent-detection = { version = "0.2.2", path = "../franken_agent_detection", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }

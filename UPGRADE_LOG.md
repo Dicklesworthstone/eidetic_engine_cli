@@ -164,3 +164,39 @@ This unit restores one explicit identity across those surfaces.
 
 Pinned RCH verification is pending on the committed tree. Results will be
 recorded here and on `bd-022z1`; no local Cargo command is permitted.
+
+---
+
+# 2026-09-12 — Release dependency refresh
+
+Registry versions were checked against the official crates.io sparse index.
+Pinned sibling repositories and the nightly toolchain remain explicit release
+inputs. Upgrades are applied and tested individually before the next upgrade.
+
+- [x] Inventory direct registry dependencies and preserve path dependencies.
+- [ ] crossbeam-queue 0.3.13 → 0.3.14: applied; writer queue tests pending.
+- [ ] base64 0.22.1 → 0.23.1: research and test cursor/encoding consumers.
+- [ ] fs4 0.13.1 → 1.1.0: research and test synchronous file locks.
+- [ ] uuid 1.24.1 → 1.26.1: research and test identifier generation.
+- [ ] zeroize 1.8.2 → 1.9.0: research and test secret handling.
+- [ ] zstd 0.13.3 → 0.14.0: research and test pack/model compression.
+- [ ] toml_edit 0.25.12 → 0.25.15: research and test config editing.
+- [ ] Run final check, Clippy, formatting, tests and dependency audit.
+- [ ] Qualify six DSR artifacts, publish release and update Homebrew.
+- [ ] Verify crates.io publication eligibility against registry dependencies.
+
+## crossbeam-queue 0.3.14
+
+The [released changelog](https://github.com/crossbeam-rs/crossbeam/blob/crossbeam-queue-0.3.14/crossbeam-queue/CHANGELOG.md)
+changes index width on 32-bit platforms with 64-bit atomics and extends the
+upstream MSRV support policy. EE's `ArrayQueue` usage needs no API change.
+The dependency list is unchanged; the lock checksum was verified against the
+official sparse index. Validation is pending, not a completed upgrade.
+
+## Existing release gates
+
+The preceding issue-fix candidate had an E0308 in the optional-reranking
+degradation return type; commit daba50a03 fixes that mismatch. A fresh remote
+all-targets check is running. The preceding broad integration run had 758
+passes and 71 failures; those results predate these upgrades and still require
+classification or fixes. No new version or release is published yet.
