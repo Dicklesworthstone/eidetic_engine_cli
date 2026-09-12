@@ -176,14 +176,15 @@ inputs. Upgrades are applied and tested individually before the next upgrade.
 - [x] Inventory direct registry dependencies and preserve path dependencies.
 - [x] crossbeam-queue 0.3.13 → 0.3.14: 58 writer queue tests passed.
 - [x] base64 0.22.1 → 0.23.1: 151 selected regression tests passed.
-- [ ] fs4 0.13.1 → 1.1.0: API migration applied; lock tests pending.
-- [ ] uuid 1.24.1 → 1.26.1: research and test identifier generation.
+- [x] fs4 0.13.1 → 1.1.0: 78 lock and secret-store tests passed.
+- [ ] uuid 1.24.1 → 1.26.1: applied; identifier tests pending.
 - [ ] zeroize 1.8.2 → 1.9.0: research and test secret handling.
 - [ ] zstd 0.13.3 → 0.14.0: research and test pack/model compression.
 - [ ] toml_edit 0.25.13 → 0.25.15: research and test config editing.
 - [ ] Run final check, Clippy, formatting, tests and dependency audit.
 - [ ] Qualify six DSR artifacts, publish release and update Homebrew.
-- [ ] Verify crates.io publication eligibility against registry dependencies.
+- [x] Check crates.io eligibility: six unpublished versions and a missing
+  published runtime API prevent registry publication of this source graph.
 
 ## crossbeam-queue 0.3.14
 
@@ -215,7 +216,19 @@ EE retains synchronous-only features and distinguishes contention from I/O
 errors in doctor locking. Key rotation still takes an exclusive lock while
 approval transactions hold shared locks. Existing contention and release
 assertions use the new API without weakening their guarantees. Tantivy retains
-its separate fs4 0.13.1 requirement. Remote lock tests are pending.
+its separate fs4 0.13.1 requirement. Pinned RCH tests at c1e15d265 passed
+all 78 selected doctor-lock and secret-store tests on vmi1152480, with no
+failures or ignored tests. Separate CLI and Windows checks remain in the
+final release gate.
+
+## uuid 1.26.1
+
+The [upstream releases](https://github.com/uuid-rs/uuid/releases) retain the
+v7 timestamp and builder APIs EE uses. The root requirement is explicit;
+the lock checksum was checked against the official sparse index and its
+resolved dependency list is unchanged. EE's deterministic generator already
+builds its ordinal payload explicitly, so the upgrade does not rely on
+ambient randomness. Identifier and deterministic-runtime tests are pending.
 
 ## Existing release gates
 
