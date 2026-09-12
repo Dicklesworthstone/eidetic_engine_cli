@@ -80,6 +80,8 @@ future changelog pass expands those rows into full capability sections.
   trailing whitespace. Query normalization preserves literal leading exclusion
   markers, and deterministic UUID generation preserves its explicit sequence
   without drawing ambient randomness.
+- Recorder follow commands handle SIGINT even when a background launcher
+  passes an ignored signal disposition, including during long polling waits.
 - SessionStart hooks inject token-bounded rule and memory text with provenance,
   preserve session deduplication, and expose invocation outcomes separately from
   installation freshness in `ee hook status`. Missing Python or EE processes
