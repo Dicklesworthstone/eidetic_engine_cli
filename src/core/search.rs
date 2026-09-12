@@ -7133,13 +7133,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
                 Ok(run)
             })
         };
-        read_snapshot.commit().map_err(|error| {
-            SearchError::Index(format!(
-                "Failed to release search read snapshot for {}: {error}",
-                database_path.display()
-            ))
-        })?;
-        let mut run = result?;
+        let mut run = finish_search_snapshot(read_snapshot, result, &database_path)?;
         if let Some(preparation) = embedder_preparation {
             run.performance
                 .record_duration("search::embedderPrepare", preparation.elapsed);
@@ -7175,6 +7169,37 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     }
     run.report.elapsed_ms = total_start.elapsed().as_secs_f64() * 1000.0;
     Ok(run)
+}
+
+fn finish_search_snapshot<T>(
+    snapshot: crate::db::read_pool::SnapshotPin<'_>,
+    result: Result<T, SearchError>,
+    database_path: &Path,
+) -> Result<T, SearchError> {
+    match result {
+        Ok(value) => {
+            snapshot.commit().map_err(|error| {
+                SearchError::Index(format!(
+                    "Failed to release search read snapshot for {}: {error}",
+                    database_path.display()
+                ))
+            })?;
+            Ok(value)
+        }
+        Err(error) => {
+            // A slow synchronous reranker can observe cancellation only after
+            // the pin's cleanup grace has elapsed. Preserve the search failure
+            // instead of replacing it with a watchdog error from COMMIT.
+            if let Err(cleanup_error) = snapshot.rollback() {
+                tracing::warn!(
+                    database = %database_path.display(),
+                    error = %cleanup_error,
+                    "Failed to roll back a failed search snapshot"
+                );
+            }
+            Err(error)
+        }
+    }
 }
 
 fn search_checkpoint(cx: &asupersync::Cx) -> Result<(), SearchError> {
@@ -12607,6 +12632,67 @@ mod tests {
             search_snapshot_max_pin_duration(Duration::from_secs(300)),
             Duration::from_secs(305)
         );
+    }
+
+    #[test]
+    fn search_snapshot_cleanup_preserves_cancellation_after_expiry() -> TestResult {
+        let pool = crate::db::read_pool::ReadConnectionPool::new(
+            DatabaseConfig::memory(),
+            PoolConfig::default_single().with_max_pin_duration(Duration::ZERO),
+        );
+        let snapshot = pool.pin_snapshot().map_err(|error| error.to_string())?;
+        let reason = asupersync::CancelReason::deadline().with_message("reranking deadline");
+        let result = finish_search_snapshot::<()>(
+            snapshot,
+            Err(SearchError::Cancelled(reason.clone())),
+            Path::new(":memory:"),
+        );
+        match result {
+            Err(SearchError::Cancelled(actual)) => assert_eq!(actual, reason),
+            other => return Err(format!("snapshot cleanup replaced cancellation: {other:?}")),
+        }
+        assert_eq!(pool.stats().active_pins, 0);
+        let connection = pool.acquire().map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("CREATE TABLE after_cancel (id INTEGER PRIMARY KEY)")
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn search_snapshot_cleanup_never_certifies_expired_success() -> TestResult {
+        let pool = crate::db::read_pool::ReadConnectionPool::new(
+            DatabaseConfig::memory(),
+            PoolConfig::default_single().with_max_pin_duration(Duration::ZERO),
+        );
+        let snapshot = pool.pin_snapshot().map_err(|error| error.to_string())?;
+        assert!(matches!(
+            finish_search_snapshot(snapshot, Ok(()), Path::new(":memory:")),
+            Err(SearchError::Index(message)) if message.contains("poisoned or expired")
+        ));
+        assert_eq!(pool.stats().active_pins, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn search_snapshot_cleanup_commits_success_and_retains_search_errors() -> TestResult {
+        let pool = crate::db::read_pool::ReadConnectionPool::new(
+            DatabaseConfig::memory(),
+            PoolConfig::default_single(),
+        );
+        let snapshot = pool.pin_snapshot().map_err(|error| error.to_string())?;
+        assert_eq!(
+            finish_search_snapshot(snapshot, Ok(17), Path::new(":memory:"))
+                .map_err(|error| error.to_string())?,
+            17
+        );
+        let snapshot = pool.pin_snapshot().map_err(|error| error.to_string())?;
+        assert!(matches!(
+            finish_search_snapshot::<()>(snapshot, Err(SearchError::NoIndex), Path::new(":memory:")),
+            Err(SearchError::NoIndex)
+        ));
+        assert_eq!(pool.stats().active_pins, 0);
+        Ok(())
     }
 
     fn unique_test_dir(label: &str) -> PathBuf {
