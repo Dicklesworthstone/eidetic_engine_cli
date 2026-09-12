@@ -20,7 +20,7 @@
         "validationPasses": 1
       },
       "indexJobId": "<INDEX_JOB_ID>",
-      "indexStatus": "queued",
+      "indexStatus": "indexed",
       "persisted": true,
       "previousRule": {
         "confidence": 0.85,
@@ -119,10 +119,11 @@
         "trigger": "validation_passed",
         "utilityDelta": 0.04
       },
-      "version": "0.1.0",
+      "version": "<VERSION>",
       "workspaceId": "<WORKSPACE_ID>",
       "workspacePath": "<WORKSPACE>"
     },
+    "degraded": [],
     "schema": "ee.response.v2",
     "success": true
   },
@@ -246,10 +247,11 @@
         "trigger": "validation_passed",
         "utilityDelta": 0.04
       },
-      "version": "0.1.0",
+      "version": "<VERSION>",
       "workspaceId": "<WORKSPACE_ID>",
       "workspacePath": "<WORKSPACE>"
     },
+    "degraded": [],
     "schema": "ee.response.v2",
     "success": true
   },
@@ -272,7 +274,7 @@
       "degraded": [],
       "dryRun": false,
       "indexJobId": "<INDEX_JOB_ID>",
-      "indexStatus": "queued",
+      "indexStatus": "indexed",
       "persisted": true,
       "previousRule": {
         "confidence": 0.91,
@@ -360,10 +362,11 @@
       "ruleId": "<RULE_ID>",
       "schema": "ee.rule.update.v1",
       "status": "updated",
-      "version": "0.1.0",
+      "version": "<VERSION>",
       "workspaceId": "<WORKSPACE_ID>",
       "workspacePath": "<WORKSPACE>"
     },
+    "degraded": [],
     "schema": "ee.response.v2",
     "success": true
   },
@@ -474,10 +477,11 @@
       "ruleId": "<RULE_ID>",
       "schema": "ee.rule.update.v1",
       "status": "would_update",
-      "version": "0.1.0",
+      "version": "<VERSION>",
       "workspaceId": "<WORKSPACE_ID>",
       "workspacePath": "<WORKSPACE>"
     },
+    "degraded": [],
     "schema": "ee.response.v2",
     "success": true
   },
@@ -580,10 +584,11 @@
       "ruleId": "<RULE_ID>",
       "schema": "ee.rule.update.v1",
       "status": "unchanged",
-      "version": "0.1.0",
+      "version": "<VERSION>",
       "workspaceId": "<WORKSPACE_ID>",
       "workspacePath": "<WORKSPACE>"
     },
+    "degraded": [],
     "schema": "ee.response.v2",
     "success": true
   }

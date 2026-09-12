@@ -165,8 +165,16 @@ fn scrub_rule(rule: &mut JsonValue) {
     }
 }
 
-fn normalize_rule_response(mut value: JsonValue) -> JsonValue {
+fn normalize_rule_response(mut value: JsonValue) -> Result<JsonValue, String> {
+    ensure(
+        value["data"]["version"].as_str() == Some(env!("CARGO_PKG_VERSION")),
+        "rule response must identify the current package version",
+    )?;
     if let Some(data) = value.get_mut("data").and_then(JsonValue::as_object_mut) {
+        data.insert(
+            "version".to_owned(),
+            JsonValue::String("<VERSION>".to_owned()),
+        );
         data.insert(
             "ruleId".to_owned(),
             JsonValue::String("<RULE_ID>".to_owned()),
@@ -202,7 +210,7 @@ fn normalize_rule_response(mut value: JsonValue) -> JsonValue {
             scrub_rule(rule);
         }
     }
-    value
+    Ok(value)
 }
 
 fn scrubbed_optional_timestamp(value: &JsonValue) -> JsonValue {
@@ -508,11 +516,11 @@ fn rule_mark_and_update_are_audited_and_idempotent() -> TestResult {
 
     assert_golden(
         json!({
-            "markDryRun": normalize_rule_response(mark_dry_run_json),
-            "markApply": normalize_rule_response(mark_apply_json),
-            "updateDryRun": normalize_rule_response(update_dry_run_json),
-            "updateApply": normalize_rule_response(update_apply_json),
-            "updateDuplicate": normalize_rule_response(duplicate_json),
+            "markDryRun": normalize_rule_response(mark_dry_run_json)?,
+            "markApply": normalize_rule_response(mark_apply_json)?,
+            "updateDryRun": normalize_rule_response(update_dry_run_json)?,
+            "updateApply": normalize_rule_response(update_apply_json)?,
+            "updateDuplicate": normalize_rule_response(duplicate_json)?,
         }),
         include_str!("golden/rule-mark-update.snap"),
         "rule mark update",
