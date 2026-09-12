@@ -12688,7 +12688,11 @@ mod tests {
         );
         let snapshot = pool.pin_snapshot().map_err(|error| error.to_string())?;
         assert!(matches!(
-            finish_search_snapshot::<()>(snapshot, Err(SearchError::NoIndex), Path::new(":memory:")),
+            finish_search_snapshot::<()>(
+                snapshot,
+                Err(SearchError::NoIndex),
+                Path::new(":memory:")
+            ),
             Err(SearchError::NoIndex)
         ));
         assert_eq!(pool.stats().active_pins, 0);

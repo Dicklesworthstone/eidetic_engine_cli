@@ -914,6 +914,7 @@ the closed daemon hot-mode surface.
 | `daemon_request_decode_failed` | medium | bd-oja31 |
 | `daemon_request_schema_mismatch` | medium | bd-oja31 |
 | `daemon_search_fallback` | warning | bd-search-warm-latency-0bh05 |
+| `daemon_memory_read_fallback` | info | gh-39: requested orientation/recall daemon path unavailable; local retrieval used |
 | `daemon_setsockopt_failed` | high | bd-3pnno (SRR1) |
 | `daemon_shutting_down` | medium | bd-36dp2 (SRR1) |
 | `daemon_socket_unavailable` | info | bd-oja31 (bd-1feff emission wiring) |

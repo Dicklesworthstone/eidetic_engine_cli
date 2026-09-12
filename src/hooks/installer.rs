@@ -2611,14 +2611,14 @@ def already_seen(text):
     except Exception:
         pass
     return False
-def emit(text):
+def emit(text, codes):
     if already_seen(text):
-        _ee_record_invocation("duplicate")
+        _ee_record_invocation("duplicate", degraded_codes=codes)
         return
     header = f"<!-- ee ambient_context schema={SCHEMA} surface={SURFACE} budgetTokens={BUDGET} maxPaths={MAX_PATHS} verbosity={VERBOSITY} provenance=ee:{SCHEMA} -->"
     payload = {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name") or "PreToolUse", "additionalContext": header + "\n" + text}}
     print(json.dumps(payload, separators=(",", ":")))
-    _ee_record_invocation("emitted", len(payload["hookSpecificOutput"]["additionalContext"].encode("utf-8")))
+    _ee_record_invocation("emitted", len(payload["hookSpecificOutput"]["additionalContext"].encode("utf-8")), codes)
 tool_input = data.get("tool_input") or {}
 if not isinstance(tool_input, dict):
     sys.exit(0)
@@ -2643,10 +2643,10 @@ for path in paths:
         seen.append(path)
 if not seen:
     sys.exit(0)
-cmd = [ee, "recall"]
+cmd = [ee, "recall", "--use-daemon"]
 for path in seen[:MAX_PATHS]:
     cmd.extend(["--path", path])
-cmd.extend(["--budget-tokens", str(BUDGET), "--format", "markdown"])
+cmd.extend(["--budget-tokens", str(BUDGET), "--format", "hook", "--fields", "command,ambientContext"])
 try:
     result = subprocess.run(cmd, cwd=data.get("cwd") or None, text=True, capture_output=True, timeout=9)
 except subprocess.TimeoutExpired:
@@ -2655,11 +2655,22 @@ except subprocess.TimeoutExpired:
 except Exception:
     _ee_record_invocation("command_error")
     sys.exit(0)
-text = result.stdout.strip()
-if result.returncode != 0 or not text:
-    _ee_record_invocation("command_error" if result.returncode != 0 else "empty")
+if result.returncode != 0:
+    _ee_record_invocation("command_error")
     sys.exit(0)
-emit(text)
+try:
+    response = json.loads(result.stdout)
+    if response.get("success") is not True:
+        raise ValueError("unsuccessful response")
+    text = response["data"]["ambientContext"]["text"].strip()
+    codes = sorted({entry["code"] for entry in response.get("degraded", []) if isinstance(entry.get("code"), str)})
+except Exception:
+    _ee_record_invocation("invalid_response")
+    sys.exit(0)
+if not text:
+    _ee_record_invocation("empty", degraded_codes=codes)
+    sys.exit(0)
+emit(text, codes)
 "#
 }
 
@@ -2723,7 +2734,7 @@ def already_seen(text):
 task = str(data.get("task") or data.get("prompt") or "session start")[:240]
 # Budget the actual prompt, reserving room for the provenance header below.
 # The diagnostic envelope is parsed, never injected into the agent's context.
-cmd = [ee, "orient", task, "--workspace", ".", "--include-primer", "--fast", "--candidate-pool", "20", "--format", "hook", "--fields", "command,ambientContext", "--max-tokens", str(BUDGET - 128)]
+cmd = [ee, "orient", task, "--workspace", ".", "--use-daemon", "--include-primer", "--fast", "--candidate-pool", "20", "--format", "hook", "--fields", "command,ambientContext", "--max-tokens", str(BUDGET - 128)]
 try:
     result = subprocess.run(cmd, cwd=data.get("cwd") or None, text=True, capture_output=True, timeout=9)
 except subprocess.TimeoutExpired:

@@ -1022,6 +1022,8 @@ fn daemon_capabilities_advertises_schema_and_method_contract_over_wire() -> Test
                 METHOD_CONTEXT,
                 METHOD_ECHO,
                 METHOD_SEARCH,
+                ee::daemon::protocol::METHOD_ORIENT_HOOK,
+                ee::daemon::protocol::METHOD_RECALL,
                 METHOD_SHUTDOWN,
                 METHOD_TELEMETRY,
                 METHOD_WRITE,

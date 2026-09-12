@@ -52,6 +52,194 @@ fn successful(output: Output) -> Result<Value, String> {
 
 #[cfg(unix)]
 #[test]
+fn workspace_daemon_serves_real_hook_reads_and_falls_back_without_crossing_stores() -> TestResult {
+    let temp = TempDir::new().map_err(|error| error.to_string())?;
+    let root = temp.path();
+    let binary = env!("CARGO_BIN_EXE_ee");
+    let other = root.join("other");
+    fs::create_dir_all(&other).map_err(|error| error.to_string())?;
+    for (workspace, content) in [
+        (root, "Release alpha checksums. anchor:path:src/release.rs"),
+        (
+            other.as_path(),
+            "Release beta signatures. anchor:path:src/release.rs",
+        ),
+    ] {
+        successful(
+            isolated_command(binary, workspace)
+                .args(["init", "--workspace", ".", "--json"])
+                .output()
+                .map_err(|error| error.to_string())?,
+        )?;
+        successful(
+            isolated_command(binary, workspace)
+                .args([
+                    "remember",
+                    content,
+                    "--level",
+                    "procedural",
+                    "--kind",
+                    "rule",
+                    "--json",
+                ])
+                .output()
+                .map_err(|error| error.to_string())?,
+        )?;
+    }
+    let orient = [
+        "orient",
+        "release",
+        "--fast",
+        "--include-primer",
+        "--format",
+        "hook",
+        "--fields",
+        "command,ambientContext",
+        "--max-tokens",
+        "1072",
+        "--use-daemon",
+    ];
+    let recall = [
+        "recall",
+        "--path",
+        "src/release.rs",
+        "--budget-tokens",
+        "400",
+        "--format",
+        "hook",
+        "--fields",
+        "command,ambientContext",
+        "--use-daemon",
+    ];
+    let read = |workspace: &Path, args: &[&str], socket: Option<&Path>| -> Result<Value, String> {
+        let mut command = isolated_command(binary, workspace);
+        command.args(args);
+        if let Some(socket) = socket {
+            command.arg("--daemon-socket").arg(socket);
+        }
+        successful(command.output().map_err(|error| error.to_string())?)
+    };
+    let has_fallback = |response: &Value| {
+        response["degraded"].as_array().is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry["code"] == "daemon_memory_read_fallback")
+        })
+    };
+    let missing = read(root, &orient, Some(&root.join("missing.sock")))?;
+    assert!(
+        has_fallback(&missing),
+        "missing daemon must be observable: {missing}"
+    );
+    assert!(
+        missing["data"]["ambientContext"]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("alpha checksums")
+    );
+    successful(
+        isolated_command(binary, root)
+            .env("EE_DAEMON_WARM", "off")
+            .args(["daemon", "start", "--json"])
+            .output()
+            .map_err(|error| error.to_string())?,
+    )?;
+    let checks = std::panic::catch_unwind(|| -> TestResult {
+        for args in [&orient[..], &recall[..]] {
+            let warm = read(root, args, None)?;
+            assert!(
+                !has_fallback(&warm),
+                "same-workspace RPC must execute successfully: {warm}"
+            );
+            let text = warm["data"]["ambientContext"]["text"]
+                .as_str()
+                .ok_or("ambient text missing")?;
+            assert!(
+                text.contains("alpha checksums"),
+                "real memory missing: {warm}"
+            );
+            assert!(!text.contains("beta signatures"));
+            let mismatch = read(
+                &other,
+                args,
+                Some(&ee::daemon::workspace_daemon_socket_path(root)),
+            )?;
+            assert!(
+                has_fallback(&mismatch),
+                "wrong-workspace daemon must be refused: {mismatch}"
+            );
+            let text = mismatch["data"]["ambientContext"]["text"]
+                .as_str()
+                .ok_or("fallback text missing")?;
+            assert!(
+                text.contains("beta signatures"),
+                "fallback must read the requested workspace: {mismatch}"
+            );
+            assert!(!text.contains("alpha checksums"));
+        }
+        // Exercise the actual generated SessionStart snippet against the daemon.
+        let mut install = options(
+            HarnessHookTarget::Codex,
+            &root.join("managed-hooks.json"),
+            false,
+            false,
+        );
+        install.ee_binary_path = Some(PathBuf::from(binary));
+        let report = generate_harness_hook_install(&install).map_err(|error| error.message())?;
+        let snippet = report
+            .snippets
+            .iter()
+            .find(|snippet| snippet.event == "SessionStart")
+            .ok_or("session snippet missing")?;
+        let mut child = isolated_command("sh", root)
+            .args(["-c", &snippet.command])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        child.stdin.take().ok_or("hook stdin missing")?.write_all(serde_json::json!({"cwd": root, "session_id": "daemon", "task": "release", "hook_event_name": "SessionStart"}).to_string().as_bytes()).map_err(|error| error.to_string())?;
+        let hook = successful(
+            child
+                .wait_with_output()
+                .map_err(|error| error.to_string())?,
+        )?;
+        assert!(
+            hook["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("alpha checksums")
+        );
+        let state: Value = serde_json::from_slice(
+            &fs::read(root.join(".ee/hook-state/session_start_orient.last.json"))
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(state["outcome"], "emitted");
+        assert!(
+            !state["degradedCodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|code| code == "daemon_memory_read_fallback")
+        );
+        Ok(())
+    });
+    let stopped = successful(
+        isolated_command(binary, root)
+            .args(["daemon", "stop", "--json"])
+            .output()
+            .map_err(|error| error.to_string())?,
+    );
+    stopped?;
+    match checks {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn generated_session_hook_delivers_context_and_records_runtime_outcomes() -> TestResult {
     let temp = TempDir::new().map_err(|error| error.to_string())?;
     let root = temp.path();

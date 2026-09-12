@@ -1241,7 +1241,11 @@ pub fn recall_for_workspace(
     )?;
     let mut extra_degraded = Vec::new();
     let diff_paths = if request.diff_ref.is_some() || request.diff_staged {
-        match collect_diff_paths_via_git(workspace_path, request.diff_ref.as_deref(), request.diff_staged) {
+        match collect_diff_paths_via_git(
+            workspace_path,
+            request.diff_ref.as_deref(),
+            request.diff_staged,
+        ) {
             Ok(paths) => paths,
             Err(reason) => {
                 extra_degraded.push(RecallDegradedEntry::git_unavailable(&reason));
@@ -1269,7 +1273,10 @@ pub fn recall_for_workspace(
     let mut resume_cursor = None;
     let rejected = match resolve_recall_cursor(cursor, &query, db_generation) {
         RecallCursorResolution::Fresh => false,
-        RecallCursorResolution::Resume { offset, dropped_count } => {
+        RecallCursorResolution::Resume {
+            offset,
+            dropped_count,
+        } => {
             query.offset = offset;
             resume_cursor = Some((offset, dropped_count));
             false
@@ -1278,15 +1285,23 @@ pub fn recall_for_workspace(
             extra_degraded.push(RecallDegradedEntry::cursor_invalid());
             true
         }
-        RecallCursorResolution::RejectedStale { cursor_generation, current_generation } => {
-            extra_degraded.push(RecallDegradedEntry::cursor_stale(cursor_generation, current_generation));
+        RecallCursorResolution::RejectedStale {
+            cursor_generation,
+            current_generation,
+        } => {
+            extra_degraded.push(RecallDegradedEntry::cursor_stale(
+                cursor_generation,
+                current_generation,
+            ));
             true
         }
     };
     let mut report = if rejected {
         let index_generation = connection
             .memory_anchor_index_generation(&workspace_id)
-            .map_err(|error| storage_error(format!("Failed to read anchor index generation: {error}")))?;
+            .map_err(|error| {
+                storage_error(format!("Failed to read anchor index generation: {error}"))
+            })?;
         empty_recall_report_for_rejected_cursor(index_generation, db_generation)
     } else {
         run_recall(&connection, &workspace_id, &query)
@@ -1296,13 +1311,22 @@ pub fn recall_for_workspace(
         && !recall_cursor_page_is_honest(offset, dropped_count, report.total_matched)
     {
         extra_degraded.push(RecallDegradedEntry::cursor_invalid());
-        report = empty_recall_report_for_rejected_cursor(report.index_generation, report.db_generation);
+        report =
+            empty_recall_report_for_rejected_cursor(report.index_generation, report.db_generation);
     }
-    let mut degraded: Vec<_> = report.degraded.iter().map(RecallDegradedEntry::from_engine).collect();
+    let mut degraded: Vec<_> = report
+        .degraded
+        .iter()
+        .map(RecallDegradedEntry::from_engine)
+        .collect();
     degraded.append(&mut extra_degraded);
-    if report.truncated && let Some(budget) = request.budget_tokens {
+    if report.truncated
+        && let Some(budget) = request.budget_tokens
+    {
         degraded.push(match report.continuation_cursor.as_deref() {
-            Some(cursor) => RecallDegradedEntry::budget_truncated(report.dropped_count, cursor, budget),
+            Some(cursor) => {
+                RecallDegradedEntry::budget_truncated(report.dropped_count, cursor, budget)
+            }
             None => RecallDegradedEntry::budget_unsatisfiable(report.dropped_count, budget),
         });
     }

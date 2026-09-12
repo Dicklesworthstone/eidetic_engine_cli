@@ -359,7 +359,7 @@ impl DoctorReport {
             check_search_index(workspace_path),
             check_lexical_ram_tier(workspace_path).advisory(),
             check_graph_numa_pin(workspace_path).advisory(),
-            check_daemon_socket_reachable().advisory(),
+            check_daemon_socket_reachable(workspace_path).advisory(),
             check_rch_worker_pressure(&rch_worker_pressure).advisory(),
             check_rch_verify_ledger(&verification_ledger).advisory(),
             check_cass().advisory(),
@@ -3549,8 +3549,12 @@ fn graph_numa_pin_snapshot_path(workspace_path: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".ee").join("graph"))
 }
 
-fn check_daemon_socket_reachable() -> CheckResult {
-    check_daemon_socket_reachable_at(&crate::daemon::default_daemon_socket_path())
+fn check_daemon_socket_reachable(workspace: Option<&Path>) -> CheckResult {
+    let socket = workspace.map_or_else(
+        crate::daemon::default_daemon_socket_path,
+        crate::daemon::workspace_daemon_socket_path,
+    );
+    check_daemon_socket_reachable_at(&socket)
 }
 
 #[cfg(unix)]

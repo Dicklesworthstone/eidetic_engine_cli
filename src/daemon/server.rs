@@ -57,11 +57,14 @@ use crate::output::{ContextJsonRenderOptions, render_context_response_json_with_
 use crate::pack::{ContextPackProfile, DEFAULT_COORDINATION_STALE_AFTER_MS, PackResourceProfile};
 use crate::search::SpeedMode;
 
+use super::protocol::{
+    DAEMON_MEMORY_READ_RESPONSE_SCHEMA_V1, DAEMON_ORIENT_HOOK_REQUEST_SCHEMA_V1,
+    DAEMON_RECALL_REQUEST_SCHEMA_V1, DaemonMemoryReadResult, DaemonOrientHookParams,
+    DaemonRecallParams, DaemonRequest, DaemonResponse, FrameReadError, METHOD_ORIENT_HOOK,
+    METHOD_RECALL, read_request, write_response,
+};
 pub use super::protocol::{
     DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V3, METHOD_SEARCH,
-};
-use super::protocol::{
-    DaemonRequest, DaemonResponse, FrameReadError, read_request, write_response,
 };
 use super::{
     DAEMON_DEFAULT_RPC_TIMEOUT, DAEMON_MAX_INFLIGHT, DAEMON_METHOD_UNAUTHORIZED_CODE,
@@ -2248,10 +2251,91 @@ fn dispatch_with_echo_policy_and_workspace_inner(
             search_advisory_session,
             defer_advisory_until_socket_write,
         ),
+        METHOD_ORIENT_HOOK | METHOD_RECALL => dispatch_memory_read(request),
         METHOD_TELEMETRY => dispatch_telemetry(request),
         METHOD_WRITE => dispatch_write(request, write_router),
         METHOD_WRITE_JOURNAL => dispatch_journal(request, write_router),
         _ => unreachable!("registered daemon methods are handled above"),
+    }
+}
+
+fn dispatch_memory_read(request: &DaemonRequest) -> DaemonResponse {
+    let result = (|| -> Result<DaemonMemoryReadResult, String> {
+        // Authorization has already checked the envelope's workspace. Resolve
+        // all filesystem input from that workspace, never a second RPC path.
+        let workspace = fs::canonicalize(request.workspace_id.as_deref().unwrap_or_default())
+            .map_err(|error| format!("Workspace is unavailable: {error}"))?;
+        let database =
+            canonical_contained_path(&workspace, &workspace.join(".ee/ee.db"), "database")?;
+        let (response, markdown) = if request.method == METHOD_ORIENT_HOOK {
+            let params: DaemonOrientHookParams = serde_json::from_value(request.params.clone())
+                .map_err(|error| format!("Invalid orientation request: {error}"))?;
+            if params.schema != DAEMON_ORIENT_HOOK_REQUEST_SCHEMA_V1 {
+                return Err("Unsupported orientation request schema".to_owned());
+            }
+            let index =
+                canonical_contained_path(&workspace, &workspace.join(".ee/index"), "index")?;
+            let response = crate::core::orient::orient_hook_response(
+                &crate::core::orient::OrientFastContentOptions {
+                    workspace_path: &workspace,
+                    database_path: Some(&database),
+                    index_dir: Some(&index),
+                    task: &params.task,
+                    max_tokens: params.max_tokens,
+                    candidate_pool: params.candidate_pool,
+                },
+                params.include_primer,
+            )
+            .map_err(|error| error.to_string())?;
+            let markdown = response
+                .pointer("/data/ambientContext/text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            (response, markdown)
+        } else {
+            let params: DaemonRecallParams = serde_json::from_value(request.params.clone())
+                .map_err(|error| format!("Invalid recall request: {error}"))?;
+            if params.schema != DAEMON_RECALL_REQUEST_SCHEMA_V1 {
+                return Err("Unsupported recall request schema".to_owned());
+            }
+            let (report, degraded) = crate::core::recall::recall_for_workspace(
+                &workspace,
+                Some(&database),
+                &params.query,
+                params.cursor.as_deref(),
+            )
+            .map_err(|error| error.to_string())?;
+            let markdown = crate::core::recall::render_recall_markdown(&report, &degraded);
+            let response = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": crate::core::recall::recall_data_json(&report, &params.query),
+                "degraded": degraded.iter().map(crate::core::recall::RecallDegradedEntry::to_json).collect::<Vec<_>>(),
+            });
+            (response, markdown)
+        };
+        Ok(DaemonMemoryReadResult {
+            schema: DAEMON_MEMORY_READ_RESPONSE_SCHEMA_V1.to_owned(),
+            response,
+            markdown,
+        })
+    })();
+    match result.and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string()))
+    {
+        Ok(result) => DaemonResponse::ok(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            result,
+        ),
+        Err(error) => DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            "daemon_memory_read_failed",
+            error,
+        ),
     }
 }
 
@@ -5627,9 +5711,8 @@ fn daemon_method_authority(method: &str) -> Option<DaemonAuthority> {
         METHOD_CAPABILITIES | METHOD_ECHO | METHOD_SHUTDOWN | METHOD_TELEMETRY => {
             Some(DaemonAuthority::SameUid)
         }
-        METHOD_CONTEXT | METHOD_SEARCH | METHOD_WRITE | METHOD_WRITE_JOURNAL => {
-            Some(DaemonAuthority::SameUidWorkspace)
-        }
+        METHOD_CONTEXT | METHOD_SEARCH | METHOD_WRITE | METHOD_WRITE_JOURNAL
+        | METHOD_ORIENT_HOOK | METHOD_RECALL => Some(DaemonAuthority::SameUidWorkspace),
         _ => None,
     }
 }
@@ -5700,6 +5783,8 @@ fn daemon_capabilities_result() -> serde_json::Value {
             METHOD_CONTEXT,
             METHOD_ECHO,
             METHOD_SEARCH,
+            METHOD_ORIENT_HOOK,
+            METHOD_RECALL,
             METHOD_SHUTDOWN,
             METHOD_TELEMETRY,
             METHOD_WRITE,
@@ -5710,12 +5795,22 @@ fn daemon_capabilities_result() -> serde_json::Value {
             "ee.daemon.context": daemon_method_authority(METHOD_CONTEXT).expect("registered method").as_wire_label(),
             "ee.daemon.echo": daemon_method_authority(METHOD_ECHO).expect("registered method").as_wire_label(),
             "ee.daemon.search": daemon_method_authority(METHOD_SEARCH).expect("registered method").as_wire_label(),
+            "ee.daemon.orient_hook": daemon_method_authority(METHOD_ORIENT_HOOK).expect("registered method").as_wire_label(),
+            "ee.daemon.recall": daemon_method_authority(METHOD_RECALL).expect("registered method").as_wire_label(),
             "ee.daemon.shutdown": daemon_method_authority(METHOD_SHUTDOWN).expect("registered method").as_wire_label(),
             "ee.daemon.telemetry": daemon_method_authority(METHOD_TELEMETRY).expect("registered method").as_wire_label(),
             "ee.daemon.write": daemon_method_authority(METHOD_WRITE).expect("registered method").as_wire_label(),
             "ee.daemon.write_journal": daemon_method_authority(METHOD_WRITE_JOURNAL).expect("registered method").as_wire_label()
         },
         "method_schemas": {
+            "ee.daemon.orient_hook": {
+                "request": DAEMON_ORIENT_HOOK_REQUEST_SCHEMA_V1,
+                "response": DAEMON_MEMORY_READ_RESPONSE_SCHEMA_V1
+            },
+            "ee.daemon.recall": {
+                "request": DAEMON_RECALL_REQUEST_SCHEMA_V1,
+                "response": DAEMON_MEMORY_READ_RESPONSE_SCHEMA_V1
+            },
             "ee.daemon.search": {
                 "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
                 "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V3
@@ -7835,6 +7930,8 @@ mod tests {
                 METHOD_CONTEXT,
                 METHOD_ECHO,
                 METHOD_SEARCH,
+                METHOD_ORIENT_HOOK,
+                METHOD_RECALL,
                 METHOD_SHUTDOWN,
                 METHOD_TELEMETRY,
                 METHOD_WRITE,

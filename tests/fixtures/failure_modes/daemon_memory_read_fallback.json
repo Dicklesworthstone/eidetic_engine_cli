@@ -1,0 +1,20 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "daemon_memory_read_fallback",
+  "honesty_only": true,
+  "introduced_by": {"bead": "gh-39", "epic_letter": "daemon"},
+  "surfaces": ["orient --fast --format hook --use-daemon", "recall --use-daemon"],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Requested daemon memory retrieval cannot negotiate its schema, reach the workspace endpoint, or complete before the deadline. The CLI executes the same retrieval locally and records the actual fallback reason.",
+    "setup_commands": ["(no compatible workspace daemon running)"],
+    "invocation": "ee recall --path 'src/**' --use-daemon --json"
+  },
+  "expected_emission": {
+    "code": "daemon_memory_read_fallback",
+    "severity": "info",
+    "message_contains": ["Workspace daemon unavailable", "used in-process memory retrieval"],
+    "repair_contains": "ee daemon start"
+  }
+}

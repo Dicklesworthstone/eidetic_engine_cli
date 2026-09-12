@@ -4081,6 +4081,26 @@ ee search release --use-daemon --json
 
 ---
 
+## `daemon_memory_read_fallback`
+
+**Severity:** info
+
+**Surfaces:** orient --fast --format hook --use-daemon, recall --use-daemon
+
+**Introduced by:** gh-39 (epic daemon)
+
+**Trigger.** A requested workspace daemon is missing, incompatible, bound elsewhere, or fails to complete before the client deadline. The same retrieval runs locally; the response records the fallback reason.
+
+**Invocation.** `ee recall --path 'src/**' --use-daemon --json`
+
+**Expected emission.** Message contains: `Workspace daemon unavailable ... used in-process memory retrieval`
+
+**Repair hint.** `ee daemon start --workspace <workspace>`
+
+**Fixture.** [`tests/fixtures/failure_modes/daemon_memory_read_fallback.json`](../tests/fixtures/failure_modes/daemon_memory_read_fallback.json)
+
+---
+
 ## `daemon_setsockopt_failed`
 
 **Severity:** high

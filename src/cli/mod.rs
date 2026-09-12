@@ -186,7 +186,8 @@ use crate::core::memory::{
     update_memory_tags,
 };
 use crate::core::orient::{
-    OrientDecisionOptions, OrientFastContentOptions, orient_decisions, orient_fast_content,
+    OrientDecisionOptions, OrientFastContentOptions, orient_ambient_context, orient_decisions,
+    orient_fast_content, orient_hook_response, orient_primer_value,
 };
 use crate::core::outcome::{
     CliCancelReason, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
@@ -2676,13 +2677,15 @@ pub enum DaemonCommand {
     Status(DaemonStatusArgs),
     /// Start the optional hot-mode UDS RPC daemon. The daemon is opt-in;
     /// every CLI command continues to work without it. Binds a
-    /// Unix-domain socket at `${XDG_RUNTIME_DIR}/ee/daemon.sock` on
-    /// Linux, falling back to `${TMPDIR:-/tmp}/ee-daemon.sock` on macOS.
+    /// Unix-domain socket named `d-<workspace-hash>.sock` under the private
+    /// ee runtime directory. Each workspace has its own daemon endpoint.
     ///
     /// When bound to a workspace it serves `ee search --use-daemon` with
     /// the embedding model resident, warming that stack at startup so the
     /// first search does not pay the cold load. `EE_DAEMON_WARM=off`
     /// disables the warm-up.
+    /// Each running daemon owns its model memory (potentially over 1 GB);
+    /// stop idle workspace daemons with `ee daemon stop --workspace PATH`.
     ///
     /// Socket path constraints, checked at bind: the parent directory
     /// must be owned by your uid and must not grant group or other
@@ -2692,11 +2695,8 @@ pub enum DaemonCommand {
     /// Unix-domain socket path at 107 bytes; a longer `--socket` fails
     /// the bind with an OS error rather than an `ee` diagnostic.
     Start(DaemonHotModeStartArgs),
-    /// Stop a running hot-mode daemon by removing its UDS file. Best-
-    /// effort: a daemon started in a separate process tree needs an
-    /// out-of-band signal to actually exit; this command unlinks the
-    /// socket so subsequent `ee` invocations stop short-circuiting to
-    /// the (now-dead) daemon.
+    /// Ask the workspace's hot-mode daemon to shut down, then wait for its
+    /// workers and socket to be released.
     Stop(DaemonHotModeStopArgs),
     /// Install a user-scoped launchd/systemd/Windows-task unit for the team steward.
     /// This does not start the hot search RPC daemon; use `ee daemon start`
@@ -2711,9 +2711,7 @@ pub struct DaemonStatusArgs {}
 
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct DaemonHotModeStartArgs {
-    /// Override the UDS path. When absent, falls back to
-    /// `${XDG_RUNTIME_DIR}/ee/daemon.sock` (Linux) or
-    /// `${TMPDIR:-/tmp}/ee-daemon.sock` (macOS).
+    /// Override the UDS path. Defaults to the private workspace-hashed endpoint.
     #[arg(long, value_name = "PATH")]
     pub socket: Option<PathBuf>,
     /// Run in foreground (block until terminated). When false the command
@@ -3253,6 +3251,14 @@ pub struct OrientArgs {
     /// Timeout for external probe commands used by the swarm brief.
     #[arg(long = "command-timeout-ms", default_value_t = DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS)]
     pub command_timeout_ms: u64,
+
+    /// Prefer the workspace daemon for bounded --fast --format hook context; fall back locally.
+    #[arg(long)]
+    pub use_daemon: bool,
+
+    /// Override the workspace daemon socket.
+    #[arg(long, requires = "use_daemon", value_name = "PATH")]
+    pub daemon_socket: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -6189,6 +6195,14 @@ pub struct RecallArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+
+    /// Prefer the workspace daemon; fall back to local recall if unavailable.
+    #[arg(long)]
+    pub use_daemon: bool,
+
+    /// Override the workspace daemon socket.
+    #[arg(long, requires = "use_daemon", value_name = "PATH")]
+    pub daemon_socket: Option<PathBuf>,
 }
 
 /// Arguments for `ee timeline`.
@@ -30767,12 +30781,13 @@ fn contention_report_value_in_process() -> serde_json::Value {
 #[cfg(unix)]
 fn contention_report_value_from_daemon(
     args: &DiagContentionArgs,
+    workspace: &Path,
     degraded: &mut Vec<serde_json::Value>,
 ) -> Option<serde_json::Value> {
     let socket_path = args
         .daemon_socket
         .clone()
-        .unwrap_or_else(crate::daemon::default_daemon_socket_path);
+        .unwrap_or_else(|| crate::daemon::workspace_daemon_socket_path(workspace));
     let request = crate::daemon::protocol::DaemonRequest::new(
         format!("diag-contention-{}", std::process::id()),
         "ee-diag-contention",
@@ -30812,6 +30827,7 @@ fn contention_report_value_from_daemon(
 #[cfg(not(unix))]
 fn contention_report_value_from_daemon(
     _args: &DiagContentionArgs,
+    _workspace: &Path,
     degraded: &mut Vec<serde_json::Value>,
 ) -> Option<serde_json::Value> {
     degraded.push(serde_json::json!({
@@ -30833,7 +30849,7 @@ where
 {
     let mut degraded: Vec<serde_json::Value> = Vec::new();
     let report_value = if args.use_daemon {
-        contention_report_value_from_daemon(args, &mut degraded)
+        contention_report_value_from_daemon(args, &cli.resolve_workspace(), &mut degraded)
             .unwrap_or_else(contention_report_value_in_process)
     } else {
         contention_report_value_in_process()
@@ -40191,6 +40207,56 @@ where
         || workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR),
         |store_dir| store_dir.join(DEFAULT_INDEX_SUBDIR),
     );
+    if orient_requests_only_ambient_context(cli, args) {
+        let mut fallback = None;
+        if args.use_daemon && args.database.is_none() {
+            use crate::daemon::protocol::{
+                DAEMON_ORIENT_HOOK_REQUEST_SCHEMA_V1, DaemonOrientHookParams, METHOD_ORIENT_HOOK,
+            };
+            let params = serde_json::json!(DaemonOrientHookParams {
+                schema: DAEMON_ORIENT_HOOK_REQUEST_SCHEMA_V1.to_owned(),
+                task: args.task.clone(),
+                max_tokens: args.max_tokens,
+                candidate_pool: args.candidate_pool,
+                include_primer: args.include_primer,
+            });
+            match memory_read_via_daemon(
+                &workspace_path,
+                args.daemon_socket.as_deref(),
+                METHOD_ORIENT_HOOK,
+                DAEMON_ORIENT_HOOK_REQUEST_SCHEMA_V1,
+                "orient",
+                params,
+            ) {
+                Ok(result) => return write_stdout(stdout, &(result.response.to_string() + "\n")),
+                Err(reason) => fallback = Some(reason),
+            }
+        } else if args.use_daemon {
+            fallback = Some("Explicit --database remains in-process".to_owned());
+        }
+        return match orient_hook_response(
+            &OrientFastContentOptions {
+                workspace_path: &workspace_path,
+                database_path: Some(&addressed_database_path),
+                index_dir: Some(&addressed_index_dir),
+                task: &args.task,
+                max_tokens: args.max_tokens,
+                candidate_pool: args.candidate_pool,
+            },
+            args.include_primer,
+        ) {
+            Ok(mut response) => {
+                if let Some(reason) = fallback {
+                    response["degraded"]
+                        .as_array_mut()
+                        .into_iter()
+                        .for_each(|entries| entries.push(daemon_memory_read_fallback(&reason)));
+                }
+                write_stdout(stdout, &(response.to_string() + "\n"))
+            }
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    }
     let orient_start_backend = crate::core::index::active_embed_backend();
     let mut degraded = Vec::new();
 
@@ -40376,7 +40442,7 @@ where
     }
 
     let primer = if args.include_primer {
-        orient_primer_value(&workspace_path, &mut degraded)
+        orient_primer_value(&workspace_path, &addressed_database_path, &mut degraded)
     } else {
         serde_json::Value::Null
     };
@@ -40523,117 +40589,15 @@ fn orient_component_data_from_envelope(raw: &str) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
-/// Budget the prompt text, rather than the diagnostic JSON containing it. A
-/// session hook must not lose all useful context because unrelated posture
-/// metadata exceeds the envelope governor's minimum (GH #35, #39).
-fn orient_ambient_context(
-    data: &serde_json::Value,
-    degraded: &[serde_json::Value],
-    budget: u32,
-) -> serde_json::Value {
-    let mut text = String::new();
-    let mut omitted = 0_u32;
-    let mut append = |block: String| {
-        let candidate = format!("{text}{block}\n");
-        if crate::pack::estimate_tokens_default(&candidate) <= budget {
-            text = candidate;
-            true
-        } else {
-            omitted = omitted.saturating_add(1);
-            false
-        }
-    };
-    append("## ee orientation (read-only)".to_owned());
-    if let Some(workspace) = data.get("workspace").and_then(serde_json::Value::as_str) {
-        append(format!("Workspace: {workspace}"));
-    }
-    let codes = degraded
-        .iter()
-        .chain(
-            data.pointer("/primer/degraded")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten(),
-        )
-        .filter_map(|entry| entry.get("code").and_then(serde_json::Value::as_str))
-        .collect::<BTreeSet<_>>();
-    if !codes.is_empty() {
-        append(format!(
-            "Observations: {}. Details: ee orient \"session start\" --fast --json.",
-            codes.into_iter().collect::<Vec<_>>().join(", ")
-        ));
-    }
-    let mut seen = BTreeSet::new();
-    let provenance = |item: &serde_json::Value, id: &str| {
-        let uris = item
-            .get("provenance")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| entry.get("uri").and_then(serde_json::Value::as_str))
-            .collect::<BTreeSet<_>>();
-        if uris.is_empty() {
-            format!("ee-mem://{id}")
-        } else {
-            uris.into_iter().collect::<Vec<_>>().join(", ")
-        }
-    };
-    // JSON primer lines carry the body only. Budget their redacted provenance
-    // together with the body, preserving global-store and original source URIs.
-    for section in data
-        .pointer("/primer/sections")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let name = section
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("primer");
-        for item in section
-            .get("items")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            if let (Some(id), Some(line)) = (
-                item.get("memory_id").and_then(serde_json::Value::as_str),
-                item.get("line").and_then(serde_json::Value::as_str),
-            ) && !seen.contains(id)
-                && append(format!("- {name}: {line} [{}]", provenance(item, id)))
-            {
-                seen.insert(id);
-            }
-        }
-    }
-    for section in ["relevant", "recent"] {
-        for item in data
-            .get("fastContent")
-            .and_then(|content| content.get(section))
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            if let (Some(id), Some(snippet), Some(why)) = (
-                item.get("id").and_then(serde_json::Value::as_str),
-                item.get("snippet").and_then(serde_json::Value::as_str),
-                item.get("why").and_then(serde_json::Value::as_str),
-            ) && !seen.contains(id)
-                && append(format!(
-                    "- {snippet}\n  Source: {}. Why: {why}",
-                    provenance(item, id)
-                ))
-            {
-                seen.insert(id);
-            }
-        }
-    }
-    serde_json::json!({
-        "text": text,
-        "budgetTokens": budget,
-        "usedTokens": crate::pack::estimate_tokens_default(&text),
-        "omittedBlocks": omitted,
-    })
+fn orient_requests_only_ambient_context(cli: &Cli, args: &OrientArgs) -> bool {
+    let fields: Vec<_> = cli.fields.raw().split(',').map(str::trim).collect();
+    args.fast
+        && !args.include_rch
+        && matches!(cli.renderer(), output::Renderer::Hook)
+        && fields.contains(&"ambientContext")
+        && fields
+            .iter()
+            .all(|field| matches!(*field, "command" | "ambientContext"))
 }
 
 fn orient_learn_gaps_value(
@@ -40681,67 +40645,6 @@ fn orient_learn_gaps_value(
             ));
             serde_json::Value::Null
         }
-    }
-}
-
-/// Assemble the embedded primer for `ee orient --include-primer`.
-/// Read-only by contract: served from the primer cache when fresh and
-/// assembled without persisting otherwise (orient is sideEffectFree).
-fn orient_primer_value(
-    workspace_path: &Path,
-    degraded: &mut Vec<serde_json::Value>,
-) -> serde_json::Value {
-    let database_path = workspace_path.join(".ee").join("ee.db");
-    let unavailable = |message: String, degraded: &mut Vec<serde_json::Value>| {
-        degraded.push(orient_degradation_value(
-            "orient_primer_unavailable",
-            "info",
-            message,
-            Some("Run `ee primer --json` to isolate primer assembly.".to_owned()),
-        ));
-        serde_json::Value::Null
-    };
-    if !database_path.exists() {
-        return unavailable(
-            "Primer skipped: workspace database is missing.".to_owned(),
-            degraded,
-        );
-    }
-    let connection = match crate::db::DbConnection::open_file(&database_path) {
-        Ok(connection) => connection,
-        Err(error) => {
-            return unavailable(
-                format!("Primer skipped: database open failed: {error}"),
-                degraded,
-            );
-        }
-    };
-    let workspace_id = match bound_cli_workspace_id(&connection, workspace_path) {
-        Ok(workspace_id) => workspace_id,
-        Err(error) => {
-            return unavailable(
-                format!("Primer skipped: workspace lookup failed: {error}"),
-                degraded,
-            );
-        }
-    };
-    let settings = crate::core::primer::primer_settings_from_workspace(
-        workspace_path,
-        crate::core::primer::PrimerFormat::Markdown,
-        None,
-    );
-    match crate::core::primer::run_primer_with_persistence(
-        &connection,
-        &workspace_id,
-        &settings,
-        false,
-        false,
-    ) {
-        Ok(report) => serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
-        Err(error) => unavailable(
-            format!("Primer skipped: assembly failed: {error}"),
-            degraded,
-        ),
     }
 }
 
@@ -47602,7 +47505,7 @@ fn daemon_search_attempt_timeout() -> std::time::Duration {
 fn daemon_search_attempt_timeout_from_env_value(value: Option<&str>) -> std::time::Duration {
     value
         .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .filter(|millis| *millis > 0)
+        .filter(|millis| (1..=300_000).contains(millis))
         .map_or(
             DAEMON_SEARCH_ATTEMPT_TIMEOUT,
             std::time::Duration::from_millis,
@@ -47696,6 +47599,20 @@ fn validate_daemon_search_capabilities(
     use crate::daemon::protocol::{
         DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V3, METHOD_SEARCH,
     };
+    validate_daemon_method_capabilities(
+        capabilities,
+        METHOD_SEARCH,
+        DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+        DAEMON_SEARCH_RESPONSE_SCHEMA_V3,
+    )
+}
+
+fn validate_daemon_method_capabilities(
+    capabilities: &serde_json::Value,
+    method: &str,
+    request_schema: &str,
+    response_schema: &str,
+) -> Result<(), DaemonSearchFallbackReason> {
     use crate::daemon::{DAEMON_REQUEST_SCHEMA_V1, DAEMON_RESPONSE_SCHEMA_V1};
 
     if capabilities
@@ -47716,24 +47633,29 @@ fn validate_daemon_search_capabilities(
     {
         return Err(DaemonSearchFallbackReason::CapabilityEnvelopeSchemaDrift);
     }
-    if !advertises("methods", METHOD_SEARCH) {
+    if !advertises("methods", method) {
         return Err(DaemonSearchFallbackReason::CapabilityMethodMissing);
     }
     if capabilities
-        .pointer("/authorization/ee.daemon.search")
+        .get("authorization")
+        .and_then(|value| value.get(method))
         .and_then(serde_json::Value::as_str)
         != Some("same_uid_workspace")
     {
         return Err(DaemonSearchFallbackReason::CapabilityAuthorizationDrift);
     }
     if capabilities
-        .pointer("/method_schemas/ee.daemon.search/request")
+        .get("method_schemas")
+        .and_then(|value| value.get(method))
+        .and_then(|value| value.get("request"))
         .and_then(serde_json::Value::as_str)
-        != Some(DAEMON_SEARCH_REQUEST_SCHEMA_V2)
+        != Some(request_schema)
         || capabilities
-            .pointer("/method_schemas/ee.daemon.search/response")
+            .get("method_schemas")
+            .and_then(|value| value.get(method))
+            .and_then(|value| value.get("response"))
             .and_then(serde_json::Value::as_str)
-            != Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V3)
+            != Some(response_schema)
     {
         return Err(DaemonSearchFallbackReason::CapabilityMethodSchemaDrift);
     }
@@ -47752,7 +47674,7 @@ fn search_via_daemon(
     let socket_path = args
         .daemon_socket
         .clone()
-        .unwrap_or_else(crate::daemon::default_daemon_socket_path);
+        .unwrap_or_else(|| crate::daemon::workspace_daemon_socket_path(&options.workspace_path));
     let mut options = options.clone();
     if let Ok(canonical_workspace) = std::fs::canonicalize(&options.workspace_path) {
         options.workspace_path = canonical_workspace;
@@ -47877,6 +47799,103 @@ fn search_via_daemon(
         return Err(reason);
     }
     Err(DaemonSearchFallbackReason::PlatformUnsupported)
+}
+
+fn daemon_memory_read_fallback(reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "code": "daemon_memory_read_fallback", "severity": "info",
+        "message": format!("Workspace daemon unavailable ({reason}); used in-process memory retrieval."),
+        "repair": "Start `ee daemon start --workspace <workspace>` or inspect the explicit --daemon-socket.",
+    })
+}
+
+#[cfg(unix)]
+fn memory_read_via_daemon(
+    workspace: &Path,
+    socket: Option<&Path>,
+    method: &'static str,
+    request_schema: &'static str,
+    command: &'static str,
+    params: serde_json::Value,
+) -> Result<crate::daemon::protocol::DaemonMemoryReadResult, String> {
+    use crate::daemon::protocol::{
+        DAEMON_MEMORY_READ_RESPONSE_SCHEMA_V1, DaemonMemoryReadResult, DaemonRequest,
+    };
+    use crate::daemon::server::{METHOD_CAPABILITIES, client_round_trip_before};
+    let workspace = resolve_cli_workspace_path(workspace);
+    let socket = socket
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| crate::daemon::workspace_daemon_socket_path(&workspace));
+    let timeout = daemon_search_attempt_timeout();
+    let deadline = Instant::now() + timeout;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = (|| -> Result<DaemonMemoryReadResult, String> {
+            let agent = crate::core::memory_scope::current_agent_name()
+                .unwrap_or_else(|| "ee-cli-memory-read".to_owned());
+            let capability_request = DaemonRequest::new(
+                format!("memory-capabilities-{}", std::process::id()),
+                &agent,
+                METHOD_CAPABILITIES,
+                serde_json::json!({}),
+            );
+            let capabilities = client_round_trip_before(&socket, &capability_request, deadline)
+                .map_err(|error| format!("Capability request failed: {error}"))?;
+            if let Some(error) = capabilities.error {
+                return Err(error.message);
+            }
+            let capabilities = capabilities
+                .result
+                .ok_or_else(|| "Capability result missing".to_owned())?;
+            validate_daemon_method_capabilities(
+                &capabilities,
+                method,
+                request_schema,
+                DAEMON_MEMORY_READ_RESPONSE_SCHEMA_V1,
+            )
+            .map_err(|reason| format!("{method}: {}", reason.as_str()))?;
+            // These lexical/anchored reads do not need the embedding model.
+            // They remain available while the daemon's neural stack warms.
+            let mut request = DaemonRequest::new(
+                format!("memory-{}", std::process::id()),
+                agent,
+                method,
+                params,
+            );
+            request.workspace_id = Some(workspace.display().to_string());
+            let response = client_round_trip_before(&socket, &request, deadline)
+                .map_err(|error| format!("Memory request failed: {error}"))?;
+            if let Some(error) = response.error {
+                return Err(format!("{}: {}", error.code, error.message));
+            }
+            let result: DaemonMemoryReadResult = serde_json::from_value(
+                response
+                    .result
+                    .ok_or_else(|| "Memory result missing".to_owned())?,
+            )
+            .map_err(|error| format!("Invalid memory response: {error}"))?;
+            if !result.validate(command) {
+                return Err("Memory response schema drift".to_owned());
+            }
+            Ok(result)
+        })();
+        let _ = sender.send(result);
+    });
+    receiver
+        .recv_timeout(timeout)
+        .map_err(|_| "Daemon attempt deadline exceeded".to_owned())?
+}
+
+#[cfg(not(unix))]
+fn memory_read_via_daemon(
+    _workspace: &Path,
+    _socket: Option<&Path>,
+    _method: &'static str,
+    _request_schema: &'static str,
+    _command: &'static str,
+    _params: serde_json::Value,
+) -> Result<crate::daemon::protocol::DaemonMemoryReadResult, String> {
+    Err("Daemon memory retrieval is unsupported on this platform".to_owned())
 }
 
 fn write_daemon_search_renderings<W>(
@@ -49748,8 +49767,33 @@ where
         stale_only: args.stale,
         budget_tokens: args.budget_tokens,
     };
-
-    let (report, degraded) = match recall_for_workspace(
+    let mut fallback = None;
+    if args.use_daemon && args.database.is_none() {
+        use crate::daemon::protocol::{
+            DAEMON_RECALL_REQUEST_SCHEMA_V1, DaemonRecallParams, METHOD_RECALL,
+        };
+        let params = serde_json::json!(DaemonRecallParams {
+            schema: DAEMON_RECALL_REQUEST_SCHEMA_V1.to_owned(),
+            query: query_echo.clone(),
+            cursor: args.cursor.clone(),
+        });
+        match memory_read_via_daemon(
+            &workspace_path,
+            args.daemon_socket.as_deref(),
+            METHOD_RECALL,
+            DAEMON_RECALL_REQUEST_SCHEMA_V1,
+            "recall",
+            params,
+        ) {
+            Ok(result) => {
+                return write_recall_renderings(cli, result.response, &result.markdown, stdout);
+            }
+            Err(reason) => fallback = Some(reason),
+        }
+    } else if args.use_daemon {
+        fallback = Some("Explicit --database remains in-process".to_owned());
+    }
+    let (report, mut degraded) = match recall_for_workspace(
         &workspace_path,
         args.database.as_deref(),
         &query_echo,
@@ -49758,33 +49802,44 @@ where
         Ok(response) => response,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &render_recall_markdown(&report, &degraded))
-        }
-        output::Renderer::Toon => {
-            let envelope = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V2,
-                "success": true,
-                "data": recall_data_json(&report, &query_echo),
-                "degraded": degraded.iter().map(RecallDegradedEntry::to_json).collect::<Vec<_>>(),
-            });
-            write_stdout(
-                stdout,
-                &(output::render_toon_from_json(&envelope.to_string()) + "\n"),
-            )
-        }
-        _ => {
-            let envelope = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V2,
-                "success": true,
-                "data": recall_data_json(&report, &query_echo),
-                "degraded": degraded.iter().map(RecallDegradedEntry::to_json).collect::<Vec<_>>(),
-            });
-            write_stdout(stdout, &(envelope.to_string() + "\n"))
-        }
+    if let Some(reason) = fallback {
+        let entry = daemon_memory_read_fallback(&reason);
+        degraded.push(RecallDegradedEntry {
+            code: "daemon_memory_read_fallback".to_owned(),
+            severity: "info".to_owned(),
+            message: entry["message"].as_str().unwrap_or_default().to_owned(),
+            repair: entry["repair"].as_str().map(str::to_owned),
+            details: None,
+        });
     }
+    let envelope = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2, "success": true,
+        "data": recall_data_json(&report, &query_echo),
+        "degraded": degraded.iter().map(RecallDegradedEntry::to_json).collect::<Vec<_>>(),
+    });
+    write_recall_renderings(
+        cli,
+        envelope,
+        &render_recall_markdown(&report, &degraded),
+        stdout,
+    )
+}
+
+fn write_recall_renderings<W: Write>(
+    cli: &Cli,
+    mut response: serde_json::Value,
+    markdown: &str,
+    stdout: &mut W,
+) -> ProcessExitCode {
+    if matches!(cli.renderer(), output::Renderer::Hook) {
+        let has_items = response
+            .pointer("/data/recall/items")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| !items.is_empty());
+        response["data"]["ambientContext"] =
+            serde_json::json!({"text": if has_items { markdown } else { "" }});
+    }
+    write_daemon_search_renderings(cli, &response, markdown, stdout)
 }
 
 fn handle_timeline<W, E>(
@@ -49890,7 +49945,7 @@ fn try_append_journal_via_daemon(
     let socket_path = args
         .daemon_socket
         .clone()
-        .unwrap_or_else(crate::daemon::default_daemon_socket_path);
+        .unwrap_or_else(|| crate::daemon::workspace_daemon_socket_path(options.workspace_path));
     if !daemon_socket_accepts_connection(&socket_path) {
         return None;
     }
@@ -62121,11 +62176,11 @@ where
     #[cfg(unix)]
     {
         use crate::daemon::{DaemonStartError, server::start_server_for_workspace};
+        let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
         let socket_path = args
             .socket
             .clone()
-            .unwrap_or_else(crate::daemon::default_daemon_socket_path);
-        let workspace_path = cli.resolve_workspace();
+            .unwrap_or_else(|| crate::daemon::workspace_daemon_socket_path(&workspace_path));
         let daemon_workspace_id = workspace_path.display().to_string();
 
         if args.foreground {
@@ -62633,10 +62688,9 @@ where
 {
     #[cfg(unix)]
     {
-        let socket_path = args
-            .socket
-            .clone()
-            .unwrap_or_else(crate::daemon::default_daemon_socket_path);
+        let socket_path = args.socket.clone().unwrap_or_else(|| {
+            crate::daemon::workspace_daemon_socket_path(&cli.resolve_workspace())
+        });
         // Refuse to unlink anything that is not a same-uid socket
         // answering the daemon protocol. The file-type and owner gates
         // stop arbitrary path deletion; the liveness probe stops
@@ -87725,7 +87779,15 @@ mod tests {
         )?;
         // A zero or unparseable value must not disable the deadline: an
         // unbounded wait would hang the CLI against a wedged daemon.
-        for rejected in ["0", "-1", "", "soon", "2s"] {
+        for rejected in [
+            "0",
+            "-1",
+            "",
+            "soon",
+            "2s",
+            "300001",
+            "18446744073709551615",
+        ] {
             ensure_equal(
                 &daemon_search_attempt_timeout_from_env_value(Some(rejected)),
                 &DAEMON_SEARCH_ATTEMPT_TIMEOUT,

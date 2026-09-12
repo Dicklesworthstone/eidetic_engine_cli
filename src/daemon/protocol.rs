@@ -38,6 +38,66 @@ pub const DAEMON_SEARCH_REQUEST_SCHEMA_V2: &str = "ee.daemon.search.request.v2";
 /// Strict method-specific response schema for [`METHOD_SEARCH`].
 pub const DAEMON_SEARCH_RESPONSE_SCHEMA_V3: &str = "ee.daemon.search.response.v3";
 
+/// Bounded SessionStart context, without full diagnostic probes.
+pub const METHOD_ORIENT_HOOK: &str = "ee.daemon.orient_hook";
+/// Anchored recall using the same cursor and filtering contract as the CLI.
+pub const METHOD_RECALL: &str = "ee.daemon.recall";
+pub const DAEMON_ORIENT_HOOK_REQUEST_SCHEMA_V1: &str = "ee.daemon.orient_hook.request.v1";
+pub const DAEMON_RECALL_REQUEST_SCHEMA_V1: &str = "ee.daemon.recall.request.v1";
+pub const DAEMON_MEMORY_READ_RESPONSE_SCHEMA_V1: &str = "ee.daemon.memory_read.response.v1";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonOrientHookParams {
+    pub schema: String,
+    pub task: String,
+    pub max_tokens: u32,
+    pub candidate_pool: u32,
+    pub include_primer: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonRecallParams {
+    pub schema: String,
+    pub query: crate::core::recall::RecallQueryEcho,
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonMemoryReadResult {
+    pub schema: String,
+    pub response: Value,
+    pub markdown: String,
+}
+
+impl DaemonMemoryReadResult {
+    pub fn validate(&self, command: &str) -> bool {
+        self.schema == DAEMON_MEMORY_READ_RESPONSE_SCHEMA_V1
+            && self.response.get("schema").and_then(Value::as_str)
+                == Some(crate::models::RESPONSE_SCHEMA_V2)
+            && self.response.get("success").and_then(Value::as_bool) == Some(true)
+            && self
+                .response
+                .pointer("/data/command")
+                .and_then(Value::as_str)
+                == Some(command)
+            && self.response.get("degraded").is_some_and(Value::is_array)
+            && match command {
+                "orient" => self
+                    .response
+                    .pointer("/data/ambientContext/text")
+                    .is_some_and(Value::is_string),
+                "recall" => self
+                    .response
+                    .pointer("/data/recall/items")
+                    .is_some_and(Value::is_array),
+                _ => false,
+            }
+    }
+}
+
 fn deserialize_present_json_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
 where
     D: Deserializer<'de>,

@@ -184,6 +184,23 @@ pub fn default_daemon_socket_path() -> PathBuf {
     default_daemon_socket_path_with(|key| std::env::var_os(key), current_euid())
 }
 
+/// One private, bounded-length endpoint per canonical workspace. Workspace
+/// paths never appear verbatim in the socket name, including deeply nested ones.
+#[must_use]
+pub fn workspace_daemon_socket_path(workspace: &Path) -> PathBuf {
+    let canonical = crate::config::workspace::canonical_workspace_root_or_lexical(workspace);
+    let digest = blake3::hash(canonical.as_os_str().as_encoded_bytes()).to_hex();
+    let name = format!("d-{}.sock", &digest[..24]);
+    let mut socket = default_daemon_socket_path().with_file_name(&name);
+    // Leave room for the broker's per-attempt temporary socket suffix too.
+    if socket.as_os_str().as_encoded_bytes().len() > 75 {
+        socket = PathBuf::from("/tmp")
+            .join(format!("ee-{}", current_euid()))
+            .join(name);
+    }
+    socket
+}
+
 fn default_daemon_socket_path_with(
     mut env_var: impl FnMut(&str) -> Option<std::ffi::OsString>,
     uid: u32,
@@ -304,6 +321,27 @@ impl std::error::Error for DaemonStartError {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[test]
+    fn workspace_sockets_are_short_distinct_and_canonical() -> Result<(), std::io::Error> {
+        let temp = tempfile::tempdir()?;
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        std::fs::create_dir_all(first.join("child"))?;
+        std::fs::create_dir_all(&second)?;
+        let socket = workspace_daemon_socket_path(&first);
+        assert_eq!(
+            socket,
+            workspace_daemon_socket_path(&first.join("child/.."))
+        );
+        assert_ne!(socket, workspace_daemon_socket_path(&second));
+        assert!(socket.as_os_str().as_encoded_bytes().len() <= 75);
+        assert_eq!(
+            socket.parent(),
+            workspace_daemon_socket_path(&second).parent()
+        );
+        Ok(())
+    }
 
     fn daemon_socket_path_for_env(vars: &[(&str, &str)], uid: u32) -> PathBuf {
         default_daemon_socket_path_with(
