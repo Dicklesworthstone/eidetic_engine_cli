@@ -22,19 +22,19 @@
 //! - **MR3 — same `--max-tokens N` envelope idempotency.** Two
 //!   back-to-back `ee context "<q>" --max-tokens N --json`
 //!   invocations against the same workspace must produce
-//!   byte-identical JSON envelopes (stricter than the existing
+//!   byte-identical normalized JSON envelopes (stricter than the existing
 //!   pack-hash equality check at determinism_unit.rs:196).
 //! - **MR4 — three-invocation envelope stability across cold
 //!   processes.** Mirrors the existing pack-hash test but tightens
 //!   the assertion from `data.pack.hash` equality to full-envelope
-//!   byte equality (modulo volatile fields surfaced via the
-//!   determinism volatile-strip helper at determinism_unit.rs:
-//!   `strip_volatile`). Catches drift in any envelope field other
-//!   than pack.hash that the existing test silently tolerates.
+//!   byte equality after normalizing only the registered wall-clock field
+//!   `data.pack.slo.actuals.elapsedMs`; see `docs/volatile_field_registry.md`.
+//!   Catches drift in fields outside pack.hash that the existing test
+//!   silently tolerates, without requiring identical assembly durations.
 //! - **MR5 — `graph.ppr.alpha = 0` invariance.** With the graph
 //!   contribution explicitly muted via `ee config set
 //!   graph.ppr.alpha 0`, two `ee context` invocations against the
-//!   same workspace must produce byte-identical envelopes. This is
+//!   same workspace must produce byte-identical normalized envelopes. This is
 //!   the "no graph features change the answer" property: if a
 //!   future change makes a zero PPR weight still leak graph state
 //!   into selection, the byte-equality fails here. The bd-2m607
@@ -313,7 +313,7 @@ fn run_ee_context_stdout(
     query: &str,
     max_tokens: &str,
 ) -> Result<String, String> {
-    run_ee_stdout(
+    let stdout = run_ee_stdout(
         workspace,
         &[
             "pack",
@@ -327,7 +327,90 @@ fn run_ee_context_stdout(
             "--json",
         ],
         &format!("ee context {query:?} --max-tokens {max_tokens}"),
-    )
+    )?;
+    normalize_pack_envelope(&stdout)
+}
+
+fn normalize_pack_envelope(stdout: &str) -> Result<String, String> {
+    let mut envelope: JsonValue =
+        serde_json::from_str(stdout).map_err(|error| format!("pack envelope not JSON: {error}"))?;
+    if envelope
+        .pointer("/data/pack/items")
+        .and_then(JsonValue::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return Err(format!(
+            "pack determinism requires a nonempty selection: {envelope}"
+        ));
+    }
+
+    // Pack SLO diagnostics expose real assembly time, registered as volatile
+    // in ee::obs::VOLATILE_FIELD_NAMES. Normalize this exact numeric field;
+    // preserve all other diagnostics, hashes, item order, scores and provenance.
+    // serde_json's preserve_order feature retains object insertion order too.
+    let elapsed_ms = envelope
+        .pointer_mut("/data/pack/slo/actuals/elapsedMs")
+        .ok_or_else(|| "pack envelope missing SLO elapsedMs".to_owned())?;
+    if !elapsed_ms.is_u64() {
+        return Err(format!(
+            "pack SLO elapsedMs must be an unsigned integer, got {elapsed_ms}"
+        ));
+    }
+    *elapsed_ms = JsonValue::from(0_u64);
+    serde_json::to_string(&envelope)
+        .map_err(|error| format!("serialize normalized pack envelope: {error}"))
+}
+
+#[test]
+fn pack_envelope_normalization_preserves_semantic_drift() -> TestResult {
+    let original = serde_json::json!({
+        "data": {
+            "pack": {
+                "hash": "blake3:original",
+                "items": [{
+                    "memoryId": "mem_original",
+                    "content": "Preserve release provenance.",
+                    "provenance": [{"uri": "ee://memory/original"}]
+                }],
+                "slo": {"actuals": {"elapsedMs": 21, "scannedCount": 6}}
+            }
+        },
+        "degraded": []
+    });
+    let baseline = normalize_pack_envelope(&original.to_string())?;
+    let mut different_timing = original.clone();
+    different_timing["data"]["pack"]["slo"]["actuals"]["elapsedMs"] = JsonValue::from(34);
+    if normalize_pack_envelope(&different_timing.to_string())? != baseline {
+        return Err("registered assembly timing must not cause semantic drift".to_owned());
+    }
+    for (pointer, replacement) in [
+        ("/data/pack/hash", serde_json::json!("blake3:changed")),
+        (
+            "/data/pack/items/0/memoryId",
+            serde_json::json!("mem_changed"),
+        ),
+        (
+            "/data/pack/items/0/content",
+            serde_json::json!("Changed content"),
+        ),
+        (
+            "/data/pack/items/0/provenance/0/uri",
+            serde_json::json!("ee://memory/changed"),
+        ),
+        ("/data/pack/slo/actuals/scannedCount", serde_json::json!(7)),
+        ("/degraded", serde_json::json!([{"code": "index_stale"}])),
+    ] {
+        let mut changed = original.clone();
+        *changed
+            .pointer_mut(pointer)
+            .ok_or_else(|| format!("negative control missing {pointer}"))? = replacement;
+        if normalize_pack_envelope(&changed.to_string())? == baseline {
+            return Err(format!(
+                "normalization concealed semantic drift at {pointer}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn pack_hash(value: &JsonValue) -> Option<String> {
@@ -570,7 +653,8 @@ fn pack_item_contents(value: &JsonValue) -> Vec<String> {
 //
 // Two back-to-back `ee context` invocations against the same workspace
 // with the same query and `--max-tokens N` must produce byte-identical
-// JSON envelopes. The existing determinism_unit.rs:196 test asserts
+// JSON envelopes after normalizing only the registered SLO assembly time.
+// The existing determinism_unit.rs:196 test asserts
 // pack.hash equality; this stricter form catches drift in any other
 // envelope field (degraded[], packDna, provenance footer, tokenSavings,
 // …) that the hash-only check silently tolerates.
@@ -606,8 +690,8 @@ fn pack_envelope_byte_identical_under_repeated_max_tokens_invocation() -> TestRe
 //
 // Three back-to-back cold-process `ee context` invocations (each is a
 // fresh subprocess; no shared in-process state) must all emit the same
-// envelope. determinism_unit.rs:196 already pins pack.hash across three
-// runs; this tightens the assertion to the full envelope and proves
+// normalized envelope. determinism_unit.rs:196 already pins pack.hash across
+// three runs; this tightens the assertion to the full envelope and proves
 // that no per-process counter, RNG seed, or cache-warmup field leaks
 // into the JSON contract.
 
@@ -643,8 +727,9 @@ fn pack_envelope_byte_identical_across_three_cold_process_invocations() -> TestR
 //
 // Setting `graph.ppr.alpha = 0` in the workspace config must
 // produce a configuration in which two `ee context` invocations are
-// byte-identical (the graph contribution is wired through PPR scoring but
-// must be a strict zero under this knob). This pins the contract that
+// byte-identical after SLO timing normalization (the graph contribution is wired
+// through PPR scoring but must be a strict zero under this knob). This pins
+// the contract that
 // `graph.ppr.alpha = 0` is a valid + no-panic + deterministic configuration
 // before higher-order MRs exercise snapshot stale-vs-fresh independence.
 
