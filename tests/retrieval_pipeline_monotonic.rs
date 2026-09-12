@@ -1,13 +1,14 @@
 //! Integration coverage for the eight-stage retrieval pipeline in plan section 13.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::str::FromStr;
 
 use ee::models::{MemoryId, ProvenanceUri, UnitScore};
 use ee::pack::{
-    ContextPackProfile, PackCandidate, PackCandidateInput, PackProvenance, PackSection,
-    TokenBudget, assemble_draft_with_profile,
+    ContextPackProfile, PackCandidate, PackCandidateInput, PackDraft, PackProvenance, PackSection,
+    PackSelectionPhase, TokenBudget, assemble_draft_with_profile,
 };
 use ee::search::scoring::{
     RetrievalMaturity, SearchScoreComponents, SearchScoringConfig, SearchScoringSignals,
@@ -90,12 +91,11 @@ fn run_ee_json(args: &[&str]) -> Result<Value, String> {
     })
 }
 
-fn json_array_len(value: &Value, pointer: &str) -> Result<usize, String> {
+fn json_u64(value: &Value, pointer: &str) -> Result<u64, String> {
     value
         .pointer(pointer)
-        .and_then(Value::as_array)
-        .map(Vec::len)
-        .ok_or_else(|| format!("JSON pointer {pointer} must be an array"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("JSON pointer {pointer} must be an unsigned integer"))
 }
 
 fn json_array<'a>(value: &'a Value, pointer: &str) -> Result<&'a [Value], String> {
@@ -138,27 +138,66 @@ fn assert_search_results_have_why_and_provenance(results: &[Value]) -> TestResul
     Ok(())
 }
 
-fn assert_context_items_have_why_and_provenance(items: &[Value]) -> TestResult {
+fn assert_context_items_have_why_and_provenance(context: &Value, items: &[Value]) -> TestResult {
     ensure(!items.is_empty(), "context should return at least one item")?;
+    let mut memory_ids = BTreeSet::new();
+    let mut source_schemes = BTreeSet::new();
+    let mut source_count = 0_u64;
     for item in items {
         let memory_id = item
             .get("memoryId")
             .and_then(Value::as_str)
             .ok_or_else(|| format!("context item missing memoryId: {item:?}"))?;
         ensure(
+            memory_ids.insert(memory_id),
+            format!("context repeats memory {memory_id}"),
+        )?;
+        ensure(
             item.get("why")
                 .and_then(Value::as_str)
                 .is_some_and(|why| !why.trim().is_empty()),
             format!("context item {memory_id} missing non-empty why"),
         )?;
+        let sources = json_array(item, "/provenance")?;
         ensure(
-            item.get("provenance")
-                .and_then(Value::as_array)
-                .is_some_and(|provenance| !provenance.is_empty()),
+            !sources.is_empty(),
             format!("context item {memory_id} missing provenance"),
         )?;
+        let source_index = json_u64(item, "/sourceIndex")?;
+        ensure(
+            source_index > 0 && source_index <= sources.len() as u64,
+            format!("context item {memory_id} sourceIndex does not identify an inline source"),
+        )?;
+        for source in sources {
+            let uri = source
+                .get("uri")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("context item {memory_id} source has no URI"))?;
+            let parsed = ProvenanceUri::from_str(uri)
+                .map_err(|error| format!("context item {memory_id} has invalid URI: {error:?}"))?;
+            ensure(
+                source.get("scheme").and_then(Value::as_str) == Some(parsed.scheme()),
+                format!("context item {memory_id} source scheme disagrees with its URI"),
+            )?;
+            source_schemes.insert(parsed.scheme().to_owned());
+            source_count += 1;
+        }
     }
-    Ok(())
+    // The A1 pack contract keeps provenance inline and aggregate statistics
+    // in the footer; the redundant provenanceFooter.entries array was removed.
+    ensure(
+        json_u64(context, "/data/pack/provenanceFooter/memoryCount")? == memory_ids.len() as u64,
+        "context provenance footer memoryCount must match unique packed memories",
+    )?;
+    ensure(
+        json_u64(context, "/data/pack/provenanceFooter/sourceCount")? == source_count,
+        "context provenance footer sourceCount must match all inline sources",
+    )?;
+    let expected_schemes: Vec<_> = source_schemes.into_iter().map(Value::String).collect();
+    ensure(
+        json_array(context, "/data/pack/provenanceFooter/schemes")? == expected_schemes.as_slice(),
+        "context provenance footer schemes must match the inline sources",
+    )
 }
 
 fn score(value: f32) -> Result<UnitScore, String> {
@@ -228,7 +267,7 @@ fn fixture_candidates() -> Vec<RetrievalFixture> {
             workspace: "eidetic_engine_cli",
             level: "semantic",
             kind: "decision",
-            content: "Release work must stay on main and never reference master.",
+            content: "Release work must stay on main and never create branches.",
             base_score: 0.70,
             utility: 0.80,
             confidence: 0.72,
@@ -398,7 +437,7 @@ fn stage_6_policy_filter(scored: &[ScoredFixture]) -> Vec<ScoredFixture> {
         .collect()
 }
 
-fn stage_7_mmr(policy_filtered: &[ScoredFixture]) -> Result<Vec<MemoryId>, String> {
+fn stage_7_mmr(policy_filtered: &[ScoredFixture]) -> Result<PackDraft, String> {
     let candidates: Result<Vec<_>, _> = policy_filtered
         .iter()
         .map(|candidate| {
@@ -425,14 +464,13 @@ fn stage_7_mmr(policy_filtered: &[ScoredFixture]) -> Result<Vec<MemoryId>, Strin
             .map_err(|error| format!("{error:?}"))
         })
         .collect();
-    let draft = assemble_draft_with_profile(
+    assemble_draft_with_profile(
         ContextPackProfile::Compact,
         "prepare release",
         TokenBudget::new(40).map_err(|error| format!("{error:?}"))?,
         candidates?,
     )
-    .map_err(|error| format!("{error:?}"))?;
-    Ok(draft.items.into_iter().map(|item| item.memory_id).collect())
+    .map_err(|error| format!("{error:?}"))
 }
 
 #[test]
@@ -443,7 +481,8 @@ fn retrieval_pipeline_narrows_monotonically_across_eight_stages() -> TestResult 
     let stage_4 = stage_4_hydrate(&stage_3);
     let stage_5 = stage_5_score(&stage_4);
     let stage_6 = stage_6_policy_filter(&stage_5);
-    let stage_7 = stage_7_mmr(&stage_6)?;
+    let draft = stage_7_mmr(&stage_6)?;
+    let stage_7: Vec<_> = draft.items.iter().map(|item| item.memory_id).collect();
     let stage_8: Vec<_> = stage_7.iter().take(2).copied().collect();
 
     let counts = [
@@ -527,8 +566,51 @@ fn retrieval_pipeline_narrows_monotonically_across_eight_stages() -> TestResult 
         "top-k stage must honor the requested result limit",
     )?;
     ensure(
-        stage_8 == vec![memory_id(1), memory_id(2)],
-        format!("unexpected final top-k order: {stage_8:?}"),
+        stage_8 == vec![memory_id(3), memory_id(1)],
+        format!("the reserved failure must precede the highest-scoring rule: {stage_8:?}"),
+    )?;
+    ensure(
+        draft.items.first().is_some_and(|item| {
+            item.selected_in == PackSelectionPhase::AntiPatternFirst
+                && item.section == PackSection::Failures
+                && item.why.starts_with("What NOT to do:")
+        }),
+        "the leading failure must explain its reserved selection phase",
+    )?;
+    ensure(
+        draft.used_tokens <= draft.budget.max_tokens()
+            && draft.used_tokens
+                == draft
+                    .items
+                    .iter()
+                    .map(|item| item.estimated_tokens)
+                    .sum::<u32>(),
+        "MMR token accounting must match selected items and stay within budget",
+    )?;
+    let eligible_ids: BTreeSet<_> = stage_6
+        .iter()
+        .map(|candidate| memory_id(candidate.fixture.seed))
+        .collect();
+    let selected_ids: BTreeSet<_> = stage_7.iter().copied().collect();
+    ensure(
+        selected_ids.len() == stage_7.len() && selected_ids.is_subset(&eligible_ids),
+        "MMR must select each policy-eligible candidate at most once",
+    )?;
+    for item in &draft.items {
+        let candidate = stage_6
+            .iter()
+            .find(|candidate| memory_id(candidate.fixture.seed) == item.memory_id)
+            .ok_or_else(|| format!("selected memory {} was not policy-eligible", item.memory_id))?;
+        ensure(
+            item.provenance == vec![provenance(candidate.fixture.seed)?],
+            "MMR must preserve each selected candidate's provenance",
+        )?;
+    }
+    let mut reversed = stage_6.clone();
+    reversed.reverse();
+    ensure(
+        stage_7_mmr(&reversed)?.items == draft.items,
+        "MMR selection and explanations must be stable under candidate input reordering",
     )
 }
 
@@ -628,10 +710,12 @@ fn real_binary_search_context_pipeline_narrows_and_preserves_explanations() -> T
         "160",
         "--profile",
         "compact",
+        "--fields",
+        "full",
         "--json",
     ])?;
     let context_items = json_array(&context, "/data/pack/items")?;
-    assert_context_items_have_why_and_provenance(context_items)?;
+    assert_context_items_have_why_and_provenance(&context, context_items)?;
 
     let stored_count = memories.len();
     let broad_count = broad_results.len();
@@ -650,8 +734,5 @@ fn real_binary_search_context_pipeline_narrows_and_preserves_explanations() -> T
         context_count <= narrowed_count,
         format!("context pack widened candidates: {context_count} > {narrowed_count}"),
     )?;
-    ensure(
-        json_array_len(&context, "/data/pack/provenanceFooter/entries")? >= context_count,
-        "context provenance footer should cover packed items",
-    )
+    Ok(())
 }

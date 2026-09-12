@@ -620,8 +620,23 @@ fn north_star_3_promoted_ci_rule_is_retrievable() -> TestResult {
 
     // Plan §4.7 success signal folded in: the promotion must be auditable —
     // hash-chained rows, typed mutation kind, no silent rewrites.
-    let output = run_ee(&["audit", "timeline", "--target", &rule_id, "--json"])?;
-    ensure(output.status.success(), "audit timeline failed")?;
+    let output = run_ee(&[
+        "audit",
+        "timeline",
+        "--workspace",
+        dir.to_str().unwrap(),
+        "--target",
+        &rule_id,
+        "--json",
+    ])?;
+    ensure(
+        output.status.success(),
+        format!(
+            "audit timeline failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
     let audit = parse_json_stdout(&output, "audit timeline")?;
     let entries = audit
         .pointer("/data/entries")
@@ -683,7 +698,7 @@ fn north_star_3b_pack_surfaces_promoted_rule() -> TestResult {
     let stdout = String::from_utf8_lossy(&output.stdout);
     ensure(
         stdout.contains("Treat clippy warnings as errors before any release tag."),
-        format!("pack must surface promoted rule {rule_id} body verbatim"),
+        format!("pack must surface promoted rule {rule_id} body verbatim; output:\n{stdout}"),
     )?;
 
     Ok(())
