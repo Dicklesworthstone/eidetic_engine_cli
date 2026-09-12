@@ -8485,7 +8485,8 @@ async fn run_search_inner_with_performance(
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     match search_result {
-        Ok((mut raw_hits, errors)) => {
+        Ok((mut raw_hits, retrieval_degraded)) => {
+            degraded.extend(retrieval_degraded);
             // Bead bd-17c65.2.3 (B3): dedupe on docId BEFORE the floor
             // filter so the floor metrics reflect the deduped pool.
             // After fusion, the same docId can appear multiple times
@@ -8807,7 +8808,7 @@ async fn run_search_inner_with_performance(
                     requested_limit: options.limit,
                     results: above_floor,
                     elapsed_ms,
-                    errors,
+                    errors: Vec::new(),
                     degraded,
                     runtime_profile,
                     rerank_configured_mode,
@@ -10619,7 +10620,7 @@ async fn global_store_frankensearch_hits(
     )
     .await;
     trace.record_elapsed("search::globalRetrieve", global_search_start);
-    let (raw_hits, errors) = match search_result {
+    let (raw_hits, retrieval_degraded) = match search_result {
         Ok(result) => result,
         Err(error) => {
             degraded.push(SearchDegradation::global_index_unavailable(
@@ -10628,11 +10629,7 @@ async fn global_store_frankensearch_hits(
             return Vec::new();
         }
     };
-    if !errors.is_empty() {
-        degraded.push(SearchDegradation::global_index_unavailable(
-            &errors.join("; "),
-        ));
-    }
+    degraded.extend(retrieval_degraded);
 
     let reference_time = options.as_of.unwrap_or_else(Utc::now);
     let memories_by_id = memories
@@ -11152,7 +11149,7 @@ fn search_sync(
     source_mode: SearchSourceMode,
     determinism: &Deterministic<Seed>,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
-) -> Result<(Vec<SearchHit>, Vec<String>), String> {
+) -> Result<(Vec<SearchHit>, Vec<SearchDegradation>), String> {
     let mut trace = SearchPerformanceTrace::default();
     crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
         search_sync_with_performance(
@@ -11189,7 +11186,7 @@ async fn search_sync_with_performance(
     fusion_weights: SearchFusionWeights,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
     trace: &mut SearchPerformanceTrace,
-) -> Result<(Vec<SearchHit>, Vec<String>), SearchError> {
+) -> Result<(Vec<SearchHit>, Vec<SearchDegradation>), SearchError> {
     search_checkpoint(cx)?;
     let plan_cache_key =
         search_plan_cache_key(index_dir, query, limit, &config, explain, source_mode);
@@ -11218,8 +11215,9 @@ async fn search_sync_with_performance(
         "threaded deterministic token through search_sync"
     );
     #[allow(clippy::type_complexity)]
-    let result_holder: Arc<Mutex<Option<Result<(Vec<SearchHit>, Vec<String>), SearchError>>>> =
-        Arc::new(Mutex::new(None));
+    let result_holder: Arc<
+        Mutex<Option<Result<(Vec<SearchHit>, Vec<SearchDegradation>), SearchError>>>,
+    > = Arc::new(Mutex::new(None));
     let task_result = Arc::clone(&result_holder);
     let sync_timings: Arc<Mutex<Vec<SearchPerformanceTiming>>> = Arc::new(Mutex::new(Vec::new()));
     let async_timings = Arc::clone(&sync_timings);
