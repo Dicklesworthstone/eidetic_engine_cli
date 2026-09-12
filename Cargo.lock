@@ -1327,7 +1327,7 @@ checksum = "fa54cf3a70a400e92d1fff502b845ae883145bca4dae8753d4c6ff8c68a6f78b"
 
 [[package]]
 name = "eidetic-engine"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "arc-swap",
  "asupersync",

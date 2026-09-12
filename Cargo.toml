@@ -22,7 +22,7 @@ exclude = [
 
 [package]
 name = "eidetic-engine"
-version = "0.15.1"
+version = "0.15.2"
 edition = "2024"
 license = "MIT"
 description = "Durable, local-first, explainable memory for coding agents."
