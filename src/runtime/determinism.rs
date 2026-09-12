@@ -39,7 +39,7 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use chrono::{DateTime, Utc};
-use uuid::{Timestamp, Uuid};
+use uuid::{Builder, Timestamp, Uuid};
 
 /// N4.1 inventory hash that drove the first deterministic-token design.
 pub const RANDOMNESS_INVENTORY_ROWS_CONTENT_HASH: &str =
@@ -381,7 +381,20 @@ impl<S> DeterministicClock<'_, S> {
     /// Advance the deterministic clock and return a UUIDv7 value.
     #[must_use]
     pub fn next_uuid_v7(&mut self) -> Uuid {
-        Uuid::new_v7(self.advance())
+        let ordinal = self.token.counter;
+        let (seconds, nanos) = self.advance().to_unix();
+        let millis = seconds
+            .saturating_mul(1_000)
+            .saturating_add(u64::from(nanos) / 1_000_000);
+
+        // Supply every payload bit explicitly: Uuid::new_v7 reads ambient
+        // randomness even when a 74-bit counter fills the entire payload.
+        // The builder writes the variant over the top two bits of byte 2,
+        // so preserve those counter bits in rand_a before writing rand_b.
+        let mut payload = [0_u8; 10];
+        payload[1] = (ordinal >> 62) as u8;
+        payload[2..].copy_from_slice(&ordinal.to_be_bytes());
+        Builder::from_unix_timestamp_millis(millis, &payload).into_uuid()
     }
 }
 
@@ -568,6 +581,87 @@ mod tests {
             &seed_zero_second,
             "seed and ordinal must not collapse to the same RNG stream position",
         )
+    }
+
+    #[test]
+    fn uuid_clock_does_not_collapse_seed_and_counter() -> TestResult {
+        let mut seed_one = Deterministic::from_seed(1);
+        let first_at_one = seed_one.clock().next_uuid_v7();
+
+        let mut seed_zero = Deterministic::from_seed(0);
+        let _first_at_zero = seed_zero.clock().next_uuid_v7();
+        let second_at_zero = seed_zero.clock().next_uuid_v7();
+
+        ensure_not_equal(
+            &first_at_one,
+            &second_at_zero,
+            "distinct seed and ordinal pairs sharing a timestamp must retain their counters",
+        )
+    }
+
+    #[test]
+    fn uuid_clock_remains_unique_and_replayable_when_millis_saturate() -> TestResult {
+        let mut token = Deterministic::from_seed(u64::MAX);
+        let mut replay = Deterministic::from_seed(u64::MAX);
+        let mut previous = None;
+
+        for expected in [
+            "ffffffff-ffff-7000-8000-000000000000",
+            "ffffffff-ffff-7000-8000-000000000001",
+            "ffffffff-ffff-7000-8000-000000000002",
+        ] {
+            let actual = token.clock().next_uuid_v7();
+            ensure_equal(
+                &actual.to_string(),
+                &expected.to_owned(),
+                "saturated timestamp must preserve the full counter",
+            )?;
+            ensure_equal(
+                &actual,
+                &replay.clock().next_uuid_v7(),
+                "saturated UUID sequence must replay exactly",
+            )?;
+            if previous.is_some_and(|previous| previous >= actual) {
+                return Err("saturated UUID sequence must remain strictly increasing".to_owned());
+            }
+            previous = Some(actual);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn uuid_clock_preserves_counter_bits_across_the_variant() -> TestResult {
+        for (ordinal, expected) in [
+            ((1_u64 << 62) - 1, "ffffffff-ffff-7000-bfff-ffffffffffff"),
+            (1_u64 << 62, "ffffffff-ffff-7001-8000-000000000000"),
+            ((1_u64 << 62) + 1, "ffffffff-ffff-7001-8000-000000000001"),
+            ((1_u64 << 63) - 1, "ffffffff-ffff-7001-bfff-ffffffffffff"),
+            (1_u64 << 63, "ffffffff-ffff-7002-8000-000000000000"),
+            (u64::MAX - 1, "ffffffff-ffff-7003-bfff-fffffffffffe"),
+        ] {
+            let mut token = Deterministic::from_seed(u64::MAX);
+            token.counter = ordinal;
+            ensure_equal(
+                &token.clock().next_uuid_v7().to_string(),
+                &expected.to_owned(),
+                "counter bits must survive UUID version and variant insertion",
+            )?;
+            ensure_equal(
+                &token.counter,
+                &(ordinal + 1),
+                "UUID generation must consume exactly one ordinal",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[should_panic(expected = "deterministic token counter exhausted")]
+    fn uuid_clock_exhaustion_panics_instead_of_reusing_scope_ordinals() {
+        let mut token = Deterministic::from_seed(7);
+        token.counter = u64::MAX;
+
+        let _ = token.clock().next_uuid_v7();
     }
 
     #[test]
