@@ -106,7 +106,7 @@ science-analytics = []
 [dependencies]
 asupersync = { version = "=0.4.11", default-features = false, features = ["tracing-integration"] }
 arc-swap = { version = "=1.9.2" }
-base64 = { version = "0.22.1" }
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 blake3 = { version = "1.5" }
 crossbeam-queue = { version = "0.3.14" }
 determinism = { package = "ee-determinism", version = "0.1.0", path = "crates/determinism" }

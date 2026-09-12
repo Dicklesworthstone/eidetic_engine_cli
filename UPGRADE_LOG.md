@@ -174,8 +174,8 @@ Pinned sibling repositories and the nightly toolchain remain explicit release
 inputs. Upgrades are applied and tested individually before the next upgrade.
 
 - [x] Inventory direct registry dependencies and preserve path dependencies.
-- [ ] crossbeam-queue 0.3.13 → 0.3.14: applied; writer queue tests pending.
-- [ ] base64 0.22.1 → 0.23.1: research and test cursor/encoding consumers.
+- [x] crossbeam-queue 0.3.13 → 0.3.14: 58 writer queue tests passed.
+- [ ] base64 0.22.1 → 0.23.1: applied; cursor/encoding tests pending.
 - [ ] fs4 0.13.1 → 1.1.0: research and test synchronous file locks.
 - [ ] uuid 1.24.1 → 1.26.1: research and test identifier generation.
 - [ ] zeroize 1.8.2 → 1.9.0: research and test secret handling.
@@ -191,13 +191,24 @@ The [released changelog](https://github.com/crossbeam-rs/crossbeam/blob/crossbea
 changes index width on 32-bit platforms with 64-bit atomics and extends the
 upstream MSRV support policy. EE's `ArrayQueue` usage needs no API change.
 The dependency list is unchanged; the lock checksum was verified against the
-official sparse index. Validation is pending, not a completed upgrade.
+official sparse index. Pinned RCH tests at af09aa6bc passed all 58
+`core::write_owner::tests` (no failures or ignored tests) on hz2.
+
+## base64 0.23.1
+
+The [release notes](https://github.com/marshallpierce/rust-base64/blob/069bf7067b949f5c0a92b6ceb82492920502f2c2/RELEASE-NOTES.md)
+describe the new default SIMD implementation and error-shape changes. EE uses
+the unchanged general-purpose encoding/decoding APIs and does not match the
+changed error variant. Default features are disabled and `std` remains enabled;
+the scalar implementation is sufficient for EE's cursors and credentials.
+Version 0.23.1 was already present in the lockfile for Asupersync. The older
+0.22.1 entry remains required by other transitive consumers. Tests are pending.
 
 ## Existing release gates
 
 The preceding issue-fix candidate had an E0308 in the optional-reranking
 degradation return type; commit daba50a03 fixes that mismatch. A fresh remote
-all-targets check is running. The preceding broad integration run had 758
+all-targets check passed on daba50a03. The preceding broad integration run had 758
 passes and 71 failures; those results predate these upgrades and still require
 classification or fixes. No new version or release is published yet.
 
