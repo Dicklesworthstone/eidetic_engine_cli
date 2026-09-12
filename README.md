@@ -337,7 +337,7 @@ Hard constraints. CI fails if any of them break.
 | Method | Status | Evidence |
 |---|---|---|
 | GitHub release installer | available | [latest release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest) |
-| Homebrew tap | available; the formula serves v0.14.5 as of 2026-09-11 and is refreshed by hand | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
+| Homebrew tap | available; the formula is refreshed by hand after release assets are verified | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
 | crates.io | publication pending; registry search returned no `eidetic-engine` package on 2026-09-11 | tracked in `PUBLISH_CHECKLIST.md` |
 | Source build | available now | this README |
 
@@ -2903,7 +2903,7 @@ Boundaries to know:
 | Retention model | Forgetting and decay are product features. Export JSONL into git when you need sealed long-term records. |
 | Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
-| Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) is refreshed by hand and serves v0.14.5 as of 2026-09-11. crates.io publication is still pending. Releases are currently cut outside GitHub Actions; `v0.14.5` ships checksums and a manifest but no Sigstore bundle or SLSA provenance, so `--require-provenance` fails against it by design. |
+| Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) is refreshed by hand after asset verification. crates.io publication is blocked by unavailable pinned dependency versions and APIs. Releases are currently cut outside GitHub Actions and ship checksums and a manifest without Sigstore bundles or SLSA provenance; `--require-provenance` therefore fails by design. See the release notes for each version's validation and remaining limits. |
 | Reserved adapters | `science-analytics` reports a capability gap until its adapter matures. The loopback-only `serve` adapter is compiled into every build; the `serve` Cargo feature flag only changes how `ee capabilities` reports it. |
 | Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |
 

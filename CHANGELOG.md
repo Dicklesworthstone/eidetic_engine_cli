@@ -20,13 +20,14 @@ checked-in Beads records. The durable research ledger is
 | 2026-08-20 → 2026-08-27 | **`0.14.3`** retrieval correctness and deterministic contract hardening; tagged, but not published as a GitHub Release. |
 | 2026-08-27 → 2026-08-29 | **`0.14.4`** agent-facing capability discovery plus tag, policy, and provenance correctness. |
 | 2026-08-29 → 2026-09-11 | **`0.14.5`** portable GNU/Linux binaries, Windows storage I/O, recovery, and runtime resource use. |
+| 2026-09-11 → 2026-09-12 | **`0.15.0`** daemon retrieval, hook context, reranking, Windows doctor, and dependency updates. |
 
 Release surface (as of 2026-09-11):
 
 - Latest **published** GitHub Release: [`v0.14.5`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.14.5) (2026-09-11), with six platform archives, checksums, a build manifest, and both installers.
 - `v0.14.3` is an annotated tag without a corresponding GitHub Release.
-- `Cargo.toml` carries `version = "0.14.5"` for this cut; prior tags remain
-  unchanged.
+- `Cargo.toml` carries `version = "0.15.0"` for the next cut; publication and
+  platform validation are recorded on its GitHub Release page.
 - Distribution paths: verified GitHub release installers and
   `brew install Dicklesworthstone/tap/ee` (the formula is bumped by hand and
   serves v0.14.5 as of 2026-09-11). crates.io publication remains pending:
@@ -65,6 +66,8 @@ GitHub Release page for asset lists and the original generated notes until a
 future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
+
+## [0.15.0] - 2026-09-12
 
 - Windows doctor runs preserve and replace their existing `latest` pointer
   instead of rejecting it as a redirected lifecycle directory on the second
@@ -1650,7 +1653,8 @@ Closed workstreams behind this changelog:
   workspace hygiene, QoS, flight recorder, mesh/Tailscale optionality, duplicate
   work detection, host profiles, and crowded-checkout ergonomics.
 
-[Unreleased]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.14.5...main
+[Unreleased]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.15.0...main
+[0.15.0]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.14.5...v0.15.0
 [0.14.5]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.14.4...v0.14.5
 [0.3.0]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.1.0...v0.2.0
