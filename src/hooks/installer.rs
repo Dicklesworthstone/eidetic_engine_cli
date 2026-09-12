@@ -1392,7 +1392,7 @@ pub struct HarnessHookInstallAuditReport {
 }
 
 /// Last observed invocation, distinct from whether the installed snippet is fresh.
-/// Contains no recalled content, commands, or subprocess stderr.
+/// Contains bounded diagnostic messages, never recalled content or subprocess stderr.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessHookInvocation {
@@ -1402,6 +1402,8 @@ pub struct HarnessHookInvocation {
     pub duration_ms: u64,
     pub emitted_bytes: u64,
     pub degraded_codes: Vec<String>,
+    #[serde(default)]
+    pub degraded_messages: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1808,6 +1810,11 @@ fn read_harness_hook_invocations(
                     code.len() > 128
                         || !code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
                 })
+                || item.degraded_messages.len() > 8
+                || item
+                    .degraded_messages
+                    .iter()
+                    .any(|message| message.len() > 2048 || message.chars().any(char::is_control))
             {
                 return None;
             }
@@ -2545,6 +2552,9 @@ def _ee_record_invocation(outcome, emitted_bytes=0, degraded_codes=None):
         root = _ee_state_root()
         os.makedirs(root, exist_ok=True)
         record = {"surface": SURFACE, "outcome": outcome, "updatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(), "durationMs": int((time.monotonic() - _ee_started) * 1000), "emittedBytes": emitted_bytes, "degradedCodes": degraded_codes or []}
+        response = globals().get("response", {})
+        entries = response.get("degraded", []) if isinstance(response, dict) else []
+        record["degradedMessages"] = [" ".join(str(entry.get("message", "")).split())[:512] for entry in entries[:8] if isinstance(entry, dict)]
         with open(os.path.join(root, SURFACE + ".last.json"), "w", encoding="utf-8") as f:
             json.dump(record, f, sort_keys=True, separators=(",", ":"))
     except Exception:

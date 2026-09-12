@@ -5538,10 +5538,10 @@ fn default_search_embedder_for_settings(settings: &EeEmbedderSettings) -> Defaul
     // and execution share discovery; only execution constructs the real model.
     // In particular, off prohibits downloads, not use of verified cached files.
     if let Some(model_dir) = verified_default_model_dir(settings) {
-        match Model2VecEmbedder::load_with_name(&model_dir, POTION_MODEL_NAME) {
+        match Model2VecEmbedder::load_shared_with_name(&model_dir, POTION_MODEL_NAME) {
             Ok(embedder) => {
                 return DefaultSearchEmbedder::ready(
-                    EmbedderStack::from_parts(Arc::new(embedder), None),
+                    EmbedderStack::from_parts(embedder, None),
                     EmbedModelResolution::ready(settings.local_source),
                 );
             }
@@ -5946,37 +5946,33 @@ fn load_registered_model2vec(
     let canonical_source = identity.canonical_source.clone();
     let content_hash = identity.content_hash.clone();
     let dimension = identity.dimension;
+    let mut rejection = EmbedRegistryRejectionReason::ModelLoadFailed;
     let fast = REGISTERED_MODEL2VEC_CACHE
         .get_or_init(RegisteredModel2VecCache::default)
         .get_or_try_insert_with(identity, || {
             let Ok(embedder) =
-                Model2VecEmbedder::load_with_name(&canonical_source, POTION_MODEL_NAME)
+                Model2VecEmbedder::load_shared_with_name(&canonical_source, POTION_MODEL_NAME)
             else {
                 return None;
             };
-            let fingerprint = active_embedder_fingerprint(&embedder, ModelProvider::Model2Vec);
+            let fingerprint =
+                active_embedder_fingerprint(embedder.as_ref(), ModelProvider::Model2Vec);
             let hash_matches = content_hash.eq_ignore_ascii_case(&fingerprint.content_hash);
             let dimension_matches = Some(dimension) == u32::try_from(embedder.dimension()).ok();
-            if !hash_matches || !dimension_matches {
+            if !hash_matches {
+                rejection = EmbedRegistryRejectionReason::ContentHashMismatch;
                 return None;
             }
-            Some(Arc::new(embedder) as Arc<dyn crate::search::Embedder>)
+            if !dimension_matches {
+                rejection = EmbedRegistryRejectionReason::DimensionMismatch;
+                return None;
+            }
+            Some(embedder as Arc<dyn crate::search::Embedder>)
         });
     let Some(fast) = fast else {
-        let reason = match Model2VecEmbedder::load_with_name(&canonical_source, POTION_MODEL_NAME) {
-            Ok(embedder) => {
-                let fingerprint = active_embedder_fingerprint(&embedder, ModelProvider::Model2Vec);
-                if !content_hash.eq_ignore_ascii_case(&fingerprint.content_hash) {
-                    EmbedRegistryRejectionReason::ContentHashMismatch
-                } else if Some(dimension) != u32::try_from(embedder.dimension()).ok() {
-                    EmbedRegistryRejectionReason::DimensionMismatch
-                } else {
-                    EmbedRegistryRejectionReason::ModelLoadFailed
-                }
-            }
-            Err(_) => EmbedRegistryRejectionReason::ModelLoadFailed,
-        };
-        return Err(reason);
+        // Keep the actual first failure; reloading only to classify it rebuilt
+        // the tokenizer and matrix a second time on a rejected registry entry.
+        return Err(rejection);
     };
     Ok(EmbedderStack::from_parts(fast, None))
 }
@@ -6172,9 +6168,11 @@ impl EeLazyModel2VecEmbedder {
     ) -> Result<Arc<dyn crate::search::Embedder>, SearchError> {
         model_initialization_checkpoint(cx, "before local model load")?;
         let destination = potion_model_destination_dir(&self.model_root);
-        if let Ok(embedder) = Model2VecEmbedder::load_with_name(&destination, POTION_MODEL_NAME) {
+        if let Ok(embedder) =
+            Model2VecEmbedder::load_shared_with_name(&destination, POTION_MODEL_NAME)
+        {
             model_initialization_checkpoint(cx, "after local model load")?;
-            return Ok(Arc::new(embedder) as Arc<dyn crate::search::Embedder>);
+            return Ok(embedder as Arc<dyn crate::search::Embedder>);
         }
         model_initialization_checkpoint(cx, "before model download")?;
 
@@ -6220,9 +6218,9 @@ impl EeLazyModel2VecEmbedder {
             "ee-managed embedding model download completed"
         );
         model_initialization_checkpoint(cx, "before downloaded model load")?;
-        let embedder = Model2VecEmbedder::load_with_name(&destination, POTION_MODEL_NAME)?;
+        let embedder = Model2VecEmbedder::load_shared_with_name(&destination, POTION_MODEL_NAME)?;
         model_initialization_checkpoint(cx, "after downloaded model load")?;
-        Ok(Arc::new(embedder) as Arc<dyn crate::search::Embedder>)
+        Ok(embedder as Arc<dyn crate::search::Embedder>)
     }
 
     fn mark_failed(&self) {

@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync"
-version = "0.4.10"
+version = "0.4.11"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -261,7 +261,6 @@ dependencies = [
  "prost",
  "rmp-serde",
  "rustls",
- "rustls-pemfile",
  "rustls-pki-types",
  "semver",
  "serde",
@@ -293,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.4.9"
+version = "0.4.11"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1522,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "franken-decision"
-version = "0.4.9"
+version = "0.4.11"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -1531,7 +1530,7 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.4.9"
+version = "0.4.11"
 dependencies = [
  "serde",
  "serde_json",
@@ -1539,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.4.9"
+version = "0.4.11"
 dependencies = [
  "serde",
 ]
@@ -4394,15 +4393,6 @@ dependencies = [
  "rustls-webpki",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]

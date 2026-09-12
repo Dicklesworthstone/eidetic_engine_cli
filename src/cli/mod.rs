@@ -15195,6 +15195,9 @@ fn render_hook_harness_human(report: &crate::hooks::HarnessHookInstallReport) ->
             invocation.duration_ms,
             invocation.emitted_bytes
         ));
+        for message in &invocation.degraded_messages {
+            out.push_str(&format!("    degraded: {message}\n"));
+        }
     }
     for snippet in &report.snippets {
         out.push_str(&format!(
@@ -15236,6 +15239,9 @@ fn render_hook_status_human(report: &crate::hooks::HarnessHookInstallReport) -> 
             invocation.duration_ms,
             invocation.emitted_bytes
         ));
+        for message in &invocation.degraded_messages {
+            out.push_str(&format!("    degraded: {message}\n"));
+        }
     }
     for finding in &report.install_audit.findings {
         out.push_str(&format!(
