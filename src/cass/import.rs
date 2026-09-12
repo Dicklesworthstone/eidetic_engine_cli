@@ -263,8 +263,11 @@ impl CassImportReport {
 }
 
 fn redact_import_report_source_ref(value: &str) -> String {
-    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
-    redact_import_report_path_like_segments(&secret_redacted)
+    // Redact paths before inserting secret placeholders. Otherwise a `]` in
+    // a generated placeholder terminates the path scan early and leaves a
+    // trailing filename fragment such as `].jsonl` in the public report.
+    let path_redacted = redact_import_report_path_like_segments(value);
+    crate::policy::redact_secret_like_content(&path_redacted).content
 }
 
 fn redact_import_report_path_like_segments(value: &str) -> String {
@@ -2552,6 +2555,32 @@ mod tests {
             &redact_import_report_source_ref(r"source=C:\Users\Alice\session.jsonl"),
             &"source=[REDACTED_PATH]".to_owned(),
             "embedded drive path at a token boundary is redacted",
+        )
+    }
+
+    #[test]
+    fn public_cass_source_ref_redacts_secret_bearing_filenames_as_one_path() -> TestResult {
+        let token = format!("sk_live_{}", "1234567890abcdef1234567890abcdef");
+        for path in [
+            format!("/tmp/cass/session-{token}.jsonl"),
+            format!(r"C:\Users\Alice\session-{token}.jsonl"),
+            format!("file:///tmp/cass/session-{token}.jsonl"),
+        ] {
+            ensure_equal(
+                &redact_import_report_source_ref(&path),
+                &"[REDACTED_PATH]".to_owned(),
+                "secret-bearing filename must not leave placeholder or suffix fragments",
+            )?;
+        }
+        let redacted =
+            redact_import_report_source_ref(&format!("source=/tmp/session.jsonl token={token}"));
+        ensure(
+            redacted.contains("source=[REDACTED_PATH]"),
+            "path redaction",
+        )?;
+        ensure(
+            !redacted.contains(&token),
+            "separate secrets must still be redacted",
         )
     }
 
