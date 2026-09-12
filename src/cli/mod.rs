@@ -28994,11 +28994,33 @@ where
     W: Write,
     E: Write,
 {
+    // Background launchers can pass an ignored SIGINT disposition through exec.
+    // Own the registration for this loop so both follow surfaces remain
+    // interruptible and release their signal resources on every return path.
+    #[cfg(unix)]
+    let mut interrupt_signals =
+        match signal_hook::iterator::Signals::new([signal_hook::consts::signal::SIGINT]) {
+            Ok(signals) => signals,
+            Err(error) => {
+                let error = DomainError::Configuration {
+                    message: format!("Failed to install recorder follow signal handler: {error}"),
+                    repair: Some(
+                        "Inspect host signal-handler limits, then retry recorder follow."
+                            .to_owned(),
+                    ),
+                };
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+        };
     let mut seen_event_ids = BTreeSet::new();
     let poll_interval = Duration::from_millis(poll_ms.max(10));
     let mut idle_started = Instant::now();
 
     loop {
+        #[cfg(unix)]
+        if interrupt_signals.pending().next().is_some() {
+            return ProcessExitCode::Cancelled;
+        }
         match crate::core::recorder::poll_follow_events_from_store(conn, &options, &seen_event_ids)
         {
             Ok(crate::core::recorder::TailFollowResult::Events(events)) => {
@@ -29044,6 +29066,21 @@ where
                 {
                     return ProcessExitCode::Success;
                 }
+                #[cfg(unix)]
+                {
+                    let wait_started = Instant::now();
+                    loop {
+                        if interrupt_signals.pending().next().is_some() {
+                            return ProcessExitCode::Cancelled;
+                        }
+                        let remaining = poll_interval.saturating_sub(wait_started.elapsed());
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        std::thread::sleep(remaining.min(Duration::from_millis(50)));
+                    }
+                }
+                #[cfg(not(unix))]
                 std::thread::sleep(poll_interval);
             }
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),

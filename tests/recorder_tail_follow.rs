@@ -428,59 +428,137 @@ fn recorder_tail_follow_idle_timeout_exits_without_hanging() -> TestResult {
 #[cfg(unix)]
 #[test]
 fn recorder_tail_follow_sigint_exits_quickly() -> TestResult {
-    use std::os::unix::process::ExitStatusExt;
-    use std::process::Stdio;
-    use std::thread;
-    use std::time::{Duration, Instant};
-
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     fs::create_dir_all(tempdir.path().join(".ee")).map_err(|error| error.to_string())?;
     let database = tempdir.path().join(".ee").join("ee.db");
     let conn = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
     conn.migrate().map_err(|error| error.to_string())?;
+    insert_run(&conn, "run_sigint", "active")?;
+    insert_event(
+        &conn,
+        "run_sigint",
+        1,
+        "user_message",
+        "2026-05-06T10:00:01Z",
+        "clean",
+    )?;
     conn.close().map_err(|error| error.to_string())?;
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
+    assert_recorder_follow_sigint(
+        tempdir.path(),
+        "follow",
+        &["follow", "--json-lines", "--poll-ms", "10000"],
+    )?;
+    assert_recorder_follow_sigint(
+        tempdir.path(),
+        "tail-follow",
+        &["tail", "--follow", "--tail-format", "jsonl"],
+    )
+}
+
+#[cfg(unix)]
+fn assert_recorder_follow_sigint(
+    workspace: &std::path::Path,
+    label: &str,
+    args: &[&str],
+) -> TestResult {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let stdout_path = workspace.join(format!("{label}.stdout.jsonl"));
+    let stderr_path = workspace.join(format!("{label}.stderr.log"));
+    let stdout = fs::File::create_new(&stdout_path).map_err(|error| error.to_string())?;
+    let stderr = fs::File::create_new(&stderr_path).map_err(|error| error.to_string())?;
+    // Bash deliberately passes SIG_IGN through exec, reproducing the inherited
+    // disposition of a background verification launcher without unsafe Rust.
+    let mut child = Command::new("bash")
+        .arg("-c")
+        .arg("trap '' INT; exec \"$@\"")
+        .arg("ee-recorder-sigint-test")
+        .arg(env!("CARGO_BIN_EXE_ee"))
         .arg("--workspace")
-        .arg(tempdir.path())
+        .arg(workspace)
         .arg("recorder")
-        .arg("follow")
-        .arg("--json-lines")
-        .arg("--poll-ms")
-        .arg("1000")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .args(args)
+        .env_remove("BASH_ENV")
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()
-        .map_err(|error| format!("failed to spawn recorder follow: {error}"))?;
+        .map_err(|error| format!("failed to spawn recorder {label}: {error}"))?;
 
-    thread::sleep(Duration::from_millis(150));
-    let start = Instant::now();
-    let kill = Command::new("kill")
-        .arg("-INT")
-        .arg(child.id().to_string())
-        .status()
-        .map_err(|error| format!("failed to send SIGINT: {error}"))?;
-    assert!(kill.success(), "failed to send SIGINT");
+    let result = (|| -> TestResult {
+        let startup = Instant::now();
+        loop {
+            let output = fs::read_to_string(&stdout_path).map_err(|error| error.to_string())?;
+            if let Some((line, _)) = output.split_once('\n') {
+                let event: serde_json::Value = serde_json::from_str(line)
+                    .map_err(|error| format!("invalid readiness event: {error}"))?;
+                if event["schema"] != ee::core::recorder::RECORDER_TAIL_FOLLOW_EVENT_SCHEMA_V1
+                    || event["eventId"] != "evt_run_sigint_0001"
+                    || event["sequence"] != 1
+                {
+                    return Err(format!("unexpected readiness event: {event}"));
+                }
+                // A real event is emitted only after the shared follow loop has
+                // installed its handler and successfully read the recorder DB.
+                break;
+            }
+            if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+                return Err(format!(
+                    "recorder exited before emitting readiness: {status}"
+                ));
+            }
+            if startup.elapsed() >= Duration::from_secs(10) {
+                return Err("recorder did not emit its readiness event within 10s".to_owned());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
 
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("failed to poll recorder follow: {error}"))?
-        {
-            break status;
+        let start = Instant::now();
+        let kill = Command::new("kill")
+            .arg("-INT")
+            .arg(child.id().to_string())
+            .output()
+            .map_err(|error| format!("failed to send SIGINT: {error}"))?;
+        if !kill.status.success() {
+            return Err(format!(
+                "failed to send SIGINT: {}",
+                String::from_utf8_lossy(&kill.stderr)
+            ));
         }
-        if start.elapsed() >= Duration::from_secs(2) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("recorder follow did not terminate promptly after SIGINT".to_owned());
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+                break status;
+            }
+            if start.elapsed() >= Duration::from_secs(2) {
+                return Err("recorder did not terminate within 2s after SIGINT".to_owned());
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        if status.code() != Some(130) {
+            return Err(format!(
+                "expected recorder cancellation exit 130, got {status}"
+            ));
         }
-        thread::sleep(Duration::from_millis(20));
-    };
-    assert!(
-        status.code() == Some(130) || status.signal() == Some(2),
-        "expected SIGINT termination, got code {:?}, signal {:?}",
-        status.code(),
-        status.signal(),
-    );
-    Ok(())
+        Ok(())
+    })();
+
+    // Every error path after spawning must reap the owned follow process.
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let stdout = fs::read_to_string(&stdout_path)
+        .unwrap_or_else(|error| format!("could not read stdout: {error}"));
+    let stderr = fs::read_to_string(&stderr_path)
+        .unwrap_or_else(|error| format!("could not read stderr: {error}"));
+    result
+        .and_then(|()| {
+            if stderr.is_empty() {
+                Ok(())
+            } else {
+                Err("recorder wrote unexpected stderr".to_owned())
+            }
+        })
+        .map_err(|error| format!("recorder {label}: {error}\nstdout={stdout}\nstderr={stderr}"))
 }
