@@ -84,10 +84,17 @@ seed_read_pool_corpus() {
         printf '{"schema":"ee.export.memory.v1","memory_id":"%s","workspace_id":"ws_%s","level":"procedural","kind":"rule","content":"Read pool concurrency fixture %s for %s: context readers must see stable packs while writers commit.","importance":0.8,"confidence":0.8,"utility":0.8,"created_at":"2026-05-16T00:00:01Z","updated_at":null,"tombstoned_at":null,"tombstoned_reason":null,"valid_from":null,"valid_to":null,"expires_at":null,"source_agent":"bd-2caru.5","provenance_uri":"ee-export://bd-2caru.5/%s","superseded_by":null,"supersedes":null,"redacted":false,"redaction_reason":null}\n' \
             "$memory_id" "$RUN_ID" "$i" "$RUN_ID" "$i" >>"$import_file"
     done
+    printf '{"schema":"ee.export.footer.v1","export_id":"exp_%s","completed_at":"2026-05-16T00:00:02Z","total_records":%s,"memory_count":%s,"artifact_count":0,"link_count":0,"tag_count":0,"audit_count":0,"checksum":null,"success":true,"error_message":null}\n' \
+        "$RUN_ID" "$((READ_POOL_CORPUS_SIZE + 2))" "$READ_POOL_CORPUS_SIZE" >>"$import_file"
 
-    if ee_workspace import jsonl --source "$import_file" --json >/dev/null 2>&1; then
+    if ee_workspace import jsonl --source "$import_file" --json \
+        >"$ARTIFACT_DIR/seed-import.stdout.json" 2>"$ARTIFACT_DIR/seed-import.stderr.log" \
+        && jq -e --argjson expected "$READ_POOL_CORPUS_SIZE" \
+            '.success == true and .data.memoriesImported == $expected' \
+            "$ARTIFACT_DIR/seed-import.stdout.json" >/dev/null; then
         read_pool_step "setup" "true" "seeded=$READ_POOL_CORPUS_SIZE" "0" "" "$(_e2e_hash_file "$import_file")"
     else
+        cat "$ARTIFACT_DIR/seed-import.stdout.json" "$ARTIFACT_DIR/seed-import.stderr.log" >&2
         read_pool_step "setup" "false" "import_failed" "0" "" "$(_e2e_hash_file "$import_file")"
         exit 3
     fi
