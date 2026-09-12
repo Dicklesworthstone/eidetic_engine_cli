@@ -8092,14 +8092,13 @@ fn load_verified_search_reranker(
 ) -> Result<NativeReranker, String> {
     let source_path = reranker_entry_source_path(entry)?;
     let model_dir = unpacked_rerank_model_dir(&source_path)?;
-    let reranker = NativeReranker::load(&model_dir).map_err(|error| {
+    NativeReranker::load(&model_dir).map_err(|error| {
         format!(
             "Failed to load rerank model {} from {}: {error}",
             entry.model_name,
             model_dir.display()
         )
-    })?;
-    Ok(reranker)
+    })
 }
 
 fn verify_reranker_registry_hash(entry: &StoredModelRegistryEntry) -> Result<(), String> {

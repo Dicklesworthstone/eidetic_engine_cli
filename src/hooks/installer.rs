@@ -2653,7 +2653,13 @@ for edit in edits:
         if isinstance(value, str) and value:
             paths.append(value)
 seen = []
+workspace = os.path.abspath(data.get("cwd") or os.getcwd())
 for path in paths:
+    # Harnesses commonly send absolute file paths; the anchor index stores
+    # workspace-relative paths. Ignore edits outside this workspace.
+    path = os.path.relpath(os.path.abspath(os.path.join(workspace, path)), workspace)
+    if path == os.pardir or path.startswith(os.pardir + os.sep):
+        continue
     if path not in seen:
         seen.append(path)
 if not seen:
@@ -4826,6 +4832,27 @@ mod tests {
             assert!(
                 !temp.path().join("relative-state").exists(),
                 "invalid edit events must return before attempting EE or writing invocation state"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pre_edit_hook_ignores_paths_outside_event_workspace() -> TestResult {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        for path in [
+            temp.path().join("outside.rs").display().to_string(),
+            "../outside.rs".to_owned(),
+        ] {
+            let event = serde_json::json!({"cwd": workspace, "tool_input": {"file_path": path}});
+            let output = run_python_hook_state_probe(pre_edit_python(), &event, temp.path())?;
+            assert!(output.stdout.is_empty());
+            assert!(output.stderr.is_empty());
+            assert!(
+                !workspace.join("relative-state").exists(),
+                "outside edits must return before invoking EE or writing hook state"
             );
         }
         Ok(())

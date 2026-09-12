@@ -195,7 +195,7 @@ fn workspace_daemon_serves_real_hook_reads_and_falls_back_without_crossing_store
             (
                 "PreToolUse",
                 "pre_edit_recall",
-                serde_json::json!({"file_path": "src/release.rs"}),
+                serde_json::json!({"file_path": root.join("src/release.rs")}),
             ),
         ] {
             let snippet = report
