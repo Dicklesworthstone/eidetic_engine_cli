@@ -171,18 +171,6 @@ pub struct RecallDegradation {
     pub repair: Option<String>,
 }
 
-impl RecallDegradation {
-    #[must_use]
-    fn from_model_lifecycle(degradation: &crate::core::model::ModelLifecycleDegradation) -> Self {
-        Self {
-            code: degradation.code,
-            severity: degradation.severity,
-            message: degradation.message.clone(),
-            repair: degradation.repair.clone(),
-        }
-    }
-}
-
 /// Deterministic recall result (`ee.recall.v1`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecallReport {
@@ -849,31 +837,10 @@ pub fn run_recall(
         })
         .collect();
 
-    let mut report = evaluate_recall(query, &rows, index_generation, db_generation);
-    if let Some(degradation) = recall_model_lifecycle_degradation(connection, workspace_id)
-        && !report.degraded.iter().any(|existing| {
-            existing.code == degradation.code && existing.message == degradation.message
-        })
-    {
-        report.degraded.push(degradation);
-    }
-    Ok(report)
-}
-
-fn recall_model_lifecycle_degradation(
-    connection: &crate::db::DbConnection,
-    workspace_id: &str,
-) -> Option<RecallDegradation> {
-    let workspace = connection.get_workspace(workspace_id).ok().flatten()?;
-    let report = crate::core::model::build_model_lifecycle_report_for_workspace(
-        std::path::Path::new(&workspace.path),
-        None,
-        Some(connection),
-    )
-    .ok()?;
-    report
-        .semantic_surface_degradation("recall")
-        .map(|degradation| RecallDegradation::from_model_lifecycle(&degradation))
+    // Path and symbol recall only reads the anchor index. Missing embeddings
+    // do not affect these results and must not trigger model loading or an
+    // unrelated per-response degradation (including during daemon warm-up).
+    Ok(evaluate_recall(query, &rows, index_generation, db_generation))
 }
 
 // ---------------------------------------------------------------------------
@@ -2389,7 +2356,7 @@ mod tests {
     }
 
     #[test]
-    fn run_recall_threads_model_lifecycle_lexical_only_degradation() {
+    fn run_recall_without_embeddings_preserves_anchor_results_without_degradation() {
         let (_temp, connection, workspace_id) = wrapper_test_file_db();
         let memory_id = format!("mem_{:026}", 9);
         wrapper_insert_memory(
@@ -2410,15 +2377,11 @@ mod tests {
         .expect("run recall");
 
         assert_eq!(report.items.len(), 1);
-        let lifecycle = report
-            .degraded
-            .iter()
-            .find(|degradation| degradation.code == "embed_model_unavailable")
-            .expect("model lifecycle degraded entry");
+        assert_eq!(report.items[0].memory_id, memory_id);
         assert!(
-            lifecycle.message.contains("lexical-only"),
-            "unexpected lifecycle message: {}",
-            lifecycle.message
+            report.degraded.is_empty(),
+            "anchor recall must work without an embedding model: {:?}",
+            report.degraded
         );
     }
 
