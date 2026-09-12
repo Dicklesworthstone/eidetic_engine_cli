@@ -188,6 +188,32 @@ inputs. Upgrades are applied and tested individually before the next upgrade.
 - [x] Check crates.io eligibility: six unpublished versions and a missing
   published runtime API prevent registry publication of this source graph.
 
+## Crates.io publication follow-through
+
+The operator authorized publishing the missing upstream dependency chain after
+the v0.15.0 binary release. Registry publication remains in progress; none of
+the following checks may be inferred from the existing binary release.
+
+- [x] Store the supplied registry credential outside repositories and source
+  bundles, readable only by its owner.
+- [x] Package the unchanged `ee-determinism 0.1.0` source from `v0.15.0` and
+  pass a packaging-only `cargo publish --dry-run --no-verify`.
+- [ ] Run the standalone macro tests remotely through DSR and publish it.
+  The registry accepted authentication but returned its new-crate rate limit;
+  the latest retry deadline is 2026-09-12 13:23:06 UTC.
+- [ ] Align the required storage, ORM, search and graph package versions with
+  published Asupersync 0.5.0. Its public capability-checked blocking-pool API
+  is required by EE; registry 0.4.11 lacks it.
+- [ ] Qualify the combined source changes with compiler checks and relevant
+  real memory, search, pack, runtime and native model tests.
+- [ ] Publish dependency packages in order and verify their downloaded bytes.
+- [ ] Package EE 0.15.1 and compile its registry-only dependency graph remotely,
+  with no sibling paths or Cargo patches and no duplicate Asupersync runtime.
+- [ ] Publish `eidetic-engine`, verify a fresh registry installation and run
+  its memory/search/pack loop.
+- [ ] Publish and verify matching 0.15.1 DSR binaries and Homebrew metadata;
+  preserve the existing v0.15.0 tag and assets.
+
 ## crossbeam-queue 0.3.14
 
 The [released changelog](https://github.com/crossbeam-rs/crossbeam/blob/crossbeam-queue-0.3.14/crossbeam-queue/CHANGELOG.md)

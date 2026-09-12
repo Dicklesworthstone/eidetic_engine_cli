@@ -21,7 +21,7 @@ exclude = [
 
 [package]
 name = "eidetic-engine"
-version = "0.15.0"
+version = "0.15.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -104,24 +104,24 @@ serve = []
 science-analytics = []
 
 [dependencies]
-asupersync = { version = "=0.4.11", default-features = false, features = ["tracing-integration"] }
+asupersync = { version = "=0.5.0", default-features = false, features = ["tracing-integration"] }
 arc-swap = { version = "=1.9.2" }
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 blake3 = { version = "1.5" }
 crossbeam-queue = { version = "0.3.14" }
 determinism = { package = "ee-determinism", version = "0.1.0", path = "crates/determinism" }
-franken-agent-detection = { version = "0.2.2", path = "../franken_agent_detection", default-features = false }
+franken-agent-detection = { version = "=0.2.3", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = { version = "4.6.1" }
-fnx-algorithms = { version = "0.2.0", path = "../franken_networkx/crates/fnx-algorithms" }
-fnx-classes = { version = "0.2.0", path = "../franken_networkx/crates/fnx-classes" }
-fnx-runtime = { version = "0.2.0", path = "../franken_networkx/crates/fnx-runtime", default-features = false, features = ["asupersync-integration"] }
-frankensearch = { version = "0.5.0", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "storage", "model2vec", "download", "rerank", "native"] }
+fnx-algorithms = { version = "0.3.0", path = "../franken_networkx/crates/fnx-algorithms" }
+fnx-classes = { version = "0.3.0", path = "../franken_networkx/crates/fnx-classes" }
+fnx-runtime = { version = "0.3.0", path = "../franken_networkx/crates/fnx-runtime", default-features = false, features = ["asupersync-integration"] }
+frankensearch = { version = "0.6.0", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "storage", "model2vec", "download", "rerank", "native"] }
 # EE's schema uses json_valid() in unconditional CHECK constraints. SQLModel
 # intentionally disables FrankenSQLite's default extension set, so unify the
 # JSON feature explicitly instead of depending on a transitive default.
-fsqlite = { version = "0.3.16", path = "../frankensqlite/crates/fsqlite", default-features = false, features = ["json"] }
+fsqlite = { version = "0.4.0", path = "../frankensqlite/crates/fsqlite", default-features = false, features = ["json"] }
 # MSRV-compatible, safe advisory file locking for doctor fix/undo coordination.
 # Keep async features disabled: Tokio/async-std/smol are forbidden here.
 fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
@@ -140,14 +140,14 @@ serde_json = { version = "1.0.149", features = ["arbitrary_precision", "preserve
 serde_yaml = { version = "0.9.34" }
 sha2 = { version = "0.11.0" }
 signal-hook = { version = "0.4" }
-sqlmodel-core = { version = "0.4.2", path = "../sqlmodel_rust/crates/sqlmodel-core" }
-sqlmodel-frankensqlite = { version = "0.4.2", path = "../sqlmodel_rust/crates/sqlmodel-frankensqlite" }
+sqlmodel-core = { version = "0.5.0", path = "../sqlmodel_rust/crates/sqlmodel-core" }
+sqlmodel-frankensqlite = { version = "0.5.0", path = "../sqlmodel_rust/crates/sqlmodel-frankensqlite" }
 tempfile = { version = "3.27.0" }
 # Real BPE tokenization for context pack budget enforcement
 # (eidetic_engine_cli-aitk). Default features only; the `async-openai`
 # feature would pull tokio/reqwest/hyper which are forbidden here.
 tiktoken-rs = { version = "0.12.0", default-features = false }
-toon = { package = "tru", version = "0.2.4", path = "../toon_rust", default-features = false }
+toon = { package = "tru", version = "=0.2.4", default-features = false }
 toml_edit = { version = "0.25.15", default-features = false, features = ["parse", "display"] }
 tracing = { version = "0.1.44" }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
@@ -178,7 +178,7 @@ windows-permissions = { version = "0.2.4" }
 # rely on those constructors, so we opt in here: as a dev-dependency the feature
 # is unified into test/bench/`--all-targets` builds only and stays OUT of the
 # release binary (which uses the detached, capability-less production Cx path).
-asupersync = { version = "=0.4.11", default-features = false, features = ["tracing-integration", "test-internals"] }
+asupersync = { version = "=0.5.0", default-features = false, features = ["tracing-integration", "test-internals"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 insta = { version = "1.48.0", features = ["json"] }
 proptest = { version = "1.9.0", default-features = false, features = ["std"] }

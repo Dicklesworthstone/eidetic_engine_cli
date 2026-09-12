@@ -3807,7 +3807,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_patch",
-            version: "0.4.11",
+            version: "0.5.0",
             path: "/dp/asupersync",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -3833,7 +3833,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
             "runtime.async_boundary",
         ],
         diagnostic_command: "ee status --json",
-        release_pin_decision: "Version 0.4.11 uses the exact source revision in franken-stack.lock; the published registry version lacks the required blocking-pool API.",
+        release_pin_decision: "Version 0.5.0 publishes the capability-checked blocking-pool API used by native reranking; Cargo.lock fixes the selected dependency graph.",
     },
     DependencyContractEntry {
         name: "frankensqlite",
@@ -3843,7 +3843,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_patch",
-            version: "0.3.18",
+            version: "0.4.0",
             path: "/data/projects/frankensqlite",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -3871,7 +3871,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_dependency",
-            version: "0.4.3",
+            version: "0.5.0",
             path: "/data/projects/sqlmodel_rust",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -3899,7 +3899,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_dependency",
-            version: "0.5.0",
+            version: "0.6.0",
             path: "/data/projects/frankensearch",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -3936,7 +3936,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "path_dependency",
-            version: "0.2.1",
+            version: "0.3.0",
             path: "/data/projects/franken_networkx",
         },
         default_feature_profile: DependencyFeatureProfile {

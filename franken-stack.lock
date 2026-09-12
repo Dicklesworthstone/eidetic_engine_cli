@@ -1,20 +1,15 @@
 # ee.franken-stack.lock.v1
 #
 # Full commit IDs are mandatory. This set pins the sibling revisions that
-# ee's Cargo.lock closes over. Refreshed 2026-09-09 after the locked dependency
-# update: Asupersync 0.4.11, FrankenSQLite 0.3.18, Frankensearch 0.5.0,
-# FrankenNetworkX 0.2.1, agent detection 0.2.3, SQLModel 0.4.3, and Tru 0.2.4.
-# Asupersync includes the maintained rustls-pki-types PEM parser migration and
-# guards its Unix-only UDP readiness import so the Windows build stays valid.
-# Its local patch must remain selected instead of falling back to crates.io.
-# FrankenSQLite includes the non-Unix identity accessor fix and bounded inline
-# Windows I/O, backported onto 0.3.18 without unrelated later storage changes.
-# Frankensearch embeds the 0.2.7 streamed/shared Model2Vec loader. Its producer
-# identity changed; existing strict semantic indexes may require rebuilding.
-asupersync	ba3342249f2c8bd292494feacf786a4397873c18
+# ee's Cargo.lock closes over. The 0.15.1 publication candidate uses the
+# published Asupersync 0.5.0 source and coordinated downstream minor versions:
+# FrankenSQLite 0.4.0, Frankensearch 0.6.0, FrankenNetworkX 0.3.0 and
+# SQLModel 0.5.0. This records source provenance while their registry packages
+# are qualified; publication status is tracked in UPGRADE_LOG.md.
+asupersync	78b64636e99fea4ea2d868096576021dd3b8e519
 franken_agent_detection	1b0a14e19550581300e813a8a424083171fd18d2
-franken_networkx	6809c573a99e79497a43aa5a7c77fb2b0f9e2fc8
-frankensearch	4ea318c01c98d1e55fbd62bab8c660b434c176d7
-frankensqlite	3a59109d8327c4a1e92e07c286eb2bd4185b0f5a
-sqlmodel_rust	80feaa267c0e52966da7c9197f57866e36b2a886
+franken_networkx	bc6821a67e8c82dc7efe32cf07d2332c20fc8c8b
+frankensearch	f20e944670d1de1d9e2cfa515410c6bb9b8ce3b9
+frankensqlite	a855a15399a1994943c81e15f284bed780b4f86b
+sqlmodel_rust	d15853bafb4bd80f4faf060522989bc519fc417b
 toon_rust	ab5c29b372ba6d39baf0f3071d7247ca3c72bc9c
