@@ -1169,7 +1169,8 @@ impl RecallDegradedEntry {
 
 /// The normalized query echoed back under `data.recall.query` (ADR 0064
 /// appendix). Selector and filter fields only — offsets are cursor-internal.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecallQueryEcho {
     pub paths: Vec<String>,
     pub symbols: Vec<String>,
@@ -1179,6 +1180,133 @@ pub struct RecallQueryEcho {
     pub levels: Vec<String>,
     pub stale_only: bool,
     pub budget_tokens: Option<u32>,
+}
+
+/// Shared CLI/daemon orchestration, including cursor and degradation semantics.
+pub fn recall_for_workspace(
+    workspace_path: &std::path::Path,
+    database_path: Option<&std::path::Path>,
+    request: &RecallQueryEcho,
+    cursor: Option<&str>,
+) -> Result<(RecallReport, Vec<RecallDegradedEntry>), crate::models::DomainError> {
+    use crate::models::DomainError;
+    if request.paths.is_empty()
+        && request.symbols.is_empty()
+        && request.diff_ref.is_none()
+        && !request.diff_staged
+    {
+        return Err(DomainError::Usage {
+            message: "ee recall requires at least one selector: --path, --symbol, --diff, or --diff-staged".to_owned(),
+            repair: Some("ee recall --path 'src/**' --workspace . --json".to_owned()),
+        });
+    }
+    if request.budget_tokens == Some(0) {
+        return Err(DomainError::Usage {
+            message: "ee recall --budget-tokens must be greater than zero".to_owned(),
+            repair: Some("Re-run with --budget-tokens 400 or omit the flag.".to_owned()),
+        });
+    }
+    if request.diff_ref.is_some() && request.diff_staged {
+        return Err(DomainError::Usage {
+            message: "--diff and --diff-staged cannot be combined".to_owned(),
+            repair: Some("Select one git diff mode.".to_owned()),
+        });
+    }
+    let default_database = workspace_path.join(".ee").join("ee.db");
+    let database_path = database_path.unwrap_or(&default_database);
+    if !database_path.exists() {
+        return Err(crate::core::storeless_workspace_error(database_path));
+    }
+    let storage_error = |message| DomainError::Storage {
+        message,
+        repair: Some("ee doctor --json".to_owned()),
+    };
+    let connection = crate::db::DbConnection::open_file(database_path).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee status --json".to_owned()),
+        }
+    })?;
+    connection.migrate().map_err(|error| DomainError::Storage {
+        message: format!("Failed to migrate database: {error}"),
+        repair: Some("ee migrate run --workspace . --json".to_owned()),
+    })?;
+    let canonical = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &crate::core::workspace::stable_workspace_id(&canonical),
+        &[workspace_path, canonical.as_path()],
+    )?;
+    let mut extra_degraded = Vec::new();
+    let diff_paths = if request.diff_ref.is_some() || request.diff_staged {
+        match collect_diff_paths_via_git(workspace_path, request.diff_ref.as_deref(), request.diff_staged) {
+            Ok(paths) => paths,
+            Err(reason) => {
+                extra_degraded.push(RecallDegradedEntry::git_unavailable(&reason));
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let mut query = RecallQuery {
+        paths: request.paths.clone(),
+        symbols: request.symbols.clone(),
+        diff_paths,
+        kinds: request.kinds.clone(),
+        levels: request.levels.clone(),
+        stale_only: request.stale_only,
+        max_tokens: request.budget_tokens,
+        offset: 0,
+        stale_anchor_penalty: crate::search::scoring::DEFAULT_STALE_ANCHOR_PENALTY,
+    };
+    let db_generation = connection
+        .get_workspace_generation(&workspace_id)
+        .map_err(|error| storage_error(format!("Failed to read workspace generation: {error}")))?
+        .map_or(0, |value| i64::try_from(value).unwrap_or(i64::MAX));
+    let mut resume_cursor = None;
+    let rejected = match resolve_recall_cursor(cursor, &query, db_generation) {
+        RecallCursorResolution::Fresh => false,
+        RecallCursorResolution::Resume { offset, dropped_count } => {
+            query.offset = offset;
+            resume_cursor = Some((offset, dropped_count));
+            false
+        }
+        RecallCursorResolution::RejectedInvalid => {
+            extra_degraded.push(RecallDegradedEntry::cursor_invalid());
+            true
+        }
+        RecallCursorResolution::RejectedStale { cursor_generation, current_generation } => {
+            extra_degraded.push(RecallDegradedEntry::cursor_stale(cursor_generation, current_generation));
+            true
+        }
+    };
+    let mut report = if rejected {
+        let index_generation = connection
+            .memory_anchor_index_generation(&workspace_id)
+            .map_err(|error| storage_error(format!("Failed to read anchor index generation: {error}")))?;
+        empty_recall_report_for_rejected_cursor(index_generation, db_generation)
+    } else {
+        run_recall(&connection, &workspace_id, &query)
+            .map_err(|error| storage_error(format!("Failed to run recall: {error}")))?
+    };
+    if let Some((offset, dropped_count)) = resume_cursor
+        && !recall_cursor_page_is_honest(offset, dropped_count, report.total_matched)
+    {
+        extra_degraded.push(RecallDegradedEntry::cursor_invalid());
+        report = empty_recall_report_for_rejected_cursor(report.index_generation, report.db_generation);
+    }
+    let mut degraded: Vec<_> = report.degraded.iter().map(RecallDegradedEntry::from_engine).collect();
+    degraded.append(&mut extra_degraded);
+    if report.truncated && let Some(budget) = request.budget_tokens {
+        degraded.push(match report.continuation_cursor.as_deref() {
+            Some(cursor) => RecallDegradedEntry::budget_truncated(report.dropped_count, cursor, budget),
+            None => RecallDegradedEntry::budget_unsatisfiable(report.dropped_count, budget),
+        });
+    }
+    Ok((report, degraded))
 }
 
 /// Four-decimal score rounding for stable JSON output, mirroring the
