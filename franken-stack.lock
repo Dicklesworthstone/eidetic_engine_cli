@@ -1,15 +1,16 @@
 # ee.franken-stack.lock.v1
 #
-# Full commit IDs are mandatory. This set pins the sibling revisions that
-# ee's Cargo.lock closes over. The 0.15.1 publication candidate uses the
+# Full commit IDs are mandatory. These are source revisions for the registry
+# packages selected by Cargo.lock; sibling checkouts are not required. The
+# 0.15.1 publication candidate uses the
 # published Asupersync 0.5.0 source and coordinated downstream minor versions:
 # FrankenSQLite 0.4.0, Frankensearch 0.6.0, FrankenNetworkX 0.3.0 and
 # SQLModel 0.5.0. This records source provenance while their registry packages
 # are qualified; publication status is tracked in UPGRADE_LOG.md.
 asupersync	78b64636e99fea4ea2d868096576021dd3b8e519
-franken_agent_detection	1b0a14e19550581300e813a8a424083171fd18d2
-franken_networkx	bc6821a67e8c82dc7efe32cf07d2332c20fc8c8b
-frankensearch	f20e944670d1de1d9e2cfa515410c6bb9b8ce3b9
+franken_agent_detection	0feebc55fed8db4d596f330742fe11ca4cb70764
+franken_networkx	0159a5d90a45092792e9b04fbfd87f8b57fb79ee
+frankensearch	dd093fb230404ab08be2ed6f27776ed6c4796485
 frankensqlite	a855a15399a1994943c81e15f284bed780b4f86b
-sqlmodel_rust	d15853bafb4bd80f4faf060522989bc519fc417b
-toon_rust	ab5c29b372ba6d39baf0f3071d7247ca3c72bc9c
+sqlmodel_rust	12d490b22ce3a82533591b5b39d2318b21da1f0f
+toon_rust	d356b8d344a7d709417c2e381f8b595d237683b9

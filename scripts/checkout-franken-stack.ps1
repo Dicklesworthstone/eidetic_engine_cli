@@ -154,6 +154,15 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 }
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
+$manifestFile = Join-Path $repositoryRoot "Cargo.toml"
+if (-not (Test-Path -LiteralPath $manifestFile -PathType Leaf)) {
+    throw "missing manifest: $manifestFile"
+}
+if (-not (Select-String -LiteralPath $manifestFile -Pattern 'path\s*=\s*["'']\.\./' -Quiet)) {
+    Write-Host "franken-stack: Cargo.toml uses registry dependencies; no sibling checkout needed"
+    return
+}
+
 $lockFile = Join-Path $repositoryRoot "franken-stack.lock"
 if (-not (Test-Path -LiteralPath $lockFile -PathType Leaf)) {
     throw "missing lock file: $lockFile"

@@ -1,96 +1,31 @@
 # Publish Checklist
 
-Pre-release checklist for publishing the `eidetic-engine` package to crates.io.
+Publish package `eidetic-engine`; its installed binary is `ee`. Current progress
+and actual test results are recorded in
+[UPGRADE_LOG.md](UPGRADE_LOG.md#cratesio-publication-follow-through).
 
-## Prerequisites
+1. Resolve every required dependency from crates.io, including optional package
+   metadata. Remove sibling paths and root Cargo patches. Keep registry versions
+   and checksums in `Cargo.lock`; never substitute unpublished source for a
+   different published version with the same name.
+2. Run formatting, forbidden-dependency inspection, all-target check and Clippy,
+   relevant tests, and real memory/search/pack workflows. Use DSR or the repository
+   RCH tooling for compilation, with one pinned nightly toolchain. Retain and
+   disclose failures, ignored cases and advisory findings.
+3. Commit on `main` and inspect `cargo package --list`. Package from that exact
+   source and run `cargo publish --dry-run --no-verify`. This validates packaging
+   only: separately compile the packaged registry-only graph on a DSR worker.
+4. Create and push the release tag without triggering GitHub Actions. Use DSR
+   to run the authorized `cargo publish --no-verify` after remote qualification.
+   Keep credentials outside source trees, archives, logs and remote workers.
+5. Download the public crate. Verify its checksum, source commit, included source
+   files and manifest. Run a fresh `cargo +nightly install eidetic-engine --locked`
+   through DSR, then exercise init, remember, search, pack and why against a new
+   workspace using that installed binary.
+6. Build the six supported binaries through DSR, run their platform workflows,
+   publish the GitHub release without Actions/dispatch, and verify every public
+   asset before updating the four Homebrew archive URLs and hashes.
 
-Before publishing, ensure:
-
-1. **Wave 4 gates cleared**
-   - [ ] All process-fix beads closed
-   - [ ] First wave of `implements-surface:*` beads closed
-   - [ ] Vision coverage gap at 0%
-
-2. **Dependencies publishable**
-   - [ ] `frankensearch` published to crates.io (or feature-gated)
-   - [ ] `sqlmodel-*` crates published to crates.io (or feature-gated)
-   - [ ] `fnx-*` crates published to crates.io (or feature-gated behind `graph`)
-   - [ ] `franken-agent-detection` published to crates.io (or feature-gated)
-   - [ ] `toon` (`tru`) published to crates.io
-   - [ ] `scripts/audit_install_pipeline.sh` reports `dependency_resolution.dep_resolution_ready = true`
-
-   The audit's `dependency_resolution.required_crates[]` is the current
-   machine-readable checklist for this gate. It includes direct path
-   dependencies from `Cargo.toml` plus the transitive franken-stack crates that
-   must be available for the selected default/feature profile.
-
-3. **Crate name ownership resolved**
-   - [ ] `cargo owner --list eidetic-engine` works with a logged-in crates.io token
-   - [x] Replacement package name chosen: `eidetic-engine`
-   - [ ] `scripts/audit_install_pipeline.sh` reports `crates_io.crate_name` as `eidetic-engine` and `crates_io.repository` as `https://github.com/Dicklesworthstone/eidetic_engine_cli`
-
-   As of the 2026-05-13 audit, crates.io has `ee` at `0.0.0` owned by `ewpratten`
-   and pointing at `https://github.com/ewpratten/ee`; the project cannot publish
-   the package as `ee`. The selected publish package is now `eidetic-engine`;
-   `[[bin]] name = "ee"` keeps the installed command name unchanged.
-
-4. **Metadata complete**
-   - [x] `description` set
-   - [x] `license` set (MIT)
-   - [x] `repository` set
-   - [x] `homepage` set
-   - [x] `documentation` set
-   - [x] `readme` set
-   - [x] `keywords` set
-   - [x] `categories` set
-   - [x] `exclude` set (no test fixtures, profiling data)
-
-5. **Signed release provenance ready**
-   - [ ] `.github/workflows/release.yml` emits `ee-<target>.provenance.json`
-   - [ ] Provenance uses SLSA v1 predicate data with source commit, runner, cargo command, target, artifact SHA256, and Cargo.lock BLAKE3
-   - [ ] Provenance JSON is signed with Sigstore and uploaded as `ee-<target>.provenance.json.sigstore.json`
-   - [ ] Release publication verifies binary bundles and provenance bundles before `gh release upload`
-   - [ ] `install.sh --require-provenance` verifies provenance JSON, artifact digest, and provenance Sigstore bundle
-
-## Manual Steps
-
-1. **Remove publish block**
-   ```toml
-   # Change from:
-   publish = false
-   # To:
-   publish = true
-   ```
-
-2. **Verify dry-run**
-   ```bash
-   cargo publish --dry-run --allow-dirty
-   ```
-
-3. **Run full verification**
-   ```bash
-   ./scripts/verify.sh
-   ```
-
-4. **Publish**
-   ```bash
-   cargo publish
-   ```
-
-## Automated Gates
-
-The following are enforced by CI:
-
-- `./scripts/check-forbidden-deps.sh` - No tokio, rusqlite, petgraph, etc.
-- `./scripts/closure-lint.sh` - No abstention-as-implementation closures
-- `./scripts/vision-coverage.sh` - Blocks release if gap > 0
-- `scripts/e2e_release_provenance.sh --static` - SLSA provenance workflow and installer contract
-- `cargo fmt --check`
-- `cargo clippy --all-targets -- -D warnings`
-- `cargo test --workspace --all-targets`
-
-## Post-Publish
-
-1. Verify on crates.io: https://crates.io/crates/eidetic-engine
-2. Test install: `cargo install eidetic-engine`
-3. Run `ee --version` and `ee doctor`
+The current manual releases carry SHA-256 checksums and a build manifest. They
+do not carry Sigstore bundles or SLSA attestations; `--require-provenance` remains
+unsatisfied. Do not describe unsigned metadata as signed provenance.

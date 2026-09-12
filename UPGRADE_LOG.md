@@ -198,21 +198,68 @@ the following checks may be inferred from the existing binary release.
   bundles, readable only by its owner.
 - [x] Package the unchanged `ee-determinism 0.1.0` source from `v0.15.0` and
   pass a packaging-only `cargo publish --dry-run --no-verify`.
-- [ ] Run the standalone macro tests remotely through DSR and publish it.
-  The registry accepted authentication but returned its new-crate rate limit;
-  the latest retry deadline is 2026-09-12 13:23:06 UTC.
-- [ ] Align the required storage, ORM, search and graph package versions with
+- [x] Run all 16 standalone macro tests remotely through DSR and publish
+  `ee-determinism 0.1.0` at 2026-09-12 13:33:08 UTC. Earlier uploads received
+  the registry's new-crate rate limit; the retry after its final deadline
+  succeeded. The public archive's SHA-256 is
+  `fa54cf3a70a400e92d1fff502b845ae883145bca4dae8753d4c6ff8c68a6f78b`;
+  its source and original manifest match the tagged files byte-for-byte.
+- [x] Align the required storage, ORM, search and graph package versions with
   published Asupersync 0.5.0. Its public capability-checked blocking-pool API
   is required by EE; registry 0.4.11 lacks it.
 - [ ] Qualify the combined source changes with compiler checks and relevant
   real memory, search, pack, runtime and native model tests.
 - [ ] Publish dependency packages in order and verify their downloaded bytes.
+  - [x] Publish `fnx-runtime 0.3.0`; all 130 normal runtime tests passed
+    (five existing measurement cases ignored). Public source and manifest
+    match `fnx-runtime-v0.3.0`; archive SHA-256
+    `ee559f4c159dd8bb2017f3d41318e38cb9432f893ccfaafc0c89ed486061e034`.
+  - [x] Publish all 22 required FrankenSQLite library packages at `0.4.0`.
+    Each public archive matches its registry checksum and its original
+    manifest/source files match `fsqlite-v0.4.0` at `a855a1539`.
+    All 47 error-crate tests and 23 selected real storage regressions passed.
+    The latter cover drop recovery, freelist repair, read-only preservation
+    and foreign SQLite readers; they do not qualify optional WAL-FEC.
+  - [x] Publish graph classes/algorithms at `0.3.0`; 109 class tests and 970
+    algorithm tests passed, with 192 existing ignored cases. Both public
+    archives match their registry checksums and tagged source files.
+  - [x] Preserve SQLModel's documented lockstep contract: publish all 12
+    library packages at `0.5.0`, including EE's two direct dependencies.
+    All 1,852 library tests and seven database E2E tests passed; one existing
+    retained-file test remains ignored. Concurrent FrankenSQLite writers
+    preserved all 50 increments. Cancellation tests used C SQLite; external
+    PostgreSQL/MySQL/MariaDB services were not exercised. All 12 public
+    archives match the registry checksums and `sqlmodel-v0.5.0` source files.
+  - [x] Fix and recheck the unchanged Frankensearch shadow latency guard
+    against Asupersync 0.5. All 15 shadow tests passed, including a completed
+    persisted comparison using the caller's pool; default missing-pool callers
+    explicitly degrade. Core/storage all-target check and strict Clippy passed,
+    along with 34 FTS5 adapter tests (one existing scaling probe ignored).
+  - [x] Publish the seven base Frankensearch packages at `0.3.0` from
+    `frankensearch-v0.6.0` (`dd093fb23`), after individual packaging dry runs.
+  - [x] Qualify the three existing native asynchronous reranker cases with
+    the actual registered model: 3 passed, 0 failed, 0 ignored in 1.24 seconds
+    using the optimized profile. Original assertions and budgets are unchanged.
+    Publish rerank `0.4.0`, fusion `0.3.0` and the facade `0.6.0` from the same
+    tagged source. The ten search package uploads are complete.
 - [ ] Package EE 0.15.1 and compile its registry-only dependency graph remotely,
   with no sibling paths or Cargo patches and no duplicate Asupersync runtime.
 - [ ] Publish `eidetic-engine`, verify a fresh registry installation and run
   its memory/search/pack loop.
 - [ ] Publish and verify matching 0.15.1 DSR binaries and Homebrew metadata;
   preserve the existing v0.15.0 tag and assets.
+
+The EE lockfile now has 573 packages: EE itself and 572 checksum-pinned
+crates.io packages, with no path/git dependencies or Cargo patches. The final
+path-to-registry conversion changed only source/checksum metadata; package
+versions and dependency edges match the preceding combined candidate. There
+is exactly one Asupersync version, `0.5.0`.
+
+The refreshed registry lock still contains `lru 0.16.4` through published
+Tantivy 0.26.2. `cargo audit --json` exits zero and lists zero vulnerabilities,
+but reports RUSTSEC-2026-0253 under informational `unsound` warnings, alongside
+the existing unmaintained `paste` warning. The Tantivy version bump does not
+resolve issue #40; the strict advisory gate has not been declared passing.
 
 ## crossbeam-queue 0.3.14
 

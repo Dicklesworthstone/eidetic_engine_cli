@@ -908,7 +908,7 @@ function Invoke-FromSource {
         if ($LASTEXITCODE -ne 0) {
             Write-ErrorExit "git clone failed."
         }
-        Write-Info "Checking out locked Franken-stack source dependencies ..."
+        Write-Info "Checking whether locked source dependencies are needed ..."
         $checkoutHelper = Join-Path $src "scripts\checkout-franken-stack.ps1"
         if (-not (Test-Path -LiteralPath $checkoutHelper -PathType Leaf)) {
             Write-ErrorExit "Source checkout is missing $checkoutHelper"
@@ -918,7 +918,7 @@ function Invoke-FromSource {
         Write-Info "Building ee (release profile)…"
         Push-Location $src
         try {
-            & cargo build --release
+            & cargo build --release --locked
             if ($LASTEXITCODE -ne 0) {
                 Write-ErrorExit "cargo build failed."
             }

@@ -17,13 +17,13 @@ exclude = [
     "fuzz",
     "tests/fixtures",
     ".ci",
+    "crates/determinism",
 ]
 
 [package]
 name = "eidetic-engine"
 version = "0.15.1"
 edition = "2024"
-rust-version = "1.85"
 license = "MIT"
 description = "Durable, local-first, explainable memory for coding agents."
 repository = "https://github.com/Dicklesworthstone/eidetic_engine_cli"
@@ -109,19 +109,19 @@ arc-swap = { version = "=1.9.2" }
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 blake3 = { version = "1.5" }
 crossbeam-queue = { version = "0.3.14" }
-determinism = { package = "ee-determinism", version = "0.1.0", path = "crates/determinism" }
+determinism = { package = "ee-determinism", version = "0.1.0" }
 franken-agent-detection = { version = "=0.2.3", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = { version = "4.6.1" }
-fnx-algorithms = { version = "0.3.0", path = "../franken_networkx/crates/fnx-algorithms" }
-fnx-classes = { version = "0.3.0", path = "../franken_networkx/crates/fnx-classes" }
-fnx-runtime = { version = "0.3.0", path = "../franken_networkx/crates/fnx-runtime", default-features = false, features = ["asupersync-integration"] }
-frankensearch = { version = "0.6.0", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "storage", "model2vec", "download", "rerank", "native"] }
+fnx-algorithms = { version = "0.3.0" }
+fnx-classes = { version = "0.3.0" }
+fnx-runtime = { version = "0.3.0", default-features = false, features = ["asupersync-integration"] }
+frankensearch = { version = "0.6.0", default-features = false, features = ["hash", "storage", "model2vec", "download", "rerank", "native"] }
 # EE's schema uses json_valid() in unconditional CHECK constraints. SQLModel
 # intentionally disables FrankenSQLite's default extension set, so unify the
 # JSON feature explicitly instead of depending on a transitive default.
-fsqlite = { version = "0.4.0", path = "../frankensqlite/crates/fsqlite", default-features = false, features = ["json"] }
+fsqlite = { version = "0.4.0", default-features = false, features = ["json"] }
 # MSRV-compatible, safe advisory file locking for doctor fix/undo coordination.
 # Keep async features disabled: Tokio/async-std/smol are forbidden here.
 fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
@@ -140,8 +140,8 @@ serde_json = { version = "1.0.149", features = ["arbitrary_precision", "preserve
 serde_yaml = { version = "0.9.34" }
 sha2 = { version = "0.11.0" }
 signal-hook = { version = "0.4" }
-sqlmodel-core = { version = "0.5.0", path = "../sqlmodel_rust/crates/sqlmodel-core" }
-sqlmodel-frankensqlite = { version = "0.5.0", path = "../sqlmodel_rust/crates/sqlmodel-frankensqlite" }
+sqlmodel-core = { version = "0.5.0" }
+sqlmodel-frankensqlite = { version = "0.5.0" }
 tempfile = { version = "3.27.0" }
 # Real BPE tokenization for context pack budget enforcement
 # (eidetic_engine_cli-aitk). Default features only; the `async-openai`
@@ -504,46 +504,6 @@ path = "tests/conformance/query_v1_matrix.rs"
 [[test]]
 name = "witness_retention_e2e"
 path = "tests/contracts/witness_retention_e2e.rs"
-
-[patch.crates-io]
-asupersync = { path = "../asupersync" }
-fsqlite = { path = "../frankensqlite/crates/fsqlite" }
-fsqlite-core = { path = "../frankensqlite/crates/fsqlite-core" }
-fsqlite-error = { path = "../frankensqlite/crates/fsqlite-error" }
-fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
-fsqlite-func = { path = "../frankensqlite/crates/fsqlite-func" }
-fsqlite-ext-fts3 = { path = "../frankensqlite/crates/fsqlite-ext-fts3" }
-fsqlite-ext-fts5 = { path = "../frankensqlite/crates/fsqlite-ext-fts5" }
-fsqlite-ext-json = { path = "../frankensqlite/crates/fsqlite-ext-json" }
-fsqlite-ext-rtree = { path = "../frankensqlite/crates/fsqlite-ext-rtree" }
-fsqlite-ext-session = { path = "../frankensqlite/crates/fsqlite-ext-session" }
-fsqlite-ext-icu = { path = "../frankensqlite/crates/fsqlite-ext-icu" }
-fsqlite-ext-misc = { path = "../frankensqlite/crates/fsqlite-ext-misc" }
-fsqlite-ast = { path = "../frankensqlite/crates/fsqlite-ast" }
-fsqlite-btree = { path = "../frankensqlite/crates/fsqlite-btree" }
-fsqlite-pager = { path = "../frankensqlite/crates/fsqlite-pager" }
-fsqlite-parser = { path = "../frankensqlite/crates/fsqlite-parser" }
-fsqlite-planner = { path = "../frankensqlite/crates/fsqlite-planner" }
-fsqlite-vdbe = { path = "../frankensqlite/crates/fsqlite-vdbe" }
-fsqlite-vfs = { path = "../frankensqlite/crates/fsqlite-vfs" }
-fsqlite-wal = { path = "../frankensqlite/crates/fsqlite-wal" }
-fsqlite-mvcc = { path = "../frankensqlite/crates/fsqlite-mvcc" }
-fsqlite-observability = { path = "../frankensqlite/crates/fsqlite-observability" }
-frankensearch = { path = "../frankensearch/frankensearch" }
-frankensearch-core = { path = "../frankensearch/crates/frankensearch-core" }
-frankensearch-embed = { path = "../frankensearch/crates/frankensearch-embed" }
-frankensearch-index = { path = "../frankensearch/crates/frankensearch-index" }
-frankensearch-lexical = { path = "../frankensearch/crates/frankensearch-lexical" }
-frankensearch-fusion = { path = "../frankensearch/crates/frankensearch-fusion" }
-frankensearch-rerank = { path = "../frankensearch/crates/frankensearch-rerank" }
-frankensearch-storage = { path = "../frankensearch/crates/frankensearch-storage" }
-frankensearch-durability = { path = "../frankensearch/crates/frankensearch-durability" }
-fnx-runtime = { path = "../franken_networkx/crates/fnx-runtime" }
-fnx-classes = { path = "../franken_networkx/crates/fnx-classes" }
-fnx-algorithms = { path = "../franken_networkx/crates/fnx-algorithms" }
-fnx-views = { path = "../franken_networkx/crates/fnx-views" }
-fnx-dispatch = { path = "../franken_networkx/crates/fnx-dispatch" }
-fnx-convert = { path = "../franken_networkx/crates/fnx-convert" }
 
 # Lint Policy (EE-002)
 # CI runs: cargo clippy --all-targets -- -D warnings

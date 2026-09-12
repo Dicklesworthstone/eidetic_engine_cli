@@ -31,6 +31,15 @@ REPOSITORY_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
 LOCK_FILE="$REPOSITORY_ROOT/franken-stack.lock"
 DESTINATION_ROOT=$1
 
+# Registry-only releases need no sibling checkouts. Keep this helper callable
+# by installers and build workflows without cloning unused repositories.
+MANIFEST_FILE="$REPOSITORY_ROOT/Cargo.toml"
+[ -r "$MANIFEST_FILE" ] || die "missing or unreadable manifest: $MANIFEST_FILE"
+if ! grep -qE "path[[:space:]]*=[[:space:]]*[\"']\.\./" "$MANIFEST_FILE"; then
+  echo "franken-stack: Cargo.toml uses registry dependencies; no sibling checkout needed"
+  exit 0
+fi
+
 [ -f "$LOCK_FILE" ] || die "missing lock file: $LOCK_FILE"
 [ -n "$DESTINATION_ROOT" ] || die "destination root must not be empty"
 mkdir -p "$DESTINATION_ROOT"

@@ -26,13 +26,14 @@ Release surface (as of 2026-09-12):
 
 - Latest **published** GitHub Release: [`v0.15.0`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.15.0) (2026-09-12), with six platform archives, checksums, a build manifest, and both installers. All 16 public asset downloads were verified.
 - `v0.14.3` is an annotated tag without a corresponding GitHub Release.
-- `Cargo.toml` carries `version = "0.15.0"`; release binaries were built from
-  `d09edf26a0adf8d39897de615610b7d67430bb81` through DSR without GitHub Actions.
+- `Cargo.toml` carries the `0.15.1` registry publication candidate. The existing
+  v0.15.0 binaries were built from `d09edf26a0adf8d39897de615610b7d67430bb81`
+  through DSR without GitHub Actions.
 - Distribution paths: verified GitHub release installers and
   `brew install Dicklesworthstone/tap/ee` (the formula is bumped by hand and
-  serves v0.15.0 as of 2026-09-12). crates.io publication remains blocked by
-  six unpublished dependency versions and an unavailable published runtime API;
-  see [the dependency update record](UPGRADE_LOG.md#publication-prerequisites-checked).
+  serves v0.15.0 as of 2026-09-12). Publication of the missing dependency chain
+  and the first registry-only EE package is in progress; see
+  [the dependency update record](UPGRADE_LOG.md#cratesio-publication-follow-through).
 - This release has SHA-256 checksums and a build manifest, without Sigstore
   signatures or SLSA attestations. Its assets do not satisfy `--require-provenance`.
 
@@ -68,6 +69,20 @@ GitHub Release page for asset lists and the original generated notes until a
 future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
+
+- Prepare the first crates.io `eidetic-engine` package at version 0.15.1.
+  All normal dependencies resolve from the registry; sibling repository paths
+  and root Cargo patches are removed. Source installers use `--locked`, and
+  their dependency checkout helpers skip cloning for registry-only manifests.
+- Align the dependency graph with published Asupersync 0.5.0, FrankenSQLite
+  0.4.0, SQLModel 0.5.0, Frankensearch 0.6.0 and FrankenNetworkX 0.3.0.
+  Doctor reports the linked registry versions and their crates.io sources.
+- Frankensearch's optional shadow comparisons use the caller's blocking pool.
+  Without one they report degradation; synchronous shadow work no longer delays
+  serving by default. Explicit inline execution remains available to callers
+  that accept that cost, including deterministic test runtimes.
+- The transitive `lru 0.16.4` RustSec warning remains open (#40). Registry
+  publication does not claim to resolve the existing broader test failures.
 
 ## [0.15.0] - 2026-09-12
 

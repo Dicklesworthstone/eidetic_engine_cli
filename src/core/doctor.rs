@@ -3806,9 +3806,9 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         status: "accepted_default",
         enabled_by_default: true,
         source: DependencySource {
-            kind: "path_patch",
+            kind: "registry",
             version: "0.5.0",
-            path: "/dp/asupersync",
+            path: "https://crates.io/crates/asupersync",
         },
         default_feature_profile: DependencyFeatureProfile {
             default_features: false,
@@ -3842,9 +3842,9 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         status: "accepted_default",
         enabled_by_default: true,
         source: DependencySource {
-            kind: "path_patch",
+            kind: "registry",
             version: "0.4.0",
-            path: "/data/projects/frankensqlite",
+            path: "https://crates.io/crates/fsqlite",
         },
         default_feature_profile: DependencyFeatureProfile {
             default_features: false,
@@ -3861,7 +3861,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         degradation_code: "storage_unavailable",
         status_fields: &["capabilities.storage", "degraded[].code"],
         diagnostic_command: "ee doctor --json",
-        release_pin_decision: "Local path patches are accepted only for development; release must record a registry pin or ADR-backed local source policy.",
+        release_pin_decision: "Published registry packages are resolved and checksummed in Cargo.lock.",
     },
     DependencyContractEntry {
         name: "sqlmodel_rust",
@@ -3870,9 +3870,9 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         status: "accepted_default",
         enabled_by_default: true,
         source: DependencySource {
-            kind: "path_dependency",
+            kind: "registry",
             version: "0.5.0",
-            path: "/data/projects/sqlmodel_rust",
+            path: "https://crates.io/crates/sqlmodel-frankensqlite",
         },
         default_feature_profile: DependencyFeatureProfile {
             default_features: true,
@@ -3889,7 +3889,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         degradation_code: "storage_unavailable",
         status_fields: &["capabilities.storage", "database.schema_version"],
         diagnostic_command: "ee status --json",
-        release_pin_decision: "Local path dependencies are accepted only for development; release must record a registry pin or ADR-backed local source policy.",
+        release_pin_decision: "Published registry packages are resolved and checksummed in Cargo.lock.",
     },
     DependencyContractEntry {
         name: "frankensearch",
@@ -3898,9 +3898,9 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         status: "accepted_default",
         enabled_by_default: true,
         source: DependencySource {
-            kind: "path_dependency",
+            kind: "registry",
             version: "0.6.0",
-            path: "/data/projects/frankensearch",
+            path: "https://crates.io/crates/frankensearch",
         },
         default_feature_profile: DependencyFeatureProfile {
             default_features: false,
@@ -3926,7 +3926,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         degradation_code: "search_unavailable",
         status_fields: &["capabilities.search", "index.generation", "degraded[].code"],
         diagnostic_command: "ee index status --json",
-        release_pin_decision: "Local path dependencies are accepted only for development; release must record a registry pin or ADR-backed local source policy.",
+        release_pin_decision: "Published registry packages are resolved and checksummed in Cargo.lock.",
     },
     DependencyContractEntry {
         name: "franken_networkx",
@@ -3935,9 +3935,9 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         status: "accepted_default",
         enabled_by_default: true,
         source: DependencySource {
-            kind: "path_dependency",
+            kind: "registry",
             version: "0.3.0",
-            path: "/data/projects/franken_networkx",
+            path: "https://crates.io/crates/fnx-algorithms",
         },
         default_feature_profile: DependencyFeatureProfile {
             default_features: false,
@@ -3962,7 +3962,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         degradation_code: "graph_unavailable",
         status_fields: &["capabilities.graph", "graph.snapshot_generation"],
         diagnostic_command: "ee diag graph --json",
-        release_pin_decision: "Local path dependencies are accepted only for development; release must record a registry pin or ADR-backed local source policy.",
+        release_pin_decision: "Published registry packages are resolved and checksummed in Cargo.lock.",
     },
     DependencyContractEntry {
         name: "coding_agent_session_search",
@@ -3999,9 +3999,9 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         status: "accepted_default",
         enabled_by_default: true,
         source: DependencySource {
-            kind: "path_dependency",
+            kind: "registry",
             version: "0.2.4",
-            path: "/data/projects/toon_rust",
+            path: "https://crates.io/crates/tru",
         },
         default_feature_profile: DependencyFeatureProfile {
             default_features: false,
@@ -4014,7 +4014,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         degradation_code: "toon_unavailable",
         status_fields: &["capabilities.output.toon"],
         diagnostic_command: "ee status --json",
-        release_pin_decision: "Local path dependency is accepted only for development; release must record a registry pin or ADR-backed local source policy.",
+        release_pin_decision: "Published registry packages are resolved and checksummed in Cargo.lock.",
     },
     DependencyContractEntry {
         name: "franken_mermaid",
@@ -4055,9 +4055,9 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         status: "accepted_default",
         enabled_by_default: true,
         source: DependencySource {
-            kind: "path_dependency",
+            kind: "registry",
             version: "0.2.3",
-            path: "/data/projects/franken_agent_detection",
+            path: "https://crates.io/crates/franken-agent-detection",
         },
         default_feature_profile: DependencyFeatureProfile {
             default_features: false,
@@ -4074,7 +4074,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         degradation_code: "agent_detection_unavailable",
         status_fields: &["capabilities.agent_detection"],
         diagnostic_command: "ee agent sources --json",
-        release_pin_decision: "Local path dependency is accepted only for development; release must record a registry pin or ADR-backed local source policy.",
+        release_pin_decision: "Published registry packages are resolved and checksummed in Cargo.lock.",
     },
     DependencyContractEntry {
         name: "fastmcp-rust",

@@ -1931,10 +1931,10 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
     exit 1
   fi
 
-  info "Checking out locked Franken-stack source dependencies"
+  info "Checking whether locked source dependencies are needed"
   "$TMP/src/scripts/checkout-franken-stack.sh" "$TMP"
 
-  (cd "$TMP/src" && run_with_spinner "Building $BINARY (release profile)" cargo build --release)
+  (cd "$TMP/src" && run_with_spinner "Building $BINARY (release profile)" cargo build --release --locked)
 
   # CARGO_TARGET_DIR may have redirected the build output (e.g., this project
   # documents a USB-NVMe redirect on the canonical Mac dev host). Probe the

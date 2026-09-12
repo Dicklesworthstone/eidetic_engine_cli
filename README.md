@@ -338,7 +338,7 @@ Hard constraints. CI fails if any of them break.
 |---|---|---|
 | GitHub release installer | v0.15.0 available for six targets; public assets verified | [v0.15.0 release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.15.0) |
 | Homebrew tap | v0.15.0 available for Apple Silicon, Intel Mac, Linux ARM64 and Linux x86-64 | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
-| crates.io | blocked as of 2026-09-12 by six unpublished dependency versions and an unavailable published Asupersync API | [dependency publication findings](UPGRADE_LOG.md#publication-prerequisites-checked) |
+| crates.io | v0.15.1 publication in progress; requires nightly Rust | [publication progress](UPGRADE_LOG.md#cratesio-publication-follow-through) |
 | Source build | available now | this README |
 
 For v0.15.0, rebuild each workspace's semantic index with
@@ -441,32 +441,33 @@ brew install Dicklesworthstone/tap/ee
 
 ### Cargo
 
-The `eidetic-engine` package is not on crates.io yet; the franken-stack
-dependencies it needs are still path/git pinned (see
-`PUBLISH_CHECKLIST.md`). Until that lands, use the release installer,
-Homebrew, or the source build below. `cargo install eidetic-engine` will
-fail with "could not find".
+Install the `ee` binary using nightly Rust and the published lockfile:
+
+```bash
+cargo +nightly install eidetic-engine --version 0.15.1 --locked
+```
+
+Version 0.15.1 is the first registry-only release. Its publication status is
+recorded in the installation table above and in `UPGRADE_LOG.md`.
 
 ### From source
 
-Requires a nightly Rust toolchain.
+Requires a nightly Rust toolchain. Dependencies resolve from crates.io using
+the committed `Cargo.lock`; sibling repositories are no longer required.
 
 ```bash
 mkdir ee-source
 cd ee-source
 git clone https://github.com/Dicklesworthstone/eidetic_engine_cli
 cd eidetic_engine_cli
-./scripts/checkout-franken-stack.sh ..
-cargo build --release
-./target/release/ee --version
+cargo build --release --locked
+cargo run --release --locked -- --version
 ```
 
-`ee` uses sibling path dependencies during early development. The checkout
-helper reads [`franken-stack.lock`](franken-stack.lock), fetches the exact
-compatible revisions next to the `eidetic_engine_cli` checkout, verifies every
-result, and refuses to modify an unrelated or dirty existing repository.
-`install.sh --from-source` and `install.ps1 -FromSource` run the same locked
-setup automatically.
+`install.sh --from-source` and `install.ps1 -FromSource` use the same locked
+Cargo build. Their dependency checkout helpers return immediately for this
+registry-only manifest. [`franken-stack.lock`](franken-stack.lock) retains the
+source revisions used to qualify the upstream package releases.
 
 ### Verify
 
@@ -2909,7 +2910,7 @@ Boundaries to know:
 | Retention model | Forgetting and decay are product features. Export JSONL into git when you need sealed long-term records. |
 | Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
-| Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) is refreshed by hand after asset verification. crates.io publication is blocked by unavailable pinned dependency versions and APIs. Releases are currently cut outside GitHub Actions and ship checksums and a manifest without Sigstore bundles or SLSA provenance; `--require-provenance` therefore fails by design. See the release notes for each version's validation and remaining limits. |
+| Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) is refreshed by hand after asset verification. Starting with 0.15.1, Cargo builds resolve the complete dependency graph from crates.io using `Cargo.lock`. Releases are cut outside GitHub Actions and ship checksums and a manifest without Sigstore bundles or SLSA provenance; `--require-provenance` therefore fails by design. See the installation table for current publication status and the release notes for validation and remaining limits. |
 | Reserved adapters | `science-analytics` reports a capability gap until its adapter matures. The loopback-only `serve` adapter is compiled into every build; the `serve` Cargo feature flag only changes how `ee capabilities` reports it. |
 | Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |
 
