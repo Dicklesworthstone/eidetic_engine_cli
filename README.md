@@ -254,6 +254,12 @@ use `reranked`. Relevance floors, score summaries, calibration intervals, and
 context packing all consume the normalized relevance projection rather than
 comparing those native scales.
 
+Optional reranking has a 20-second inference budget. If it cannot complete,
+search preserves the fusion results and reports `rerank_model_unavailable`
+with the runtime reason. Reduce `search.rerank_top_k` for expensive documents,
+or set `search.rerank = "off"` to skip inference. Cancellation or expiration of
+the overall search request still cancels the request.
+
 These projections rank results; they are not probabilities that a result answers
 the task. Retrieval metrics report `qualityAssessment: "unknown"` when results
 exist and `"empty"` when none survive. `honestQualityScore` is `null`: score size,

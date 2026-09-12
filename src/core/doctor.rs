@@ -3120,7 +3120,7 @@ fn reranker_posture_check_result(available: Option<bool>, reason: Option<&str>) 
     match available {
         Some(true) => CheckResult::ok(
             "reranker_posture",
-            "Local reranker capability is available; search can apply reranked scoring when configured.",
+            "Verified local reranker artifacts loaded. This is a model-readiness check; run `ee search '<query>' --explain --json` to verify query execution and inspect any inference-budget fallback.",
         )
         .advisory(),
         Some(false) => CheckResult {

@@ -7739,6 +7739,60 @@ struct SearchRerankRuntime {
 }
 
 const SEARCH_RERANK_MIN_CANDIDATES: usize = 5;
+const SEARCH_RERANK_TIMEOUT: Duration = Duration::from_secs(20);
+
+async fn apply_search_rerank_with_budget(
+    cx: &asupersync::Cx,
+    query: &str,
+    candidates: &mut [crate::search::ScoredResult],
+    reranker: Arc<dyn Reranker>,
+    text_fn: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    top_k: usize,
+    timeout: Duration,
+) -> Option<SearchDegradation> {
+    // Reranking is optional. Keep the completed fusion result intact until
+    // the child finishes, and reserve the parent budget for delivering it.
+    // Joining drains the child; no inference task outlives its owning request.
+    let scope = cx.scope_with_budget(cx.budget_for_timeout(timeout));
+    let query = query.to_owned();
+    let mut reranked = candidates.to_vec();
+    let task = cx.spawn_in(&scope, move |child| async move {
+        apply_search_rerank(
+            &child,
+            &query,
+            &mut reranked,
+            reranker.as_ref(),
+            text_fn,
+            top_k,
+        )
+        .await
+        .map(|()| reranked)
+    });
+    let mut task = match task {
+        Ok(task) => task,
+        Err(error) => {
+            tracing::warn!(%error, "Optional rerank task could not start");
+            return Some(SearchDegradation::rerank_model_unavailable(
+                "The request runtime could not start optional inference.",
+            ));
+        }
+    };
+    match task.join(cx).await {
+        Ok(Ok(reranked)) => {
+            candidates.clone_from_slice(&reranked);
+            None
+        }
+        result => {
+            tracing::warn!(?result, "Optional rerank task did not complete");
+            // The caller checks its own cancellation immediately after this
+            // returns. A child deadline may degrade ranking; a parent deadline
+            // must still cancel the request instead of returning stale success.
+            Some(SearchDegradation::rerank_model_unavailable(
+                "Optional inference did not complete within its runtime budget; reduce search.rerank_top_k or set search.rerank to off.",
+            ))
+        }
+    }
+}
 
 async fn apply_search_rerank(
     cx: &asupersync::Cx,
@@ -11354,13 +11408,14 @@ async fn search_sync_with_performance(
                     rerank_runtime_owned.text_provider.clone(),
                 ) {
                     let rerank_start = Instant::now();
-                    let rerank_result = apply_search_rerank(
+                    let degradation = apply_search_rerank_with_budget(
                         &cx,
                         &query_owned,
                         &mut results,
-                        reranker.as_ref(),
-                        |doc_id| text_provider.text_for_doc(doc_id),
+                        reranker,
+                        move |doc_id| text_provider.text_for_doc(doc_id),
                         rerank_runtime_owned.top_k,
+                        SEARCH_RERANK_TIMEOUT,
                     )
                     .await;
                     push_search_performance_timing(
@@ -11374,12 +11429,9 @@ async fn search_sync_with_performance(
                         }
                         return;
                     }
-                    match rerank_result {
-                        Ok(()) => Ok((results, metrics)),
-                        Err(error) => Err(error),
-                    }
+                    Ok((results, metrics, degradation.into_iter().collect()))
                 } else {
-                    Ok((results, metrics))
+                    Ok((results, metrics, Vec::new()))
                 }
             }
             Err(error) => Err(error),
@@ -11392,7 +11444,7 @@ async fn search_sync_with_performance(
 
         let convert_start = Instant::now();
         let converted = match search_result {
-            Ok((results, metrics)) => {
+            Ok((results, metrics, degraded)) => {
                 let final_score_scale = two_tier_final_score_scale(source_mode, &results, &metrics);
                 let reranked_count = results
                     .iter()
@@ -11414,7 +11466,7 @@ async fn search_sync_with_performance(
                 let mut hits = search_hits_from_scored_results(results, explain, final_score_scale);
                 canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                 sort_search_hits_by_score_order(&mut hits);
-                Ok((hits, Vec::new()))
+                Ok((hits, degraded))
             }
             Err(error) => Err(map_frankensearch_error(&cx, "Search failed", error)),
         };
@@ -20860,29 +20912,33 @@ mod tests {
         let reranker: Arc<dyn Reranker> =
             Arc::new(frankensearch::SyncRerankerAdapter(StubReverseReranker));
 
-        let (reranked_order, top_candidate) = crate::core::run_cli_future(async move {
-            let cx = asupersync::Cx::for_testing();
-            apply_search_rerank(
-                &cx,
-                "release format checklist",
-                &mut candidates,
-                reranker.as_ref(),
-                |doc_id: &str| Some(format!("text body for {doc_id}")),
-                candidate_count,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-            let order: Vec<String> = candidates
-                .iter()
-                .map(|hit| hit.doc_id.to_string())
-                .collect();
-            let top_candidate = candidates
-                .into_iter()
-                .next()
-                .ok_or_else(|| "rerank unexpectedly returned no candidates".to_string())?;
-            Ok::<(Vec<String>, crate::search::ScoredResult), String>((order, top_candidate))
-        })
-        .map_err(|error| error.to_string())??;
+        let (reranked_order, top_candidate) =
+            crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+                let degradation = apply_search_rerank_with_budget(
+                    &cx,
+                    "release format checklist",
+                    &mut candidates,
+                    reranker,
+                    |doc_id: &str| Some(format!("text body for {doc_id}")),
+                    candidate_count,
+                    SEARCH_RERANK_TIMEOUT,
+                )
+                .await;
+                assert!(
+                    degradation.is_none(),
+                    "positive rerank must complete: {degradation:?}"
+                );
+                let order: Vec<String> = candidates
+                    .iter()
+                    .map(|hit| hit.doc_id.to_string())
+                    .collect();
+                let top_candidate = candidates
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| "rerank unexpectedly returned no candidates".to_string())?;
+                Ok::<(Vec<String>, crate::search::ScoredResult), String>((order, top_candidate))
+            })
+            .map_err(|error| error.to_string())??;
 
         assert_ne!(
             reranked_order, fusion_order,
@@ -20966,6 +21022,65 @@ mod tests {
             assert_eq!(scores.len(), documents.len());
             assert!(scores.iter().all(|score| score.score.is_finite()));
             assert!(scores.windows(2).all(|pair| pair[0].score >= pair[1].score));
+            let reranker: Arc<dyn Reranker> = Arc::new(reranker);
+            let fusion: Vec<crate::search::ScoredResult> = documents
+                .iter()
+                .map(|document| crate::search::ScoredResult {
+                    doc_id: document.doc_id.clone().into(),
+                    score: 0.03,
+                    source: crate::search::ScoreSource::Hybrid,
+                    index: None,
+                    fast_score: None,
+                    quality_score: None,
+                    lexical_score: Some(0.03),
+                    rerank_score: None,
+                    explanation: None,
+                    metadata: None,
+                })
+                .collect();
+            let texts: HashMap<_, _> = documents
+                .iter()
+                .map(|document| (document.doc_id.clone(), document.text.clone()))
+                .collect();
+            let mut candidates = fusion.clone();
+            let positive_texts = texts.clone();
+            assert!(
+                apply_search_rerank_with_budget(
+                    &cx,
+                    "release checksums",
+                    &mut candidates,
+                    Arc::clone(&reranker),
+                    move |id| positive_texts.get(id).cloned(),
+                    5,
+                    SEARCH_RERANK_TIMEOUT,
+                )
+                .await
+                .is_none()
+            );
+            assert!(candidates.iter().all(|hit| hit.rerank_score.is_some()));
+            let mut expired = fusion.clone();
+            let degradation = apply_search_rerank_with_budget(
+                &cx,
+                "release checksums",
+                &mut expired,
+                Arc::clone(&reranker),
+                move |id| texts.get(id).cloned(),
+                5,
+                Duration::ZERO,
+            )
+            .await
+            .ok_or("expired optional inference must report fusion fallback")?;
+            assert_eq!(degradation.code, "rerank_model_unavailable");
+            assert!(!degradation.is_permanent());
+            assert_eq!(
+                serde_json::to_value(&expired).map_err(|error| error.to_string())?,
+                serde_json::to_value(&fusion).map_err(|error| error.to_string())?,
+                "fallback must preserve every fusion field"
+            );
+            assert!(
+                cx.checkpoint().is_ok(),
+                "child timeout must not cancel the parent"
+            );
             cx.cancel_with(asupersync::CancelKind::User, Some("fixture cancellation"));
             assert!(matches!(
                 reranker.rerank(&cx, "release checksums", &documents).await,
