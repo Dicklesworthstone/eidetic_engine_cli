@@ -7426,12 +7426,12 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(input: &str) -> Option<Vec<u8>> {
-    if input.len() % 2 != 0 {
+    if !input.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(input.len() / 2);
     let bytes = input.as_bytes();
-    for chunk in bytes.chunks_exact(2) {
+    for chunk in bytes.as_chunks::<2>().0 {
         let high = hex_nibble(chunk[0])?;
         let low = hex_nibble(chunk[1])?;
         out.push((high << 4) | low);

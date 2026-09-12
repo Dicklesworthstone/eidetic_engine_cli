@@ -719,13 +719,13 @@ fn decode_hex_nibble(byte: u8, label: &str) -> Result<u8, CredentialBackupError>
 }
 
 fn decode_hex_var(value: &str, label: &str) -> Result<Vec<u8>, CredentialBackupError> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(CredentialBackupError::Malformed {
             message: format!("{label} must have even length"),
         });
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
-    for chunk in value.as_bytes().chunks_exact(2) {
+    for chunk in value.as_bytes().as_chunks::<2>().0 {
         let high = decode_hex_nibble(chunk[0], label)?;
         let low = decode_hex_nibble(chunk[1], label)?;
         bytes.push((high << 4) | low);

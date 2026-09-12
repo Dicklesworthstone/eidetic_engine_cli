@@ -209,7 +209,7 @@ the following checks may be inferred from the existing binary release.
   is required by EE; registry 0.4.11 lacks it.
 - [ ] Qualify the combined source changes with compiler checks and relevant
   real memory, search, pack, runtime and native model tests.
-- [ ] Publish dependency packages in order and verify their downloaded bytes.
+- [x] Publish all 48 dependency packages in order and verify their downloaded bytes.
   - [x] Publish `fnx-runtime 0.3.0`; all 130 normal runtime tests passed
     (five existing measurement cases ignored). Public source and manifest
     match `fnx-runtime-v0.3.0`; archive SHA-256
@@ -254,6 +254,14 @@ crates.io packages, with no path/git dependencies or Cargo patches. The final
 path-to-registry conversion changed only source/checksum metadata; package
 versions and dependency edges match the preceding combined candidate. There
 is exactly one Asupersync version, `0.5.0`.
+
+The first registry-only candidate passed all-target compiler checks, three
+focused library regressions and all nine dependency-contract tests. Removing
+the obsolete MSRV exposed eleven strict Clippy idiom diagnostics; the fixes
+preserve hex validation and cache-maintenance cadence. Installer tests found
+one stale README assertion (32 other cases passed): it now checks the current
+guarded download commands and cacheable fallback URLs. The superseded DSR
+binary build was stopped; publication requires rechecking the corrected source.
 
 The refreshed registry lock still contains `lru 0.16.4` through published
 Tantivy 0.26.2. `cargo audit --json` exits zero and lists zero vulnerabilities,

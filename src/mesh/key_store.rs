@@ -2254,7 +2254,7 @@ fn decode_secret_hex(value: &[u8], label: &str) -> Result<SecretBytes, KeyStoreE
         });
     }
     let mut bytes = [0_u8; SECRET_BYTES_LEN];
-    for (index, chunk) in value.chunks_exact(2).enumerate() {
+    for (index, chunk) in value.as_chunks::<2>().0.iter().enumerate() {
         let high = match hex_nibble(chunk[0], label) {
             Ok(value) => value,
             Err(error) => {

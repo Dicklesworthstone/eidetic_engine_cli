@@ -61,14 +61,19 @@ fn readme_recommends_verified_idempotent_installers_without_claiming_hook_mutati
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
 
     ensure(
-        readme.matches("| bash -s -- --easy-mode --verify").count() >= 2,
+        readme
+            .matches(r#"if [ -s "$f" ]; then bash "$f" --easy-mode --verify"#)
+            .count()
+            >= 2,
         "README should recommend PATH repair and executable verification in both Unix install examples",
     )?;
     ensure(
         readme.contains(
-            "raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.ps1?cache=",
-        ) && readme.contains("& $f -Verify"),
-        "README should fetch the current Windows installer and recommend executable verification",
+            "https://cdn.jsdelivr.net/gh/Dicklesworthstone/eidetic_engine_cli@main/install.ps1",
+        ) && readme.contains(
+            "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.ps1\" -OutFile $f",
+        ) && readme.contains("if (Test-Path $f) { & $f -Verify }"),
+        "README should fetch the Windows installer with a cacheable fallback and verify it after a successful download",
     )?;
     ensure(
         readme.contains("settings remain untouched")

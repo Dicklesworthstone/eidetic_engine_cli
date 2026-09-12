@@ -1618,7 +1618,7 @@ fn scale_fixture_record(
     let component_index =
         usize::try_from((ordinal - 1) % SCALE_ENVELOPE_COMPONENTS.len() as u64).unwrap_or_default();
     let component = SCALE_ENVELOPE_COMPONENTS[component_index].to_owned();
-    let duplicate_of = if ordinal > 1 && ordinal % profile.duplicate_stride() == 0 {
+    let duplicate_of = if ordinal > 1 && ordinal.is_multiple_of(profile.duplicate_stride()) {
         Some(scale_fixture_memory_id(profile, ordinal - 1))
     } else {
         None

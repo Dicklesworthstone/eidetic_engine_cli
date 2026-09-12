@@ -806,7 +806,7 @@ fn algorithm_cache_lock(cache_key: &str) -> Arc<Mutex<()>> {
     // is still incremented on every call so the trigger fires
     // close to its original 1-in-64 frequency once a write does
     // happen.
-    if counter_tick % 64 == 0 {
+    if counter_tick.is_multiple_of(64) {
         write_guard.retain(|_, v| Arc::strong_count(v) > 1);
     }
 
@@ -900,7 +900,10 @@ where
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // Periodic garbage collection of expired results
-    if CLEANUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 64 == 0 {
+    if CLEANUP_COUNTER
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .is_multiple_of(64)
+    {
         let evicted_count = evict_expired_in_memory_algorithm_results(&mut cache, Instant::now());
         if evicted_count > 0 {
             emit_cache_evict(CacheEvictEvent {
