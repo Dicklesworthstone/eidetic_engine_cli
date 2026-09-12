@@ -49734,91 +49734,10 @@ where
     E: Write,
 {
     use crate::core::recall::{
-        RecallCursorResolution, RecallDegradedEntry, RecallQuery, RecallQueryEcho,
-        collect_diff_paths_via_git, empty_recall_report_for_rejected_cursor,
-        recall_cursor_page_is_honest, recall_data_json, render_recall_markdown,
-        resolve_recall_cursor, run_recall,
+        RecallDegradedEntry, RecallQueryEcho, recall_data_json, recall_for_workspace,
+        render_recall_markdown,
     };
-
-    // At least one selector is required (ADR 0064 §2): with no selectors the
-    // engine deterministically matches nothing, so an unselected invocation
-    // is a usage error rather than a silently empty result.
-    if args.paths.is_empty() && args.symbols.is_empty() && args.diff.is_none() && !args.diff_staged
-    {
-        let error = DomainError::Usage {
-            message: "ee recall requires at least one selector: --path, --symbol, --diff, or \
-                      --diff-staged"
-                .to_owned(),
-            repair: Some("ee recall --path 'src/**' --workspace . --json".to_owned()),
-        };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-    }
-    if args.budget_tokens == Some(0) {
-        let error = DomainError::Usage {
-            message: "ee recall --budget-tokens must be greater than zero".to_owned(),
-            repair: Some("Re-run with --budget-tokens 400 or omit the flag.".to_owned()),
-        };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-    }
-
     let workspace_path = cli.resolve_workspace();
-    let database_path = args
-        .database
-        .clone()
-        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
-    if !database_path.exists() {
-        let error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-    }
-    let connection = match crate::db::DbConnection::open_file(&database_path) {
-        Ok(connection) => connection,
-        Err(error) => {
-            let error = DomainError::Storage {
-                message: format!("Failed to open database: {error}"),
-                repair: Some("ee status --json".to_owned()),
-            };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-        }
-    };
-    if let Err(error) = connection.migrate() {
-        let error = DomainError::Storage {
-            message: format!("Failed to migrate database: {error}"),
-            repair: Some("ee migrate run --workspace . --json".to_owned()),
-        };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-    }
-    let workspace_id = match bound_cli_workspace_id(&connection, &workspace_path) {
-        Ok(workspace_id) => workspace_id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    };
-
-    let mut extra_degraded: Vec<RecallDegradedEntry> = Vec::new();
-
-    // --diff/--diff-staged: read-only git path extraction; failure degrades
-    // to git_unavailable and never blocks recall (ADR 0064 §2).
-    let mut diff_paths: Vec<String> = Vec::new();
-    if args.diff.is_some() || args.diff_staged {
-        match collect_diff_paths_via_git(&workspace_path, args.diff.as_deref(), args.diff_staged) {
-            Ok(paths) => diff_paths = paths,
-            Err(reason) => extra_degraded.push(RecallDegradedEntry::git_unavailable(&reason)),
-        }
-    }
-
-    let mut query = RecallQuery {
-        paths: args.paths.clone(),
-        symbols: args.symbols.clone(),
-        diff_paths,
-        kinds: args.kinds.clone(),
-        levels: args.levels.clone(),
-        stale_only: args.stale,
-        max_tokens: args.budget_tokens,
-        offset: 0,
-        // bd-2vq2z.1 (Phase-6 pass 2): drift is a FLAG, not a rank penalty. The
-        // neutral default keeps drifted memories at their natural rank; the
-        // `[retrieval] stale_anchor_penalty` TOML wiring is the remaining leaf
-        // step that will resolve an operator override here.
-        stale_anchor_penalty: crate::search::scoring::DEFAULT_STALE_ANCHOR_PENALTY,
-    };
     let query_echo = RecallQueryEcho {
         paths: args.paths.clone(),
         symbols: args.symbols.clone(),
@@ -49830,102 +49749,15 @@ where
         budget_tokens: args.budget_tokens,
     };
 
-    // Cursor binding needs the live DB generation before the engine runs.
-    let db_generation = match connection.get_workspace_generation(&workspace_id) {
-        Ok(value) => i64::try_from(value.unwrap_or(0)).unwrap_or(i64::MAX),
-        Err(error) => {
-            let error = DomainError::Storage {
-                message: format!("Failed to read workspace generation: {error}"),
-                repair: Some("ee doctor --json".to_owned()),
-            };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-        }
+    let (report, degraded) = match recall_for_workspace(
+        &workspace_path,
+        args.database.as_deref(),
+        &query_echo,
+        args.cursor.as_deref(),
+    ) {
+        Ok(response) => response,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    let mut resume_cursor: Option<(usize, usize)> = None;
-    let rejected_page = match resolve_recall_cursor(args.cursor.as_deref(), &query, db_generation) {
-        RecallCursorResolution::Fresh => None,
-        RecallCursorResolution::Resume {
-            offset,
-            dropped_count,
-        } => {
-            query.offset = offset;
-            resume_cursor = Some((offset, dropped_count));
-            None
-        }
-        RecallCursorResolution::RejectedInvalid => {
-            extra_degraded.push(RecallDegradedEntry::cursor_invalid());
-            Some(())
-        }
-        RecallCursorResolution::RejectedStale {
-            cursor_generation,
-            current_generation,
-        } => {
-            extra_degraded.push(RecallDegradedEntry::cursor_stale(
-                cursor_generation,
-                current_generation,
-            ));
-            Some(())
-        }
-    };
-    let mut report = if rejected_page.is_some() {
-        // A rejected cursor yields an empty page (never a restarted one), so
-        // a page sequence can never duplicate or skip items across writes.
-        let index_generation = match connection.memory_anchor_index_generation(&workspace_id) {
-            Ok(value) => value,
-            Err(error) => {
-                let error = DomainError::Storage {
-                    message: format!("Failed to read anchor index generation: {error}"),
-                    repair: Some("ee doctor --json".to_owned()),
-                };
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-            }
-        };
-        empty_recall_report_for_rejected_cursor(index_generation, db_generation)
-    } else {
-        match run_recall(&connection, &workspace_id, &query) {
-            Ok(report) => report,
-            Err(error) => {
-                let error = DomainError::Storage {
-                    message: format!("Failed to run recall: {error}"),
-                    repair: Some("ee doctor --json".to_owned()),
-                };
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-            }
-        }
-    };
-    if let Some((offset, dropped_count)) = resume_cursor
-        && !recall_cursor_page_is_honest(offset, dropped_count, report.total_matched)
-    {
-        extra_degraded.push(RecallDegradedEntry::cursor_invalid());
-        report =
-            empty_recall_report_for_rejected_cursor(report.index_generation, report.db_generation);
-    }
-
-    // Engine degradations first, then CLI-level entries, then the budget
-    // truncation entry — one truncation vocabulary (ADR 0064 §5).
-    let mut degraded: Vec<RecallDegradedEntry> = report
-        .degraded
-        .iter()
-        .map(RecallDegradedEntry::from_engine)
-        .collect();
-    degraded.append(&mut extra_degraded);
-    if report.truncated
-        && let (Some(budget), Some(cursor)) =
-            (args.budget_tokens, report.continuation_cursor.as_deref())
-    {
-        degraded.push(RecallDegradedEntry::budget_truncated(
-            report.dropped_count,
-            cursor,
-            budget,
-        ));
-    } else if report.truncated
-        && let Some(budget) = args.budget_tokens
-    {
-        degraded.push(RecallDegradedEntry::budget_unsatisfiable(
-            report.dropped_count,
-            budget,
-        ));
-    }
 
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
