@@ -148,7 +148,7 @@ tempfile = { version = "3.27.0" }
 # feature would pull tokio/reqwest/hyper which are forbidden here.
 tiktoken-rs = { version = "0.12.0", default-features = false }
 toon = { package = "tru", version = "0.2.4", path = "../toon_rust", default-features = false }
-toml_edit = { version = "0.25.12", default-features = false, features = ["parse", "display"] }
+toml_edit = { version = "0.25.15", default-features = false, features = ["parse", "display"] }
 tracing = { version = "0.1.44" }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 # NFC normalization for policy tag/secret detection (bd-17c65.3.3 / C3).

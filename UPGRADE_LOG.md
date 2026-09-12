@@ -179,8 +179,8 @@ inputs. Upgrades are applied and tested individually before the next upgrade.
 - [x] fs4 0.13.1 → 1.1.0: 78 lock and secret-store tests passed.
 - [x] uuid 1.24.1 → 1.26.1: 34 identifier and runtime tests passed.
 - [x] zeroize 1.8.2 → 1.9.0: five backup/recovery tests passed.
-- [ ] zstd 0.13.3 → 0.14.0: applied; compression tests pending.
-- [ ] toml_edit 0.25.13 → 0.25.15: research and test config editing.
+- [x] zstd 0.13.3 → 0.14.0: 44 compression/cache and eight integration tests passed.
+- [ ] toml_edit 0.25.13 → 0.25.15: applied; config-editing tests pending.
 - [ ] Run final check, Clippy, formatting, tests and dependency audit.
 - [ ] Qualify six DSR artifacts, publish release and update Homebrew.
 - [x] Check crates.io eligibility: six unpublished versions and a missing
@@ -260,8 +260,14 @@ with `-D warnings` on a separate remote worker.
 
 The zstd upgrade is now applied with registry-verified checksums for zstd
 0.14.0, zstd-safe 8.0.0 and zstd-sys 2.1.0. The separate Tantivy zstd 0.13.3
-and zstd-safe 7.2.4 entries remain explicit. Runtime compression checks are
-pending; no passing result is inferred from the unchanged call sites.
+and zstd-safe 7.2.4 entries remain explicit. Pinned RCH tests at f0b610734
+passed all 44 selected compression/cache/ledger tests and all eight pack
+metamorphic integration tests, including the corrected timing comparisons.
+There were no failures or ignored tests in either selected run.
+
+The toml_edit 0.25.15 upgrade is now applied with its official registry
+checksum. Config parsing, safe config writes and profile application tests
+are the next validation step; their result is pending.
 
 ## Existing release gates
 
@@ -270,6 +276,38 @@ degradation return type; commit daba50a03 fixes that mismatch. A fresh remote
 all-targets check passed on daba50a03. The preceding broad integration run had 758
 passes and 71 failures; those results predate these upgrades and still require
 classification or fixes. No new version or release is published yet.
+
+The subsequent hash-embedder integration run at 2f43ef0cb completed with 784
+passes, seven failures and 39 filtered cases. Its PPR duplicate-warning failure
+was fixed and passed at b25703f47. Three pack determinism tests compared the
+registered volatile `elapsedMs` field; their narrow comparison correction is
+included in the passing f0b610734 zstd run. Three semantic north-star scenarios passed
+separately with the real Model2Vec model on af09aa6bc. These are distinct runs,
+not a claim that the entire integration suite is green.
+
+## Security audit disposition
+
+A fresh RustSec audit on f0b610734 used database revision
+`b50980aad8b8f14f77e25a97b32dd94bf008b0af` (1,243 advisories) and scanned
+569 locked dependencies. `cargo audit --deny warnings` exits 1 for
+[RUSTSEC-2026-0253](https://rustsec.org/advisories/RUSTSEC-2026-0253.html):
+Tantivy 0.26.1 still requires affected `lru 0.16.4`. The same dependency was
+already present in v0.14.5; this refresh did not introduce it. The existing
+`paste` maintenance exception remains unchanged; no LRU exception was added.
+
+Source review of the exact registry code, repeated by a second agent, found
+one private Tantivy cache, `LruCache<usize, OwnedBytes>`, in
+[`src/store/reader.rs`](https://github.com/quickwit-oss/tantivy/blob/0.26.1/src/store/reader.rs).
+It uses `new`, `get`, `put` and `len`, never the affected `pop` operation.
+Its integer keys also cannot have the panicking destructor required by this
+advisory. This explains the limited impact in EE's pinned use; it does not
+turn the audit into a pass or establish that the dependency is free of other
+defects. Tantivy 0.26.2, published September 8, retains the same affected
+requirement. Clean remediation needs a 0.26.x backport of upstream's LRU
+dependency update. This remains an explicit upstream release finding.
+
+The all-features dependency tree at f0b610734 contains none of the 13 forbidden
+runtime, storage, graph or HTTP crates. This is a separate passing gate.
 
 ## Publication prerequisites checked
 
