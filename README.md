@@ -2199,6 +2199,14 @@ ee hook claude-code --install --workspace . --json
 
 The `ee pack`, `ee recall`, and hook-install JSON outputs are stable and parseable.
 
+Managed SessionStart and pre-edit hooks try the workspace daemon first, then
+fall back to local retrieval if it is unavailable. Start it explicitly with
+`ee daemon start --workspace . --json`; each workspace has its own socket.
+These memory reads remain available while the neural model warms. Use
+`ee hook status --workspace . --json` to inspect the last invocation and its
+degradation messages. Stop an idle daemon with `ee daemon stop --workspace .`;
+a daemon retaining a neural model can use more than 1 GB of RAM.
+
 ### Codex
 
 Codex shells out, so the same calls work. `ee pack "<task>" --json` can be

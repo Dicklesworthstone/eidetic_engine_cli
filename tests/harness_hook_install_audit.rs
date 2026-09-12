@@ -177,7 +177,7 @@ fn workspace_daemon_serves_real_hook_reads_and_falls_back_without_crossing_store
             );
             assert!(!text.contains("alpha checksums"));
         }
-        // Exercise the actual generated SessionStart snippet against the daemon.
+        // Exercise both actual generated memory-read snippets against the daemon.
         let mut install = options(
             HarnessHookTarget::Codex,
             &root.join("managed-hooks.json"),
@@ -186,43 +186,56 @@ fn workspace_daemon_serves_real_hook_reads_and_falls_back_without_crossing_store
         );
         install.ee_binary_path = Some(PathBuf::from(binary));
         let report = generate_harness_hook_install(&install).map_err(|error| error.message())?;
-        let snippet = report
-            .snippets
-            .iter()
-            .find(|snippet| snippet.event == "SessionStart")
-            .ok_or("session snippet missing")?;
-        let mut child = isolated_command("sh", root)
-            .args(["-c", &snippet.command])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| error.to_string())?;
-        child.stdin.take().ok_or("hook stdin missing")?.write_all(serde_json::json!({"cwd": root, "session_id": "daemon", "task": "release", "hook_event_name": "SessionStart"}).to_string().as_bytes()).map_err(|error| error.to_string())?;
-        let hook = successful(
-            child
-                .wait_with_output()
-                .map_err(|error| error.to_string())?,
-        )?;
-        assert!(
-            hook["hookSpecificOutput"]["additionalContext"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("alpha checksums")
-        );
-        let state: Value = serde_json::from_slice(
-            &fs::read(root.join(".ee/hook-state/session_start_orient.last.json"))
-                .map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
-        assert_eq!(state["outcome"], "emitted");
-        assert!(
-            !state["degradedCodes"]
-                .as_array()
-                .unwrap()
+        for (event_name, surface, tool_input) in [
+            (
+                "SessionStart",
+                "session_start_orient",
+                serde_json::json!({}),
+            ),
+            (
+                "PreToolUse",
+                "pre_edit_recall",
+                serde_json::json!({"file_path": "src/release.rs"}),
+            ),
+        ] {
+            let snippet = report
+                .snippets
                 .iter()
-                .any(|code| code == "daemon_memory_read_fallback")
-        );
+                .find(|snippet| snippet.event == event_name)
+                .ok_or("memory-read snippet missing")?;
+            let mut child = isolated_command("sh", root)
+                .args(["-c", &snippet.command])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|error| error.to_string())?;
+            child.stdin.take().ok_or("hook stdin missing")?.write_all(serde_json::json!({"cwd": root, "session_id": "daemon", "task": "release", "hook_event_name": event_name, "tool_name": "Edit", "tool_input": tool_input}).to_string().as_bytes()).map_err(|error| error.to_string())?;
+            let hook = successful(
+                child
+                    .wait_with_output()
+                    .map_err(|error| error.to_string())?,
+            )?;
+            assert!(
+                hook["hookSpecificOutput"]["additionalContext"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("alpha checksums")
+            );
+            let state: Value = serde_json::from_slice(
+                &fs::read(root.join(format!(".ee/hook-state/{surface}.last.json")))
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(state["outcome"], "emitted");
+            assert!(
+                !state["degradedCodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|code| code == "daemon_memory_read_fallback")
+            );
+        }
         Ok(())
     });
     let stopped = successful(

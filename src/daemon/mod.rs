@@ -1,10 +1,11 @@
 //! Optional `ee daemon` Unix-domain socket RPC skeleton (bd-oja31 / SRR1).
 //!
 //! The daemon is opt-in: every CLI command continues to work without it.
-//! When started, it binds a UDS at `${XDG_RUNTIME_DIR}/ee/daemon.sock` on
-//! Linux, falling back to `${TMPDIR:-/tmp}/ee-${uid}/daemon.sock` on
+//! When started, it binds a workspace-hashed UDS named `d-<hash>.sock` under
+//! `${XDG_RUNTIME_DIR}/ee` on Linux, falling back to `${TMPDIR:-/tmp}/ee-${uid}` on
 //! platforms (macOS) that do not standardize `XDG_RUNTIME_DIR` or when
-//! `XDG_RUNTIME_DIR` points at a shared temp root such as `/tmp`. The
+//! `XDG_RUNTIME_DIR` points at a shared temp root such as `/tmp`. Long paths use
+//! `/tmp/ee-${uid}` to reserve room for the broker's temporary bind suffix. The
 //! socket file is chmodded to 0o600 and the parent directory to 0o700
 //! immediately after bind; the accept loop also gates every connection
 //! through a `getpeereid` / `SO_PEERCRED` check (bd-3j0td). The wire
@@ -30,6 +31,8 @@
 //!   matching `workspace_id`, then executes the canonical in-process
 //!   `ee pack` request and returns the rendered `ee.response.v2` envelope as
 //!   the daemon response `result`.
+//! - `ee.daemon.orient_hook` and `ee.daemon.recall` — workspace-bound,
+//!   lexical memory reads for managed hooks, available during neural warm-up.
 //!
 //! Threading model: the skeleton uses a `std::thread::spawn` accept loop
 //! and a small per-connection worker. A future slice will wrap the

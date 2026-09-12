@@ -10,7 +10,7 @@
 # Windows I/O, backported onto 0.3.18 without unrelated later storage changes.
 # Frankensearch embeds the 0.2.7 streamed/shared Model2Vec loader. Its producer
 # identity changed; existing strict semantic indexes may require rebuilding.
-asupersync	f35d73f1ce84887de0534ecdb6434c8d6af91f13
+asupersync	c8bb605e6229c4ca9a13ff5350fc40e0ec1df665
 franken_agent_detection	1b0a14e19550581300e813a8a424083171fd18d2
 franken_networkx	6809c573a99e79497a43aa5a7c77fb2b0f9e2fc8
 frankensearch	4ea318c01c98d1e55fbd62bab8c660b434c176d7

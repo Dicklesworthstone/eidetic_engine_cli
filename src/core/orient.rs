@@ -1852,6 +1852,56 @@ mod tests {
     }
 
     #[test]
+    fn orient_primer_reads_the_explicit_database() -> TestResult {
+        let temp = orient_test_tempdir()?;
+        let workspace = temp.path();
+        remember_fixture(workspace, "Default-store-only rule.", "default", None)?;
+        let database = workspace.join("custom.db");
+        let connection =
+            crate::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &crate::core::workspace::stable_workspace_id(workspace),
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("custom-primer".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        remember_memory(&RememberMemoryOptions {
+            workspace_path: workspace,
+            database_path: Some(&database),
+            content: "Custom-store-only rule.",
+            workflow_id: None,
+            level: "procedural",
+            kind: "rule",
+            tags: None,
+            confidence: 0.9,
+            source: Some("file://CUSTOM.md"),
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: false,
+            propose_candidates: false,
+            allow_secret_mention: false,
+        })
+        .map_err(|error| error.to_string())?;
+        let mut degraded = Vec::new();
+        let primer = orient_primer_value(workspace, &database, &mut degraded);
+        let rendered = primer.to_string();
+        ensure(
+            rendered.contains("Custom-store-only rule."),
+            format!("explicit store must supply primer: {rendered}; {degraded:?}"),
+        )?;
+        ensure(
+            !rendered.contains("Default-store-only rule."),
+            format!("default store must not leak into explicit primer: {rendered}"),
+        )
+    }
+
+    #[test]
     fn orient_fast_content_returns_admitted_recent_and_lexical_items() -> TestResult {
         let temp = orient_test_tempdir()?;
         let workspace = temp.path();

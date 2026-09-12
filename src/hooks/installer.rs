@@ -2554,7 +2554,12 @@ def _ee_record_invocation(outcome, emitted_bytes=0, degraded_codes=None):
         record = {"surface": SURFACE, "outcome": outcome, "updatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(), "durationMs": int((time.monotonic() - _ee_started) * 1000), "emittedBytes": emitted_bytes, "degradedCodes": degraded_codes or []}
         response = globals().get("response", {})
         entries = response.get("degraded", []) if isinstance(response, dict) else []
-        record["degradedMessages"] = [" ".join(str(entry.get("message", "")).split())[:512] for entry in entries[:8] if isinstance(entry, dict)]
+        entries = entries if isinstance(entries, list) else []
+        record["degradedMessages"] = []
+        for entry in entries[:8]:
+            if isinstance(entry, dict) and isinstance(entry.get("message"), str):
+                message = "".join(ch for ch in entry["message"] if ch.isprintable() or ch.isspace())
+                record["degradedMessages"].append(" ".join(message.split())[:512])
         with open(os.path.join(root, SURFACE + ".last.json"), "w", encoding="utf-8") as f:
             json.dump(record, f, sort_keys=True, separators=(",", ":"))
     except Exception:
@@ -4890,6 +4895,49 @@ mod tests {
         assert_eq!(state.outcome, "command_error");
         assert_eq!(state.emitted_bytes, 0);
         assert!(!temp.path().join("relative-state").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn ambient_hook_records_malformed_degradations_and_bounds_diagnostics() -> TestResult {
+        let prefix = session_start_python()
+            .split_once("task = str(data.get(\"task\")")
+            .ok_or("hook probe boundary missing")?
+            .0;
+        for (degraded, expected) in [
+            (
+                serde_json::json!({"unexpected": true}),
+                Vec::<String>::new(),
+            ),
+            (
+                serde_json::json!([
+                    {"message": "socket\u{001b} unavailable\n retry\u{0000}"},
+                    {"message": "x".repeat(600)},
+                    {"message": 42}
+                ]),
+                vec!["socket unavailable retry".to_owned(), "x".repeat(512)],
+            ),
+        ] {
+            let temp = TempDir::new().map_err(|error| error.to_string())?;
+            let event = serde_json::json!({"cwd": temp.path(), "degraded": degraded});
+            let probe = format!(
+                "{prefix}\nresponse = {{'degraded': data['degraded']}}\n_ee_record_invocation('invalid_response')\n"
+            );
+            let output = run_python_hook_state_probe(&probe, &event, temp.path())?;
+            assert!(output.stdout.is_empty());
+            assert!(output.stderr.is_empty());
+            let state: HarnessHookInvocation = serde_json::from_slice(
+                &fs::read(
+                    temp.path()
+                        .join("relative-state/session_start_orient.last.json"),
+                )
+                .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(state.outcome, "invalid_response");
+            assert_eq!(state.degraded_messages, expected);
+            assert_eq!(state.emitted_bytes, 0);
+        }
         Ok(())
     }
 

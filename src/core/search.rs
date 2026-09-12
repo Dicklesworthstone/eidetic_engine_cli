@@ -7858,6 +7858,7 @@ impl SearchRerankTextProvider {
 
 fn resolve_search_rerank_runtime(
     options: &SearchOptions,
+    blocking_pool: Option<asupersync::runtime::BlockingPoolHandle>,
     explicit_lexical_only: bool,
     connection: Option<&DbConnection>,
     configured_mode: crate::config::SearchRerankMode,
@@ -7953,8 +7954,16 @@ fn resolve_search_rerank_runtime(
         model_id = %resolved.entry.model_name,
         top_k = configured_top_k,
     );
+    // The production request supplies its runtime-owned pool. A posture-only
+    // probe may omit it because it never executes inference. Do not wrap this
+    // model in SyncRerankerAdapter: that blocks the executor and bypasses the
+    // native implementation's cancellation checkpoints (GH #36).
+    let reranker = match blocking_pool {
+        Some(pool) => resolved.reranker.with_blocking_pool(pool),
+        None => resolved.reranker,
+    };
     SearchRerankRuntime::enabled(
-        resolved.reranker,
+        Arc::new(reranker),
         SearchRerankTextProvider::new(database_path, &options.workspace_path, options),
         resolved.entry.model_name,
         configured_top_k,
@@ -7982,6 +7991,7 @@ pub(crate) fn resolve_search_rerank_runtime_posture(
     let mut degraded = Vec::new();
     let runtime = resolve_search_rerank_runtime(
         options,
+        None,
         explicit_lexical_only,
         connection,
         configured_mode,
@@ -8008,7 +8018,7 @@ pub(crate) enum RegisteredRerankerResolution {
 
 pub(crate) struct ResolvedRegisteredReranker {
     entry: StoredModelRegistryEntry,
-    reranker: Arc<dyn Reranker>,
+    reranker: NativeReranker,
 }
 
 pub(crate) fn resolve_registered_reranker(
@@ -8079,7 +8089,7 @@ fn sorted_available_reranker_entries(
 
 fn load_verified_search_reranker(
     entry: &StoredModelRegistryEntry,
-) -> Result<Arc<dyn Reranker>, String> {
+) -> Result<NativeReranker, String> {
     let source_path = reranker_entry_source_path(entry)?;
     let model_dir = unpacked_rerank_model_dir(&source_path)?;
     let reranker = NativeReranker::load(&model_dir).map_err(|error| {
@@ -8089,7 +8099,7 @@ fn load_verified_search_reranker(
             model_dir.display()
         )
     })?;
-    Ok(Arc::new(frankensearch::SyncRerankerAdapter(reranker)))
+    Ok(reranker)
 }
 
 fn verify_reranker_registry_hash(entry: &StoredModelRegistryEntry) -> Result<(), String> {
@@ -8350,6 +8360,7 @@ async fn run_search_inner_with_performance(
         resolve_search_rerank_config(&options.workspace_path);
     let rerank_runtime = resolve_search_rerank_runtime(
         options,
+        cx.blocking_pool_handle(),
         // Applied lexical-only WITHOUT a fallback means the operator asked
         // for lexical; a fallback means hybrid was requested and degraded.
         source_mode.applied == SearchSourceMode::LexicalOnly && !source_mode.fallback_applied,
@@ -20912,6 +20923,58 @@ mod tests {
             "the reranked winner must survive EE's default relevance floor"
         );
         Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires the real rerank-default-v1 fixture via EE_RERANK_MODEL_FIXTURE_DIR"]
+    fn registered_native_reranker_uses_request_pool_and_rejects_cancellation() -> TestResult {
+        let directory = std::env::var("EE_RERANK_MODEL_FIXTURE_DIR")
+            .map_err(|error| format!("real reranker fixture required: {error}"))?;
+        let mut entry = registered_reranker_entry(
+            "mdl_real_pool_test",
+            "rerank-default-v1",
+            ModelPurpose::Reranker,
+            ModelRegistryStatus::Available,
+        );
+        entry.source_uri = Some(directory);
+        let loaded = load_verified_search_reranker(&entry)?;
+        assert!(
+            !Reranker::is_available(&loaded),
+            "async inference requires a runtime-owned pool"
+        );
+        crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+            let pool = cx.blocking_pool_handle().ok_or("runtime pool missing")?;
+            let reranker = loaded.with_blocking_pool(pool);
+            assert!(Reranker::is_available(&reranker));
+            let documents = [
+                "Verify release checksums before publishing.",
+                "Check the database migration before release.",
+                "The garden has purple flowers.",
+                "Run the release test suite.",
+                "Publish signed release artifacts.",
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(rank, text)| frankensearch::RerankDocument {
+                doc_id: format!("mem_real_{rank}"),
+                text: text.to_owned(),
+            })
+            .collect::<Vec<_>>();
+            let scores = reranker
+                .rerank(&cx, "release checksums", &documents)
+                .await
+                .map_err(|error| error.to_string())?;
+            assert_eq!(scores.len(), documents.len());
+            assert!(scores.iter().all(|score| score.score.is_finite()));
+            assert!(scores.windows(2).all(|pair| pair[0].score >= pair[1].score));
+            cx.cancel_with(asupersync::CancelKind::User, Some("fixture cancellation"));
+            assert!(matches!(
+                reranker.rerank(&cx, "release checksums", &documents).await,
+                Err(frankensearch::SearchError::Cancelled { .. })
+            ));
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
     }
 
     #[test]
