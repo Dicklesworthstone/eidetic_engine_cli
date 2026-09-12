@@ -180,7 +180,7 @@ inputs. Upgrades are applied and tested individually before the next upgrade.
 - [ ] uuid 1.24.1 → 1.26.1: research and test identifier generation.
 - [ ] zeroize 1.8.2 → 1.9.0: research and test secret handling.
 - [ ] zstd 0.13.3 → 0.14.0: research and test pack/model compression.
-- [ ] toml_edit 0.25.12 → 0.25.15: research and test config editing.
+- [ ] toml_edit 0.25.13 → 0.25.15: research and test config editing.
 - [ ] Run final check, Clippy, formatting, tests and dependency audit.
 - [ ] Qualify six DSR artifacts, publish release and update Homebrew.
 - [ ] Verify crates.io publication eligibility against registry dependencies.
@@ -200,3 +200,22 @@ degradation return type; commit daba50a03 fixes that mismatch. A fresh remote
 all-targets check is running. The preceding broad integration run had 758
 passes and 71 failures; those results predate these upgrades and still require
 classification or fixes. No new version or release is published yet.
+
+## Publication prerequisites checked
+
+CASS view recovered the August 29 release session
+`01a04493-0981-7670-851e-8001f6fc191c`, lines 18068 and 18186: six DSR
+targets followed by `dsr release --verify-tag --no-dispatch`. The retained
+September 11 release record supplies the updated six-target configuration
+and Windows cross-compilation/native qualification procedure. All three
+repository Actions workflows remain `disabled_manually`.
+
+The current 39-package path dependency graph was checked against crates.io.
+Six exact versions are unavailable: `ee-determinism 0.1.0`,
+`fnx-algorithms`, `fnx-cgse`, `fnx-classes`, and `fnx-runtime` at `0.2.1`,
+and `frankensearch-embed 0.2.7`. Additionally, published Asupersync 0.4.11
+comes from `9b114c1f` and has a crate-private `blocking_pool_handle`; EE's
+pinned `d69851f4` exposes the capability-checked API required by reranking.
+Publishing this EE manifest against the registry would therefore fail.
+Crates.io publication needs upstream version releases; binary releases
+and Homebrew can consume the exact pinned sources.

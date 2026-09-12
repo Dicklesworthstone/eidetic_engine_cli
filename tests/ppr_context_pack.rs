@@ -5,6 +5,7 @@ use ee::core::context::{
     ContextPackOptions, ContextPackOutputOptions, attach_pack_dna_to_context_response,
     run_context_pack,
 };
+use ee::core::init::{InitOptions, init_workspace};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::{
     CreateMemoryLinkInput, DbConnection, GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource,
@@ -268,10 +269,23 @@ fn ppr_unavailable_snapshot_summary(
 #[test]
 fn requested_pack_ppr_degrades_without_changing_textual_ranking() -> TestResult {
     let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
-    let workspace_path = temp_dir.path();
-    let db_path = db_path(workspace_path);
-    fs::create_dir_all(db_path.parent().ok_or("missing db parent")?)
+    let workspace = temp_dir
+        .path()
+        .canonicalize()
         .map_err(|error| error.to_string())?;
+    let workspace_path = workspace.as_path();
+    let db_path = db_path(workspace_path);
+    let init = init_workspace(&InitOptions {
+        workspace_path: workspace.clone(),
+        dry_run: false,
+        repair_plan: false,
+        force: false,
+        allow_symlink: false,
+        skip_boilerplate: true,
+    });
+    if !init.status.is_success() {
+        return Err(format!("initialize PPR fixture workspace failed: {init:?}"));
+    }
 
     let seed_id = remember_fixture(
         workspace_path,

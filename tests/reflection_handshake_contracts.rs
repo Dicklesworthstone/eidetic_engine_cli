@@ -213,6 +213,10 @@ fn hmac_binding_changes_when_any_bound_field_changes() -> TestResult {
         "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         "blake3:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     ];
+    let source_hashes_changed: [&str; 2] = [
+        source_hashes_base[0],
+        "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    ];
 
     let base = build_reflection_request_challenge(
         binding(
@@ -303,6 +307,20 @@ fn hmac_binding_changes_when_any_bound_field_changes() -> TestResult {
             ),
         ),
         (
+            "sourceContentHashes",
+            binding(
+                CANONICAL_REQUEST_ID,
+                CANONICAL_REQUEST_HASH,
+                WORKSPACE_ID,
+                REFLECTION_KIND,
+                CANONICAL_PKG_HASH,
+                &source_hashes_changed,
+                CANONICAL_RESP_HASH,
+                EXPIRES_AT,
+                KEY_ID,
+            ),
+        ),
+        (
             "responseSchemaHash",
             binding(
                 CANONICAL_REQUEST_ID,
@@ -356,7 +374,7 @@ fn hmac_binding_changes_when_any_bound_field_changes() -> TestResult {
         }
     }
 
-    // Source content hashes are also bound. Permuting them must change the HMAC.
+    // Source content hashes bind a canonical set, so reordering preserves the HMAC.
     let permuted_sources: [&str; 2] = [source_hashes_base[1], source_hashes_base[0]];
     let permuted = build_reflection_request_challenge(
         binding(
@@ -373,8 +391,8 @@ fn hmac_binding_changes_when_any_bound_field_changes() -> TestResult {
         KEY_MATERIAL,
     )
     .map_err(|e| e.to_string())?;
-    if permuted.hmac == base.hmac {
-        return Err("HMAC unchanged after permuting source content hashes".into());
+    if permuted.hmac != base.hmac {
+        return Err("HMAC changed after permuting the same source content hashes".into());
     }
 
     Ok(())
@@ -549,9 +567,14 @@ fn result_validation_rejects_request_expired() -> TestResult {
             .map(|entry| entry.id.clone())
             .collect(),
         body: "fixture reflection result body".to_owned(),
-        kind_fields: serde_json::Map::new(),
+        kind_fields: serde_json::Map::from_iter([(
+            "knowledgeGaps".to_owned(),
+            serde_json::json!(["Which lifecycle boundary cases still need coverage?"]),
+        )]),
         self_reported_confidence: 0.5,
     };
+    validate_reflection_result_artifact(&request, &result, KEY_MATERIAL, CREATED_AT)
+        .map_err(|error| format!("expiry fixture must be valid before expiry: {error:?}"))?;
     // now > expires_at → expired
     let now = "2099-12-31T23:59:59Z";
     match validate_reflection_result_artifact(&request, &result, KEY_MATERIAL, now) {

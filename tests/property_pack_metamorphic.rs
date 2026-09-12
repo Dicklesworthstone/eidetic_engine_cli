@@ -115,8 +115,9 @@ fn run_ee_with_workspace_str(workspace: &str, args: &[&str]) -> Result<Output, S
 fn ee_stdout_json(output: Output, context: &str) -> Result<JsonValue, String> {
     if !output.status.success() {
         return Err(format!(
-            "{context} failed: exit={:?} stderr={}",
+            "{context} failed: exit={:?} stdout={} stderr={}",
             output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         ));
     }
@@ -129,8 +130,9 @@ fn ee_stdout_json(output: Output, context: &str) -> Result<JsonValue, String> {
 fn ee_stdout_string(output: Output, context: &str) -> Result<String, String> {
     if !output.status.success() {
         return Err(format!(
-            "{context} failed: exit={:?} stderr={}",
+            "{context} failed: exit={:?} stdout={} stderr={}",
             output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         ));
     }
@@ -682,8 +684,12 @@ fn pack_envelope_byte_identical_under_graph_ppr_alpha_zero() -> TestResult {
     let get_json = ee_stdout_json(get_output, "ee config get graph.ppr.alpha")?;
     let observed = get_json
         .pointer("/data/value")
-        .and_then(JsonValue::as_f64)
-        .ok_or_else(|| format!("config get did not surface a float value: envelope={get_json}"))?;
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| format!("config get did not surface a string value: envelope={get_json}"))?
+        .parse::<f64>()
+        .map_err(|error| {
+            format!("config get value is not a float: {error}; envelope={get_json}")
+        })?;
     if observed != 0.0 {
         return Err(format!(
             "MR5 sanity broken — config set graph.ppr.alpha 0.0 did not persist; observed={observed}"
