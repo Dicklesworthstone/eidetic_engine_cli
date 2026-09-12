@@ -19,8 +19,11 @@
 //!    partitions one generation's result set exactly: no duplicates,
 //!    no gaps, flat order preserved, and the page sequence is
 //!    byte-deterministic (drain twice → identical pages including
-//!    cursors). `output_budget_unsatisfiable` may only ever appear on
-//!    a fresh first page, never mid-sequence.
+//!    cursors). A later whole item plus continuation metadata may exceed
+//!    the ceiling even when earlier pages fit. An explicit
+//!    `output_budget_unsatisfiable` response emits no items or new cursor;
+//!    retrying the same incoming cursor at a higher ceiling must preserve
+//!    the complete result sequence.
 //! 4. **Rejected resume is an empty page** — a tampered cursor yields
 //!    `cursor_invalid`, a generation advance yields `cursor_stale`,
 //!    both with an emptied truncation point and no continuation
@@ -243,37 +246,48 @@ fn govern_once(
 struct Drained {
     /// Per-page kept element ids, in emission order.
     pages: Vec<Vec<String>>,
-    /// Raw governed page payloads (byte-determinism evidence).
+    /// Raw governed payloads, including budget refusals (determinism evidence).
     raw_pages: Vec<String>,
-}
-
-enum DrainOutcome {
-    Drained(Drained),
-    /// `output_budget_unsatisfiable` on the FRESH first page (legal).
-    UnsatisfiableFirstPage,
+    /// Incoming cursors retained for retry after an explicit budget refusal.
+    refused_cursors: Vec<Option<String>>,
 }
 
 fn drain_to_exhaustion(
     envelope: &str,
-    ceiling: u64,
+    mut ceiling: u64,
     registry: &[TruncationPoint],
     ids_of: fn(&JsonValue) -> Vec<String>,
     generation: u64,
-) -> Result<DrainOutcome, TestCaseError> {
+) -> Result<Drained, TestCaseError> {
     let mut cursor: Option<String> = None;
     let mut pages = Vec::new();
     let mut raw_pages = Vec::new();
+    let mut refused_cursors = Vec::new();
     for _ in 0..MAX_DRAIN_PAGES {
         let governed = govern_once(envelope, ceiling, registry, generation, cursor.as_deref())?;
         let value = parse(&governed)?;
+        if has_degraded_code(&value, CURSOR_INVALID_CODE)
+            || has_degraded_code(&value, CURSOR_STALE_CODE)
+        {
+            return Err(TestCaseError::fail(
+                "a valid cursor from the same generation was rejected during drain",
+            ));
+        }
         if has_degraded_code(&value, OUTPUT_BUDGET_UNSATISFIABLE_CODE) {
-            if cursor.is_some() {
+            if !ids_of(&value).is_empty() || continuation_cursor(&value).is_some() {
                 return Err(TestCaseError::fail(
-                    "output_budget_unsatisfiable mid-sequence: the envelope shell fit on an \
-                     earlier page, so a remainder page must never fail closed",
+                    "a budget refusal must emit no items and no continuation cursor",
                 ));
             }
-            return Ok(DrainOutcome::UnsatisfiableFirstPage);
+            refused_cursors.push(cursor.clone());
+            raw_pages.push(governed);
+            // ADR 0063 forbids splitting a large item or skipping it. A
+            // previously issued cursor remains valid when only the output
+            // ceiling changes, so retry that exact boundary with more room.
+            ceiling = ceiling.checked_mul(2).ok_or_else(|| {
+                TestCaseError::fail("budget refusals persisted through ceiling overflow")
+            })?;
+            continue;
         }
         if let Some(estimate) = tokens_estimated(&value) {
             if estimate > ceiling {
@@ -292,15 +306,28 @@ fn drain_to_exhaustion(
                 governed.len()
             )));
         }
-        pages.push(ids_of(&value));
+        let ids = ids_of(&value);
+        let next = continuation_cursor(&value);
+        if next.is_some() && (ids.is_empty() || next == cursor) {
+            return Err(TestCaseError::fail(
+                "a continuation page must emit items and advance its cursor",
+            ));
+        }
+        pages.push(ids);
         raw_pages.push(governed);
-        match continuation_cursor(&value) {
+        match next {
             Some(next) => cursor = Some(next),
-            None => return Ok(DrainOutcome::Drained(Drained { pages, raw_pages })),
+            None => {
+                return Ok(Drained {
+                    pages,
+                    raw_pages,
+                    refused_cursors,
+                });
+            }
         }
     }
     Err(TestCaseError::fail(format!(
-        "drain did not terminate within {MAX_DRAIN_PAGES} pages"
+        "drain did not terminate within {MAX_DRAIN_PAGES} attempts"
     )))
 }
 
@@ -310,6 +337,31 @@ fn body_lens() -> impl Strategy<Value = Vec<usize>> {
 
 fn section_lens() -> impl Strategy<Value = Vec<Vec<usize>>> {
     proptest::collection::vec(proptest::collection::vec(1usize..80, 0..12), 1..6)
+}
+
+#[test]
+fn flat_drain_retries_a_larger_later_item_without_losing_the_cursor() {
+    let lens = [
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 129, 129, 35, 33, 58, 9, 131, 79, 119, 32, 75, 92, 72, 54,
+        12, 142, 114, 94, 57,
+    ];
+    let (envelope, full_ids) = flat_envelope(&lens);
+    let first = drain_to_exhaustion(&envelope, 394, FLAT_REGISTRY, flat_ids, 7)
+        .expect("a larger ceiling must resume the withheld remainder");
+
+    assert!(
+        first.refused_cursors.iter().any(Option::is_some),
+        "the regression must exercise a budget refusal after a successful page"
+    );
+    assert_eq!(
+        first.pages.iter().flatten().cloned().collect::<Vec<_>>(),
+        full_ids,
+        "retrying the same cursor must recover every item exactly once in order"
+    );
+    let second = drain_to_exhaustion(&envelope, 394, FLAT_REGISTRY, flat_ids, 7)
+        .expect("the repeated drain must also complete");
+    assert_eq!(first.raw_pages, second.raw_pages);
+    assert_eq!(first.refused_cursors, second.refused_cursors);
 }
 
 proptest! {
@@ -514,23 +566,14 @@ proptest! {
         ceiling in 32u64..1_500,
     ) {
         let (envelope, full_ids) = flat_envelope(&lens);
-        let outcome = drain_to_exhaustion(&envelope, ceiling, FLAT_REGISTRY, flat_ids, 7)?;
-        let DrainOutcome::Drained(first) = outcome else {
-            return Ok(());
-        };
+        let first = drain_to_exhaustion(&envelope, ceiling, FLAT_REGISTRY, flat_ids, 7)?;
         let drained: Vec<String> = first.pages.iter().flatten().cloned().collect();
         prop_assert_eq!(
             &drained,
             &full_ids,
             "drained pages must concatenate to exactly the full id sequence"
         );
-        let DrainOutcome::Drained(second) =
-            drain_to_exhaustion(&envelope, ceiling, FLAT_REGISTRY, flat_ids, 7)?
-        else {
-            return Err(TestCaseError::fail(
-                "second drain failed closed where the first drained",
-            ));
-        };
+        let second = drain_to_exhaustion(&envelope, ceiling, FLAT_REGISTRY, flat_ids, 7)?;
         prop_assert_eq!(
             &first.raw_pages,
             &second.raw_pages,
@@ -547,11 +590,8 @@ proptest! {
         ceiling in 32u64..1_200,
     ) {
         let (envelope, full_ids) = sections_envelope(&lens);
-        let outcome =
+        let drained =
             drain_to_exhaustion(&envelope, ceiling, SECTION_REGISTRY, section_item_ids, 11)?;
-        let DrainOutcome::Drained(drained) = outcome else {
-            return Ok(());
-        };
         let mut seen = std::collections::BTreeSet::new();
         for (page_index, page) in drained.pages.iter().enumerate() {
             for id in page {

@@ -21,11 +21,9 @@
 //! - **MR2 — resource-profile does not change selection.** A
 //!   `--resource-profile lean` and `--resource-profile swarm_heavy`
 //!   run of the same query (with all other flags equal) must produce
-//!   the SAME selected memory_id list and the same pack hash. The
-//!   resource profile governs runtime SLOs (cancellation budgets,
-//!   reserved memory, candidate-pool caps), not the selection
-//!   algorithm — if it leaks into the pack content the determinism
-//!   contract is broken.
+//!   same selected memory_id list. Each profile must produce a stable
+//!   hash on replay, but hashes differ across profiles because they
+//!   bind the resource-profile SLO output as part of request identity.
 //!
 //! - **MR3 — candidate-pool growth preserves the selected set.** For
 //!   a fixed query and budget, increasing `--candidate-pool` from N
@@ -233,7 +231,7 @@ fn pack_profile_selection_is_deterministic_across_cold_re_run() -> TestResult {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn resource_profile_does_not_change_pack_selection_or_hash() -> TestResult {
+fn resource_profile_preserves_selection_and_binds_replay_hash() -> TestResult {
     let workspace = unique_workspace("mr2-resource-profile-invariance")?;
     seed_workspace(&workspace)?;
 
@@ -261,12 +259,30 @@ fn resource_profile_does_not_change_pack_selection_or_hash() -> TestResult {
             "MR2 broken — resource-profile changes selected memory_id sequence:\n  lean={ids_lean:?}\n  swarm_heavy={ids_swarm:?}",
         ));
     }
-    let hash_lean = pack_hash(&lean);
-    let hash_swarm = pack_hash(&swarm_heavy);
-    if hash_lean != hash_swarm {
+    if ids_lean.is_empty() {
+        return Err("MR2 fixture must select memories".to_owned());
+    }
+    let hash_lean = pack_hash(&lean).ok_or("lean pack hash is missing")?;
+    let hash_swarm = pack_hash(&swarm_heavy).ok_or("swarm_heavy pack hash is missing")?;
+    if hash_lean == hash_swarm {
         return Err(format!(
-            "MR2 broken — resource-profile changes pack hash:\n  lean={hash_lean:?}\n  swarm_heavy={hash_swarm:?}",
+            "MR2 broken — pack hash must bind resource-profile SLO output: {hash_lean}",
         ));
+    }
+    for (profile, expected_hash) in [("lean", &hash_lean), ("swarm_heavy", &hash_swarm)] {
+        let replay = context_json(
+            &workspace,
+            "prepare release",
+            "balanced",
+            "20",
+            "1500",
+            Some(profile),
+        )?;
+        if selected_memory_ids(&replay) != ids_lean
+            || pack_hash(&replay).as_ref() != Some(expected_hash)
+        {
+            return Err(format!("MR2 broken — {profile} pack changed on replay"));
+        }
     }
     Ok(())
 }

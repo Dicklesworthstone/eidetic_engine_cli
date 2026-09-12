@@ -1,22 +1,20 @@
-//! bd-2hwmw — metamorphic relations for `ee remember` + `ee search`
-//! idempotence and ordering invariants.
+//! bd-2hwmw — metamorphic relations for `ee remember`, `ee memory list`,
+//! and `ee search` idempotence, tag filtering, and ordering invariants.
 //!
 //! Five MRs from the bd-2hwmw spec:
 //!
-//! - **MR1 — `ee remember` is idempotent on re-run with same args.**
+//! - **MR1 — `ee remember` is idempotent when replaying the same key.**
 //!   Two back-to-back `ee remember <content> --level procedural --kind
-//!   rule --json` invocations with byte-identical positional + flag
-//!   arguments must NOT produce two distinct logical memories surfaced
-//!   as independent search hits. Drift here would expose a missing
-//!   content-or-canonical-key dedup gate in the remember write path.
+//!   rule --idempotency-key <key> --json` invocations with identical
+//!   arguments must return the original memory ID and expose exactly
+//!   one search hit. Separate writes without a replay key may record
+//!   separate observations with the same content.
 //!
-//! - **MR2 — `ee search` ordering is stable when a filter narrows the
-//!   universe.** For a query `q`, two runs differing only by a more
-//!   restrictive `--tag` filter must return a result list that is a
-//!   SUBSET (by docId) of the broader run, with relative rank order
-//!   preserved across the surviving docIds. Drift here would surface
-//!   a tag-filter pipeline that re-ranks the survivors rather than
-//!   simply removing the excluded ones.
+//! - **MR2 — `ee memory list` ordering is stable when a tag filter
+//!   narrows the universe.** The filtered list must contain exactly
+//!   the matching memory IDs and preserve their order in the unfiltered
+//!   list. Tag filtering belongs to `memory list`; `search` does not
+//!   expose a `--tag` flag.
 //!
 //! - **MR3 — remember-then-search returns the just-added memory.**
 //!   After `ee remember <discriminative content>` succeeds with a
@@ -29,8 +27,7 @@
 //! - **MR4 — tag set has set semantics, not list semantics.** Two
 //!   memories with identical CONTENT but `--tags a,b,c` vs
 //!   `--tags c,b,a` must surface identically under tag-filtered
-//!   search. The set `{a,b,c}` equals `{c,b,a}`; if the surfaced
-//!   results differ, the tag pipeline is order-sensitive.
+//!   memory listing. Repeated tags also leave membership unchanged.
 //!
 //! - **MR5 — outcome signal does not change retrieval seed.** Recording
 //!   an `ee outcome` signal against a memory must not alter the
@@ -106,8 +103,9 @@ fn run_ee_search(workspace: &Path, query_args: &[&str]) -> Result<Output, String
 fn ee_stdout_json(output: Output, context: &str) -> Result<JsonValue, String> {
     if !output.status.success() {
         return Err(format!(
-            "{context} failed: exit={:?} stderr={}",
+            "{context} failed: exit={:?} stdout={} stderr={}",
             output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         ));
     }
@@ -184,6 +182,22 @@ fn search_doc_ids(envelope: &JsonValue) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn listed_memory_ids(envelope: &JsonValue) -> Result<Vec<String>, String> {
+    envelope
+        .pointer("/data/memories")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| format!("memory list response missing memories: {envelope}"))?
+        .iter()
+        .map(|memory| {
+            memory
+                .get("id")
+                .and_then(JsonValue::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| format!("listed memory missing id: {memory}"))
+        })
+        .collect()
+}
+
 /// Try to surface a memory_id from a search result. Different output
 /// shapes carry the memory ID under different pointers; check each.
 fn search_result_memory_ids(envelope: &JsonValue) -> Vec<String> {
@@ -214,29 +228,47 @@ fn search_result_memory_ids(envelope: &JsonValue) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// MR1 — remember idempotency on re-run with same args
+// MR1 — remember idempotency on replay with the same key
 // ---------------------------------------------------------------------------
 
 #[test]
-fn remember_is_idempotent_on_byte_identical_re_run() -> TestResult {
+fn remember_is_idempotent_on_byte_identical_keyed_re_run() -> TestResult {
     let workspace = unique_workspace("mr1-remember-idempotent")?;
     init_workspace(&workspace)?;
 
     let content = "MR1 fixture: idempotent re-run must not produce two distinct surfaced memories.";
     let tags = "mr1,idempotency,bd-2hwmw";
+    let args = [
+        "remember",
+        content,
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--tags",
+        tags,
+        "--idempotency-key",
+        "mr1-remember-replay",
+        "--json",
+    ];
 
-    let first = remember(&workspace, content, Some(tags), "remember #1")?;
+    let first = run_ee_json(&workspace, &args, "remember #1")?;
     let first_id = memory_id_of(&first, "remember #1")?;
-    let second = remember(&workspace, content, Some(tags), "remember #2")?;
-    let second_id = memory_id_of(&second, "remember #2")?;
+    let second = run_ee_json(&workspace, &args, "remember #2")?;
+    let second_id = second
+        .pointer("/data/memoryId")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| format!("replay response missing memoryId: {second}"))?;
+    if second_id != first_id
+        || second.pointer("/data/status").and_then(JsonValue::as_str) != Some("already_recorded")
+    {
+        return Err(format!(
+            "MR1 broken — keyed replay did not return the original memory {first_id}: {second}"
+        ));
+    }
 
-    // Search for the discriminative content and assert the surfaced
-    // result set carries at MOST one distinct memory_id matching this
-    // fixture. If remember is strictly idempotent we get exactly one;
-    // if remember uses a dedup-link semantic we still get exactly one
-    // logical memory surfaced even though `first_id` and `second_id`
-    // may differ. Both forms satisfy the bd-2hwmw contract; what
-    // breaks it is two distinct hits.
+    // The fixture has one logical memory. Require its hit so an empty
+    // result cannot pass the replay invariant vacuously.
     let search = run_search_json(
         &workspace,
         &["MR1 fixture: idempotent re-run"],
@@ -244,28 +276,24 @@ fn remember_is_idempotent_on_byte_identical_re_run() -> TestResult {
     )?;
     let surfaced_ids = search_result_memory_ids(&search);
 
-    let matching: Vec<&String> = surfaced_ids
-        .iter()
-        .filter(|id| *id == &first_id || *id == &second_id)
-        .collect();
-    if matching.len() > 1 {
+    if surfaced_ids != vec![first_id.clone()] {
         return Err(format!(
-            "MR1 broken — two distinct memories surfaced for the same remember args:\n  first_id={first_id} second_id={second_id}\n  surfaced ids={surfaced_ids:?}",
+            "MR1 broken — keyed replay must surface exactly the original memory:\n  first_id={first_id}\n  surfaced ids={surfaced_ids:?}",
         ));
     }
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// MR2 — search ordering stable when filter narrows
+// MR2 — memory-list ordering stable when a tag filter narrows
 // ---------------------------------------------------------------------------
 
 #[test]
-fn search_ordering_is_stable_when_tag_filter_narrows_universe() -> TestResult {
-    let workspace = unique_workspace("mr2-search-narrowing")?;
+fn memory_list_ordering_is_stable_when_tag_filter_narrows_universe() -> TestResult {
+    let workspace = unique_workspace("mr2-list-narrowing")?;
     init_workspace(&workspace)?;
 
-    // Seed a four-memory corpus where two carry the narrowing tag.
+    // Seed a four-memory corpus where three carry the narrowing tag.
     let pairs = [
         (
             "Before release run cargo fmt --check to verify code formatting.",
@@ -284,55 +312,44 @@ fn search_ordering_is_stable_when_tag_filter_narrows_universe() -> TestResult {
             "release,db,bd-2hwmw",
         ),
     ];
+    let mut expected_all = Vec::new();
+    let mut expected_release = Vec::new();
     for (content, tags) in pairs {
-        remember(&workspace, content, Some(tags), "remember mr2")?;
+        let remembered = remember(&workspace, content, Some(tags), "remember mr2")?;
+        let id = memory_id_of(&remembered, "remember mr2")?;
+        if tags.split(',').any(|tag| tag == "release") {
+            expected_release.push(id.clone());
+        }
+        expected_all.push(id);
     }
+    expected_all.sort();
+    expected_release.sort();
 
-    let broad = run_search_json(&workspace, &["release cargo"], "broad search")?;
-    let narrow = run_search_json(
+    let broad = run_ee_json(
         &workspace,
-        &["release cargo", "--tag", "release"],
-        "narrow search",
+        &["memory", "list", "--json"],
+        "broad memory list",
     )?;
+    let narrow_args = ["memory", "list", "--tag", "release", "--json"];
+    let narrow = run_ee_json(&workspace, &narrow_args, "narrow memory list")?;
 
-    let broad_ids = search_doc_ids(&broad);
-    let narrow_ids = search_doc_ids(&narrow);
+    let broad_ids = listed_memory_ids(&broad)?;
+    let narrow_ids = listed_memory_ids(&narrow)?;
 
-    if narrow_ids.is_empty() {
-        // The narrowing filter may be unsupported via this exact flag
-        // name on the current CLI surface. Treat empty narrow as a
-        // skip-with-explanation rather than a false failure — the
-        // metamorphic relation is vacuously preserved.
-        return Ok(());
-    }
-
-    // Subset property: every docId in the narrow result list must
-    // appear in the broad result list.
-    for id in &narrow_ids {
-        if !broad_ids.contains(id) {
-            return Err(format!(
-                "MR2 broken — narrow docId not in broad result set: id={id}\n  broad={broad_ids:?}\n  narrow={narrow_ids:?}",
-            ));
-        }
-    }
-
-    // Order-preservation: the relative order of narrow's docIds must
-    // match their relative order in broad. Walk broad in order and
-    // ensure narrow_ids appear as a sub-sequence.
-    let mut narrow_iter = narrow_ids.iter();
-    let mut current = narrow_iter.next();
-    for broad_id in &broad_ids {
-        if let Some(target) = current
-            && broad_id == target
-        {
-            current = narrow_iter.next();
-        }
-    }
-    if current.is_some() {
+    // Both lists use ascending memory-ID order. Comparing each complete
+    // expected sequence also pins the relative order of surviving IDs.
+    if broad_ids != expected_all || narrow_ids != expected_release {
         return Err(format!(
-            "MR2 broken — narrow docIds are a subset but their order does not match the broad sequence:\n  broad={broad_ids:?}\n  narrow={narrow_ids:?}",
+            "MR2 broken — memory listing must return exactly the expected IDs in deterministic order:\n  expected all={expected_all:?} actual={broad_ids:?}\n  expected release={expected_release:?} actual={narrow_ids:?}"
         ));
     }
+    let repeated = run_ee_json(&workspace, &narrow_args, "repeat narrow memory list")?;
+    if listed_memory_ids(&repeated)? != narrow_ids {
+        return Err(format!(
+            "MR2 broken — repeated tag-filtered listing changed: {repeated}"
+        ));
+    }
+
     Ok(())
 }
 
@@ -373,7 +390,7 @@ fn remember_then_search_surfaces_the_just_added_memory() -> TestResult {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tag_set_has_set_semantics_not_list_semantics() -> TestResult {
+fn memory_list_tag_filter_has_set_semantics_under_reordering_and_duplicates() -> TestResult {
     let workspace_canonical = unique_workspace("mr4-tags-canonical")?;
     let workspace_reordered = unique_workspace("mr4-tags-reordered")?;
     init_workspace(&workspace_canonical)?;
@@ -383,58 +400,55 @@ fn tag_set_has_set_semantics_not_list_semantics() -> TestResult {
         (
             "MR4 fixture: cargo fmt is the canonical pre-commit formatter (bd-2hwmw).",
             "release,cargo,format",
-            "format,cargo,release",
+            "format,cargo,release,cargo",
         ),
         (
             "MR4 fixture: cargo test validates CI integration before pushing (bd-2hwmw).",
             "cargo,test,ci",
             "ci,test,cargo",
         ),
+        (
+            "MR4 fixture: database recovery preserves provenance (bd-2hwmw).",
+            "database,recovery",
+            "recovery,database,recovery",
+        ),
     ];
+    let mut expected_canonical = std::collections::BTreeSet::new();
+    let mut expected_reordered = std::collections::BTreeSet::new();
     for (content, canonical_tags, reordered_tags) in pairs {
-        remember(
+        let canonical = remember(
             &workspace_canonical,
             content,
             Some(canonical_tags),
             "remember canonical mr4",
         )?;
-        remember(
+        let reordered = remember(
             &workspace_reordered,
             content,
             Some(reordered_tags),
             "remember reordered mr4",
         )?;
+        if canonical_tags.split(',').any(|tag| tag == "cargo") {
+            expected_canonical.insert(memory_id_of(&canonical, "remember canonical mr4")?);
+            expected_reordered.insert(memory_id_of(&reordered, "remember reordered mr4")?);
+        }
     }
 
-    // Search both workspaces with the SAME query + tag filter ordering.
-    // A set-semantic tag pipeline returns the same surfaced doc set
-    // (modulo stable ordering); a list-semantic pipeline diverges.
-    let canonical = run_search_json(
-        &workspace_canonical,
-        &["MR4 fixture", "--tag", "cargo"],
-        "search canonical mr4",
-    )?;
-    let reordered = run_search_json(
-        &workspace_reordered,
-        &["MR4 fixture", "--tag", "cargo"],
-        "search reordered mr4",
-    )?;
+    // Compare known memory identities in each workspace; identical content
+    // receives independent IDs across workspaces. The non-cargo control must
+    // be absent from both lists.
+    let args = ["memory", "list", "--tag", "cargo", "--json"];
+    let canonical = run_ee_json(&workspace_canonical, &args, "list canonical mr4")?;
+    let reordered = run_ee_json(&workspace_reordered, &args, "list reordered mr4")?;
 
-    let canonical_ids: std::collections::BTreeSet<String> =
-        search_doc_ids(&canonical).into_iter().collect();
-    let reordered_ids: std::collections::BTreeSet<String> =
-        search_doc_ids(&reordered).into_iter().collect();
+    let canonical_ids = listed_memory_ids(&canonical)?;
+    let reordered_ids = listed_memory_ids(&reordered)?;
+    let expected_canonical: Vec<String> = expected_canonical.into_iter().collect();
+    let expected_reordered: Vec<String> = expected_reordered.into_iter().collect();
 
-    // If neither workspace surfaces results under this tag filter the
-    // relation is vacuously preserved; if one diverges from the other
-    // the set semantic is broken. The check is on the SET, not the
-    // order — MMR/diversity reshuffling does not produce a false
-    // positive.
-    let canonical_size = canonical_ids.len();
-    let reordered_size = reordered_ids.len();
-    if canonical_size != reordered_size {
+    if canonical_ids != expected_canonical || reordered_ids != expected_reordered {
         return Err(format!(
-            "MR4 broken — tag-set order changes surfaced result count: canonical={canonical_size} reordered={reordered_size}\n  canonical_ids={canonical_ids:?}\n  reordered_ids={reordered_ids:?}",
+            "MR4 broken — tag-filtered lists must return exactly the cargo-tagged memories regardless of tag order or repetition:\n  expected canonical={expected_canonical:?} actual={canonical_ids:?}\n  expected reordered={expected_reordered:?} actual={reordered_ids:?}",
         ));
     }
     Ok(())
