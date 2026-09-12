@@ -11992,6 +11992,7 @@ mod tests {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
         let workspace_id = "wsp_012345678901234567890123r1";
+        let _embedder_guard = install_test_hash_workspace_embedder(workspace_id);
         connection
             .insert_workspace(
                 workspace_id,
@@ -12094,6 +12095,7 @@ mod tests {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
         let workspace_id = "wsp_012345678901234567890123c1";
+        let _embedder_guard = install_test_hash_workspace_embedder(workspace_id);
         connection
             .insert_workspace(
                 workspace_id,

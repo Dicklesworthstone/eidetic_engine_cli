@@ -75,7 +75,7 @@ fn duplicate_content(group_index: usize, slot: usize) -> String {
 
 fn seed_fixture(memory_count: usize) -> ConsolidatorFixture {
     assert!(
-        memory_count % DUPLICATE_GROUP_SIZE == 0,
+        memory_count.is_multiple_of(DUPLICATE_GROUP_SIZE),
         "benchmark scale must divide evenly into duplicate groups"
     );
     let temp_dir = TempDir::new().expect("create consolidator benchmark tempdir");

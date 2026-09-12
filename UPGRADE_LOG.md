@@ -263,6 +263,14 @@ one stale README assertion (32 other cases passed): it now checks the current
 guarded download commands and cacheable fallback URLs. The superseded DSR
 binary build was stopped; publication requires rechecking the corrected source.
 
+The next all-target Clippy pass exposed four remaining test/benchmark idioms;
+these were corrected without relaxing the lint policy. Two existing index
+snapshot tests also mixed a cached neural producer with hash-embedded queries.
+Both ordering scenarios passed unchanged in an isolated hash-model process.
+Their fixtures now install the existing workspace-scoped hash-embedder guard
+so machine model caches cannot change the producer. Every ordering assertion
+is retained; the production index implementation is unchanged.
+
 The refreshed registry lock still contains `lru 0.16.4` through published
 Tantivy 0.26.2. `cargo audit --json` exits zero and lists zero vulnerabilities,
 but reports RUSTSEC-2026-0253 under informational `unsound` warnings, alongside

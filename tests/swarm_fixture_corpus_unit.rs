@@ -254,7 +254,7 @@ fn fixture_hash_embedder(content: &str) -> Vec<f32> {
     let mut buf = vec![0_u8; HASH_EMBEDDER_DIMENSIONS * 4];
     digest.finalize_xof().fill(&mut buf);
     let mut vector = Vec::with_capacity(HASH_EMBEDDER_DIMENSIONS);
-    for chunk in buf.chunks_exact(4) {
+    for chunk in buf.as_chunks::<4>().0 {
         let raw = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         let unit = (raw as f32 / u32::MAX as f32) * 2.0 - 1.0;
         vector.push(unit);
