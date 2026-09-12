@@ -175,8 +175,8 @@ inputs. Upgrades are applied and tested individually before the next upgrade.
 
 - [x] Inventory direct registry dependencies and preserve path dependencies.
 - [x] crossbeam-queue 0.3.13 → 0.3.14: 58 writer queue tests passed.
-- [ ] base64 0.22.1 → 0.23.1: applied; cursor/encoding tests pending.
-- [ ] fs4 0.13.1 → 1.1.0: research and test synchronous file locks.
+- [x] base64 0.22.1 → 0.23.1: 151 selected regression tests passed.
+- [ ] fs4 0.13.1 → 1.1.0: API migration applied; lock tests pending.
 - [ ] uuid 1.24.1 → 1.26.1: research and test identifier generation.
 - [ ] zeroize 1.8.2 → 1.9.0: research and test secret handling.
 - [ ] zstd 0.13.3 → 0.14.0: research and test pack/model compression.
@@ -202,7 +202,20 @@ the unchanged general-purpose encoding/decoding APIs and does not match the
 changed error variant. Default features are disabled and `std` remains enabled;
 the scalar implementation is sufficient for EE's cursors and credentials.
 Version 0.23.1 was already present in the lockfile for Asupersync. The older
-0.22.1 entry remains required by other transitive consumers. Tests are pending.
+0.22.1 entry remains required by other transitive consumers. Pinned RCH tests
+at 4eae0038e passed all 151 selected cursor, query, preflight-token,
+deterministic-ID and JSONL regression tests on hz4, with no failures or ignores.
+
+## fs4 1.1.0
+
+The [upstream source](https://github.com/al8n/fs4/tree/df476ee1de2926ae4599607c325a5aa1d334501d)
+exports synchronous `FileExt` at the crate root, renames exclusive locking to
+`lock`/`try_lock`, and returns `TryLockError::WouldBlock` for contention.
+EE retains synchronous-only features and distinguishes contention from I/O
+errors in doctor locking. Key rotation still takes an exclusive lock while
+approval transactions hold shared locks. Existing contention and release
+assertions use the new API without weakening their guarantees. Tantivy retains
+its separate fs4 0.13.1 requirement. Remote lock tests are pending.
 
 ## Existing release gates
 

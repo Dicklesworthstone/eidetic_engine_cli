@@ -68888,7 +68888,7 @@ mod tests {
 
     use asupersync::{CancelKind, CancelReason};
     use clap::{CommandFactory, Parser, error::ErrorKind};
-    use fs4::fs_std::FileExt as Fs4FileExt;
+    use fs4::FileExt as Fs4FileExt;
 
     use crate::core::agent_docs::{AGENT_CORE_COMMANDS, AgentDocsTopic};
     use crate::core::init::{InitOptions, init_workspace};
@@ -69806,11 +69806,8 @@ mod tests {
             .write(true)
             .open(&lock_path)
             .map_err(|error| format!("open persistent doctor lock: {error}"))?;
-        ensure(
-            Fs4FileExt::try_lock_exclusive(&lock)
-                .map_err(|error| format!("probe persistent doctor lock: {error}"))?,
-            "persistent doctor lock is still held",
-        )?;
+        Fs4FileExt::try_lock(&lock)
+            .map_err(|error| format!("probe persistent doctor lock: {error}"))?;
         Fs4FileExt::unlock(&lock).map_err(|error| format!("release test doctor lock: {error}"))
     }
 

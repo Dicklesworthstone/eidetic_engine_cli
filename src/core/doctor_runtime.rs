@@ -57,7 +57,7 @@ use chrono::Utc;
     target_vendor = "apple",
     windows
 ))]
-use fs4::fs_std::FileExt as Fs4FileExt;
+use fs4::FileExt as Fs4FileExt;
 use serde::{Deserialize, Serialize};
 
 /// Public schema string for the doctor capabilities report. Bump only on a
@@ -2942,13 +2942,13 @@ fn acquire_doctor_advisory_lock(
     lock_file: &fs::File,
     lock_path: &Path,
 ) -> Result<(), DoctorRuntimeError> {
-    match Fs4FileExt::try_lock_exclusive(lock_file) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(DoctorRuntimeError::ConcurrencyLost {
+    match Fs4FileExt::try_lock(lock_file) {
+        Ok(()) => Ok(()),
+        Err(fs4::TryLockError::WouldBlock) => Err(DoctorRuntimeError::ConcurrencyLost {
             lock_path: lock_path.to_path_buf(),
             holder_run_id: read_doctor_lock_holder_file(lock_file),
         }),
-        Err(source) => Err(DoctorRuntimeError::Io {
+        Err(fs4::TryLockError::Error(source)) => Err(DoctorRuntimeError::Io {
             context: format!("acquire persistent doctor lock {}", lock_path.display()),
             source,
         }),
@@ -4298,11 +4298,7 @@ mod tests {
             .write(true)
             .open(&lock_path)
             .expect("open persistent doctor lock");
-        assert!(
-            Fs4FileExt::try_lock_exclusive(&lock)
-                .expect("probe released persistent doctor advisory lock"),
-            "persistent doctor advisory lock should be released"
-        );
+        Fs4FileExt::try_lock(&lock).expect("persistent doctor advisory lock should be released");
         Fs4FileExt::unlock(&lock).expect("unlock test doctor lock");
     }
 
@@ -4790,10 +4786,7 @@ mod tests {
             .write(true)
             .open(&lock_path)
             .unwrap();
-        assert!(
-            Fs4FileExt::try_lock_exclusive(&lock).expect("hold external advisory lock"),
-            "external advisory lock should be available"
-        );
+        Fs4FileExt::try_lock(&lock).expect("external advisory lock should be available");
 
         let result = RunContext::start(
             ws.path(),
@@ -4964,10 +4957,7 @@ mod tests {
         let lock = fs::File::create(&lock_path).unwrap();
         lock.set_len(DOCTOR_LOCK_FILE_INSPECT_LIMIT.saturating_add(1))
             .unwrap();
-        assert!(
-            Fs4FileExt::try_lock_exclusive(&lock).expect("hold oversized lock"),
-            "oversized advisory lock should be available"
-        );
+        Fs4FileExt::try_lock(&lock).expect("oversized advisory lock should be available");
 
         let result = RunContext::start(
             ws.path(),
@@ -5003,10 +4993,7 @@ mod tests {
         let original = b"peer-owned read-only lock contents";
         fs::write(&lock_path, original).unwrap();
         let mut read_only = fs::OpenOptions::new().read(true).open(&lock_path).unwrap();
-        assert!(
-            Fs4FileExt::try_lock_exclusive(&read_only).expect("acquire test advisory lock"),
-            "read-only test advisory lock should be available"
-        );
+        Fs4FileExt::try_lock(&read_only).expect("read-only test advisory lock should be available");
 
         let result = write_doctor_lock_contents(&mut read_only, "replacement\n");
 

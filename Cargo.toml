@@ -124,7 +124,7 @@ frankensearch = { version = "0.5.0", path = "../frankensearch/frankensearch", de
 fsqlite = { version = "0.3.16", path = "../frankensqlite/crates/fsqlite", default-features = false, features = ["json"] }
 # MSRV-compatible, safe advisory file locking for doctor fix/undo coordination.
 # Keep async features disabled: Tokio/async-std/smol are forbidden here.
-fs4 = { version = "0.13.1", default-features = false, features = ["sync"] }
+fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["fast", "zeroize"] }
 getrandom = { version = "0.4.2" }
 zeroize = { version = "=1.8.2", default-features = false }

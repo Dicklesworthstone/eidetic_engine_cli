@@ -36,7 +36,7 @@ use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
-use fs4::fs_std::FileExt as Fs4FileExt;
+use fs4::FileExt as Fs4FileExt;
 use ring::{aead, pbkdf2};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
@@ -759,7 +759,7 @@ impl StoreAuthRoot {
     /// is atomically replaced. Returns the new current key id.
     pub fn rotate(&mut self) -> Result<KeyId, StoreAuthError> {
         let lock_file = open_key_lock_file(&self.keys_dir)?;
-        Fs4FileExt::lock_exclusive(&lock_file).map_err(|error| StoreAuthError::Io {
+        Fs4FileExt::lock(&lock_file).map_err(|error| StoreAuthError::Io {
             path: self.keys_dir.join(KEY_LOCK_FILE_NAME).display().to_string(),
             message: format!("acquire exclusive key-store lock: {error}"),
         })?;
@@ -1334,15 +1334,16 @@ mod tests {
         let contender = open_key_lock_file(dir.path()).expect("rotation contender");
 
         assert!(
-            !Fs4FileExt::try_lock_exclusive(&contender).expect("try exclusive while shared"),
+            matches!(
+                Fs4FileExt::try_lock(&contender),
+                Err(fs4::TryLockError::WouldBlock)
+            ),
             "rotation must not enter while an approval transaction holds the read guard"
         );
 
         drop(guard);
-        assert!(
-            Fs4FileExt::try_lock_exclusive(&contender).expect("try exclusive after shared"),
-            "rotation may enter after the approval transaction releases its guard"
-        );
+        Fs4FileExt::try_lock(&contender)
+            .expect("rotation may enter after the approval transaction releases its guard");
         Fs4FileExt::unlock(&contender).expect("unlock contender");
     }
 
