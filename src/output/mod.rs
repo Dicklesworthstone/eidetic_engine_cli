@@ -11369,6 +11369,33 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: daemon_search_request_schema_definition,
         },
         SchemaEntry {
+            id: crate::daemon::protocol::DAEMON_ORIENT_HOOK_REQUEST_SCHEMA_V1,
+            version: "1",
+            description: "Bounded workspace daemon SessionStart context request.",
+            category: "ops",
+            definition: || {
+                include_str!("../../docs/schemas/ee.daemon.orient_hook.request.v1.json").to_owned()
+            },
+        },
+        SchemaEntry {
+            id: crate::daemon::protocol::DAEMON_RECALL_REQUEST_SCHEMA_V1,
+            version: "1",
+            description: "Workspace daemon anchored recall request.",
+            category: "ops",
+            definition: || {
+                include_str!("../../docs/schemas/ee.daemon.recall.request.v1.json").to_owned()
+            },
+        },
+        SchemaEntry {
+            id: crate::daemon::protocol::DAEMON_MEMORY_READ_RESPONSE_SCHEMA_V1,
+            version: "1",
+            description: "Canonical orientation or recall response served by the workspace daemon.",
+            category: "ops",
+            definition: || {
+                include_str!("../../docs/schemas/ee.daemon.memory_read.response.v1.json").to_owned()
+            },
+        },
+        SchemaEntry {
             id: crate::daemon::protocol::DAEMON_SEARCH_RESPONSE_SCHEMA_V3,
             version: "3",
             description: "Strict daemon search result with optional ee.explain.performance.v1 payload.",

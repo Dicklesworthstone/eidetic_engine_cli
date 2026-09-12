@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.daemon.memory_read.response.v1.json",
+  "title": "ee.daemon.memory_read.response.v1",
+  "description": "Method result for orient_hook and recall, containing canonical ee.response.v2 output and its Markdown rendering. The outer daemon envelope echoes the authorized workspace.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "response", "markdown"],
+  "properties": {
+    "schema": {"const": "ee.daemon.memory_read.response.v1"},
+    "markdown": {"type": "string"},
+    "response": {
+      "type": "object",
+      "required": ["schema", "success", "data", "degraded"],
+      "properties": {
+        "schema": {"const": "ee.response.v2"},
+        "success": {"const": true},
+        "data": {"type": "object", "required": ["command"], "properties": {"command": {"enum": ["orient", "recall"]}}},
+        "degraded": {"type": "array", "items": {"type": "object"}}
+      }
+    }
+  }
+}

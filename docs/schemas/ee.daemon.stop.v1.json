@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.daemon.stop.v1.json",
   "title": "ee.daemon.stop.v1",
-  "description": "Payload schema for the `data` object emitted by `ee daemon stop` (see src/cli/mod.rs::handle_daemon_hot_mode_stop). The outer envelope is the canonical `ee.response.v2` success envelope; this schema describes the inner `data` object only. The SRR1 skeleton (bd-oja31) implements stop as a best-effort unlink of the UDS file; a follow-up slice will add a real shutdown RPC that drains in-flight requests before unlink. The schema is intentionally narrow so future lifecycle fields (e.g. pid, drained_request_count) can be added under a `v2` schema rather than mutating `v1`.",
+  "description": "The data object in the ee.response.v2 envelope from ee daemon stop. The CLI validates endpoint ownership and the daemon protocol, sends a shutdown request, and waits for the daemon to release its workers and socket. It does not unlink an arbitrary supplied path.",
   "type": "object",
   "required": [
     "schema",
@@ -18,7 +18,7 @@
     "socketPath": {
       "type": "string",
       "minLength": 1,
-      "description": "Absolute path to the Unix-domain socket the stop attempt targeted. Defaults match `ee daemon start` (`${XDG_RUNTIME_DIR}/ee/daemon.sock` on Linux when the runtime dir is a private per-user directory, otherwise the per-UID `${TMPDIR:-/tmp}/ee-${uid}/daemon.sock` fallback used on macOS and shared-XDG hosts) and may be overridden via `--socket`. Rendered via `Path::display()`; Unix-only at this revision."
+      "description": "Absolute workspace endpoint targeted for shutdown: `${XDG_RUNTIME_DIR}/ee/d-<workspace-hash>.sock`, or the private per-UID `${TMPDIR:-/tmp}/ee-${uid}/d-<workspace-hash>.sock` fallback. Long runtime paths use /tmp/ee-${uid}. Matches daemon start's canonical workspace hash; override with --socket."
     },
     "removed": {
       "type": "boolean",

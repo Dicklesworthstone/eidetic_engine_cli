@@ -193,7 +193,8 @@ pub fn workspace_daemon_socket_path(workspace: &Path) -> PathBuf {
     let name = format!("d-{}.sock", &digest[..24]);
     let mut socket = default_daemon_socket_path().with_file_name(&name);
     // Leave room for the broker's per-attempt temporary socket suffix too.
-    if socket.as_os_str().as_encoded_bytes().len() > 75 {
+    // macOS permits 103 path bytes plus NUL; .tmp.<32 hex UUID> adds 37.
+    if socket.as_os_str().as_encoded_bytes().len() > 65 {
         socket = PathBuf::from("/tmp")
             .join(format!("ee-{}", current_euid()))
             .join(name);
@@ -335,7 +336,7 @@ mod tests {
             workspace_daemon_socket_path(&first.join("child/.."))
         );
         assert_ne!(socket, workspace_daemon_socket_path(&second));
-        assert!(socket.as_os_str().as_encoded_bytes().len() <= 75);
+        assert!(socket.as_os_str().as_encoded_bytes().len() + 37 < 104);
         assert_eq!(
             socket.parent(),
             workspace_daemon_socket_path(&second).parent()

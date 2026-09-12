@@ -98,6 +98,24 @@ impl DaemonMemoryReadResult {
     }
 }
 
+#[cfg(test)]
+mod memory_read_tests {
+    use super::*;
+
+    #[test]
+    fn memory_read_requests_reject_path_overrides_and_unknown_selectors() {
+        let orient = serde_json::json!({"schema": DAEMON_ORIENT_HOOK_REQUEST_SCHEMA_V1, "task": "release", "max_tokens": 1000, "candidate_pool": 20, "include_primer": true});
+        assert!(serde_json::from_value::<DaemonOrientHookParams>(orient.clone()).is_ok());
+        let mut escaped = orient;
+        escaped["database_path"] = Value::String("/different/workspace/ee.db".to_owned());
+        assert!(serde_json::from_value::<DaemonOrientHookParams>(escaped).is_err());
+        let mut recall = serde_json::json!({"schema": DAEMON_RECALL_REQUEST_SCHEMA_V1, "query": crate::core::recall::RecallQueryEcho::default()});
+        assert!(serde_json::from_value::<DaemonRecallParams>(recall.clone()).is_ok());
+        recall["query"]["workspace"] = Value::String("/different/workspace".to_owned());
+        assert!(serde_json::from_value::<DaemonRecallParams>(recall).is_err());
+    }
+}
+
 fn deserialize_present_json_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
 where
     D: Deserializer<'de>,

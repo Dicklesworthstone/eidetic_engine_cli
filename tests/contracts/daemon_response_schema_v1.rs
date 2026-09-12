@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use ee::core::search::PERFORMANCE_FALLBACK_REDACTED_MESSAGE;
 use ee::daemon::DAEMON_RESPONSE_SCHEMA_V1;
-use ee::daemon::protocol::{DaemonRequest, DaemonResponse};
+use ee::daemon::protocol::{DaemonRequest, DaemonResponse, METHOD_ORIENT_HOOK, METHOD_RECALL};
 use ee::daemon::server::{
     DAEMON_SEARCH_EXECUTION_FAILED_CODE, DAEMON_SEARCH_PARAMS_INVALID_CODE,
     DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V3, DaemonSearchResult,
@@ -1046,6 +1046,21 @@ fn daemon_search_current_method_schemas_are_registered_and_exportable() -> TestR
             SEARCH_RESPONSE_SCHEMA_PATH,
             "https://eidetic-engine/schemas/ee.daemon.search.response.v3.json",
         ),
+        (
+            ee::daemon::protocol::DAEMON_ORIENT_HOOK_REQUEST_SCHEMA_V1,
+            "docs/schemas/ee.daemon.orient_hook.request.v1.json",
+            "https://eidetic-engine/schemas/ee.daemon.orient_hook.request.v1.json",
+        ),
+        (
+            ee::daemon::protocol::DAEMON_RECALL_REQUEST_SCHEMA_V1,
+            "docs/schemas/ee.daemon.recall.request.v1.json",
+            "https://eidetic-engine/schemas/ee.daemon.recall.request.v1.json",
+        ),
+        (
+            ee::daemon::protocol::DAEMON_MEMORY_READ_RESPONSE_SCHEMA_V1,
+            "docs/schemas/ee.daemon.memory_read.response.v1.json",
+            "https://eidetic-engine/schemas/ee.daemon.memory_read.response.v1.json",
+        ),
     ] {
         let registration_count = ee::output::public_schemas()
             .iter()
@@ -1108,6 +1123,8 @@ fn daemon_request_schema_advertises_seed_methods() -> TestResult {
         METHOD_ECHO,
         METHOD_CONTEXT,
         METHOD_SEARCH,
+        METHOD_ORIENT_HOOK,
+        METHOD_RECALL,
         METHOD_SHUTDOWN,
         METHOD_TELEMETRY,
         METHOD_WRITE,
@@ -1189,8 +1206,8 @@ fn daemon_schema_descriptions_document_per_uid_socket_default() -> TestResult {
     let forbidden_bare_default = "/tmp/ee-daemon.sock";
     // The true fallback documented by the resolver: a per-UID parent under
     // the temp root, alongside the XDG-first Linux default.
-    let required_per_uid_fallback = "${TMPDIR:-/tmp}/ee-${uid}/daemon.sock";
-    let required_xdg_default = "${XDG_RUNTIME_DIR}/ee/daemon.sock";
+    let required_per_uid_fallback = "${TMPDIR:-/tmp}/ee-${uid}/d-<workspace-hash>.sock";
+    let required_xdg_default = "${XDG_RUNTIME_DIR}/ee/d-<workspace-hash>.sock";
 
     for schema_path in DAEMON_LIFECYCLE_SCHEMAS {
         let path = repo_root().join(schema_path);

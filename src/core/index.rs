@@ -9348,18 +9348,19 @@ mod tests {
             descriptor.semantic && descriptor.ready,
             "verified model must be available",
         )?;
-        let loaded = Model2VecEmbedder::load_with_name(&directory, POTION_MODEL_NAME)
+        let loaded = Model2VecEmbedder::load_shared_with_name(&directory, POTION_MODEL_NAME)
             .map_err(|error| error.to_string())?;
         let manifest = ModelManifest::potion_128m();
         ensure(
             descriptor_content_hash(&descriptor, ModelProvider::Model2Vec, Some(&manifest))
-                == active_embedder_fingerprint(&loaded, ModelProvider::Model2Vec).content_hash,
+                == active_embedder_fingerprint(loaded.as_ref(), ModelProvider::Model2Vec)
+                    .content_hash,
             "weight-free fingerprint must equal the real model's persisted fingerprint",
         )?;
         let coverage = EmbeddingVectorCoverage::new(3, 3);
         let inspected = embedding_posture_from_records(&descriptor, None, &[], coverage);
         let executed = embedding_posture_from_records(
-            &EmbedderDescriptor::from_embedder(&loaded),
+            &EmbedderDescriptor::from_embedder(loaded.as_ref()),
             None,
             &[],
             coverage,
@@ -9367,6 +9368,28 @@ mod tests {
         ensure(
             inspected == executed,
             "inspection and the real loaded model must report identical posture fields",
+        )?;
+        let expected = loaded as Arc<dyn crate::search::Embedder>;
+        let default = search_embedder_stack_for_settings(&settings).fast_arc();
+        let registered = load_registered_model2vec(RegisteredModel2VecIdentity {
+            canonical_source: directory,
+            content_hash: descriptor_content_hash(
+                &descriptor,
+                ModelProvider::Model2Vec,
+                Some(&manifest),
+            ),
+            dimension: BUNDLED_EMBEDDING_DIMENSION,
+            distance_metric: "cosine",
+        })
+        .map_err(|error| format!("real registered model load failed: {error:?}"))?
+        .fast_arc();
+        ensure(
+            Arc::ptr_eq(&expected, &default),
+            "default route must reuse the verified real model allocation",
+        )?;
+        ensure(
+            Arc::ptr_eq(&expected, &registered),
+            "registry route must reuse the same tokenizer and matrix allocation",
         )
     }
 

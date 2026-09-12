@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.daemon.start.v1.json",
   "title": "ee.daemon.start.v1",
-  "description": "Payload schema for the `data` object emitted by `ee daemon start` (see src/cli/mod.rs::handle_daemon_hot_mode_start). The outer envelope is the canonical `ee.response.v2` success envelope; this schema describes the inner `data` object only. The handler binds the Unix-domain socket and either reports the socket path and detaches (default) or blocks until terminated (`--foreground`). The schema is intentionally narrow because the SRR1 skeleton (bd-oja31) makes a small set of declarations; future slices (true daemonize, readiness poll, lifecycle PID file) may add fields under a `v2` schema rather than mutating `v1`. The skeleton's `std::mem::forget(handle)` leak (tracked in bd-37o8k) does NOT change the wire shape — the envelope still describes what the CLI claimed at emission time.",
+  "description": "The data object in the ee.response.v2 envelope from ee daemon start. Foreground mode binds the workspace endpoint and waits for termination. Detached mode starts a foreground child and reports success only after its endpoint becomes reachable. Each workspace daemon owns its model memory; no daemon is required for ordinary CLI operation.",
   "type": "object",
   "required": [
     "schema",
@@ -18,7 +18,7 @@
     "socketPath": {
       "type": "string",
       "minLength": 1,
-      "description": "Absolute path to the Unix-domain socket the daemon bound. On Linux this defaults to `${XDG_RUNTIME_DIR}/ee/daemon.sock` when the runtime dir is a private per-user directory; on macOS — and anywhere XDG_RUNTIME_DIR is unset, empty, or points at a shared temp root — it defaults to the per-UID path `${TMPDIR:-/tmp}/ee-${uid}/daemon.sock` (XDG_RUNTIME_DIR is not standard on Darwin). The daemon never defaults to a bare shared socket name directly under /tmp; that shape collided across local UIDs and was removed as a cross-tenant attack surface (bd-3j0td, bd-10ex7). May be overridden via the `--socket` flag. Rendered via `Path::display()`, so on Windows targets the value would use backslashes — but `ee daemon start` is currently Unix-only and emits a `DomainError::Configuration` on Windows, so consumers can treat this as a POSIX path."
+      "description": "Absolute bound workspace endpoint: `${XDG_RUNTIME_DIR}/ee/d-<workspace-hash>.sock`, or the private per-UID `${TMPDIR:-/tmp}/ee-${uid}/d-<workspace-hash>.sock` fallback. Long runtime paths use /tmp/ee-${uid} to preserve socket length headroom. The hash uses the canonical workspace path. Override with --socket. Unix-only; the parent must be private and owned by the current UID."
     },
     "foreground": {
       "type": "boolean",

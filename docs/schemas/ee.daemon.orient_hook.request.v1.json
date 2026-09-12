@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.daemon.orient_hook.request.v1.json",
+  "title": "ee.daemon.orient_hook.request.v1",
+  "description": "Bounded lexical SessionStart context. Workspace comes only from the authorized request envelope; full diagnostic probes are excluded. Embedding warm-up is not required.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "task", "max_tokens", "candidate_pool", "include_primer"],
+  "properties": {
+    "schema": {"const": "ee.daemon.orient_hook.request.v1"},
+    "task": {"type": "string"},
+    "max_tokens": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "candidate_pool": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "include_primer": {"type": "boolean"}
+  }
+}

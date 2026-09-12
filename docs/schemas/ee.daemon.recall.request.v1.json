@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.daemon.recall.request.v1.json",
+  "title": "ee.daemon.recall.request.v1",
+  "description": "Anchored recall for the authorized envelope workspace. Filtering, token budgets, cursor validation and provenance use the canonical CLI implementation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "query"],
+  "properties": {
+    "schema": {"const": "ee.daemon.recall.request.v1"},
+    "cursor": {"type": ["string", "null"]},
+    "query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paths", "symbols", "diffStaged", "kinds", "levels", "staleOnly"],
+      "properties": {
+        "paths": {"type": "array", "items": {"type": "string"}},
+        "symbols": {"type": "array", "items": {"type": "string"}},
+        "diffRef": {"type": ["string", "null"]},
+        "diffStaged": {"type": "boolean"},
+        "kinds": {"type": "array", "items": {"type": "string"}},
+        "levels": {"type": "array", "items": {"type": "string"}},
+        "staleOnly": {"type": "boolean"},
+        "budgetTokens": {"type": ["integer", "null"], "minimum": 0, "maximum": 4294967295}
+      }
+    }
+  }
+}

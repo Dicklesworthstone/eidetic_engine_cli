@@ -40265,6 +40265,11 @@ where
     }
     let orient_start_backend = crate::core::index::active_embed_backend();
     let mut degraded = Vec::new();
+    if args.use_daemon {
+        degraded.push(daemon_memory_read_fallback(
+            "Full orientation remains in-process; the daemon serves --fast --format hook --fields command,ambientContext",
+        ));
+    }
 
     let mut swarm_sources = if args.fast {
         [
