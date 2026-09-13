@@ -1078,6 +1078,31 @@ pub struct RuntimeProfileReport {
     pub budgets: ProfileBudgets,
 }
 
+impl<'de> serde::Deserialize<'de> for RuntimeProfileReport {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct WireProfile {
+            schema: String,
+            active_profile: String,
+            source: String,
+            budgets: serde_json::Value,
+        }
+        let wire = WireProfile::deserialize(deserializer)?;
+        let profile = wire.active_profile.parse().map_err(serde::de::Error::custom)?;
+        let report = Self::for_profile(profile, wire.source);
+        // Budgets are defined by the selected profile, never supplied by a
+        // transport peer. Reject a different schema or budget revision.
+        if wire.schema != RUNTIME_PROFILE_SCHEMA_V1
+            || serde_json::to_value(&report.budgets).map_err(serde::de::Error::custom)?
+                != wire.budgets
+        {
+            return Err(serde::de::Error::custom("runtime profile schema or budgets differ"));
+        }
+        Ok(report)
+    }
+}
+
 impl RuntimeProfileReport {
     #[must_use]
     pub fn for_profile(profile: OperatingProfile, source: impl Into<String>) -> Self {

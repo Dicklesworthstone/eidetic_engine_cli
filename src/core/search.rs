@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::MeshCommandMode;
 use crate::config::env_registry::{EnvVar, read};
@@ -571,7 +571,8 @@ impl SearchDedupMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SearchSourceMode {
     LexicalOnly,
     SemanticOnly,
@@ -813,7 +814,8 @@ fn default_workspace_index_dir(workspace_path: &Path) -> PathBuf {
         .join(DEFAULT_INDEX_SUBDIR)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum QueryAssistMode {
     Compact,
     Explain,
@@ -845,7 +847,7 @@ impl QueryAssistMode {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueryAssistReport {
     pub weak_result_reason: String,
     pub mode: QueryAssistMode,
@@ -857,20 +859,20 @@ pub struct QueryAssistReport {
     pub relevance_floor: Option<f32>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct QueryAssistReformulation {
     pub query: String,
-    pub strategy: &'static str,
+    pub strategy: String,
     pub rationale: String,
     pub matched_doc_id: String,
     pub matched_memory_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct QueryAssistCaptureTemplate {
-    pub level: &'static str,
-    pub kind: &'static str,
-    pub tags: Vec<&'static str>,
+    pub level: String,
+    pub kind: String,
+    pub tags: Vec<String>,
     pub content: String,
     pub command: String,
 }
@@ -889,9 +891,9 @@ impl QueryAssistCaptureTemplate {
             shell_quote(&content)
         );
         Self {
-            level: "semantic",
-            kind: "note",
-            tags: vec!["query-gap", "search-miss"],
+            level: "semantic".to_owned(),
+            kind: "note".to_owned(),
+            tags: vec!["query-gap".to_owned(), "search-miss".to_owned()],
             content,
             command,
         }
@@ -950,7 +952,7 @@ impl QueryAssistReformulation {
 /// independently of advisory-episode dedupe, so a suppressed warning never
 /// hides stale/generation/gap truth (bd-index-auto-freshness-m5kwf). Never
 /// reconstructed from advisory prose.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchIndexFreshness {
     pub stale: bool,
@@ -963,7 +965,7 @@ pub struct SearchIndexFreshness {
     pub large_gap: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchReport {
     pub status: SearchStatus,
     pub embed_backend: EmbedBackend,
@@ -1775,7 +1777,7 @@ pub struct RetrievalFieldCoverage {
     pub explanation_count: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchHit {
     pub doc_id: String,
     pub score: f32,
@@ -2037,13 +2039,13 @@ pub fn search_hit_dedup_link(conn: &DbConnection, hit: &SearchHit) -> Option<Ded
     find_embed_dedup_link(conn, hit.doc_id.as_str())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScoreExplanation {
     pub summary: String,
     pub factors: Vec<ScoreFactor>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScoreFactor {
     pub name: String,
     pub value: f32,
@@ -2052,7 +2054,7 @@ pub struct ScoreFactor {
     pub formula: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SearchDegradation {
     pub code: String,
     pub severity: String,
@@ -2826,7 +2828,8 @@ impl ScoreFactor {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ScoreSource {
     Lexical,
     SemanticFast,
@@ -2867,7 +2870,8 @@ impl ScoreSource {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SearchStatus {
     Success,
     NoResults,
@@ -5444,7 +5448,7 @@ fn push_query_assist_reformulation(
     }
     reformulations.push(QueryAssistReformulation {
         query: normalized,
-        strategy,
+        strategy: strategy.to_owned(),
         rationale: rationale.to_owned(),
         matched_doc_id: candidate.doc_id.clone(),
         matched_memory_id: candidate.memory_id().map(str::to_owned),
@@ -21793,7 +21797,7 @@ mod tests {
         secret.push_str(&"b".repeat(36));
         let reformulation = QueryAssistReformulation {
             query: format!("release with {secret}"),
-            strategy: "nearest_memory_terms",
+            strategy: "nearest_memory_terms".to_owned(),
             rationale: "test".to_owned(),
             matched_doc_id: "mem_semantic_secret".to_owned(),
             matched_memory_id: Some("mem_semantic_secret".to_owned()),
