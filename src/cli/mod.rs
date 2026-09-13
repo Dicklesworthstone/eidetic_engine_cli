@@ -63119,7 +63119,7 @@ where
         object.insert("warm".to_owned(), hot["warm"].clone());
         object.insert("hotMode".to_owned(), hot);
         let database_path = workspace_path.join(".ee").join("ee.db");
-        let team = if let Ok(connection) = crate::db::DbConnection::open_file(&database_path) {
+        let team = if let Ok(connection) = crate::db::DbConnection::open_file_read_only(&database_path) {
             let workspace_id = bound_cli_workspace_id(&connection, &workspace_path)
                 .unwrap_or_else(|_| crate::core::causal::stable_workspace_id(&workspace_path));
             crate::mesh::team::inspect_team_health(
@@ -89205,6 +89205,16 @@ mod tests {
         ensure_equal(&value["data"]["running"], &serde_json::json!(false), "no daemon is running")?;
         ensure_equal(&value["data"]["stewardRunning"], &serde_json::json!(false), "no steward jobs")?;
         ensure_equal(&value["data"]["hotMode"]["running"], &serde_json::json!(false), "absent hot daemon")
+    }
+
+    #[test]
+    fn daemon_status_does_not_initialize_an_absent_database() -> TestResult {
+        let workspace = unique_temp_workspace("status-uninitialized")?;
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let database = Path::new(&workspace).join(".ee/ee.db");
+        let (exit, _, _) = invoke(&["ee", "--json", "--workspace", &workspace, "daemon", "status"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "status before init")?;
+        ensure(!database.exists(), "status must not create a memory database")
     }
 
     #[cfg(unix)]
