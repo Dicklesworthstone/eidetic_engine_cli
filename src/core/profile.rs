@@ -1088,8 +1088,11 @@ impl<'de> serde::Deserialize<'de> for RuntimeProfileReport {
             source: String,
             budgets: serde_json::Value,
         }
-        let wire = WireProfile::deserialize(deserializer)?;
-        let profile = wire.active_profile.parse().map_err(serde::de::Error::custom)?;
+        let wire: WireProfile = serde::Deserialize::deserialize(deserializer)?;
+        let profile = wire
+            .active_profile
+            .parse()
+            .map_err(serde::de::Error::custom)?;
         let report = Self::for_profile(profile, wire.source);
         // Budgets are defined by the selected profile, never supplied by a
         // transport peer. Reject a different schema or budget revision.
@@ -1097,7 +1100,9 @@ impl<'de> serde::Deserialize<'de> for RuntimeProfileReport {
             || serde_json::to_value(&report.budgets).map_err(serde::de::Error::custom)?
                 != wire.budgets
         {
-            return Err(serde::de::Error::custom("runtime profile schema or budgets differ"));
+            return Err(serde::de::Error::custom(
+                "runtime profile schema or budgets differ",
+            ));
         }
         Ok(report)
     }

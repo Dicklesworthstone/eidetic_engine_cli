@@ -3645,9 +3645,19 @@ mod tests {
         );
         let first_json = serve_response_json(&first.wire)?;
         ensure(
+            first.wire.starts_with("HTTP/1.1 200 OK\r\n"),
+            true,
+            &format!("real context first request succeeds: {first_json}"),
+        )?;
+        ensure(
+            first_json["response"]["payload"]["success"].as_bool(),
+            Some(true),
+            &format!("real context first payload succeeds: {first_json}"),
+        )?;
+        ensure(
             first_json["response"]["payload"]["data"]["rerank"]["advisory"].is_object(),
             true,
-            "real context payload carries advisory before failed delivery",
+            &format!("real context payload carries advisory before failed delivery: {first_json}"),
         )?;
         write_serve_rendered_response(&mut FailingServeWriter, first, &state)
             .expect_err("real context disconnected writer must fail");
@@ -3663,9 +3673,19 @@ mod tests {
         );
         let retry_json = serve_response_json(&retry.wire)?;
         ensure(
+            retry.wire.starts_with("HTTP/1.1 200 OK\r\n"),
+            true,
+            &format!("real context retry request succeeds: {retry_json}"),
+        )?;
+        ensure(
+            retry_json["response"]["payload"]["success"].as_bool(),
+            Some(true),
+            &format!("real context retry payload succeeds: {retry_json}"),
+        )?;
+        ensure(
             retry_json["response"]["payload"]["data"]["rerank"]["advisory"].is_object(),
             true,
-            "real context retry preserves the undelivered advisory",
+            &format!("real context retry preserves the undelivered advisory: {retry_json}"),
         )?;
         ensure(
             retry_json["response"]["payload"]["data"]["rerank"]["advisorySummary"]
@@ -3690,6 +3710,16 @@ mod tests {
             serve_search_payload_json,
         );
         let search_json = serve_response_json(&search.wire)?;
+        ensure(
+            search.wire.starts_with("HTTP/1.1 200 OK\r\n"),
+            true,
+            &format!("real search request succeeds: {search_json}"),
+        )?;
+        ensure(
+            search_json["response"]["payload"]["success"].as_bool(),
+            Some(true),
+            &format!("real search payload succeeds: {search_json}"),
+        )?;
         ensure(
             search_json["response"]["payload"]["data"]["rerank"]["advisory"].is_null(),
             true,

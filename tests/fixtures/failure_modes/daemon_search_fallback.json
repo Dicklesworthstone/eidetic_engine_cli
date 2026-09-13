@@ -7,12 +7,15 @@
     "epic_letter": "search-warm-latency"
   },
   "surfaces": [
-    "search --use-daemon"
+    "search --use-daemon",
+    "pack --use-daemon",
+    "pack build --use-daemon",
+    "context --use-daemon"
   ],
   "severity": "warning",
   "repair_present": true,
   "trigger": {
-    "description": "An opt-in warm daemon search cannot negotiate the exact envelope, method, authorization, and method-specific request/response schemas, its round-trip fails, or the single cumulative two-second capability-plus-search attempt expires. The CLI executes canonical in-process search and records why the requested acceleration path was not used.",
+    "description": "An opt-in warm daemon search or pack retrieval cannot negotiate the exact envelope, method, authorization, and method-specific schemas, its round-trip fails, its scope requires local hydration, or the bounded capability-plus-retrieval attempt expires (five seconds by default). The CLI executes canonical in-process search and records why the requested acceleration path was not used.",
     "setup_commands": [
       "(no compatible daemon currently running)"
     ],

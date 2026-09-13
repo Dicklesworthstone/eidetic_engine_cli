@@ -64,7 +64,8 @@ use super::protocol::{
     METHOD_RECALL, read_request, write_response,
 };
 pub use super::protocol::{
-    DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V3, METHOD_SEARCH,
+    DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+    DAEMON_SEARCH_RESPONSE_SCHEMA_V3, METHOD_PACK_SEARCH, METHOD_SEARCH,
 };
 use super::{
     DAEMON_DEFAULT_RPC_TIMEOUT, DAEMON_MAX_INFLIGHT, DAEMON_METHOD_UNAUTHORIZED_CODE,
@@ -2245,6 +2246,7 @@ fn dispatch_with_echo_policy_and_workspace_inner(
             search_advisory_session,
             defer_advisory_until_socket_write,
         ),
+        METHOD_PACK_SEARCH => dispatch_pack_search(request, shutdown),
         METHOD_SEARCH => dispatch_search(
             request,
             shutdown,
@@ -4167,6 +4169,57 @@ fn validate_canonical_search_result(
     Ok(())
 }
 
+fn dispatch_pack_search(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonResponse {
+    if shutdown.load(Ordering::SeqCst) {
+        return daemon_search_params_error(request, "daemon is shutting down");
+    }
+    let params = match DaemonSearchParams::from_value(&request.params) {
+        Ok(params) => params,
+        Err(message) => return daemon_search_params_error(request, &message),
+    };
+    let Some(workspace_id) = request.workspace_id.as_deref() else {
+        return daemon_search_params_error(request, "authorized workspace_id is missing");
+    };
+    let (options, kind, filters, _) = match params.into_search_parts(workspace_id) {
+        Ok(parts) => parts,
+        Err(message) => return daemon_search_params_error(request, &message),
+    };
+    if kind.is_some()
+        || !filters.is_empty()
+        || matches!(
+            options.memory_scope,
+            MemoryScope::SelfOnly | MemoryScope::Team
+        )
+    {
+        return daemon_search_params_error(
+            request,
+            "pack filters and agent-specific scope remain local",
+        );
+    }
+    match crate::core::search::run_pack_search(&options) {
+        Ok(handoff) => {
+            let response = DaemonResponse::ok(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+                serde_json::json!({ "schema": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1, "handoff": handoff }),
+            );
+            if daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
+                response
+            } else {
+                daemon_search_params_error(request, "pack retrieval exceeds the response cap")
+            }
+        }
+        Err(error) => DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_SEARCH_EXECUTION_FAILED_CODE,
+            format!("Pack retrieval failed: {error}"),
+        ),
+    }
+}
+
 fn dispatch_search(
     request: &DaemonRequest,
     shutdown: &AtomicBool,
@@ -5711,8 +5764,10 @@ fn daemon_method_authority(method: &str) -> Option<DaemonAuthority> {
         METHOD_CAPABILITIES | METHOD_ECHO | METHOD_SHUTDOWN | METHOD_TELEMETRY => {
             Some(DaemonAuthority::SameUid)
         }
-        METHOD_CONTEXT | METHOD_SEARCH | METHOD_WRITE | METHOD_WRITE_JOURNAL
-        | METHOD_ORIENT_HOOK | METHOD_RECALL => Some(DaemonAuthority::SameUidWorkspace),
+        METHOD_CONTEXT | METHOD_SEARCH | METHOD_PACK_SEARCH | METHOD_WRITE
+        | METHOD_WRITE_JOURNAL | METHOD_ORIENT_HOOK | METHOD_RECALL => {
+            Some(DaemonAuthority::SameUidWorkspace)
+        }
         _ => None,
     }
 }
@@ -5784,6 +5839,7 @@ fn daemon_capabilities_result(bound_workspace_id: Option<&str>) -> serde_json::V
             METHOD_CONTEXT,
             METHOD_ECHO,
             METHOD_SEARCH,
+            METHOD_PACK_SEARCH,
             METHOD_ORIENT_HOOK,
             METHOD_RECALL,
             METHOD_SHUTDOWN,
@@ -5796,6 +5852,7 @@ fn daemon_capabilities_result(bound_workspace_id: Option<&str>) -> serde_json::V
             "ee.daemon.context": daemon_method_authority(METHOD_CONTEXT).expect("registered method").as_wire_label(),
             "ee.daemon.echo": daemon_method_authority(METHOD_ECHO).expect("registered method").as_wire_label(),
             "ee.daemon.search": daemon_method_authority(METHOD_SEARCH).expect("registered method").as_wire_label(),
+            "ee.daemon.pack_search": daemon_method_authority(METHOD_PACK_SEARCH).expect("registered method").as_wire_label(),
             "ee.daemon.orient_hook": daemon_method_authority(METHOD_ORIENT_HOOK).expect("registered method").as_wire_label(),
             "ee.daemon.recall": daemon_method_authority(METHOD_RECALL).expect("registered method").as_wire_label(),
             "ee.daemon.shutdown": daemon_method_authority(METHOD_SHUTDOWN).expect("registered method").as_wire_label(),
@@ -5815,6 +5872,10 @@ fn daemon_capabilities_result(bound_workspace_id: Option<&str>) -> serde_json::V
             "ee.daemon.search": {
                 "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
                 "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V3
+            },
+            "ee.daemon.pack_search": {
+                "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                "response": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1
             }
         },
         // GH #37: lets a client tell "this daemon is still loading its model"
@@ -5846,31 +5907,24 @@ pub fn client_round_trip(
     )
 }
 
-/// Apply a caller-owned cumulative deadline to one daemon round-trip's framed
-/// I/O. The deadline may be shared across capability negotiation and the
-/// method call so per-request socket timeouts cannot accidentally multiply it.
-/// The CLI additionally bounds the whole worker attempt, including connect.
+/// Apply a caller-owned cumulative deadline to connection establishment and
+/// one daemon round-trip's framed I/O. The deadline may be shared across
+/// capability negotiation and the method call so per-request socket timeouts
+/// cannot accidentally multiply it.
 pub fn client_round_trip_before(
     socket_path: &Path,
     request: &DaemonRequest,
     deadline: Instant,
 ) -> Result<DaemonResponse, ClientError> {
-    ensure_client_deadline(deadline)?;
-    let mut stream = UnixStream::connect(socket_path).map_err(ClientError::Connect)?;
+    let mut stream = connect_client_before(socket_path, deadline)?;
     set_client_deadline(&stream, deadline)?;
 
     let body = serde_json::to_vec(request).map_err(ClientError::Encode)?;
     use std::io::Write;
     let length = u32::try_from(body.len())
         .map_err(|_| ClientError::RequestTooLarge { actual: body.len() })?;
-    set_client_deadline(&stream, deadline)?;
-    stream
-        .write_all(&length.to_be_bytes())
-        .map_err(|error| client_io_error(error, deadline))?;
-    set_client_deadline(&stream, deadline)?;
-    stream
-        .write_all(&body)
-        .map_err(|error| client_io_error(error, deadline))?;
+    client_write_all_before(&mut stream, &length.to_be_bytes(), deadline)?;
+    client_write_all_before(&mut stream, &body, deadline)?;
     set_client_deadline(&stream, deadline)?;
     stream
         .flush()
@@ -5878,11 +5932,7 @@ pub fn client_round_trip_before(
 
     // Read the response with the same frame shape.
     let mut response_prefix = [0_u8; 4];
-    use std::io::Read;
-    set_client_deadline(&stream, deadline)?;
-    stream
-        .read_exact(&mut response_prefix)
-        .map_err(|error| client_io_error(error, deadline))?;
+    client_read_exact_before(&mut stream, &mut response_prefix, deadline)?;
     let announced = u32::from_be_bytes(response_prefix);
     let announced_usize =
         usize::try_from(announced).map_err(|_| ClientError::ResponseTooLarge { announced })?;
@@ -5890,10 +5940,7 @@ pub fn client_round_trip_before(
         return Err(ClientError::ResponseTooLarge { announced });
     }
     let mut buffer = vec![0_u8; announced_usize];
-    set_client_deadline(&stream, deadline)?;
-    stream
-        .read_exact(&mut buffer)
-        .map_err(|error| client_io_error(error, deadline))?;
+    client_read_exact_before(&mut stream, &mut buffer, deadline)?;
     let response: DaemonResponse = serde_json::from_slice(&buffer).map_err(ClientError::Decode)?;
     if response.schema != super::DAEMON_RESPONSE_SCHEMA_V1 {
         return Err(ClientError::ResponseSchemaMismatch {
@@ -5920,6 +5967,167 @@ pub fn client_round_trip_before(
         });
     }
     Ok(response)
+}
+
+fn nonblocking_client_socket() -> Result<UnixStream, ClientError> {
+    use rustix::net::{AddressFamily, SocketType};
+
+    // Linux can set these atomically; Darwin has neither socket flag and
+    // needs the same descriptor setup used by a standard UnixStream.
+    #[cfg(target_os = "linux")]
+    let socket = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        rustix::net::SocketFlags::CLOEXEC | rustix::net::SocketFlags::NONBLOCK,
+        None,
+    )
+    .map_err(|error| ClientError::Connect(error.into()))?;
+    #[cfg(not(target_os = "linux"))]
+    let socket = {
+        let socket = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None)
+            .map_err(|error| ClientError::Connect(error.into()))?;
+        rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)
+            .map_err(|error| ClientError::Connect(error.into()))?;
+        rustix::io::ioctl_fionbio(&socket, true)
+            .map_err(|error| ClientError::Connect(error.into()))?;
+        socket
+    };
+    #[cfg(target_vendor = "apple")]
+    rustix::net::sockopt::set_socket_nosigpipe(&socket, true)
+        .map_err(|error| ClientError::Connect(error.into()))?;
+    Ok(UnixStream::from(socket))
+}
+
+fn connect_client_before(socket_path: &Path, deadline: Instant) -> Result<UnixStream, ClientError> {
+    ensure_client_deadline(deadline)?;
+    let address = rustix::net::SocketAddrUnix::new(socket_path)
+        .map_err(|error| ClientError::Connect(error.into()))?;
+    loop {
+        ensure_client_deadline(deadline)?;
+        let stream = nonblocking_client_socket()?;
+        match rustix::net::connect(&stream, &address) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::INPROGRESS) => {
+                wait_for_client_connect(&stream, deadline)?;
+            }
+            Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => {
+                // Linux AF_UNIX returns EAGAIN for a full accept queue without
+                // starting a connection. Polling that socket can report writable
+                // with SO_ERROR=0 even though it is unconnected. Retry with a new
+                // socket, retaining the caller's deadline and no background worker.
+                drop(stream);
+                thread::sleep(ensure_client_deadline(deadline)?.min(Duration::from_millis(5)));
+                continue;
+            }
+            Err(error) => return Err(ClientError::Connect(error.into())),
+        }
+        ensure_client_deadline(deadline)?;
+        return Ok(stream);
+    }
+}
+
+fn wait_for_client_connect(stream: &UnixStream, deadline: Instant) -> Result<(), ClientError> {
+    wait_for_client_ready(stream, rustix::event::PollFlags::OUT, deadline).map_err(|error| {
+        match error {
+            ClientError::Io(error) => ClientError::Connect(error),
+            other => other,
+        }
+    })?;
+    rustix::net::sockopt::socket_error(stream)
+        .and_then(|result| result)
+        .map_err(|error| ClientError::Connect(error.into()))
+}
+
+fn wait_for_client_ready(
+    stream: &UnixStream,
+    events: rustix::event::PollFlags,
+    deadline: Instant,
+) -> Result<(), ClientError> {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+
+    loop {
+        // Keep each wait representable by platforms whose poll timeout is an
+        // i32 number of milliseconds, even for an unusually distant deadline.
+        let remaining = ensure_client_deadline(deadline)?.min(Duration::from_secs(60));
+        let timeout = Timespec::try_from(remaining)
+            .map_err(|error| ClientError::Io(io::Error::other(error)))?;
+        let mut descriptors = [PollFd::new(stream, events)];
+        match poll(&mut descriptors, Some(&timeout)) {
+            Ok(0) | Err(rustix::io::Errno::INTR) => continue,
+            Err(error) => return Err(ClientError::Io(error.into())),
+            Ok(_) => {
+                ensure_client_deadline(deadline)?;
+                if descriptors[0].revents().contains(PollFlags::NVAL) {
+                    return Err(ClientError::Io(rustix::io::Errno::BADF.into()));
+                }
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn client_write_all_before(
+    stream: &mut UnixStream,
+    mut buffer: &[u8],
+    deadline: Instant,
+) -> Result<(), ClientError> {
+    use std::io::Write;
+
+    // SO_SNDTIMEO alone can restart inside one Darwin send while the peer
+    // slowly drains it. Nonblocking calls leave all waiting under our deadline.
+    stream.set_nonblocking(true).map_err(ClientError::Io)?;
+    while !buffer.is_empty() {
+        set_client_deadline(stream, deadline)?;
+        match stream.write(buffer) {
+            Ok(0) => {
+                return Err(client_io_error(
+                    io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to write the complete daemon request",
+                    ),
+                    deadline,
+                ));
+            }
+            Ok(written) => buffer = &buffer[written..],
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait_for_client_ready(stream, rustix::event::PollFlags::OUT, deadline)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(client_io_error(error, deadline)),
+        }
+    }
+    ensure_client_deadline(deadline).map(|_| ())
+}
+
+fn client_read_exact_before(
+    stream: &mut UnixStream,
+    mut buffer: &mut [u8],
+    deadline: Instant,
+) -> Result<(), ClientError> {
+    use std::io::Read;
+
+    stream.set_nonblocking(true).map_err(ClientError::Io)?;
+    while !buffer.is_empty() {
+        set_client_deadline(stream, deadline)?;
+        match stream.read(buffer) {
+            Ok(0) => {
+                return Err(client_io_error(
+                    io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "failed to read the complete daemon response",
+                    ),
+                    deadline,
+                ));
+            }
+            Ok(read) => buffer = &mut buffer[read..],
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait_for_client_ready(stream, rustix::event::PollFlags::IN, deadline)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(client_io_error(error, deadline)),
+        }
+    }
+    ensure_client_deadline(deadline).map(|_| ())
 }
 
 fn ensure_client_deadline(deadline: Instant) -> Result<Duration, ClientError> {
@@ -7605,6 +7813,254 @@ mod tests {
             set_client_deadline(&client, Instant::now()),
             Err(ClientError::DeadlineExceeded)
         ));
+    }
+
+    #[test]
+    fn client_connection_socket_preserves_nonblocking_and_descriptor_flags() {
+        let stream = nonblocking_client_socket().expect("create client socket");
+        assert!(
+            rustix::fs::fcntl_getfl(&stream)
+                .expect("socket status flags")
+                .contains(rustix::fs::OFlags::NONBLOCK)
+        );
+        assert!(
+            rustix::io::fcntl_getfd(&stream)
+                .expect("descriptor flags")
+                .contains(rustix::io::FdFlags::CLOEXEC)
+        );
+        #[cfg(target_vendor = "apple")]
+        assert!(rustix::net::sockopt::socket_nosigpipe(&stream).expect("socket SIGPIPE policy"));
+    }
+
+    #[test]
+    fn client_partial_read_preserves_unexpected_eof() {
+        use std::io::Write;
+
+        let (mut peer, mut client) = UnixStream::pair().expect("socketpair");
+        peer.write_all(&[1, 2]).expect("write incomplete response");
+        drop(peer);
+        let mut buffer = [0_u8; 4];
+        let result = client_read_exact_before(
+            &mut client,
+            &mut buffer,
+            Instant::now() + Duration::from_secs(2),
+        );
+        assert!(
+            matches!(&result, Err(ClientError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof),
+            "{result:?}"
+        );
+        assert_eq!(&buffer[..2], &[1, 2], "preserve the bytes already read");
+    }
+
+    #[test]
+    fn client_round_trip_preserves_matching_response() {
+        let mut request = DaemonRequest::new(
+            "req-client-connection",
+            TEST_AGENT_ID,
+            METHOD_ECHO,
+            serde_json::json!({"round_trip": true}),
+        );
+        request.workspace_id = Some(TEST_WORKSPACE_ID.to_owned());
+        let response = DaemonResponse::ok(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            request.params.clone(),
+        );
+        assert_eq!(
+            client_round_trip_against_single_response(&request, response.clone())
+                .expect("complete matching response"),
+            response
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    #[test]
+    fn client_connection_full_backlog_is_bounded() {
+        use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("backlog.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind backlog fixture");
+        rustix::net::listen(&listener, 1).expect("set small real socket backlog");
+        let address = SocketAddrUnix::new(&socket_path).expect("socket address");
+        let mut queued = Vec::new();
+        let mut backlog_full = false;
+        for _ in 0..16 {
+            let fd = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None)
+                .expect("create fixture connection");
+            let stream = UnixStream::from(fd);
+            stream.set_nonblocking(true).expect("nonblocking fixture");
+            match rustix::net::connect(&stream, &address) {
+                Ok(()) => queued.push(stream),
+                #[cfg(target_os = "linux")]
+                Err(rustix::io::Errno::AGAIN) => {
+                    backlog_full = true;
+                    break;
+                }
+                #[cfg(target_vendor = "apple")]
+                Err(rustix::io::Errno::CONNREFUSED) => {
+                    backlog_full = true;
+                    break;
+                }
+                Err(error) => panic!("unexpected backlog fixture connect error: {error}"),
+            }
+        }
+        assert!(
+            backlog_full,
+            "fixture must actually exhaust the accept queue"
+        );
+        assert!(!queued.is_empty());
+        let (release, release_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            // Rescue a regressed blocking connect so the test fails on elapsed
+            // time instead of leaving a permanently blocked test thread.
+            let _ = release_rx.recv_timeout(Duration::from_secs(1));
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            while let Ok((stream, _)) = listener.accept() {
+                drop(stream);
+            }
+        });
+        let request = DaemonRequest::new(
+            "req-full-backlog",
+            TEST_AGENT_ID,
+            METHOD_ECHO,
+            serde_json::json!({}),
+        );
+        let started = Instant::now();
+        let result =
+            client_round_trip_before(&socket_path, &request, started + Duration::from_millis(100));
+        let elapsed = started.elapsed();
+        let _ = release.send(());
+        worker.join().expect("backlog rescue thread must finish");
+        #[cfg(target_os = "linux")]
+        assert!(
+            matches!(result, Err(ClientError::DeadlineExceeded)),
+            "{result:?}"
+        );
+        #[cfg(target_vendor = "apple")]
+        assert!(
+            matches!(&result, Err(ClientError::Connect(error)) if error.kind() == io::ErrorKind::ConnectionRefused),
+            "Darwin rejects a full UDS backlog immediately: {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "connect took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn client_round_trip_trickled_frame_obeys_cumulative_deadline() {
+        use std::io::Write;
+
+        for trickle_prefix in [false, true] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let socket_path = temp.path().join("trickle.sock");
+            let listener = UnixListener::bind(&socket_path).expect("bind trickle fixture");
+            let request = DaemonRequest::new(
+                "req-trickled-frame",
+                TEST_AGENT_ID,
+                METHOD_ECHO,
+                serde_json::json!({}),
+            );
+            let response = DaemonResponse::ok(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                None,
+                serde_json::json!({"reply": "a deliberately slow framed response"}),
+            );
+            let (stop, stop_rx) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                let mut stream = accept_pending_connection(&listener);
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking fixture peer");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .expect("read timeout");
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .expect("write timeout");
+                read_request(&mut stream).expect("read actual framed request");
+                let body = serde_json::to_vec(&response).expect("serialize response");
+                let prefix = u32::try_from(body.len())
+                    .expect("bounded response")
+                    .to_be_bytes();
+                let mut bytes = Vec::new();
+                if trickle_prefix {
+                    bytes.extend_from_slice(&prefix);
+                } else {
+                    stream.write_all(&prefix).expect("write complete prefix");
+                }
+                bytes.extend_from_slice(&body);
+                for byte in bytes.into_iter().take(40) {
+                    if stop_rx.recv_timeout(Duration::from_millis(20)).is_ok() {
+                        break;
+                    }
+                    if stream.write_all(&[byte]).is_err() {
+                        break;
+                    }
+                }
+            });
+            let started = Instant::now();
+            let result = client_round_trip_before(
+                &socket_path,
+                &request,
+                started + Duration::from_millis(100),
+            );
+            let elapsed = started.elapsed();
+            let _ = stop.send(());
+            worker.join().expect("trickle peer must finish");
+            assert!(
+                matches!(result, Err(ClientError::DeadlineExceeded)),
+                "{result:?}"
+            );
+            assert!(
+                elapsed < Duration::from_millis(500),
+                "read took {elapsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn client_partial_write_obeys_cumulative_deadline() {
+        use std::io::Read;
+
+        let (mut client, mut peer) = UnixStream::pair().expect("socketpair");
+        rustix::net::sockopt::set_socket_send_buffer_size(&client, 4096)
+            .expect("bounded sender buffer");
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("peer read timeout");
+        let (stop, stop_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut buffer = [0_u8; 4096];
+            for _ in 0..40 {
+                if stop_rx.recv_timeout(Duration::from_millis(20)).is_ok() {
+                    break;
+                }
+                match peer.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+        let body = vec![42_u8; 1024 * 1024];
+        let started = Instant::now();
+        let result =
+            client_write_all_before(&mut client, &body, started + Duration::from_millis(100));
+        let elapsed = started.elapsed();
+        let _ = stop.send(());
+        worker.join().expect("slow reader must finish");
+        assert!(
+            matches!(result, Err(ClientError::DeadlineExceeded)),
+            "{result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "write took {elapsed:?}"
+        );
     }
 
     fn client_round_trip_against_single_response(

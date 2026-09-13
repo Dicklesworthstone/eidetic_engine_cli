@@ -32,6 +32,10 @@ use super::{
 /// Method dispatch name for the warm-loaded `ee search` path.
 pub const METHOD_SEARCH: &str = "ee.daemon.search";
 
+/// Retrieval-only search for a pack assembled and persisted by its caller.
+pub const METHOD_PACK_SEARCH: &str = "ee.daemon.pack_search";
+pub const DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V1: &str = "ee.daemon.pack_search.response.v1";
+
 /// Strict method-specific request schema for [`METHOD_SEARCH`].
 pub const DAEMON_SEARCH_REQUEST_SCHEMA_V2: &str = "ee.daemon.search.request.v2";
 

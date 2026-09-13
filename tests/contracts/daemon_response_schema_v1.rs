@@ -12,9 +12,12 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
 use ee::core::search::PERFORMANCE_FALLBACK_REDACTED_MESSAGE;
 use ee::daemon::DAEMON_RESPONSE_SCHEMA_V1;
-use ee::daemon::protocol::{DaemonRequest, DaemonResponse, METHOD_ORIENT_HOOK, METHOD_RECALL};
+use ee::daemon::protocol::{
+    DaemonRequest, DaemonResponse, METHOD_ORIENT_HOOK, METHOD_PACK_SEARCH, METHOD_RECALL,
+};
 use ee::daemon::server::{
     DAEMON_SEARCH_EXECUTION_FAILED_CODE, DAEMON_SEARCH_PARAMS_INVALID_CODE,
     DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V3, DaemonSearchResult,
@@ -209,7 +212,7 @@ fn actual_daemon_search_result(query: &str) -> Result<Value, String> {
     connection.migrate().map_err(|error| error.to_string())?;
     connection
         .insert_workspace(
-            "wsp_daemon_schema_contract_00001",
+            "wsp_00000000000000000000000001",
             &CreateWorkspaceInput {
                 path: workspace.display().to_string(),
                 name: Some("daemon schema contract".to_owned()),
@@ -219,6 +222,7 @@ fn actual_daemon_search_result(query: &str) -> Result<Value, String> {
     connection.close().map_err(|error| error.to_string())?;
 
     let workspace_id = workspace.display().to_string();
+    let index_dir = state_dir.join("missing-index");
     let mut request = DaemonRequest::new(
         "req-search-response-schema",
         "agent-search-response-schema",
@@ -228,7 +232,7 @@ fn actual_daemon_search_result(query: &str) -> Result<Value, String> {
             "query": query,
             "workspacePath": workspace_id,
             "databasePath": database,
-            "indexDir": state_dir.join("missing-index"),
+            "indexDir": index_dir,
             "speed": "instant",
             "sourceMode": "lexical_only",
             "strictSourceMode": true,
@@ -238,6 +242,35 @@ fn actual_daemon_search_result(query: &str) -> Result<Value, String> {
         }),
     );
     request.workspace_id = Some(workspace.display().to_string());
+    let missing = dispatch(&request);
+    if missing.result.is_some()
+        || !missing.error.as_ref().is_some_and(|error| {
+            error.code == DAEMON_SEARCH_EXECUTION_FAILED_CODE
+                && error.message.contains("Search index not found")
+        })
+    {
+        return Err(format!(
+            "missing index must return the canonical daemon search error: {:?}",
+            missing.error
+        ));
+    }
+
+    // An absent index returns an execution error, not a search result with
+    // performance data. Build the real empty index for the positive response
+    // and exceed the profile's limit to exercise an actual redacted fallback.
+    let rebuilt = rebuild_index(&IndexRebuildOptions {
+        workspace_path: workspace.clone(),
+        database_path: Some(database),
+        index_dir: Some(index_dir),
+        dry_run: false,
+    })
+    .map_err(|error| format!("build daemon schema fixture index: {error}"))?;
+    if rebuilt.status != IndexRebuildStatus::NoDocuments || !rebuilt.errors.is_empty() {
+        return Err(format!(
+            "daemon schema fixture must publish a valid empty index: {rebuilt:?}"
+        ));
+    }
+    request.params["limit"] = serde_json::json!(1000);
     let response = dispatch(&request);
     if let Some(error) = response.error {
         return Err(format!(
@@ -245,9 +278,21 @@ fn actual_daemon_search_result(query: &str) -> Result<Value, String> {
             error.code, error.message
         ));
     }
-    response
+    let result = response
         .result
-        .ok_or_else(|| "real daemon search response omitted result".to_owned())
+        .ok_or_else(|| "real daemon search response omitted result".to_owned())?;
+    if !result
+        .pointer("/performance/data/fallbacks")
+        .and_then(Value::as_array)
+        .is_some_and(|fallbacks| {
+            fallbacks.iter().any(|fallback| {
+                fallback.get("code").and_then(Value::as_str) == Some("profile_search_limit_capped")
+            })
+        })
+    {
+        return Err("real daemon response must report the capped-limit fallback".to_owned());
+    }
+    Ok(result)
 }
 
 #[test]
@@ -1123,6 +1168,7 @@ fn daemon_request_schema_advertises_seed_methods() -> TestResult {
         METHOD_ECHO,
         METHOD_CONTEXT,
         METHOD_SEARCH,
+        METHOD_PACK_SEARCH,
         METHOD_ORIENT_HOOK,
         METHOD_RECALL,
         METHOD_SHUTDOWN,

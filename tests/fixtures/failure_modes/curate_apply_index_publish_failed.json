@@ -11,7 +11,7 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "A curation apply commits a derived memory or procedural rule with its provenance, audit row and exact durable index job, but automatic index publication fails. The setup below exercises the derived-memory case; rule and anti-pattern applies use the same code and retain the committed job for retry.",
+    "description": "A curation apply commits a derived memory or procedural rule with its provenance, audit row and exact durable index job, but automatic index publication fails. In this fixture the publisher claims that job and then rejects a symlinked active index directory. The setup below exercises the derived-memory case; rule and anti-pattern applies use the same code and retain the committed job for retry.",
     "setup_commands": [
       "ee init --workspace .",
       "# Create and approve a create-derived curation candidate through the integration harness.",

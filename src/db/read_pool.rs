@@ -1341,7 +1341,7 @@ mod tests {
             DatabaseConfig::file(database_path.clone()),
             PoolConfig::new(8, Duration::from_secs(30)),
         ));
-        let latencies = fanout_batch_completion_latencies(
+        let latencies = run_prepared_readers(
             readers,
             |_| {
                 let pin = must(pool.pin_snapshot(), "fanout reader snapshot opens");
@@ -1360,12 +1360,12 @@ mod tests {
         latencies
     }
 
-    fn fanout_batch_completion_latencies<T>(
+    fn run_prepared_readers<T, R: Send>(
         readers: usize,
         prepare: impl Fn(usize) -> T + Sync,
         while_ready: impl FnOnce(),
-        measure: impl Fn(T, Instant) -> u128 + Sync,
-    ) -> Vec<u128> {
+        measure: impl Fn(T, Instant) -> R + Sync,
+    ) -> Vec<R> {
         thread::scope(|scope| {
             let (ready_tx, ready_rx) = mpsc::channel();
             let mut releases = Vec::with_capacity(readers);
@@ -1408,10 +1408,10 @@ mod tests {
                 .into_iter()
                 .map(thread::ScopedJoinHandle::join)
                 .collect();
-            let mut latencies = Vec::with_capacity(readers);
+            let mut completed = Vec::with_capacity(readers);
             for result in results {
                 match result {
-                    Ok(Some(latency)) => latencies.push(latency),
+                    Ok(Some(value)) => completed.push(value),
                     Ok(None) => {}
                     Err(payload) => resume_unwind(payload),
                 }
@@ -1420,11 +1420,11 @@ mod tests {
                 resume_unwind(payload);
             }
             assert_eq!(
-                latencies.len(),
+                completed.len(),
                 readers,
                 "every fanout reader must complete"
             );
-            latencies
+            completed
         })
     }
 
@@ -1443,7 +1443,7 @@ mod tests {
                 let dropped = std::sync::atomic::AtomicUsize::new(0);
                 let writer_ran = AtomicBool::new(false);
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    fanout_batch_completion_latencies(
+                    run_prepared_readers(
                         8,
                         |reader| {
                             let guard = FanoutReaderDropCount(&dropped);
@@ -1475,7 +1475,7 @@ mod tests {
     fn fanout_batch_propagates_writer_panic_after_releasing_every_reader() {
         let dropped = std::sync::atomic::AtomicUsize::new(0);
         let result = catch_unwind(AssertUnwindSafe(|| {
-            fanout_batch_completion_latencies(
+            run_prepared_readers::<_, ()>(
                 8,
                 |_| FanoutReaderDropCount(&dropped),
                 || panic!("fanout writer failure"),
@@ -2403,23 +2403,31 @@ mod tests {
             DatabaseConfig::file(database_path),
             PoolConfig::new(1, Duration::from_secs(30)),
         ));
-        let pin_acquired = Arc::new(Barrier::new(2));
+        let (pin_acquired_tx, pin_acquired_rx) = mpsc::sync_channel(0);
 
         let reader = {
             let pool = Arc::clone(&pool);
-            let pin_acquired = Arc::clone(&pin_acquired);
             thread::spawn(move || {
                 let pin = must(pool.pin_snapshot(), "reader snapshot pin opens");
                 assert_eq!(snapshot_item_count(&pin), 1);
-                pin_acquired.wait();
+                must(pin_acquired_tx.send(()), "reader reports pinned snapshot");
                 thread::sleep(Duration::from_millis(10));
                 drop(pin);
             })
         };
 
-        pin_acquired.wait();
-        let report = pool.drain_snapshot_pins(Duration::from_secs(1));
-        must(reader.join().map_err(|_| "reader panicked"), "reader joins");
+        // A failed reader disconnects readiness instead of stranding this test
+        // at a barrier. Join first so its original storage/assertion error wins.
+        let ready = pin_acquired_rx.recv();
+        let report = ready
+            .as_ref()
+            .ok()
+            .map(|()| pool.drain_snapshot_pins(Duration::from_secs(1)));
+        if let Err(payload) = reader.join() {
+            resume_unwind(payload);
+        }
+        must(ready, "reader acquires pinned snapshot");
+        let report = must_some(report, "ready reader produces drain report");
 
         assert!(report.drained);
         assert_eq!(report.active_pins_remaining, 0);
@@ -2993,34 +3001,22 @@ mod tests {
             DatabaseConfig::memory(),
             PoolConfig::new(max_size, Duration::from_secs(30)).with_acquire_timeout(Duration::ZERO),
         ));
-        let start = Arc::new(Barrier::new(readers + 1));
-        let release = Arc::new(Barrier::new(readers + 1));
-
-        let handles: Vec<_> = (0..readers)
-            .map(|_| {
-                let pool = Arc::clone(&pool);
-                let start = Arc::clone(&start);
-                let release = Arc::clone(&release);
-                thread::spawn(move || {
-                    start.wait();
-                    let acquired = must(pool.acquire(), "concurrent acquire succeeds");
-                    let result = (acquired.is_ad_hoc(), acquired.slot_id());
-                    release.wait();
-                    result
-                })
-            })
-            .collect();
-
-        start.wait();
-        release.wait();
+        let start = Barrier::new(readers);
+        let results = run_prepared_readers(
+            readers,
+            |_| {
+                // Every reader reaches the start gate before doing fallible
+                // work; acquired connections stay held until all readers finish.
+                start.wait();
+                must(pool.acquire(), "concurrent acquire succeeds")
+            },
+            || {},
+            |acquired, _| (acquired.is_ad_hoc(), acquired.slot_id()),
+        );
 
         let mut pooled_slots = BTreeSet::new();
         let mut ad_hoc_count = 0usize;
-        for handle in handles {
-            let (is_ad_hoc, slot_id) = match handle.join() {
-                Ok(result) => result,
-                Err(_) => panic!("reader thread panicked"),
-            };
+        for (is_ad_hoc, slot_id) in results {
             if is_ad_hoc {
                 ad_hoc_count += 1;
                 assert_eq!(slot_id, None);

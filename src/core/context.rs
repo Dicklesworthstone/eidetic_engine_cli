@@ -1362,6 +1362,7 @@ pub(crate) fn run_context_pack_with_embedder(
             PackRecordPersistence::Seeded,
             ContextPackControl::new(&cx, None, None),
             Some(embedder),
+            None,
         )
         .await
         .map(|run| run.response)
@@ -2050,6 +2051,36 @@ pub fn run_context_pack_with_performance(
     .map_err(|error| ContextPackError::Pack(format!("Failed to start pack runtime: {error}")))?
 }
 
+/// Optional retrieval adapter; pack policy, budgets, hydration, and all writes
+/// remain in the canonical pipeline. An unavailable adapter returns its actual
+/// degradation and the pipeline performs ordinary in-process retrieval.
+pub(crate) type ContextSearchProvider<'a> = dyn Fn(
+        &SearchOptions,
+    )
+        -> Result<crate::core::search::PackSearchHandoff, crate::core::search::SearchDegradation>
+    + Sync
+    + 'a;
+
+pub(crate) fn run_context_pack_with_search_provider(
+    options: &ContextPackOptions,
+    command: &'static str,
+    provider: &ContextSearchProvider<'_>,
+) -> Result<ContextPackPerformanceRun, ContextPackError> {
+    crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+        run_context_pack_with_performance_inner(
+            options,
+            command,
+            Deterministic::from_seed(0),
+            PackRecordPersistence::Ambient,
+            ContextPackControl::new(&cx, None, None),
+            None,
+            Some(provider),
+        )
+        .await
+    })
+    .map_err(|error| ContextPackError::Pack(format!("Failed to start pack runtime: {error}")))?
+}
+
 pub async fn run_context_pack_with_performance_with_cx(
     cx: &asupersync::Cx,
     options: &ContextPackOptions,
@@ -2062,6 +2093,7 @@ pub async fn run_context_pack_with_performance_with_cx(
         determinism,
         PackRecordPersistence::Ambient,
         ContextPackControl::new(cx, None, None),
+        None,
         None,
     )
     .await
@@ -2137,6 +2169,7 @@ pub fn run_context_pack_with_performance_controlled(
             PackRecordPersistence::Ambient,
             ContextPackControl::new(&cx, deadline, cancellation_flag),
             None,
+            None,
         )
         .await
     })
@@ -2155,6 +2188,7 @@ pub fn run_context_pack_with_performance_seeded(
             determinism,
             PackRecordPersistence::Seeded,
             ContextPackControl::new(&cx, None, None),
+            None,
             None,
         )
         .await
@@ -2604,6 +2638,7 @@ async fn run_context_pack_with_performance_inner(
     pack_record_persistence: PackRecordPersistence,
     control: ContextPackControl<'_>,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
+    search_provider: Option<&ContextSearchProvider<'_>>,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
     let total_start = Instant::now();
     control.check()?;
@@ -2673,8 +2708,26 @@ async fn run_context_pack_with_performance_inner(
         memory_scope: options.memory_scope,
         strict_scope: options.strict_scope,
     };
-    reconcile_search_index_before_read_with_cx(control.cx, &search_options).await;
-    let embedder_preparation = if fast_embedder_override.is_none()
+    let mut remote_search = if let Some(provider) = search_provider {
+        let remote_start = Instant::now();
+        let result = provider(&search_options);
+        trace.record_elapsed("daemonRetrieval", remote_start);
+        control.check()?;
+        match result {
+            Ok(handoff) => Some(handoff),
+            Err(fallback) => {
+                push_search_degradations(&mut degraded, &[fallback]);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if remote_search.is_none() {
+        reconcile_search_index_before_read_with_cx(control.cx, &search_options).await;
+    }
+    let embedder_preparation = if remote_search.is_none()
+        && fast_embedder_override.is_none()
         && options.source_mode.uses_embeddings()
         && index_dir.exists()
         && index_corpus_compatibility_is_current(&index_dir)
@@ -2733,6 +2786,35 @@ async fn run_context_pack_with_performance_inner(
         .ok()
         .and_then(|connection| context_read_snapshot_generation(connection).ok());
 
+    if let Some(handoff) = &remote_search
+        && !handoff.snapshot_matches(
+            &search_options,
+            checked_context_read_snapshot(&read_pool, &read_snapshot)?,
+        )
+    {
+        // The source store changed after daemon retrieval. Release the old
+        // snapshot and perform the complete canonical path once, including
+        // reconciliation, without trying the daemon again.
+        drop(read_snapshot);
+        let mut run = Box::pin(run_context_pack_with_performance_inner(
+            options,
+            command,
+            determinism,
+            pack_record_persistence,
+            control,
+            fast_embedder_override,
+            None,
+        ))
+        .await?;
+        push_search_degradations(
+            &mut run.response.data.degraded,
+            &[crate::core::search::SearchDegradation::daemon_fallback(
+                "workspace changed after daemon retrieval",
+            )],
+        );
+        return Ok(run);
+    }
+
     let output_redaction_enabled =
         crate::config::workspace_output_redaction_enabled(&options.workspace_path);
     if !output_redaction_enabled {
@@ -2750,39 +2832,41 @@ async fn run_context_pack_with_performance_inner(
     // a profile lowers the configured ceiling — falsely flags healthy packs that used a
     // tiny fraction of the budget as degraded. See the post-assembly emission below.
 
-    let l2_cache_context =
-        if options.output_options.cache_json_response && fast_embedder_override.is_none() {
-            let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-            let l2_context = context_pack_l2_prepare(
+    let l2_cache_context = if options.output_options.cache_json_response
+        && fast_embedder_override.is_none()
+        && search_provider.is_none()
+    {
+        let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+        let l2_context = context_pack_l2_prepare(
+            options,
+            read_connection,
+            &request,
+            &effective_filters,
+            &runtime_profile,
+            output_redaction_enabled,
+            prepared_embed_backend,
+            &mut degraded,
+        );
+        if let Some(context) = &l2_context
+            && let Some(cached_run) = context_pack_l2_try_hit(
+                context,
+                command,
                 options,
+                &search_options,
                 read_connection,
                 &request,
-                &effective_filters,
-                &runtime_profile,
-                output_redaction_enabled,
-                prepared_embed_backend,
+                total_start,
+                &mut trace,
                 &mut degraded,
-            );
-            if let Some(context) = &l2_context
-                && let Some(cached_run) = context_pack_l2_try_hit(
-                    context,
-                    command,
-                    options,
-                    &search_options,
-                    read_connection,
-                    &request,
-                    total_start,
-                    &mut trace,
-                    &mut degraded,
-                )
-            {
-                control.check()?;
-                return Ok(cached_run);
-            }
-            l2_context
-        } else {
-            None
-        };
+            )
+        {
+            control.check()?;
+            return Ok(cached_run);
+        }
+        l2_context
+    } else {
+        None
+    };
 
     control.check()?;
     let search_start = Instant::now();
@@ -2793,7 +2877,13 @@ async fn run_context_pack_with_performance_inner(
     };
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut search_preloaded_memories = BTreeMap::new();
-    let mut search_report =
+    let mut search_report = if let Some(mut handoff) = remote_search.take() {
+        search_preloaded_memories = handoff.revalidate(&search_options, read_connection);
+        if let Some(connection) = &context_write_connection {
+            handoff.record_audit(&search_options, connection);
+        }
+        handoff.report
+    } else {
         match run_context_search_with_preloaded_memories_and_workspace_state_with_cx(
             control.cx,
             &search_options,
@@ -2826,7 +2916,8 @@ async fn run_context_pack_with_performance_inner(
                 return Err(context_pack_cancellation_error(reason));
             }
             Err(error) => return Err(ContextPackError::Search(error)),
-        };
+        }
+    };
     trace.index_status_checks = trace.index_status_checks.saturating_add(1);
     trace.record_elapsed("search", search_start);
     control.check()?;
@@ -13555,6 +13646,300 @@ mod tests {
             baseline_write: None,
             no_lod: false,
         }
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    fn daemon_pack_retrieval_fixture() -> Result<
+        (
+            super::ContextPackOptions,
+            String,
+            String,
+            crate::core::index::TestWorkspaceEmbedderStackGuard,
+        ),
+        String,
+    > {
+        let root = tempfile::Builder::new()
+            .prefix("ee-pack-snapshot-")
+            .tempdir()
+            .map_err(|error| error.to_string())?
+            .keep()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let init = crate::core::init::init_workspace(&crate::core::init::InitOptions {
+            workspace_path: root.clone(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        if matches!(init.status, crate::core::init::InitStatus::Failed) {
+            return Err(format!(
+                "initialize pack retrieval fixture: {:?}",
+                init.action_errors
+            ));
+        }
+        let workspace_id = {
+            let connection = DbConnection::open_file_read_only(&init.database_path)
+                .map_err(|error| error.to_string())?;
+            connection
+                .get_workspace_by_path(&root.to_string_lossy())
+                .map_err(|error| error.to_string())?
+                .ok_or("fixture workspace missing")?
+                .id
+        };
+        let guard = crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+        let remembered =
+            crate::core::memory::remember_memory(&crate::core::memory::RememberMemoryOptions {
+                workspace_path: &root,
+                database_path: None,
+                content: "Check quasar release checksums before publication.",
+                workflow_id: None,
+                level: "procedural",
+                kind: "rule",
+                tags: None,
+                confidence: 0.9,
+                source: Some("manual://pack-snapshot"),
+                valid_from: None,
+                valid_to: None,
+                dry_run: false,
+                auto_link: false,
+                propose_candidates: false,
+                allow_secret_mention: false,
+            })
+            .map_err(|error| error.to_string())?;
+        let rebuilt = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: root.clone(),
+            database_path: None,
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        if rebuilt.status != crate::core::index::IndexRebuildStatus::Success {
+            return Err(format!("fixture index failed: {rebuilt:?}"));
+        }
+        let mut options = context_options_with_coordination_snapshot(PathBuf::new());
+        options.workspace_path = root;
+        options.database_path = Some(init.database_path);
+        options.query = "quasar release checksums".to_owned();
+        options.source_mode = crate::core::search::SearchSourceMode::LexicalOnly;
+        options.speed = crate::search::SpeedMode::Instant;
+        options.max_tokens = Some(800);
+        options.coordination_snapshot_path = None;
+        options.persist_pack = false;
+        Ok((
+            options,
+            workspace_id,
+            remembered.memory_id.to_string(),
+            guard,
+        ))
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn daemon_pack_changed_store_restarts_local_admission() -> TestResult {
+        let (options, _, memory_id, _guard) = daemon_pack_retrieval_fixture()?;
+        let database = options.database_path.as_ref().ok_or("fixture database")?;
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let provider = |search_options: &SearchOptions| -> Result<_, SearchDegradation> {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let handoff = crate::core::search::run_pack_search(search_options)
+                .map_err(|error| SearchDegradation::daemon_fallback(&error.to_string()))?;
+            assert!(
+                handoff
+                    .report
+                    .results
+                    .iter()
+                    .any(|hit| hit.doc_id == memory_id),
+                "real retrieval must first admit the live memory"
+            );
+            let connection = DbConnection::open_file(database)
+                .map_err(|error| SearchDegradation::daemon_fallback(&error.to_string()))?;
+            let changed = connection
+                .expire_memory_valid_to(&memory_id, "2001-01-01T00:00:00Z")
+                .map_err(|error| SearchDegradation::daemon_fallback(&error.to_string()))?;
+            assert!(
+                changed,
+                "fixture mutation must actually update the source store"
+            );
+            assert!(
+                !handoff.snapshot_matches(search_options, &connection),
+                "mutation invalidates retrieved generation"
+            );
+            Ok(handoff)
+        };
+        let run = super::run_context_pack_with_search_provider(&options, PACK_COMMAND, &provider)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "changed snapshots fall back once without querying the daemon again"
+        );
+        assert!(
+            run.response.data.pack.items.is_empty(),
+            "expired memory cannot enter the pack"
+        );
+        assert!(
+            run.response
+                .data
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "daemon_search_fallback"
+                    && entry.message.contains("workspace changed"))
+        );
+        let connection =
+            DbConnection::open_file_read_only(database).map_err(|error| error.to_string())?;
+        assert_eq!(
+            connection
+                .count_table_rows("pack_records")
+                .map_err(|error| error.to_string())?,
+            0
+        );
+        assert!(
+            connection
+                .list_audit_by_action(crate::db::audit_actions::SEARCH_EXECUTED, None)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn daemon_pack_abandoned_retrieval_leaves_pending_jobs_and_audit_unchanged() -> TestResult {
+        let (options, workspace_id, memory_id, _guard) = daemon_pack_retrieval_fixture()?;
+        let database = options.database_path.as_ref().ok_or("fixture database")?;
+        {
+            let connection =
+                DbConnection::open_file(database).map_err(|error| error.to_string())?;
+            let changed = connection
+                .apply_memory_score_update_audited(
+                    &memory_id,
+                    &crate::db::ApplyMemoryScoreUpdateInput {
+                        workspace_id: workspace_id.clone(),
+                        confidence: 0.8,
+                        utility: 0.7,
+                        importance: 0.7,
+                        updated_at: Utc::now().to_rfc3339(),
+                        actor: None,
+                        details: "{}".to_owned(),
+                        feedback_event_ids: Vec::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            assert!(
+                changed.is_some(),
+                "real memory mutation makes the index stale"
+            );
+            connection
+                .insert_search_index_job(
+                    "sidx_00000000000000000000000001",
+                    &crate::db::CreateSearchIndexJobInput {
+                        workspace_id: workspace_id.clone(),
+                        job_type: crate::db::SearchIndexJobType::SingleDocument,
+                        document_source: Some("memory".to_owned()),
+                        document_id: Some(memory_id.clone()),
+                        documents_total: 1,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let status =
+            crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                workspace_path: options.workspace_path.clone(),
+                database_path: options.database_path.clone(),
+                index_dir: None,
+            })
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            status.health,
+            crate::core::index::IndexHealth::Stale,
+            "the former automatic repair path must actually be eligible"
+        );
+        let generation_gap = status
+            .db_generation
+            .zip(status.index_generation)
+            .map(|(database, index)| database.saturating_sub(index))
+            .ok_or("known index generation gap")?;
+        assert!(
+            (1..=crate::core::search::SEARCH_INDEX_LARGE_GAP_THRESHOLD).contains(&generation_gap)
+        );
+        assert_eq!(
+            status.db_memory_count, 1,
+            "fixture is below the bounded repair corpus limit"
+        );
+        let snapshot = || -> Result<_, String> {
+            let connection =
+                DbConnection::open_file_read_only(database).map_err(|error| error.to_string())?;
+            Ok((
+                connection
+                    .list_search_index_jobs(&workspace_id, None)
+                    .map_err(|error| error.to_string())?,
+                connection
+                    .list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|error| error.to_string())?,
+                connection
+                    .count_table_rows("pack_records")
+                    .map_err(|error| error.to_string())?,
+            ))
+        };
+        let before = snapshot()?;
+        assert!(
+            before.0.iter().any(|job| {
+                job.id == "sidx_00000000000000000000000001" && job.status == "pending"
+            })
+        );
+        let search_options = SearchOptions {
+            workspace_path: options.workspace_path.clone(),
+            database_path: options.database_path.clone(),
+            index_dir: None,
+            query: options.query.clone(),
+            limit: 10,
+            speed: options.speed,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: crate::core::search::SearchDedupMode::DocId,
+            source_mode: options.source_mode,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        drop(receiver); // The requesting client has already abandoned this result.
+        let worker = std::thread::spawn(move || -> Result<bool, String> {
+            let handoff = crate::core::search::run_pack_search(&search_options)
+                .map_err(|error| error.to_string())?;
+            assert!(
+                handoff
+                    .report
+                    .results
+                    .iter()
+                    .any(|hit| hit.doc_id == memory_id),
+                "worker performed real retrieval"
+            );
+            assert!(
+                !handoff.can_reuse_for_pack(),
+                "a stale retrieval must return to the caller's canonical index repair path"
+            );
+            Ok(sender.send(handoff).is_err())
+        });
+        assert!(
+            worker
+                .join()
+                .map_err(|_| "retrieval worker panicked".to_owned())??,
+            "result delivery really observed an abandoned receiver"
+        );
+        assert_eq!(
+            snapshot()?,
+            before,
+            "completed background retrieval cannot claim jobs, append audits, or persist packs"
+        );
+        Ok(())
     }
 
     #[test]

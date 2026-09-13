@@ -1499,6 +1499,7 @@ pub struct SearchPerformanceRun {
     pub report: SearchReport,
     pub performance: SearchPerformanceTrace,
     pub(crate) audit_facts: Option<SearchAuditFacts>,
+    pack_snapshot: Option<PackSearchSnapshot>,
 }
 
 /// Retrieval-only handoff. It never owns a write connection: the caller may
@@ -1508,9 +1509,128 @@ pub struct SearchPerformanceRun {
 pub(crate) struct PackSearchHandoff {
     pub report: SearchReport,
     pub audit_facts: Option<SearchAuditFacts>,
+    snapshot: PackSearchSnapshot,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PackSearchSnapshot {
+    workspace_id: String,
+    generation: u64,
 }
 
 impl PackSearchHandoff {
+    pub(crate) fn snapshot_matches(
+        &self,
+        options: &SearchOptions,
+        connection: &DbConnection,
+    ) -> bool {
+        self.snapshot.workspace_id
+            == bound_search_workspace_id(
+                &options.workspace_path,
+                options.database_path.as_deref(),
+                Some(connection),
+            )
+            && connection
+                .get_workspace_generation(&self.snapshot.workspace_id)
+                .is_ok_and(|generation| generation == Some(self.snapshot.generation))
+    }
+
+    pub(crate) fn revalidate(
+        &mut self,
+        options: &SearchOptions,
+        connection: &DbConnection,
+    ) -> BTreeMap<String, StoredMemory> {
+        let mut memories = BTreeMap::new();
+        let hits = std::mem::take(&mut self.report.results);
+        let hits = apply_tombstone_visibility_with_connection(
+            options,
+            hits,
+            &mut self.report.degraded,
+            connection,
+            Some(&mut memories),
+        );
+        self.report.results = apply_live_evidence_visibility(
+            options,
+            hits,
+            &mut self.report.degraded,
+            Some(connection),
+        );
+        if self.report.results.is_empty() && self.report.status == SearchStatus::Success {
+            self.report.status = SearchStatus::NoResults;
+        }
+        memories
+    }
+
+    pub(crate) fn from_value(mut value: serde_json::Value) -> Result<Self, serde_json::Error> {
+        // The daemon envelope's JSON parser represents numbers as floats.
+        // Recover only exactly representable integers; leave out-of-range
+        // values for the typed decoder to reject rather than round them.
+        fn canonicalize(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Number(number) if number.is_f64() => {
+                    if let Some(value) = number.as_f64()
+                        && value.fract() == 0.0
+                        && value.abs() <= 9_007_199_254_740_991.0
+                    {
+                        *number = serde_json::Number::from(value as i64);
+                    }
+                }
+                serde_json::Value::Array(values) => values.iter_mut().for_each(canonicalize),
+                serde_json::Value::Object(values) => values.values_mut().for_each(canonicalize),
+                _ => {}
+            }
+        }
+        canonicalize(&mut value);
+        serde_json::from_value(value)
+    }
+
+    /// Validate request identity before admitting remote scores to local pack
+    /// assembly. Bodies are always reloaded from the caller's own store.
+    pub(crate) fn matches_request(&self, options: &SearchOptions) -> bool {
+        let report = &self.report;
+        report.query == options.query
+            && report.requested_limit == options.limit
+            && report.source_mode_requested == options.source_mode
+            && report.strict_source_mode == options.strict_source_mode
+            && report.memory_scope == options.memory_scope
+            && report.strict_scope == options.strict_scope
+            && report.results.iter().all(|hit| {
+                hit.score.is_finite()
+                    && [
+                        hit.fast_score,
+                        hit.quality_score,
+                        hit.lexical_score,
+                        hit.rerank_score,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .all(f32::is_finite)
+            })
+    }
+
+    /// Retrieval-only workers never repair derived indexes. Let the caller run
+    /// canonical read repair whenever this result cannot establish freshness.
+    pub(crate) fn can_reuse_for_pack(&self) -> bool {
+        matches!(
+            self.report.status,
+            SearchStatus::Success | SearchStatus::NoResults
+        ) && !self
+            .report
+            .index_freshness
+            .as_ref()
+            .is_some_and(|freshness| freshness.stale)
+            && !self.report.degraded.iter().any(|degradation| {
+                matches!(
+                    degradation.code.as_str(),
+                    "index_stale"
+                        | "index_missing"
+                        | "index_corrupt"
+                        | "search_index_degraded"
+                        | "global_index_unavailable"
+                )
+            })
+    }
+
     pub(crate) fn record_audit(&self, options: &SearchOptions, connection: &DbConnection) {
         if let Some(facts) = &self.audit_facts {
             facts.record(
@@ -1554,7 +1674,8 @@ impl SearchAuditFacts {
             connection,
             &requested,
             &[&options.workspace_path, canonical_workspace.as_path()],
-        ).unwrap_or(requested);
+        )
+        .unwrap_or(requested);
         let persisted = search_audit_workspace_persisted(Some(connection), &workspace_id);
         trace.record_elapsed("search::auditWorkspaceCheck", workspace_start);
         if !persisted {
@@ -1562,38 +1683,79 @@ impl SearchAuditFacts {
         }
         let payload_start = Instant::now();
         let q_hash = audit_query_hash(&options.query);
-        let source_arms = hits.iter().map(|hit| hit.source.as_str()).collect::<BTreeSet<_>>();
+        let source_arms = hits
+            .iter()
+            .map(|hit| hit.source.as_str())
+            .collect::<BTreeSet<_>>();
         let mut batch = SearchAuditBatch::new(2 + hits.len().saturating_mul(2));
-        batch.push(audit_ids, Some(&workspace_id), audit_actions::SEARCH_EXECUTED,
-            Some("workspace"), Some(&workspace_id), Some(serde_json::json!({
-                "queryHash": &q_hash, "resultCount": hits.len(),
-                "sourceArms": source_arms, "status": status.as_str(),
-            }).to_string()));
+        batch.push(
+            audit_ids,
+            Some(&workspace_id),
+            audit_actions::SEARCH_EXECUTED,
+            Some("workspace"),
+            Some(&workspace_id),
+            Some(
+                serde_json::json!({
+                    "queryHash": &q_hash, "resultCount": hits.len(),
+                    "sourceArms": source_arms, "status": status.as_str(),
+                })
+                .to_string(),
+            ),
+        );
         let top_score = hits.first().map(SearchHit::relevance_score);
         if let Some(reason) = classify_search_query_miss(self.floor_counts, self.floor, top_score) {
             let details = search_query_miss_audit_details(SearchQueryMissAuditDetails {
-                query_hash: &q_hash, reason, status, kept: self.kept,
-                considered: self.floor_counts.considered, dropped_below_floor: self.dropped,
-                floor: self.floor, top_score_before_floor: self.pre_floor_top_score,
+                query_hash: &q_hash,
+                reason,
+                status,
+                kept: self.kept,
+                considered: self.floor_counts.considered,
+                dropped_below_floor: self.dropped,
+                floor: self.floor,
+                top_score_before_floor: self.pre_floor_top_score,
                 top_score_after_floor: top_score,
             });
-            batch.push(audit_ids, Some(&workspace_id), audit_actions::SEARCH_MISS_RECORDED,
-                Some("query_hash"), Some(&q_hash), Some(details));
+            batch.push(
+                audit_ids,
+                Some(&workspace_id),
+                audit_actions::SEARCH_MISS_RECORDED,
+                Some("query_hash"),
+                Some(&q_hash),
+                Some(details),
+            );
         }
         for (rank, hit) in hits.iter().enumerate() {
-            batch.push(audit_ids, Some(&workspace_id), audit_actions::SEARCH_RETURNED_MEM,
-                Some("memory"), Some(&hit.doc_id), Some(serde_json::json!({
-                    "queryHash": &q_hash, "rank": (rank + 1) as u32,
-                    "score": hit.score, "relevanceScore": hit.relevance_score(),
-                    "scoreKind": hit.score_kind(), "source": hit.source.as_str(),
-                }).to_string()));
-            for pattern in self.redactions.get(&hit.doc_id).into_iter().flatten() {
-                batch.push(audit_ids, Some(&workspace_id), audit_actions::REDACT_AT_OUTPUT,
-                    Some("memory"), Some(&hit.doc_id), Some(serde_json::json!({
+            batch.push(
+                audit_ids,
+                Some(&workspace_id),
+                audit_actions::SEARCH_RETURNED_MEM,
+                Some("memory"),
+                Some(&hit.doc_id),
+                Some(
+                    serde_json::json!({
                         "queryHash": &q_hash, "rank": (rank + 1) as u32,
-                        "surface": "search", "memoryId": &hit.doc_id,
-                        "detectedPattern": pattern, "action": audit_actions::REDACT_AT_OUTPUT,
-                    }).to_string()));
+                        "score": hit.score, "relevanceScore": hit.relevance_score(),
+                        "scoreKind": hit.score_kind(), "source": hit.source.as_str(),
+                    })
+                    .to_string(),
+                ),
+            );
+            for pattern in self.redactions.get(&hit.doc_id).into_iter().flatten() {
+                batch.push(
+                    audit_ids,
+                    Some(&workspace_id),
+                    audit_actions::REDACT_AT_OUTPUT,
+                    Some("memory"),
+                    Some(&hit.doc_id),
+                    Some(
+                        serde_json::json!({
+                            "queryHash": &q_hash, "rank": (rank + 1) as u32,
+                            "surface": "search", "memoryId": &hit.doc_id,
+                            "detectedPattern": pattern, "action": audit_actions::REDACT_AT_OUTPUT,
+                        })
+                        .to_string(),
+                    ),
+                );
             }
         }
         trace.record_elapsed("search::auditPayloadBuild", payload_start);
@@ -2166,6 +2328,17 @@ pub struct SearchDegradation {
 }
 
 impl SearchDegradation {
+    pub(crate) fn daemon_fallback(reason: &str) -> Self {
+        Self {
+            code: "daemon_search_fallback".to_owned(),
+            severity: "warning".to_owned(),
+            message: format!(
+                "Warm daemon search unavailable ({reason}); used canonical in-process search."
+            ),
+            repair: Some("ee daemon status --json".to_owned()),
+        }
+    }
+
     /// Whether this entry describes a stable capability posture rather than a
     /// transient degradation that belongs in every query response.
     #[must_use]
@@ -4796,7 +4969,7 @@ fn search_score_calibration_feedback_events_with_workspace_id(
     if !database_path.exists() {
         return SearchScoreCalibrationFeedbackEvents::available(Vec::new());
     }
-    let connection = match DbConnection::open_file(database_path) {
+    let connection = match DbConnection::open_file_read_only(database_path) {
         Ok(connection) => connection,
         Err(_error) => {
             return SearchScoreCalibrationFeedbackEvents::unavailable(
@@ -7081,6 +7254,7 @@ pub(crate) fn run_search_with_embedder(
             search_index_auto_reconcile_timeout(),
             request_timeout,
             Some(embedder),
+            false,
         )
         .await
         .map(|run| run.report)
@@ -7103,6 +7277,56 @@ pub fn run_search_with_performance(
     run_search_with_performance_and_filters(options, None, &[])
 }
 
+/// Run canonical retrieval without a writer. The daemon may finish this after
+/// a disconnected client; only the receiving pack process can persist it.
+pub(crate) fn run_pack_search(options: &SearchOptions) -> Result<PackSearchHandoff, SearchError> {
+    let timeout = search_request_timeout();
+    let run = crate::core::run_cli_with_cx(timeout, |cx| async move {
+        run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+            &cx,
+            options,
+            None,
+            &[],
+            Duration::ZERO,
+            timeout,
+            None,
+            true,
+        )
+        .await
+    })
+    .map_err(|error| SearchError::Index(format!("Failed to start search runtime: {error}")))??;
+    let mut report = run.report;
+    // The receiving pack resolves bodies and provenance from its own stores.
+    // Keep internal scope/mesh routing metadata, but never make this internal
+    // transport an alternate route to unredacted indexed content.
+    for hit in &mut report.results {
+        if let Some(metadata) = &mut hit.metadata {
+            *metadata = crate::core::support_bundle::redact_json_value(metadata);
+        }
+    }
+    if let Some(assist) = &mut report.query_assist {
+        for hit in &mut assist.did_you_mean {
+            if let Some(metadata) = &mut hit.metadata {
+                *metadata = crate::core::support_bundle::redact_json_value(metadata);
+            }
+        }
+        for reformulation in &mut assist.reformulations {
+            reformulation.query =
+                crate::policy::redact_secret_like_content(&reformulation.query).content;
+        }
+    }
+    let snapshot = run.pack_snapshot.ok_or_else(|| {
+        SearchError::Index(
+            "Pack daemon retrieval requires a source-of-truth workspace snapshot".to_owned(),
+        )
+    })?;
+    Ok(PackSearchHandoff {
+        report,
+        audit_facts: run.audit_facts,
+        snapshot,
+    })
+}
+
 pub fn run_search_with_performance_and_filters(
     options: &SearchOptions,
     kind_filter: Option<&str>,
@@ -7119,6 +7343,7 @@ pub fn run_search_with_performance_and_filters(
             reconcile_timeout,
             request_timeout,
             None,
+            false,
         )
         .await
     })
@@ -7145,6 +7370,7 @@ pub async fn run_search_with_performance_and_filters_with_cx(
         search_index_auto_reconcile_timeout(),
         request_timeout,
         None,
+        false,
     )
     .await
 }
@@ -7157,6 +7383,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     reconcile_timeout: Duration,
     request_timeout: Duration,
     prepared_fast_embedder: Option<Arc<dyn crate::search::Embedder>>,
+    retrieval_only: bool,
 ) -> Result<SearchPerformanceRun, SearchError> {
     let total_start = Instant::now();
     options.validate()?;
@@ -7166,7 +7393,12 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
 
     let index_dir = options.resolve_index_dir();
     let database_path = options.resolve_database_path();
-    reconcile_search_index_before_read_with_cx_and_timeout(cx, options, reconcile_timeout).await;
+    // A retrieval-only daemon worker may outlive its socket client. It must
+    // never claim/requeue index jobs or open the source store for repair.
+    if !retrieval_only {
+        reconcile_search_index_before_read_with_cx_and_timeout(cx, options, reconcile_timeout)
+            .await;
+    }
     let embedder_preparation = if prepared_fast_embedder.is_none()
         && options.source_mode.uses_embeddings()
         && index_dir.exists()
@@ -7228,9 +7460,27 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
                 true,
                 None,
                 fast_embedder_override.clone(),
+                retrieval_only,
             )
             .await
             .and_then(|mut run| {
+                if retrieval_only {
+                    let workspace_id = bound_search_workspace_id(
+                        &options.workspace_path,
+                        options.database_path.as_deref(),
+                        Some(connection),
+                    );
+                    let generation = connection
+                        .get_workspace_generation(&workspace_id)
+                        .map_err(|error| SearchError::Index(error.to_string()))?
+                        .ok_or_else(|| {
+                            SearchError::Index("Workspace generation unavailable".to_owned())
+                        })?;
+                    run.pack_snapshot = Some(PackSearchSnapshot {
+                        workspace_id,
+                        generation,
+                    });
+                }
                 apply_memory_kind_and_typed_field_filters_to_report_with_connection(
                     connection,
                     &mut run.report,
@@ -7261,6 +7511,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
         true,
         None,
         fast_embedder_override,
+        retrieval_only,
     )
     .await?;
     if kind_filter.is_some() || !typed_field_filters.is_empty() {
@@ -7572,6 +7823,7 @@ pub async fn run_context_search_with_preloaded_memories_and_workspace_state_with
         false,
         Some(&mut preloaded_memories),
         fast_embedder_override,
+        false,
     )
     .await?;
     Ok(ContextSearchReport {
@@ -8470,6 +8722,7 @@ async fn run_search_inner(
         include_passthrough_scope_analysis_metadata,
         preloaded_memories,
         None,
+        false,
     )
     .await
     .map(|run| run.report)
@@ -8486,6 +8739,7 @@ async fn run_search_inner_with_performance(
     include_passthrough_scope_analysis_metadata: bool,
     mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
+    capture_deferred_audit: bool,
 ) -> Result<SearchPerformanceRun, SearchError> {
     options.validate()?;
     // Always keep an authoritative-memory map for this request. Global-store
@@ -8593,6 +8847,7 @@ async fn run_search_inner_with_performance(
         trace.record_elapsed("search::total", start);
         return Ok(SearchPerformanceRun {
             audit_facts: None,
+            pack_snapshot: None,
             report: SearchReport {
                 index_freshness,
                 status: SearchStatus::NoResults,
@@ -8665,6 +8920,7 @@ async fn run_search_inner_with_performance(
                 &mut degraded,
                 preloaded_memories.as_deref_mut(),
                 &mut trace,
+                !capture_deferred_audit,
             )
             .await;
             if !global_hits.is_empty() {
@@ -8834,30 +9090,47 @@ async fn run_search_inner_with_performance(
 
             search_checkpoint(cx)?;
 
-            let audit_facts = SearchAuditFacts {
-                floor_counts,
-                kept,
-                dropped,
-                floor,
-                pre_floor_top_score,
-                redactions: if output_redaction_enabled {
-                    above_floor.iter().map(|hit| (
-                        hit.doc_id.clone(), search_hit_output_redaction_patterns(hit),
-                    )).collect()
-                } else {
-                    BTreeMap::new()
-                },
-            };
+            let audit_facts =
+                (capture_deferred_audit || audit_connection.is_some()).then(|| SearchAuditFacts {
+                    floor_counts,
+                    kept,
+                    dropped,
+                    floor,
+                    pre_floor_top_score,
+                    redactions: if output_redaction_enabled {
+                        above_floor
+                            .iter()
+                            .map(|hit| {
+                                (
+                                    hit.doc_id.clone(),
+                                    search_hit_output_redaction_patterns(hit),
+                                )
+                            })
+                            .collect()
+                    } else {
+                        BTreeMap::new()
+                    },
+                });
             // A missing caller-owned write connection still means no writes.
             // Remote retrieval returns these facts for the local pack writer.
-            if let Some(connection) = audit_connection {
-                audit_facts.record(options, connection, &above_floor, status, audit_ids, &mut trace);
+            if let Some(connection) = audit_connection
+                && let Some(audit_facts) = &audit_facts
+            {
+                audit_facts.record(
+                    options,
+                    connection,
+                    &above_floor,
+                    status,
+                    audit_ids,
+                    &mut trace,
+                );
             }
 
             search_checkpoint(cx)?;
             trace.record_elapsed("search::total", start);
             Ok(SearchPerformanceRun {
-                audit_facts: Some(audit_facts),
+                audit_facts,
+                pack_snapshot: None,
                 report: SearchReport {
                     status,
                     embed_backend,
@@ -8900,6 +9173,7 @@ async fn run_search_inner_with_performance(
             trace.record_elapsed("search::total", start);
             Ok(SearchPerformanceRun {
                 audit_facts: None,
+                pack_snapshot: None,
                 report: SearchReport {
                     status: SearchStatus::IndexError,
                     embed_backend,
@@ -10553,6 +10827,7 @@ async fn global_store_frankensearch_hits(
     degraded: &mut Vec<SearchDegradation>,
     preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
     trace: &mut SearchPerformanceTrace,
+    reconcile: bool,
 ) -> Vec<SearchHit> {
     if !global_store_participates_in_scope(options.memory_scope) {
         return Vec::new();
@@ -10632,7 +10907,9 @@ async fn global_store_frankensearch_hits(
         memory_scope: MemoryScope::Global,
         strict_scope: options.strict_scope,
     };
-    reconcile_search_index_before_read_with_cx(cx, &global_options).await;
+    if reconcile {
+        reconcile_search_index_before_read_with_cx(cx, &global_options).await;
+    }
     let index_status = match cached_index_status_for_search(&global_options, &paths.index_dir, None)
     {
         Ok(status) => status,

@@ -2515,7 +2515,11 @@ mod tests {
         fs::create_dir_all(&dir_direct).map_err(|error| error.to_string())?;
         let binary_direct = dir_direct.join("cass");
         write_executable_script(&binary_direct, script, 0o755)?;
-        let mut child = std::process::Command::new(&binary_direct)
+        // This branch tests the reader, not executable admission. An explicit
+        // interpreter avoids unrelated ETXTBSY if a parallel child briefly
+        // inherits the fixture's write descriptor before it is closed.
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg(&binary_direct)
             .stdout(std::process::Stdio::piped())
             .spawn()
             .map_err(|error| error.to_string())?;

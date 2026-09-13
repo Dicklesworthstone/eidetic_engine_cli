@@ -703,10 +703,17 @@ fn curate_apply_index_publish_failed_contract_is_pinned() -> TestResult {
                 fixture_path.display()
             ),
         )?;
+        let source_fragment = match fragment {
+            "create-derived memory was committed" => "{subject} was committed",
+            "Search may omit the new memory until the durable job is retried" => {
+                "Search may omit the new {entity} until the durable job is retried"
+            }
+            _ => fragment,
+        };
         ensure(
-            source.contains(fragment),
+            source.contains(source_fragment),
             format!(
-                "{}: runtime emission must contain fixture fragment `{fragment}`",
+                "{}: runtime emission template must contain `{source_fragment}` for fixture fragment `{fragment}`",
                 source_path.display()
             ),
         )?;

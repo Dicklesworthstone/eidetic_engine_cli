@@ -747,6 +747,7 @@ Common red flags:
 | Output profile | `--pack-profile lean\|standard\|verbose` | Trim or expand JSON metadata |
 | Resource profile | `--resource-profile lean\|standard\|swarm_heavy` | Pick pack assembly SLO posture |
 | Retrieval source | `--source-mode lexical_only\|semantic_only\|hybrid`, `--strict-source-mode` | Force lexical-only, semantic-only, or hybrid retrieval before packing; strict mode fails instead of falling back |
+| Warm retrieval | `--use-daemon`, `--daemon-socket <path>` | Reuse the workspace daemon's loaded search model, with local pack assembly and persistence; fall back to in-process retrieval when the daemon is unavailable or the request cannot be served there |
 | Size | `--max-tokens N`, `--candidate-pool N` | Bound prompt budget and candidate pool |
 | Output format | `--format markdown\|json\|toon`, `--stream --json` | Token-tight prompt text (markdown), parser output (json), stable-field structured output (toon — not smaller than json for packs), or NDJSON frames |
 | JSON diet | `--no-rendered-text`, `--no-skipped`, `--no-meta`, `--no-pack-dna` | Suppress bulky sections for structured consumers |
@@ -1600,6 +1601,8 @@ keys, just like the other authenticated history above.
 | `ee analyze science-status --json` | Report optional science analytics feature posture and degradations |
 | `ee capabilities` / `check` / `health` | Inspect feature availability and readiness |
 | `ee daemon --foreground` | Optional supervised maintenance daemon |
+| `ee daemon start` | Start the optional workspace search daemon in the background and load its models once |
+| `ee daemon status [--socket <path>] --json` | Probe the workspace search daemon and report `data.running`, `data.warm.posture`, socket details, and separate durable steward job state |
 
 Use pack-quality evaluation when a canonical task should keep selecting specific
 memories across retrieval or packing changes. The report is a deterministic

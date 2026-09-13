@@ -23014,6 +23014,40 @@ mod tests {
         );
         assert!(first.degraded[0].message.contains(index_job_id.as_str()));
 
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/failure_modes/curate_apply_index_publish_failed.json"
+        ))
+        .map_err(|error| format!("parse publication-failure fixture: {error}"))?;
+        let expected = &fixture["expected_emission"];
+        let emitted = &first.degraded[0];
+        assert_eq!(Some(emitted.code.as_str()), expected["code"].as_str());
+        assert_eq!(
+            Some(emitted.severity.as_str()),
+            expected["severity"].as_str()
+        );
+        assert_eq!(
+            Some(emitted.repair.as_str()),
+            expected["repair_string"].as_str()
+        );
+        let repair_fragment = expected["repair_contains"]
+            .as_str()
+            .ok_or("publication-failure fixture must specify its repair fragment")?;
+        assert!(emitted.repair.contains(repair_fragment));
+        let message_fragments = expected["message_contains"]
+            .as_array()
+            .ok_or("publication-failure fixture must specify its message fragments")?;
+        assert!(!message_fragments.is_empty());
+        for fragment in message_fragments {
+            let fragment = fragment
+                .as_str()
+                .ok_or("publication-failure message fragments must be strings")?;
+            assert!(
+                emitted.message.contains(fragment),
+                "actual post-claim publication failure must contain {fragment:?}: {}",
+                emitted.message
+            );
+        }
+
         let stored = connection
             .get_curation_candidate(&workspace_id, &candidate_id)
             .map_err(|error| error.to_string())?
