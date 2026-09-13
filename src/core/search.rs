@@ -1498,6 +1498,109 @@ impl SearchAdvisorySession {
 pub struct SearchPerformanceRun {
     pub report: SearchReport,
     pub performance: SearchPerformanceTrace,
+    pub(crate) audit_facts: Option<SearchAuditFacts>,
+}
+
+/// Retrieval-only handoff. It never owns a write connection: the caller may
+/// discard a timed-out result without any delayed pack or audit mutation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PackSearchHandoff {
+    pub report: SearchReport,
+    pub audit_facts: Option<SearchAuditFacts>,
+}
+
+impl PackSearchHandoff {
+    pub(crate) fn record_audit(&self, options: &SearchOptions, connection: &DbConnection) {
+        if let Some(facts) = &self.audit_facts {
+            facts.record(
+                options,
+                connection,
+                &self.report.results,
+                self.report.status,
+                &mut SearchAuditIdSource::Ambient,
+                &mut SearchPerformanceTrace::default(),
+            );
+        }
+    }
+}
+
+/// Immutable facts retained before floor filtering and presentation so the
+/// local pack writer can reproduce canonical search audit rows exactly.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct SearchAuditFacts {
+    floor_counts: RelevanceFloorCounts,
+    kept: usize,
+    dropped: usize,
+    floor: f32,
+    pre_floor_top_score: Option<f32>,
+    redactions: BTreeMap<String, Vec<String>>,
+}
+
+impl SearchAuditFacts {
+    fn record(
+        &self,
+        options: &SearchOptions,
+        connection: &DbConnection,
+        hits: &[SearchHit],
+        status: SearchStatus,
+        audit_ids: &mut SearchAuditIdSource,
+        trace: &mut SearchPerformanceTrace,
+    ) {
+        let workspace_start = Instant::now();
+        let canonical_workspace = default_workspace_root(&options.workspace_path);
+        let requested = crate::core::curate::stable_workspace_id(&canonical_workspace);
+        let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+            connection,
+            &requested,
+            &[&options.workspace_path, canonical_workspace.as_path()],
+        ).unwrap_or(requested);
+        let persisted = search_audit_workspace_persisted(Some(connection), &workspace_id);
+        trace.record_elapsed("search::auditWorkspaceCheck", workspace_start);
+        if !persisted {
+            return;
+        }
+        let payload_start = Instant::now();
+        let q_hash = audit_query_hash(&options.query);
+        let source_arms = hits.iter().map(|hit| hit.source.as_str()).collect::<BTreeSet<_>>();
+        let mut batch = SearchAuditBatch::new(2 + hits.len().saturating_mul(2));
+        batch.push(audit_ids, Some(&workspace_id), audit_actions::SEARCH_EXECUTED,
+            Some("workspace"), Some(&workspace_id), Some(serde_json::json!({
+                "queryHash": &q_hash, "resultCount": hits.len(),
+                "sourceArms": source_arms, "status": status.as_str(),
+            }).to_string()));
+        let top_score = hits.first().map(SearchHit::relevance_score);
+        if let Some(reason) = classify_search_query_miss(self.floor_counts, self.floor, top_score) {
+            let details = search_query_miss_audit_details(SearchQueryMissAuditDetails {
+                query_hash: &q_hash, reason, status, kept: self.kept,
+                considered: self.floor_counts.considered, dropped_below_floor: self.dropped,
+                floor: self.floor, top_score_before_floor: self.pre_floor_top_score,
+                top_score_after_floor: top_score,
+            });
+            batch.push(audit_ids, Some(&workspace_id), audit_actions::SEARCH_MISS_RECORDED,
+                Some("query_hash"), Some(&q_hash), Some(details));
+        }
+        for (rank, hit) in hits.iter().enumerate() {
+            batch.push(audit_ids, Some(&workspace_id), audit_actions::SEARCH_RETURNED_MEM,
+                Some("memory"), Some(&hit.doc_id), Some(serde_json::json!({
+                    "queryHash": &q_hash, "rank": (rank + 1) as u32,
+                    "score": hit.score, "relevanceScore": hit.relevance_score(),
+                    "scoreKind": hit.score_kind(), "source": hit.source.as_str(),
+                }).to_string()));
+            for pattern in self.redactions.get(&hit.doc_id).into_iter().flatten() {
+                batch.push(audit_ids, Some(&workspace_id), audit_actions::REDACT_AT_OUTPUT,
+                    Some("memory"), Some(&hit.doc_id), Some(serde_json::json!({
+                        "queryHash": &q_hash, "rank": (rank + 1) as u32,
+                        "surface": "search", "memoryId": &hit.doc_id,
+                        "detectedPattern": pattern, "action": audit_actions::REDACT_AT_OUTPUT,
+                    }).to_string()));
+            }
+        }
+        trace.record_elapsed("search::auditPayloadBuild", payload_start);
+        let flush_start = Instant::now();
+        batch.flush_best_effort_with_connection(connection);
+        trace.record_elapsed("search::auditFlush", flush_start);
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -8304,7 +8407,7 @@ fn truncate_hits_to_limit(hits: &mut Vec<SearchHit>, limit: u32) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct RelevanceFloorCounts {
     considered: usize,
     passed: usize,
@@ -8489,6 +8592,7 @@ async fn run_search_inner_with_performance(
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         trace.record_elapsed("search::total", start);
         return Ok(SearchPerformanceRun {
+            audit_facts: None,
             report: SearchReport {
                 index_freshness,
                 status: SearchStatus::NoResults,
@@ -8730,136 +8834,30 @@ async fn run_search_inner_with_performance(
 
             search_checkpoint(cx)?;
 
-            // Search is a canonical no-write surface. Audit rows are only
-            // emitted when an enclosing mutating operation supplies its
-            // already-owned write connection (for example, persisted pack
-            // assembly). A missing audit connection means "do not audit";
-            // it must never trigger an implicit read-write reopen.
-            if let Some(audit_connection) = audit_connection {
-                let audit_workspace_start = Instant::now();
-                // Bind to the stored workspace row so path-keyed ids join
-                // the same audit workspace as remember/init writes.
-                // Canonicalize first so /tmp -> /private/tmp on macOS.
-                let canonical_workspace = default_workspace_root(&options.workspace_path);
-                let requested = crate::core::curate::stable_workspace_id(&canonical_workspace);
-                let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
-                    audit_connection,
-                    &requested,
-                    &[&options.workspace_path, canonical_workspace.as_path()],
-                )
-                .unwrap_or(requested);
-                let audit_workspace_persisted =
-                    search_audit_workspace_persisted(Some(audit_connection), &workspace_id);
-                trace.record_elapsed("search::auditWorkspaceCheck", audit_workspace_start);
-                if audit_workspace_persisted {
-                    let audit_payload_start = Instant::now();
-                    let q_hash = audit_query_hash(&options.query);
-                    let source_arms: Vec<&str> = above_floor
-                        .iter()
-                        .map(|hit| hit.source.as_str())
-                        .collect::<std::collections::BTreeSet<&str>>()
-                        .into_iter()
-                        .collect();
-                    let executed_details = serde_json::json!({
-                        "queryHash": &q_hash,
-                        "resultCount": above_floor.len(),
-                        "sourceArms": source_arms,
-                        "status": status.as_str(),
-                    })
-                    .to_string();
-                    // bd-21gya: buffer audit rows and flush in one connection +
-                    // one transaction instead of opening DbConnection per row.
-                    // Capacity hint sized for the worst case (1 executed + 1
-                    // optional miss row + 1 returned_mem per hit + redaction
-                    // overhead).
-                    let mut audit_batch =
-                        SearchAuditBatch::new(2 + above_floor.len().saturating_mul(2));
-                    audit_batch.push(
-                        audit_ids,
-                        Some(&workspace_id),
-                        audit_actions::SEARCH_EXECUTED,
-                        Some("workspace"),
-                        Some(&workspace_id),
-                        Some(executed_details),
-                    );
-                    if let Some(miss_reason) = classify_search_query_miss(
-                        floor_counts,
-                        floor,
-                        above_floor.first().map(SearchHit::relevance_score),
-                    ) {
-                        let miss_details =
-                            search_query_miss_audit_details(SearchQueryMissAuditDetails {
-                                query_hash: &q_hash,
-                                reason: miss_reason,
-                                status,
-                                kept,
-                                considered: floor_counts.considered,
-                                dropped_below_floor: dropped,
-                                floor,
-                                top_score_before_floor: pre_floor_top_score,
-                                top_score_after_floor: above_floor
-                                    .first()
-                                    .map(SearchHit::relevance_score),
-                            });
-                        audit_batch.push(
-                            audit_ids,
-                            Some(&workspace_id),
-                            audit_actions::SEARCH_MISS_RECORDED,
-                            Some("query_hash"),
-                            Some(&q_hash),
-                            Some(miss_details),
-                        );
-                    }
-                    for (rank, hit) in above_floor.iter().enumerate() {
-                        let returned_details = serde_json::json!({
-                            "queryHash": &q_hash,
-                            "rank": (rank + 1) as u32,
-                            "score": hit.score,
-                            "relevanceScore": hit.relevance_score(),
-                            "scoreKind": hit.score_kind(),
-                            "source": hit.source.as_str(),
-                        })
-                        .to_string();
-                        audit_batch.push(
-                            audit_ids,
-                            Some(&workspace_id),
-                            audit_actions::SEARCH_RETURNED_MEM,
-                            Some("memory"),
-                            Some(&hit.doc_id),
-                            Some(returned_details),
-                        );
-                        if output_redaction_enabled {
-                            for detected_pattern in search_hit_output_redaction_patterns(hit) {
-                                let redaction_details = serde_json::json!({
-                                    "queryHash": &q_hash,
-                                    "rank": (rank + 1) as u32,
-                                    "surface": "search",
-                                    "memoryId": &hit.doc_id,
-                                    "detectedPattern": detected_pattern,
-                                    "action": audit_actions::REDACT_AT_OUTPUT,
-                                })
-                                .to_string();
-                                audit_batch.push(
-                                    audit_ids,
-                                    Some(&workspace_id),
-                                    audit_actions::REDACT_AT_OUTPUT,
-                                    Some("memory"),
-                                    Some(&hit.doc_id),
-                                    Some(redaction_details),
-                                );
-                            }
-                        }
-                    }
-                    trace.record_elapsed("search::auditPayloadBuild", audit_payload_start);
-                    let audit_flush_start = Instant::now();
-                    audit_batch.flush_best_effort_with_connection(audit_connection);
-                    trace.record_elapsed("search::auditFlush", audit_flush_start);
-                }
+            let audit_facts = SearchAuditFacts {
+                floor_counts,
+                kept,
+                dropped,
+                floor,
+                pre_floor_top_score,
+                redactions: if output_redaction_enabled {
+                    above_floor.iter().map(|hit| (
+                        hit.doc_id.clone(), search_hit_output_redaction_patterns(hit),
+                    )).collect()
+                } else {
+                    BTreeMap::new()
+                },
+            };
+            // A missing caller-owned write connection still means no writes.
+            // Remote retrieval returns these facts for the local pack writer.
+            if let Some(connection) = audit_connection {
+                audit_facts.record(options, connection, &above_floor, status, audit_ids, &mut trace);
             }
 
             search_checkpoint(cx)?;
             trace.record_elapsed("search::total", start);
             Ok(SearchPerformanceRun {
+                audit_facts: Some(audit_facts),
                 report: SearchReport {
                     status,
                     embed_backend,
@@ -8901,6 +8899,7 @@ async fn run_search_inner_with_performance(
 
             trace.record_elapsed("search::total", start);
             Ok(SearchPerformanceRun {
+                audit_facts: None,
                 report: SearchReport {
                     status: SearchStatus::IndexError,
                     embed_backend,
