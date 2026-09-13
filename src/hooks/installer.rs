@@ -2256,11 +2256,26 @@ fn audit_harness_hook_snippet(
         };
     };
 
-    let managed_entries: Vec<&serde_json::Value> = entries
+    let managed_hook_count: usize = entries
         .iter()
-        .filter(|entry| json_contains_marker(entry, HARNESS_HOOK_MARKER))
-        .collect();
-    if managed_entries.is_empty() {
+        .filter_map(|entry| {
+            let hooks = entry.get("hooks")?.as_array()?;
+            Some(
+                hooks
+                    .iter()
+                    .filter(|hook| {
+                        harness_hook_is_managed(
+                            hook,
+                            has_harness_hook_marker(entry),
+                            hooks.len(),
+                            snippet,
+                        )
+                    })
+                    .count(),
+            )
+        })
+        .sum();
+    if managed_hook_count == 0 {
         return HarnessHookInstallAuditFinding {
             code: "missing_hook".to_owned(),
             status: "missing_hook".to_owned(),
@@ -2275,8 +2290,26 @@ fn audit_harness_hook_snippet(
         };
     }
 
+    if managed_hook_count > 1 {
+        return HarnessHookInstallAuditFinding {
+            code: "duplicate_hook".to_owned(),
+            status: "stale_hook".to_owned(),
+            event: Some(snippet.event.clone()),
+            matcher: snippet.matcher.clone(),
+            target_path,
+            message: format!(
+                "{managed_hook_count} ee-managed {} hooks are configured; duplicate hooks can run more than once per event.",
+                snippet.event
+            ),
+            repair: format!(
+                "Run `ee hook {} --install` to replace duplicates with one current hook.",
+                target.as_str()
+            ),
+        };
+    }
+
     let expected = harness_hook_entry(target, snippet);
-    if managed_entries.iter().any(|entry| *entry == &expected) {
+    if entries.iter().any(|entry| entry == &expected) {
         HarnessHookInstallAuditFinding {
             code: "hook_present_fresh".to_owned(),
             status: "fresh".to_owned(),
@@ -3090,7 +3123,31 @@ fn merge_harness_hooks(
         let array = event_entries
             .as_array_mut()
             .expect("checked hook event array above");
-        array.retain(|value| !json_contains_marker(value, HARNESS_HOOK_MARKER));
+        array.retain_mut(|group| {
+            let group_managed = has_harness_hook_marker(group);
+            let Some(group_hooks) = group
+                .get_mut("hooks")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                return true;
+            };
+            let original_count = group_hooks.len();
+            group_hooks.retain(|hook| {
+                !harness_hook_is_managed(hook, group_managed, original_count, snippet)
+            });
+            if group_hooks.len() == original_count {
+                return true;
+            }
+            if group_hooks.is_empty() {
+                return false;
+            }
+            // Remaining hooks belong to the user. Keeping our group marker
+            // would incorrectly claim a remaining singleton on the next install.
+            if group_managed && let Some(object) = group.as_object_mut() {
+                object.remove("eeManaged");
+            }
+            true
+        });
         array.push(entry);
     }
     Ok(())
@@ -3125,19 +3182,23 @@ fn harness_hook_entry(
     entry
 }
 
-fn json_contains_marker(value: &serde_json::Value, marker: &str) -> bool {
-    match value {
-        serde_json::Value::String(text) => text.contains(marker),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .any(|value| json_contains_marker(value, marker)),
-        serde_json::Value::Object(values) => values
-            .values()
-            .any(|value| json_contains_marker(value, marker)),
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
-            false
-        }
-    }
+fn has_harness_hook_marker(value: &serde_json::Value) -> bool {
+    value.get("eeManaged").and_then(serde_json::Value::as_str) == Some(HARNESS_HOOK_MARKER)
+}
+
+fn harness_hook_is_managed(
+    hook: &serde_json::Value,
+    group_managed: bool,
+    group_hook_count: usize,
+    snippet: &HarnessHookSnippet,
+) -> bool {
+    hook.get("type").and_then(serde_json::Value::as_str) == Some("command")
+        && (has_harness_hook_marker(hook)
+            || hook.get("command").and_then(serde_json::Value::as_str)
+                == Some(snippet.command.as_str())
+            // Older installs mark the group, not its single command. A mixed
+            // group is not blanket ownership of unrelated user commands.
+            || (group_managed && group_hook_count == 1))
 }
 
 fn validate_harness_conformance_case(case: &HarnessConformanceCase) -> Result<(), DomainError> {

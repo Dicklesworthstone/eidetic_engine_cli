@@ -486,6 +486,243 @@ fn install_audit_reports_missing_fresh_and_docs() -> TestResult {
 }
 
 #[test]
+fn install_audit_reclaims_exact_commands_without_metadata() -> TestResult {
+    for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let settings_path = temp.path().join("settings.json");
+        let install = options(target, &settings_path, true, false);
+        let initial = generate_harness_hook_install(&install).map_err(|error| error.message())?;
+        let mut document: Value =
+            serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        for groups in document["hooks"].as_object_mut().unwrap().values_mut() {
+            for group in groups.as_array_mut().unwrap() {
+                group.as_object_mut().unwrap().remove("eeManaged");
+            }
+        }
+        fs::write(
+            &settings_path,
+            serde_json::to_vec_pretty(&document).unwrap(),
+        )
+        .unwrap();
+
+        let repaired = generate_harness_hook_install(&install).map_err(|error| error.message())?;
+        assert_eq!(repaired.install_audit.status, "fresh");
+        assert_eq!(repaired.install_audit.hook_fresh_count, 4);
+        let repaired_bytes = fs::read(&settings_path).unwrap();
+        let repaired_document: Value = serde_json::from_slice(&repaired_bytes).unwrap();
+        for snippet in &initial.snippets {
+            let groups = repaired_document["hooks"][&snippet.event]
+                .as_array()
+                .unwrap();
+            assert_eq!(
+                groups.len(),
+                1,
+                "metadata loss must not append another group"
+            );
+            assert_eq!(groups[0]["eeManaged"], initial.markers.entry_marker);
+            let hooks = groups[0]["hooks"].as_array().unwrap();
+            assert_eq!(hooks.len(), 1);
+            assert_eq!(hooks[0]["type"], "command");
+            assert_eq!(hooks[0]["command"], snippet.command);
+        }
+        let repeated = generate_harness_hook_install(&install).map_err(|error| error.message())?;
+        assert!(repeated.written_paths.is_empty());
+        assert_eq!(fs::read(&settings_path).unwrap(), repaired_bytes);
+    }
+    Ok(())
+}
+
+#[test]
+fn install_audit_detects_and_repairs_duplicate_commands_per_event() -> TestResult {
+    for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
+        for (same_group, strip_first_marker, strip_duplicate_marker) in [
+            (false, false, false),
+            (false, false, true),
+            (false, true, true),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            let temp = TempDir::new().map_err(|error| error.to_string())?;
+            let settings_path = temp.path().join("settings.json");
+            let install = options(target, &settings_path, true, false);
+            generate_harness_hook_install(&install).map_err(|error| error.message())?;
+            let mut document: Value =
+                serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+            for groups in document["hooks"].as_object_mut().unwrap().values_mut() {
+                let groups = groups.as_array_mut().unwrap();
+                let mut duplicate = groups[0].clone();
+                if strip_duplicate_marker {
+                    duplicate.as_object_mut().unwrap().remove("eeManaged");
+                }
+                if strip_first_marker {
+                    groups[0].as_object_mut().unwrap().remove("eeManaged");
+                }
+                if same_group {
+                    groups[0]["hooks"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(duplicate["hooks"][0].clone());
+                } else {
+                    groups.push(duplicate);
+                }
+            }
+            let duplicated_bytes = serde_json::to_vec_pretty(&document).unwrap();
+            fs::write(&settings_path, &duplicated_bytes).unwrap();
+            let audit =
+                generate_harness_hook_install(&options(target, &settings_path, false, false))
+                    .map_err(|error| error.message())?;
+            assert!(audit.read_only);
+            assert_eq!(fs::read(&settings_path).unwrap(), duplicated_bytes);
+            assert_eq!(audit.install_audit.status, "stale_hook");
+            assert_eq!(audit.install_audit.hook_fresh_count, 0);
+            assert_eq!(audit.install_audit.hook_stale_count, 4);
+            assert_eq!(audit.install_audit.hook_missing_count, 0);
+            let duplicates: Vec<_> = audit
+                .install_audit
+                .findings
+                .iter()
+                .filter(|finding| finding.code == "duplicate_hook")
+                .collect();
+            assert_eq!(duplicates.len(), 4, "each duplicate event needs a finding");
+            assert!(
+                duplicates
+                    .iter()
+                    .all(|finding| finding.message.starts_with("2 ee-managed"))
+            );
+            assert!(!audit.install_audit.repair_plan.is_empty());
+
+            let repaired =
+                generate_harness_hook_install(&install).map_err(|error| error.message())?;
+            assert_eq!(repaired.install_audit.status, "fresh");
+            let repaired_bytes = fs::read(&settings_path).unwrap();
+            let repaired_document: Value = serde_json::from_slice(&repaired_bytes).unwrap();
+            for snippet in &repaired.snippets {
+                let groups = repaired_document["hooks"][&snippet.event]
+                    .as_array()
+                    .unwrap();
+                assert_eq!(groups.len(), 1);
+                assert_eq!(groups[0]["hooks"].as_array().unwrap().len(), 1);
+                assert_eq!(groups[0]["hooks"][0]["command"], snippet.command);
+            }
+            let repeated =
+                generate_harness_hook_install(&install).map_err(|error| error.message())?;
+            assert!(repeated.written_paths.is_empty());
+            assert_eq!(fs::read(&settings_path).unwrap(), repaired_bytes);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn install_audit_preserves_mixed_groups_and_near_matching_user_hooks() -> TestResult {
+    for (marked_group, singleton_user_hook) in [(false, false), (true, false), (true, true)] {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let settings_path = temp.path().join("settings.json");
+        let install = options(HarnessHookTarget::ClaudeCode, &settings_path, true, false);
+        let generated = generate_harness_hook_install(&options(
+            HarnessHookTarget::ClaudeCode,
+            &settings_path,
+            false,
+            false,
+        ))
+        .map_err(|error| error.message())?;
+        let snippet = generated
+            .snippets
+            .iter()
+            .find(|snippet| snippet.event == "SessionStart")
+            .unwrap();
+        let mut user_hooks = serde_json::json!([
+            {"type": "command", "command": format!("{} # user extension", snippet.command), "timeout": 77},
+            {"type": "command", "command": format!("echo {}", generated.markers.entry_marker)},
+            {"type": "prompt", "command": snippet.command, "prompt": "Preserve this prompt", "timeout": 73}
+        ]);
+        if singleton_user_hook {
+            user_hooks.as_array_mut().unwrap().truncate(1);
+        }
+        let user_group = serde_json::json!({
+            "matcher": "compact", "timeout": 42, "description": "user group settings",
+            "hooks": user_hooks
+        });
+        let mut mixed_group = user_group.clone();
+        mixed_group["hooks"].as_array_mut().unwrap().insert(
+            1,
+            serde_json::json!({
+                "type": "command", "command": snippet.command, "timeout": snippet.timeout_seconds
+            }),
+        );
+        if marked_group {
+            mixed_group["eeManaged"] = generated.markers.entry_marker.clone().into();
+        }
+        let other_group = serde_json::json!({
+            "eeManaged": format!("{}-user", generated.markers.entry_marker),
+            "hooks": [{"type": "command", "command": "echo unrelated", "timeout": 91}],
+            "description": generated.markers.entry_marker
+        });
+        let unrelated_setting = serde_json::json!({"theme": "user-choice"});
+        let document = serde_json::json!({
+            "userSettings": unrelated_setting,
+            "hooks": {"SessionStart": [mixed_group, other_group]}
+        });
+        fs::write(
+            &settings_path,
+            serde_json::to_vec_pretty(&document).unwrap(),
+        )
+        .unwrap();
+        let repaired = generate_harness_hook_install(&install).map_err(|error| error.message())?;
+        assert_eq!(repaired.install_audit.status, "fresh");
+        let repaired_bytes = fs::read(&settings_path).unwrap();
+        let repaired_document: Value = serde_json::from_slice(&repaired_bytes).unwrap();
+        assert_eq!(repaired_document["userSettings"], unrelated_setting);
+        let groups = repaired_document["hooks"]["SessionStart"]
+            .as_array()
+            .unwrap();
+        assert_eq!(groups.len(), 3);
+        assert_eq!(
+            groups[0], user_group,
+            "preserve every unrelated hook and group setting"
+        );
+        assert_eq!(
+            groups[1], other_group,
+            "marker substrings are not ownership"
+        );
+        assert_eq!(groups[2]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(groups[2]["hooks"][0]["command"], snippet.command);
+        let repeated = generate_harness_hook_install(&install).map_err(|error| error.message())?;
+        assert!(repeated.written_paths.is_empty());
+        assert_eq!(fs::read(&settings_path).unwrap(), repaired_bytes);
+    }
+    Ok(())
+}
+
+#[test]
+fn install_audit_rejects_malformed_settings_without_rewriting_them() -> TestResult {
+    for (contents, message) in [
+        ("{invalid", "not valid JSON"),
+        ("[]", "must be a JSON object"),
+        (r#"{"hooks":[]}"#, "`hooks` must be an object"),
+        (
+            r#"{"hooks":{"PostToolUse":{}}}"#,
+            "`PostToolUse` must be an array",
+        ),
+    ] {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let settings_path = temp.path().join("settings.json");
+        fs::write(&settings_path, contents).unwrap();
+        let error = generate_harness_hook_install(&options(
+            HarnessHookTarget::ClaudeCode,
+            &settings_path,
+            true,
+            false,
+        ))
+        .unwrap_err();
+        assert_eq!(error.code(), "configuration");
+        assert!(error.message().contains(message), "{}", error.message());
+        assert_eq!(fs::read_to_string(&settings_path).unwrap(), contents);
+    }
+    Ok(())
+}
+
+#[test]
 fn install_audit_reports_stale_managed_hooks() -> TestResult {
     let temp = TempDir::new().map_err(|error| error.to_string())?;
     let settings_path = temp.path().join("claude-settings.json");

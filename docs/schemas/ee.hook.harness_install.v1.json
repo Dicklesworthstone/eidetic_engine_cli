@@ -188,6 +188,7 @@
                 "enum": [
                   "missing_hook",
                   "stale_hook",
+                  "duplicate_hook",
                   "hook_present_fresh",
                   "unsupported_harness_version",
                   "config_not_writable",
