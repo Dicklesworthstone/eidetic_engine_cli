@@ -1205,9 +1205,9 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use std::fs;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, mpsc};
     use std::thread;
 
     fn memory_pool(max_size: usize, idle_timeout: Duration) -> ReadConnectionPool {
@@ -1318,21 +1318,6 @@ mod tests {
         )
     }
 
-    fn join_reader_latency(handle: thread::JoinHandle<u128>) -> u128 {
-        match handle.join() {
-            Ok(value) => value,
-            Err(payload) => {
-                if let Some(message) = payload.downcast_ref::<&str>() {
-                    panic!("reader thread panicked: {message}");
-                }
-                if let Some(message) = payload.downcast_ref::<String>() {
-                    panic!("reader thread panicked: {message}");
-                }
-                panic!("reader thread panicked with non-string payload");
-            }
-        }
-    }
-
     fn p50_latency_ms(values: &[u128]) -> u128 {
         let mut sorted = values.to_vec();
         sorted.sort_unstable();
@@ -1356,47 +1341,153 @@ mod tests {
             DatabaseConfig::file(database_path.clone()),
             PoolConfig::new(8, Duration::from_secs(30)),
         ));
-        let readers_ready = Arc::new(Barrier::new(readers + 1));
-        let release_readers = Arc::new(Barrier::new(readers + 1));
-        let batch_start = Arc::new(Mutex::new(None::<Instant>));
-
-        let handles: Vec<_> = (0..readers)
-            .map(|_| {
-                let pool = Arc::clone(&pool);
-                let readers_ready = Arc::clone(&readers_ready);
-                let release_readers = Arc::clone(&release_readers);
-                let batch_start = Arc::clone(&batch_start);
-                thread::spawn(move || {
-                    let pin = must(pool.pin_snapshot(), "fanout reader snapshot opens");
-                    assert_eq!(snapshot_item_count(&pin), 1);
-                    readers_ready.wait();
-                    release_readers.wait();
-                    thread::sleep(per_reader_work);
-                    assert_eq!(snapshot_item_count(&pin), 1);
-                    batch_start
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .expect("batch start set before readers release")
-                        .elapsed()
-                        .as_millis()
-                })
-            })
-            .collect();
-
-        readers_ready.wait();
-        insert_snapshot_item(&database_path, 2, "during_pool_eight_readers");
-        {
-            let mut start = batch_start
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *start = Some(Instant::now());
-        }
-        release_readers.wait();
-
-        let latencies: Vec<u128> = handles.into_iter().map(join_reader_latency).collect();
+        let latencies = fanout_batch_completion_latencies(
+            readers,
+            |_| {
+                let pin = must(pool.pin_snapshot(), "fanout reader snapshot opens");
+                assert_eq!(snapshot_item_count(&pin), 1);
+                pin
+            },
+            || insert_snapshot_item(&database_path, 2, "during_pool_eight_readers"),
+            |pin, batch_start| {
+                thread::sleep(per_reader_work);
+                assert_eq!(snapshot_item_count(&pin), 1);
+                batch_start.elapsed().as_millis()
+            },
+        );
         let fresh = must(pool.acquire(), "fresh reader opens after fanout batch");
         assert_eq!(snapshot_item_count(&fresh), 2);
         latencies
+    }
+
+    fn fanout_batch_completion_latencies<T>(
+        readers: usize,
+        prepare: impl Fn(usize) -> T + Sync,
+        while_ready: impl FnOnce(),
+        measure: impl Fn(T, Instant) -> u128 + Sync,
+    ) -> Vec<u128> {
+        thread::scope(|scope| {
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let mut releases = Vec::with_capacity(readers);
+            let mut handles = Vec::with_capacity(readers);
+            for reader in 0..readers {
+                let ready_tx = ready_tx.clone();
+                let (release_tx, release_rx) = mpsc::channel();
+                releases.push(release_tx);
+                let prepare = &prepare;
+                let measure = &measure;
+                handles.push(scope.spawn(move || {
+                    let prepared = prepare(reader);
+                    must(ready_tx.send(()), "reader reports readiness");
+                    // A preparation panic drops this sender too, so the coordinator
+                    // can count every successful reader without an unfillable barrier.
+                    drop(ready_tx);
+                    release_rx
+                        .recv()
+                        .ok()
+                        .map(|batch_start| measure(prepared, batch_start))
+                }));
+            }
+            drop(ready_tx);
+            let ready_count = ready_rx.into_iter().count();
+            let batch = catch_unwind(AssertUnwindSafe(|| {
+                assert_eq!(ready_count, readers, "every fanout reader must prepare");
+                while_ready();
+                let batch_start = Instant::now();
+                for release in &releases {
+                    must(
+                        release.send(batch_start),
+                        "prepared reader receives release",
+                    );
+                }
+            }));
+            // Disconnect releases on coordinator failure before joining: readers
+            // must drop their pinned snapshots even when the writer panics.
+            drop(releases);
+            let results: Vec<_> = handles
+                .into_iter()
+                .map(thread::ScopedJoinHandle::join)
+                .collect();
+            let mut latencies = Vec::with_capacity(readers);
+            for result in results {
+                match result {
+                    Ok(Some(latency)) => latencies.push(latency),
+                    Ok(None) => {}
+                    Err(payload) => resume_unwind(payload),
+                }
+            }
+            if let Err(payload) = batch {
+                resume_unwind(payload);
+            }
+            assert_eq!(
+                latencies.len(),
+                readers,
+                "every fanout reader must complete"
+            );
+            latencies
+        })
+    }
+
+    struct FanoutReaderDropCount<'a>(&'a std::sync::atomic::AtomicUsize);
+
+    impl Drop for FanoutReaderDropCount<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn fanout_batch_propagates_reader_panic_after_joining_every_reader() {
+        for fail_before_ready in [true, false] {
+            for failed_reader in [0, 7] {
+                let dropped = std::sync::atomic::AtomicUsize::new(0);
+                let writer_ran = AtomicBool::new(false);
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    fanout_batch_completion_latencies(
+                        8,
+                        |reader| {
+                            let guard = FanoutReaderDropCount(&dropped);
+                            assert!(
+                                !fail_before_ready || reader != failed_reader,
+                                "fanout reader failure"
+                            );
+                            (reader, guard)
+                        },
+                        || writer_ran.store(true, Ordering::SeqCst),
+                        |(reader, _guard), _| {
+                            assert!(reader != failed_reader, "fanout reader failure");
+                            1
+                        },
+                    )
+                }));
+                let payload = result.expect_err("a reader failure must fail the whole batch");
+                assert_eq!(
+                    payload.downcast_ref::<&str>(),
+                    Some(&"fanout reader failure")
+                );
+                assert_eq!(dropped.load(Ordering::SeqCst), 8, "all readers joined");
+                assert_eq!(writer_ran.load(Ordering::SeqCst), !fail_before_ready);
+            }
+        }
+    }
+
+    #[test]
+    fn fanout_batch_propagates_writer_panic_after_releasing_every_reader() {
+        let dropped = std::sync::atomic::AtomicUsize::new(0);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            fanout_batch_completion_latencies(
+                8,
+                |_| FanoutReaderDropCount(&dropped),
+                || panic!("fanout writer failure"),
+                |_, _| panic!("failed writer must not release readers into measurement"),
+            )
+        }));
+        let payload = result.expect_err("a writer failure must fail the whole batch");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"fanout writer failure")
+        );
+        assert_eq!(dropped.load(Ordering::SeqCst), 8, "all readers joined");
     }
 
     fn pool_size_one_batch_completion_latencies(
