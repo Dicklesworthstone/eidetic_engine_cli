@@ -2673,7 +2673,7 @@ pub struct HelpArgs {
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum DaemonCommand {
-    /// Report daemon supervisor status.
+    /// Report the workspace's hot daemon, model readiness, and steward status.
     Status(DaemonStatusArgs),
     /// Start the optional hot-mode UDS RPC daemon. The daemon is opt-in;
     /// every CLI command continues to work without it. Binds a
@@ -2707,7 +2707,11 @@ pub enum DaemonCommand {
 }
 
 #[derive(Clone, Debug, Parser, PartialEq)]
-pub struct DaemonStatusArgs {}
+pub struct DaemonStatusArgs {
+    /// Override the hot daemon's UDS path. Same defaults as `daemon start`.
+    #[arg(long, value_name = "PATH")]
+    pub socket: Option<PathBuf>,
+}
 
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct DaemonHotModeStartArgs {
@@ -3021,6 +3025,14 @@ pub struct ContextArgs {
     #[arg(value_name = "QUERY")]
     pub query: String,
 
+    /// Reuse a warm workspace daemon for retrieval; fall back to in-process search if unavailable.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub use_daemon: bool,
+
+    /// Explicit daemon socket path. Requires --use-daemon.
+    #[arg(long, value_name = "PATH", requires = "use_daemon")]
+    pub daemon_socket: Option<PathBuf>,
+
     /// Explicit maximum token budget for the context pack.
     #[arg(long, short = 't', value_name = "N")]
     pub max_tokens: Option<u32>,
@@ -3331,6 +3343,14 @@ pub struct PackArgs {
     #[arg(value_name = "QUERY")]
     pub query: Option<String>,
 
+    /// Reuse a warm workspace daemon for retrieval; fall back to in-process search if unavailable.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub use_daemon: bool,
+
+    /// Explicit daemon socket path. Requires --use-daemon.
+    #[arg(long, value_name = "PATH", requires = "use_daemon")]
+    pub daemon_socket: Option<PathBuf>,
+
     /// Raw diagnostic text or file path to fingerprint as an error-recall pack seed.
     #[arg(long = "error-log", value_name = "TEXT")]
     pub error_log: Option<String>,
@@ -3521,6 +3541,14 @@ pub struct PackBuildArgs {
     #[arg(long, value_name = "PATH")]
     pub query_file: PathBuf,
 
+    /// Reuse a warm workspace daemon for retrieval; pack assembly and persistence remain local.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub use_daemon: bool,
+
+    /// Explicit daemon socket path. Requires --use-daemon.
+    #[arg(long, value_name = "PATH", requires = "use_daemon")]
+    pub daemon_socket: Option<PathBuf>,
+
     /// Raw diagnostic text or file path to fingerprint as an error-recall pack seed.
     #[arg(long = "error-log", value_name = "TEXT")]
     pub error_log: Option<String>,
@@ -3685,6 +3713,8 @@ impl PackArgs {
 
         Ok(PackBuildArgs {
             query_file,
+            use_daemon: self.use_daemon,
+            daemon_socket: self.daemon_socket.clone(),
             error_log: self.error_log.clone(),
             max_tokens: self.max_tokens,
             candidate_pool: self.candidate_pool,
@@ -44635,6 +44665,8 @@ where
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
         let context_args = ContextArgs {
+            use_daemon: args.use_daemon,
+            daemon_socket: args.daemon_socket.clone(),
             query,
             max_tokens: args
                 .max_tokens
@@ -62959,6 +62991,83 @@ fn serve_bound_startup_response_human(listener_metadata: &serde_json::Value) -> 
     )
 }
 
+#[cfg(unix)]
+fn probe_daemon_hot_status(socket_path: &std::path::Path, workspace: &std::path::Path) -> serde_json::Value {
+    use crate::daemon::protocol::DaemonRequest;
+    use crate::daemon::server::{METHOD_CAPABILITIES, client_round_trip_before};
+
+    // Discovery never loads the client search stack. Bound connect as well as
+    // framed I/O, since a full socket backlog can otherwise hang a status call.
+    let timeout = std::time::Duration::from_secs(1);
+    let deadline = std::time::Instant::now() + timeout;
+    let socket = socket_path.to_path_buf();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let request = DaemonRequest::new(
+            format!("status-capabilities-{}", std::process::id()),
+            "ee-cli-status",
+            METHOD_CAPABILITIES,
+            serde_json::json!({}),
+        );
+        let result = client_round_trip_before(&socket, &request, deadline)
+            .map_err(|error| error.to_string())
+            .and_then(|response| {
+                if let Some(error) = response.error {
+                    return Err(error.message);
+                }
+                response.result.ok_or_else(|| "daemon capabilities result missing".to_owned())
+            });
+        let _ = sender.send(result);
+    });
+    let capabilities = receiver.recv_timeout(timeout)
+        .map_err(|_| "daemon status deadline exceeded".to_owned())
+        .and_then(std::convert::identity);
+    daemon_hot_status_from_capabilities(socket_path, workspace, capabilities)
+}
+
+#[cfg(unix)]
+fn daemon_hot_status_from_capabilities(
+    socket_path: &std::path::Path,
+    workspace: &std::path::Path,
+    capabilities: Result<serde_json::Value, String>,
+) -> serde_json::Value {
+    let mut status = serde_json::json!({
+        "running": false,
+        "socketPath": socket_path,
+        "warm": {"posture": "unknown"},
+    });
+    let capabilities = match capabilities {
+        Ok(value) => value,
+        Err(message) => {
+            status["posture"] = serde_json::json!("unavailable");
+            status["message"] = serde_json::json!(message);
+            return status;
+        }
+    };
+    if let Err(reason) = validate_daemon_search_capabilities(&capabilities) {
+        status["posture"] = serde_json::json!("protocol_mismatch");
+        status["message"] = serde_json::json!(reason.as_str());
+        return status;
+    }
+    let expected_workspace = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
+    let bound_workspace = capabilities.get("workspace_path").and_then(serde_json::Value::as_str);
+    if bound_workspace.map(std::path::Path::new) != Some(expected_workspace.as_path()) {
+        status["posture"] = serde_json::json!("workspace_mismatch");
+        status["message"] = serde_json::json!("The endpoint does not advertise this workspace; restart the workspace daemon or check --socket.");
+        return status;
+    }
+    let posture = capabilities.pointer("/warm/posture").and_then(serde_json::Value::as_str);
+    if !matches!(posture, Some("cold" | "warming" | "ready" | "failed")) {
+        status["posture"] = serde_json::json!("protocol_mismatch");
+        status["message"] = serde_json::json!("The endpoint did not report a recognized model warm posture.");
+        return status;
+    }
+    status["running"] = serde_json::json!(true);
+    status["posture"] = serde_json::json!("running");
+    status["warm"] = serde_json::json!({"posture": posture});
+    status
+}
+
 fn write_daemon_status<W, E>(
     cli: &Cli,
     args: &DaemonArgs,
@@ -62990,7 +63099,25 @@ where
             return write_domain_error(&error, cli.wants_json(), stdout, stderr);
         }
     };
+    let socket = match &args.command {
+        Some(DaemonCommand::Status(status)) => status.socket.clone(),
+        _ => None,
+    }.unwrap_or_else(|| crate::daemon::workspace_daemon_socket_path(&workspace_path));
+    #[cfg(unix)]
+    let hot = probe_daemon_hot_status(&socket, &workspace_path);
+    #[cfg(not(unix))]
+    let hot = serde_json::json!({
+        "running": false,
+        "socketPath": socket,
+        "posture": "unsupported",
+        "warm": {"posture": "unsupported"},
+    });
     if let Some(object) = data.as_object_mut() {
+        let steward_running = object.get("running").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        object.insert("stewardRunning".to_owned(), serde_json::json!(steward_running));
+        object.insert("running".to_owned(), serde_json::json!(steward_running || hot["running"].as_bool().unwrap_or(false)));
+        object.insert("warm".to_owned(), hot["warm"].clone());
+        object.insert("hotMode".to_owned(), hot);
         let database_path = workspace_path.join(".ee").join("ee.db");
         let team = if let Ok(connection) = crate::db::DbConnection::open_file(&database_path) {
             let workspace_id = bound_cli_workspace_id(&connection, &workspace_path)
@@ -63020,12 +63147,16 @@ where
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
             let running = data["running"].as_bool().unwrap_or(false);
+            let hot_running = data["hotMode"]["running"].as_bool().unwrap_or(false);
+            let warm = data["warm"]["posture"].as_str().unwrap_or("unknown");
+            let socket = data["hotMode"]["socketPath"].as_str().unwrap_or("unavailable");
+            let message = data["hotMode"]["message"].as_str().unwrap_or("");
             let open_jobs = data["durable"]["openJobCount"].as_u64().unwrap_or(0);
             let recent = data["durable"]["recentOutcomeCount"].as_u64().unwrap_or(0);
             write_stdout(
                 stdout,
                 &format!(
-                    "ee daemon status\n================\n\nRunning:    {running}\nSupervisor: asupersync_foreground\nMode:       bounded foreground\nOpen jobs:  {open_jobs}\nRecent:     {recent}\n\nNext:\n  ee daemon --foreground --once --json\n"
+                    "ee daemon status\n================\n\nRunning:     {running}\nHot daemon:  {hot_running}\nWarm posture: {warm}\nSocket:      {socket}\n{message}\nSteward open jobs: {open_jobs}\nRecent outcomes:   {recent}\n"
                 ),
             )
         }
@@ -89070,7 +89201,86 @@ mod tests {
             &value["data"]["schema"],
             &serde_json::json!(crate::serve::DAEMON_STATUS_SCHEMA_V1),
             "daemon status schema",
-        )
+        )?;
+        ensure_equal(&value["data"]["running"], &serde_json::json!(false), "no daemon is running")?;
+        ensure_equal(&value["data"]["stewardRunning"], &serde_json::json!(false), "no steward jobs")?;
+        ensure_equal(&value["data"]["hotMode"]["running"], &serde_json::json!(false), "absent hot daemon")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_status_preserves_each_reported_warm_posture() -> TestResult {
+        for posture in ["cold", "warming", "ready", "failed"] {
+            let mut capabilities = daemon_search_capabilities_fixture();
+            capabilities["workspace_path"] = serde_json::json!("/");
+            capabilities["warm"] = serde_json::json!({"posture": posture});
+            let status = super::daemon_hot_status_from_capabilities(
+                Path::new("/unused-status-test.sock"), Path::new("/"), Ok(capabilities),
+            );
+            ensure_equal(&status["running"], &serde_json::json!(true), "live endpoint")?;
+            ensure_equal(&status["warm"]["posture"], &serde_json::json!(posture), "actual warm posture")?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_status_rejects_wrong_workspace_and_unknown_readiness() -> TestResult {
+        for (workspace, posture, expected) in [
+            ("/other-workspace", "ready", "workspace_mismatch"),
+            ("/", "invented-ready", "protocol_mismatch"),
+        ] {
+            let mut capabilities = daemon_search_capabilities_fixture();
+            capabilities["workspace_path"] = serde_json::json!(workspace);
+            capabilities["warm"] = serde_json::json!({"posture": posture});
+            let status = super::daemon_hot_status_from_capabilities(
+                Path::new("/unused-status-test.sock"), Path::new("/"), Ok(capabilities),
+            );
+            ensure_equal(&status["running"], &serde_json::json!(false), "unverified endpoint")?;
+            ensure_equal(&status["posture"], &serde_json::json!(expected), "specific probe failure")?;
+            ensure_equal(&status["warm"]["posture"], &serde_json::json!("unknown"), "never fabricate readiness")?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_status_probes_real_workspace_daemon() -> TestResult {
+        let workspace = init_cli_workspace("hot-status")?;
+        let socket_dir = Path::new(&workspace).join(".ee");
+        let socket = socket_dir.join("status.sock");
+        let canonical = Path::new(&workspace).canonicalize().map_err(|error| error.to_string())?;
+        let mut server = crate::daemon::server::start_server_for_workspace(
+            &socket, canonical.to_string_lossy().into_owned(),
+        ).map_err(|error| error.to_string())?;
+        let (exit, stdout, stderr) = invoke(&[
+            "ee", "--json", "--workspace", &workspace, "daemon", "status", "--socket",
+            socket.to_str().ok_or("socket path must be UTF-8")?,
+        ]);
+        // Always stop the real server before checking response assertions.
+        server.shutdown().map_err(|error| error.to_string())?;
+        ensure_equal(&exit, &ProcessExitCode::Success, "hot status exit")?;
+        ensure(stderr.is_empty(), "hot status stderr clean")?;
+        let value = ensure_response_top_level_degraded_empty(&stdout, "hot daemon status")?;
+        ensure_equal(&value["data"]["running"], &serde_json::json!(true), "hot daemon reports running")?;
+        ensure_equal(&value["data"]["stewardRunning"], &serde_json::json!(false), "hot daemon does not become a steward job")?;
+        ensure_equal(&value["data"]["hotMode"]["running"], &serde_json::json!(true), "real endpoint reached")?;
+        ensure(matches!(value["data"]["warm"]["posture"].as_str(), Some("cold" | "warming" | "ready" | "failed")), "live warm posture is exposed")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_status_bounds_a_peer_that_never_replies() -> TestResult {
+        let workspace = init_cli_workspace("status-timeout")?;
+        let socket = Path::new(&workspace).join(".ee/status.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).map_err(|error| error.to_string())?;
+        let started = std::time::Instant::now();
+        // A real listener leaves the connection queued without accepting it.
+        let status = super::probe_daemon_hot_status(&socket, Path::new(&workspace));
+        drop(listener);
+        ensure(started.elapsed() < std::time::Duration::from_secs(3), "unresponsive status stays bounded")?;
+        ensure_equal(&status["running"], &serde_json::json!(false), "unresponsive peer not reported running")?;
+        ensure_equal(&status["warm"]["posture"], &serde_json::json!("unknown"), "unresponsive readiness remains unknown")
     }
 
     #[test]

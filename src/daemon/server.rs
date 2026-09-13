@@ -2204,7 +2204,7 @@ fn dispatch_with_echo_policy_and_workspace_inner(
             request.request_id.clone(),
             request.agent_id.clone(),
             request.workspace_id.clone(),
-            daemon_capabilities_result(),
+            daemon_capabilities_result(bound_workspace_id),
         ),
         // bd-3uev6: echo is the one public dispatch method that returns
         // caller-supplied content, so it MUST route through the same
@@ -5773,9 +5773,10 @@ fn method_unauthorized_response(request: &DaemonRequest, message: &'static str) 
 }
 
 #[allow(clippy::expect_used)]
-fn daemon_capabilities_result() -> serde_json::Value {
+fn daemon_capabilities_result(bound_workspace_id: Option<&str>) -> serde_json::Value {
     serde_json::json!({
         "protocol": "ee.daemon",
+        "workspace_path": bound_workspace_id,
         "request_schemas": [super::DAEMON_REQUEST_SCHEMA_V1],
         "response_schemas": [super::DAEMON_RESPONSE_SCHEMA_V1],
         "methods": [
@@ -7813,7 +7814,8 @@ mod tests {
 
     #[test]
     fn daemon_capabilities_advertise_the_warm_posture() {
-        let capabilities = daemon_capabilities_result();
+        let capabilities = daemon_capabilities_result(Some("/workspace/warm-test"));
+        assert_eq!(capabilities["workspace_path"], "/workspace/warm-test");
         let posture = capabilities
             .pointer("/warm/posture")
             .and_then(serde_json::Value::as_str)
