@@ -6029,9 +6029,148 @@ pub(crate) fn verified_potion_model_dir(model_dir: &Path) -> bool {
 /// `ee model status` report a directory as usable that the runtime then
 /// refused, silently falling through to the download or hash-fallback path.
 pub(crate) fn potion_model_dir_verification(model_dir: &Path) -> Result<(), SearchError> {
-    ModelArtifactManifestV1::potion_128m_native()?
-        .verify_dir_cached(&ModelManifest::potion_128m(), model_dir)
-        .map(|_| ())
+    static VERIFIED_MODELS: OnceLock<ModelDirectoryVerificationCache> = OnceLock::new();
+    VERIFIED_MODELS
+        .get_or_init(ModelDirectoryVerificationCache::default)
+        .verify(
+            &ModelArtifactManifestV1::potion_128m_native()?,
+            &ModelManifest::potion_128m(),
+            model_dir,
+        )
+}
+
+/// Process-local proof of a successful Frankensearch verification. A missing
+/// or stale on-disk receipt must not force every warm request to hash 531 MB.
+/// Nothing is written to the model directory, and Frankensearch still owns
+/// manifest, hash, layout and producer validation on every cache miss.
+#[derive(Default)]
+struct ModelDirectoryVerificationCache {
+    entries: Mutex<Vec<VerifiedModelDirectory>>,
+    #[cfg(test)]
+    verification_calls: std::sync::atomic::AtomicUsize,
+}
+
+struct VerifiedModelDirectory {
+    path: PathBuf,
+    native: ModelArtifactManifestV1,
+    download: ModelManifest,
+    files: BTreeMap<PathBuf, ModelVerificationFileState>,
+}
+
+#[derive(Eq, PartialEq)]
+struct ModelVerificationFileState {
+    directory: bool,
+    size: u64,
+    modified: SystemTime,
+    created: Option<SystemTime>,
+    #[cfg(unix)]
+    identity_and_change: (u64, u64, i64, i64),
+}
+
+impl ModelDirectoryVerificationCache {
+    fn verify(
+        &self,
+        native: &ModelArtifactManifestV1,
+        download: &ModelManifest,
+        model_dir: &Path,
+    ) -> Result<(), SearchError> {
+        const MAX_VERIFIED_DIRECTORIES: usize = 8;
+        let path = std::fs::canonicalize(model_dir).map_err(SearchError::Io)?;
+        let before = model_verification_file_states(&path);
+        if let Some(files) = &before
+            && let Ok(entries) = self.entries.lock()
+            && entries.iter().any(|entry| {
+                entry.path == path
+                    && &entry.native == native
+                    && &entry.download == download
+                    && &entry.files == files
+            })
+        {
+            return Ok(());
+        }
+
+        #[cfg(test)]
+        self.verification_calls.fetch_add(1, Ordering::Relaxed);
+        native.verify_dir_cached(download, &path)?;
+
+        if let Some(before) = before {
+            let after = model_verification_file_states(&path);
+            if after.as_ref() != Some(&before) {
+                return Err(SearchError::HashMismatch {
+                    path,
+                    expected: "unchanged model files throughout verification".to_owned(),
+                    actual: "model directory changed during verification".to_owned(),
+                });
+            }
+            if let Ok(mut entries) = self.entries.lock() {
+                // Replace stale proof for this path. Bounded FIFO eviction
+                // avoids retaining every workspace/model ever observed.
+                entries.retain(|entry| entry.path != path);
+                if entries.len() >= MAX_VERIFIED_DIRECTORIES {
+                    entries.remove(0);
+                }
+                entries.push(VerifiedModelDirectory {
+                    path,
+                    native: native.clone(),
+                    download: download.clone(),
+                    files: before,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Bind all directory entries, including nested additions and the receipt,
+/// so a new unregistered semantic file cannot bypass the upstream layout gate.
+/// Unix ctime and device/inode also invalidate same-size edits with restored
+/// mtime and atomic replacements. Where that identity is unavailable, or a
+/// tree is unusual/oversized, use ordinary upstream verification instead.
+fn model_verification_file_states(
+    model_dir: &Path,
+) -> Option<BTreeMap<PathBuf, ModelVerificationFileState>> {
+    #[cfg(not(unix))]
+    {
+        let _ = model_dir;
+        None
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        const MAX_ENTRIES: usize = 256;
+        let mut pending = vec![model_dir.to_path_buf()];
+        let mut files = BTreeMap::new();
+        while let Some(path) = pending.pop() {
+            let metadata = std::fs::symlink_metadata(&path).ok()?;
+            if !(metadata.is_file() || metadata.is_dir()) || files.len() >= MAX_ENTRIES {
+                return None;
+            }
+            if metadata.is_dir() {
+                for entry in std::fs::read_dir(&path).ok()? {
+                    pending.push(entry.ok()?.path());
+                    if files.len().saturating_add(pending.len()) > MAX_ENTRIES {
+                        return None;
+                    }
+                }
+            }
+            files.insert(
+                path.strip_prefix(model_dir).ok()?.to_path_buf(),
+                ModelVerificationFileState {
+                    directory: metadata.is_dir(),
+                    size: metadata.len(),
+                    modified: metadata.modified().ok()?,
+                    created: metadata.created().ok(),
+                    identity_and_change: (
+                        metadata.dev(),
+                        metadata.ino(),
+                        metadata.ctime(),
+                        metadata.ctime_nsec(),
+                    ),
+                },
+            );
+        }
+        Some(files)
+    }
 }
 
 /// Stable, deliberately small backend vocabulary shared by search, pack, and
@@ -9151,6 +9290,118 @@ mod tests {
             reloaded_first.model_name() == "registry-identity-a-reloaded",
             "switching back must return the newly loaded embedder",
         )
+    }
+
+    #[cfg(unix)]
+    fn verification_cache_fixture(
+        directory: &Path,
+    ) -> Result<(ModelArtifactManifestV1, ModelManifest), String> {
+        use sha2::{Digest as _, Sha256};
+        let mut native =
+            ModelArtifactManifestV1::potion_128m_native().map_err(|error| error.to_string())?;
+        let mut download = ModelManifest::potion_128m();
+        for (name, bytes) in [
+            ("tokenizer.json", b"{\"tokenizer\":1}".as_slice()),
+            ("model.safetensors", b"test-model-weights".as_slice()),
+        ] {
+            std::fs::write(directory.join(name), bytes).map_err(|error| error.to_string())?;
+            let mut digest = String::with_capacity(64);
+            for byte in Sha256::digest(bytes) {
+                use std::fmt::Write as _;
+                write!(digest, "{byte:02x}").map_err(|error| error.to_string())?;
+            }
+            let artifact = native
+                .artifacts
+                .iter_mut()
+                .find(|artifact| artifact.relative_path == name)
+                .ok_or_else(|| format!("missing native fixture artifact {name}"))?;
+            artifact.sha256 = digest.clone();
+            artifact.size = bytes.len() as u64;
+            let file = download
+                .files
+                .iter_mut()
+                .find(|file| file.name == name)
+                .ok_or_else(|| format!("missing download fixture file {name}"))?;
+            file.sha256 = digest;
+            file.size = bytes.len() as u64;
+        }
+        Ok((native, download))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_verification_cache_reuses_proof_and_rejects_restored_mtime_edits() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (native, download) = verification_cache_fixture(directory.path())?;
+        let cache = ModelDirectoryVerificationCache::default();
+        cache
+            .verify(&native, &download, directory.path())
+            .map_err(|error| error.to_string())?;
+        for _ in 0..10 {
+            cache
+                .verify(&native, &download, directory.path())
+                .map_err(|error| error.to_string())?;
+        }
+        assert_eq!(cache.verification_calls.load(Ordering::Relaxed), 1);
+        assert!(!directory.path().join(".verified").exists());
+
+        let model = directory.path().join("model.safetensors");
+        let modified = std::fs::metadata(&model)
+            .and_then(|metadata| metadata.modified())
+            .map_err(|error| error.to_string())?;
+        std::fs::write(&model, b"TEST-model-weights").map_err(|error| error.to_string())?;
+        std::fs::File::open(&model)
+            .and_then(|file| file.set_modified(modified))
+            .map_err(|error| error.to_string())?;
+        assert!(cache.verify(&native, &download, directory.path()).is_err());
+        assert_eq!(cache.verification_calls.load(Ordering::Relaxed), 2);
+
+        std::fs::write(&model, b"test-model-weights").map_err(|error| error.to_string())?;
+        cache
+            .verify(&native, &download, directory.path())
+            .map_err(|error| error.to_string())?;
+        cache
+            .verify(&native, &download, directory.path())
+            .map_err(|error| error.to_string())?;
+        assert_eq!(cache.verification_calls.load(Ordering::Relaxed), 3);
+        assert!(!directory.path().join(".verified").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_verification_cache_binds_manifest_replacements_and_nested_layout() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (native, download) = verification_cache_fixture(directory.path())?;
+        let cache = ModelDirectoryVerificationCache::default();
+        cache
+            .verify(&native, &download, directory.path())
+            .map_err(|error| error.to_string())?;
+        let mut changed = native.clone();
+        changed.artifacts[0].sha256 = "0".repeat(64);
+        assert!(cache.verify(&changed, &download, directory.path()).is_err());
+        assert_eq!(cache.verification_calls.load(Ordering::Relaxed), 2);
+
+        let model = directory.path().join("model.safetensors");
+        let preserved = directory.path().join("preserved.bytes");
+        std::fs::rename(&model, &preserved).map_err(|error| error.to_string())?;
+        std::fs::write(&model, b"TEST-model-weights").map_err(|error| error.to_string())?;
+        assert!(cache.verify(&native, &download, directory.path()).is_err());
+        std::fs::write(&model, b"test-model-weights").map_err(|error| error.to_string())?;
+        cache
+            .verify(&native, &download, directory.path())
+            .map_err(|error| error.to_string())?;
+
+        let nested = directory.path().join("nested");
+        std::fs::create_dir(&nested).map_err(|error| error.to_string())?;
+        cache
+            .verify(&native, &download, directory.path())
+            .map_err(|error| error.to_string())?;
+        let before = cache.verification_calls.load(Ordering::Relaxed);
+        std::fs::write(nested.join("config.json"), b"{}").map_err(|error| error.to_string())?;
+        assert!(cache.verify(&native, &download, directory.path()).is_err());
+        assert_eq!(cache.verification_calls.load(Ordering::Relaxed), before + 1);
+        Ok(())
     }
 
     #[test]
