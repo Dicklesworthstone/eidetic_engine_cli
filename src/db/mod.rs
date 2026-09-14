@@ -344,6 +344,7 @@ pub struct DbConnection {
     inner: FrankenConnection,
     location: DatabaseLocation,
     mode: DatabaseOpenMode,
+    memory_write_owner_gate: Box<Mutex<()>>,
     agent_context_profile_pack_cache: RwLock<Option<AgentContextProfilePackCache>>,
 }
 
@@ -396,7 +397,7 @@ struct AgentContextProfilePackCache {
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum WriteOwnerKey {
-    Memory,
+    Memory(usize),
     File(PathBuf),
 }
 
@@ -404,17 +405,17 @@ enum WriteOwnerKey {
 // takes `.read()` for cache-hit reads of an existing per-key
 // `&'static Mutex<()>` ownership gate. Sibling to bd-8tsi5 /
 // bd-1nan9 / bd-2lin9 / bd-25yao / bd-2r38i. The gates are
-// Box::leak'd, so the bounded set of distinct WriteOwnerKey values
+// Box::leak'd, so the bounded set of distinct file paths
 // (small N — finite db paths a process opens) persists for the
 // process lifetime; no TTL or GC needed.
-static FILE_WRITE_OWNER_GATES: OnceLock<RwLock<BTreeMap<WriteOwnerKey, &'static Mutex<()>>>> =
+static FILE_WRITE_OWNER_GATES: OnceLock<RwLock<BTreeMap<PathBuf, &'static Mutex<()>>>> =
     OnceLock::new();
 
-fn file_write_owner_gates() -> &'static RwLock<BTreeMap<WriteOwnerKey, &'static Mutex<()>>> {
+fn file_write_owner_gates() -> &'static RwLock<BTreeMap<PathBuf, &'static Mutex<()>>> {
     FILE_WRITE_OWNER_GATES.get_or_init(|| RwLock::new(BTreeMap::new()))
 }
 
-fn file_write_owner_gate(key: &WriteOwnerKey) -> &'static Mutex<()> {
+fn file_write_owner_gate(key: &Path) -> &'static Mutex<()> {
     let gates = file_write_owner_gates();
     // bd-3mr0x: fast path — shared `.read()` lock for the cache-hit
     // lookup. Concurrent writers against DIFFERENT db files
@@ -438,14 +439,17 @@ fn file_write_owner_gate(key: &WriteOwnerKey) -> &'static Mutex<()> {
         return *gate;
     }
     let gate: &'static Mutex<()> = Box::leak(Box::new(Mutex::new(())));
-    write_guard.insert(key.clone(), gate);
+    write_guard.insert(key.to_path_buf(), gate);
     gate
 }
 
-fn write_owner_key(location: &DatabaseLocation) -> WriteOwnerKey {
+fn file_write_owner_key(location: &DatabaseLocation) -> Result<PathBuf> {
     match location {
-        DatabaseLocation::Memory => WriteOwnerKey::Memory,
-        DatabaseLocation::File(path) => WriteOwnerKey::File(normalized_write_owner_file_key(path)),
+        DatabaseLocation::Memory => Err(DbError::MalformedRow {
+            operation: DbOperation::BeginTransaction,
+            message: "in-memory write ownership requires a connection-local gate".to_owned(),
+        }),
+        DatabaseLocation::File(path) => Ok(normalized_write_owner_file_key(path)),
     }
 }
 
@@ -476,14 +480,14 @@ thread_local! {
         const { RefCell::new(BTreeMap::new()) };
 }
 
-struct FileWriteOwnerGuard {
+struct WriteOwnerGuard<'a> {
     key: WriteOwnerKey,
     _lock_file: Option<File>,
-    _process_guard: Option<MutexGuard<'static, ()>>,
+    _process_guard: Option<MutexGuard<'a, ()>>,
     active: bool,
 }
 
-impl Drop for FileWriteOwnerGuard {
+impl Drop for WriteOwnerGuard<'_> {
     fn drop(&mut self) {
         if !self.active {
             return;
@@ -502,8 +506,23 @@ impl Drop for FileWriteOwnerGuard {
     }
 }
 
-fn lock_file_write_owner_gate(location: &DatabaseLocation) -> Result<FileWriteOwnerGuard> {
-    let key = write_owner_key(location);
+fn lock_file_write_owner_gate(location: &DatabaseLocation) -> Result<WriteOwnerGuard<'static>> {
+    let path = file_write_owner_key(location)?;
+    lock_write_owner_gate(
+        WriteOwnerKey::File(path.clone()),
+        || file_write_owner_gate(&path),
+        || match location {
+            DatabaseLocation::File(path) => lock_database_write_file(path).map(Some),
+            DatabaseLocation::Memory => unreachable!("file location was validated above"),
+        },
+    )
+}
+
+fn lock_write_owner_gate<'a>(
+    key: WriteOwnerKey,
+    gate: impl FnOnce() -> &'a Mutex<()>,
+    lock_file: impl FnOnce() -> Result<Option<File>>,
+) -> Result<WriteOwnerGuard<'a>> {
     let mut cross_database_nested = false;
     let nested = FILE_WRITE_OWNER_DEPTHS.with(|depths| {
         let mut depths = depths.borrow_mut();
@@ -523,11 +542,11 @@ fn lock_file_write_owner_gate(location: &DatabaseLocation) -> Result<FileWriteOw
     if cross_database_nested {
         return Err(DbError::MalformedRow {
             operation: DbOperation::BeginTransaction,
-            message: "nested writes across multiple database files are unsupported".to_string(),
+            message: "nested writes across multiple databases are unsupported".to_string(),
         });
     }
     if nested {
-        return Ok(FileWriteOwnerGuard {
+        return Ok(WriteOwnerGuard {
             key,
             _process_guard: None,
             _lock_file: None,
@@ -535,19 +554,16 @@ fn lock_file_write_owner_gate(location: &DatabaseLocation) -> Result<FileWriteOw
         });
     }
 
-    let process_guard = file_write_owner_gate(&key)
+    let process_guard = gate()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let lock_file = match location {
-        DatabaseLocation::Memory => None,
-        DatabaseLocation::File(path) => Some(lock_database_write_file(path)?),
-    };
+    let lock_file = lock_file()?;
 
     FILE_WRITE_OWNER_DEPTHS.with(|depths| {
         depths.borrow_mut().insert(key.clone(), 1);
     });
 
-    Ok(FileWriteOwnerGuard {
+    Ok(WriteOwnerGuard {
         key,
         _process_guard: Some(process_guard),
         _lock_file: lock_file,
@@ -557,13 +573,17 @@ fn lock_file_write_owner_gate(location: &DatabaseLocation) -> Result<FileWriteOw
 
 #[cfg(test)]
 fn file_write_owner_gate_address_for_test(location: &DatabaseLocation) -> usize {
-    let key = write_owner_key(location);
+    let key = file_write_owner_key(location)
+        .unwrap_or_else(|error| panic!("file gate address requires a file: {error}"));
     file_write_owner_gate(&key) as *const Mutex<()> as usize
 }
 
 #[cfg(test)]
 fn file_write_owner_depth_for_test(location: &DatabaseLocation) -> usize {
-    let key = write_owner_key(location);
+    let key = WriteOwnerKey::File(
+        file_write_owner_key(location)
+            .unwrap_or_else(|error| panic!("file owner depth requires a file: {error}")),
+    );
     FILE_WRITE_OWNER_DEPTHS.with(|depths| depths.borrow().get(&key).copied().unwrap_or(0))
 }
 
@@ -1152,6 +1172,7 @@ impl DbConnection {
             inner,
             location: config.location,
             mode: config.mode,
+            memory_write_owner_gate: Box::new(Mutex::new(())),
             agent_context_profile_pack_cache: RwLock::new(None),
         })
     }
@@ -1208,12 +1229,11 @@ impl DbConnection {
 
     /// Begin a transaction with the specified isolation level.
     /// For SQLite, uses DEFERRED (default), IMMEDIATE, or EXCLUSIVE.
-    /// Begin a transaction with the specified isolation level.
     ///
     /// # Warning
-    /// For file-backed databases, manually managing transactions with `begin_transaction`,
-    /// `commit`, and `rollback` does NOT hold the write-owner lock across the transaction.
-    /// Prefer `with_transaction` or `with_write_transaction` for safe transactional writes.
+    /// Manually managing transactions with `begin_transaction`, `commit`, and
+    /// `rollback` does not hold the write-owner lock across the transaction.
+    /// Prefer `with_transaction` for safe transactional writes.
     pub(crate) fn begin_transaction(&self, isolation: IsolationLevel) -> Result<()> {
         let sql = match isolation {
             IsolationLevel::ReadUncommitted | IsolationLevel::ReadCommitted => "BEGIN DEFERRED",
@@ -1226,8 +1246,8 @@ impl DbConnection {
     /// Begin a transaction with the default isolation level (DEFERRED).
     ///
     /// # Warning
-    /// For file-backed databases, manually managing transactions does NOT hold the
-    /// write-owner lock. Prefer `with_transaction` for safe transactional writes.
+    /// Manually managing transactions does not hold the write-owner lock across
+    /// the transaction. Prefer `with_transaction` for safe transactional writes.
     pub(crate) fn begin(&self) -> Result<()> {
         self.execute_raw_for(DbOperation::BeginTransaction, "BEGIN DEFERRED")
     }
@@ -1240,8 +1260,8 @@ impl DbConnection {
     /// Commit the current transaction.
     ///
     /// # Warning
-    /// For file-backed databases, manually managing transactions does NOT hold the
-    /// write-owner lock. Prefer `with_transaction` for safe transactional writes.
+    /// Manually managing transactions does not hold the write-owner lock across
+    /// the transaction. Prefer `with_transaction` for safe transactional writes.
     pub(crate) fn commit(&self) -> Result<()> {
         self.execute_raw_for(DbOperation::CommitTransaction, "COMMIT")
     }
@@ -1254,8 +1274,8 @@ impl DbConnection {
     /// Rollback the current transaction.
     ///
     /// # Warning
-    /// For file-backed databases, manually managing transactions does NOT hold the
-    /// write-owner lock. Prefer `with_transaction` for safe transactional writes.
+    /// Manually managing transactions does not hold the write-owner lock across
+    /// the transaction. Prefer `with_transaction` for safe transactional writes.
     pub(crate) fn rollback(&self) -> Result<()> {
         self.execute_raw_for(DbOperation::RollbackTransaction, "ROLLBACK")
     }
@@ -1285,9 +1305,47 @@ impl DbConnection {
     {
         let _write_owner = self
             .reject_read_only_write(DbOperation::BeginTransaction)
-            .and_then(|()| lock_file_write_owner_gate(&self.location))
+            .and_then(|()| self.lock_write_owner())
             .map_err(map_error)?;
         f()
+    }
+
+    fn write_owner_key(&self) -> WriteOwnerKey {
+        match &self.location {
+            DatabaseLocation::Memory => {
+                // SAFETY: the boxed gate keeps its identity when the connection
+                // moves. Owner guards borrow the connection, so the gate cannot
+                // be freed or its address reused while ownership is registered.
+                WriteOwnerKey::Memory(
+                    self.memory_write_owner_gate.as_ref() as *const Mutex<()> as usize
+                )
+            }
+            DatabaseLocation::File(path) => {
+                WriteOwnerKey::File(normalized_write_owner_file_key(path))
+            }
+        }
+    }
+
+    fn lock_write_owner(&self) -> Result<WriteOwnerGuard<'_>> {
+        match &self.location {
+            DatabaseLocation::Memory => lock_write_owner_gate(
+                self.write_owner_key(),
+                || &self.memory_write_owner_gate,
+                || Ok(None),
+            ),
+            DatabaseLocation::File(_) => lock_file_write_owner_gate(&self.location),
+        }
+    }
+
+    #[cfg(test)]
+    fn write_owner_depth_for_test(&self) -> usize {
+        FILE_WRITE_OWNER_DEPTHS.with(|depths| {
+            depths
+                .borrow()
+                .get(&self.write_owner_key())
+                .copied()
+                .unwrap_or(0)
+        })
     }
 
     /// Execute a closure within a transaction.
@@ -1426,12 +1484,13 @@ impl DbConnection {
         }
     }
 
-    fn begin_write_transaction(&self) -> Result<Option<FileWriteOwnerGuard>> {
+    fn begin_write_transaction(&self) -> Result<WriteOwnerGuard<'_>> {
         self.reject_read_only_write(DbOperation::BeginTransaction)?;
         match self.location {
             DatabaseLocation::Memory => {
+                let write_owner = self.lock_write_owner()?;
                 self.begin()?;
-                Ok(None)
+                Ok(write_owner)
             }
             DatabaseLocation::File(_) => {
                 const MAX_ATTEMPTS: usize = 16;
@@ -1461,7 +1520,7 @@ impl DbConnection {
                         Err(error) => return Err(error),
                     };
                     match self.begin_transaction(IsolationLevel::RepeatableRead) {
-                        Ok(()) => return Ok(Some(write_owner)),
+                        Ok(()) => return Ok(write_owner),
                         Err(error) if db_error_is_transient_sqlite_contention(&error) => {
                             last_retryable_error = Some(error);
                             drop(write_owner);
@@ -1490,6 +1549,9 @@ impl DbConnection {
 
     pub fn execute_raw(&self, sql: &str) -> Result<()> {
         self.reject_read_only_write(DbOperation::Execute)?;
+        let _write_owner = self.lock_write_owner()?;
+        // A raw batch may partially execute before an error. Hold ownership,
+        // but preserve single execution rather than retrying the entire batch.
         self.inner
             .execute_raw(sql)
             .map_err(|source| DbError::sqlmodel(DbOperation::Execute, source))
@@ -1660,6 +1722,7 @@ impl DbConnection {
                     .map_err(|source| DbError::sqlmodel(operation, source))
             })?
         } else {
+            let _write_owner = self.lock_write_owner()?;
             self.inner
                 .query_sync(sql, &[])
                 .map_err(|source| DbError::sqlmodel(operation, source))?
@@ -2066,6 +2129,7 @@ impl DbConnection {
             });
         }
 
+        let _write_owner = self.lock_write_owner()?;
         run()
     }
 
@@ -2100,6 +2164,7 @@ impl DbConnection {
             });
         }
 
+        let _write_owner = self.lock_write_owner()?;
         run()
     }
 
@@ -27481,7 +27546,7 @@ impl DbConnection {
         if matches!(&self.location, DatabaseLocation::File(_)) {
             let in_gate = FILE_WRITE_OWNER_DEPTHS.with(|d| {
                 d.borrow()
-                    .get(&write_owner_key(&self.location))
+                    .get(&self.write_owner_key())
                     .copied()
                     .unwrap_or(0)
                     > 0
@@ -58871,11 +58936,10 @@ mod tests {
     #[test]
     fn with_write_owner_fence_is_reentrant_without_implicit_transaction() -> TestResult {
         let connection = DbConnection::open_memory().map_err(TestFailure::from)?;
-        let location = connection.location().clone();
 
         connection.with_write_owner_fence(TestFailure::from, || {
             ensure_equal(
-                &file_write_owner_depth_for_test(&location),
+                &connection.write_owner_depth_for_test(),
                 &1usize,
                 "outer write-owner fence depth",
             )?;
@@ -58887,20 +58951,20 @@ mod tests {
 
             connection.with_write_owner_fence(TestFailure::from, || {
                 ensure_equal(
-                    &file_write_owner_depth_for_test(&location),
+                    &connection.write_owner_depth_for_test(),
                     &2usize,
                     "nested write-owner fence depth",
                 )
             })?;
             ensure_equal(
-                &file_write_owner_depth_for_test(&location),
+                &connection.write_owner_depth_for_test(),
                 &1usize,
                 "nested fence release restores outer depth",
             )
         })?;
 
         ensure_equal(
-            &file_write_owner_depth_for_test(&location),
+            &connection.write_owner_depth_for_test(),
             &0usize,
             "outer fence release clears owner depth",
         )
@@ -58908,8 +58972,7 @@ mod tests {
 
     #[test]
     fn with_write_owner_fence_serializes_process_threads() -> TestResult {
-        // Use a private file gate: the shared in-memory gate can be occupied
-        // by unrelated migration tests for longer than this test's deadline.
+        // Separate connections to one file must share the same writer gate.
         let temp_dir =
             tempfile::tempdir().map_err(|error| TestFailure::new(format!("tempdir: {error}")))?;
         let database_path = temp_dir.path().join("write-owner-fence.db");
@@ -59014,6 +59077,295 @@ mod tests {
             .join()
             .map_err(|_| TestFailure::new("contender fence thread panicked"))?
             .map_err(TestFailure::new)
+    }
+
+    #[test]
+    fn independent_memory_connections_make_progress_under_another_writer_fence() -> TestResult {
+        let owner = DbConnection::open_memory()?;
+        let (start_tx, start_rx) = mpsc::channel();
+        let (persisted_tx, persisted_rx) = mpsc::channel();
+        let contender = thread::spawn(move || -> std::result::Result<i64, String> {
+            start_rx
+                .recv()
+                .map_err(|error| format!("await independent owner: {error}"))?;
+            let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            connection.with_write_owner_fence(
+                |error| error.to_string(),
+                || {
+                    connection
+                        .with_transaction(|| {
+                            connection
+                                .execute_raw("CREATE TABLE memory_owner_probe (value INTEGER)")?;
+                            connection.execute_raw("INSERT INTO memory_owner_probe VALUES (42)")
+                        })
+                        .map_err(|error| error.to_string())?;
+                    let rows = connection
+                        .query("SELECT value FROM memory_owner_probe", &[])
+                        .map_err(|error| error.to_string())?;
+                    let value = rows
+                        .first()
+                        .and_then(|row| row.get(0))
+                        .and_then(Value::as_i64)
+                        .ok_or_else(|| "independent committed row missing".to_owned())?;
+                    persisted_tx
+                        .send(value)
+                        .map_err(|error| format!("announce independent commit: {error}"))?;
+                    Ok(value)
+                },
+            )
+        });
+
+        let mut while_owner_held = None;
+        let owner_result = owner.with_write_owner_fence(TestFailure::from, || {
+            owner.with_transaction_error(|| -> TestResult {
+                owner.execute_raw("CREATE TABLE memory_owner_probe (value INTEGER)")?;
+                owner.execute_raw("INSERT INTO memory_owner_probe VALUES (7)")?;
+                start_tx.send(()).map_err(|error| {
+                    TestFailure::new(format!("start independent writer: {error}"))
+                })?;
+                while_owner_held = Some(persisted_rx.recv_timeout(Duration::from_secs(2)));
+                Ok(())
+            })
+        });
+        // Release the owner's transaction/fence and join even when the old global
+        // memory gate prevents progress. The regression must fail, not strand a worker.
+        drop(start_tx);
+        let contender_result = contender.join();
+        owner_result?;
+        let contender_value = contender_result
+            .map_err(|_| TestFailure::new("independent memory writer panicked"))?
+            .map_err(TestFailure::new)?;
+        ensure_equal(
+            &contender_value,
+            &42,
+            "independent writer persisted its own row",
+        )?;
+        ensure(
+            matches!(while_owner_held, Some(Ok(42))),
+            format!("independent commit must finish before owner release: {while_owner_held:?}"),
+        )?;
+        let owner_rows = owner.query("SELECT value FROM memory_owner_probe", &[])?;
+        ensure_equal(
+            &owner_rows
+                .first()
+                .and_then(|row| row.get(0))
+                .and_then(Value::as_i64),
+            &Some(7),
+            "independent writer must not alter the owner's database",
+        )
+    }
+
+    #[test]
+    fn shared_memory_connection_serializes_complete_transactions() -> TestResult {
+        let connection = Arc::new(DbConnection::open_memory()?);
+        connection.execute_raw("CREATE TABLE memory_transaction_probe (id INTEGER PRIMARY KEY)")?;
+        let contender_connection = Arc::clone(&connection);
+        let (start_tx, start_rx) = mpsc::channel();
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let contender = thread::spawn(move || -> std::result::Result<i64, String> {
+            start_rx
+                .recv()
+                .map_err(|error| format!("await shared transaction owner: {error}"))?;
+            attempt_tx
+                .send(())
+                .map_err(|error| format!("announce shared transaction attempt: {error}"))?;
+            let result = contender_connection
+                .with_transaction(|| {
+                    contender_connection
+                        .execute_raw("INSERT INTO memory_transaction_probe VALUES (2)")?;
+                    let rows = contender_connection
+                        .query("SELECT COUNT(*) FROM memory_transaction_probe", &[])?;
+                    rows.first()
+                        .and_then(|row| row.get(0))
+                        .and_then(Value::as_i64)
+                        .ok_or_else(|| DbError::MalformedRow {
+                            operation: DbOperation::Query,
+                            message: "shared transaction row count missing".to_owned(),
+                        })
+                })
+                .map_err(|error| error.to_string());
+            finished_tx
+                .send(result.clone())
+                .map_err(|error| format!("announce shared transaction result: {error}"))?;
+            result
+        });
+
+        let mut while_owner_held = None;
+        let owner_result = connection.with_transaction_error(|| -> TestResult {
+            connection.execute_raw("INSERT INTO memory_transaction_probe VALUES (1)")?;
+            start_tx
+                .send(())
+                .map_err(|error| TestFailure::new(format!("start shared transaction: {error}")))?;
+            attempt_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|error| {
+                    TestFailure::new(format!("shared writer did not attempt: {error}"))
+                })?;
+            while_owner_held = Some(finished_rx.recv_timeout(Duration::from_millis(200)));
+            Ok(())
+        });
+        drop(start_tx);
+        let contender_result = contender.join();
+        owner_result?;
+        ensure(
+            matches!(while_owner_held, Some(Err(mpsc::RecvTimeoutError::Timeout))),
+            format!(
+                "shared transaction must wait for the complete owner transaction: {while_owner_held:?}"
+            ),
+        )?;
+        let count = contender_result
+            .map_err(|_| TestFailure::new("shared memory writer panicked"))?
+            .map_err(TestFailure::new)?;
+        ensure_equal(
+            &count,
+            &2,
+            "contender observes owner's committed row and its own write",
+        )?;
+        let rows = connection.query("SELECT id FROM memory_transaction_probe ORDER BY id", &[])?;
+        let ids: Vec<_> = rows
+            .iter()
+            .map(|row| row.get(0).and_then(Value::as_i64))
+            .collect();
+        ensure_equal(
+            &ids,
+            &vec![Some(1), Some(2)],
+            "both serialized transactions committed",
+        )
+    }
+
+    #[test]
+    fn shared_memory_raw_write_waits_for_owner_rollback_and_survives() -> TestResult {
+        let connection = Arc::new(DbConnection::open_memory()?);
+        connection.execute_raw("CREATE TABLE memory_rollback_probe (id INTEGER PRIMARY KEY)")?;
+        let contender_connection = Arc::clone(&connection);
+        let (start_tx, start_rx) = mpsc::channel();
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let contender = thread::spawn(move || -> std::result::Result<(), String> {
+            start_rx
+                .recv()
+                .map_err(|error| format!("await rollback owner: {error}"))?;
+            attempt_tx
+                .send(())
+                .map_err(|error| format!("announce raw write attempt: {error}"))?;
+            let result = contender_connection
+                .execute_raw("INSERT INTO memory_rollback_probe VALUES (2)")
+                .map_err(|error| error.to_string());
+            finished_tx
+                .send(result.clone())
+                .map_err(|error| format!("announce raw write result: {error}"))?;
+            result
+        });
+
+        let mut while_owner_held = None;
+        let owner_result = connection.with_transaction_error(|| -> TestResult {
+            connection.execute_raw("INSERT INTO memory_rollback_probe VALUES (1)")?;
+            start_tx
+                .send(())
+                .map_err(|error| TestFailure::new(format!("start raw write: {error}")))?;
+            attempt_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|error| {
+                    TestFailure::new(format!("raw writer did not attempt: {error}"))
+                })?;
+            while_owner_held = Some(finished_rx.recv_timeout(Duration::from_millis(200)));
+            Err(TestFailure::new("intentional owner rollback"))
+        });
+        // Finish rollback and join before checking the observations, including
+        // the broken case where the raw write joined the owner's transaction.
+        drop(start_tx);
+        let contender_result = contender.join();
+        let owner_error = owner_result.expect_err("owner transaction must roll back");
+        ensure_equal(
+            &owner_error.to_string(),
+            &"intentional owner rollback".to_owned(),
+            "owner reaches the intended rollback after inserting its row",
+        )?;
+        contender_result
+            .map_err(|_| TestFailure::new("raw memory writer panicked"))?
+            .map_err(TestFailure::new)?;
+        let rows = connection.query("SELECT id FROM memory_rollback_probe ORDER BY id", &[])?;
+        let ids: Vec<_> = rows
+            .iter()
+            .map(|row| row.get(0).and_then(Value::as_i64))
+            .collect();
+        ensure(
+            matches!(while_owner_held, Some(Err(mpsc::RecvTimeoutError::Timeout))),
+            format!(
+                "raw write must wait through owner rollback: {while_owner_held:?}; rows={ids:?}"
+            ),
+        )?;
+        ensure_equal(
+            &ids,
+            &vec![Some(2)],
+            "owner row rolls back while the later public raw write persists",
+        )
+    }
+
+    #[test]
+    fn memory_write_owner_nesting_distinguishes_connections() -> TestResult {
+        let owner = DbConnection::open_memory()?;
+        let other = DbConnection::open_memory()?;
+        for connection in [&owner, &other] {
+            connection.execute_raw("CREATE TABLE memory_nesting_probe (id INTEGER PRIMARY KEY)")?;
+        }
+        let mut other_entered = false;
+        let nested_result = owner.with_write_owner_fence(TestFailure::from, || {
+            owner.with_write_owner_fence(TestFailure::from, || {
+                owner
+                    .with_transaction(|| {
+                        owner.execute_raw("INSERT INTO memory_nesting_probe VALUES (1)")
+                    })
+                    .map_err(TestFailure::from)
+            })?;
+            Ok(other.with_write_owner_fence(
+                |error| error,
+                || {
+                    other_entered = true;
+                    other.with_transaction(|| {
+                        other.execute_raw("INSERT INTO memory_nesting_probe VALUES (2)")
+                    })
+                },
+            ))
+        })?;
+        ensure(
+            matches!(nested_result, Err(DbError::MalformedRow {
+                operation: DbOperation::BeginTransaction,
+                ref message,
+            }) if message.contains("nested writes across")),
+            format!(
+                "distinct memory owner must be refused as cross-database nesting: {nested_result:?}"
+            ),
+        )?;
+        ensure(
+            !other_entered,
+            "cross-database refusal must occur before running the closure",
+        )?;
+        let other_rows = other.query("SELECT id FROM memory_nesting_probe", &[])?;
+        ensure(
+            other_rows.is_empty(),
+            "refused nested write must leave the other database unchanged",
+        )?;
+        other.with_write_owner_fence(TestFailure::from, || {
+            other
+                .with_transaction(|| {
+                    other.execute_raw("INSERT INTO memory_nesting_probe VALUES (2)")
+                })
+                .map_err(TestFailure::from)
+        })?;
+        for (connection, expected) in [(&owner, 1), (&other, 2)] {
+            let rows = connection.query("SELECT id FROM memory_nesting_probe", &[])?;
+            ensure_equal(
+                &rows
+                    .first()
+                    .and_then(|row| row.get(0))
+                    .and_then(Value::as_i64),
+                &Some(expected),
+                "same-connection nesting and later independent ownership both persist",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

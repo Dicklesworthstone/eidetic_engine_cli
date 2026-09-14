@@ -12959,14 +12959,23 @@ mod tests {
 
     #[test]
     fn workspace_id_for_database_preserves_legacy_lexical_only_row() -> TestResult {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let temp = tempfile::tempdir().map_err(|error| {
+            format!(
+                "create legacy workspace fixture under {}: {error}",
+                std::env::temp_dir().display()
+            )
+        })?;
         let workspace = temp.path().join("legacy-global-root");
-        std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&workspace)
+            .map_err(|error| format!("create legacy workspace {}: {error}", workspace.display()))?;
         let lexical_workspace = workspace.join("..").join("legacy-global-root");
         let legacy_workspace_id = "wsp_00000000000000000000legacy";
 
-        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
-        connection.migrate().map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_memory()
+            .map_err(|error| format!("open legacy workspace database: {error}"))?;
+        connection
+            .migrate()
+            .map_err(|error| format!("migrate legacy workspace database: {error}"))?;
         connection
             .insert_workspace(
                 legacy_workspace_id,
@@ -12975,16 +12984,19 @@ mod tests {
                     name: Some("legacy lexical workspace".to_owned()),
                 },
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("insert legacy lexical workspace row: {error}"))?;
 
         ensure(
             workspace_id_for_database(&connection, &lexical_workspace),
             legacy_workspace_id.to_owned(),
             "legacy lexical workspace fallback",
         )?;
-        let canonical_workspace = workspace
-            .canonicalize()
-            .map_err(|error| error.to_string())?;
+        let canonical_workspace = workspace.canonicalize().map_err(|error| {
+            format!(
+                "canonicalize legacy workspace {}: {error}",
+                workspace.display()
+            )
+        })?;
         ensure(
             canonical_workspace != lexical_workspace,
             true,
