@@ -418,6 +418,26 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `validity_filtered_significant_recall_drop` | warning | bd-17c65.2.10 (B11) |
 | `weak_query_recall` | low | bd-17c65.2.5 (B5) |
 | `search_index_stale` | medium | bd-17c65.2.1 (B1) |
+| `index_incompatible` | medium | gh-37 (B): producer identity cannot authorize retrieval; rebuild with the active binary and model |
+| `ask_conflicting_evidence` | warning | bd-169v0.5 (QA) |
+| `ask_semantic_degraded` | info | bd-169v0.5 (QA) |
+| `cass_limited` | info | bd-1et0v.14 (doctor-health) |
+| `graph_ppr_upstream_unavailable` | medium | bd-reality-core-convergence-1azkt.15 (G) |
+| `graph_witness_unparseable_recorded_at` | medium | bd-bife.25 (G) |
+| `import_index_publish_failed` | warning | bd-index-auto-freshness-m5kwf (I) |
+| `mesh_frame_auth_failed` | high | bd-tc-epic-qzk7o.3.2 (TC) |
+| `mesh_frame_replay_rejected` | high | bd-tc-epic-qzk7o.3.2 (TC) |
+| `mesh_frame_target_mismatch` | high | bd-tc-epic-qzk7o.3.2 (TC) |
+| `mesh_transport_unreachable` | warning | bd-tc-epic-qzk7o.3.2 (TC) |
+| `no_confident_answer` | info | bd-169v0.5 (QA) |
+| `pack_ledger_missing` | medium | bd-1pi9m.5 (CAP) |
+| `perf_live_graph_snapshot_lock_metrics_unavailable` | warning | bd-z5knh (J) |
+| `rch_worker_pressure_advisory` | info | bd-1et0v.14 (doctor-health) |
+| `rule_index_publish_failed` | medium | bd-index-auto-freshness-m5kwf (I) |
+| `scale_fixture_unavailable` | medium | bd-ssoco.1 (scale-envelope) |
+| `scale_posture_thrashing` | high | bd-ssoco.1 (scale-envelope) |
+| `scale_posture_warming` | low | bd-ssoco.1 (scale-envelope) |
+| `scale_probe_budget_exceeded` | warning | bd-ssoco.1 (scale-envelope) |
 | `search_index_large_gap` | medium | bd-index-auto-freshness-m5kwf (I) |
 | `cass_import_index_publish_failed` | medium | bd-index-auto-freshness-m5kwf (I) |
 | `search_index_degraded` | medium | bd-17c65.10.6 (J6) |

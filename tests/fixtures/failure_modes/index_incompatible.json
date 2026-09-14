@@ -1,0 +1,36 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "index_incompatible",
+  "introduced_by": {
+    "bead": "gh-37",
+    "epic_letter": "B"
+  },
+  "surfaces": [
+    "search",
+    "context"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A valid vector index was built with a producer identity that the active embedder cannot verify. Retrieval refuses those vectors and requires rebuilding with the active binary and embedding model; this does not imply index corruption.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Release procedure.' --workspace . --level procedural --kind rule",
+      "ee index rebuild --workspace .",
+      "# Change to a binary or embedding model with a different producer identity, keeping the existing index."
+    ],
+    "invocation": "ee search 'release procedure' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "index_incompatible",
+    "severity": "medium",
+    "message_contains": [
+      "Search index rebuild required",
+      "producer identity",
+      "Vector retrieval is unavailable"
+    ],
+    "repair_contains": "ee index rebuild",
+    "repair_string": "ee index rebuild --workspace .",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}
