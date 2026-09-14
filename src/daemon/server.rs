@@ -8423,6 +8423,7 @@ mod tests {
                 METHOD_CONTEXT,
                 METHOD_ECHO,
                 METHOD_SEARCH,
+                METHOD_PACK_SEARCH,
                 METHOD_ORIENT_HOOK,
                 METHOD_RECALL,
                 METHOD_SHUTDOWN,

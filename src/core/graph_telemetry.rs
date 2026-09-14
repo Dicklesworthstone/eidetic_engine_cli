@@ -325,6 +325,9 @@ mod tests {
     }
 
     fn capture<F: FnOnce()>(thunk: F) -> Vec<CapturedEvent> {
+        // Keep tracing's interest cache aware of threads without a subscriber.
+        let _unsubscribed_threads =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let layer = CaptureLayer::default();
         let events = layer.events.clone();
         // TRACE filter so even the trace-level cache events show up.

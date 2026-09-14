@@ -12908,45 +12908,21 @@ fn persist_candidate_disposition(
     evidence_count: u32,
     distinct_session_count: u32,
 ) -> Result<String, DomainError> {
-    connection.begin().map_err(|error| DomainError::Storage {
-        message: format!("Failed to begin curation disposition transaction: {error}"),
-        repair: Some("ee doctor".to_owned()),
-    })?;
-
-    let result = persist_candidate_disposition_inner(
-        connection,
-        stored,
-        policy,
-        to_status,
-        to_review_state,
-        snoozed_until,
-        ttl_policy_id,
-        now,
-        actor,
-        evidence_count,
-        distinct_session_count,
-    );
-
-    match result {
-        Ok(audit_id) => {
-            connection.commit().map_err(|error| DomainError::Storage {
-                message: format!("Failed to commit curation disposition: {error}"),
-                repair: Some("ee doctor".to_owned()),
-            })?;
-            Ok(audit_id)
-        }
-        Err(error) => {
-            if let Err(rollback_error) = connection.rollback() {
-                tracing::error!(
-                    phase = "curate_write",
-                    error = %error,
-                    rollback_error = %rollback_error,
-                    "failed to rollback transaction after curate write failure"
-                );
-            }
-            Err(error)
-        }
-    }
+    persist_curation_transaction(connection, "disposition", || {
+        persist_candidate_disposition_inner(
+            connection,
+            stored,
+            policy,
+            to_status,
+            to_review_state,
+            snoozed_until,
+            ttl_policy_id,
+            now,
+            actor,
+            evidence_count,
+            distinct_session_count,
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13844,34 +13820,17 @@ fn persist_candidate_validation(
     reviewed_by: &str,
     decision: &ValidationDecision,
 ) -> Result<String, DomainError> {
-    connection.begin().map_err(|error| DomainError::Storage {
-        message: format!("Failed to begin curation validation transaction: {error}"),
-        repair: Some("ee doctor".to_owned()),
-    })?;
-
-    let result = persist_candidate_validation_inner(
-        connection,
-        workspace_id,
-        stored,
-        to_status,
-        reviewed_at,
-        reviewed_by,
-        decision,
-    );
-
-    match result {
-        Ok(audit_id) => {
-            connection.commit().map_err(|error| DomainError::Storage {
-                message: format!("Failed to commit curation validation: {error}"),
-                repair: Some("ee doctor".to_owned()),
-            })?;
-            Ok(audit_id)
-        }
-        Err(error) => {
-            let _ = connection.rollback();
-            Err(error)
-        }
-    }
+    persist_curation_transaction(connection, "validation", || {
+        persist_candidate_validation_inner(
+            connection,
+            workspace_id,
+            stored,
+            to_status,
+            reviewed_at,
+            reviewed_by,
+            decision,
+        )
+    })
 }
 
 fn persist_candidate_validation_inner(
@@ -13950,35 +13909,29 @@ fn persist_candidate_review(
     reviewed_by: &str,
     reason: Option<&str>,
 ) -> Result<String, DomainError> {
-    connection.begin().map_err(|error| DomainError::Storage {
-        message: format!("Failed to begin curation review transaction: {error}"),
-        repair: Some("ee doctor".to_owned()),
+    let audit_id = persist_curation_transaction(connection, "review", || {
+        persist_candidate_review_inner(
+            connection,
+            workspace_id,
+            stored,
+            action,
+            decision,
+            reviewed_at,
+            reviewed_by,
+            reason,
+        )
     })?;
-
-    let result = persist_candidate_review_inner(
-        connection,
-        workspace_id,
-        stored,
-        action,
-        decision,
-        reviewed_at,
-        reviewed_by,
-        reason,
+    tracing::info!(
+        target: "ee::curate::transition",
+        candidate_id = %stored.id,
+        actor = %reviewed_by,
+        transition_kind = %action.as_str(),
+        reason_present = reason.is_some(),
+        reason_len = reason.map(str::len).unwrap_or(0),
+        dry_run = false,
+        "curate transition recorded"
     );
-
-    match result {
-        Ok(audit_id) => {
-            connection.commit().map_err(|error| DomainError::Storage {
-                message: format!("Failed to commit curation review: {error}"),
-                repair: Some("ee doctor".to_owned()),
-            })?;
-            Ok(audit_id)
-        }
-        Err(error) => {
-            let _ = connection.rollback();
-            Err(error)
-        }
-    }
+    Ok(audit_id)
 }
 
 fn curate_review_planned_details(
@@ -14061,17 +14014,33 @@ fn persist_candidate_review_inner(
             message: format!("Failed to write curation review audit entry: {error}"),
             repair: Some("ee doctor".to_owned()),
         })?;
-    tracing::info!(
-        target: "ee::curate::transition",
-        candidate_id = %stored.id,
-        actor = %reviewed_by,
-        transition_kind = %action.as_str(),
-        reason_present = reason.is_some(),
-        reason_len = reason.map(str::len).unwrap_or(0),
-        dry_run = false,
-        "curate transition recorded"
-    );
     Ok(audit_id)
+}
+
+fn persist_curation_transaction<T>(
+    connection: &DbConnection,
+    operation: &str,
+    persist: impl FnOnce() -> Result<T, DomainError>,
+) -> Result<T, DomainError> {
+    // Hold the writer fence through commit or rollback, including unwinding.
+    // Preserve domain refusals while the database helper handles transaction failures.
+    let mut domain_error = None;
+    let result = connection.with_transaction(|| {
+        persist().map_err(|error| {
+            let message = error.message();
+            domain_error = Some(error);
+            DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message,
+            }
+        })
+    });
+    result.map_err(|error| {
+        domain_error.unwrap_or_else(|| DomainError::Storage {
+            message: format!("Failed to persist curation {operation} transaction: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })
+    })
 }
 
 fn persist_candidate_application(
@@ -14083,9 +14052,8 @@ fn persist_candidate_application(
     applied_at: &str,
     applied_by: &str,
 ) -> Result<String, DomainError> {
-    let mut domain_error = None;
-    let result = connection.with_transaction(|| {
-        match persist_candidate_application_inner(
+    let audit_id = persist_curation_transaction(connection, "apply", || {
+        persist_candidate_application_inner(
             connection,
             workspace_id,
             stored,
@@ -14093,26 +14061,21 @@ fn persist_candidate_application(
             recipe,
             applied_at,
             applied_by,
-        ) {
-            Ok(audit_id) => Ok(audit_id),
-            Err(error) => {
-                let message = error.message();
-                domain_error = Some(error);
-                Err(DbError::MalformedRow {
-                    operation: DbOperation::Execute,
-                    message,
-                })
-            }
-        }
-    });
-
-    match result {
-        Ok(audit_id) => Ok(audit_id),
-        Err(error) => Err(domain_error.unwrap_or_else(|| DomainError::Storage {
-            message: format!("Failed to persist curation apply transaction: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })),
+        )
+    })?;
+    if let Some(derived_create) = &decision.derived_create {
+        tracing::info!(
+            target: "ee::curate::transition",
+            candidate_id = %stored.id,
+            actor = %applied_by,
+            transition_kind = "create_derived_memory",
+            dry_run = false,
+            created_memory_id = %derived_create.memory_id,
+            decision = %decision.application.decision,
+            "curate create-derived transition recorded"
+        );
     }
+    Ok(audit_id)
 }
 
 fn persist_candidate_application_inner(
@@ -14153,7 +14116,6 @@ fn persist_candidate_application_inner(
             connection,
             workspace_id,
             stored,
-            decision,
             derived_create,
             applied_at,
             applied_by,
@@ -14974,7 +14936,6 @@ fn persist_create_derived_candidate_application_inner(
     connection: &DbConnection,
     workspace_id: &str,
     stored: &StoredCurationCandidate,
-    decision: &ApplyDecision,
     derived_create: &ApplyDerivedMemoryInput,
     applied_at: &str,
     applied_by: &str,
@@ -15113,16 +15074,6 @@ fn persist_create_derived_candidate_application_inner(
             },
         )
         .map_err(map_create_derived_insert_audit_db_error)?;
-    tracing::info!(
-        target: "ee::curate::transition",
-        candidate_id = %stored.id,
-        actor = %applied_by,
-        transition_kind = "create_derived_memory",
-        dry_run = false,
-        created_memory_id = %derived_create.memory_id,
-        decision = %decision.application.decision,
-        "curate create-derived transition recorded"
-    );
     Ok(audit_id)
 }
 
@@ -16552,19 +16503,16 @@ mod tests {
     }
 
     fn capture_events<T>(thunk: impl FnOnce() -> T) -> (T, Vec<CapturedEvent>) {
+        // tracing-core 0.1.36's single-dispatcher fast path can cache another
+        // thread's NoSubscriber decision. Register that state without installing it.
+        let _unsubscribed_threads =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let layer = CaptureLayer::default();
         let events = Arc::clone(&layer.events);
         let subscriber = Registry::default()
             .with(layer)
             .with(tracing_subscriber::filter::LevelFilter::TRACE);
-        let result = with_default(subscriber, || {
-            // Other tests install filtered dispatchers in parallel. Refresh
-            // the global callsite interest cache after this thread-local
-            // TRACE dispatcher is active so a callsite previously cached as
-            // disabled cannot make this telemetry contract test flaky.
-            tracing::callsite::rebuild_interest_cache();
-            thunk()
-        });
+        let result = with_default(subscriber, thunk);
         let captured = events.lock().expect("curate event capture lock").clone();
         (result, captured)
     }
@@ -16575,6 +16523,36 @@ mod tests {
             .get(name)
             .map(String::as_str)
             .ok_or_else(|| format!("event missing field {name}; fields={:?}", event.fields))
+    }
+
+    #[test]
+    fn capture_events_preserves_scope_after_another_thread_registers_the_callsite() -> TestResult {
+        fn emit(phase: &str) {
+            tracing::info!(target: "ee::curate::capture_regression", phase, "capture scope");
+        }
+
+        let ((), events) = capture_events(|| {
+            std::thread::spawn(|| {
+                tracing::dispatcher::with_default(&tracing::Dispatch::none(), || {
+                    emit("uncaptured-worker");
+                });
+            })
+            .join()
+            .expect("first-callsite registration worker");
+            emit("accept");
+            emit("reject");
+        });
+        let phases = events
+            .iter()
+            .filter(|event| event.target == "ee::curate::capture_regression")
+            .map(|event| event_field(event, "phase"))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            phases,
+            ["accept", "reject"],
+            "capture must retain each own-thread event once and exclude other threads"
+        );
+        Ok(())
     }
 
     fn reflection_request_ledger_material_fixture(
@@ -25347,6 +25325,119 @@ mod tests {
             !serialized_events.contains("duplicate"),
             "transition telemetry must not include raw reject reason"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn review_curation_candidate_commit_failure_rolls_back_without_transition_event() -> TestResult
+    {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(32)).to_string();
+        let candidate_id = curate_id(33);
+        let connection = seed_candidate_database(
+            &database_path,
+            &workspace_id,
+            &memory_id,
+            &candidate_id,
+            "promote",
+            Some("pending"),
+            None,
+        )?;
+        for sql in [
+            "CREATE TABLE review_commit_parent (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE review_commit_child (
+                id INTEGER PRIMARY KEY,
+                parent_id INTEGER NOT NULL,
+                FOREIGN KEY (parent_id) REFERENCES review_commit_parent(id)
+                    DEFERRABLE INITIALLY DEFERRED
+            )",
+            "CREATE TRIGGER review_commit_failure AFTER UPDATE OF status ON curation_candidates
+             BEGIN INSERT INTO review_commit_child (id, parent_id) VALUES (1, 404); END",
+        ] {
+            connection
+                .execute_raw(sql)
+                .map_err(|error| error.to_string())?;
+        }
+        let candidate_before = connection
+            .get_curation_candidate(&workspace_id, &candidate_id)
+            .map_err(|error| error.to_string())?;
+        let audits_before = connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?;
+        let options = CurateReviewOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            action: CurateReviewAction::Accept,
+            actor: Some("Alice"),
+            dry_run: false,
+            snoozed_until: None,
+            reason: Some("private review evidence"),
+            merge_into_candidate_id: None,
+        };
+
+        let (failed, failed_events) = capture_events(|| review_curation_candidate(&options));
+        let error = failed.expect_err("deferred foreign key must fail the real transaction commit");
+        let message = error.message().to_ascii_lowercase();
+        assert!(
+            matches!(error, DomainError::Storage { .. })
+                && message.contains("commit")
+                && message.contains("foreign key"),
+            "failure must come from the deferred constraint at commit: {message}"
+        );
+        assert!(
+            failed_events
+                .iter()
+                .all(|event| event.target != "ee::curate::transition"),
+            "failed commit must emit no persisted transition: {failed_events:?}"
+        );
+        assert_eq!(
+            connection
+                .get_curation_candidate(&workspace_id, &candidate_id)
+                .map_err(|error| error.to_string())?,
+            candidate_before,
+            "failed commit must leave the entire candidate unchanged"
+        );
+        assert_eq!(
+            connection
+                .list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?,
+            audits_before,
+            "failed commit must leave audit history unchanged"
+        );
+        connection
+            .execute_raw("INSERT INTO review_commit_parent (id) VALUES (404)")
+            .map_err(|error| error.to_string())?;
+        let (retry, retry_events) = capture_events(|| review_curation_candidate(&options));
+        let retry = retry.map_err(|error| error.to_string())?;
+        assert!(retry.mutation.persisted);
+        let audit_id = retry
+            .mutation
+            .audit_id
+            .as_ref()
+            .ok_or_else(|| "successful retry must return a committed audit id".to_owned())?;
+        let candidate_after = connection
+            .get_curation_candidate(&workspace_id, &candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "candidate missing after successful retry".to_owned())?;
+        assert_eq!(candidate_after.status, "approved");
+        assert_eq!(candidate_after.review_state, "accepted");
+        let audits_after = connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(audits_after.len(), audits_before.len() + 1);
+        assert!(audits_after.iter().any(|audit| &audit.id == audit_id));
+        let transitions = retry_events
+            .iter()
+            .filter(|event| event.target == "ee::curate::transition")
+            .collect::<Vec<_>>();
+        assert_eq!(transitions.len(), 1, "retry emits exactly one transition");
+        assert!(event_field(transitions[0], "candidate_id")?.contains(&candidate_id));
+        assert!(event_field(transitions[0], "transition_kind")?.contains("accept"));
+        assert!(!format!("{transitions:?}").contains("private review evidence"));
         Ok(())
     }
 

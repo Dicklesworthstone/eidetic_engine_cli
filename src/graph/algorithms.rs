@@ -1433,6 +1433,9 @@ mod tests {
     }
 
     fn capture_graph_events<F: FnOnce()>(thunk: F) -> Vec<CapturedEvent> {
+        // Keep tracing's interest cache aware of threads without a subscriber.
+        let _unsubscribed_threads =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let layer = CaptureLayer::default();
         let events = Arc::clone(&layer.events);
         let subscriber = Registry::default()

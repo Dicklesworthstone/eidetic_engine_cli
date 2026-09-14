@@ -6930,6 +6930,9 @@ mod tests {
 
     #[cfg(feature = "graph")]
     fn capture_graph_events<T>(thunk: impl FnOnce() -> T) -> (T, Vec<CapturedGraphEvent>) {
+        // Keep tracing's interest cache aware of threads without a subscriber.
+        let _unsubscribed_threads =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let layer = GraphEventCaptureLayer::default();
         let events = layer.events.clone();
         let subscriber = Registry::default()
