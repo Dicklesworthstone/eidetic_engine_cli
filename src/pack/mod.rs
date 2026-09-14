@@ -5092,6 +5092,10 @@ pub const fn category_for_code(code: &str) -> DegradedCategory {
     // const fn cannot use str comparison directly; expand to a match on
     // byte slices. Each arm is a known code → its category.
     match code.as_bytes() {
+        // The current retrieval refused incompatible vectors. Keep the
+        // rebuild action visible on every affected response.
+        b"index_incompatible" => DegradedCategory::AffectsThisResponse,
+
         // Build-time feature gaps — feature was not compiled into the
         // binary. Belongs in `ee capabilities`, NOT per-response.
         b"graph_snapshot_unimplemented"

@@ -1381,6 +1381,11 @@ pub fn degraded_recovery_actions(code: &str) -> Vec<RecoveryAction> {
                 "Rebuild the derived search index after confirming it is stale.",
             ),
         ],
+        "index_incompatible" => vec![recovery_command(
+            1,
+            "ee index rebuild --workspace . --json",
+            "Rebuild the derived search index with this binary and its active embedding model before retrying retrieval.",
+        )],
         "index_missing" => vec![
             recovery_command(
                 1,

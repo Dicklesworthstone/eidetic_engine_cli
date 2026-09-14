@@ -22828,6 +22828,64 @@ mod tests {
     }
 
     #[test]
+    fn pack_text_preserves_index_incompatible_repair_by_default() -> TestResult {
+        let message = "Vector retrieval is unavailable until the index is rebuilt with the active binary and embedding model.";
+        let repair = "ee index rebuild --workspace .";
+        let mut response = context_response_fixture()?;
+        response.data.degraded.clear();
+        response.data.degraded.push(
+            crate::pack::ContextResponseDegradation::new(
+                "index_incompatible",
+                crate::pack::ContextResponseSeverity::Medium,
+                message,
+                Some(repair.to_owned()),
+            )
+            .map_err(|error| format!("degradation rejected: {error:?}"))?,
+        );
+
+        let rendered = render_context_response_json(&response);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+        ensure_top_level_degraded_mirrors_data_degraded(&parsed, "incompatible index pack")?;
+        for pointer in ["/degraded", "/data/degraded"] {
+            let entries = parsed
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| format!("default pack omitted {pointer}: {parsed}"))?;
+            ensure_equal(&entries.len(), &1usize, pointer)?;
+            let entry = &entries[0];
+            ensure_equal(
+                &entry["code"],
+                &serde_json::json!("index_incompatible"),
+                pointer,
+            )?;
+            ensure_equal(&entry["severity"], &serde_json::json!("medium"), pointer)?;
+            ensure_equal(&entry["message"], &serde_json::json!(message), pointer)?;
+            ensure_equal(&entry["repair"], &serde_json::json!(repair), pointer)?;
+            ensure(
+                entry["details"]["recovery"]
+                    .as_array()
+                    .is_some_and(|actions| {
+                        actions.iter().any(|action| {
+                            action["command"] == "ee index rebuild --workspace . --json"
+                        })
+                    }),
+                format!("default pack omitted structured rebuild recovery at {pointer}"),
+            )?;
+        }
+        let pack_text = parsed["data"]["pack"]["text"]
+            .as_str()
+            .ok_or_else(|| "default pack omitted rendered text".to_owned())?;
+        ensure_contains(pack_text, "## Degradations", "vector refusal section")?;
+        ensure_contains(pack_text, message, "default pack explains vector refusal")?;
+        ensure_equal(
+            &parsed["data"]["pack"]["advisoryBanner"]["degradationCount"],
+            &serde_json::json!(1),
+            "default advisory banner counts the vector refusal",
+        )
+    }
+
+    #[test]
     fn context_markdown_preserves_section_order_by_rank() -> TestResult {
         // Create items in a specific non-alphabetical order: Failures (rank 1),
         // ProceduralRules (rank 2), Decisions (rank 3). Alphabetically this would
