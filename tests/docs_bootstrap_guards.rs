@@ -226,10 +226,12 @@ fn explicit_reference_globs_add_only_selected_docs_with_durable_source_tags() {
         "references/operator.md",
         "# Operator library\n",
     );
+    // Headings are structure since docs-bootstrap-v2; the reference doc needs
+    // an extractable statement to prove its candidates keep durable tags.
     write_file(
         tempdir.path(),
         "references/deep/failures.md",
-        "# Failure taxonomy\n",
+        "# Failure taxonomy\n\nNever retry a failed migration without a verified backup.\n",
     );
     write_file(
         tempdir.path(),

@@ -47,7 +47,9 @@ printf '# AGENTS\n\n## Forbidden deps\n- tokio (use asupersync)\n- rusqlite (use
 printf '# Demo project\n\nThis project does X. Run ee init to start.\n' >"$WS/README.md"
 printf '# Skill guide\n\nAlways inspect counterexamples before promotion.\n' >"$WS/SKILL.md"
 mkdir -p "$WS/references/phases"
-printf '# Operator library\n' >"$WS/references/operators.md"
+# Headings are structure in docs-bootstrap-v2, so a reference doc needs an
+# extractable statement for the reference-candidate assertions to bite.
+printf '# Operator library\n\nNever promote a rule without a counterexample search.\n' >"$WS/references/operators.md"
 printf '# Counterexample enumeration\n' >"$WS/references/phases/counterexamples.md"
 printf '# Not selected\n' >"$WS/references/phases/ignored.txt"
 # A stray non-allowlisted file the compiler must NOT read.
