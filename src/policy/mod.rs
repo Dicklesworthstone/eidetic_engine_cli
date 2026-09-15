@@ -2069,9 +2069,9 @@ fn push_secret_match(
 }
 
 fn detect_secret_key_value_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
+    let lower = input.to_ascii_lowercase();
     for pattern in SECRET_KEY_PATTERNS {
         let mut search_start = 0;
-        let lower = input.to_ascii_lowercase();
         loop {
             if search_start >= lower.len() {
                 break;
@@ -2314,10 +2314,10 @@ fn detect_pii_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
 fn redact_secret_key_values(input: &str, reasons: &mut Vec<&'static str>) -> (String, bool) {
     let mut output = input.to_owned();
     let mut changed = false;
+    let mut lower = output.to_ascii_lowercase();
 
     for pattern in SECRET_KEY_PATTERNS {
         let mut search_start = 0;
-        let mut lower = output.to_ascii_lowercase();
         loop {
             if search_start >= lower.len() {
                 break;
@@ -2433,7 +2433,27 @@ fn find_secret_key_pattern(
     pattern_key: &str,
     mut search_start: usize,
 ) -> Option<(usize, usize)> {
+    if search_start >= input_lower.len() {
+        return None;
+    }
+    // Without escape markers, the leading alphanumeric part of a key must
+    // occur literally. Skip impossible starts using the string searcher;
+    // retain the exact matcher for separator variants and the original scan
+    // whenever percent/Unicode escapes could encode any part of the key.
+    // Single-ASCII searches use byte scanning; an array pattern decodes and
+    // compares every character, which dominates long non-secret payloads.
+    let remaining = &input_lower[search_start..];
+    let literal_prefix = if remaining.contains('\\') || remaining.contains('%') {
+        None
+    } else {
+        pattern_key.split(['_', '-', '.']).next().filter(|prefix| {
+            !prefix.is_empty() && prefix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+    };
     while search_start < input_lower.len() {
+        if let Some(prefix) = literal_prefix {
+            search_start += input_lower[search_start..].find(prefix)?;
+        }
         if let Some(key_end) = secret_key_pattern_end(input_lower, pattern_key, search_start) {
             return Some((search_start, key_end));
         }
@@ -4850,6 +4870,74 @@ mod tests {
                     "missing redaction reason {reason:?}; got {:?}",
                     first.redacted_reasons,
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn secret_key_search_matches_original_scan_at_every_character_boundary() {
+        fn original_scan(input: &str, key: &str, mut start: usize) -> Option<(usize, usize)> {
+            while start < input.len() {
+                if let Some(end) = super::secret_key_pattern_end(input, key, start) {
+                    return Some((start, end));
+                }
+                start += input[start..].chars().next()?.len_utf8();
+            }
+            None
+        }
+
+        for key in super::SECRET_KEY_PATTERNS
+            .iter()
+            .map(|pattern| pattern.key)
+            .chain(["", "_key", "\0", "é"])
+        {
+            let percent = key
+                .bytes()
+                .map(|byte| format!("%{byte:02x}"))
+                .collect::<String>();
+            let unicode = key
+                .bytes()
+                .map(|byte| format!("\\u{byte:04x}"))
+                .collect::<String>();
+            let mixed = key
+                .bytes()
+                .enumerate()
+                .map(|(index, byte)| {
+                    if index % 2 == 0 {
+                        char::from(byte).to_string()
+                    } else {
+                        format!("%{byte:02x}")
+                    }
+                })
+                .collect::<String>();
+            let sources = [
+                String::new(),
+                "ordinary release evidence 🦀 é \0 end".to_owned(),
+                format!("lead {key}=example end"),
+                format!("x{key}x {key} {key}=example"),
+                format!("🦀{key} é{key}=example"),
+                format!("{}=example", key.replace(['_', '.'], "-")),
+                format!("{}=example", key.replace(['_', '-'], ".")),
+                format!("{percent}=example {key}=next"),
+                format!("{unicode}=example {key}=next"),
+                format!("{mixed}=example {key}=next"),
+                format!("{key}=example trailing %"),
+                format!("{key}=example trailing \\"),
+                format!("%zz \\u0g00 \\u00e9 %c3 {key}=example"),
+                "\\u0041pi_key=example %41pi_key=other".to_owned(),
+            ];
+            for source in sources {
+                for start in source
+                    .char_indices()
+                    .map(|(offset, _)| offset)
+                    .chain([source.len(), source.len() + 1])
+                {
+                    assert_eq!(
+                        super::find_secret_key_pattern(&source, key, start),
+                        original_scan(&source, key, start),
+                        "key={key:?} start={start} source={source:?}"
+                    );
+                }
             }
         }
     }
