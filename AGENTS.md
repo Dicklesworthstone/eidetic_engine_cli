@@ -882,7 +882,8 @@ release:
 
 Homebrew (`Dicklesworthstone/homebrew-tap`) is updated by the disabled
 `update-homebrew` job, so a hand-cut release must also bump the formula by
-hand. The `eidetic-engine` crate is not yet published to crates.io.
+hand. The `eidetic-engine` crate is published to crates.io; a hand-cut release
+must publish the matching package version there and verify installation.
 
 ### 5. Verify
 
