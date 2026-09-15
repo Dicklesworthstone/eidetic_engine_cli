@@ -32,8 +32,8 @@ use std::path::{Component, Path, PathBuf};
 use chrono::Utc;
 
 use crate::core::primer::{
-    PrimerFormat, PrimerRedactionSkip, PrimerReport, PrimerSection,
-    primer_settings_from_workspace, run_primer_with_persistence,
+    PrimerFormat, PrimerRedactionSkip, PrimerReport, PrimerSection, primer_settings_from_workspace,
+    run_primer_with_persistence,
 };
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
@@ -691,9 +691,10 @@ fn sentence_ranges(text: &str) -> Vec<(usize, usize)> {
             end += 1;
         }
         let followed_by_space = bytes.get(end).is_some_and(u8::is_ascii_whitespace);
-        let opens_sentence = text[end..].trim_start().chars().next().is_some_and(|next| {
-            next.is_uppercase() || matches!(next, '`' | '*' | '"' | '(' | '[')
-        });
+        let opens_sentence =
+            text[end..].trim_start().chars().next().is_some_and(|next| {
+                next.is_uppercase() || matches!(next, '`' | '*' | '"' | '(' | '[')
+            });
         let abbreviation = byte == b'.' && ends_with_abbreviation(&text[start..index]);
         if followed_by_space && opens_sentence && !abbreviation {
             ranges.push((start, end));
