@@ -74,6 +74,28 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
+- `ee pack --use-daemon` reuses warmed daemon retrieval while the client retains
+  token budgeting, provenance, deterministic packing and local persistence.
+  Read-only packs do not write search audits or pack records. Missing,
+  incompatible or wrong-workspace daemons use the documented local fallback.
+- Cache successful Model2Vec file verification within the process. Repeated
+  warm requests inspect directory and file metadata instead of rereading the
+  entire model; changed manifests or file identities still require full
+  verification. On the retained three-memory Potion workload, ten measured
+  warm requests after three warm-ups had median latency of 365 ms with normal
+  registry discovery, down from 2,618 ms. The syscall check observed no model
+  reads or mappings on either warm selection path. These are measured warm
+  results, not a cold-start or arbitrary-workload guarantee.
+- Report an unverifiable vector-index producer as `index_incompatible`, with
+  rebuild guidance, and refuse to reuse its vectors. Malformed index files
+  continue to report corruption separately.
+- Give each private in-memory database its own writer gate. Shared connections
+  retain writer ownership through commit or rollback, and raw writes use the
+  same ownership rules. Curation success telemetry is emitted only after the
+  transaction commits.
+- Probe daemon hot-mode status without creating a workspace database. Detect
+  and collapse duplicate EE-managed harness hooks during installation.
+
 ## [0.15.2] - 2026-09-12
 
 - Publish the corrected `eidetic-engine` package at version 0.15.2 and all
