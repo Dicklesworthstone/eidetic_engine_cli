@@ -61,6 +61,11 @@ static NEARBY_STORE_SCAN_WORKER_LIMITER: std::sync::OnceLock<
     std::sync::Arc<NearbyStoreScanWorkerLimiter>,
 > = std::sync::OnceLock::new();
 
+#[cfg(test)]
+thread_local! {
+    static NEARBY_STORE_PROFILE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Directory names never descended into during nearby-store discovery.
 const NEARBY_STORE_SKIP_DIRS: &[&str] = &[
     ".git",
@@ -1598,16 +1603,22 @@ fn inspect_nearby_store_candidate(
         if nearby_store_scan_should_stop(cx, started, budget, scan) {
             return;
         }
+        let database_identity = database.canonicalize().unwrap_or_else(|_| database.clone());
+        // A prior successful local/registry probe already established this
+        // database's identity and live count. Later registry aliases must not
+        // spend the remaining scan budget reopening the same store. Failed
+        // identity probes are never inserted, so they cannot suppress a later
+        // independently valid candidate.
+        if seen_databases.contains(&database_identity) {
+            continue;
+        }
         let Some((documents, last_write)) = nearby_store_profile(&database, candidate) else {
             continue;
         };
         if documents == 0 || nearby_store_scan_should_stop(cx, started, budget, scan) {
             continue;
         }
-        let database_identity = database.canonicalize().unwrap_or_else(|_| database.clone());
-        if !seen_databases.insert(database_identity) {
-            continue;
-        }
+        seen_databases.insert(database_identity);
         scan.stores.push(NearbyStore {
             workspace_root: candidate.workspace_root.display().to_string(),
             store_dir: store_dir.display().to_string(),
@@ -1681,6 +1692,8 @@ fn nearby_store_profile(
     database: &Path,
     candidate: &NearbyStoreCandidate,
 ) -> Option<(u64, Option<String>)> {
+    #[cfg(test)]
+    NEARBY_STORE_PROFILE_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
     let connection = DbConnection::open_file_read_only(database).ok()?;
     let workspace = nearby_store_workspace_identity(&connection, candidate)?;
     let documents = connection
@@ -2794,6 +2807,59 @@ mod tests {
             &nearby_store_profile(&database, &local).map(|profile| profile.0),
             &Some(1_u64),
             "local path identity remains independently discoverable",
+        )?;
+
+        let before = NEARBY_STORE_PROFILE_CALLS.get();
+        let cx = Cx::detached_cancel_context();
+        let started = std::time::Instant::now();
+        let addressed = temp.path().join("absent-addressed.db");
+        let mut seen_databases = BTreeSet::new();
+        let mut scan = NearbyStoreScanAssessment::default();
+        let mut published = 0;
+        let mut publish = |_scan: &NearbyStoreScanAssessment| published += 1;
+        inspect_nearby_store_candidate(
+            &cx,
+            &wrong_workspace,
+            &addressed,
+            None,
+            started,
+            std::time::Duration::MAX,
+            &mut seen_databases,
+            &mut scan,
+            &mut publish,
+        );
+        ensure(
+            scan.stores.is_empty() && seen_databases.is_empty(),
+            "a failed registry identity must neither publish nor mark the database as proved"
+                .to_owned(),
+        )?;
+        for candidate in [&local, &matching_registry, &wrong_repository, &local] {
+            inspect_nearby_store_candidate(
+                &cx,
+                candidate,
+                &addressed,
+                None,
+                started,
+                std::time::Duration::MAX,
+                &mut seen_databases,
+                &mut scan,
+                &mut publish,
+            );
+        }
+        ensure_equal(
+            &(NEARBY_STORE_PROFILE_CALLS.get() - before),
+            &2,
+            "only the initial rejected identity and first valid identity may open/profile the real database",
+        )?;
+        ensure_equal(&published, &1, "one independently proved store publication")?;
+        ensure(
+            scan.stores.len() == 1
+                && scan.stores[0].documents == 1
+                && scan.stores[0].provenance == NearbyStoreProvenance::ChildScan,
+            format!(
+                "duplicate registry entries must not replace local identity proof or its live count: {:?}",
+                scan.stores
+            ),
         )
     }
 
