@@ -10900,6 +10900,20 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: swarm_slo_coordination_event_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::audit::AUDIT_DIFF_SCHEMA_V1,
+            version: "1",
+            description: "Read-only audit changes within an inclusive timestamp window, with optional output-budget pagination.",
+            category: "ops",
+            definition: audit_diff_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::core::audit::AUDIT_VERIFY_SCHEMA_V1,
+            version: "1",
+            description: "Read-only audit hash-chain verification, including optional shard summaries and output-budget pagination.",
+            category: "ops",
+            definition: audit_verify_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.audit_lane.v1",
             version: "1",
             description: "Structured audit-lane telemetry event emitted by the Swarm-X audit queue.",
@@ -12688,6 +12702,14 @@ fn swarm_slo_resource_usage_event_schema_definition() -> String {
 
 fn swarm_slo_coordination_event_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.swarm_slo.coordination_event.v1.json").to_string()
+}
+
+fn audit_diff_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.audit.diff.v1.json").to_string()
+}
+
+fn audit_verify_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.audit.verify.v1.json").to_string()
 }
 
 fn audit_lane_schema_definition() -> String {
@@ -24160,6 +24182,14 @@ mod tests {
             )],
             row_count: 1,
         };
+        let diff_schema: serde_json::Value =
+            serde_json::from_str(&render_schema_export_json(Some(&diff.schema)))
+                .map_err(|error| error.to_string())?;
+        let diff_json: serde_json::Value = serde_json::from_str(
+            &super::render_audit_diff_json(&diff).map_err(|error| error.message())?,
+        )
+        .map_err(|error| error.to_string())?;
+        crate::testing::validate_json_schema_instance(&diff_json, &diff_schema)?;
         ensure_toon_matches_json(
             &super::render_audit_diff_json(&diff).map_err(|error| error.message())?,
             &super::render_audit_diff_toon(&diff).map_err(|error| error.message())?,
@@ -24182,6 +24212,14 @@ mod tests {
             broken_shard_count: 0,
             shards: Vec::new(),
         };
+        let verify_schema: serde_json::Value =
+            serde_json::from_str(&render_schema_export_json(Some(&verify.schema)))
+                .map_err(|error| error.to_string())?;
+        let verify_json: serde_json::Value = serde_json::from_str(
+            &super::render_audit_verify_json(&verify).map_err(|error| error.message())?,
+        )
+        .map_err(|error| error.to_string())?;
+        crate::testing::validate_json_schema_instance(&verify_json, &verify_schema)?;
         ensure_toon_matches_json(
             &super::render_audit_verify_json(&verify).map_err(|error| error.message())?,
             &super::render_audit_verify_toon(&verify).map_err(|error| error.message())?,

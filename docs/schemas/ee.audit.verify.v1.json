@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.audit.verify.v1.json",
+  "title": "ee.audit.verify.v1",
+  "description": "Read-only audit hash-chain verification. success means verification completed; integrity_ok describes the chain. Aggregate counts and optional shard summaries describe the full verification even when the governor pages issues[]. An unsatisfiable output budget emits only the data.schema identifier and an explicit output_budget_unsatisfiable degradation.",
+  "type": "object",
+  "required": ["schema", "success", "data", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "ee.response.v2"},
+    "success": {"const": true},
+    "fields": {"type": "string"},
+    "meta": {
+      "type": "object",
+      "required": ["tokensEstimated"],
+      "additionalProperties": false,
+      "properties": {
+        "tokensEstimated": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}
+      }
+    },
+    "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}},
+    "data": {
+      "type": "object",
+      "required": ["schema"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "ee.audit.verify.v1"},
+        "integrity_ok": {"type": "boolean"},
+        "rows": {"$ref": "#/$defs/uint32"},
+        "last_hash": {"type": ["string", "null"]},
+        "first_break": {"type": ["string", "null"]},
+        "issues": {"type": "array", "items": {"$ref": "#/$defs/issue"}},
+        "shard_count": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "broken_shard_count": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "shards": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/shard"}}
+      }
+    }
+  },
+  "oneOf": [
+    {"properties": {"data": {"required": ["integrity_ok", "rows", "last_hash", "first_break", "issues"]}}},
+    {
+      "required": ["meta"],
+      "properties": {
+        "data": {"maxProperties": 1},
+        "degraded": {
+          "contains": {
+            "required": ["code", "severity"],
+            "properties": {
+              "code": {"const": "output_budget_unsatisfiable"},
+              "severity": {"const": "medium"}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "uint32": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "issue": {
+      "type": "object",
+      "required": ["code", "audit_id", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "audit_id": {"type": ["string", "null"]},
+        "shard_id": {"type": "string"},
+        "message": {"type": "string"}
+      }
+    },
+    "shard": {
+      "type": "object",
+      "required": ["shard_id", "integrity_ok", "rows", "last_hash", "first_break", "issues"],
+      "additionalProperties": false,
+      "properties": {
+        "shard_id": {"type": "string"},
+        "integrity_ok": {"type": "boolean"},
+        "rows": {"$ref": "#/$defs/uint32"},
+        "last_hash": {"type": ["string", "null"]},
+        "first_break": {"type": ["string", "null"]},
+        "issues": {"type": "array", "items": {"$ref": "#/$defs/issue"}}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {"enum": ["info", "low", "warning", "medium", "high", "critical"]},
+        "message": {"type": "string"},
+        "repair": {"type": "string"},
+        "repairKind": {"enum": ["actionable", "template", "placeholder", "unknown", "empty"]},
+        "sources": {"type": "array", "items": {"type": "string"}},
+        "details": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}
