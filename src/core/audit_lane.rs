@@ -1,14 +1,12 @@
-//! Audit-lane public contract constants and in-process queue primitives.
+//! Bounded synchronous audit producers and batched database drains.
 //!
-//! The database writer and foreground call-site integration land in later
-//! `bd-wp5ac` slices. This module owns the bounded producer lane and drain
-//! semantics that those call sites will use.
+//! Queue publication and accounting share one lock. Database work runs after
+//! releasing it, so producers never wait for a batch commit.
 
+use std::collections::VecDeque;
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
-
-use asupersync::channel::mpsc::{self, RecvError, SendError};
 
 use crate::db::{CreateAuditInput, DbConnection};
 
@@ -280,53 +278,49 @@ pub fn insert_audit_event_batch(
     connection.insert_audit_batch(&entries)
 }
 
-#[derive(Debug, Default)]
-struct AuditLaneCounters {
-    accepted: AtomicU64,
-    drained: AtomicU64,
-    failed: AtomicU64,
-    // Linearizes queue publication/dequeue with counter retirement and snapshots.
-    linearization_gate: Mutex<()>,
+#[derive(Debug)]
+struct AuditLaneState {
+    queue: VecDeque<AuditEvent>,
+    accepted: u64,
+    drained: u64,
+    failed: u64,
 }
 
-impl AuditLaneCounters {
-    fn accepted(&self) -> u64 {
-        self.accepted.load(Ordering::Acquire)
+impl AuditLaneState {
+    fn pending(&self) -> u64 {
+        // Events remain pending while a batch is in the sink, even though
+        // they no longer occupy queue capacity.
+        self.accepted
+            .saturating_sub(self.drained)
+            .saturating_sub(self.failed)
     }
+}
 
-    fn drained(&self) -> u64 {
-        self.drained.load(Ordering::Acquire)
-    }
+#[derive(Debug)]
+struct AuditLaneShared {
+    state: Mutex<AuditLaneState>,
+    // Keep the public closure probe nonblocking. Changes are published while
+    // holding `state`, in the same order as queue admission.
+    closed: AtomicBool,
+}
 
-    fn failed(&self) -> u64 {
-        self.failed.load(Ordering::Acquire)
-    }
-
+impl AuditLaneShared {
     // A poisoned gate may mean publication completed without accepted accounting; fail closed.
     #[allow(clippy::expect_used)]
-    fn lock_linearization_gate(&self) -> MutexGuard<'_, ()> {
-        self.linearization_gate
+    fn lock_state(&self) -> MutexGuard<'_, AuditLaneState> {
+        self.state
             .lock()
             .expect("audit lane linearization gate poisoned; event accounting is uncertain")
     }
 
-    fn pending_under_gate(&self) -> u64 {
-        // Callers must hold `linearization_gate` so publication cannot outrun accounting.
-        self.accepted()
-            .saturating_sub(self.drained())
-            .saturating_sub(self.failed())
-    }
-
     fn pending(&self) -> u64 {
-        let _linearization_guard = self.lock_linearization_gate();
-        self.pending_under_gate()
+        self.lock_state().pending()
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct AuditLaneHandle {
-    sender: mpsc::Sender<AuditEvent>,
-    counters: Arc<AuditLaneCounters>,
+    shared: Arc<AuditLaneShared>,
     capacity: usize,
 }
 
@@ -344,63 +338,85 @@ impl AuditLaneHandle {
     where
         F: FnOnce(),
     {
-        let _linearization_guard = self.counters.lock_linearization_gate();
-        let audit_seq = event.audit_seq;
-        match self.sender.try_send(event) {
-            Ok(()) => {
-                after_publish();
-                self.counters.accepted.fetch_add(1, Ordering::AcqRel);
-                AuditEnqueueResult::Enqueued {
-                    audit_seq,
-                    pending_events: self.counters.pending_under_gate(),
-                }
-            }
-            Err(SendError::Full(event)) => AuditEnqueueResult::Backpressure {
+        let mut state = self.shared.lock_state();
+        if self.shared.closed.load(Ordering::Relaxed) {
+            return AuditEnqueueResult::Closed { event };
+        }
+        if state.queue.len() >= self.capacity {
+            return AuditEnqueueResult::Backpressure {
                 code: AUDIT_BACKPRESSURE_CODE,
                 event,
                 capacity: self.capacity,
-                pending_events: self.counters.pending_under_gate(),
-            },
-            Err(SendError::Disconnected(event) | SendError::Cancelled(event)) => {
-                AuditEnqueueResult::Closed { event }
-            }
+                pending_events: state.pending(),
+            };
+        }
+        let audit_seq = event.audit_seq;
+        state.queue.push_back(event);
+        after_publish();
+        state.accepted = state.accepted.wrapping_add(1);
+        AuditEnqueueResult::Enqueued {
+            audit_seq,
+            pending_events: state.pending(),
         }
     }
 
     #[must_use]
     pub fn pending_events(&self) -> u64 {
-        self.counters.pending()
+        self.shared.pending()
     }
 
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.sender.is_closed()
+        self.shared.closed.load(Ordering::Acquire)
     }
 }
 
 #[derive(Debug)]
 pub struct AuditLane {
-    receiver: mpsc::Receiver<AuditEvent>,
-    counters: Arc<AuditLaneCounters>,
+    shared: Arc<AuditLaneShared>,
     config: AuditLaneConfig,
+}
+
+impl Drop for AuditLane {
+    fn drop(&mut self) {
+        // Disposal must also work after a producer panics under the gate.
+        // Recover only to close and release queued values; operational access
+        // to the poisoned accounting state still fails closed.
+        let queued = {
+            let mut state = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.shared.closed.store(true, Ordering::Release);
+            std::mem::take(&mut state.queue)
+        };
+        drop(queued);
+    }
 }
 
 impl AuditLane {
     #[must_use]
     pub fn new(config: AuditLaneConfig) -> (AuditLaneHandle, Self) {
         let config = config.normalized();
-        let counters = Arc::new(AuditLaneCounters::default());
-        let (sender, receiver) = mpsc::channel(config.capacity);
+        let shared = Arc::new(AuditLaneShared {
+            state: Mutex::new(AuditLaneState {
+                queue: if config.capacity == usize::MAX {
+                    VecDeque::new()
+                } else {
+                    VecDeque::with_capacity(config.capacity)
+                },
+                accepted: 0,
+                drained: 0,
+                failed: 0,
+            }),
+            closed: AtomicBool::new(false),
+        });
         let handle = AuditLaneHandle {
-            sender,
-            counters: Arc::clone(&counters),
+            shared: Arc::clone(&shared),
             capacity: config.capacity,
         };
-        let lane = Self {
-            receiver,
-            counters,
-            config,
-        };
+        let lane = Self { shared, config };
         (handle, lane)
     }
 
@@ -447,7 +463,16 @@ impl AuditLane {
     where
         F: FnMut(&[AuditEvent]) -> Result<(), E>,
     {
-        self.receiver.close();
+        {
+            // Seal admission even if interrupted publication poisoned the
+            // state. The drain below must still refuse uncertain accounting.
+            let _state = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.shared.closed.store(true, Ordering::Release);
+        }
         self.drain_with_limit(
             AuditLanePhase::Shutdown,
             Some(self.config.shutdown_event_limit as u64),
@@ -486,7 +511,7 @@ impl AuditLane {
         while max_events.is_none_or(|limit| received_events < limit) {
             let receive_result = self.try_recv_with_gate_hook(&mut on_dequeue_gate_contention);
             match receive_result {
-                Ok(event) => {
+                Some(event) => {
                     received_events = received_events.saturating_add(1);
                     batch.push(event);
                     if batch.len() == self.config.batch_size {
@@ -510,7 +535,7 @@ impl AuditLane {
                         batches = batches.saturating_add(1);
                     }
                 }
-                Err(RecvError::Empty | RecvError::Disconnected | RecvError::Cancelled) => break,
+                None => break,
             }
         }
 
@@ -531,25 +556,22 @@ impl AuditLane {
         Ok(self.finish_drain_report(phase, drained_events, batches, 0, 0))
     }
 
-    fn try_recv_with_gate_hook<H>(
-        &mut self,
-        on_gate_contention: &mut H,
-    ) -> Result<AuditEvent, RecvError>
+    fn try_recv_with_gate_hook<H>(&mut self, on_gate_contention: &mut H) -> Option<AuditEvent>
     where
         H: FnMut(),
     {
-        let _linearization_guard = match self.counters.linearization_gate.try_lock() {
+        let mut state = match self.shared.state.try_lock() {
             Ok(guard) => guard,
             Err(TryLockError::WouldBlock) => {
                 on_gate_contention();
-                self.counters.lock_linearization_gate()
+                self.shared.lock_state()
             }
             Err(TryLockError::Poisoned(poisoned)) => {
                 drop(poisoned.into_inner());
-                self.counters.lock_linearization_gate()
+                self.shared.lock_state()
             }
         };
-        self.receiver.try_recv()
+        state.queue.pop_front()
     }
 
     fn finish_drain_report(
@@ -561,18 +583,10 @@ impl AuditLane {
         failed_batches: u64,
     ) -> AuditLaneDrainReport {
         let pending_events = {
-            let _linearization_guard = self.counters.lock_linearization_gate();
-            if drained_events > 0 {
-                self.counters
-                    .drained
-                    .fetch_add(drained_events, Ordering::AcqRel);
-            }
-            if failed_events > 0 {
-                self.counters
-                    .failed
-                    .fetch_add(failed_events, Ordering::AcqRel);
-            }
-            self.counters.pending_under_gate()
+            let mut state = self.shared.lock_state();
+            state.drained = state.drained.wrapping_add(drained_events);
+            state.failed = state.failed.wrapping_add(failed_events);
+            state.pending()
         };
         let mut degraded_codes = Vec::new();
         if failed_batches > 0 {
@@ -805,6 +819,128 @@ mod tests {
             }
         );
         assert_eq!(handle.pending_events(), 1);
+    }
+
+    #[test]
+    fn sink_can_enqueue_into_freed_capacity_before_accounting_retires() {
+        let (handle, mut lane) = AuditLane::new(AuditLaneConfig {
+            capacity: 1,
+            batch_size: 1,
+            shutdown_event_limit: 2,
+        });
+        assert!(matches!(
+            handle.enqueue(AuditEvent::new("workspace-a", 1, "memory.create")),
+            AuditEnqueueResult::Enqueued { .. }
+        ));
+        let mut delivered = Vec::new();
+        let report = lane.drain_available(|batch| {
+            delivered.push(batch[0].audit_seq);
+            if delivered.len() == 1 {
+                assert_eq!(handle.pending_events(), 1);
+                assert!(matches!(
+                    handle.enqueue(AuditEvent::new("workspace-a", 2, "memory.update")),
+                    AuditEnqueueResult::Enqueued {
+                        audit_seq: 2,
+                        pending_events: 2,
+                    }
+                ));
+            } else {
+                assert_eq!(handle.pending_events(), 2);
+            }
+        });
+        assert_eq!(delivered, vec![1, 2]);
+        assert_eq!(report.drained_events, 2);
+        assert_eq!(report.pending_events, 0);
+        assert_eq!(handle.pending_events(), 0);
+    }
+
+    #[test]
+    fn dropping_producers_keeps_events_and_dropping_lane_closes_handles() {
+        let (handle, mut lane) = AuditLane::new(AuditLaneConfig::default());
+        let retained = handle.clone();
+        assert!(matches!(
+            handle.enqueue(AuditEvent::new("workspace-a", 1, "memory.create")),
+            AuditEnqueueResult::Enqueued { .. }
+        ));
+        drop(handle);
+        let mut delivered = Vec::new();
+        lane.drain_available(|batch| delivered.extend_from_slice(batch));
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].audit_seq, 1);
+        assert!(matches!(
+            retained.enqueue(AuditEvent::new("workspace-a", 2, "memory.update")),
+            AuditEnqueueResult::Enqueued { .. }
+        ));
+        drop(lane);
+        assert!(retained.is_closed());
+        assert_eq!(retained.pending_events(), 1);
+        let rejected = AuditEvent::new("workspace-a", 3, "memory.delete");
+        assert_eq!(
+            retained.enqueue(rejected.clone()),
+            AuditEnqueueResult::Closed { event: rejected }
+        );
+
+        let (handle, mut lane) = AuditLane::new(AuditLaneConfig::default());
+        assert!(matches!(
+            handle.enqueue(AuditEvent::new("workspace-a", 4, "memory.create")),
+            AuditEnqueueResult::Enqueued { .. }
+        ));
+        drop(handle);
+        let report = lane.drain_available(|batch| assert_eq!(batch[0].audit_seq, 4));
+        assert_eq!(report.drained_events, 1);
+        assert_eq!(report.pending_events, 0);
+    }
+
+    #[test]
+    fn publication_panic_keeps_accounting_closed_and_lane_drop_does_not_panic() {
+        let (handle, mut lane) = AuditLane::new(AuditLaneConfig::default());
+        let producer = handle.clone();
+        assert!(
+            thread::spawn(move || {
+                producer.enqueue_with_publish_hook(
+                    AuditEvent::new("workspace-a", 1, "memory.create"),
+                    || panic!("publication interrupted before accounting"),
+                )
+            })
+            .join()
+            .is_err()
+        );
+        assert!(!handle.is_closed());
+        assert!(std::panic::catch_unwind(|| handle.pending_events()).is_err());
+        assert!(
+            std::panic::catch_unwind(|| {
+                handle.enqueue(AuditEvent::new("workspace-a", 2, "memory.update"))
+            })
+            .is_err()
+        );
+        let mut sink_called = false;
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                lane.shutdown_drain(|_| sink_called = true)
+            }))
+            .is_err()
+        );
+        assert!(!sink_called);
+        assert!(handle.is_closed());
+        assert!(std::panic::catch_unwind(|| drop(lane)).is_ok());
+        assert!(handle.is_closed());
+        assert!(std::panic::catch_unwind(|| handle.pending_events()).is_err());
+    }
+
+    #[test]
+    fn maximum_capacity_does_not_require_eager_allocation() {
+        let (handle, mut lane) = AuditLane::new(AuditLaneConfig {
+            capacity: usize::MAX,
+            batch_size: 1,
+            shutdown_event_limit: 1,
+        });
+        assert!(matches!(
+            handle.enqueue(AuditEvent::new("workspace-a", 1, "memory.create")),
+            AuditEnqueueResult::Enqueued { .. }
+        ));
+        let report = lane.shutdown_drain(|batch| assert_eq!(batch[0].audit_seq, 1));
+        assert_eq!(report.drained_events, 1);
+        assert_eq!(report.pending_events, 0);
     }
 
     #[test]
@@ -1104,6 +1240,9 @@ mod tests {
             .get(p99_index)
             .copied()
             .ok_or_else(|| "missing enqueue latency sample".to_owned())?;
+        eprintln!(
+            "audit lane enqueue: producers={PRODUCER_COUNT} events={EVENT_COUNT} p99={p99_enqueue_latency:?} budget=2ms"
+        );
         assert!(
             p99_enqueue_latency <= Duration::from_millis(2),
             "p99 foreground enqueue latency {p99_enqueue_latency:?} exceeded 2ms budget"
