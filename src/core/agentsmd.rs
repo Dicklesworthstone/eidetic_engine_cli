@@ -905,6 +905,12 @@ impl AgentsmdExportReport {
             self.warnings_count,
             self.redaction_skipped,
         );
+        for skip in &self.redaction_skipped_memories {
+            out.push_str(&format!(
+                "redaction skipped: {} (matched `{}`)\n",
+                skip.memory_id, skip.pattern
+            ));
+        }
         if let Some(backup) = &self.backup_path {
             out.push_str(&format!("backup: {backup}\n"));
         }
@@ -2534,6 +2540,66 @@ The deploy job MUST wait for the smoke suite to finish.
         assert_eq!(statements.len(), 1);
         assert_eq!(statements[0].polarity, RulePolarity::Negative);
         assert_eq!(statements[0].modality, "Do not");
+    }
+
+    #[test]
+    fn parser_rejoins_soft_wrapped_prose_into_sentences_with_spans() {
+        let content = "\
+Any tool that calls a production surface (Graph API, prod
+PostgreSQL, the Search index) MUST build its clients via `ops_client.py` — hard
+failure otherwise. Other prose follows e.g. this aside.
+
+- Never ask for a call count
+  without a written budget. You MUST NOT retry after `v0.2.` either.
+> ALWAYS skip blockquotes in the import parser, even wrapped
+> across lines.
+";
+        let statements = parse_rule_statements(content, None);
+        let spans: Vec<(usize, usize, &str, &str)> = statements
+            .iter()
+            .map(|statement| {
+                (
+                    statement.line_number,
+                    statement.end_line_number,
+                    statement.modality,
+                    statement.text.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            spans,
+            vec![
+                (
+                    1,
+                    3,
+                    "MUST",
+                    "Any tool that calls a production surface (Graph API, prod PostgreSQL, the Search index) MUST build its clients via `ops_client.py` — hard failure otherwise.",
+                ),
+                (
+                    5,
+                    6,
+                    "Never",
+                    "Never ask for a call count without a written budget.",
+                ),
+                (6, 6, "MUST NOT", "You MUST NOT retry after `v0.2.` either."),
+            ],
+            "wrapped rules are whole sentences; the blockquote stays excluded"
+        );
+        assert!(
+            markdown_prose_sentences(content, None, true)
+                .iter()
+                .any(|sentence| sentence.start_line == 7
+                    && sentence.end_line == 8
+                    && sentence.text
+                        == "ALWAYS skip blockquotes in the import parser, even wrapped across lines."),
+            "callers that opt in see wrapped blockquotes as one sentence"
+        );
+        let text = "Use tools e.g. Cargo here. Then stop.";
+        let sentences: Vec<&str> = sentence_ranges(text)
+            .into_iter()
+            .map(|(start, end)| text[start..end].trim())
+            .collect();
+        assert_eq!(sentences, vec!["Use tools e.g. Cargo here.", "Then stop."]);
     }
 
     #[test]

@@ -992,6 +992,247 @@ fn drift_missing_file_is_honest_and_read_only() -> TestResult {
     Ok(())
 }
 
+/// GH-52: export writes a primer line cut at 200 chars; drift must count that
+/// exact line as the rule's presence instead of reporting every long rule
+/// missing and suggesting the export that just ran.
+#[test]
+fn drift_counts_exported_long_rules_present_and_export_names_redaction_skips() -> TestResult {
+    let workspace = seed_bridge_workspace()?;
+    let workspace_arg = workspace.path().to_str().unwrap().to_owned();
+    let db_path = workspace.path().join(".ee").join("ee.db");
+    let long_rule = "Always run the full verification suite before pushing to main, including formatting, lint with warnings denied, the unit and integration targets, the golden comparisons, the forbidden dependency audit, and the end-to-end shell harnesses, then record the proof in the tracker.";
+    if long_rule.chars().count() <= 200 {
+        return Err("fixture rule must exceed the 200-char primer line cut".to_owned());
+    }
+    let connection =
+        ee::db::DbConnection::open_file(&db_path).map_err(|error| format!("open db: {error}"))?;
+    insert_rule_memory(
+        &connection,
+        "mem_00000000000000000000000015",
+        "procedural",
+        "rule",
+        long_rule,
+        0.9,
+    )?;
+    insert_rule_memory(
+        &connection,
+        "mem_00000000000000000000000016",
+        "procedural",
+        "rule",
+        "Rotate the staging password every week before the release train departs.",
+        0.9,
+    )?;
+    connection
+        .close()
+        .map_err(|error| format!("close db: {error}"))?;
+
+    let export = run_ee_json(&[
+        "export",
+        "agentsmd",
+        "--create",
+        "--workspace",
+        &workspace_arg,
+        "--json",
+    ])?;
+    if export.pointer("/data/redactionSkipped") != Some(&Value::from(1))
+        || export.pointer("/data/redactionSkippedMemories")
+            != Some(&serde_json::json!([
+                {"memoryId": "mem_00000000000000000000000016", "pattern": "password"}
+            ]))
+    {
+        return Err(format!(
+            "export must name the withheld memory and its detector keyword: {export}"
+        ));
+    }
+    let file = std::fs::read_to_string(workspace.path().join("AGENTS.md"))
+        .map_err(|error| format!("read AGENTS.md: {error}"))?;
+    if !file.contains('…') || file.contains("record the proof in the tracker") {
+        return Err(format!(
+            "the long rule must be exported as a cut primer line: {file}"
+        ));
+    }
+
+    let run_drift = || {
+        run_ee_json(&[
+            "diag",
+            "agentsmd-drift",
+            "--workspace",
+            &workspace_arg,
+            "--json",
+        ])
+    };
+    let exports_suggested = |payload: &Value| {
+        payload
+            .pointer("/data/suggestedCommands")
+            .and_then(Value::as_array)
+            .is_some_and(|commands| {
+                commands
+                    .iter()
+                    .any(|command| command.as_str() == Some("ee export agentsmd --workspace ."))
+            })
+    };
+    let missing_ids = |payload: &Value| -> Result<Vec<String>, String> {
+        Ok(payload
+            .pointer("/data/missingRules")
+            .and_then(Value::as_array)
+            .ok_or("missingRules must be an array")?
+            .iter()
+            .filter_map(|finding| finding.pointer("/memoryId").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect())
+    };
+
+    let fresh = run_drift()?;
+    if !missing_ids(&fresh)?.is_empty()
+        || exports_suggested(&fresh)
+        || fresh.pointer("/data/managedBlock/stale") != Some(&Value::Bool(false))
+        || fresh.pointer("/data/managedBlock/hashMatches") != Some(&Value::Bool(true))
+    {
+        return Err(format!(
+            "a fresh export must leave no missing rules and no re-export suggestion: {fresh}"
+        ));
+    }
+
+    // Planted negative: a rule written after the export is genuinely absent.
+    let connection =
+        ee::db::DbConnection::open_file(&db_path).map_err(|error| format!("open db: {error}"))?;
+    insert_rule_memory(
+        &connection,
+        "mem_00000000000000000000000017",
+        "procedural",
+        "rule",
+        "Always pin the nightly toolchain and keep release hosts on that exact channel so rustc and cargo never drift apart mid-build, and rebuild every artifact whenever the pin moves forward to a newer date.",
+        0.9,
+    )?;
+    connection
+        .close()
+        .map_err(|error| format!("close db: {error}"))?;
+    let later = run_drift()?;
+    if missing_ids(&later)? != vec!["mem_00000000000000000000000017".to_owned()]
+        || !exports_suggested(&later)
+    {
+        return Err(format!(
+            "only the rule added after export is missing, and export is suggested: {later}"
+        ));
+    }
+    Ok(())
+}
+
+/// GH-50: hard-wrapped Markdown rules import as whole sentences whose
+/// provenance spans every line they occupy, and drift sees them as present.
+#[test]
+fn import_and_drift_rejoin_hard_wrapped_rules_with_line_spans() -> TestResult {
+    let workspace = seed_bridge_workspace()?;
+    let workspace_arg = workspace.path().to_str().unwrap().to_owned();
+    let wrapped_list_rule =
+        "NEVER ask a teammate to authorize a call count without a written budget.";
+    let connection = ee::db::DbConnection::open_file(&workspace.path().join(".ee").join("ee.db"))
+        .map_err(|error| format!("open db: {error}"))?;
+    insert_rule_memory(
+        &connection,
+        "mem_00000000000000000000000018",
+        "procedural",
+        "rule",
+        wrapped_list_rule,
+        0.9,
+    )?;
+    connection
+        .close()
+        .map_err(|error| format!("close db: {error}"))?;
+    std::fs::write(
+        workspace.path().join("AGENTS.md"),
+        "# Rules\n\nAny tool or script that calls a production surface (Graph API, prod\nPostgreSQL, the search index) MUST build its clients via the ops client. Other\nprose follows.\n\n| Command | MUST NOT be extracted |\n|---|---|\n\n- NEVER ask a teammate to authorize a call count\n  without a written budget.\n",
+    )
+    .map_err(|error| format!("seed file: {error}"))?;
+
+    let import = run_ee_json(&[
+        "import",
+        "agentsmd",
+        "--workspace",
+        &workspace_arg,
+        "--json",
+    ])?;
+    let payload = import.pointer("/data").ok_or("missing data payload")?;
+    validate_import_against_schema(payload)?;
+    let proposals = payload
+        .pointer("/proposals")
+        .and_then(Value::as_array)
+        .ok_or("proposals must be an array")?
+        .iter()
+        .map(|proposal| {
+            (
+                proposal["contentDraft"].clone(),
+                proposal["lineNumber"].clone(),
+                proposal["endLineNumber"].clone(),
+                proposal["evidence"].clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected = vec![
+        (
+            Value::from(
+                "Any tool or script that calls a production surface (Graph API, prod PostgreSQL, the search index) MUST build its clients via the ops client.",
+            ),
+            Value::from(3),
+            Value::from(4),
+            serde_json::json!(["file://AGENTS.md#L3-L4"]),
+        ),
+        (
+            Value::from(wrapped_list_rule),
+            Value::from(10),
+            Value::from(11),
+            serde_json::json!(["file://AGENTS.md#L10-L11"]),
+        ),
+    ];
+    if proposals != expected {
+        return Err(format!(
+            "hard-wrapped rules must import whole with line spans, got {proposals:?}"
+        ));
+    }
+
+    run_ee_json(&[
+        "import",
+        "agentsmd",
+        "--apply",
+        "--workspace",
+        &workspace_arg,
+        "--json",
+    ])?;
+    let rows = read_import_rows(workspace.path())?;
+    let evidence = rows["evidence"]
+        .as_array()
+        .ok_or("evidence rows must be an array")?;
+    if evidence.len() != 1
+        || evidence[0]["startLine"] != Value::from(3)
+        || evidence[0]["endLine"] != Value::from(4)
+    {
+        return Err(format!(
+            "persisted evidence must span the wrapped lines: {rows}"
+        ));
+    }
+
+    let drift = run_ee_json(&[
+        "diag",
+        "agentsmd-drift",
+        "--workspace",
+        &workspace_arg,
+        "--json",
+    ])?;
+    let missing = drift
+        .pointer("/data/missingRules")
+        .and_then(Value::as_array)
+        .ok_or("missingRules must be an array")?;
+    if missing
+        .iter()
+        .any(|finding| finding["memoryId"] == "mem_00000000000000000000000018")
+    {
+        return Err(format!(
+            "a rule present as a wrapped list item must not be reported missing: {drift}"
+        ));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Schema contract (structural, mirrors primer_cli_golden.rs)
 // ---------------------------------------------------------------------------

@@ -3469,7 +3469,9 @@ mod tests {
         assert!(
             run.candidates.iter().all(|candidate| {
                 candidate.proposed_content != "Stack"
-                    && !candidate.proposed_content.contains("bootstrap exported memory")
+                    && !candidate
+                        .proposed_content
+                        .contains("bootstrap exported memory")
             }),
             "headings and the ee managed block never become candidates"
         );
@@ -3550,7 +3552,7 @@ mod tests {
         );
         assert_eq!(quarantine.action, "quarantine");
         assert_eq!(quarantine.target, "curate_candidate");
-        assert_eq!(quarantine.candidate_kind, "heading");
+        assert_eq!(quarantine.candidate_kind, "explicit_policy");
         assert_eq!(quarantine.source_path, "AGENTS.md");
         assert_eq!(quarantine.source_kind, "root_policy");
         assert!(quarantine.source_hash.starts_with("blake3:"));
