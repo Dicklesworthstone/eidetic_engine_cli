@@ -175,6 +175,48 @@ pub fn workspace_config(workspace_path: &Path) -> Option<ConfigFile> {
     ConfigFile::parse(&contents).ok()
 }
 
+pub(crate) const MEMORY_POLICY_REPAIR: &str =
+    "Repair .ee/config.toml, then run `ee config show --workspace . --json`.";
+
+/// Privacy admission distinguishes an absent policy from one that cannot be
+/// trusted. Optional tuning callers may ignore unsafe config, but that must
+/// never turn an existing global-lane opt-out into the permissive default.
+pub(crate) fn workspace_memory_policy(workspace_path: &Path) -> Result<MemoryConfig, String> {
+    let path = workspace_path.join(".ee").join("config.toml");
+    let invalid = |reason: &str| {
+        format!(
+            "Cannot read memory privacy policy from '{}': {reason}",
+            path.display()
+        )
+    };
+    if first_existing_config_symlink_component(&path)
+        .map_err(|error| invalid(&error.to_string()))?
+        .is_some()
+    {
+        return Err(invalid("symlinked policy paths are not allowed"));
+    }
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(MemoryConfig::default());
+        }
+        Err(error) => return Err(invalid(&error.to_string())),
+    };
+    if !metadata.is_file() {
+        return Err(invalid("the policy path must be a regular file"));
+    }
+    if metadata.len() > SHARED_WORKSPACE_CONFIG_INSPECT_LIMIT {
+        return Err(invalid("the policy exceeds the bounded config size limit"));
+    }
+    let contents =
+        read_config_file_no_follow(&path).map_err(|error| invalid(&error.to_string()))?;
+    ConfigFile::parse(&contents)
+        .map(|config| config.memory)
+        // TOML diagnostics can quote configuration values. Report the failure
+        // without echoing potentially private policy contents.
+        .map_err(|_| invalid("the existing workspace configuration is invalid"))
+}
+
 /// Hard cap on `<workspace>/.ee/config.toml` reads in the shared
 /// config-loader path. Real config files are kilobytes at most (even the
 /// kitchen-sink shape in `src/config/file.rs` tops out well under 16 KiB);

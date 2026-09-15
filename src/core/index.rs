@@ -9595,9 +9595,11 @@ mod tests {
     #[test]
     #[ignore = "requires the real potion-multilingual-128M fixture"]
     fn verified_potion_descriptor_matches_real_loaded_model() -> TestResult {
-        let root = std::env::var_os("EE_EMBED_MODEL_FIXTURE_DIR")
-            .map(PathBuf::from)
-            .ok_or_else(|| "EE_EMBED_MODEL_FIXTURE_DIR must name the real model".to_owned())?;
+        let root = crate::config::env_registry::read_os(
+            crate::config::env_registry::EnvVar::EmbedModelFixtureDir,
+        )
+        .map(PathBuf::from)
+        .ok_or_else(|| "EE_EMBED_MODEL_FIXTURE_DIR must name the real model".to_owned())?;
         let settings = EeEmbedderSettings {
             model_root: root,
             download_mode: EeEmbedDownloadMode::Auto,

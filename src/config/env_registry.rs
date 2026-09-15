@@ -131,6 +131,8 @@ pub enum EnvVar {
     EmbedDownload,
     /// `EE_EMBED_MODEL_DIR`
     EmbedModelDir,
+    /// `EE_EMBED_MODEL_FIXTURE_DIR`
+    EmbedModelFixtureDir,
     /// `EE_EMBED_MODEL_PATH`
     EmbedModelPath,
     /// `EE_EMBED_REMOTE_API_KEY`
@@ -267,6 +269,8 @@ pub enum EnvVar {
     ReflectionSourceBudgetBytes,
     /// `EE_REMEMBER_CURATION_SYNC_BUDGET_MS`
     RememberCurationSyncBudgetMs,
+    /// `EE_RERANK_MODEL_FIXTURE_DIR`
+    RerankModelFixtureDir,
     /// `EE_SECURITY_PROFILE`
     SecurityProfile,
     /// `EE_SERVE_TOKEN`
@@ -361,6 +365,7 @@ impl EnvVar {
             Self::EmbedDedupHammingK,
             Self::EmbedDownload,
             Self::EmbedModelDir,
+            Self::EmbedModelFixtureDir,
             Self::EmbedModelPath,
             Self::EmbedRemoteApiKey,
             Self::EmbedRemoteDimension,
@@ -429,6 +434,7 @@ impl EnvVar {
             Self::ReflectionRequestTtlSeconds,
             Self::ReflectionSourceBudgetBytes,
             Self::RememberCurationSyncBudgetMs,
+            Self::RerankModelFixtureDir,
             Self::SecurityProfile,
             Self::ServeToken,
             Self::ScienceBackendPath,
@@ -496,6 +502,7 @@ impl EnvVar {
             Self::EmbedDedupHammingK => "EE_EMBED_DEDUP_HAMMING_K",
             Self::EmbedDownload => "EE_EMBED_DOWNLOAD",
             Self::EmbedModelDir => "EE_EMBED_MODEL_DIR",
+            Self::EmbedModelFixtureDir => "EE_EMBED_MODEL_FIXTURE_DIR",
             Self::EmbedModelPath => "EE_EMBED_MODEL_PATH",
             Self::EmbedRemoteApiKey => "EE_EMBED_REMOTE_API_KEY",
             Self::EmbedRemoteDimension => "EE_EMBED_REMOTE_DIMENSION",
@@ -566,6 +573,7 @@ impl EnvVar {
             Self::ReflectionRequestTtlSeconds => "EE_REFLECTION_REQUEST_TTL_SECONDS",
             Self::ReflectionSourceBudgetBytes => "EE_REFLECTION_SOURCE_BUDGET_BYTES",
             Self::RememberCurationSyncBudgetMs => "EE_REMEMBER_CURATION_SYNC_BUDGET_MS",
+            Self::RerankModelFixtureDir => "EE_RERANK_MODEL_FIXTURE_DIR",
             Self::SecurityProfile => "EE_SECURITY_PROFILE",
             Self::ServeToken => "EE_SERVE_TOKEN",
             Self::ScienceBackendPath => "EE_SCIENCE_BACKEND_PATH",
@@ -697,6 +705,9 @@ impl EnvVar {
             }
             Self::EmbedModelDir => {
                 "Override the bundled embedding model cache directory used by ee."
+            }
+            Self::EmbedModelFixtureDir => {
+                "Select the real Potion model fixture for explicitly invoked model tests; does not configure normal retrieval."
             }
             Self::EmbedModelPath => {
                 "Fault-injection path used to simulate an unavailable search embedder; this does not load alternate models."
@@ -855,6 +866,9 @@ impl EnvVar {
             }
             Self::RememberCurationSyncBudgetMs => {
                 "Override remember-time curation sync budget in milliseconds."
+            }
+            Self::RerankModelFixtureDir => {
+                "Select the real reranker fixture for explicitly invoked model tests; does not configure normal retrieval."
             }
             Self::SecurityProfile => "Select security profile.",
             Self::ServeToken => {
@@ -1037,6 +1051,8 @@ impl EnvVar {
             | Self::NoColor
             | Self::OutputFormat => "output",
             Self::FlightRecorder
+            | Self::EmbedModelFixtureDir
+            | Self::RerankModelFixtureDir
             | Self::FlightRecorderRetentionDays
             | Self::LogFormat
             | Self::LogJson
