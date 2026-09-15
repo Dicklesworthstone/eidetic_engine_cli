@@ -4320,11 +4320,10 @@ fn push_search_degradations(
 /// Attach the internal search's structured reranker posture to a context
 /// response while sharing the long-lived transport's delivery reservation.
 ///
-/// The search renderer also owns stale/large-gap episode accounting. Replace
-/// only those two context degradation entries with its delivery-filtered view
-/// so one response cannot observe the same episode twice. All other context
-/// degradations, including transient reranker load failures, remain visible on
-/// every affected response.
+/// The search renderer also owns large-gap episode accounting. Replace that
+/// advisory with its delivery-filtered view while retaining the context's
+/// per-response stale-index fact. All other context degradations, including
+/// transient reranker load failures, remain visible on every affected response.
 pub(crate) fn attach_context_search_advisories_for_delivery(
     response: &mut serde_json::Value,
     search_report: &SearchReport,
@@ -4372,13 +4371,21 @@ fn attach_context_search_advisory_data(
         else {
             continue;
         };
+        // The context renderer already records whether this pack used a
+        // stale index. Search's once-per-episode warning suppression must not
+        // erase that per-response fact. Only the large-gap advisory is
+        // replaced with the session's delivery decision.
         entries.retain(|entry| {
-            !matches!(
-                entry.get("code").and_then(serde_json::Value::as_str),
-                Some("search_index_stale" | "search_index_large_gap")
-            )
+            entry.get("code").and_then(serde_json::Value::as_str) != Some("search_index_large_gap")
         });
-        entries.extend(search_stale_entries.iter().cloned());
+        for entry in &search_stale_entries {
+            if !entries
+                .iter()
+                .any(|existing| existing.get("code") == entry.get("code"))
+            {
+                entries.push(entry.clone());
+            }
+        }
     }
 }
 
@@ -13385,6 +13392,88 @@ mod tests {
             &"search_index_stale".to_owned(),
             "transient code remains visible",
         )
+    }
+
+    #[test]
+    fn context_advisory_merge_keeps_stale_truth_and_suppresses_only_large_gap() -> Result<(), String>
+    {
+        let stale = serde_json::json!({
+            "code": "search_index_stale",
+            "severity": "medium",
+            "message": "This pack used the stale index.",
+            "repair": "ee index rebuild --workspace ."
+        });
+        let large_gap = serde_json::json!({
+            "code": "search_index_large_gap",
+            "severity": "medium",
+            "message": "Automatic read repair was skipped.",
+            "repair": "ee index rebuild --workspace ."
+        });
+        let unrelated = serde_json::json!({
+            "code": "graph_feature_disabled",
+            "severity": "medium",
+            "message": "Graph scoring is disabled."
+        });
+        let mut response = serde_json::json!({
+            "degraded": [stale.clone(), large_gap.clone(), unrelated.clone()],
+            "data": {"degraded": [stale.clone(), large_gap.clone(), unrelated.clone()]}
+        });
+        super::attach_context_search_advisory_data(
+            &mut response,
+            &serde_json::json!({"degraded": [stale.clone(), large_gap.clone()]}),
+        );
+        for pointer in ["/degraded", "/data/degraded"] {
+            let entries = response
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| format!("context degradation array missing at {pointer}"))?;
+            assert_eq!(entries.len(), 3);
+            assert_eq!(entries.iter().filter(|entry| *entry == &stale).count(), 1);
+            assert_eq!(
+                entries.iter().filter(|entry| *entry == &large_gap).count(),
+                1
+            );
+            assert!(entries.contains(&unrelated));
+        }
+
+        super::attach_context_search_advisory_data(
+            &mut response,
+            &serde_json::json!({"degraded": [], "rerank": {"advisory": null}}),
+        );
+        for pointer in ["/degraded", "/data/degraded"] {
+            assert_eq!(
+                response.pointer(pointer),
+                Some(&serde_json::json!([stale.clone(), unrelated.clone()])),
+                "repeated search warnings must not erase the context's stale-index fact"
+            );
+        }
+        assert!(response["data"]["rerank"]["advisory"].is_null());
+
+        let mut fresh = serde_json::json!({
+            "degraded": [unrelated.clone()],
+            "data": {"degraded": [unrelated.clone()]}
+        });
+        super::attach_context_search_advisory_data(
+            &mut fresh,
+            &serde_json::json!({"degraded": []}),
+        );
+        for pointer in ["/degraded", "/data/degraded"] {
+            assert_eq!(
+                fresh.pointer(pointer),
+                Some(&serde_json::json!([unrelated.clone()]))
+            );
+        }
+        super::attach_context_search_advisory_data(
+            &mut fresh,
+            &serde_json::json!({"degraded": [stale.clone()]}),
+        );
+        for pointer in ["/degraded", "/data/degraded"] {
+            assert_eq!(
+                fresh.pointer(pointer),
+                Some(&serde_json::json!([unrelated.clone(), stale.clone()]))
+            );
+        }
+        Ok(())
     }
 
     proptest! {
