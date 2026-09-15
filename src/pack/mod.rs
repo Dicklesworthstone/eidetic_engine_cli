@@ -8163,20 +8163,62 @@ fn truncated_preview_content(content: &str, token_limit: u32) -> Option<String> 
         return None;
     }
     let words = content.split_whitespace().collect::<Vec<_>>();
-    if words.is_empty() {
+    if words.len() < 2 {
         return None;
     }
-    let max_take_count = words.len().checked_sub(1)?;
-    for take_count in (1..=max_take_count).rev() {
+    let max_take_count = (words.len() - 1).min(max_preview_word_count(
+        token_limit,
+        cl100k_base_encoder().is_some(),
+    ));
+    // For this exact format, cl100k pieces cannot cross a word's trailing
+    // ASCII-space boundary. Appending a whole word therefore adds tokens
+    // without changing earlier pieces or the fixed ellipsis. The character
+    // fallback and saturated counts are also nondecreasing. This does not
+    // assume monotonicity for arbitrary BPE text or character prefixes.
+    let mut low = 1;
+    let mut high = max_take_count;
+    let mut best = None;
+    // Preserve the one-tokenization fast path when the largest preview fits.
+    let mut take_count = high;
+    while low <= high {
         let mut preview = words[..take_count].join(" ");
-        if take_count < words.len() {
-            preview.push_str(" ...");
-        }
+        preview.push_str(" ...");
         if estimate_tokens_default(&preview) <= token_limit {
-            return Some(preview);
+            best = Some(preview);
+            low = take_count + 1;
+        } else {
+            high = take_count - 1;
+        }
+        if low <= high {
+            take_count = low + (high - low) / 2;
         }
     }
-    None
+    best
+}
+
+fn max_preview_word_count(token_limit: u32, tokenizer_available: bool) -> usize {
+    // Token estimates saturate at u32::MAX, so that limit cannot exclude
+    // any prefix on the basis of its mathematical token count.
+    if token_limit == u32::MAX {
+        return usize::MAX;
+    }
+    let limit = u64::from(token_limit);
+    let bound = if tokenizer_available {
+        // cl100k's regex never joins two ASCII-space-separated words into
+        // one piece; its special tokens contain no whitespace either.
+        // Each nonempty word and the appended "..." therefore costs >=1
+        // token. BPE merges stay inside a piece.
+        limit.saturating_sub(1)
+    } else {
+        // k nonempty words joined with spaces plus " ..." have >=2k+3
+        // characters. The fallback costs ceil((4k+6)/7) tokens. It can
+        // count fewer tokens than words, so the BPE bound is unsafe here.
+        (limit * CHARACTER_HEURISTIC_CHARS_PER_TOKEN_NUMERATOR)
+            .saturating_sub(3 * CHARACTER_HEURISTIC_CHARS_PER_TOKEN_DENOMINATOR)
+            / (2 * CHARACTER_HEURISTIC_CHARS_PER_TOKEN_DENOMINATOR)
+    };
+    // Only prefixes that cannot fit are excluded by this bound.
+    usize::try_from(bound).unwrap_or(usize::MAX)
 }
 
 fn link_only_lod_candidate(candidate: &PackCandidate, token_limit: u32) -> Option<PackCandidate> {
@@ -13096,6 +13138,188 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn lod_preview_matches_exhaustive_reference() -> TestResult {
+        // Keep the original unbounded descending scan as the oracle: a
+        // faster search must return the same longest fitting word prefix.
+        fn exhaustive_preview(content: &str, limit: u32) -> Option<String> {
+            let words = content.split_whitespace().collect::<Vec<_>>();
+            for take_count in (1..words.len()).rev() {
+                let mut preview = words[..take_count].join(" ");
+                preview.push_str(" ...");
+                if estimate_tokens_default(&preview) <= limit {
+                    return Some(preview);
+                }
+            }
+            None
+        }
+
+        ensure(
+            super::cl100k_base_encoder().is_some(),
+            "the BPE oracle must exercise the real embedded tokenizer",
+        )?;
+        let mut sources = vec![
+            String::new(),
+            " \t\r\n\u{2003}".to_string(),
+            "singleword".to_string(),
+            "a a a a a a".to_string(),
+            "  alpha\tbeta\r\ngamma\u{a0}delta  ".to_string(),
+            "\u{feff} \u{feff}word tail".to_string(),
+            "\0 \0x end".to_string(),
+            "é e\u{301} 中文 日本語 🦀 👩‍💻 نهاية".to_string(),
+            "'s 'll 've 're 'd 'm 't".to_string(),
+            "... !!! --- ___ ``` () [] {}".to_string(),
+            "0 123456789 3.141592653589793 -42 1e100".to_string(),
+            "<|endoftext|> <|fim_prefix|> <|fim_middle|> <|fim_suffix|> <|endofprompt|> tail"
+                .to_string(),
+            "before<|endoftext|>after <|fim_prefix|><|fim_middle|> _end tail".to_string(),
+            "\u{200b} \u{2060} \u{200e} \u{1c} end".to_string(),
+            "fn main() {\n println!(\"hello world\");\n}".to_string(),
+        ];
+        sources.push("a ".repeat(128));
+        sources.push(repeated_lod_content("operator-evidence", 96));
+        sources.push(format!("{} short ending", "unbroken".repeat(96)));
+        let limits = (0..=24).chain([31, 63, 128, 256, u32::MAX - 1, u32::MAX]);
+        for limit in limits {
+            for source in &sources {
+                ensure_equal(
+                    &super::truncated_preview_content(source, limit),
+                    &exhaustive_preview(source, limit),
+                    &format!("longest preview changed at limit {limit} for {source:?}"),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lod_preview_tokens_are_monotone_at_word_boundaries() -> TestResult {
+        let encoder = super::cl100k_base_encoder()
+            .ok_or_else(|| "word-boundary proof requires the embedded tokenizer".to_string())?;
+        let words = [
+            "a",
+            "hello",
+            "don't",
+            "'",
+            "'ll",
+            "...",
+            "!!!",
+            "_",
+            "-",
+            "0",
+            "1234",
+            "3.14",
+            "é",
+            "e\u{301}",
+            "中文",
+            "🦀",
+            "👩‍💻",
+            "\u{feff}",
+            "\0",
+            "\u{200b}",
+            "\u{2060}",
+            "\u{200e}",
+            "\u{1c}",
+            "<|endoftext|>",
+            "<|fim_prefix|>",
+            "<|fim_middle|>",
+            "<|fim_suffix|>",
+            "<|endofprompt|>",
+            "before<|endoftext|>after",
+            "<|fim_prefix|><|fim_middle|>",
+        ];
+        let ellipsis_tokens = encoder.encode_with_special_tokens(" ...").len();
+        for first in words {
+            let first_tokens = encoder.encode_with_special_tokens(first).len();
+            let prefix = format!("{first} ...");
+            ensure_equal(
+                &encoder.encode_with_special_tokens(&prefix).len(),
+                &(first_tokens + ellipsis_tokens),
+                "the fixed ellipsis must not change earlier token pieces",
+            )?;
+            for next in words {
+                // Use raw BPE here: estimate_tokens trims the leading space,
+                // which is part of this independently encoded component.
+                let next_tokens = encoder
+                    .encode_with_special_tokens(&format!(" {next}"))
+                    .len();
+                let extended = format!("{first} {next} ...");
+                ensure_equal(
+                    &encoder.encode_with_special_tokens(&extended).len(),
+                    &(first_tokens + next_tokens + ellipsis_tokens),
+                    &format!("word boundary changed token pieces: {extended:?}"),
+                )?;
+                ensure(next_tokens > 0, "a whole word must add a token")?;
+                ensure(
+                    estimate_tokens(&extended, TokenEstimationStrategy::CharacterHeuristic)
+                        >= estimate_tokens(&prefix, TokenEstimationStrategy::CharacterHeuristic),
+                    "the fallback must also be monotone at word boundaries",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lod_preview_word_bound_preserves_character_fallback() -> TestResult {
+        let sources = [
+            "a ".repeat(64),
+            "\u{feff} \0 é 🦀 中文 ... ".repeat(8),
+            "  alpha\tbeta\r\ngamma\u{a0}delta  ".repeat(8),
+            "<|endoftext|> <|fim_prefix|> tail ".repeat(8),
+        ];
+        for source in sources {
+            let words = source.split_whitespace().collect::<Vec<_>>();
+            for limit in 0..=40 {
+                let bound = super::max_preview_word_count(limit, false);
+                for take_count in (bound + 1)..words.len() {
+                    let preview = format!("{} ...", words[..take_count].join(" "));
+                    ensure(
+                        estimate_tokens(&preview, TokenEstimationStrategy::CharacterHeuristic)
+                            > limit,
+                        &format!("fallback bound skipped a fitting preview: {preview:?}"),
+                    )?;
+                }
+            }
+        }
+        ensure_equal(
+            &estimate_tokens("a a a a a ...", TokenEstimationStrategy::CharacterHeuristic),
+            &4,
+            "five words can fit four fallback tokens",
+        )?;
+        ensure_equal(
+            &super::max_preview_word_count(4, false),
+            &5,
+            "the fallback must retain the five-word counterexample",
+        )
+    }
+
+    #[test]
+    fn lod_preview_word_bound_preserves_saturating_limits() -> TestResult {
+        for tokenizer_available in [false, true] {
+            ensure_equal(
+                &super::max_preview_word_count(u32::MAX, tokenizer_available),
+                &usize::MAX,
+                "a saturated token limit must not prune any prefix",
+            )?;
+            ensure_equal(
+                &super::max_preview_word_count(0, tokenizer_available),
+                &0,
+                "zero tokens cannot fit a preview",
+            )?;
+            ensure_equal(
+                &super::max_preview_word_count(1, tokenizer_available),
+                &0,
+                "a word plus the ellipsis cannot fit one token",
+            )?;
+        }
+        ensure_equal(
+            &super::max_preview_word_count(300, true),
+            &299,
+            "the BPE word bound reserves a token for the ellipsis",
+        )
     }
 
     #[test]

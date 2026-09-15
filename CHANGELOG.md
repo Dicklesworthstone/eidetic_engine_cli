@@ -113,8 +113,17 @@ future changelog pass expands those rows into full capability sections.
   command remains unfinished (#46).
 - Reuse the request's workspace-roster snapshot during pack assembly. Ten
   interleaved pairs on a 32-note lexical fixture measured median latency of
-  1,755 ms versus 2,478 ms, with unchanged semantic output and DB/index bytes.
-  The separate 245-note neural workload remains under investigation (#49).
+  1,755 ms versus 2,478 ms, with unchanged semantic output and DB/index bytes
+  (#49).
+- Find the longest fitting whole-word preview with bounded binary search,
+  preserving the original preview, token limits and one-tokenization fast path
+  when it already fits. On a generated 245-note fixture with a warmed neural
+  daemon and a 20-candidate pool, ten interleaved debug-build pairs measured
+  median pack latency of 8.23 seconds versus 16.60 seconds (50.4% lower).
+  Responses matched after validating timing-only SLO fields; database/index
+  bytes and timestamps stayed unchanged, with essentially unchanged peak memory.
+  A separate 100-candidate request still exceeded an internal deadline; these
+  fixture measurements do not establish a latency guarantee (#49).
 - Report elapsed pack SLO overruns through `elapsedStatus` and the aggregate
   `status`, while keeping deterministic resource evidence in `resourceStatus`.
   Timing does not change selected memories or pack hashes (#49).
