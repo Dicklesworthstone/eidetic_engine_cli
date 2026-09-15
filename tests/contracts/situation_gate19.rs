@@ -66,6 +66,21 @@ fn read_golden(name: &str) -> Result<JsonValue, String> {
         .map_err(|error| format!("golden {} must be JSON: {error}", path.display()))
 }
 
+fn read_golden_for_current_build(name: &str, version_pointer: &str) -> Result<JsonValue, String> {
+    let mut expected = read_golden(name)?;
+    let version = expected
+        .pointer_mut(version_pointer)
+        .ok_or_else(|| format!("{name}: missing package version at {version_pointer}"))?;
+    ensure(
+        version.is_string(),
+        format!("{name}: package version must be a string"),
+    )?;
+    // The renderer must report this compiled package, not the historical
+    // fixture's release. Every other expected field remains unchanged.
+    *version = JsonValue::String(env!("CARGO_PKG_VERSION").to_owned());
+    Ok(expected)
+}
+
 fn classification_envelope(text: &str) -> JsonValue {
     let result = classify_task(text);
     serde_json::json!({
@@ -213,15 +228,17 @@ fn gate19_heuristic_tag_goldens_are_stable_and_non_decisioning() -> TestResult {
     let async_migration = classification_envelope("migrate async runtime from tokio to asupersync");
 
     ensure(
-        low_confidence == read_golden("low_confidence_broadening")?,
+        low_confidence
+            == read_golden_for_current_build("low_confidence_broadening", "/data/version")?,
         "low-confidence broadening golden mismatch",
     )?;
     ensure(
-        high_risk == read_golden("high_risk_alternative")?,
+        high_risk == read_golden_for_current_build("high_risk_alternative", "/data/version")?,
         "high-risk alternative golden mismatch",
     )?;
     ensure(
-        async_migration == read_golden("classify_async_migration")?,
+        async_migration
+            == read_golden_for_current_build("classify_async_migration", "/data/version")?,
         "async migration classification golden mismatch",
     )?;
 
@@ -408,7 +425,7 @@ fn gate19_compare_and_link_dry_run_goldens_are_stable() -> TestResult {
 #[test]
 fn gate19_fixture_metrics_match_golden_and_cover_gate_surfaces() -> TestResult {
     let actual = evaluate_built_in_situation_fixtures().data_json();
-    let expected = read_golden("fixture_metrics")?;
+    let expected = read_golden_for_current_build("fixture_metrics", "/version")?;
 
     ensure_json_equal(
         actual.get("schema"),

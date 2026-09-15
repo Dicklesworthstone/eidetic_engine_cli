@@ -1592,6 +1592,15 @@ mod tests {
                     "priority",
                     "kind",
                     "rationale",
+                    "riskClass",
+                    "preflightCommand",
+                    "requiresHumanApproval",
+                    "mutatesExternalState",
+                    "mutatesTrackerState",
+                    "privacyClass",
+                    "manualStep",
+                    "evidence",
+                    "preconditions",
                     "envName",
                     "valueHint",
                     "configPath",
@@ -1635,7 +1644,47 @@ mod tests {
                 );
             }
             validate_required_string(object, "rationale", &context, &mut issues);
+            validate_required_string(object, "riskClass", &context, &mut issues);
+            if let Some(risk_class) = object.get("riskClass").and_then(JsonValue::as_str) {
+                validate_enum(
+                    risk_class,
+                    &[
+                        "read_only_probe",
+                        "idempotent_refresh",
+                        "mutating_local_repair",
+                        "mutating_external_coordination_repair",
+                        "approval_required_repair",
+                        "destructive_or_irreversible_repair",
+                        "unavailable_or_manual_only",
+                    ],
+                    &format!("{context} riskClass"),
+                    &mut issues,
+                );
+            }
+            if !object.get("privacyClass").is_some_and(JsonValue::is_string) {
+                issues.push(format!("{context} privacyClass must be a string"));
+            }
+            for field in [
+                "requiresHumanApproval",
+                "mutatesExternalState",
+                "mutatesTrackerState",
+            ] {
+                if !object.get(field).is_some_and(JsonValue::is_boolean) {
+                    issues.push(format!("{context} {field} must be a boolean"));
+                }
+            }
+            for field in ["evidence", "preconditions"] {
+                if let Some(value) = object.get(field)
+                    && !value
+                        .as_array()
+                        .is_some_and(|values| values.iter().all(JsonValue::is_string))
+                {
+                    issues.push(format!("{context} {field} must be an array of strings"));
+                }
+            }
             for optional_field in [
+                "preflightCommand",
+                "manualStep",
                 "envName",
                 "valueHint",
                 "configPath",
@@ -1868,6 +1917,23 @@ mod tests {
         "sessions",
         "situation_records",
         "task_episodes",
+        // Team tables introduced by V105–V118; V116 and V120 rebuild existing
+        // tables without leaving their temporary migration copies behind.
+        "team_admission_peer_state",
+        "team_history_projections",
+        "team_idp_oidc",
+        "team_idp_policy",
+        "team_idp_token_replay",
+        "team_invite_auth_floor",
+        "team_join_attempts",
+        "team_member_identity",
+        "team_member_nodes",
+        "team_member_signing_keys",
+        "team_members",
+        "team_pending_invites",
+        "team_posture",
+        "team_projects",
+        "team_removal_acknowledgements",
         "tripwire_check_events",
         "tripwires",
         "trust_quarantine",
@@ -2379,13 +2445,17 @@ mod tests {
 
     fn observed_key_for_path(path: &str, rule: &CanonicalFieldRule) -> String {
         let key = field_key_from_path(path);
-        if path.ends_with(rule.canonical_key) {
+        let ends_with_field = |field: &str| {
+            path.strip_suffix(field)
+                .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('.'))
+        };
+        if ends_with_field(rule.canonical_key) {
             rule.canonical_key.to_owned()
         } else if let Some(alias) = rule
             .forbidden_aliases
             .iter()
             .copied()
-            .find(|alias| path.ends_with(alias))
+            .find(|alias| ends_with_field(alias))
         {
             alias.to_owned()
         } else {
@@ -3769,6 +3839,8 @@ mod tests {
         let drift_cases = [
             ("memory body text", "body"),
             ("memory body text", "text"),
+            ("memory level", "memory_level"),
+            ("memory kind", "memory_kind"),
             ("memory kind", "type"),
             ("workspace id", "workspaceId"),
             ("workspace path", "workspacePath"),
@@ -4207,6 +4279,11 @@ mod tests {
           "priority": 0,
           "kind": "rebuild",
           "rationale": "Rebuild the derived index.",
+          "riskClass": "idempotent_refresh",
+          "requiresHumanApproval": false,
+          "mutatesExternalState": false,
+          "mutatesTrackerState": false,
+          "privacyClass": "bounded_command_no_raw_state",
           "command": "ee index rebuild --workspace .",
         },
       ],
@@ -4289,6 +4366,11 @@ mod tests {
           "priority": 0,
           "kind": "rebuild",
           "rationale": "Rebuild the derived index.",
+          "riskClass": "idempotent_refresh",
+          "requiresHumanApproval": false,
+          "mutatesExternalState": false,
+          "mutatesTrackerState": false,
+          "privacyClass": "bounded_command_no_raw_state",
           "command": "ee index rebuild --workspace ."
         }
       ]
@@ -4335,6 +4417,84 @@ mod tests {
             &Some("ee.test_event.v1"),
             "invalid error event schema",
         )
+    }
+
+    #[test]
+    fn recovery_examples_require_published_safety_fields_and_reject_drift() -> TestResult {
+        let valid = serde_json::json!([
+            ee::models::RecoveryAction::migration(
+                0,
+                "ee migrate run --workspace .",
+                "Apply pending workspace migrations."
+            )
+            .data_json(),
+            ee::models::RecoveryAction::env(
+                1,
+                "EE_INDEX_DIR",
+                "<absolute path>",
+                "Select an existing derived index directory."
+            )
+            .data_json(),
+            ee::models::RecoveryAction::config(
+                2,
+                ".ee/config.toml",
+                "index.path",
+                "<absolute path>",
+                "Select the workspace index in configuration."
+            )
+            .data_json()
+        ]);
+        let issues = validate_recovery_array(&valid);
+        ensure(
+            issues.is_empty(),
+            format!("real RecoveryAction output must validate: {issues:?}"),
+        )?;
+
+        let schema: JsonValue = serde_json::from_str(
+            &fs::read_to_string(repo_path("docs/schemas/ee.error.v2.json"))
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let required = schema["$defs"]["recoveryAction"]["required"]
+            .as_array()
+            .ok_or_else(|| "recoveryAction.required must be an array".to_owned())?;
+        for field in required {
+            let field = field
+                .as_str()
+                .ok_or_else(|| "required recovery field must be a string".to_owned())?;
+            let mut missing = valid.clone();
+            missing[0]
+                .as_object_mut()
+                .ok_or_else(|| "real recovery must be an object".to_owned())?
+                .remove(field);
+            let issues = validate_recovery_array(&missing);
+            ensure(
+                issues.iter().any(|issue| issue.contains(field)),
+                format!("missing required recovery field {field} must fail: {issues:?}"),
+            )?;
+        }
+
+        for (field, replacement) in [
+            ("riskClass", serde_json::json!("invented_risk")),
+            ("requiresHumanApproval", serde_json::json!("false")),
+            ("mutatesExternalState", serde_json::json!(0)),
+            ("mutatesTrackerState", JsonValue::Null),
+            ("privacyClass", serde_json::json!(false)),
+            ("preflightCommand", serde_json::json!(7)),
+            ("manualStep", serde_json::json!([])),
+            ("evidence", serde_json::json!([false])),
+            ("preconditions", serde_json::json!("workspace")),
+            ("unknownSafetyField", serde_json::json!(true)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[0][field] = replacement;
+            let issues = validate_recovery_array(&invalid);
+            ensure(
+                issues.iter().any(|issue| issue.contains(field)),
+                format!("invalid recovery field {field} must fail: {issues:?}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

@@ -4,8 +4,9 @@
 //! naming in JSON output. This prevents field name drift between retrieval commands.
 //!
 //! Acceptance criteria from eidetic_engine_cli-fbmq:
-//! - All retrieval JSON fields use camelCase
-//! - No snake_case fields appear in context/search/why machine output
+//! - Retrieval JSON fields use camelCase, apart from the documented root
+//!   `embed_backend` token in the public retrieval schemas
+//! - Other snake_case fields remain rejected at every depth
 //! - Field naming is stable across commands
 
 use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
@@ -40,7 +41,9 @@ fn contains_snake_case_key(value: &Value, path: &str) -> Option<String> {
     match value {
         Value::Object(map) => {
             for (key, child) in map {
-                if key.contains('_') {
+                // ee.search.v1.json explicitly requires this shared retrieval
+                // backend token. The exception is confined to the report root.
+                if key.contains('_') && !(path == "search" && key == "embed_backend") {
                     return Some(format!("{path}.{key}"));
                 }
                 if let Some(found) = contains_snake_case_key(child, &format!("{path}.{key}")) {
@@ -59,6 +62,26 @@ fn contains_snake_case_key(value: &Value, path: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+#[test]
+fn embedding_backend_exception_does_not_allow_other_or_nested_snake_case_fields() -> TestResult {
+    let valid = serde_json::json!({"embed_backend": "hash_fallback", "resultCount": 0});
+    ensure(
+        contains_snake_case_key(&valid, "search").is_none(),
+        "documented backend field must be accepted",
+    )?;
+    for invalid in [
+        serde_json::json!({"embed_backend": "hash_fallback", "elapsed_ms": 1}),
+        serde_json::json!({"results": [{"embed_backend": "hash_fallback"}]}),
+        serde_json::json!({"rerank": {"unknown_field": false}}),
+    ] {
+        ensure(
+            contains_snake_case_key(&invalid, "search").is_some(),
+            format!("undocumented snake_case field escaped detection: {invalid}"),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -373,6 +396,7 @@ fn field_naming_contract_is_stable() -> TestResult {
     let expected_search_fields = [
         "command",
         "status",
+        "embed_backend",
         "query",
         "results",
         "resultCount",
@@ -529,6 +553,15 @@ fn field_naming_contract_is_stable() -> TestResult {
     };
 
     let json = report.data_json();
+
+    ensure(
+        json.get("embed_backend").and_then(Value::as_str) == Some("hash_fallback"),
+        "canonical embed_backend must report the captured fixture backend",
+    )?;
+    ensure(
+        json.get("embedBackend").is_none(),
+        "backend token must not acquire an undocumented camelCase alias",
+    )?;
 
     // Verify top-level search fields
     for field in expected_search_fields {

@@ -110,7 +110,11 @@ fn flight_recorder_script_sets_documented_env_overrides() {
 #[test]
 fn flight_recorder_script_invokes_status_doctor_and_recorder_append() {
     let body = script_body();
-    for verb_phrase in ["status --json", "doctor --json", "recorder flight append"] {
+    for verb_phrase in [
+        "status --json",
+        "doctor --full --json",
+        "recorder flight append",
+    ] {
         assert!(
             body.contains(verb_phrase),
             "script must invoke `{verb_phrase}` so the bead's three observable surfaces all execute"

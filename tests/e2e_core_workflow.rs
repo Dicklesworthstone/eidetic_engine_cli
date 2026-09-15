@@ -1144,6 +1144,7 @@ fn search_family_is_queryless_complete_scoped_and_redaction_safe() -> TestResult
         family_id,
         "--json",
     ])?;
+    persist_artifact("family_complete", &family);
     ensure_equal(
         &family.status.code(),
         &Some(EXIT_SUCCESS),
@@ -1322,6 +1323,54 @@ fn search_family_is_queryless_complete_scoped_and_redaction_safe() -> TestResult
             .map(Vec::len),
         &Some(1),
         "same family id remains workspace-isolated",
+    )?;
+
+    let missing = run_ee(&[
+        "--workspace",
+        &first_workspace,
+        "search",
+        "--family",
+        "fam-no-recorded-attempts",
+        "--json",
+    ])?;
+    persist_artifact("family_missing", &missing);
+    ensure_equal(
+        &missing.status.code(),
+        &Some(EXIT_SUCCESS),
+        "empty family read snapshot",
+    )?;
+    assert_stderr_empty(&missing, "empty family read snapshot")?;
+    let missing_json = stdout_json(&missing)?;
+    ensure_equal(
+        &missing_json.pointer("/data/members"),
+        &Some(&serde_json::json!([])),
+        "unknown family cannot borrow another family's members",
+    )?;
+    ensure_equal(
+        &missing_json.pointer("/data/promotionPosture"),
+        &Some(&serde_json::json!("blocked_undeclared")),
+        "unknown family cannot acquire declared promotion eligibility",
+    )?;
+
+    let repeated = run_ee(&[
+        "--workspace",
+        &first_workspace,
+        "search",
+        "--family",
+        family_id,
+        "--json",
+    ])?;
+    persist_artifact("family_repeated", &repeated);
+    ensure_equal(
+        &repeated.status.code(),
+        &Some(EXIT_SUCCESS),
+        "repeat family search after scoped and empty reads",
+    )?;
+    assert_stderr_empty(&repeated, "repeat family search")?;
+    ensure_equal(
+        &stdout_json(&repeated)?,
+        &family_json,
+        "independent read snapshots preserve the complete family response",
     )
 }
 
@@ -1426,6 +1475,7 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
         family_id,
         "--json",
     ])?;
+    persist_artifact("family_incomplete", &partial);
     ensure_equal(
         &partial.status.code(),
         &Some(EXIT_SUCCESS),
@@ -2208,9 +2258,12 @@ fn context_pack_includes_relevant_memories() -> TestResult {
 
     let mut remembered = BTreeMap::new();
     for (index, (level, kind, content)) in memories.iter().copied().enumerate() {
-        let source_path = tempdir.path().join(format!("memory-source-{index}.md"));
+        let source_name = format!("memory-source-{index}.md");
+        let source_path = tempdir.path().join(&source_name);
         fs::write(&source_path, content).map_err(|error| error.to_string())?;
-        let source_uri = format!("file://{}#L1", source_path.display());
+        // Relative sources resolve inside the real workspace and remain
+        // distinguishable after the pack renderer redacts private absolute paths.
+        let source_uri = format!("file://{source_name}#L1");
 
         let remember = run_ee(&[
             "--workspace",
@@ -2333,6 +2386,36 @@ fn context_pack_includes_relevant_memories() -> TestResult {
                     stored.source_uri
                 ),
             )?;
+            ensure(
+                !provenance.iter().any(|entry| {
+                    entry
+                        .get("uri")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|uri| {
+                            remembered.iter().any(|(other_id, other)| {
+                                other_id != memory_id && uri == other.source_uri
+                            })
+                        })
+                }),
+                format!("context item {memory_id} must not cite another memory's source"),
+            )?;
+            let expected_note =
+                format!("Memory {memory_id} selected for context pack; evidenceFreshness=fresh");
+            ensure(
+                provenance.iter().any(|entry| {
+                    entry.get("uri").and_then(serde_json::Value::as_str)
+                        == Some(stored.source_uri.as_str())
+                        && entry.get("note").and_then(serde_json::Value::as_str)
+                            == Some(expected_note.as_str())
+                }),
+                format!("context item {memory_id} must verify its real source as fresh"),
+            )?;
+            ensure(
+                !serde_json::to_string(provenance)
+                    .map_err(|error| error.to_string())?
+                    .contains(&workspace),
+                format!("context item {memory_id} must not disclose the private workspace path"),
+            )?;
         }
     }
 
@@ -2370,8 +2453,10 @@ fn context_pack_includes_relevant_memories() -> TestResult {
         )?;
         ensure_equal(
             &json_str(&why_json, "/data/storage/provenanceUri", "why")?,
-            &stored.source_uri.as_str(),
-            &format!("why {memory_id} provenanceUri"),
+            // The search/why privacy policy treats file://<non-slash> as
+            // host-like, so even this local relative spelling is redacted.
+            &"[REDACTED_PATH]#L1",
+            &format!("why {memory_id} public provenanceUri"),
         )?;
         ensure_equal(
             &json_str(&why_json, "/data/retrieval/level", "why")?,
@@ -2387,6 +2472,21 @@ fn context_pack_includes_relevant_memories() -> TestResult {
             json_str(&why_json, "/data/selection/latestPackSelection/why", "why")
                 .is_ok_and(|why| !why.trim().is_empty()),
             format!("why {memory_id} should include latest pack selection rationale"),
+        )?;
+    }
+
+    let connection =
+        ee::db::DbConnection::open_file_read_only(tempdir.path().join(".ee").join("ee.db"))
+            .map_err(|error| error.to_string())?;
+    for (memory_id, expected) in &remembered {
+        let stored = connection
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("source-backed memory {memory_id} disappeared"))?;
+        ensure_equal(
+            &stored.provenance_uri.as_deref(),
+            &Some(expected.source_uri.as_str()),
+            &format!("why must not mutate {memory_id}'s stored source URI"),
         )?;
     }
 

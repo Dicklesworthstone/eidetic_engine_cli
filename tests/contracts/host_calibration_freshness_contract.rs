@@ -19,7 +19,7 @@
 use std::{collections::BTreeSet, fs};
 
 use ee::core::profile::{
-    CpuProbe, EnvironmentProbe, HOST_PROFILE_PROBE_SCHEMA_V1, HostCalibrationFreshness,
+    CpuProbe, EnvironmentProbe, HOST_PROFILE_PROBE_SCHEMA_V1, HostCalibrationFreshness, HostClass,
     HostClassReport, HostClassificationOptions, HostResourceProbeReport, HostTopologyProbe,
     MemoryProbe, OperatingProfile, PathCapacityProbe, RchTopologyProbe, WorkspaceProbe,
     classify_host_profile,
@@ -423,26 +423,39 @@ fn fresh_calibration_emits_no_warning_calibration_degradation() {
 
 #[test]
 fn rch_only_topology_reports_topology_blocker_not_local_weakness() {
-    let probe = synthetic_probe(16, 64, /* rch_available */ false);
+    // RCH-only describes a capable host whose local build disk is constrained,
+    // with remote compilation available. Missing RCH alone is not this topology.
+    let probe = synthetic_topology_probe(16, 64, 1, true, true);
     let report = classify_with_freshness(&probe, HostCalibrationFreshness::Fresh);
-
-    let codes: BTreeSet<&str> = report.degraded.iter().map(|entry| entry.code).collect();
-    assert!(
-        codes.contains("host_calibration_rch_topology_blocked"),
-        "RCH-only topology must emit host_calibration_rch_topology_blocked, got {:?}",
-        codes
+    assert_eq!(report.host_class, HostClass::RchOnlyTopology);
+    let blocker = report
+        .degraded
+        .iter()
+        .find(|entry| entry.code == "host_calibration_rch_topology_blocked")
+        .expect("RCH-only topology must report its calibration-confidence blocker");
+    assert_eq!(blocker.severity, "warning");
+    assert_eq!(
+        blocker.message,
+        "RCH-only topology is treated as a calibration-confidence blocker, not as proof that local hardware is weak."
     );
+    assert_eq!(
+        blocker.repair,
+        Some("Run `rch queue` and `rch status --workers --jobs --json`.")
+    );
+    assert!(report.repair_actions.iter().any(|action| {
+        action.kind == "rch_status_probe"
+            && action.command == Some("rch queue && rch status --workers --jobs --json")
+    }));
 
-    for entry in &report.degraded {
-        let lowered = entry.message.to_ascii_lowercase();
-        assert!(
-            !lowered.contains("weak")
-                && !lowered.contains("underpowered")
-                && !lowered.contains("insufficient hardware"),
-            "RCH-only topology degradation message must not characterise the local host as weak: {:?}",
-            entry.message
-        );
-    }
+    let missing_rch = synthetic_topology_probe(16, 64, 64, true, false);
+    let missing_report = classify_with_freshness(&missing_rch, HostCalibrationFreshness::Fresh);
+    assert_ne!(missing_report.host_class, HostClass::RchOnlyTopology);
+    assert!(
+        missing_report
+            .degraded
+            .iter()
+            .all(|entry| { entry.code != "host_calibration_rch_topology_blocked" })
+    );
 }
 
 #[test]

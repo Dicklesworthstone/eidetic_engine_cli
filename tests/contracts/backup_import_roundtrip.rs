@@ -1,23 +1,24 @@
 //! L2 contract test (eidetic_engine_cli bd-17c65.12.3).
 //!
 //! Workspace round-trip determinism: a workspace exported via
-//! `create_backup` and re-imported via `import_jsonl_records` must
+//! `create_backup` and restored via `restore_backup_to_side_path` must
 //! produce a target workspace whose memory state is content-equivalent
 //! to the source.
 //!
 //! The equivalence check uses a **workspace_state_hash** that hashes
 //! the canonical content set of each workspace, stripping volatile
 //! fields (timestamps, audit IDs, etc.) so the round-trip can be
-//! validated even though re-import generates new audit row IDs and
-//! workspace IDs.
+//! validated independently of restored identities and audit rows.
 //!
 //! Two scenarios:
 //! 1. `RedactionLevel::None` — full fidelity round-trip.
 //! 2. `RedactionLevel::Standard` — redaction preserved on re-import.
 //!
-//! Both scenarios use the in-process API (create_backup +
-//! import_jsonl_records), not the CLI binary, to keep the test fast
-//! and to expose the underlying contract directly.
+//! Both scenarios use the public in-process backup/restore APIs. Restore
+//! authenticates the manifest with the explicitly selected source workspace's
+//! keys before invoking the real JSONL importer. The fresh destination caps
+//! source `human_explicit` claims at `agent_validated`; ordinary unauthenticated
+//! JSONL import must not grant native trust merely because rows came from a backup.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -25,8 +26,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ee::core::backup::{
-    BackupCreateOptions, BackupInspectOptions, BackupVerifyOptions, create_backup, inspect_backup,
-    verify_backup,
+    BackupCreateOptions, BackupInspectOptions, BackupRestoreOptions, BackupVerifyOptions,
+    create_backup, inspect_backup, restore_backup_to_side_path, verify_backup,
 };
 use ee::core::handoff::{
     CapsuleProfile, CreateOptions as HandoffCreateOptions, HANDOFF_CAPSULE_SCHEMA_V1,
@@ -34,7 +35,6 @@ use ee::core::handoff::{
     InspectOptions as HandoffInspectOptions, ResumeOptions as HandoffResumeOptions, create_handoff,
     inspect_handoff, resume_handoff,
 };
-use ee::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::DbConnection;
 use ee::models::{
@@ -382,7 +382,10 @@ fn build_source_workspace(workspace: &Path, database: &Path) -> Result<(), Strin
 fn run_roundtrip(redaction_level: RedactionLevel) -> Result<RoundtripFixture, String> {
     // -- Source workspace --------------------------------------------------
     let src_dir = tempfile::tempdir().map_err(|error| format!("src tempdir: {error}"))?;
-    let src_workspace = src_dir.path().to_path_buf();
+    let src_workspace = src_dir
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonical source workspace: {error}"))?;
     let src_db = src_workspace.join(".ee").join("ee.db");
     build_source_workspace(&src_workspace, &src_db)?;
 
@@ -409,29 +412,50 @@ fn run_roundtrip(redaction_level: RedactionLevel) -> Result<RoundtripFixture, St
 
     // -- Destination workspace --------------------------------------------
     let dst_dir = tempfile::tempdir().map_err(|error| format!("dst tempdir: {error}"))?;
-    let dst_workspace = dst_dir.path().to_path_buf();
+    let dst_workspace = dst_dir
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonical destination workspace: {error}"))?;
     let dst_db = dst_workspace.join(".ee").join("ee.db");
-    std::fs::create_dir_all(dst_db.parent().expect("dst db parent"))
-        .map_err(|error| format!("dst .ee dir: {error}"))?;
-    let dst_conn =
-        DbConnection::open_file(&dst_db).map_err(|error| format!("dst db open: {error}"))?;
-    dst_conn
-        .migrate()
-        .map_err(|error| format!("dst db migrate: {error}"))?;
-    drop(dst_conn);
 
-    let import_report = import_jsonl_records(&JsonlImportOptions {
-        workspace_path: dst_workspace.clone(),
-        database_path: Some(dst_db.clone()),
-        source_path: backup_records_path.clone(),
+    // A raw JSONL import into this unrelated store correctly refuses native
+    // human trust. The supported restore path authenticates using source keys
+    // and imports the records at the documented foreign-store trust cap.
+    let restore_report = restore_backup_to_side_path(&BackupRestoreOptions {
+        workspace_path: src_workspace,
+        backup_path: PathBuf::from(&backup_report.backup_path),
+        side_path: dst_workspace.clone(),
+        restore_graph_cache: false,
         dry_run: false,
     })
-    .map_err(|error| format!("import_jsonl_records: {error:?}"))?;
-    if import_report.memories_imported == 0 {
+    .map_err(|error| format!("restore_backup_to_side_path: {error:?}"))?;
+    if restore_report.status != "completed" || restore_report.import_status != "completed" {
         return Err(format!(
-            "import_jsonl_records imported 0 memories: status={}, issues={:?}",
-            import_report.status, import_report.issues
+            "backup restore did not complete: status={}, import_status={}, degraded={:?}",
+            restore_report.status, restore_report.import_status, restore_report.degraded
         ));
+    }
+    assert_eq!(
+        restore_report.imported_memory_count, 4,
+        "all seeded memories restored"
+    );
+    assert_eq!(Path::new(&restore_report.restored_database_path), dst_db);
+    assert_eq!(
+        Some(restore_report.source_manifest_hash.as_str()),
+        backup_report.manifest_hash.as_deref()
+    );
+    let restored = DbConnection::open_file_read_only(&dst_db)
+        .map_err(|error| format!("restored db open: {error}"))?;
+    let workspace_id = single_workspace_id(&restored)?;
+    let memories = restored
+        .list_memories(&workspace_id, None, true)
+        .map_err(|error| format!("restored list_memories: {error}"))?;
+    assert_eq!(memories.len(), 4, "restored rows match the import report");
+    for memory in memories {
+        assert_eq!(
+            memory.trust_class, "agent_validated",
+            "foreign human trust must not cross the restore boundary"
+        );
     }
 
     Ok(RoundtripFixture {
@@ -442,12 +466,12 @@ fn run_roundtrip(redaction_level: RedactionLevel) -> Result<RoundtripFixture, St
         dst_db,
         _dst_workspace: dst_workspace,
         _backup_records_path: backup_records_path,
-        _memories_imported: import_report.memories_imported,
+        _memories_imported: restore_report.imported_memory_count,
     })
 }
 
 #[test]
-fn backup_export_import_roundtrip_preserves_workspace_state_hash() -> TestResult {
+fn backup_export_restore_roundtrip_preserves_workspace_state_hash() -> TestResult {
     let fixture = run_roundtrip(RedactionLevel::None)?;
 
     let src_hash = workspace_state_hash(&fixture.src_db)?;
@@ -473,7 +497,7 @@ fn backup_export_import_roundtrip_preserves_workspace_state_hash() -> TestResult
 }
 
 #[test]
-fn backup_export_import_roundtrip_with_standard_redaction_remains_deterministic() -> TestResult {
+fn backup_export_restore_roundtrip_with_standard_redaction_remains_deterministic() -> TestResult {
     // Standard redaction intentionally masks source identifiers in the
     // JSONL stream. Import regenerates stable local memory IDs from the
     // redacted records, so the content/tag state remains round-trippable
@@ -515,7 +539,7 @@ fn backup_export_import_roundtrip_with_standard_redaction_remains_deterministic(
 }
 
 #[test]
-fn backup_export_import_roundtrip_imports_all_redaction_levels() -> TestResult {
+fn backup_export_restore_roundtrip_imports_all_redaction_levels() -> TestResult {
     for level in RedactionLevel::all() {
         let fixture = run_roundtrip(*level)
             .map_err(|error| format!("round-trip for redaction level `{level}`: {error}"))?;

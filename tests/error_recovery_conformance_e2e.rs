@@ -1411,7 +1411,7 @@ fn storeless_custom_address_reports_all_ranked_nearby_stores() -> TestResult {
         "human repair and JSON recovery must share the exact best retarget".to_owned(),
     )?;
     let executed = run_emitted_ee_command_with_registry(
-        &format!("ee {best_retarget} search 'root default nearby fact' --json"),
+        &format!("ee search 'root default nearby fact' {best_retarget} --json"),
         &registry,
     )?;
     ensure(
@@ -1462,7 +1462,14 @@ fn storeless_same_root_default_and_campaign_retargets_are_database_exact() -> Te
         ],
         &registry,
     )?;
-    ensure(first_init.status.success(), "campaign fixture init failed")?;
+    ensure(
+        first_init.status.success(),
+        format!(
+            "campaign fixture init failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&first_init.stdout),
+            String::from_utf8_lossy(&first_init.stderr),
+        ),
+    )?;
     for content in ["campaign same-root fact one", "campaign same-root fact two"] {
         let remember = run_ee_with_registry(
             &[
@@ -1487,17 +1494,23 @@ fn storeless_same_root_default_and_campaign_retargets_are_database_exact() -> Te
             "init".to_owned(),
             "--workspace".to_owned(),
             workspace_text.clone(),
-            "--database".to_owned(),
-            workspace
-                .join(".ee")
-                .join("ee.db")
-                .to_string_lossy()
-                .to_string(),
             "--json".to_owned(),
         ],
         &registry,
     )?;
-    ensure(second_init.status.success(), "default fixture init failed")?;
+    ensure(
+        second_init.status.success(),
+        format!(
+            "default fixture init failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&second_init.stdout),
+            String::from_utf8_lossy(&second_init.stderr),
+        ),
+    )?;
+    ensure(
+        workspace.join(".ee").join("ee.db").is_file()
+            && workspace.join(".ee-campaign").join("ee.db").is_file(),
+        "init must recreate the conventional database while preserving the campaign database",
+    )?;
     for content in [
         "default same-root fact one",
         "default same-root fact two",
@@ -1860,7 +1873,7 @@ fn storeless_miss_quotes_spaced_nearby_workspace_and_command_executes() -> TestR
         .ok_or_else(|| {
             format!("repair did not contain an executable retarget fragment: {repair}")
         })?;
-    let emitted_retarget = format!("ee {retarget_fragment} search \"{seed_content}\" --json");
+    let emitted_retarget = format!("ee search \"{seed_content}\" {retarget_fragment} --json");
     let retargeted = run_emitted_ee_command_with_registry(
         &emitted_retarget,
         &tempdir.path().join("repair-retarget-registry.db"),

@@ -129,18 +129,8 @@ fn assert_golden(name: &str, actual: &str) -> TestResult {
         )
     })?;
 
-    let expected_cmp = if name == "status" {
-        normalize_status_toon(&expected, Path::new("$STATUS_WORKSPACE"))
-    } else {
-        expected
-    };
-    let actual_cmp = if name == "status" {
-        normalize_status_toon(actual, Path::new("$STATUS_WORKSPACE"))
-    } else {
-        actual.to_owned()
-    };
-    let expected_cmp = canonicalize_toon_comparison(&expected_cmp);
-    let actual_cmp = canonicalize_toon_comparison(&actual_cmp);
+    let expected_cmp = canonicalize_toon_comparison(&expected);
+    let actual_cmp = canonicalize_toon_comparison(actual);
 
     if actual_cmp == expected_cmp {
         Ok(())
@@ -186,93 +176,25 @@ fn canonicalize_toon_comparison(text: &str) -> String {
         .join("\n")
 }
 
-fn normalize_status_toon(raw: &str, workspace: &Path) -> String {
-    let workspace_path = workspace.to_string_lossy();
-    let path_normalized = raw
-        .replace(workspace_path.as_ref(), "$STATUS_WORKSPACE")
-        .replace(env!("CARGO_MANIFEST_DIR"), "$STATUS_REPOSITORY");
-    let mut normalized = String::new();
-    let mut in_agent_inventory = false;
-    let mut skip_block_indent: Option<usize> = None;
-    for line in path_normalized.lines() {
-        let trimmed = line.trim_start();
-        let indent_len = line.len() - trimmed.len();
-        let indent = &line[..indent_len];
+fn decode_toon(raw: &str) -> Result<JsonValue, String> {
+    toon::try_decode(raw, None)
+        .map(JsonValue::from)
+        .map_err(|error| format!("TOON must decode without losing fields: {error}"))
+}
 
-        if let Some(block_indent) = skip_block_indent {
-            if trimmed.is_empty() || indent_len > block_indent {
-                continue;
-            }
-            skip_block_indent = None;
-        }
-
-        if trimmed == "agentInventory:" {
-            in_agent_inventory = true;
-        }
-
-        let replacement = if matches!(
-            trimmed,
-            "hostCalibration:" | "qos:" | "rchWorkerPressure:" | "lexicalRamTier:"
-        ) {
-            skip_block_indent = Some(indent_len);
-            Some(match trimmed {
-                "hostCalibration:" => "hostCalibration: <scrubbed:hostCalibration>",
-                "qos:" => "qos: <scrubbed:qos>",
-                "rchWorkerPressure:" => "rchWorkerPressure: <scrubbed:rchWorkerPressure>",
-                // lexicalRamTier reports the host platform (platform/supported/
-                // bytesWarmloaded differ between linux CI and macOS), so the
-                // golden cannot pin its contents.
-                "lexicalRamTier:" => "lexicalRamTier: <scrubbed:lexicalRamTier>",
-                _ => unreachable!("matched known volatile status block"),
-            })
-        } else if trimmed.starts_with("fingerprint: ") {
-            Some("fingerprint: <workspace-fingerprint>")
-        } else if trimmed.starts_with("scopeKind: ") {
-            Some("scopeKind: <workspace-scope-kind>")
-        } else if trimmed.starts_with("repositoryRoot: ") {
-            Some("repositoryRoot: <repository-root>")
-        } else if trimmed.starts_with("repositoryFingerprint: ") {
-            Some("repositoryFingerprint: <repository-fingerprint>")
-        } else if trimmed.starts_with("subprojectPath: ") {
-            Some("subprojectPath: <subproject-path>")
-        } else if trimmed.starts_with("version: ") {
-            Some("version: <ee-version>")
-        } else if trimmed.starts_with("catalogPath: ") {
-            Some("catalogPath: <catalog-path>")
-        } else if trimmed.starts_with("configHash: ") {
-            Some("configHash: <derived-asset-hash>")
-        } else if trimmed.starts_with("dataRoot: ") {
-            Some("dataRoot: <data-root>")
-        } else if trimmed.starts_with("dependencyHash: ") {
-            Some("dependencyHash: <derived-asset-hash>")
-        } else if trimmed.starts_with("featureFlagsHash: ") {
-            Some("featureFlagsHash: <derived-asset-hash>")
-        } else if trimmed.starts_with("shardId: ") {
-            Some("shardId: <shard-id>")
-        } else if trimmed.starts_with("shardPath: ") {
-            Some("shardPath: <shard-path>")
-        } else if trimmed.starts_with("shardRoot: ") {
-            Some("shardRoot: <shard-root>")
-        } else if trimmed.starts_with("sourceDependencyHash: ") {
-            Some("sourceDependencyHash: <derived-asset-hash>")
-        } else if trimmed.starts_with("workspaceId: ") {
-            Some("workspaceId: <workspace-id>")
-        } else if in_agent_inventory && trimmed.starts_with("totalCount: ") {
-            Some("totalCount: <agent-source-count>")
-        } else {
-            None
-        };
-
-        if let Some(replacement) = replacement {
-            normalized.push_str(indent);
-            normalized.push_str(replacement);
-            normalized.push('\n');
-        } else {
-            normalized.push_str(line);
-            normalized.push('\n');
-        }
-    }
-    normalized
+fn normalize_status_observation_time(value: &mut JsonValue) -> TestResult {
+    let generated_at = value
+        .pointer_mut("/data/writeGroupCommit/generatedAt")
+        .ok_or("status is missing write-group-commit observation time")?;
+    let timestamp = generated_at
+        .as_str()
+        .ok_or("observation time must be a string")?;
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map_err(|error| format!("observation time must be RFC 3339: {error}"))?;
+    // write_owner::write_group_commit_generated_at samples Utc::now per command.
+    // Preserve all payload fields; only this observation timestamp is variable.
+    *generated_at = JsonValue::String("2000-01-01T00:00:00Z".to_owned());
+    Ok(())
 }
 
 // ============================================================================
@@ -421,16 +343,59 @@ fn toon_removes_json_syntax_overhead_for_capabilities() -> TestResult {
 // ============================================================================
 
 #[test]
-fn status_toon_matches_golden() -> TestResult {
-    let workspace = isolated_workspace("golden")?;
-    let output = run_ee_in_workspace(&workspace, &["status", "--format", "toon"])?;
+fn status_toon_fixture_roundtrip_matches_golden() -> TestResult {
+    // This retained golden is the fixed typed report in agent_golden_baselines,
+    // not a snapshot of the host/workspace observed by a live status command.
+    let fixture = fs::read_to_string(golden_path("status"))
+        .map_err(|error| format!("read status adapter fixture: {error}"))?;
+    let decoded = decode_toon(&fixture)?;
     ensure(
-        output.status.success(),
-        "ee status --format toon should succeed",
+        decoded["schema"] == "ee.response.v2"
+            && decoded["data"]["command"] == "status"
+            && decoded["data"]["workspace"]["root"] == "/workspace",
+        "the retained adapter fixture must describe its fixed status workspace",
     )?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let normalized = normalize_status_toon(&stdout, &workspace);
-    assert_golden("status", &normalized)
+    let rendered = ee::output::render_toon_from_json(&decoded.to_string());
+    ensure(
+        decode_toon(&rendered)? == decoded,
+        "the complete status fixture must survive the real adapter roundtrip",
+    )?;
+    assert_golden("status", &rendered)
+}
+
+#[test]
+fn live_status_toon_preserves_every_json_field() -> TestResult {
+    let workspace = isolated_workspace("decode-parity")?;
+    let json_output =
+        run_ee_in_workspace(&workspace, &["--fields", "standard", "status", "--json"])?;
+    let toon_output = run_ee_in_workspace(
+        &workspace,
+        &["--fields", "standard", "status", "--format", "toon"],
+    )?;
+    ensure(
+        json_output.status.success() && toon_output.status.success(),
+        format!(
+            "both live status formats must succeed; JSON stderr: {}; TOON stderr: {}",
+            String::from_utf8_lossy(&json_output.stderr),
+            String::from_utf8_lossy(&toon_output.stderr),
+        ),
+    )?;
+    ensure(
+        json_output.stderr.is_empty() && toon_output.stderr.is_empty(),
+        "successful status commands must not emit stderr",
+    )?;
+    let json: JsonValue = serde_json::from_slice(&json_output.stdout)
+        .map_err(|error| format!("status JSON must parse: {error}"))?;
+    let mut expected = JsonValue::from(toon::JsonValue::from(json));
+    let raw_toon = String::from_utf8(toon_output.stdout)
+        .map_err(|error| format!("status TOON must be UTF-8: {error}"))?;
+    let mut actual = decode_toon(&raw_toon)?;
+    normalize_status_observation_time(&mut expected)?;
+    normalize_status_observation_time(&mut actual)?;
+    ensure(
+        actual == expected,
+        format!("live TOON must preserve every JSON field\nexpected: {expected}\nactual: {actual}"),
+    )
 }
 
 #[test]
@@ -614,13 +579,17 @@ fn toon_format_is_deterministic() -> TestResult {
     ensure(output1.status.success(), "first run should succeed")?;
     ensure(output2.status.success(), "second run should succeed")?;
 
-    let stdout1 = String::from_utf8_lossy(&output1.stdout);
-    let stdout2 = String::from_utf8_lossy(&output2.stdout);
+    let mut first = decode_toon(&String::from_utf8_lossy(&output1.stdout))?;
+    let mut second = decode_toon(&String::from_utf8_lossy(&output2.stdout))?;
+    normalize_status_observation_time(&mut first)?;
+    normalize_status_observation_time(&mut second)?;
+    let stdout1 = ee::output::render_toon_from_json(&first.to_string());
+    let stdout2 = ee::output::render_toon_from_json(&second.to_string());
 
     ensure(
         stdout1 == stdout2,
         format!(
-            "TOON output must be deterministic across runs ({})",
+            "TOON output must be deterministic apart from its validated observation time ({})",
             comparison_diagnosis(&stdout1, &stdout2)
         ),
     )
@@ -814,6 +783,48 @@ fn malformed_json_renders_as_toon_error() -> TestResult {
 mod unit_tests {
     use super::*;
     use ee::output::render_toon_from_json;
+
+    #[test]
+    fn status_time_normalization_rejects_bad_time_and_preserves_payload_changes() -> TestResult {
+        let original = serde_json::json!({
+            "data": {
+                "writeGroupCommit": {"generatedAt": "2026-09-15T00:00:00Z", "batches": 7},
+                "workspace": {"root": "/important-workspace"},
+                "degraded": [{"code": "storage_not_initialized"}]
+            }
+        });
+        let mut baseline = original.clone();
+        normalize_status_observation_time(&mut baseline)?;
+        for invalid in [
+            JsonValue::Null,
+            serde_json::json!(7),
+            serde_json::json!("not-a-time"),
+        ] {
+            let mut value = original.clone();
+            value["data"]["writeGroupCommit"]["generatedAt"] = invalid;
+            ensure(
+                normalize_status_observation_time(&mut value).is_err(),
+                "malformed observation times must fail, not be scrubbed away",
+            )?;
+        }
+        for (path, change) in [
+            ("/data/writeGroupCommit/batches", serde_json::json!(8)),
+            (
+                "/data/workspace/root",
+                serde_json::json!("/different-workspace"),
+            ),
+            ("/data/degraded", serde_json::json!([])),
+        ] {
+            let mut changed = original.clone();
+            *changed.pointer_mut(path).ok_or("missing control field")? = change;
+            normalize_status_observation_time(&mut changed)?;
+            ensure(
+                changed != baseline,
+                format!("payload change at {path} must remain visible"),
+            )?;
+        }
+        Ok(())
+    }
 
     #[test]
     fn render_toon_from_simple_json() -> TestResult {

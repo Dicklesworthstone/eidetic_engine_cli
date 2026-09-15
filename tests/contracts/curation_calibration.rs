@@ -58,6 +58,24 @@ fn pretty(value: &Value) -> Result<String, String> {
     Ok(rendered)
 }
 
+fn canonical_math_number(value: &mut Value) -> TestResult {
+    let Value::Number(number) = value else {
+        return Err(format!(
+            "finite math fixture must emit a JSON number, got {value}"
+        ));
+    };
+    let decimal = number.to_string();
+    // These renderer fields use decimal notation. Remove insignificant zeroes
+    // only; an f64 round-trip would discard significant arbitrary-precision digits.
+    let canonical = if decimal.contains('.') && !decimal.contains(['e', 'E']) {
+        decimal.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        &decimal
+    };
+    *value = serde_json::from_str(canonical).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn calibrated_certificate() -> RiskCertificate {
     RiskCertificate::builder()
         .candidate_type(CandidateType::Promote)
@@ -91,12 +109,14 @@ fn risk_certificate_json(certificate: &RiskCertificate) -> Value {
         "candidateType": certificate.candidate_type.as_str(),
         "targetMemoryId": certificate.target_memory_id,
         "riskLevel": certificate.risk_level.as_str(),
-        "riskScore": certificate.risk_score,
+        // Preserve the fixture's exact f32 values widened to f64, independent
+        // of serde_json's arbitrary-precision f32 spelling.
+        "riskScore": f64::from(certificate.risk_score),
         "calibrationWindowId": certificate.calibration_window_id,
         "stratum": certificate.stratum,
         "calibrationCount": certificate.calibration_count,
-        "nonconformityScore": certificate.nonconformity_score,
-        "threshold": certificate.threshold,
+        "nonconformityScore": f64::from(certificate.nonconformity_score),
+        "threshold": f64::from(certificate.threshold),
         "action": certificate.action,
         "abstainReason": certificate.abstain_reason,
         "reportOnly": certificate.report_only,
@@ -173,9 +193,9 @@ fn math_cards_carry_complete_decision_explanations_without_changing_curation() -
         trust_score_card("agent_validated", 0.80, 0.90, 0.72),
     ];
     let rendered = render_cards_json(&cards, CardsProfile::Math);
-    let value: Value = serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+    let mut value: Value = serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
     let items = value
-        .as_array()
+        .as_array_mut()
         .ok_or_else(|| "cards should render as array".to_string())?;
     ensure(!items.is_empty(), "cards present")?;
     for item in items {
@@ -191,12 +211,39 @@ fn math_cards_carry_complete_decision_explanations_without_changing_curation() -
             math["decisionChange"].is_string(),
             "card has decision change condition",
         )?;
+        canonical_math_number(&mut item["math"]["value"])?;
+        canonical_math_number(&mut item["math"]["confidence"])?;
     }
     ensure(
         curation_decision == "promote",
         "adding math cards does not change curation decision",
     )?;
     assert_golden("cards", "math_curation", &pretty(&value)?)
+}
+
+#[test]
+fn math_golden_comparison_preserves_significant_digits_and_number_types() -> TestResult {
+    for (raw, expected) in [
+        ("0.748000", "0.748"),
+        ("0.748000000000000000001000", "0.748000000000000000001"),
+        ("0.000000", "0"),
+        ("-0.750000", "-0.75"),
+    ] {
+        let mut value = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+        canonical_math_number(&mut value)?;
+        ensure(
+            value.to_string() == expected,
+            format!("math value changed: {raw}"),
+        )?;
+    }
+    for raw in ["null", "true", "\"0.748\"", "{}", "[]"] {
+        let mut value = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+        ensure(
+            canonical_math_number(&mut value).is_err(),
+            format!("non-number accepted: {raw}"),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]

@@ -4,8 +4,8 @@
  "gateBead": "bd-1n0np.23.1",
  "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
  "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
- "currentLastCompiledMigration": 115,
- "nextPlannedMigration": 116,
+ "currentLastCompiledMigration": 121,
+ "nextPlannedMigration": 122,
  "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
  "backupCoverageBead": "bd-1n0np.23.2",
  "policy": {
@@ -58,7 +58,13 @@
     "V112": "V112_TEAM_IDP_POLICY (bd-tc-epic-qzk7o T7.2 tailnet-attested IdP policy and member identity)",
     "V113": "V113_TEAM_IDP_OIDC (bd-tc-epic-qzk7o T7.4 secretless public OIDC provider pin)",
     "V114": "V114_TEAM_IDP_TOKEN_REPLAY (bd-tc-epic-qzk7o T7.5 single-use ID-token hash ledger)",
-    "V115": "V115_MESH_BODY_CACHE_LIFECYCLE (bd-tc-epic-qzk7o T5.9 staging/invalidation body-cache statuses)"
+    "V115": "V115_MESH_BODY_CACHE_LIFECYCLE (bd-tc-epic-qzk7o T5.9 staging/invalidation body-cache statuses)",
+    "V116": "V116_TEAM_PROJECTS_RECONCILED (rematerialized team project shares without a local path)",
+    "V117": "V117_TEAM_REMOVAL_ACKS (durable per-member removal acknowledgement matrix)",
+    "V118": "V118_TEAM_ADMISSION_PEERS (last authenticated admission snapshot for doctor/status)",
+    "V119": "V119_CURATION_GENERATION_TRIGGER_REPAIR (forward-only restoration of curation generation triggers and secondary indexes omitted by V103)",
+    "V120": "V120_TEAM_JOIN_ATTEMPT_FIRST_SYNC_PHASE (durable first_sync_complete phase for team joins)",
+    "V121": "V121_EVIDENCE_FEEDBACK_TARGETS (typed CASS evidence targets in feedback events and quarantine)"
    }
   }
  },
@@ -145,7 +151,7 @@
   },
   {
    "id": "attestation_bundles",
-   "version": 105,
+   "version": 122,
    "status": "planned",
    "runtimeRule": "planned_allocation_only",
    "migrationConstant": "required_before_implemented",
@@ -155,7 +161,7 @@
   },
   {
    "id": "query_miss_ledger",
-   "version": 106,
+   "version": 123,
    "status": "planned",
    "runtimeRule": "planned_allocation_only",
    "migrationConstant": "required_before_implemented",
@@ -165,7 +171,7 @@
   },
   {
    "id": "source_write_stats",
-   "version": 107,
+   "version": 124,
    "status": "planned",
    "runtimeRule": "planned_allocation_only",
    "migrationConstant": "required_before_implemented",
@@ -316,8 +322,8 @@
   },
   {
    "id": "attestation_bundles",
-   "version": 105,
-   "migrationName": "V101_ATTESTATION_BUNDLES",
+   "version": 122,
+   "migrationName": "V122_ATTESTATION_BUNDLES",
    "ownerBead": "bd-1n0np.22.1",
    "ownerSurface": "attestation_bundles",
    "status": "planned",
@@ -331,8 +337,8 @@
   },
   {
    "id": "query_miss_ledger",
-   "version": 106,
-   "migrationName": "V102_QUERY_MISS_LEDGER",
+   "version": 123,
+   "migrationName": "V123_QUERY_MISS_LEDGER",
    "ownerBead": "bd-1n0np.6.3",
    "ownerSurface": "gap_honesty",
    "status": "planned",
@@ -345,8 +351,8 @@
   },
   {
    "id": "source_write_stats",
-   "version": 107,
-   "migrationName": "V103_SOURCE_WRITE_STATS",
+   "version": 124,
+   "migrationName": "V124_SOURCE_WRITE_STATS",
    "ownerBead": "bd-1n0np.8.5",
    "ownerSurface": "read_fence",
    "status": "planned",

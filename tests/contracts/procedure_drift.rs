@@ -75,9 +75,14 @@ fn assert_golden(name: &str, actual: &str) -> TestResult {
 
     let expected = fs::read_to_string(&path)
         .map_err(|error| format!("missing golden {}: {error}", path.display()))?;
-    let expected = expected.strip_suffix('\n').unwrap_or(&expected);
+    // JSON object ordering and terminal whitespace are not field contracts.
+    // Compare the complete values while retaining every signal and its order.
+    let expected_json: JsonValue = serde_json::from_str(&expected)
+        .map_err(|error| format!("invalid golden {}: {error}", path.display()))?;
+    let actual_json: JsonValue =
+        serde_json::from_str(actual).map_err(|error| format!("invalid drift JSON: {error}"))?;
     ensure(
-        actual == expected,
+        actual_json == expected_json,
         format!(
             "procedure drift golden mismatch for {name}\n--- expected\n{expected}\n+++ actual\n{actual}"
         ),

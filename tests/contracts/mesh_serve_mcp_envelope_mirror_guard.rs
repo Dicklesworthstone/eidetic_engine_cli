@@ -181,29 +181,50 @@ fn envelope_mirror_guard_scanner_detects_the_forbidden_literal() -> TestResult {
     Ok(())
 }
 
-/// Cross-axis with bd-3nc11's catalog: the two bd-1zoiw / bd-2eiwy
-/// fix sites use the same mirror pattern (filter_map over the inner
-/// `degraded[]`'s `code` field, collect into a Vec<&str>, splice
-/// into the outer envelope). Asserting both substrings appear in
-/// src/serve.rs locks the pattern as the canonical fix shape so a
-/// future "simplification" that drops the mirror cannot quietly
-/// land — even if the forbidden literal stays absent.
+/// Both envelope builders use the shared payload reader. Pin their actual
+/// calls rather than prose comments, and exercise the public SSE renderer.
 #[test]
 fn serve_rs_retains_both_envelope_mirror_call_sites() -> TestResult {
     let serve_rs = fs::read_to_string(repo_root().join("src").join("serve.rs"))
         .map_err(|error| format!("read src/serve.rs: {error}"))?;
     for needle in [
-        // bd-1zoiw: SSE envelope mirror
-        "// bd-1zoiw: derive the outer envelope's degradedCodes",
-        // bd-2eiwy: dispatch envelope mirror
-        "// bd-2eiwy: surface the inner ee.response.v2 payload's `degraded[]`",
+        "let degraded_codes = serve_payload_degraded_codes(&wrapped_payload, payload_schema);",
+        "let degraded_codes = serve_payload_degraded_codes(payload, \"ee.response.v2\");",
     ] {
         if !serve_rs.contains(needle) {
             return Err(format!(
-                "src/serve.rs is missing the envelope-mirror provenance breadcrumb {needle:?}; \
-                 a refactor may have stripped a fix's bead-id comment. Re-add the comment or \
-                 rewire the test if the implementation moved to a helper function with its own \
-                 bead-id marker."
+                "src/serve.rs is missing an envelope builder's degraded-code reader: {needle:?}"
+            ));
+        }
+    }
+    for degraded in [
+        serde_json::json!([]),
+        serde_json::json!([
+            {"code": "index_stale", "severity": "warning"},
+            {"code": "graph_unavailable", "severity": "warning"}
+        ]),
+    ] {
+        let payload = serde_json::json!({
+            "schema": "ee.response.v2", "success": true, "data": {}, "degraded": degraded
+        });
+        let frame = ee::serve::render_serve_sse_event("status", true, &payload);
+        let data = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .ok_or("SSE renderer did not emit a data frame")?;
+        let envelope: serde_json::Value = serde_json::from_str(data)
+            .map_err(|error| format!("parse SSE data envelope: {error}"))?;
+        let expected: Vec<_> = degraded
+            .as_array()
+            .ok_or("fixture degraded must be an array")?
+            .iter()
+            .map(|entry| entry["code"].clone())
+            .collect();
+        if envelope["response"]["degradedCodes"] != serde_json::Value::Array(expected)
+            || envelope["response"]["payload"] != payload
+        {
+            return Err(format!(
+                "SSE envelope lost inner degradation evidence: {envelope}"
             ));
         }
     }

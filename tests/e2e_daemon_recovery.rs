@@ -65,10 +65,7 @@ fn daemon_supervised_job_recovery_after_kill_restart() -> TestResult {
     };
     trace.verify(
         "daemon_recovery",
-        status_before_kill
-            .pointer("/data/durable/openJobCount")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
+        open_daemon_job_count(&status_before_kill)?,
         2_u64,
         "daemon wrote durable planned rows before termination",
     );
@@ -83,7 +80,7 @@ fn daemon_supervised_job_recovery_after_kill_restart() -> TestResult {
         ),
     )?;
     ensure_equal(
-        &status_before_kill.pointer("/data/durable/openJobCount"),
+        &status_before_kill.pointer("/data/steward/durable/openJobCount"),
         &Some(&Value::from(2_u64)),
         "daemon planned rows before kill",
     )?;
@@ -127,18 +124,14 @@ fn daemon_supervised_job_recovery_after_kill_restart() -> TestResult {
     assert_success(&status_after_recovery, "daemon status after recovery")?;
     trace.verify(
         "daemon_recovery",
-        status_after_recovery
-            .json
-            .pointer("/data/durable/openJobCount")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
+        open_daemon_job_count(&status_after_recovery.json)?,
         0_u64,
         "daemon restart recovered all open durable rows",
     );
     ensure_equal(
         &status_after_recovery
             .json
-            .pointer("/data/durable/openJobCount"),
+            .pointer("/data/steward/durable/openJobCount"),
         &Some(&Value::from(0_u64)),
         "daemon open jobs after restart recovery",
     )?;
@@ -517,12 +510,9 @@ fn wait_for_open_daemon_jobs(
     let mut last_status = String::new();
     while Instant::now() < deadline {
         let status = run_ee_json(workspace, ["daemon", "status"], "daemon status poll")?;
+        assert_success(&status, "daemon status poll")?;
         last_status = status.stdout.clone();
-        let open_jobs = status
-            .json
-            .pointer("/data/durable/openJobCount")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        let open_jobs = open_daemon_job_count(&status.json)?;
         if open_jobs >= expected_open_jobs {
             return Ok(status.json);
         }
@@ -532,6 +522,15 @@ fn wait_for_open_daemon_jobs(
     Err(format!(
         "daemon did not record {expected_open_jobs} open jobs before timeout; last status: {last_status}"
     ))
+}
+
+fn open_daemon_job_count(status: &Value) -> Result<u64, String> {
+    status
+        .pointer("/data/steward/durable/openJobCount")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            format!("daemon status missing integer /data/steward/durable/openJobCount: {status}")
+        })
 }
 
 fn run_ee_json<I, S>(workspace: &Path, args: I, context: &str) -> Result<EeOutput, String>
@@ -591,7 +590,7 @@ fn assert_recovery_rows(rows: &[DaemonJobRow]) -> TestResult {
         })
         .count();
     ensure(
-        recovered >= 2,
+        recovered == 2,
         format!(
             "restart should cancel both orphaned daemon rows; recovered {recovered} rows: {rows:?}"
         ),

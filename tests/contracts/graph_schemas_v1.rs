@@ -77,6 +77,7 @@ const INSIGHTS_SECTIONS: &[&str] = &[
     "knowledgeGaps",
     "knowledgeSkyline",
     "loadBearingMemories",
+    "peerConflicts",
     "proximityHotspots",
     "revisionFrontiers",
     "topMemories",
@@ -157,6 +158,36 @@ fn require_required_fields(
             "{ctx} required fields drifted; expected {expected:?}, got {actual:?}"
         ))
     }
+}
+
+fn assert_empty_bundle_pagination(data: &Value, context: &str) -> TestResult {
+    let pagination = data
+        .get("sectionPagination")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{context} sectionPagination must be an array"))?;
+    ensure_eq(
+        Some(pagination.len()),
+        Some(INSIGHTS_SECTIONS.len()),
+        context,
+        "sectionPagination length",
+    )?;
+    for (page, name) in pagination.iter().zip(INSIGHTS_SECTIONS) {
+        ensure_eq(
+            page.get("name").and_then(Value::as_str),
+            Some(*name),
+            context,
+            "sectionPagination name",
+        )?;
+        for (field, expected) in [("limit", 10), ("offset", 0), ("returned", 0), ("total", 0)] {
+            ensure_eq(
+                page.get(field).and_then(Value::as_u64),
+                Some(expected),
+                context,
+                field,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -275,6 +306,52 @@ fn insights_empty_workspace_cli_shape_matches_contract() -> TestResult {
         "ee insights degraded signal",
         "graph.workspace_empty presence",
     )?;
+    let signals = data["degradedSignals"]
+        .as_array()
+        .ok_or_else(|| "insights degradedSignals must be an array".to_owned())?;
+    ensure_eq(
+        Some(signals.len()),
+        Some(2),
+        "ee insights degraded signals",
+        "distinct gate and empty-workspace causes",
+    )?;
+    let gated_sources =
+        collect_string_set(&signals[0]["sources"], "graph_feature_disabled.sources")?;
+    let expected_gated_sources = [
+        "authorities",
+        "causalBottlenecks",
+        "hubs",
+        "knowledgeSkyline",
+        "loadBearingMemories",
+        "revisionFrontiers",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    if gated_sources != expected_gated_sources {
+        return Err(format!(
+            "disabled sections must remain explicit: expected {expected_gated_sources:?}, got {gated_sources:?}"
+        ));
+    }
+    ensure_eq(
+        signals[1].get("severity").and_then(Value::as_str),
+        Some("info"),
+        "ee insights workspace-empty signal",
+        "severity",
+    )?;
+    let envelope_degraded = json["degraded"]
+        .as_array()
+        .ok_or_else(|| "insights envelope degraded must be an array".to_owned())?;
+    for signal in signals {
+        if !envelope_degraded.iter().any(|entry| {
+            entry.get("code") == signal.get("code")
+                && entry.get("severity") == signal.get("severity")
+        }) {
+            return Err(format!(
+                "insights envelope must preserve the response-affecting signal {signal}: {envelope_degraded:?}"
+            ));
+        }
+    }
 
     let sections = data
         .get("sections")
@@ -306,6 +383,7 @@ fn insights_empty_workspace_cli_shape_matches_contract() -> TestResult {
             ));
         }
     }
+    assert_empty_bundle_pagination(data, "ee insights empty workspace")?;
 
     Ok(())
 }
@@ -322,6 +400,12 @@ fn insights_schema_example_matches_empty_workspace_contract() -> TestResult {
         .and_then(Value::as_array)
         .and_then(|examples| examples.first())
         .ok_or_else(|| "ee.insights.v1 must include an example".to_owned())?;
+    require_required_fields(
+        &schema,
+        "/properties/sectionPagination/items/required",
+        &["name", "limit", "offset", "returned", "total"],
+        "ee.insights.v1 sectionPagination items",
+    )?;
 
     for (field, expected) in [
         ("schema", "ee.insights.v1"),
@@ -401,6 +485,7 @@ fn insights_schema_example_matches_empty_workspace_contract() -> TestResult {
             ));
         }
     }
+    assert_empty_bundle_pagination(example, "ee.insights.v1 empty example")?;
 
     Ok(())
 }

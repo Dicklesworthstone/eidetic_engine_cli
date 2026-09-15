@@ -358,6 +358,11 @@ fn top_contention_ranking_is_stable_and_deterministic() -> TestResult {
     let expected = vec![
         (
             "contended".to_owned(),
+            "flock_gate".to_owned(),
+            "flock_gate_timeouts".to_owned(),
+        ),
+        (
+            "contended".to_owned(),
             "read_pool".to_owned(),
             "read_pool_ad_hoc_bypass".to_owned(),
         ),
@@ -375,6 +380,11 @@ fn top_contention_ranking_is_stable_and_deterministic() -> TestResult {
             "hot".to_owned(),
             "singleflight".to_owned(),
             "singleflight_follower_timeouts".to_owned(),
+        ),
+        (
+            "warm".to_owned(),
+            "group_commit".to_owned(),
+            "group_commit_active_coalescing".to_owned(),
         ),
         (
             "warm".to_owned(),

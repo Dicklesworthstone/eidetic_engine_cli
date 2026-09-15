@@ -30,6 +30,7 @@ const STATUS_DATA_REQUIRED: &[&str] = &[
     "runtime",
     "read_pool",
     "wal",
+    "writeGroupCommit",
     "shardFanout",
     "packBudgetBuckets",
     "qos",
@@ -61,6 +62,7 @@ const DOCTOR_DATA_REQUIRED: &[&str] = &[
     "hostCalibration",
     "meshAutoEnrollment",
     "checks",
+    "advisories",
 ];
 const READ_POOL_FIELDS: &[&str] = &[
     "active",

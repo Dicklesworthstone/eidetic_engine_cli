@@ -193,11 +193,67 @@ fn cache_hotset_manifest_json_shape_is_stable() -> TestResult {
 
     let manifest_json =
         serde_json::to_string_pretty(&manifest.to_json()).map_err(|error| error.to_string())?;
-    assert_snapshot!(
-        "cache_hotset_v1_manifest",
-        manifest_json,
-        "manifest.to_json()"
-    );
+    assert_snapshot!(manifest_json, @r###"
+    {
+      "schema": "ee.cache.hotset.v1",
+      "workspaceId": "ws_01HQTSNAPSHOT00000000000",
+      "workspaceGeneration": 5,
+      "indexGeneration": 5,
+      "admissionThreshold": 5,
+      "profileTier": "balanced",
+      "capturedAt": "2026-05-19T20:00:00Z",
+      "redactionStatus": "content_not_stored",
+      "candidateCount": 4,
+      "admittedCount": 4,
+      "rejectedStaleCount": 0,
+      "memoryBudget": {
+        "maxEntries": 1024,
+        "maxBytes": 1048576,
+        "currentEntries": 3,
+        "currentBytes": 768
+      },
+      "searchEntries": [
+        {
+          "key": "blake3:c81c224bfd05ae9a104b40748d37589bd57140265cf8dc4bcd73d2bca583a5a1",
+          "kind": "memory",
+          "generation": 5,
+          "estimatedBytes": 128,
+          "hitCount": 1,
+          "redactionStatus": "content_not_stored"
+        },
+        {
+          "key": "blake3:e5acc1e0d22463e09c2b757da79bb26f3bf034332996a323e75b62590dfc52b6",
+          "kind": "memory",
+          "generation": 5,
+          "estimatedBytes": 128,
+          "hitCount": 3,
+          "redactionStatus": "content_not_stored"
+        },
+        {
+          "key": "blake3:3239ede66f339abebab65b31f1009a81cc3ebd43899a863e7e149162d1f17004",
+          "kind": "query_shape",
+          "generation": 5,
+          "estimatedBytes": 176,
+          "hitCount": 2,
+          "redactionStatus": "content_not_stored"
+        }
+      ],
+      "packEntries": [
+        {
+          "key": "pack:audit:fixture",
+          "kind": "selection_audit",
+          "section": null,
+          "generation": 5,
+          "estimatedBytes": 256,
+          "hitCount": 4,
+          "redactionStatus": "content_not_stored"
+        }
+      ],
+      "rejectedStaleSearchEntries": [],
+      "rejectedStalePackEntries": [],
+      "degraded": []
+    }
+    "###);
     Ok(())
 }
 
@@ -216,11 +272,63 @@ fn cache_hotset_manifest_emits_degraded_when_stale_entries_rejected() -> TestRes
 
     let manifest_json =
         serde_json::to_string_pretty(&manifest.to_json()).map_err(|error| error.to_string())?;
-    assert_snapshot!(
-        "cache_hotset_v1_manifest_stale_rejected",
-        manifest_json,
-        "manifest.to_json()"
-    );
+    assert_snapshot!(manifest_json, @r###"
+    {
+      "schema": "ee.cache.hotset.v1",
+      "workspaceId": "ws_01HQTSNAPSHOT00000000000",
+      "workspaceGeneration": 10,
+      "indexGeneration": 10,
+      "admissionThreshold": 10,
+      "profileTier": "balanced",
+      "capturedAt": "2026-05-19T20:00:00Z",
+      "redactionStatus": "content_not_stored",
+      "candidateCount": 2,
+      "admittedCount": 1,
+      "rejectedStaleCount": 1,
+      "memoryBudget": {
+        "maxEntries": 1024,
+        "maxBytes": 1048576,
+        "currentEntries": 0,
+        "currentBytes": 0
+      },
+      "searchEntries": [
+        {
+          "key": "blake3:cb2369f6514e11bff13180ca650aeb6f1ba1f3bb0f53cd654bb34735e0366c43",
+          "kind": "memory",
+          "generation": 10,
+          "estimatedBytes": 128,
+          "hitCount": 1,
+          "redactionStatus": "content_not_stored"
+        }
+      ],
+      "packEntries": [],
+      "rejectedStaleSearchEntries": [
+        {
+          "key": "blake3:189f116e12ddec1a77dc3317e59e90ec341973498575e79c62b4e74dbde0b0e2",
+          "kind": "memory",
+          "generation": 4,
+          "estimatedBytes": 128,
+          "hitCount": 1,
+          "redactionStatus": "content_not_stored"
+        }
+      ],
+      "rejectedStalePackEntries": [],
+      "degraded": [
+        {
+          "code": "cache_hotset_stale",
+          "severity": "medium",
+          "message": "Hotset rejected 1 entries older than the current generation; warming would degrade pack quality.",
+          "repair": "Recapture the hotset against the current workspace and index generation.",
+          "details": {
+            "rejectedStaleCount": 1,
+            "workspaceGeneration": 10,
+            "indexGeneration": 10,
+            "admissionThreshold": 10
+          }
+        }
+      ]
+    }
+    "###);
     Ok(())
 }
 

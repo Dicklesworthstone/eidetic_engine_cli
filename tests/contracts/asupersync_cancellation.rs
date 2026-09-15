@@ -22,8 +22,8 @@ use ee::core::{
     CliCancelReason, CliOutcomeClass, CliOutcomeSummary, EXIT_CANCELLED, EXIT_PANICKED,
     outcome_class, outcome_exit_code, run_cli_future,
 };
-use ee::db::DbConnection;
-use ee::models::{DomainError, MemoryScope, ProcessExitCode};
+use ee::db::{CreateMemoryInput, DbConnection};
+use ee::models::{DomainError, MemoryId, MemoryScope, ProcessExitCode};
 use ee::search::scoring::SpeedMode;
 use ee::steward::{
     DaemonForegroundOptions, JobPriority, JobType, ManualRunner, RunOutcome, RunnerOptions,
@@ -571,17 +571,43 @@ fn caller_cancelled_rebuild_leaves_active_generation_and_lock_state_unchanged() 
     let baseline_metadata = std::fs::read(fixture.index_dir.join("meta.json"))
         .map_err(|error| format!("read baseline cancellation index metadata: {error}"))?;
 
-    remember_fixture_memory(
-        &fixture.workspace,
-        &fixture.database,
-        "A cancelled rebuild must never publish this newer database generation.",
-    )?;
+    // Bypass the remember service's incremental index publication deliberately:
+    // this contract needs a durable database change whose index is still stale.
+    let connection = DbConnection::open_file(&fixture.database)
+        .map_err(|error| format!("open database to stage a stale index: {error}"))?;
+    let workspace = connection
+        .get_workspace_by_path(&fixture.workspace.to_string_lossy())
+        .map_err(|error| format!("read cancellation fixture workspace: {error}"))?
+        .ok_or_else(|| "cancellation fixture workspace is missing".to_owned())?;
+    connection
+        .insert_memory(
+            &MemoryId::from_uuid(uuid::Uuid::from_u128(0xEE_90B)).to_string(),
+            &CreateMemoryInput {
+                workspace_id: workspace.id,
+                level: "procedural".to_owned(),
+                kind: "rule".to_owned(),
+                content: "A cancelled rebuild must never publish this newer database generation."
+                    .to_owned(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.5,
+                importance: 0.5,
+                provenance_uri: None,
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                tags: vec!["asupersync".to_owned(), "cancellation".to_owned()],
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .map_err(|error| format!("stage durable memory without publishing its index: {error}"))?;
+    drop(connection);
     let stale_status = get_index_status(&status_options)
         .map_err(|error| format!("read stale cancellation index status: {error}"))?;
     ensure_equal(
         &stale_status.index_generation,
         &baseline_status.index_generation,
-        "remembering a new row must not mutate the active derived index",
+        "inserting directly into storage must not mutate the active derived index",
     )?;
     ensure(
         matches!(
@@ -859,32 +885,33 @@ fn daemon_foreground_runner_honors_cx_cancellation_before_job() -> TestResult {
         ),
     )?;
 
-    let report = match handle.try_join() {
-        Ok(Some(Outcome::Ok(report))) => report,
+    // LabRuntime attributes the task's cancellation to its join result even
+    // when the runner returns a report. Inspect that actual report separately.
+    let reason = match handle.try_join() {
+        Err(JoinError::Cancelled(reason)) => reason,
         Ok(Some(other)) => {
             return Err(format!(
-                "daemon foreground runner cancellation expected ok report, got {other:?}"
+                "daemon foreground runner expected a cancelled join, got {other:?}"
             ));
         }
         Ok(None) => return Err("daemon foreground runner task did not finish".to_owned()),
-        Err(JoinError::Cancelled(reason))
-            if reason.message.as_deref() == Some("join channel closed") =>
-        {
-            observed_report
-                .lock()
-                .map_err(|_| "daemon foreground runner report slot poisoned".to_owned())?
-                .clone()
-                .ok_or_else(|| {
-                    "daemon foreground runner cancellation report missing after closed join channel"
-                        .to_owned()
-                })?
-        }
         Err(error) => {
             return Err(format!(
                 "daemon foreground runner cancellation join failed: {error}"
             ));
         }
     };
+    ensure_equal(&reason.kind, &CancelKind::User, "runner cancellation kind")?;
+    ensure_equal(
+        &reason.message.as_deref(),
+        &Some("daemon foreground runner cancellation"),
+        "runner cancellation message",
+    )?;
+    let report = observed_report
+        .lock()
+        .map_err(|_| "daemon foreground runner report slot poisoned".to_owned())?
+        .take()
+        .ok_or_else(|| "daemon foreground runner cancellation report missing".to_owned())?;
 
     ensure(report.was_cancelled, "runner report must be cancelled")?;
     ensure_equal(&report.results.len(), &1, "cancelled job count")?;

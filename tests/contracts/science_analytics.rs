@@ -3,6 +3,7 @@
 //! This suite pins the public CLI payloads for science status/eval surfaces and
 //! enforces dependency-tree constraints for the `science-analytics` feature.
 
+use ee::models::ProcessExitCode;
 use ee::science::{CLUSTERING_DIAGNOSTICS_SCHEMA_V1, ClusteringDiagnostics, ScienceDegradation};
 use serde_json::{Value as JsonValue, json};
 use std::collections::BTreeSet;
@@ -82,8 +83,13 @@ fn assert_fixture_json(name: &str, actual: &JsonValue) -> TestResult {
             path.display()
         )
     })?;
-    let expected: JsonValue = serde_json::from_str(&expected_text)
+    let mut expected: JsonValue = serde_json::from_str(&expected_text)
         .map_err(|error| format!("fixture {} is invalid JSON: {error}", path.display()))?;
+    if name == "status" && expected.get("degraded").is_none() {
+        // The retained fixture predates the mandatory response-level array.
+        // Preserve every fixture field and require the current empty array.
+        expected["degraded"] = json!([]);
+    }
     ensure_json_equal(actual, &expected, name)
 }
 
@@ -91,17 +97,22 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
     crate::common_spawn::serialized_real_ee(args)
 }
 
-fn parse_json_stdout(output: Output, context: &str) -> Result<JsonValue, String> {
+fn parse_json_stdout(
+    output: Output,
+    expected_exit: ProcessExitCode,
+    context: &str,
+) -> Result<JsonValue, String> {
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("{context}: stdout not UTF-8: {error}"))?;
     let stderr = String::from_utf8(output.stderr)
         .map_err(|error| format!("{context}: stderr not UTF-8: {error}"))?;
 
     ensure(
-        output.status.success(),
+        output.status.code() == Some(expected_exit as i32),
         format!(
-            "{context}: command failed with exit {:?}; stderr: {stderr}",
-            output.status.code()
+            "{context}: expected exit {}, got {:?}; stderr: {stderr}; stdout: {stdout}",
+            expected_exit as i32,
+            output.status.code(),
         ),
     )?;
     ensure(
@@ -125,7 +136,14 @@ fn assert_eval_report_payload(payload: &JsonValue, context: &str) -> TestResult 
     )?;
     ensure_json_equal(
         payload.get("success").ok_or("missing success")?,
-        &json!(true),
+        &json!(false),
+        context,
+    )?;
+    ensure_json_equal(
+        payload
+            .pointer("/data/report/status")
+            .ok_or("missing report status")?,
+        &json!("failed"),
         context,
     )?;
     ensure_json_equal(
@@ -154,6 +172,34 @@ fn assert_eval_report_payload(payload: &JsonValue, context: &str) -> TestResult 
         &json!(5),
         context,
     )?;
+    let queries = payload
+        .pointer("/data/report/metrics/per_query")
+        .and_then(JsonValue::as_array)
+        .ok_or("missing per-query metrics")?;
+    ensure(queries.len() == 5, "all five query results must be present")?;
+    for query in queries {
+        ensure(
+            query
+                .get("retrieved_ids")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|ids| !ids.is_empty()),
+            "fixture metrics must come from actual retrieved memories",
+        )?;
+    }
+    ensure_json_equal(
+        payload
+            .pointer("/data/report/metrics/mean_precision_at_1")
+            .ok_or("missing mean P@1")?,
+        &json!(0.4),
+        "two of five release fixture queries have a relevant top result",
+    )?;
+    ensure_json_equal(
+        payload
+            .get("degraded")
+            .ok_or("missing response degraded array")?,
+        &json!([]),
+        context,
+    )?;
     ensure(
         payload.pointer("/data/scienceMetrics").is_none(),
         format!("{context}: default build must not emit scienceMetrics"),
@@ -176,11 +222,47 @@ fn assert_eval_list_payload(payload: &JsonValue, context: &str) -> TestResult {
         &json!("eval list"),
         context,
     )?;
+    let manifest: JsonValue = serde_json::from_str(
+        &fs::read_to_string(repo_path().join("tests/fixtures/eval/manifest.json"))
+            .map_err(|error| format!("read eval manifest: {error}"))?,
+    )
+    .map_err(|error| format!("parse eval manifest: {error}"))?;
+    let declared = manifest["fixtures"]
+        .as_array()
+        .ok_or("missing manifest fixtures")?;
+    let expected_ids = declared
+        .iter()
+        .map(|entry| {
+            entry["id"]
+                .as_str()
+                .ok_or("manifest fixture is missing its id")
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    ensure(
+        !expected_ids.is_empty() && expected_ids.len() == declared.len(),
+        "fixture manifest must be nonempty and contain unique IDs",
+    )?;
+    let listed = payload
+        .pointer("/data/fixtures")
+        .and_then(JsonValue::as_array)
+        .ok_or("missing listed fixtures")?;
+    let actual_ids = listed
+        .iter()
+        .map(|entry| {
+            entry["fixture_id"]
+                .as_str()
+                .ok_or("listed fixture is missing its id")
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    ensure(
+        actual_ids == expected_ids && actual_ids.len() == listed.len(),
+        format!("{context}: fixture inventory must match the manifest exactly once"),
+    )?;
     ensure_json_equal(
         payload
             .pointer("/data/fixtureCount")
             .ok_or("missing fixture count")?,
-        &json!(8),
+        &json!(declared.len()),
         context,
     )
 }
@@ -225,6 +307,7 @@ fn tree_crate_names(output: &str) -> BTreeSet<String> {
 fn science_status_json_matches_fixture() -> TestResult {
     let payload = parse_json_stdout(
         run_ee(&["--json", "analyze", "science-status"])?,
+        ProcessExitCode::Success,
         "ee --json analyze science-status",
     )?;
     assert_fixture_json("status", &payload)
@@ -234,6 +317,7 @@ fn science_status_json_matches_fixture() -> TestResult {
 fn eval_run_simple_json_reports_fixture_metrics() -> TestResult {
     let payload = parse_json_stdout(
         run_ee(&["--json", "eval", "run", "fx.release_failure.v1"])?,
+        ProcessExitCode::EvalFailure,
         "ee --json eval run fx.release_failure.v1",
     )?;
     assert_eval_report_payload(&payload, "eval run fixture")
@@ -249,6 +333,7 @@ fn eval_run_science_json_reports_fixture_without_metrics() -> TestResult {
             "fx.release_failure.v1",
             "--science",
         ])?,
+        ProcessExitCode::EvalFailure,
         "ee --json eval run fx.release_failure.v1 --science",
     )?;
     assert_eval_report_payload(&payload, "eval run --science fixture")
@@ -256,8 +341,27 @@ fn eval_run_science_json_reports_fixture_without_metrics() -> TestResult {
 
 #[test]
 fn eval_list_json_reports_fixture_inventory() -> TestResult {
-    let payload = parse_json_stdout(run_ee(&["--json", "eval", "list"])?, "ee --json eval list")?;
-    assert_eval_list_payload(&payload, "eval list fixtures")
+    let payload = parse_json_stdout(
+        run_ee(&["--json", "eval", "list"])?,
+        ProcessExitCode::Success,
+        "ee --json eval list",
+    )?;
+    assert_eval_list_payload(&payload, "eval list fixtures")?;
+    let mut unknown = payload.clone();
+    unknown["data"]["fixtures"][0]["fixture_id"] = json!("fx.unregistered.v1");
+    ensure(
+        assert_eval_list_payload(&unknown, "unregistered fixture").is_err(),
+        "an unregistered fixture must not pass the inventory contract",
+    )?;
+    let mut missing = payload;
+    missing["data"]["fixtures"]
+        .as_array_mut()
+        .ok_or("missing fixtures")?
+        .pop();
+    ensure(
+        assert_eval_list_payload(&missing, "missing fixture").is_err(),
+        "an omitted fixture must not pass the inventory contract",
+    )
 }
 
 #[test]

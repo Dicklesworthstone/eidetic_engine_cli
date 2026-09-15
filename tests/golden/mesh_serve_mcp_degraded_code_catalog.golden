@@ -4,10 +4,10 @@
 # Update path: UPDATE_GOLDENS=1 cargo test --test contracts \
 #   mesh_serve_mcp_degraded_code_catalog -- --exact; review the diff.
 #
-# Total codes:                52
-# With failure-mode fixture:  52
-# In docs/degraded_code_taxonomy.md: 52
-# In docs/degraded_codes.md (## header): 52
+# Total codes:                66
+# With failure-mode fixture:  61
+# In docs/degraded_code_taxonomy.md: 61
+# In docs/degraded_codes.md (## header): 61
 #
 # Columns: code | fixture | taxonomy | gen-docs | const | source
 #
@@ -36,11 +36,18 @@ hello_responder_port_in_use                          ✓         ✓          �
 hello_responder_rate_limited_storm                   ✓         ✓          ✓      HELLO_RESPONDER_RATE_LIMITED_STORM_CODE :: src/mesh/hello_responder.rs
 lane_grant_preview_lane_already_granted              ✓         ✓          ✓      LANE_GRANT_PREVIEW_LANE_ALREADY_GRANTED_CODE :: src/mesh/lane_grant_preview.rs
 lane_grant_preview_peer_not_in_group                 ✓         ✓          ✓      LANE_GRANT_PREVIEW_PEER_NOT_IN_GROUP_CODE :: src/mesh/lane_grant_preview.rs
+mesh_approval_token_invalid                          ✓         ✓          ✓      MESH_APPROVAL_TOKEN_INVALID_CODE :: src/mesh/lane_grant.rs
+mesh_approval_token_stale                            ✓         ✓          ✓      MESH_APPROVAL_TOKEN_STALE_CODE :: src/mesh/lane_grant.rs
 mesh_audit_ledger_corrupt                            ✓         ✓          ✓      MESH_AUDIT_LEDGER_CORRUPT_CODE :: src/mesh/audit.rs
 mesh_audit_ledger_missing                            ✓         ✓          ✓      MESH_AUDIT_LEDGER_MISSING_CODE :: src/mesh/audit.rs
+mesh_body_cache_lifecycle_failed                     ✓         ✓          ✓      MESH_BODY_CACHE_LIFECYCLE_FAILED_CODE :: src/mesh/cache.rs
+mesh_bootstrap_identity_unverified                   ✓         ✓          ✓      MESH_BOOTSTRAP_IDENTITY_UNVERIFIED_CODE :: src/mesh/responder_broker.rs
 mesh_cursor_repair_required                          ✓         ✓          ✓      MESH_CURSOR_REPAIR_REQUIRED_CODE :: src/mesh/anti_entropy_model.rs
 mesh_disabled                                        ✓         ✓          ✓      MESH_DISABLED_POSTURE_CODE :: src/mesh/foreground_cli.rs
 mesh_event_quarantined                               ✓         ✓          ✓      MESH_EVENT_QUARANTINED_CODE :: src/mesh/anti_entropy_model.rs
+mesh_import_cursor_unverified                        ✓         ✓          ✓      MESH_IMPORT_CURSOR_UNVERIFIED_CODE :: src/mesh/foreground_cli.rs
+mesh_import_peer_not_consented                       ✓         ✓          ✓      MESH_IMPORT_PEER_NOT_CONSENTED_CODE :: src/mesh/foreground_cli.rs
+mesh_key_store_unavailable                           ✓         ✓          ✓      MESH_KEY_STORE_UNAVAILABLE_CODE :: src/mesh/key_store.rs
 mesh_peer_capability_handshake_mismatch              ✓         ✓          ✓      PEER_ENROLLMENT_CAPABILITY_MISMATCH_CODE :: src/mesh/peer.rs
 mesh_peer_explicit_consent_required                  ✓         ✓          ✓      PEER_ENROLLMENT_EXPLICIT_CONSENT_REQUIRED_CODE :: src/mesh/peer.rs
 mesh_peer_handshake_denied                           ✓         ✓          ✓      PEER_ENROLLMENT_HANDSHAKE_DENIED_CODE :: src/mesh/peer.rs
@@ -48,7 +55,11 @@ mesh_peer_key_rotation_invalid_key                   ✓         ✓          �
 mesh_peer_key_rotation_revoked                       ✓         ✓          ✓      PEER_KEY_ROTATION_REVOKED_CODE :: src/mesh/peer.rs
 mesh_peer_key_rotation_unchanged                     ✓         ✓          ✓      PEER_KEY_ROTATION_UNCHANGED_CODE :: src/mesh/peer.rs
 mesh_peer_network_only_denied                        ✓         ✓          ✓      PEER_ENROLLMENT_NETWORK_ONLY_DENIED_CODE :: src/mesh/peer.rs
+mesh_peer_randomness_unavailable                     ·         ·          ·      PEER_ENROLLMENT_RANDOMNESS_UNAVAILABLE_CODE :: src/mesh/peer.rs
 mesh_peer_unknown_attempt_denied                     ✓         ✓          ✓      PEER_UNKNOWN_ATTEMPT_DENIED_CODE :: src/mesh/peer.rs
+mesh_responder_identity_upgrade_required             ·         ·          ·      MESH_RESPONDER_IDENTITY_UPGRADE_REQUIRED_CODE :: src/mesh/responder_broker.rs
+mesh_responder_port_conflict                         ✓         ✓          ✓      MESH_RESPONDER_PORT_CONFLICT_CODE :: src/mesh/responder_broker.rs
+mesh_responder_route_unavailable                     ✓         ✓          ✓      MESH_RESPONDER_ROUTE_UNAVAILABLE_CODE :: src/mesh/responder_broker.rs
 mesh_sync_once_network_deferred                      ✓         ✓          ✓      MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE :: src/mesh/foreground_cli.rs
 mesh_sync_supervisor_backpressure                    ✓         ✓          ✓      MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE :: src/mesh/foreground_cli.rs
 mesh_sync_supervisor_budget_exhausted                ✓         ✓          ✓      MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE :: src/mesh/foreground_cli.rs
@@ -63,3 +74,6 @@ steward_auto_enroll_daily_cap_reached                ✓         ✓          �
 steward_auto_enroll_disabled                         ✓         ✓          ✓      STEWARD_AUTO_ENROLL_DISABLED_CODE :: src/mesh/steward_decision.rs
 tailscale_peer_list_unavailable                      ✓         ✓          ✓      TAILSCALE_PEER_LIST_UNAVAILABLE_CODE :: src/mesh/tailscale_autodiscovery.rs
 tailscale_peer_probe_timeout                         ✓         ✓          ✓      TAILSCALE_PEER_PROBE_TIMEOUT_CODE :: src/mesh/tailscale_autodiscovery.rs
+team_idp_device_flow_expired                         ·         ·          ·      TEAM_IDP_DEVICE_FLOW_EXPIRED_CODE :: src/mesh/idp.rs
+team_idp_provider_unsupported                        ·         ·          ·      TEAM_IDP_PROVIDER_UNSUPPORTED_CODE :: src/mesh/idp.rs
+team_idp_token_invalid                               ·         ·          ·      TEAM_IDP_TOKEN_INVALID_CODE :: src/mesh/idp.rs

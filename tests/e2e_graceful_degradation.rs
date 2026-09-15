@@ -143,7 +143,13 @@ where
 }
 
 fn assert_success(output: &EeOutput, context: &str) -> TestResult {
-    ensure_equal(&output.exit_code, &Some(EXIT_SUCCESS), context)?;
+    ensure(
+        output.exit_code == Some(EXIT_SUCCESS),
+        format!(
+            "{context}: expected exit {EXIT_SUCCESS}, got {:?}; stdout: {}; stderr: {}",
+            output.exit_code, output.stdout, output.stderr
+        ),
+    )?;
     ensure(
         output.stderr.trim().is_empty(),
         format!(
@@ -411,6 +417,47 @@ fn doctor_check_severity<'a>(doctor_json: &'a Value, name: &str) -> Option<&'a s
         .and_then(Value::as_str)
 }
 
+fn assert_index_admission_refused(output: &EeOutput, reason: &str) -> TestResult {
+    ensure_equal(&output.exit_code, &Some(4), "unverifiable index exit code")?;
+    ensure(
+        output.stderr.trim().is_empty(),
+        format!("JSON refusal stderr must stay empty: {}", output.stderr),
+    )?;
+    ensure_equal(
+        &output.json.get("schema").and_then(Value::as_str),
+        &Some("ee.error.v2"),
+        "unverifiable index envelope",
+    )?;
+    ensure_equal(
+        &output.json.pointer("/error/code").and_then(Value::as_str),
+        &Some("search_index"),
+        "unverifiable index error code",
+    )?;
+    ensure(
+        output
+            .json
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains(reason) && message.contains("meta.json")),
+        format!(
+            "index refusal must retain its concrete metadata reason: {}",
+            output.stdout
+        ),
+    )?;
+    ensure_equal(
+        &output.json.pointer("/error/repair").and_then(Value::as_str),
+        &Some("ee index rebuild --workspace ."),
+        "unverifiable index repair",
+    )?;
+    ensure(
+        output.json.get("data").is_none() && output.json.get("success") != Some(&Value::Bool(true)),
+        format!(
+            "unverifiable index must not expose results or claim success: {}",
+            output.stdout
+        ),
+    )
+}
+
 #[test]
 #[ignore = "spawned by the multiprocess source-snapshot regression"]
 fn multiprocess_snapshot_writer_helper() -> TestResult {
@@ -496,38 +543,82 @@ fn corrupt_index_metadata_search_reports_corrupt_degradation() -> TestResult {
         ["search", "corruptindex alpha metadata", "--limit", "10"],
         "corrupt metadata search",
     )?;
-    assert_success(&corrupt_search, "corrupt metadata search")?;
+    // Metadata carries the evidence-egress policy epoch. Unreadable metadata
+    // cannot authorize even lexical index bytes; preserve that admission gate
+    // while distinguishing corruption from a genuinely absent index.
+    assert_index_admission_refused(&corrupt_search, "failed to parse index metadata")?;
+    let corrupt_diag = run_ee_json(
+        &workspace,
+        [
+            "diag",
+            "search",
+            "corruptindex alpha metadata",
+            "--all-arms",
+        ],
+        "corrupt metadata diagnostic search",
+    )?;
+    assert_index_admission_refused(&corrupt_diag, "failed to parse index metadata")?;
 
-    let corrupt_degraded_codes = degraded_codes(&corrupt_search.json);
+    fs::rename(
+        &metadata_path,
+        metadata_path.with_file_name("corrupt-meta.retained.json"),
+    )
+    .map_err(|error| format!("failed to retain corrupt metadata: {error}"))?;
+    let missing_search = run_ee_json(
+        &workspace,
+        [
+            "search",
+            "corruptindex alpha metadata",
+            "--source-mode",
+            "lexical_only",
+        ],
+        "missing metadata lexical search",
+    )?;
+    assert_index_admission_refused(&missing_search, "is missing")?;
+
+    let repair = run_ee_json(&workspace, ["index", "rebuild"], "repair corrupt index")?;
+    assert_success(&repair, "repair corrupt index")?;
+    let repaired_status = run_ee_json(&workspace, ["index", "status"], "repaired index status")?;
+    assert_success(&repaired_status, "repaired index status")?;
+    ensure_equal(
+        &repaired_status
+            .json
+            .pointer("/data/health")
+            .and_then(Value::as_str),
+        &Some("ready"),
+        "repaired index health",
+    )?;
+    let repaired_search = run_ee_json(
+        &workspace,
+        [
+            "search",
+            "corruptindex alpha metadata",
+            "--source-mode",
+            "lexical_only",
+            "--limit",
+            "10",
+        ],
+        "repaired lexical search",
+    )?;
+    assert_success(&repaired_search, "repaired lexical search")?;
+    let repaired_doc_ids = result_doc_ids(&repaired_search.json)?;
     ensure(
-        corrupt_degraded_codes
-            .iter()
-            .any(|code| code == "index_corrupt"),
-        format!(
-            "corrupt search should expose index_corrupt degradation: {corrupt_degraded_codes:?}"
-        ),
+        repaired_doc_ids.iter().any(|doc_id| doc_id == &memory_id),
+        format!("repaired lexical search must return the original memory: {repaired_doc_ids:?}"),
+    )?;
+    ensure_equal(
+        &repaired_search
+            .json
+            .pointer("/data/metrics/sourceModeApplied")
+            .and_then(Value::as_str),
+        &Some("lexical_only"),
+        "repaired search source mode",
     )?;
     ensure(
-        corrupt_search
-            .json
-            .pointer("/data/degraded/0/message")
-            .and_then(Value::as_str)
-            .is_some_and(|message| {
-                message.contains("failed integrity checks") && message.contains("meta.json")
-            }),
-        "corrupt search degradation must explain the metadata failure",
-    )?;
-
-    let corrupt_doc_ids = result_doc_ids(&corrupt_search.json)?;
-    ensure(
-        corrupt_search
-            .json
-            .pointer("/data/status")
-            .and_then(Value::as_str)
-            == Some("index_error")
-            || corrupt_doc_ids.iter().any(|doc_id| doc_id == &memory_id),
+        degraded_codes(&repaired_search.json).is_empty(),
         format!(
-            "corrupt search should either surface index_error or still return indexed memory with a warning: {corrupt_doc_ids:?}"
+            "repaired lexical search must be healthy: {}",
+            repaired_search.stdout
         ),
     )
 }
@@ -652,9 +743,30 @@ fn stale_index_search_degrades_to_lexical_fallback_and_recovers_after_rebuild() 
                 .any(|doc_id| !stale_doc_ids.contains(doc_id)),
         "rebuilt search should improve result coverage after indexing the new memory",
     )?;
+    let recovered_codes = degraded_codes(&recovered_search.json);
     ensure(
-        degraded_codes(&recovered_search.json).is_empty(),
-        "recovered search should not report stale-index degradation after rebuild",
+        !recovered_codes.iter().any(|code| {
+            matches!(
+                code.as_str(),
+                "search_index_stale"
+                    | "index_stale"
+                    | "stale_index"
+                    | "search_index_large_gap"
+                    | "search_index_degraded"
+                    | "index_missing"
+                    | "index_corrupt"
+            )
+        }),
+        format!(
+            "recovered search should not report stale, missing, or corrupt index after rebuild: {recovered_codes:?}"
+        ),
+    )?;
+    let recovered_status = run_ee_json(&workspace, ["index", "status"], "recovered index status")?;
+    assert_success(&recovered_status, "recovered index status")?;
+    ensure_equal(
+        &recovered_status.json.pointer("/data/health"),
+        &Some(&Value::String("ready".to_owned())),
+        "recovered index health",
     )
 }
 

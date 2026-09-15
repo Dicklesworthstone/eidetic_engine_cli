@@ -759,6 +759,59 @@ fn swarm_incident_recovery_actions_have_repair_safety_metadata() -> TestResult {
     }
 }
 
+fn validate_advisory_preflight_schema(schema: &Value) -> TestResult {
+    ensure(
+        schema
+            .pointer("/properties/exitCode/const")
+            .and_then(Value::as_u64)
+            == Some(0),
+        "preflight advisory reports must require exitCode 0",
+    )?;
+    ensure(
+        schema.pointer("/properties/matches/items/properties/action/enum")
+            == Some(&serde_json::json!(["high_risk", "warn"])),
+        "preflight match actions must remain high_risk or warn, never command denials",
+    )?;
+    ensure(
+        schema
+            .pointer("/properties/matches/items/properties/resolution/const")
+            .and_then(Value::as_str)
+            == Some("matched"),
+        "preflight match resolution must describe a match, not authorization",
+    )?;
+    ensure(
+        !schema.to_string().contains("policy_denied"),
+        "preflight guard schema must not advertise policy_denied",
+    )
+}
+
+#[test]
+fn advisory_preflight_schema_rejects_command_enforcement_drift() -> TestResult {
+    let schema = read_json(&repo_root().join("docs/schemas/ee.preflight.guard.v1.json"))?;
+    validate_advisory_preflight_schema(&schema)?;
+    for (pointer, replacement) in [
+        ("/properties/exitCode/const", serde_json::json!(7)),
+        (
+            "/properties/matches/items/properties/action/enum",
+            serde_json::json!(["high_risk", "warn", "deny"]),
+        ),
+        (
+            "/properties/matches/items/properties/resolution/const",
+            serde_json::json!("approved"),
+        ),
+    ] {
+        let mut invalid = schema.clone();
+        *invalid
+            .pointer_mut(pointer)
+            .ok_or_else(|| format!("preflight schema missing {pointer}"))? = replacement;
+        ensure(
+            validate_advisory_preflight_schema(&invalid).is_err(),
+            format!("preflight schema must reject enforcement drift at {pointer}"),
+        )?;
+    }
+    Ok(())
+}
+
 #[test]
 fn repair_safety_matrix_covers_agent_decisions() -> TestResult {
     let mut risk_classes = BTreeSet::new();
@@ -793,12 +846,5 @@ fn repair_safety_matrix_covers_agent_decisions() -> TestResult {
     }
 
     let preflight_schema = read_json(&repo_root().join("docs/schemas/ee.preflight.guard.v1.json"))?;
-    let schema_text = preflight_schema.to_string();
-    ensure(
-        schema_text.contains("destructive_or_irreversible_repair")
-            && schema_text.contains("ask_human")
-            && !schema_text.contains("policy_denied"),
-        "preflight guard schema must keep destructive guidance advisory",
-    )?;
-    Ok(())
+    validate_advisory_preflight_schema(&preflight_schema)
 }

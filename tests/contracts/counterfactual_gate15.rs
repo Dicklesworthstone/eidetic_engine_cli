@@ -118,8 +118,14 @@ fn assert_lab_golden(name: &str, actual: &str) -> TestResult {
         )
     })?;
 
+    // Object member order is not part of the JSON contract. Retain every
+    // field, array position and value when comparing the normalized envelope.
+    let actual_json: serde_json::Value = serde_json::from_str(actual)
+        .map_err(|error| format!("parse actual lab JSON for {name}: {error}"))?;
+    let expected_json: serde_json::Value = serde_json::from_str(&expected)
+        .map_err(|error| format!("parse expected lab JSON for {name}: {error}"))?;
     ensure(
-        actual == expected,
+        actual_json == expected_json,
         format!("lab golden mismatch for {name}\n--- expected\n{expected}\n+++ actual\n{actual}"),
     )
 }

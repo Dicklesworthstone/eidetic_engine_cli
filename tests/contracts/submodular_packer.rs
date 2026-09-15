@@ -49,7 +49,8 @@ fn assert_golden(name: &str, actual: &str) -> TestResult {
     let expected = fs::read_to_string(&path)
         .map_err(|error| format!("missing golden {}: {error}", path.display()))?;
     ensure(
-        actual == expected,
+        canonical_golden_json(actual, &["/totalObjectiveValue"])?
+            == canonical_golden_json(&expected, &["/totalObjectiveValue"])?,
         format!(
             "golden mismatch {}\n--- expected\n{expected}\n+++ actual\n{actual}",
             path.display()
@@ -73,13 +74,36 @@ fn assert_cards_golden(name: &str, actual: &str) -> TestResult {
     }
     let expected = fs::read_to_string(&path)
         .map_err(|error| format!("missing golden {}: {error}", path.display()))?;
+    let numbers = ["/0/math/value", "/0/math/confidence", "/1/math/value"];
     ensure(
-        actual == expected,
+        canonical_golden_json(actual, &numbers)? == canonical_golden_json(&expected, &numbers)?,
         format!(
             "golden mismatch {}\n--- expected\n{expected}\n+++ actual\n{actual}",
             path.display()
         ),
     )
+}
+
+fn canonical_golden_json(raw: &str, number_paths: &[&str]) -> Result<Value, String> {
+    let mut value: Value = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+    for path in number_paths {
+        let number = value
+            .pointer_mut(path)
+            .ok_or_else(|| format!("missing numeric field {path}"))?;
+        let Value::Number(numeric) = number else {
+            return Err(format!("{path} must remain a JSON number, got {number}"));
+        };
+        // arbitrary_precision retains the renderer's decimal padding. Strip
+        // only insignificant zeroes on both sides; never round through f64.
+        let decimal = numeric.to_string();
+        let canonical = if decimal.contains('.') && !decimal.contains(['e', 'E']) {
+            decimal.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            &decimal
+        };
+        *number = serde_json::from_str(canonical).map_err(|error| error.to_string())?;
+    }
+    Ok(value)
 }
 
 fn pretty(value: &Value) -> Result<String, String> {
@@ -357,6 +381,32 @@ fn pack_selection_audit_golden_is_stable() -> TestResult {
         "selection audit does not emit guarantee status",
     )?;
     assert_golden("pack_selection", &pretty(audit)?)
+}
+
+#[test]
+fn selection_audit_golden_rejects_significant_numeric_or_type_drift() -> TestResult {
+    let raw = fs::read_to_string(golden_path("pack_selection"))
+        .map_err(|error| format!("read selection audit golden: {error}"))?;
+    let baseline = canonical_golden_json(&raw, &["/totalObjectiveValue"])?;
+    let mut altered: Value = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+    altered["totalObjectiveValue"] =
+        serde_json::from_str("1.784000000000000000001").map_err(|error| error.to_string())?;
+    ensure(
+        canonical_golden_json(&altered.to_string(), &["/totalObjectiveValue"])? != baseline,
+        "significant arbitrary-precision objective drift must fail the golden",
+    )?;
+    for invalid in [
+        Value::String("1.784".to_owned()),
+        Value::Null,
+        Value::Bool(true),
+    ] {
+        altered["totalObjectiveValue"] = invalid;
+        ensure(
+            canonical_golden_json(&altered.to_string(), &["/totalObjectiveValue"]).is_err(),
+            "objective must not change from a number to another JSON type",
+        )?;
+    }
+    Ok(())
 }
 
 #[test]
