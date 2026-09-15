@@ -422,8 +422,33 @@ pub struct ContextDeltaTokenSavings {
     pub full_bytes: u64,
     pub delta_bytes: u64,
     pub saved_bytes: i64,
+    #[serde(serialize_with = "serialize_saved_percent")]
     pub saved_percent: f64,
     pub net_pack_tokens: u32,
+}
+
+fn serialize_saved_percent<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    // Savings are computed to two decimal places. Shortest-float formatting
+    // drops a trailing zero (52.00 -> 52.0), which can make the envelope's
+    // self-reported size oscillate forever. Pad the JSON number's spelling,
+    // without rounding values or discarding any caller-provided precision.
+    let mut encoded = value.to_string();
+    if !encoded.contains(['e', 'E']) {
+        if let Some((_, fraction)) = encoded.split_once('.') {
+            if fraction.len() == 1 {
+                encoded.push('0');
+            }
+        } else {
+            encoded.push_str(".00");
+        }
+    }
+    let number = encoded
+        .parse::<serde_json::Number>()
+        .map_err(serde::ser::Error::custom)?;
+    number.serialize(serializer)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -600,8 +625,8 @@ fn stable_serialized_len_with_overhead(
         }
         delta_bytes = next_delta_bytes;
     }
-    // Updating savedPercent can change its decimal width and make the total
-    // oscillate. The caller must withhold this delta rather than report an
+    // Integer-width boundaries can still make the total oscillate, even with
+    // stable fractional padding. Withhold this delta rather than report an
     // unverified byte count or enforce a budget against a stale measurement.
     if envelope.data.server_decision.fallback_reason.is_none() {
         envelope.data.server_decision.fallback_reason =
@@ -947,7 +972,7 @@ mod tests {
             654,
             vec![item("mem_a", "new", 12), item("mem_b", "b", 20)],
         );
-        let delta = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
+        let mut delta = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
             .map_err(|error| error.to_string())?;
 
         assert_eq!(delta.data.token_savings.full_bytes, 1200);
@@ -955,6 +980,87 @@ mod tests {
         assert!(
             delta.data.token_savings.delta_bytes > 0,
             "delta byte accounting should be finalized after serialization"
+        );
+        assert!(delta.emits_delta());
+        let serialized = serde_json::to_vec(&delta).map_err(|error| error.to_string())?;
+        let measured = serialized.len() as u64;
+        assert_eq!(delta.data.token_savings.delta_bytes, measured);
+        assert_eq!(delta.data.token_savings.saved_bytes, 1200 - measured as i64);
+        assert_eq!(
+            delta
+                .finalize_with_budget(Some(measured))
+                .map_err(|error| error.to_string())?,
+            measured,
+        );
+        assert!(delta.emits_delta());
+        assert_eq!(
+            serde_json::to_vec(&delta).map_err(|error| error.to_string())?,
+            serialized,
+            "exact-budget finalization must preserve the verified emission",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn saved_percent_padding_preserves_numeric_type_and_extra_precision() -> TestResult {
+        for (value, spelling) in [
+            (52.0, "52.00"),
+            (88.9, "88.90"),
+            (52.08, "52.08"),
+            (1.23456789, "1.23456789"),
+            (-0.0, "-0.00"),
+            (-12.3, "-12.30"),
+        ] {
+            let mut savings = token_savings(1200, 576, 654);
+            savings.saved_percent = value;
+            let rendered = serde_json::to_string(&savings).map_err(|error| error.to_string())?;
+            assert!(
+                rendered.contains(&format!("\"savedPercent\":{spelling},")),
+                "{rendered}",
+            );
+            let parsed: serde_json::Value =
+                serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+            let number = parsed["savedPercent"]
+                .as_f64()
+                .ok_or_else(|| format!("savedPercent must remain numeric: {rendered}"))?;
+            assert_eq!(number.to_bits(), value.to_bits(), "{rendered}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn remaining_integer_width_cycle_withholds_an_unverified_delta() -> TestResult {
+        let prior =
+            ContextDeltaPackSnapshot::new("h1", 1, 1000, 321, vec![item("mem_a", "old", 10)]);
+        let new = ContextDeltaPackSnapshot::new(
+            "h2",
+            2,
+            1200,
+            654,
+            vec![item("mem_a", "new", 12), item("mem_b", "b", 20)],
+        );
+        let mut delta = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
+            .map_err(|error| error.to_string())?;
+        delta.data.token_savings.full_bytes = 582;
+        // savedBytes crosses 10 -> 9. Fractional padding cannot remove this
+        // integer-width discontinuity, and neither reported size is correct.
+        for (reported, saved, percent, emitted) in [(572, 10, 1.72, 573), (573, 9, 1.55, 572)] {
+            delta.data.token_savings.delta_bytes = reported;
+            delta.data.token_savings.saved_bytes = saved;
+            delta.data.token_savings.saved_percent = percent;
+            let serialized = serde_json::to_vec(&delta).map_err(|error| error.to_string())?;
+            assert_eq!(serialized.len() as u64, emitted);
+            assert_ne!(reported, emitted);
+        }
+        let error = match delta.finalize_with_budget(None) {
+            Err(error) => error,
+            Ok(bytes) => return Err(format!("a remaining cycle returned a stale size: {bytes}")),
+        };
+        assert!(error.to_string().contains("did not converge"), "{error}");
+        assert!(!delta.emits_delta());
+        assert_eq!(
+            delta.data.server_decision.fallback_reason,
+            Some(ContextDeltaFallbackReason::ComputeBudgetExceeded),
         );
         Ok(())
     }
