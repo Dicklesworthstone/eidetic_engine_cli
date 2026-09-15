@@ -45088,10 +45088,36 @@ mod tests {
                 Value::BigInt(i64::from(first.version())),
             ],
         )?;
-        ensure_migration_drift(
-            connection.needs_migration(),
-            "drift must be rejected before reporting an otherwise missing migration",
-        )?;
+        match connection.needs_migration() {
+            Err(DbError::MigrationDrift {
+                version,
+                expected_name,
+                actual_name,
+                expected_checksum,
+                actual_checksum,
+            }) => ensure_equal(
+                &(
+                    version,
+                    expected_name,
+                    actual_name,
+                    expected_checksum,
+                    actual_checksum,
+                ),
+                &(
+                    first.version(),
+                    Some(first.name().to_owned()),
+                    "incorrect migration name".to_owned(),
+                    Some(first.checksum().to_owned()),
+                    first.checksum().to_owned(),
+                ),
+                "name drift must retain exact expected and actual metadata before reporting the gap",
+            )?,
+            other => {
+                return Err(TestFailure::new(format!(
+                    "drift must be rejected before reporting a missing migration; got {other:?}"
+                )));
+            }
+        }
         connection.execute_for(
             DbOperation::Execute,
             "UPDATE ee_schema_migrations SET name = ?1 WHERE version = ?2",
@@ -45117,10 +45143,36 @@ mod tests {
             "blake3:future",
             "2026-09-15T00:00:00Z",
         )?)?;
-        ensure_migration_drift(
-            connection.needs_migration(),
-            "an unknown newer migration must not be accepted as current",
-        )?;
+        match connection.needs_migration() {
+            Err(DbError::MigrationDrift {
+                version,
+                expected_name,
+                actual_name,
+                expected_checksum,
+                actual_checksum,
+            }) => ensure_equal(
+                &(
+                    version,
+                    expected_name,
+                    actual_name,
+                    expected_checksum,
+                    actual_checksum,
+                ),
+                &(
+                    newer_version,
+                    None,
+                    "migration from a newer producer".to_owned(),
+                    None,
+                    "blake3:future".to_owned(),
+                ),
+                "unknown newer migration must retain actual metadata without invented expectations",
+            )?,
+            other => {
+                return Err(TestFailure::new(format!(
+                    "an unknown newer migration must not be accepted as current; got {other:?}"
+                )));
+            }
+        }
         connection.close()?;
         Ok(())
     }
