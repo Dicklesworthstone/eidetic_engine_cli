@@ -1630,8 +1630,16 @@ fn command_name_from_schema(schema: &str) -> String {
 fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&'static str] {
     match command {
         "search" => match preset {
-            FieldProfile::Minimal => &["embed_backend", "memoryId", "docId", "score", "source"],
+            FieldProfile::Minimal => &[
+                "command",
+                "embed_backend",
+                "memoryId",
+                "docId",
+                "score",
+                "source",
+            ],
             FieldProfile::Summary => &[
+                "command",
                 "query",
                 "status",
                 "embed_backend",
@@ -1642,6 +1650,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "source",
             ],
             FieldProfile::Standard => &[
+                "command",
                 "query",
                 "status",
                 "embed_backend",
@@ -25733,6 +25742,79 @@ mod tests {
             fields.contains(&"indexFreshness"),
             "search standard preset must retain per-response index freshness truth",
         )
+    }
+
+    #[test]
+    fn search_field_presets_preserve_governor_dispatch_and_real_truncation() -> TestResult {
+        let input = serde_json::json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": {
+                "command": "search",
+                "query": "release",
+                "status": "success",
+                "embed_backend": "hash_fallback",
+                "resultCount": 40,
+                "results": (0..40).map(|index| serde_json::json!({
+                    "docId": format!("mem_{index:026}"),
+                    "score": 1.0,
+                    "source": "lexical"
+                })).collect::<Vec<_>>()
+            },
+            "degraded": []
+        })
+        .to_string();
+        let generation = || 7;
+        let ctx = super::governor::GovernorContext {
+            ceiling_tokens: 600,
+            params_hash: "search-field-preset".to_owned(),
+            mac_key: [7; 32],
+            db_generation: &generation,
+        };
+        for preset in ["minimal", "summary", "standard"] {
+            let projected =
+                super::apply_field_selector_to_json(&input, &super::FieldSelector::parse(preset))
+                    .map_err(|error| error.to_string())?;
+            let governed = super::governor::govern_response_json(
+                &projected,
+                &ctx,
+                super::OUTPUT_TRUNCATION_REGISTRY,
+            )
+            .map_err(|error| error.to_string())?;
+            let value = parse_rendered_json(&governed, preset)?;
+            ensure(
+                value
+                    .pointer("/data/command")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("search"),
+                "search presets must keep the command that identifies their truncation point",
+            )?;
+            let kept = value
+                .pointer("/data/results")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| format!("{preset} search lost its governed results: {value}"))?;
+            ensure(
+                !kept.is_empty() && kept.len() < 40,
+                "projected search must produce a nonempty bounded page",
+            )?;
+            ensure(
+                value
+                    .pointer("/degraded")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|entries| {
+                        entries.iter().any(|entry| {
+                            entry.get("code").and_then(serde_json::Value::as_str)
+                                == Some("output_truncated_budget")
+                                && entry
+                                    .pointer("/details/continuationCursor")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(|cursor| !cursor.is_empty())
+                        })
+                    }),
+                "projected search must expose an actual continuation cursor",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
