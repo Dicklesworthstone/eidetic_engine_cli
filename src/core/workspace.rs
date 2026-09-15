@@ -2866,6 +2866,11 @@ pub(crate) fn pick_workspace_row(
     connection: &DbConnection,
     rows: Vec<StoredWorkspace>,
 ) -> Result<StoredWorkspace, DomainError> {
+    // Live counts break ties between identities. A sole matching identity
+    // cannot lose that comparison; its consumer still reads the needed data.
+    if let [only] = rows.as_slice() {
+        return Ok(only.clone());
+    }
     let mut best: Option<(u64, String, StoredWorkspace)> = None;
     for row in rows {
         let live = connection
@@ -3430,7 +3435,7 @@ mod tests {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
         let empty = StoredWorkspace {
-            id: "wsp_bbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            id: "wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             path: "/tmp/ee-empty".to_owned(),
             name: Some("empty".to_owned()),
             scope_kind: "standalone".to_owned(),
@@ -3441,7 +3446,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".to_owned(),
         };
         let occupied = StoredWorkspace {
-            id: "wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            id: "wsp_bbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             path: "/tmp/ee-occupied".to_owned(),
             name: Some("occupied".to_owned()),
             scope_kind: "standalone".to_owned(),
@@ -3469,6 +3474,24 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
+        let only = pick_workspace_row(&connection, vec![empty.clone()])
+            .map_err(|error| error.message())?;
+        assert_eq!(only, empty, "the sole stored identity is selected intact");
+        for rows in [
+            vec![empty.clone(), occupied.clone()],
+            vec![occupied.clone(), empty.clone()],
+        ] {
+            let tied = pick_workspace_row(&connection, rows).map_err(|error| error.message())?;
+            assert_eq!(tied.id, empty.id, "equal live counts use the lower ID");
+        }
+        assert!(
+            matches!(
+                pick_workspace_row(&connection, Vec::new()),
+                Err(DomainError::Storage { message, .. })
+                    if message == "workspace row picker received an empty match set"
+            ),
+            "an empty identity set must still be rejected"
+        );
         connection
             .insert_memory(
                 "mem_00000000000000000000000001",
@@ -3491,9 +3514,13 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
-        let picked = pick_workspace_row(&connection, vec![empty, occupied.clone()])
-            .map_err(|error| error.message())?;
-        assert_eq!(picked.id, occupied.id, "occupied workspace wins");
+        for rows in [
+            vec![empty.clone(), occupied.clone()],
+            vec![occupied.clone(), empty.clone()],
+        ] {
+            let picked = pick_workspace_row(&connection, rows).map_err(|error| error.message())?;
+            assert_eq!(picked.id, occupied.id, "live count outranks the lower ID");
+        }
         Ok(())
     }
 
