@@ -406,8 +406,8 @@ fn attempt_family_trust_rows(
         .iter()
         .map(|memory| memory.id.clone())
         .collect::<Vec<_>>();
-    let snapshots =
-        connection.get_attempt_family_membership_snapshots_for_memory_ids(&memory_ids)?;
+    let snapshots = connection
+        .get_attempt_family_membership_snapshots_for_memory_ids_in_current_snapshot(&memory_ids)?;
     let mut families = BTreeMap::new();
     for snapshot in snapshots.by_memory_id.values() {
         for family in &snapshot.families {

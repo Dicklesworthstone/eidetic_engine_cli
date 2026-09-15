@@ -6470,6 +6470,7 @@ fn round_metric_f64(score: f64) -> f64 {
 pub enum SearchError {
     Index(String),
     IndexIncompatible(String),
+    Configuration(String),
     InvalidOptions(String),
     NoIndex,
     Cancelled(asupersync::CancelReason),
@@ -6485,6 +6486,7 @@ impl SearchError {
         match self {
             Self::Index(_) => Some("Check index directory and permissions"),
             Self::IndexIncompatible(_) => Some("ee index rebuild --workspace ."),
+            Self::Configuration(_) => Some(crate::config::MEMORY_POLICY_REPAIR),
             Self::InvalidOptions(_) => Some("Pass --relevance-floor between 0.0 and 1.0"),
             Self::NoIndex => Some("ee index rebuild --workspace ."),
             Self::Cancelled(_) => None,
@@ -6500,6 +6502,7 @@ impl std::fmt::Display for SearchError {
         match self {
             Self::Index(e) => write!(f, "Index error: {e}"),
             Self::IndexIncompatible(e) => write!(f, "Search index rebuild required: {e}"),
+            Self::Configuration(message) => write!(f, "Configuration error: {message}"),
             Self::InvalidOptions(message) => write!(f, "Invalid search options: {message}"),
             Self::NoIndex => write!(f, "Search index not found"),
             Self::Cancelled(reason) => f.write_str(&crate::core::outcome::cancel_message(reason)),
@@ -8782,6 +8785,13 @@ async fn run_search_inner_with_performance(
     trace.record_elapsed("search::runtimeProfile", runtime_profile_start);
     let (effective_limit, limit_capped) = runtime_profile.cap_search_limit(options.limit);
 
+    let global_memory_policy = if global_store_participates_in_scope(options.memory_scope) {
+        crate::config::workspace_memory_policy(&options.workspace_path)
+            .map_err(SearchError::Configuration)?
+    } else {
+        crate::config::MemoryConfig::default()
+    };
+
     let index_exists_start = Instant::now();
     if !index_dir.exists() {
         trace.record_elapsed("search::indexExists", index_exists_start);
@@ -8932,6 +8942,7 @@ async fn run_search_inner_with_performance(
             let global_hits = global_store_frankensearch_hits(
                 cx,
                 options,
+                &global_memory_policy,
                 effective_limit,
                 &mut degraded,
                 preloaded_memories.as_deref_mut(),
@@ -10846,6 +10857,7 @@ pub(crate) fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
 async fn global_store_frankensearch_hits(
     cx: &asupersync::Cx,
     options: &SearchOptions,
+    memory_config: &crate::config::MemoryConfig,
     effective_limit: u32,
     degraded: &mut Vec<SearchDegradation>,
     preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
@@ -10869,12 +10881,8 @@ async fn global_store_frankensearch_hits(
             return Vec::new();
         }
     };
-    // `[memory] include_global` / `participate` from the workspace config
-    // gate the lane (bd-1bfwa.3 slice C); both default to true so the
-    // opt-in-by-presence behavior is unchanged for unconfigured workspaces.
-    let memory_config = crate::config::workspace_config(&options.workspace_path)
-        .map(|config| config.memory)
-        .unwrap_or_default();
+    // The caller validated this request's policy before retrieval. Missing
+    // config retains opt-in-by-presence; unreadable config never reaches here.
     let inclusion =
         super::global_store::resolve_global_inclusion(&super::global_store::GlobalInclusionInput {
             store_present: paths.database_path.exists(),
@@ -22025,8 +22033,8 @@ mod tests {
     #[test]
     #[ignore = "requires the real rerank-default-v1 fixture via EE_RERANK_MODEL_FIXTURE_DIR"]
     fn registered_native_reranker_uses_request_pool_and_rejects_cancellation() -> TestResult {
-        let directory = std::env::var("EE_RERANK_MODEL_FIXTURE_DIR")
-            .map_err(|error| format!("real reranker fixture required: {error}"))?;
+        let directory = read(EnvVar::RerankModelFixtureDir)
+            .ok_or("EE_RERANK_MODEL_FIXTURE_DIR must name the real reranker fixture")?;
         let mut entry = registered_reranker_entry(
             "mdl_real_pool_test",
             "rerank-default-v1",
