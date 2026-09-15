@@ -1155,6 +1155,16 @@ impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
         id: usize,
         work: impl FnOnce() -> NearbyStoreProbeResult + Send + 'scope,
     ) -> bool {
+        // Completed results waiting for an earlier candidate still occupy a
+        // slot, so a slow first probe cannot create an unbounded reorder queue.
+        while self.handles.len() + self.completed.len() >= MAX_NEARBY_STORE_PROBES_PER_SCAN
+            && !self.should_stop()
+        {
+            self.receive_one();
+        }
+        if self.should_stop() {
+            return false;
+        }
         let sender = self.sender.clone();
         let cx = self.cx.clone();
         match std::thread::Builder::new()
@@ -1164,8 +1174,7 @@ impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
                     .unwrap_or(NearbyStoreProbeResult::Failed);
                 let _ = sender.send((id, result));
-            })
-        {
+            }) {
             Ok(handle) => {
                 self.handles.insert(id, handle);
                 true
@@ -1203,7 +1212,10 @@ impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
         let remaining = self.budget.saturating_sub(self.started.elapsed());
         // Duration::MAX is used by semantic tests. Bound each wait without
         // extending the real caller's remaining deadline.
-        match self.receiver.recv_timeout(remaining.min(std::time::Duration::from_secs(1))) {
+        match self
+            .receiver
+            .recv_timeout(remaining.min(std::time::Duration::from_secs(1)))
+        {
             Ok((id, result)) => {
                 // A response is sent after its database connection is dropped.
                 // Reap the thread before admitting another probe into its slot.
@@ -1233,9 +1245,9 @@ impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 self.scan.mark_unavailable();
-                self.cx.set_cancel_reason(CancelReason::timeout().with_message(
-                    "nearby-store probe workers disconnected",
-                ));
+                self.cx.set_cancel_reason(
+                    CancelReason::timeout().with_message("nearby-store probe workers disconnected"),
+                );
             }
         }
     }
@@ -1281,7 +1293,10 @@ impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
             let identity = database.canonicalize().unwrap_or_else(|_| database.clone());
             // An alias cannot suppress a later valid identity merely by being
             // in flight. Wait for its proof; failed identities remain retryable.
-            while self.pending_databases.values().any(|pending| pending == &identity)
+            while self
+                .pending_databases
+                .values()
+                .any(|pending| pending == &identity)
                 && !self.should_stop()
             {
                 self.receive_one();
@@ -1291,14 +1306,6 @@ impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
             }
             if self.seen_databases.contains(&identity) {
                 continue;
-            }
-            while self.handles.len() + self.completed.len() >= MAX_NEARBY_STORE_PROBES_PER_SCAN
-                && !self.should_stop()
-            {
-                self.receive_one();
-            }
-            if self.should_stop() {
-                return;
             }
             let candidate = candidate.clone();
             let cx = self.cx.clone();
@@ -1311,15 +1318,17 @@ impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
                 }
                 #[cfg(test)]
                 profile_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let store = nearby_store_profile(&database, &candidate).and_then(|(documents, last_write)| {
-                    (documents > 0).then(|| NearbyStore {
-                        workspace_root: candidate.workspace_root.display().to_string(),
-                        store_dir: store_dir.display().to_string(),
-                        documents,
-                        last_write,
-                        provenance: candidate.provenance,
-                    })
-                });
+                let store = nearby_store_profile(&database, &candidate).and_then(
+                    |(documents, last_write)| {
+                        (documents > 0).then(|| NearbyStore {
+                            workspace_root: candidate.workspace_root.display().to_string(),
+                            store_dir: store_dir.display().to_string(),
+                            documents,
+                            last_write,
+                            provenance: candidate.provenance,
+                        })
+                    },
+                );
                 NearbyStoreProbeResult::Store(store)
             }) {
                 self.pending_databases.insert(id, identity);
@@ -1599,192 +1608,174 @@ fn scan_nearby_stores_with_registry(
         .unwrap_or_else(|_| workspace_path.to_path_buf());
     let addressed_database_canonical = addressed_database.canonicalize().ok();
     let mut seen_candidates = BTreeSet::new();
-    let mut seen_databases = BTreeSet::new();
-
-    if let Some(candidate) = add_nearby_store_candidate(
-        scan_root.clone(),
-        None,
-        NearbyStoreProvenance::WorkspaceRoot,
-        &mut seen_candidates,
-    ) {
-        inspect_nearby_store_candidate(
-            cx,
-            &candidate,
-            addressed_database,
-            addressed_database_canonical.as_deref(),
-            started,
-            budget,
-            &mut seen_databases,
-            &mut scan,
-            publish,
-        );
-    }
-
-    // (a) local children, breadth-first and bounded by depth. Local candidates
-    // are inspected before the machine registry so a large global registry
-    // cannot consume the entire budget ahead of an adjacent workspace.
-    let mut frontier = VecDeque::from([(scan_root.clone(), 0_usize)]);
-    'frontier: while let Some((dir, depth)) = frontier.pop_front() {
-        if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-            break;
-        }
-        if depth > 0 {
-            if let Some(candidate) = add_nearby_store_candidate(
-                dir.clone(),
-                None,
-                NearbyStoreProvenance::ChildScan,
-                &mut seen_candidates,
-            ) {
-                inspect_nearby_store_candidate(
-                    cx,
-                    &candidate,
-                    addressed_database,
-                    addressed_database_canonical.as_deref(),
-                    started,
-                    budget,
-                    &mut seen_databases,
-                    &mut scan,
-                    publish,
-                );
-            }
-        }
-        if depth >= NEARBY_STORE_CHILD_DEPTH {
-            continue;
-        }
-        let Ok(read_dir) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-            break;
-        }
-        let mut entries = Vec::new();
-        for entry in read_dir.flatten() {
-            // A single very wide directory must not bypass the advertised
-            // wall-clock bound while we enumerate it. Checking only between
-            // directories lets one directory with millions of entries turn
-            // this read-only recovery hint into an unbounded walk.
-            if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-                break 'frontier;
-            }
-            entries.push(entry);
-        }
-        // `read_dir` order is filesystem-dependent. Sort each breadth level's
-        // children before enqueueing so both discovery publication and the
-        // bounded prefix selected under a time limit are deterministic.
-        entries.sort_by_key(std::fs::DirEntry::file_name);
-        for entry in entries {
-            if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-                break 'frontier;
-            }
-            let path = entry.path();
-            // `Path::is_dir` follows symlinks. Discovery is intentionally
-            // confined to the addressed workspace tree, so inspect the
-            // directory entry itself and never traverse a symlinked tree.
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-                break 'frontier;
-            }
-            if !file_type.is_dir() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if NEARBY_STORE_SKIP_DIRS.contains(&name) || NEARBY_STORE_MARKERS.contains(&name) {
-                continue;
-            }
-            frontier.push_back((path, depth + 1));
-        }
-    }
-
-    // (b) local parents up to (and including) the git root.
-    let mut parent = if scan_root.join(".git").exists() {
-        None
-    } else {
-        scan_root.parent()
-    };
-    while let Some(dir) = parent {
-        if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-            break;
-        }
+    std::thread::scope(|scope| {
+        let mut probes = NearbyStoreProbes::new(scope, cx, started, budget, &mut scan, publish);
+        // Read the optional registry concurrently with local stores, but merge
+        // its candidates only after the deterministic local traversal.
+        probes.start_registry(registry_path);
         if let Some(candidate) = add_nearby_store_candidate(
-            dir.to_path_buf(),
+            scan_root.clone(),
             None,
-            NearbyStoreProvenance::ParentScan,
+            NearbyStoreProvenance::WorkspaceRoot,
             &mut seen_candidates,
         ) {
-            inspect_nearby_store_candidate(
-                cx,
+            probes.inspect(
                 &candidate,
                 addressed_database,
                 addressed_database_canonical.as_deref(),
-                started,
-                budget,
-                &mut seen_databases,
-                &mut scan,
-                publish,
             );
         }
-        if dir.join(".git").exists() {
-            break;
-        }
-        parent = dir.parent();
-    }
 
-    // (c) registered workspaces. A registry failure does not invalidate
-    // candidates proved by the local scans. Preserve both that usable subset
-    // and the optional-source degradation in the typed partial outcome. With
-    // no local proof, discovery is globally unavailable and must not imply an
-    // actionable candidate or a complete no-store conclusion.
-    if !nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-        match crate::core::workspace::list_workspace_registry(
-            &crate::core::workspace::WorkspaceListOptions {
-                registry_path: registry_path.map(Path::to_path_buf),
-            },
-        ) {
-            Ok(registry) => {
-                if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-                    return scan;
-                }
-                for workspace in registry.workspaces {
-                    if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-                        break;
-                    }
-                    let identity = NearbyStoreRegistryIdentity {
-                        workspace_id: workspace.workspace_id,
-                        repository_fingerprint: workspace.repository_fingerprint,
-                    };
-                    if let Some(candidate) = add_nearby_store_candidate(
-                        PathBuf::from(workspace.path),
-                        Some(identity),
-                        NearbyStoreProvenance::WorkspaceRegistry,
-                        &mut seen_candidates,
-                    ) {
-                        inspect_nearby_store_candidate(
-                            cx,
-                            &candidate,
-                            addressed_database,
-                            addressed_database_canonical.as_deref(),
-                            started,
-                            budget,
-                            &mut seen_databases,
-                            &mut scan,
-                            publish,
-                        );
-                    }
+        // (a) local children, breadth-first and bounded by depth. Registry I/O
+        // occupies at most one slot; local candidates retain admission and
+        // publication priority over every registry candidate.
+        let mut frontier = VecDeque::from([(scan_root.clone(), 0_usize)]);
+        'frontier: while let Some((dir, depth)) = frontier.pop_front() {
+            if probes.should_stop() {
+                break;
+            }
+            if depth > 0 {
+                if let Some(candidate) = add_nearby_store_candidate(
+                    dir.clone(),
+                    None,
+                    NearbyStoreProvenance::ChildScan,
+                    &mut seen_candidates,
+                ) {
+                    probes.inspect(
+                        &candidate,
+                        addressed_database,
+                        addressed_database_canonical.as_deref(),
+                    );
                 }
             }
-            Err(_) => scan.mark_registry_unavailable(),
+            if depth >= NEARBY_STORE_CHILD_DEPTH {
+                continue;
+            }
+            let Ok(read_dir) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            if probes.should_stop() {
+                break;
+            }
+            let mut entries = Vec::new();
+            for entry in read_dir.flatten() {
+                // A single very wide directory must not bypass the advertised
+                // wall-clock bound while we enumerate it. Checking only between
+                // directories lets one directory with millions of entries turn
+                // this read-only recovery hint into an unbounded walk.
+                if probes.should_stop() {
+                    break 'frontier;
+                }
+                entries.push(entry);
+            }
+            // `read_dir` order is filesystem-dependent. Sort each breadth level's
+            // children before enqueueing so both discovery publication and the
+            // bounded prefix selected under a time limit are deterministic.
+            entries.sort_by_key(std::fs::DirEntry::file_name);
+            for entry in entries {
+                if probes.should_stop() {
+                    break 'frontier;
+                }
+                let path = entry.path();
+                // `Path::is_dir` follows symlinks. Discovery is intentionally
+                // confined to the addressed workspace tree, so inspect the
+                // directory entry itself and never traverse a symlinked tree.
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if probes.should_stop() {
+                    break 'frontier;
+                }
+                if !file_type.is_dir() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if NEARBY_STORE_SKIP_DIRS.contains(&name) || NEARBY_STORE_MARKERS.contains(&name) {
+                    continue;
+                }
+                frontier.push_back((path, depth + 1));
+            }
         }
-    }
 
-    // Account for the final completed operation too. Without this terminal
-    // check, the last candidate comparison or result sort could cross the
-    // deadline after the final in-loop check and still report `truncated`
-    // as false.
-    nearby_store_scan_should_stop(cx, started, budget, &mut scan);
+        // (b) local parents up to (and including) the git root.
+        let mut parent = if scan_root.join(".git").exists() {
+            None
+        } else {
+            scan_root.parent()
+        };
+        while let Some(dir) = parent {
+            if probes.should_stop() {
+                break;
+            }
+            if let Some(candidate) = add_nearby_store_candidate(
+                dir.to_path_buf(),
+                None,
+                NearbyStoreProvenance::ParentScan,
+                &mut seen_candidates,
+            ) {
+                probes.inspect(
+                    &candidate,
+                    addressed_database,
+                    addressed_database_canonical.as_deref(),
+                );
+            }
+            if dir.join(".git").exists() {
+                break;
+            }
+            parent = dir.parent();
+        }
+
+        // (c) registered workspaces. A registry failure does not invalidate
+        // candidates proved by the local scans. Preserve both that usable subset
+        // and the optional-source degradation in the typed partial outcome. With
+        // no local proof, discovery is globally unavailable and must not imply an
+        // actionable candidate or a complete no-store conclusion.
+        let mut registry_failed = false;
+        if !probes.should_stop() {
+            match probes.take_registry() {
+                Some(Ok(registry)) => {
+                    for workspace in registry.workspaces {
+                        if probes.should_stop() {
+                            break;
+                        }
+                        let identity = NearbyStoreRegistryIdentity {
+                            workspace_id: workspace.workspace_id,
+                            repository_fingerprint: workspace.repository_fingerprint,
+                        };
+                        if let Some(candidate) = add_nearby_store_candidate(
+                            PathBuf::from(workspace.path),
+                            Some(identity),
+                            NearbyStoreProvenance::WorkspaceRegistry,
+                            &mut seen_candidates,
+                        ) {
+                            probes.inspect(
+                                &candidate,
+                                addressed_database,
+                                addressed_database_canonical.as_deref(),
+                            );
+                        }
+                    }
+                }
+                Some(Err(())) => registry_failed = true,
+                None => {}
+            }
+        }
+
+        probes.finish();
+        // Apply optional-source failure after pending local reads have had their
+        // opportunity to establish a usable subset.
+        if registry_failed && probes.scan.outcome != NearbyStoreScanOutcome::Unavailable {
+            probes.scan.mark_registry_unavailable();
+        }
+
+        // Account for the final completed operation too. Without this terminal
+        // check, the last candidate comparison or result sort could cross the
+        // deadline after the final in-loop check and still report `truncated`
+        // as false.
+        probes.should_stop();
+    });
     scan
 }
 
@@ -1825,63 +1816,6 @@ fn add_nearby_store_candidate(
         registry_identity,
         provenance,
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn inspect_nearby_store_candidate(
-    cx: &Cx<NoCaps>,
-    candidate: &NearbyStoreCandidate,
-    addressed_database: &Path,
-    addressed_database_canonical: Option<&Path>,
-    started: std::time::Instant,
-    budget: std::time::Duration,
-    seen_databases: &mut BTreeSet<PathBuf>,
-    scan: &mut NearbyStoreScanAssessment,
-    publish: &mut dyn FnMut(&NearbyStoreScanAssessment),
-) {
-    for marker in NEARBY_STORE_MARKERS {
-        if nearby_store_scan_should_stop(cx, started, budget, scan) {
-            return;
-        }
-        let store_dir = candidate.workspace_root.join(marker);
-        let database = store_dir.join("ee.db");
-        if nearby_store_is_addressed_database(
-            &database,
-            addressed_database,
-            addressed_database_canonical,
-        ) || !nearby_store_database_is_safe_regular_file(&database)
-        {
-            continue;
-        }
-        if nearby_store_scan_should_stop(cx, started, budget, scan) {
-            return;
-        }
-        let database_identity = database.canonicalize().unwrap_or_else(|_| database.clone());
-        // A prior successful local/registry probe already established this
-        // database's identity and live count. Later registry aliases must not
-        // spend the remaining scan budget reopening the same store. Failed
-        // identity probes are never inserted, so they cannot suppress a later
-        // independently valid candidate.
-        if seen_databases.contains(&database_identity) {
-            continue;
-        }
-        let Some((documents, last_write)) = nearby_store_profile(&database, candidate) else {
-            continue;
-        };
-        if documents == 0 || nearby_store_scan_should_stop(cx, started, budget, scan) {
-            continue;
-        }
-        seen_databases.insert(database_identity);
-        scan.stores.push(NearbyStore {
-            workspace_root: candidate.workspace_root.display().to_string(),
-            store_dir: store_dir.display().to_string(),
-            documents,
-            last_write,
-            provenance: candidate.provenance,
-        });
-        rank_nearby_stores(scan);
-        publish(scan);
-    }
 }
 
 fn rank_nearby_stores(scan: &mut NearbyStoreScanAssessment) {
@@ -1945,8 +1879,6 @@ fn nearby_store_profile(
     database: &Path,
     candidate: &NearbyStoreCandidate,
 ) -> Option<(u64, Option<String>)> {
-    #[cfg(test)]
-    NEARBY_STORE_PROFILE_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
     let connection = DbConnection::open_file_read_only(database).ok()?;
     let workspace = nearby_store_workspace_identity(&connection, candidate)?;
     let documents = connection
@@ -3062,45 +2994,38 @@ mod tests {
             "local path identity remains independently discoverable",
         )?;
 
-        let before = NEARBY_STORE_PROFILE_CALLS.get();
         let cx = Cx::detached_cancel_context();
         let started = std::time::Instant::now();
         let addressed = temp.path().join("absent-addressed.db");
-        let mut seen_databases = BTreeSet::new();
         let mut scan = NearbyStoreScanAssessment::default();
         let mut published = 0;
         let mut publish = |_scan: &NearbyStoreScanAssessment| published += 1;
-        inspect_nearby_store_candidate(
-            &cx,
-            &wrong_workspace,
-            &addressed,
-            None,
-            started,
-            std::time::Duration::MAX,
-            &mut seen_databases,
-            &mut scan,
-            &mut publish,
-        );
-        ensure(
-            scan.stores.is_empty() && seen_databases.is_empty(),
-            "a failed registry identity must neither publish nor mark the database as proved"
-                .to_owned(),
-        )?;
-        for candidate in [&local, &matching_registry, &wrong_repository, &local] {
-            inspect_nearby_store_candidate(
+        let profile_calls = std::thread::scope(|scope| -> Result<usize, String> {
+            let mut probes = NearbyStoreProbes::new(
+                scope,
                 &cx,
-                candidate,
-                &addressed,
-                None,
                 started,
                 std::time::Duration::MAX,
-                &mut seen_databases,
                 &mut scan,
                 &mut publish,
             );
-        }
+            probes.inspect(&wrong_workspace, &addressed, None);
+            probes.finish();
+            ensure(
+                probes.scan.stores.is_empty() && probes.seen_databases.is_empty(),
+                "a failed registry identity must neither publish nor mark the database as proved"
+                    .to_owned(),
+            )?;
+            for candidate in [&local, &matching_registry, &wrong_repository, &local] {
+                probes.inspect(candidate, &addressed, None);
+            }
+            probes.finish();
+            Ok(probes
+                .profile_calls
+                .load(std::sync::atomic::Ordering::Relaxed))
+        })?;
         ensure_equal(
-            &(NEARBY_STORE_PROFILE_CALLS.get() - before),
+            &profile_calls,
             &2,
             "only the initial rejected identity and first valid identity may open/profile the real database",
         )?;
@@ -3113,6 +3038,90 @@ mod tests {
                 "duplicate registry entries must not replace local identity proof or its live count: {:?}",
                 scan.stores
             ),
+        )
+    }
+
+    #[test]
+    fn discovery_parallel_probes_publish_real_stores_in_admission_order() -> TestResult {
+        let temp = orient_test_tempdir()?;
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        remember_fixture(&first, "First independently stored fact.", "nearby", None)?;
+        remember_fixture(&second, "Second independently stored fact.", "nearby", None)?;
+        let candidates = [first, second].map(|workspace_root| NearbyStoreCandidate {
+            workspace_root,
+            registry_identity: None,
+            provenance: NearbyStoreProvenance::ChildScan,
+        });
+        let (release_first, wait_first) = std::sync::mpsc::channel();
+        let cx = Cx::detached_cancel_context();
+        let mut scan = NearbyStoreScanAssessment::default();
+        let mut publications = Vec::new();
+        let mut publish = |snapshot: &NearbyStoreScanAssessment| {
+            publications.push(snapshot.stores.clone());
+        };
+        std::thread::scope(|scope| -> TestResult {
+            let mut probes = NearbyStoreProbes::new(
+                scope,
+                &cx,
+                std::time::Instant::now(),
+                std::time::Duration::MAX,
+                &mut scan,
+                &mut publish,
+            );
+            let mut first_wait = Some(wait_first);
+            for (offset, candidate) in candidates.iter().cloned().enumerate() {
+                let id = offset + 1;
+                let store_dir = candidate.workspace_root.join(".ee");
+                let database = store_dir.join("ee.db");
+                probes.pending_databases.insert(id, database.clone());
+                let release = first_wait.take();
+                ensure(
+                    probes.spawn(id, move || {
+                        if let Some(release) = release
+                            && release.recv_timeout(scan_budget()).is_err()
+                        {
+                            return NearbyStoreProbeResult::Failed;
+                        }
+                        NearbyStoreProbeResult::Store(
+                            nearby_store_profile(&database, &candidate).map(
+                                |(documents, last_write)| NearbyStore {
+                                    workspace_root: candidate.workspace_root.display().to_string(),
+                                    store_dir: store_dir.display().to_string(),
+                                    documents,
+                                    last_write,
+                                    provenance: candidate.provenance,
+                                },
+                            ),
+                        )
+                    }),
+                    "real store probe must start".to_owned(),
+                )?;
+            }
+            // The first probe cannot complete until this thread releases it.
+            // Receive the second actual database read, with no scheduler guess.
+            probes.receive_one();
+            ensure(
+                probes.completed.get(&2).is_some_and(|store| {
+                    store.as_ref().is_some_and(|store| store.documents == 1)
+                }) && probes.scan.stores.is_empty()
+                    && probes.next_publication == 1,
+                "a completed later store must wait for the earlier candidate".to_owned(),
+            )?;
+            release_first.send(()).map_err(|error| error.to_string())?;
+            probes.finish();
+            ensure_equal(&probes.scan.outcome, &NearbyStoreScanOutcome::Complete, "probe completion")
+        })?;
+        ensure_equal(&publications.len(), &2, "one publication per proved store")?;
+        ensure_equal(
+            &publications[0].iter().map(|store| store.workspace_root.clone()).collect::<Vec<_>>(),
+            &vec![candidates[0].workspace_root.display().to_string()],
+            "first publication uses admission order despite reversed completion",
+        )?;
+        ensure_equal(&publications[1], &scan.stores, "final ranked publication")?;
+        ensure(
+            scan.stores.len() == 2 && scan.stores.iter().all(|store| store.documents == 1),
+            format!("both actual stored memories remain discoverable: {:?}", scan.stores),
         )
     }
 
