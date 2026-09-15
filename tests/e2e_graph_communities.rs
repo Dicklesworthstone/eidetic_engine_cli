@@ -222,8 +222,8 @@ fn seed_two_disjoint_components()
     let c = remember(&workspace_arg, "Pin-test communities component B node 1.")?;
     let d = remember(&workspace_arg, "Pin-test communities component B node 2.")?;
     let database_path = workspace.join(".ee").join("ee.db");
-    insert_link(&database_path, "link_00000000000000000000com00001", &a, &b)?;
-    insert_link(&database_path, "link_00000000000000000000com00002", &c, &d)?;
+    insert_link(&database_path, "link_00000000000000000000000001", &a, &b)?;
+    insert_link(&database_path, "link_00000000000000000000000002", &c, &d)?;
     Ok((workspace, workspace_arg, a, b, c, d))
 }
 
@@ -284,7 +284,7 @@ fn graph_communities_rejects_min_confidence_out_of_range_with_usage_error() -> T
         .to_owned();
     init_workspace(&workspace_arg)?;
 
-    let (output, parsed) = run_graph_communities(&workspace_arg, &["--min-confidence", "-0.5"])?;
+    let (output, parsed) = run_graph_communities(&workspace_arg, &["--min-confidence=-0.5"])?;
     ensure(
         !output.status.success(),
         format!(

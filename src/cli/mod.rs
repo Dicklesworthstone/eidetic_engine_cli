@@ -77289,7 +77289,7 @@ mod tests {
                 for index in [0, 1] {
                     connection
                         .insert_memory_link(
-                            &format!("link_suggestion_fixture_{index}"),
+                            &format!("link_{index:026}"),
                             &crate::db::CreateMemoryLinkInput {
                                 src_memory_id: memories[index].clone(),
                                 dst_memory_id: memories[2].clone(),
@@ -77319,7 +77319,7 @@ mod tests {
         fn affinity_snapshot(&self, metrics: &str, version: u32) -> TestResult {
             self.connection
                 .insert_graph_snapshot(
-                    &format!("snapshot_suggest_links_{version}"),
+                    &format!("gsnap_{version:025}"),
                     &crate::db::CreateGraphSnapshotInput {
                         workspace_id: self.workspace_id.clone(),
                         snapshot_version: version,
@@ -77363,7 +77363,7 @@ mod tests {
             .to_string();
             self.connection
                 .insert_graph_snapshot(
-                    "snapshot_suggest_links_three",
+                    "gsnap_0000000000000000000000001",
                     &crate::db::CreateGraphSnapshotInput {
                         workspace_id: self.workspace_id.clone(),
                         snapshot_version: 1,

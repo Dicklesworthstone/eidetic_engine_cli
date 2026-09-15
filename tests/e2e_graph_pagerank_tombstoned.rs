@@ -170,7 +170,7 @@ fn seed_workspace_with_tombstoned_dst() -> Result<(PathBuf, String, String, Stri
     let database_path = workspace.join(".ee").join("ee.db");
     insert_link(
         &database_path,
-        "link_00000000000000000000pintomb01",
+        "link_00000000000000000000000001",
         &src,
         &dst,
     )?;

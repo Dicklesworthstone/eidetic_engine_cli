@@ -213,9 +213,9 @@ fn seed_triangle() -> Result<(PathBuf, String, String, String, String), String> 
     let b = remember(&workspace_arg, "Pin-test k-core triangle node b.")?;
     let c = remember(&workspace_arg, "Pin-test k-core triangle node c.")?;
     let database_path = workspace.join(".ee").join("ee.db");
-    insert_link(&database_path, "link_00000000000000000000kcr00001", &a, &b)?;
-    insert_link(&database_path, "link_00000000000000000000kcr00002", &b, &c)?;
-    insert_link(&database_path, "link_00000000000000000000kcr00003", &c, &a)?;
+    insert_link(&database_path, "link_00000000000000000000000001", &a, &b)?;
+    insert_link(&database_path, "link_00000000000000000000000002", &b, &c)?;
+    insert_link(&database_path, "link_00000000000000000000000003", &c, &a)?;
     Ok((workspace, workspace_arg, a, b, c))
 }
 
@@ -252,7 +252,7 @@ fn graph_k_core_rejects_min_confidence_out_of_range_with_usage_error() -> TestRe
         .to_owned();
     init_workspace(&workspace_arg)?;
 
-    let (output, parsed) = run_graph_k_core(&workspace_arg, &["--min-confidence", "-0.5"])?;
+    let (output, parsed) = run_graph_k_core(&workspace_arg, &["--min-confidence=-0.5"])?;
     ensure(
         !output.status.success(),
         format!(

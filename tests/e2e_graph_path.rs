@@ -206,7 +206,7 @@ fn seed_two_edge_path() -> Result<(PathBuf, String, String, String, String), Str
     let database_path = workspace.join(".ee").join("ee.db");
     insert_link(
         &database_path,
-        "link_00000000000000000000pinpath01",
+        "link_00000000000000000000000001",
         &src,
         &mid,
         0.9,
@@ -214,7 +214,7 @@ fn seed_two_edge_path() -> Result<(PathBuf, String, String, String, String), Str
     )?;
     insert_link(
         &database_path,
-        "link_00000000000000000000pinpath02",
+        "link_00000000000000000000000002",
         &mid,
         &dst,
         0.9,

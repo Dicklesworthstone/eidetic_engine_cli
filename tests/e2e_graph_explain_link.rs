@@ -292,7 +292,7 @@ fn graph_explain_link_returns_direct_link_found_when_pair_has_direct_edge() -> T
     let dst = remember(&workspace_arg, "Pin-test explain-link direct dst.")?;
 
     let database_path = workspace.join(".ee").join("ee.db");
-    let link_id = "link_00000000000000000000pindl001";
+    let link_id = "link_00000000000000000000000001";
     insert_link(&database_path, link_id, &src, &dst, 0.9, 0.8)?;
 
     let (output, parsed) = run_explain_link(&workspace_arg, &src, &dst, &[])?;
@@ -368,7 +368,7 @@ fn graph_explain_link_returns_path_found_on_two_edge_indirect_path() -> TestResu
     let database_path = workspace.join(".ee").join("ee.db");
     insert_link(
         &database_path,
-        "link_00000000000000000000pinpl001",
+        "link_00000000000000000000000001",
         &src,
         &mid,
         0.9,
@@ -376,7 +376,7 @@ fn graph_explain_link_returns_path_found_on_two_edge_indirect_path() -> TestResu
     )?;
     insert_link(
         &database_path,
-        "link_00000000000000000000pinpl002",
+        "link_00000000000000000000000002",
         &mid,
         &dst,
         0.9,

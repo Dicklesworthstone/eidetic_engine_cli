@@ -156,19 +156,19 @@ fn seed_refreshed_triangle() -> Result<(PathBuf, String), String> {
     let database_path = workspace.join(".ee").join("ee.db");
     insert_link(
         &database_path,
-        "link_00000000000000000000pinnom01",
+        "link_00000000000000000000000001",
         &alpha,
         &beta,
     )?;
     insert_link(
         &database_path,
-        "link_00000000000000000000pinnom02",
+        "link_00000000000000000000000002",
         &beta,
         &gamma,
     )?;
     insert_link(
         &database_path,
-        "link_00000000000000000000pinnom03",
+        "link_00000000000000000000000003",
         &gamma,
         &alpha,
     )?;

@@ -212,8 +212,8 @@ fn seed_two_disjoint_components()
     let c = remember(&workspace_arg, "Pin-test louvain component B node 1.")?;
     let d = remember(&workspace_arg, "Pin-test louvain component B node 2.")?;
     let database_path = workspace.join(".ee").join("ee.db");
-    insert_link(&database_path, "link_00000000000000000000lvn00001", &a, &b)?;
-    insert_link(&database_path, "link_00000000000000000000lvn00002", &c, &d)?;
+    insert_link(&database_path, "link_00000000000000000000000001", &a, &b)?;
+    insert_link(&database_path, "link_00000000000000000000000002", &c, &d)?;
     Ok((workspace, workspace_arg, a, b, c, d))
 }
 

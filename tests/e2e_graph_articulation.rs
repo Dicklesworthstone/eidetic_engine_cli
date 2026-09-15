@@ -210,8 +210,8 @@ fn seed_bridge_graph() -> Result<(PathBuf, String, String, String, String), Stri
     let b = remember(&workspace_arg, "Pin-test articulation bridge b (bridge).")?;
     let c = remember(&workspace_arg, "Pin-test articulation bridge c (leaf).")?;
     let database_path = workspace.join(".ee").join("ee.db");
-    insert_link(&database_path, "link_00000000000000000000art00001", &a, &b)?;
-    insert_link(&database_path, "link_00000000000000000000art00002", &b, &c)?;
+    insert_link(&database_path, "link_00000000000000000000000001", &a, &b)?;
+    insert_link(&database_path, "link_00000000000000000000000002", &b, &c)?;
     Ok((workspace, workspace_arg, a, b, c))
 }
 
@@ -272,7 +272,7 @@ fn graph_articulation_rejects_min_confidence_out_of_range_with_usage_error() -> 
         .to_owned();
     init_workspace(&workspace_arg)?;
 
-    let (output, parsed) = run_graph_articulation(&workspace_arg, &["--min-confidence", "-0.5"])?;
+    let (output, parsed) = run_graph_articulation(&workspace_arg, &["--min-confidence=-0.5"])?;
     ensure(
         !output.status.success(),
         format!(
@@ -419,9 +419,9 @@ fn graph_articulation_emits_sorted_points_for_multi_bridge_chain() -> TestResult
     let c = remember(&workspace_arg, "Pin-test articulation chain c.")?;
     let d = remember(&workspace_arg, "Pin-test articulation chain d.")?;
     let database_path = workspace.join(".ee").join("ee.db");
-    insert_link(&database_path, "link_00000000000000000000art00101", &a, &b)?;
-    insert_link(&database_path, "link_00000000000000000000art00102", &b, &c)?;
-    insert_link(&database_path, "link_00000000000000000000art00103", &c, &d)?;
+    insert_link(&database_path, "link_00000000000000000000000101", &a, &b)?;
+    insert_link(&database_path, "link_00000000000000000000000102", &b, &c)?;
+    insert_link(&database_path, "link_00000000000000000000000103", &c, &d)?;
 
     let (output, parsed) = run_graph_articulation(&workspace_arg, &[])?;
     ensure(

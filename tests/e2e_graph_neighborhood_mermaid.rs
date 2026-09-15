@@ -343,7 +343,7 @@ fn graph_neighborhood_mermaid_renders_directed_edge_with_relation_label() -> Tes
     let neighbor = remember(&workspace_arg, "Pin-test mermaid directed neighbor.")?;
     insert_link(
         &workspace.join(".ee").join("ee.db"),
-        "link_00000000000000000000mermaid001",
+        "link_00000000000000000000000001",
         &center,
         &neighbor,
         true,
@@ -394,7 +394,7 @@ fn graph_neighborhood_mermaid_renders_undirected_edge_without_arrowhead() -> Tes
     let neighbor = remember(&workspace_arg, "Pin-test mermaid undirected neighbor.")?;
     insert_link(
         &workspace.join(".ee").join("ee.db"),
-        "link_00000000000000000000mermaid002",
+        "link_00000000000000000000000002",
         &center,
         &neighbor,
         false,
@@ -444,7 +444,7 @@ fn graph_neighborhood_mermaid_output_is_deterministic_across_repeated_runs() -> 
     let database_path = workspace.join(".ee").join("ee.db");
     insert_link(
         &database_path,
-        "link_00000000000000000000mermaid003",
+        "link_00000000000000000000000003",
         &center,
         &neighbor_a,
         true,
@@ -452,7 +452,7 @@ fn graph_neighborhood_mermaid_output_is_deterministic_across_repeated_runs() -> 
     )?;
     insert_link(
         &database_path,
-        "link_00000000000000000000mermaid004",
+        "link_00000000000000000000000004",
         &center,
         &neighbor_b,
         true,
@@ -490,7 +490,7 @@ fn graph_neighborhood_mermaid_limit_emits_truncation_comment() -> TestResult {
     let database_path = workspace.join(".ee").join("ee.db");
     insert_link(
         &database_path,
-        "link_00000000000000000000mermaid005",
+        "link_00000000000000000000000005",
         &center,
         &neighbor_a,
         true,
@@ -498,7 +498,7 @@ fn graph_neighborhood_mermaid_limit_emits_truncation_comment() -> TestResult {
     )?;
     insert_link(
         &database_path,
-        "link_00000000000000000000mermaid006",
+        "link_00000000000000000000000006",
         &center,
         &neighbor_b,
         true,

@@ -195,7 +195,7 @@ fn seed_two_edge_path() -> Result<(PathBuf, String, String, String, String), Str
     let database_path = workspace.join(".ee").join("ee.db");
     insert_link(
         &database_path,
-        "link_00000000000000000000pgrnk001",
+        "link_00000000000000000000000001",
         &src,
         &mid,
         0.9,
@@ -203,7 +203,7 @@ fn seed_two_edge_path() -> Result<(PathBuf, String, String, String, String), Str
     )?;
     insert_link(
         &database_path,
-        "link_00000000000000000000pgrnk002",
+        "link_00000000000000000000000002",
         &mid,
         &dst,
         0.9,
@@ -291,7 +291,7 @@ fn graph_pagerank_rejects_min_confidence_out_of_range_with_usage_error() -> Test
         .to_owned();
     init_workspace(&workspace_arg)?;
 
-    let (output, parsed) = run_graph_pagerank(&workspace_arg, &["--min-confidence", "-0.5"])?;
+    let (output, parsed) = run_graph_pagerank(&workspace_arg, &["--min-confidence=-0.5"])?;
     ensure(
         !output.status.success(),
         format!(
