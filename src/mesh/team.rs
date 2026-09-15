@@ -302,12 +302,11 @@ pub fn persist_team_admission_states(
 fn load_team_admission_status(
     connection: &DbConnection,
     limits: crate::mesh::admission::MeshAdmissionLimits,
-) -> TeamAdmissionStatus {
-    let workspace_id = self_workspace_id(connection).ok().flatten();
-    let peers = workspace_id
-        .as_deref()
-        .and_then(|workspace_id| connection.list_team_admission_peers(workspace_id).ok())
-        .unwrap_or_default();
+) -> Result<TeamAdmissionStatus, OriginStreamError> {
+    let peers = match self_workspace_id(connection)? {
+        Some(workspace_id) => connection.list_team_admission_peers(&workspace_id)?,
+        None => Vec::new(),
+    };
     let throttled_peer_count = peers
         .iter()
         .filter(|peer| peer.backoff_until_epoch_ms.is_some() || peer.malformed_frame_count > 0)
@@ -319,7 +318,7 @@ fn load_team_admission_status(
     let coalesced_exhaustion = throttled_peer_count > 0 || budget_exhausted_peer_count > 0;
     let local_tier1_unaffected =
         peers.is_empty() || peers.iter().all(|peer| peer.local_tier1_reserved);
-    TeamAdmissionStatus {
+    Ok(TeamAdmissionStatus {
         max_event_batch_count: limits.max_event_batch_count,
         max_event_batch_bytes: limits.max_event_batch_bytes,
         max_body_fetch_bytes: limits.max_body_fetch_bytes,
@@ -329,7 +328,7 @@ fn load_team_admission_status(
         throttled_peer_count,
         budget_exhausted_peer_count,
         coalesced_exhaustion,
-    }
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1192,9 +1191,11 @@ pub fn local_team_status(connection: &DbConnection) -> Result<TeamStatusReport, 
         })
         .collect();
     let paused = any_local_team_paused(connection)?;
-    let steward_would_sync = plan_team_steward_once(connection)
-        .map(|plan| plan.ran_sync)
-        .unwrap_or(false);
+    let steward_would_sync = if teams.is_empty() {
+        false
+    } else {
+        plan_team_steward_once(connection)?.ran_sync
+    };
     let mut pending_invites = Vec::new();
     let mut pending_removal_acks = Vec::new();
     for team in &teams {
@@ -1227,7 +1228,7 @@ pub fn local_team_status(connection: &DbConnection) -> Result<TeamStatusReport, 
         );
     }
     let limits = crate::mesh::admission::MeshAdmissionLimits::conservative_default();
-    let admission = load_team_admission_status(connection, limits);
+    let admission = load_team_admission_status(connection, limits)?;
     Ok(TeamStatusReport {
         schema: TEAM_STATUS_SCHEMA_V1,
         command: "team status",
@@ -3876,7 +3877,7 @@ pub fn inspect_team_health(
         repair: None,
     });
     let limits = crate::mesh::admission::MeshAdmissionLimits::conservative_default();
-    let admission = load_team_admission_status(connection, limits);
+    let admission = load_team_admission_status(connection, limits)?;
     checks.push(TeamDoctorCheck {
         name: "admission".to_owned(),
         status: if admission.coalesced_exhaustion {
@@ -3939,9 +3940,8 @@ pub fn inspect_team_health(
         }
     }
     let cached_bodies = connection
-        .mesh_storage_status(workspace_id)
-        .map(|status| status.cached_body_count)
-        .unwrap_or(0);
+        .mesh_storage_status(workspace_id)?
+        .cached_body_count;
     let cache_dir_present = workspace_path
         .map(|path| path.join(".ee").join("mesh-body-cache").is_dir())
         .unwrap_or(false);
@@ -4015,10 +4015,8 @@ pub fn inspect_team_health(
             }
         });
     }
-    if let Ok(Some(policy)) = connection.get_team_idp_policy(&team.team_id) {
-        let identities = connection
-            .list_team_member_identities(&team.team_id)
-            .unwrap_or_default();
+    if let Some(policy) = connection.get_team_idp_policy(&team.team_id)? {
+        let identities = connection.list_team_member_identities(&team.team_id)?;
         let suspended = identities
             .iter()
             .filter(|identity| identity.state == "suspended")
@@ -4146,53 +4144,38 @@ pub fn inspect_team_health(
             .to_owned(),
         repair: None,
     });
-    if let Ok(jobs) = connection
-        .list_search_index_jobs(workspace_id, Some(crate::db::SearchIndexJobStatus::Pending))
-    {
-        checks.push(TeamDoctorCheck {
-            name: "index_rematerialization".to_owned(),
-            status: if jobs.is_empty() {
-                "ok".to_owned()
-            } else {
-                "warning".to_owned()
-            },
-            message: format!("{} pending index rematerialization job(s)", jobs.len()),
-            repair: (!jobs.is_empty()).then(|| "ee index rebuild --workspace .".to_owned()),
-        });
-    }
-    let stalled_cursors = connection
-        .list_mesh_peer_cursors(workspace_id)
-        .ok()
-        .map(|cursors| {
-            let stalled = cursors
-                .iter()
-                .filter(|cursor| {
-                    matches!(cursor.status.as_str(), "behind" | "blocked" | "quarantined")
-                })
-                .count();
-            checks.push(TeamDoctorCheck {
-                name: "origin_outbox".to_owned(),
-                status: if stalled == 0 {
-                    "ok".to_owned()
-                } else {
-                    "warning".to_owned()
-                },
-                message: format!(
-                    "{} peer cursor(s); {stalled} behind/blocked/quarantined",
-                    cursors.len()
-                ),
-                repair: (stalled > 0).then(|| "ee team steward once --workspace .".to_owned()),
-            });
-            stalled
-        })
-        .unwrap_or(0);
-    let floor = connection
-        .team_invite_auth_floor(&team.team_id)
-        .ok()
-        .flatten();
-    let invites = connection
-        .list_team_pending_invites(&team.team_id)
-        .unwrap_or_default();
+    let jobs = connection
+        .list_search_index_jobs(workspace_id, Some(crate::db::SearchIndexJobStatus::Pending))?;
+    checks.push(TeamDoctorCheck {
+        name: "index_rematerialization".to_owned(),
+        status: if jobs.is_empty() {
+            "ok".to_owned()
+        } else {
+            "warning".to_owned()
+        },
+        message: format!("{} pending index rematerialization job(s)", jobs.len()),
+        repair: (!jobs.is_empty()).then(|| "ee index rebuild --workspace .".to_owned()),
+    });
+    let cursors = connection.list_mesh_peer_cursors(workspace_id)?;
+    let stalled_cursors = cursors
+        .iter()
+        .filter(|cursor| matches!(cursor.status.as_str(), "behind" | "blocked" | "quarantined"))
+        .count();
+    checks.push(TeamDoctorCheck {
+        name: "origin_outbox".to_owned(),
+        status: if stalled_cursors == 0 {
+            "ok".to_owned()
+        } else {
+            "warning".to_owned()
+        },
+        message: format!(
+            "{} peer cursor(s); {stalled_cursors} behind/blocked/quarantined",
+            cursors.len()
+        ),
+        repair: (stalled_cursors > 0).then(|| "ee team steward once --workspace .".to_owned()),
+    });
+    let floor = connection.team_invite_auth_floor(&team.team_id)?;
+    let invites = connection.list_team_pending_invites(&team.team_id)?;
     let pending = invites
         .iter()
         .filter(|invite| invite.status == "pending")
@@ -4260,8 +4243,7 @@ pub fn inspect_team_health(
         }),
     });
     let delegated = connection
-        .list_all_team_members()
-        .unwrap_or_default()
+        .list_all_team_members()?
         .into_iter()
         .filter(|member| member.state == "active" && !member.is_self)
         .count();
@@ -4271,33 +4253,31 @@ pub fn inspect_team_health(
         message: format!("{delegated} active non-self member(s) to review"),
         repair: None,
     });
-    let missing_projects = connection
-        .list_mesh_manifest_origin_events(256)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|row| {
-            let Ok(OriginEventPayload::Manifest(payload)) = parse_stored_payload(&row) else {
-                return None;
-            };
-            if payload.operation != TEAM_PROJECT_SHARED_OPERATION {
-                return None;
-            }
-            payload
+    let manifest_events = connection.list_mesh_manifest_origin_events(256)?;
+    let mut missing_projects = 0;
+    let mut signed_removals = 0;
+    for row in &manifest_events {
+        let OriginEventPayload::Manifest(payload) = parse_stored_payload(row)? else {
+            continue;
+        };
+        if matches!(
+            payload.operation.as_str(),
+            TEAM_MEMBER_REMOVED_OPERATION | TEAM_LEFT_OPERATION
+        ) {
+            signed_removals += 1;
+        }
+        if payload.operation == TEAM_PROJECT_SHARED_OPERATION
+            && let Some(project_id) = payload
                 .document_payload
                 .get("projectId")
                 .and_then(serde_json::Value::as_str)
                 .map(str::trim)
                 .filter(|project_id| is_team_project_id(project_id))
-                .map(str::to_owned)
-        })
-        .filter(|project_id| {
-            connection
-                .get_team_project(project_id)
-                .ok()
-                .flatten()
-                .is_none()
-        })
-        .count();
+            && connection.get_team_project(project_id)?.is_none()
+        {
+            missing_projects += 1;
+        }
+    }
     checks.push(TeamDoctorCheck {
         name: "projects".to_owned(),
         status: if missing_projects == 0 {
@@ -4309,14 +4289,15 @@ pub fn inspect_team_health(
         repair: (missing_projects > 0)
             .then(|| "ee team projects reconcile --workspace .".to_owned()),
     });
-    let missing_inbound_memories = connection
-        .list_mesh_import_ledger_events_for_workspace(workspace_id)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|row| row.import_decision == "allow")
-        .filter_map(|row| inbound_team_memory_id(&row.event_hash))
-        .filter(|memory_id| connection.get_memory(memory_id).ok().flatten().is_none())
-        .count();
+    let mut missing_inbound_memories = 0;
+    for row in connection.list_mesh_import_ledger_events_for_workspace(workspace_id)? {
+        if row.import_decision == "allow"
+            && let Some(memory_id) = inbound_team_memory_id(&row.event_hash)
+            && connection.get_memory(&memory_id)?.is_none()
+        {
+            missing_inbound_memories += 1;
+        }
+    }
     checks.push(TeamDoctorCheck {
         name: "inbound_memories".to_owned(),
         status: if missing_inbound_memories == 0 {
@@ -4331,8 +4312,7 @@ pub fn inspect_team_health(
             .then(|| "ee team steward once --workspace .".to_owned()),
     });
     let stuck_signing = connection
-        .list_all_team_member_nodes()
-        .unwrap_or_default()
+        .list_all_team_member_nodes()?
         .into_iter()
         .filter(|node| node.state != "active")
         .count();
@@ -4346,24 +4326,7 @@ pub fn inspect_team_health(
         message: format!("{stuck_signing} non-active member-node signing binding(s)"),
         repair: (stuck_signing > 0).then(|| "ee team members rotate-key --workspace .".to_owned()),
     });
-    let signed_removals = connection
-        .list_mesh_manifest_origin_events(256)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|row| {
-            matches!(
-                parse_stored_payload(row),
-                Ok(OriginEventPayload::Manifest(payload))
-                    if matches!(
-                        payload.operation.as_str(),
-                        TEAM_MEMBER_REMOVED_OPERATION | TEAM_LEFT_OPERATION
-                    )
-            )
-        })
-        .count();
-    let acks = connection
-        .list_team_removal_acks(&team.team_id)
-        .unwrap_or_default();
+    let acks = connection.list_team_removal_acks(&team.team_id)?;
     let audience = acks.len();
     let pending_acks = acks
         .iter()
@@ -4409,19 +4372,24 @@ pub fn inspect_team_health(
         }
     });
     if let Some(path) = workspace_path
-        && let Ok(Some(store)) = crate::mesh::key_store::MeshKeyStore::open_existing(path)
-        && let Ok(peers) = connection.list_mesh_peers(workspace_id)
+        && let Some(store) =
+            crate::mesh::key_store::MeshKeyStore::open_existing(path).map_err(|error| {
+                OriginStreamError::Encode(format!("inspect team key store: {error}"))
+            })?
     {
-        let stuck_next = peers
-            .iter()
-            .filter(|peer| {
-                store
-                    .load_pair_key(&peer.peer_id, crate::mesh::key_store::PairKeyClass::Next)
-                    .ok()
-                    .flatten()
-                    .is_some()
-            })
-            .count();
+        let peers = connection.list_mesh_peers(workspace_id)?;
+        let mut stuck_next = 0;
+        for peer in &peers {
+            if store
+                .load_pair_key(&peer.peer_id, crate::mesh::key_store::PairKeyClass::Next)
+                .map_err(|error| {
+                    OriginStreamError::Encode(format!("inspect staged team pair key: {error}"))
+                })?
+                .is_some()
+            {
+                stuck_next += 1;
+            }
+        }
         checks.push(TeamDoctorCheck {
             name: "pair_rotation".to_owned(),
             status: if stuck_next == 0 {
@@ -4433,7 +4401,8 @@ pub fn inspect_team_health(
             repair: (stuck_next > 0).then(|| "ee mesh peer rotate --workspace .".to_owned()),
         });
     }
-    if let Ok(rows) = connection.list_mesh_body_cache_metadata(workspace_id) {
+    {
+        let rows = connection.list_mesh_body_cache_metadata(workspace_id)?;
         let staging = rows
             .iter()
             .filter(|row| row.cache_status == "staging")
@@ -13206,6 +13175,10 @@ mod tests {
         let missing = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
             .expect("missing");
         assert_eq!(missing.posture, "no_team");
+        let empty_status = local_team_status(&connection).expect("valid database without a team");
+        assert_eq!(empty_status.team_count, 0);
+        assert!(!empty_status.steward_would_sync);
+        assert_eq!(empty_status.admission.peer_snapshot_count, 0);
         create_local_team(
             &connection,
             "wsp_persistfixture000000000001",
@@ -13328,6 +13301,55 @@ mod tests {
     }
 
     #[test]
+    fn inspect_team_health_does_not_turn_storage_failures_into_healthy_empty_checks() {
+        for (table, check_name) in [
+            ("team_admission_peer_state", "admission"),
+            ("team_pending_invites", "pending_invites"),
+            ("team_removal_acknowledgements", "removal_acknowledgements"),
+            ("team_idp_policy", "idp"),
+            ("search_index_jobs", "index_rematerialization"),
+            ("mesh_body_cache_metadata", "body_cache_lifecycle"),
+        ] {
+            let connection = open_db();
+            let workspace_id = "wsp_persistfixture000000000001";
+            create_local_team(
+                &connection,
+                workspace_id,
+                "Analysts",
+                "2026-08-13T00:00:00Z",
+            )
+            .expect("create real team");
+            let healthy = inspect_team_health(&connection, workspace_id, None)
+                .expect("intact database must produce health checks");
+            assert!(
+                healthy
+                    .checks
+                    .iter()
+                    .any(|check| { check.name == check_name && check.status == "ok" }),
+                "missing healthy check {check_name}: {healthy:?}"
+            );
+
+            // Retain the original rows under a different table name. This is a
+            // real query failure, not a mocked repository returning an error.
+            connection
+                .execute_raw(&format!(
+                    "ALTER TABLE {table} RENAME TO {table}_unavailable"
+                ))
+                .expect("make the required table unavailable");
+            let failure = inspect_team_health(&connection, workspace_id, None)
+                .expect_err("unreadable required state must not become a healthy zero");
+            assert!(matches!(failure, OriginStreamError::Db(_)), "{failure:?}");
+            assert!(failure.to_string().contains(table), "{table}: {failure}");
+            if table == "team_admission_peer_state" {
+                let failure = local_team_status(&connection)
+                    .expect_err("status must also surface unreadable admission state");
+                assert!(matches!(failure, OriginStreamError::Db(_)), "{failure:?}");
+                assert!(failure.to_string().contains(table), "{failure}");
+            }
+        }
+    }
+
+    #[test]
     fn persisted_admission_snapshot_warns_doctor_and_status() {
         let connection = open_db();
         create_local_team(
@@ -13361,6 +13383,52 @@ mod tests {
         assert_eq!(status.admission.throttled_peer_count, 1);
         assert!(status.admission.coalesced_exhaustion);
         assert!(status.admission.local_tier1_unaffected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_team_health_reports_unreadable_key_store_without_repairing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let connection = open_db();
+        let workspace_id = "wsp_persistfixture000000000001";
+        create_local_team(
+            &connection,
+            workspace_id,
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("team");
+        let store = crate::mesh::key_store::MeshKeyStore::open_or_create(workspace.path())
+            .expect("real key store");
+        let key_dir = store.secure_dir().path();
+        let healthy = inspect_team_health(&connection, workspace_id, Some(workspace.path()))
+            .expect("healthy key store");
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| { check.name == "pair_rotation" && check.status == "ok" })
+        );
+
+        std::fs::set_permissions(key_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("plant insecure permissions on the test key directory");
+        let failure = inspect_team_health(&connection, workspace_id, Some(workspace.path()))
+            .expect_err("an unreadable key store must not silently omit rotation checks");
+        assert!(
+            failure.to_string().contains("inspect team key store"),
+            "{failure}"
+        );
+        assert_eq!(
+            std::fs::metadata(key_dir)
+                .expect("key directory")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755,
+            "doctor must report the problem without changing permissions"
+        );
     }
 
     #[test]
