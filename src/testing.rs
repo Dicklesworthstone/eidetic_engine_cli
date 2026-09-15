@@ -322,6 +322,38 @@ fn validate_json_schema_value(
     }
 
     if let Some(array) = value.as_array() {
+        if let Some(contains) = schema.get("contains") {
+            let matches = array
+                .iter()
+                .filter(|item| match contains {
+                    Value::Bool(accepts) => *accepts,
+                    _ => validate_json_schema_value(item, contains, root_schema, path).is_ok(),
+                })
+                .count();
+            let matches = u64::try_from(matches).unwrap_or(u64::MAX);
+            let minimum = schema
+                .get("minContains")
+                .map(|minimum| {
+                    minimum
+                        .as_u64()
+                        .ok_or_else(|| format!("{path} minContains must be a non-negative integer"))
+                })
+                .transpose()?
+                .unwrap_or(1);
+            let maximum = schema
+                .get("maxContains")
+                .map(|maximum| {
+                    maximum
+                        .as_u64()
+                        .ok_or_else(|| format!("{path} maxContains must be a non-negative integer"))
+                })
+                .transpose()?;
+            if matches < minimum || maximum.is_some_and(|maximum| matches > maximum) {
+                return Err(format!(
+                    "{path} has {matches} matching contains items; expected at least {minimum} and at most {maximum:?}"
+                ));
+            }
+        }
         if let Some(min_items) = schema.get("minItems").and_then(Value::as_u64)
             && array.len() < min_items as usize
         {
@@ -1220,6 +1252,64 @@ mod tests {
             return Err("numeric const/enum accepted a mathematically distinct value".into());
         }
         Ok(())
+    }
+
+    #[test]
+    fn json_schema_contains_requires_matches_and_honors_bounds() -> TestResult {
+        let schema = serde_json::json!({
+            "type": "array",
+            "contains": {"$ref": "#/$defs/refusal"},
+            "$defs": {
+                "refusal": {
+                    "type": "object",
+                    "required": ["code"],
+                    "properties": {"code": {"const": "output_budget_unsatisfiable"}}
+                }
+            }
+        });
+        let refusal = serde_json::json!({"code": "output_budget_unsatisfiable"});
+        let warning = serde_json::json!({"code": "cursor_invalid"});
+        validate_json_schema_instance(&serde_json::json!([warning, refusal]), &schema)?;
+        for invalid in [serde_json::json!([]), serde_json::json!([warning, {}])] {
+            ensure(
+                validate_json_schema_instance(&invalid, &schema).is_err(),
+                "contains must reject an array without a matching item",
+            )?;
+        }
+        let mut bounded = schema.clone();
+        bounded["minContains"] = serde_json::json!(0);
+        bounded["maxContains"] = serde_json::json!(1);
+        validate_json_schema_instance(&serde_json::json!([]), &bounded)?;
+        validate_json_schema_instance(&serde_json::json!([refusal]), &bounded)?;
+        ensure(
+            validate_json_schema_instance(&serde_json::json!([refusal, refusal]), &bounded)
+                .is_err(),
+            "maxContains must reject too many matching items",
+        )?;
+        bounded["minContains"] = serde_json::json!(2);
+        bounded["maxContains"] = serde_json::json!(2);
+        ensure(
+            validate_json_schema_instance(&serde_json::json!([refusal, warning]), &bounded)
+                .is_err(),
+            "minContains counts matches, not total items",
+        )?;
+        validate_json_schema_instance(&serde_json::json!([refusal, refusal]), &bounded)?;
+        validate_json_schema_instance(
+            &serde_json::json!([null]),
+            &serde_json::json!({"contains": true}),
+        )?;
+        ensure(
+            validate_json_schema_instance(
+                &serde_json::json!([null]),
+                &serde_json::json!({"contains": false}),
+            )
+            .is_err(),
+            "boolean false contains must match no items",
+        )?;
+        validate_json_schema_instance(
+            &serde_json::json!([]),
+            &serde_json::json!({"minContains": 1, "maxContains": 0}),
+        )
     }
 
     // ========================================================================
