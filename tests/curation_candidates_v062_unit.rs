@@ -25,7 +25,7 @@ use ee::db::{CreateCurationCandidateInput, CreateWorkspaceInput, DbConnection};
 
 type TestResult = Result<(), String>;
 
-const WORKSPACE_ID: &str = "wsp_curation_candidates_v062_unit";
+const WORKSPACE_ID: &str = "wsp_00000000000000000000000062";
 const CREATED_AT: &str = "2026-05-23T07:00:00Z";
 
 fn migrated_connection() -> Result<DbConnection, String> {
@@ -95,24 +95,19 @@ fn v062_preserves_insert_curation_candidate_api_for_ordinary_types() -> TestResu
     // Regression: V060's `insert_curation_candidate` API must still accept a
     // standard target-mutating candidate after V062 renames the table again.
     let connection = migrated_connection()?;
-    // Insert a minimal target memory by hand via the workspace bootstrap state;
-    // the existing insert API expects target_memory_id to be a valid foreign
-    // key, but the schema also accepts a no-existing-row insert because the FK
-    // is enforced via `REFERENCES memories(id) ON DELETE CASCADE` which still
-    // requires the row to exist on INSERT. So we have to thread a memory in
-    // first. Use the same path the production code uses by going through the
-    // `execute_raw` helper for a single fixture row.
+    // Seed the target required by the candidate's foreign key, using valid
+    // 30-character memory and workspace IDs from the current schema.
     connection
         .execute_raw(
             "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, provenance_chain_hash_version, provenance_verification_status, trust_class, valid_from, created_at, updated_at) \
-             VALUES ('mem_v062_regression_target_xxxxx', 'wsp_curation_candidates_v062_unit', 'episodic', 'fact', 'v062-regression', 0.9, 0.5, 0.5, 1, 'pending', 'agent_assertion', '2026-05-23T07:00:00Z', '2026-05-23T07:00:00Z', '2026-05-23T07:00:00Z')",
+             VALUES ('mem_00000000000000000000000062', 'wsp_00000000000000000000000062', 'episodic', 'fact', 'v062-regression', 0.9, 0.5, 0.5, 1, 'pending', 'agent_assertion', '2026-05-23T07:00:00Z', '2026-05-23T07:00:00Z', '2026-05-23T07:00:00Z')",
         )
         .map_err(|error| format!("seed target memory: {error}"))?;
 
     let input = CreateCurationCandidateInput {
         workspace_id: WORKSPACE_ID.to_owned(),
         candidate_type: "promote".to_owned(),
-        target_memory_id: Some("mem_v062_regression_target_xxxxx".to_owned()),
+        target_memory_id: Some("mem_00000000000000000000000062".to_owned()),
         proposed_content: None,
         proposed_confidence: None,
         proposed_trust_class: None,

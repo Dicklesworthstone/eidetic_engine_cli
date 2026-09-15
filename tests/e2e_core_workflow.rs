@@ -1522,10 +1522,15 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
     )?;
 
     let trust = run_ee(&["--workspace", &workspace, "trust", "report", "--json"])?;
+    persist_artifact("family_incomplete_trust", &trust);
     ensure_equal(
         &trust.status.code(),
         &Some(EXIT_SUCCESS),
-        "multiplicity-aware trust report",
+        &format!(
+            "multiplicity-aware trust report; stdout={}; stderr={}",
+            String::from_utf8_lossy(&trust.stdout),
+            String::from_utf8_lossy(&trust.stderr),
+        ),
     )?;
     assert_stderr_empty(&trust, "multiplicity-aware trust report")?;
     let trust_json = stdout_json(&trust)?;
@@ -1565,6 +1570,41 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
             .contains(family_id),
         "trust report must not expose the raw family id",
     )?;
+    // Reuse the real process read pool as well as the public CLI. Each report
+    // must finish its own snapshot without the membership reader nesting one.
+    let read_pool = ee::db::read_pool::registered_process_read_pool(
+        ee::db::DatabaseConfig::file(PathBuf::from(&workspace).join(".ee").join("ee.db")),
+        ee::db::read_pool::PoolConfig::default_single(),
+    );
+    let options = ee::core::trust_report::TrustReportOptions::new(PathBuf::from(&workspace));
+    let first_report = ee::core::trust_report::generate_trust_report(options.clone())
+        .map_err(|error| format!("first pooled family trust report: {error}"))?;
+    ensure(
+        read_pool.active_snapshot_pins().is_empty(),
+        "first trust report must release its read snapshot",
+    )?;
+    let repeated_report = ee::core::trust_report::generate_trust_report(options)
+        .map_err(|error| format!("repeated pooled family trust report: {error}"))?;
+    ensure(
+        read_pool.active_snapshot_pins().is_empty(),
+        "repeated trust report must release its read snapshot",
+    )?;
+    ensure_equal(
+        &repeated_report,
+        &first_report,
+        "repeated pooled trust snapshots preserve every report field",
+    )?;
+    ensure_equal(
+        &first_report.memory_count,
+        &2,
+        "pooled trust report reads the real recorded memories",
+    )?;
+    ensure_equal(
+        &first_report.data_json()["attemptFamilies"],
+        &trust_json["data"]["attemptFamilies"],
+        "pooled trust read preserves the full public family evidence",
+    )?;
+    drop(read_pool);
     let trust_human = run_ee(&["--workspace", &workspace, "trust", "report"])?;
     ensure_equal(
         &trust_human.status.code(),

@@ -1488,12 +1488,21 @@ fn storeless_same_root_default_and_campaign_retargets_are_database_exact() -> Te
     }
     std::fs::rename(workspace.join(".ee"), workspace.join(".ee-campaign"))
         .map_err(|error| error.to_string())?;
+    let agents_path = workspace.join("AGENTS.md");
+    let claude_path = workspace.join("CLAUDE.md");
+    let agents_before =
+        snapshot_file(&agents_path)?.ok_or("campaign initialization did not create AGENTS.md")?;
+    let claude_before =
+        snapshot_file(&claude_path)?.ok_or("campaign initialization did not create CLAUDE.md")?;
 
+    // This fixture intentionally creates a second store beside existing
+    // guidance. Explicit force authorizes initialization, not overwriting it.
     let second_init = run_ee_with_registry(
         &[
             "init".to_owned(),
             "--workspace".to_owned(),
             workspace_text.clone(),
+            "--force".to_owned(),
             "--json".to_owned(),
         ],
         &registry,
@@ -1510,6 +1519,11 @@ fn storeless_same_root_default_and_campaign_retargets_are_database_exact() -> Te
         workspace.join(".ee").join("ee.db").is_file()
             && workspace.join(".ee-campaign").join("ee.db").is_file(),
         "init must recreate the conventional database while preserving the campaign database",
+    )?;
+    ensure(
+        snapshot_file(&agents_path)?.as_ref() == Some(&agents_before)
+            && snapshot_file(&claude_path)?.as_ref() == Some(&claude_before),
+        "creating the default store must preserve both guidance files' bytes, mtimes, and permissions",
     )?;
     for content in [
         "default same-root fact one",
@@ -2643,10 +2657,17 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
     // Once an explicit default store exists, it is the addressed source of
     // truth. The populated campaign store at the same workspace root must no
     // longer suppress discovery; it must be reported as the retarget option.
+    let child_agents = child.join("AGENTS.md");
+    let child_claude = child.join("CLAUDE.md");
+    let child_agents_before =
+        snapshot_file(&child_agents)?.ok_or("campaign child is missing AGENTS.md")?;
+    let child_claude_before =
+        snapshot_file(&child_claude)?.ok_or("campaign child is missing CLAUDE.md")?;
     let default_init = run_ee(&[
         "init".to_owned(),
         "--workspace".to_owned(),
         child_str.clone(),
+        "--force".to_owned(),
         "--json".to_owned(),
     ])?;
     ensure(
@@ -2656,6 +2677,11 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
             String::from_utf8_lossy(&default_init.stdout),
             String::from_utf8_lossy(&default_init.stderr)
         ),
+    )?;
+    ensure(
+        snapshot_file(&child_agents)?.as_ref() == Some(&child_agents_before)
+            && snapshot_file(&child_claude)?.as_ref() == Some(&child_claude_before),
+        "the explicit default child init must preserve both existing guidance files unchanged",
     )?;
     let child_default_database = child
         .canonicalize()

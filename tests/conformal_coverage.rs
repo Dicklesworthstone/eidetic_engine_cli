@@ -35,8 +35,10 @@ fn split_conformal_quantile_covers_held_out_fixture() -> TestResult {
 
 #[test]
 fn conformal_interval_is_ordered_and_clamped() -> TestResult {
-    assert_eq!(conformal_score_interval(0.1, 0.4), [0.0, 0.5]);
-    assert_eq!(conformal_score_interval(0.9, 0.4), [0.5, 1.0]);
+    // Binary-exact inputs isolate ordering and endpoint clamping from decimal
+    // representation error (0.9_f32 - 0.4_f32 is below 0.5 by one ULP).
+    assert_eq!(conformal_score_interval(0.125, 0.375), [0.0, 0.5]);
+    assert_eq!(conformal_score_interval(0.875, 0.375), [0.5, 1.0]);
     ensure(
         conformal_score_interval(f32::NAN, 0.2) == [0.0, 0.2],
         "non-finite scores should clamp to the unit interval before expansion",

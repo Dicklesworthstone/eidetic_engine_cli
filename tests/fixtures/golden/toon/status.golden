@@ -3,7 +3,7 @@ success: true
 fields: standard
 data:
   command: status
-  version: <scrubbed:eeVersion>
+  version: "<scrubbed:eeVersion>"
   workspace:
     source: explicit
     root: /workspace

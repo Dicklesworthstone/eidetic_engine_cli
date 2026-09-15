@@ -286,7 +286,7 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "inject temp directory at the boundary instead of calling env::temp_dir",
             });
         }
-        if hash_collection_iteration_call(&compact_line, &hash_map_bindings)
+        if hash_collection_iteration_call(line, &hash_map_bindings)
             || hash_collection_direct_iteration_call(line, "HashMap")
         {
             findings.push(Finding {
@@ -295,7 +295,7 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "sort HashMap entries before deterministic output",
             });
         }
-        if hash_collection_iteration_call(&compact_line, &hash_set_bindings)
+        if hash_collection_iteration_call(line, &hash_set_bindings)
             || hash_collection_direct_iteration_call(line, "HashSet")
         {
             findings.push(Finding {
@@ -896,17 +896,14 @@ fn skip_balanced_punct_group(
 }
 
 fn contains_receiver_method_call(line: &str, receiver: &str, method: &str) -> bool {
-    let needle = format!("{receiver}.{method}()");
-    let mut search_start = 0;
-    while let Some(relative_index) = line[search_start..].find(&needle) {
-        let index = search_start + relative_index;
-        let previous = line[..index].chars().next_back();
-        if !matches!(previous, Some(ch) if is_identifier_char(ch)) {
-            return true;
-        }
-        search_start = index + needle.len();
-    }
-    false
+    // Keep identifier boundaries: removing whitespace joins `in map.iter()`
+    // into `inmap.iter()` and hides the collection being iterated.
+    source_markers(line).windows(4).any(|markers| {
+        ident_at(markers, 0) == Some(receiver)
+            && markers[1] == SourceMarker::Punct('.')
+            && ident_at(markers, 2) == Some(method)
+            && markers[3] == SourceMarker::Punct('(')
+    })
 }
 
 fn line_declares_function(line: &str) -> bool {

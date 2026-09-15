@@ -47,9 +47,9 @@ use ee::daemon::{
         DAEMON_ECHO_DISABLED_CODE, DAEMON_REQUEST_DECODE_FAILED_CODE,
         DAEMON_REQUEST_SCHEMA_MISMATCH_CODE, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
         DAEMON_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_UNKNOWN_METHOD_CODE, DaemonSearchResult,
-        METHOD_CAPABILITIES, METHOD_CONTEXT, METHOD_ECHO, METHOD_SEARCH, METHOD_SHUTDOWN,
-        METHOD_TELEMETRY, METHOD_WRITE, METHOD_WRITE_JOURNAL, client_round_trip, start_server,
-        start_server_for_workspace,
+        METHOD_CAPABILITIES, METHOD_CONTEXT, METHOD_ECHO, METHOD_PACK_SEARCH, METHOD_SEARCH,
+        METHOD_SHUTDOWN, METHOD_TELEMETRY, METHOD_WRITE, METHOD_WRITE_JOURNAL, client_round_trip,
+        start_server, start_server_for_workspace,
     },
 };
 use ee::db::{CreateMemoryInput, CreateModelRegistryInput, CreateWorkspaceInput, DbConnection};
@@ -161,8 +161,8 @@ fn search_request_with_query(
         "explainPerformance": explain_performance
     });
     if explain_performance {
-        // Force the planted-query request through the historical
-        // no_relevant_results degradation that used to echo query text.
+        // The planted-query fixture uses a zero-boost lexical query, so this
+        // floor rejects actual candidates through no_relevant_results.
         params["relevanceFloor"] = serde_json::json!(1.0);
     }
     let mut request = DaemonRequest::new(request_id, TEST_AGENT_ID, METHOD_SEARCH, params);
@@ -1022,6 +1022,7 @@ fn daemon_capabilities_advertises_schema_and_method_contract_over_wire() -> Test
                 METHOD_CONTEXT,
                 METHOD_ECHO,
                 METHOD_SEARCH,
+                METHOD_PACK_SEARCH,
                 ee::daemon::protocol::METHOD_ORIENT_HOOK,
                 ee::daemon::protocol::METHOD_RECALL,
                 METHOD_SHUTDOWN,
@@ -1051,6 +1052,23 @@ fn daemon_capabilities_advertises_schema_and_method_contract_over_wire() -> Test
             .and_then(serde_json::Value::as_str)
             == Some("same_uid_workspace"),
         format!("capabilities authorization wrong; got {result}"),
+    )?;
+    ensure(
+        result
+            .pointer("/authorization/ee.daemon.pack_search")
+            .and_then(serde_json::Value::as_str)
+            == Some("same_uid_workspace")
+            && result
+                .pointer("/method_schemas/ee.daemon.pack_search/request")
+                .and_then(serde_json::Value::as_str)
+                == Some(DAEMON_SEARCH_REQUEST_SCHEMA_V2)
+            && result
+                .pointer("/method_schemas/ee.daemon.pack_search/response")
+                .and_then(serde_json::Value::as_str)
+                == Some("ee.daemon.pack_search.response.v1"),
+        format!(
+            "pack search capability must retain its workspace authorization and typed schemas: {result}"
+        ),
     )?;
     ensure(
         result
@@ -1138,19 +1156,22 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
     second_context_request.workspace_id = Some(workspace.display().to_string());
     let second_context = client_round_trip(handle.socket_path(), &second_context_request)
         .map_err(|error| format!("second context round-trip: {error}"))?;
-    const SECRET_QUERY: &str = "release provenance sk_live_uds_query_must_not_escape_performance";
-    let privacy = client_round_trip(
-        handle.socket_path(),
-        &search_request_with_query(
-            "req-search-warm-privacy",
-            &workspace,
-            &database,
-            &index_dir,
-            SECRET_QUERY,
-            true,
-        ),
-    )
-    .map_err(|error| format!("privacy search round-trip: {error}"))?;
+    const SECRET_QUERY: &str =
+        "(release provenance sk_live_uds_query_must_not_escape_performance)^0";
+    let mut privacy_request = search_request_with_query(
+        "req-search-warm-privacy",
+        &workspace,
+        &database,
+        &index_dir,
+        SECRET_QUERY,
+        true,
+    );
+    // Tantivy's zero boost preserves real matching documents but gives them
+    // score zero. Keep this exclusion control independent of model presence.
+    privacy_request.params["sourceMode"] = serde_json::json!("lexical_only");
+    privacy_request.params["strictSourceMode"] = serde_json::json!(true);
+    let privacy = client_round_trip(handle.socket_path(), &privacy_request)
+        .map_err(|error| format!("privacy search round-trip: {error}"))?;
     ensure(
         first.error.is_none(),
         format!("first search failed: {first:?}"),
@@ -1187,13 +1208,28 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| format!("privacy search fallbacks missing: {performance}"))?;
     ensure(
+        privacy_result
+            .pointer("/response/data/status")
+            .and_then(serde_json::Value::as_str)
+            == Some("no_results")
+            && privacy_result
+                .pointer("/response/data/results")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(Vec::is_empty)
+            && privacy_result
+                .pointer("/response/data/resultCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(0)
+            && fallbacks
+                .iter()
+                .any(|fallback| fallback["code"] == "no_relevant_results"),
+        format!("planted-query control must exclude real zero-score candidates: {privacy_result}"),
+    )?;
+    ensure(
         performance
             .pointer("/data/redaction/queryTextIncluded")
             .and_then(serde_json::Value::as_bool)
             == Some(false)
-            && fallbacks
-                .iter()
-                .any(|fallback| fallback["code"] == "no_relevant_results")
             && !rendered_performance.contains(SECRET_QUERY)
             && !rendered_performance.contains("sk_live_uds_query"),
         format!("daemon performance leaked planted query: {rendered_performance}"),
@@ -2126,10 +2162,11 @@ fn daemon_context_returns_canonical_pack_response_with_provenance() -> TestResul
     let socket_path = secure_socket_path(temp.path(), "ee-daemon-ctx.sock")?;
     let (workspace, database) = seed_context_workspace(temp.path())?;
 
-    let mut handle = start_server_for_workspace(&socket_path, TEST_WORKSPACE_ID)
+    let workspace_identity = workspace.display().to_string();
+    let mut handle = start_server_for_workspace(&socket_path, &workspace_identity)
         .map_err(|error| format!("start_server_for_workspace: {error}"))?;
 
-    let request = context_request(
+    let mut request = context_request(
         "req-ctx-pack-001",
         TEST_AGENT_ID,
         context_pack_params(
@@ -2138,6 +2175,7 @@ fn daemon_context_returns_canonical_pack_response_with_provenance() -> TestResul
             "release provenance daemon context canonical pack",
         ),
     );
+    request.workspace_id = Some(workspace_identity.clone());
     let response = client_round_trip(handle.socket_path(), &request)
         .map_err(|error| format!("client_round_trip: {error}"))?;
     ensure(
@@ -2145,7 +2183,7 @@ fn daemon_context_returns_canonical_pack_response_with_provenance() -> TestResul
         format!("agent_id must echo unchanged; got {}", response.agent_id),
     )?;
     ensure(
-        response.workspace_id.as_deref() == Some("workspace-daemon-uds-test"),
+        response.workspace_id.as_deref() == Some(workspace_identity.as_str()),
         format!(
             "workspace_id must echo unchanged; got {:?}",
             response.workspace_id

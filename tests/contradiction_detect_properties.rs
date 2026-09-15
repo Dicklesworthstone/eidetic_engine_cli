@@ -15,7 +15,6 @@
 //! - the whole report is deterministic across edge orderings;
 //! - ranked clusters (when any form) are ordered most-urgent-first.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use ee::core::context::{ContextPackOptions, ContextPackOutputOptions, run_context_pack};
@@ -23,6 +22,7 @@ use ee::core::contradiction_detect::{
     ConflictEdge, ContradictionDetectionConfig, ExplicitConflictSignal,
     detect_explicit_contradictions,
 };
+use ee::core::init::{InitOptions, InitStatus, init_workspace};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::{CreateMemoryLinkInput, DbConnection, MemoryLinkRelation, MemoryLinkSource};
 use ee::models::MemoryScope;
@@ -134,10 +134,30 @@ fn pack_guard_options(
 #[test]
 fn production_pack_suppresses_one_side_of_explicit_contradiction() -> TestResult {
     let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
-    let workspace_path = temp_dir.path().to_path_buf();
-    let database_path = db_path(&workspace_path);
-    fs::create_dir_all(database_path.parent().ok_or("missing db parent")?)
+    let workspace_path = temp_dir
+        .path()
+        .canonicalize()
         .map_err(|error| error.to_string())?;
+    let database_path = db_path(&workspace_path);
+    let initialized = init_workspace(&InitOptions {
+        workspace_path: workspace_path.clone(),
+        dry_run: false,
+        repair_plan: false,
+        force: false,
+        allow_symlink: false,
+        skip_boilerplate: true,
+    });
+    assert_eq!(
+        initialized.status,
+        InitStatus::Created,
+        "contradiction pack fixture must initialize successfully: {:?}",
+        initialized.action_errors,
+    );
+    assert!(
+        initialized.action_errors.is_empty(),
+        "contradiction pack fixture cannot ignore initialization errors: {:?}",
+        initialized.action_errors,
+    );
 
     let first = remember_pack_guard_fixture(
         &workspace_path,

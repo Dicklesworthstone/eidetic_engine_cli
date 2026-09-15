@@ -168,6 +168,25 @@ fn error_envelope_not_found() -> TestResult {
     let json = error_response_json(&error);
     verify_error_envelope(&json)?;
     let value: Value = parse_error_json(&json)?;
+    let recovery = value
+        .pointer("/error/details/recovery")
+        .and_then(Value::as_array)
+        .ok_or("missing memory recovery actions")?;
+    if recovery.len() != 3
+        || recovery[0]["priority"] != 1
+        || recovery[0]["kind"] != "broaden"
+        || recovery[0]["command"] != "ee memory list --workspace . --json"
+        || recovery[1]["priority"] != 2
+        || recovery[1]["kind"] != "flag"
+        || recovery[1]["flagName"] != "--workspace"
+        || recovery[1]["valueHint"] != "<path>"
+        || recovery[1].get("command").is_some()
+        || recovery[2]["priority"] != 3
+        || recovery[2]["kind"] != "narrow"
+        || recovery[2]["command"] != "ee search '<terms>' --workspace . --json"
+    {
+        return Err(format!("memory recovery actions drifted: {recovery:?}"));
+    }
     let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
     assert_snapshot!("error_envelope_not_found", value);
     Ok(())

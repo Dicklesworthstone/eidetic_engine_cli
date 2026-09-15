@@ -143,7 +143,7 @@ fn run_linter(root: &Path) -> Result<(Output, Value), String> {
 }
 
 fn run_linter_with_env(root: &Path, envs: &[(&str, &str)]) -> Result<(Output, Value), String> {
-    let mut command = Command::new("sh");
+    let mut command = Command::new("bash");
     command
         .arg(script_path())
         .args(["--audit", "--json"])
@@ -158,8 +158,13 @@ fn run_linter_with_env(root: &Path, envs: &[(&str, &str)]) -> Result<(Output, Va
         .map_err(|error| format!("run closure-lint.sh: {error}"))?;
 
     let report_path = root.join(".closure-lint-report.json");
-    let report = fs::read(&report_path)
-        .map_err(|error| format!("read {}: {error}", report_path.display()))?;
+    let report = fs::read(&report_path).map_err(|error| {
+        format!(
+            "read {}: {error}; {}",
+            report_path.display(),
+            output_excerpt(&output)
+        )
+    })?;
     let report_json: Value = serde_json::from_slice(&report)
         .map_err(|error| format!("parse {}: {error}", report_path.display()))?;
     Ok((output, report_json))

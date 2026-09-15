@@ -54,7 +54,7 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 /// as long as the probe takes (or its 5s deadline on failure).
 fn run_daemon_start(socket_path: &Path) -> Result<Value, String> {
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(["daemon", "start", "--socket"])
+        .args(["daemon", "start", "--json", "--socket"])
         .arg(socket_path)
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
@@ -79,7 +79,7 @@ fn run_daemon_start(socket_path: &Path) -> Result<Value, String> {
 
 fn run_daemon_stop(socket_path: &Path) -> Result<Value, String> {
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(["daemon", "stop", "--socket"])
+        .args(["daemon", "stop", "--json", "--socket"])
         .arg(socket_path)
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())

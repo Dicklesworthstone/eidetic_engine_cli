@@ -1491,12 +1491,7 @@ fn boundary_log_detects_unexpected_mutation() -> TestResult {
     let mutation_dir = unique_dossier_dir("boundary-logging-mutation")?.join("status");
     fs::create_dir_all(&mutation_dir).map_err(|error| error.to_string())?;
     let clean_output = run_ee(&["--json", "status"])?;
-    fs::write(
-        mutation_dir.join("stdout"),
-        b"{\"schema\":\"ee.response.v1\",\"success\":true,\"data\":{}}\n",
-    )
-    .map_err(|error| error.to_string())?;
-    fs::write(mutation_dir.join("stderr"), b"").map_err(|error| error.to_string())?;
+    write_step_artifacts(&mutation_dir, &clean_output)?;
 
     let started = unix_ms_now()?;
     let ended = unix_ms_now()?;
@@ -1559,12 +1554,7 @@ fn boundary_log_requires_forbidden_filesystem_operation_check() -> TestResult {
     let check_dir = unique_dossier_dir("boundary-logging-forbidden-fs-check")?.join("status");
     fs::create_dir_all(&check_dir).map_err(|error| error.to_string())?;
     let clean_output = run_ee(&["--json", "status"])?;
-    fs::write(
-        check_dir.join("stdout"),
-        b"{\"schema\":\"ee.response.v1\",\"success\":true,\"data\":{}}\n",
-    )
-    .map_err(|error| error.to_string())?;
-    fs::write(check_dir.join("stderr"), b"").map_err(|error| error.to_string())?;
+    write_step_artifacts(&check_dir, &clean_output)?;
 
     let mut record = make_record(&check_dir, &clean_output, "ee.response.v2")?;
     record.forbidden_filesystem_operations_checked = false;

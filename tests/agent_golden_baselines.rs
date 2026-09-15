@@ -580,7 +580,9 @@ fn normalize_doctor_toon_for_golden(text: &str) -> String {
 }
 
 fn normalize_status_toon_for_golden(text: &str) -> String {
-    scrub_toon_version_leaf(text.trim())
+    // Keep the placeholder in the encoder's canonical string syntax so the
+    // retained status fixture can also exercise a full TOON roundtrip.
+    scrub_toon_leaf(text.trim(), "version", "\"<scrubbed:eeVersion>\"")
 }
 
 fn scrub_toon_version_leaf(text: &str) -> String {
@@ -3273,6 +3275,12 @@ fn doctor_full_host_canonicalization_uses_full_profile_shape() -> TestResult {
 fn toon_normalizers_preserve_typed_blocks() -> TestResult {
     let input = "data:\n  version: 0.0.0-test\n  qos:\n    activeRecords[0]:\n  rchWorkerPressure:\n    workerCount: 0\n    workers[0]:\n  hostCalibration:\n    budgetDeltas[0]:\n  advisories[0]:\n  checks[1]:\n    - name: fixture\n      severity: warning\n      message: Keep this exact message template.";
     let normalized = normalize_doctor_toon_for_golden(input);
+    let normalized_status = normalize_status_toon_for_golden(input);
+    ensure_contains(
+        &normalized_status,
+        "  version: \"<scrubbed:eeVersion>\"\n",
+        "status version placeholder uses canonical TOON quoting",
+    )?;
     for expected in [
         "  qos:\n",
         "  rchWorkerPressure:\n",

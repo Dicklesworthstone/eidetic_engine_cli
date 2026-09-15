@@ -509,7 +509,7 @@ fn multiprocess_snapshot_writer_helper() -> TestResult {
 }
 
 #[test]
-fn corrupt_index_metadata_search_reports_corrupt_degradation() -> TestResult {
+fn corrupt_index_metadata_requires_rebuild_before_search() -> TestResult {
     let artifact_dir = unique_artifact_dir("corrupt-index-metadata")?;
     let workspace = artifact_dir.join("workspace");
     fs::create_dir_all(&workspace)

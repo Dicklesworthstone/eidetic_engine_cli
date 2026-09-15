@@ -559,15 +559,19 @@ fn decimal_width_boundary_envelope() -> Result<ee::core::context_delta::ContextD
 }
 
 #[test]
-fn transport_decimal_width_cycle_refuses_an_unverified_delta_size() -> TestResult {
+fn transport_decimal_width_cycle_recovers_with_exact_numeric_padding() -> TestResult {
     let mut envelope = decimal_width_boundary_envelope()?;
     for (reported, saved, percent, emitted) in [(1213, 9723, 88.91, 1214), (1214, 9722, 88.9, 1213)]
     {
         envelope.data.token_savings.delta_bytes = reported;
         envelope.data.token_savings.saved_bytes = saved;
         envelope.data.token_savings.saved_percent = percent;
+        // Reproduce the old shortest-decimal representation independently of
+        // the corrected serializer, so the original defect remains explicit.
+        let mut shortest = serde_json::to_value(&envelope).map_err(|error| error.to_string())?;
+        shortest["data"]["tokenSavings"]["savedPercent"] = serde_json::json!(percent);
         assert_eq!(
-            serde_json::to_vec(&envelope)
+            serde_json::to_vec(&shortest)
                 .map_err(|error| error.to_string())?
                 .len() as u64
                 + 1,
@@ -576,17 +580,26 @@ fn transport_decimal_width_cycle_refuses_an_unverified_delta_size() -> TestResul
         );
         assert_ne!(reported, emitted);
     }
-    let error = envelope
+    let measured = envelope
         .finalize_with_budget_and_transport_overhead(None, 1)
-        .expect_err("a non-converging emission must not return a stale size");
-    assert!(error.to_string().contains("did not converge"), "{error}");
-    assert!(
-        !envelope.emits_delta(),
-        "an unmeasured delta must be withheld"
-    );
+        .map_err(|error| format!("decimal padding must recover the real delta: {error}"))?;
+    assert!(envelope.emits_delta());
+    assert_eq!(measured, 1214);
+    assert_eq!(envelope.data.token_savings.delta_bytes, measured);
+    assert_eq!(envelope.data.token_savings.saved_bytes, 9722);
+    assert_eq!(envelope.data.token_savings.saved_percent, 88.9);
+    let serialized = serde_json::to_vec(&envelope).map_err(|error| error.to_string())?;
+    assert_eq!(measured, serialized.len() as u64 + 1);
     assert_eq!(
-        envelope.data.server_decision.fallback_reason,
-        Some(ee::core::context_delta::ContextDeltaFallbackReason::ComputeBudgetExceeded),
+        envelope
+            .finalize_with_budget_and_transport_overhead(Some(measured), 1)
+            .map_err(|error| format!("exact-budget repeat must preserve the delta: {error}"))?,
+        measured,
+    );
+    assert!(envelope.emits_delta());
+    assert_eq!(
+        serde_json::to_vec(&envelope).map_err(|error| error.to_string())?,
+        serialized,
     );
     Ok(())
 }
@@ -596,7 +609,7 @@ fn transport_decimal_width_fixed_point_reports_exact_emission_bytes() -> TestRes
     let mut envelope = decimal_width_boundary_envelope()?;
     // A nearby full-pack size moves savedPercent away from the decimal-width
     // discontinuity; this positive case must retain a usable delta.
-    envelope.data.token_savings.full_bytes = 10_940;
+    envelope.data.token_savings.full_bytes = 10_942;
     let measured = envelope
         .finalize_with_budget_and_transport_overhead(None, 1)
         .map_err(|error| format!("stable decimal-width envelope: {error}"))?;

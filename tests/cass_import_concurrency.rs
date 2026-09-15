@@ -41,6 +41,7 @@ fn cass_import_redacts_sensitive_spans_and_rerun_is_idempotent() -> TestResult {
     fs::write(
         &view_json_path,
         serde_json::json!({
+            "total_lines": 1,
             "lines": [{
                 "line": 1,
                 "content": sensitive.session_line,
@@ -475,7 +476,7 @@ case "$cmd" in
       cat "$EE_FAKE_CASS_VIEW_JSON_PATH"
       exit 0
     fi
-    printf '{"lines":[{"line":1,"content":"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"remember this\"}}"}]}\n'
+    printf '%s\n' '{"total_lines":1,"lines":[{"line":1,"content":"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"remember this\"}}"}]}'
     ;;
   *)
     echo "unexpected cass command: $cmd" >&2

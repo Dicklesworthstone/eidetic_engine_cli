@@ -544,6 +544,8 @@ fn search_cursor_drain_partitions_exactly() -> TestResult {
             "release workflow clippy",
             "--limit",
             "8",
+            "--fields",
+            "minimal",
             "--json",
         ],
     )?;
@@ -555,22 +557,53 @@ fn search_cursor_drain_partitions_exactly() -> TestResult {
             full_ids.len()
         ),
     )?;
-    let (drained, _) = drain_ids(
+    let (drained, pages) = drain_ids(
         &workspace,
         &[
             "search",
             "release workflow clippy",
             "--limit",
             "8",
+            "--fields",
+            "minimal",
             "--max-output-tokens",
-            "2500",
+            "1000",
             "--json",
         ],
         "/data/results",
         "docId",
         &full_ids,
     )?;
-    assert_exact_partition(&drained, &full_ids, "search")
+    ensure(
+        pages > 1,
+        "minimal search must exercise real cursor pagination",
+    )?;
+    assert_exact_partition(&drained, &full_ids, "search")?;
+
+    let rejected = run_ee_in(
+        &workspace,
+        &[
+            "search",
+            "release workflow clippy",
+            "--limit",
+            "8",
+            "--fields",
+            "minimal",
+            "--max-output-tokens",
+            "1000",
+            "--cursor",
+            "not-a-valid-cursor",
+            "--json",
+        ],
+    )?;
+    ensure(
+        element_ids(&rejected, "/data/results", "docId").is_empty(),
+        "minimal search must not restart on a forged cursor",
+    )?;
+    ensure(
+        degraded_entry_with_code(&rejected, "cursor_invalid").is_some(),
+        "minimal search must report its forged cursor as invalid",
+    )
 }
 
 // ============================================================================

@@ -12,7 +12,57 @@ expression: value
     "repairKind": "actionable",
     "details": {
       "resource": "memory",
-      "id": "mem_00000000000000000000000099"
+      "id": "mem_00000000000000000000000099",
+      "recovery": [
+        {
+          "priority": 1,
+          "kind": "broaden",
+          "rationale": "List known memories in the active workspace to discover the current ID.",
+          "riskClass": "read_only_probe",
+          "requiresHumanApproval": false,
+          "mutatesExternalState": false,
+          "mutatesTrackerState": false,
+          "privacyClass": "bounded_command_no_raw_state",
+          "evidence": [
+            "read_only_probe_command"
+          ],
+          "command": "ee memory list --workspace . --json"
+        },
+        {
+          "priority": 2,
+          "kind": "flag",
+          "rationale": "Point at the workspace that owns the memory ID.",
+          "riskClass": "read_only_probe",
+          "requiresHumanApproval": false,
+          "mutatesExternalState": false,
+          "mutatesTrackerState": false,
+          "privacyClass": "metadata_only",
+          "evidence": [
+            "recovery_kind_without_command"
+          ],
+          "valueHint": "<path>",
+          "flagName": "--workspace"
+        },
+        {
+          "priority": 3,
+          "kind": "narrow",
+          "rationale": "Search by nearby content or provenance when the copied ID is stale.",
+          "riskClass": "approval_required_repair",
+          "preflightCommand": "ee preflight check --cmd 'ee search '\\''<terms>'\\'' --workspace . --json' --workspace . --json",
+          "requiresHumanApproval": true,
+          "mutatesExternalState": false,
+          "mutatesTrackerState": false,
+          "privacyClass": "bounded_command_no_raw_state",
+          "manualStep": "Classify this repair before running it.",
+          "evidence": [
+            "unknown_repair_command"
+          ],
+          "preconditions": [
+            "human_or_policy_review_required"
+          ],
+          "command": "ee search '<terms>' --workspace . --json"
+        }
+      ]
     }
   }
 }

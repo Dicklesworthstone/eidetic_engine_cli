@@ -29,7 +29,7 @@ fn global_memory_input(workspace_id: &str, content: &str) -> CreateMemoryInput {
         utility: 0.0,
         importance: 0.0,
         provenance_uri: None,
-        trust_class: "self".to_owned(),
+        trust_class: "agent_assertion".to_owned(),
         trust_subclass: None,
         tags: vec!["global".to_owned()],
         valid_from: None,
@@ -58,7 +58,7 @@ fn global_store_persists_across_independent_opens_and_isolates_roots() {
         assert_eq!(workspace_id, global_workspace_id(&paths));
         connection
             .insert_memory(
-                "mem_e2e_global0000000000000000001",
+                "mem_00000000000000000000000001",
                 &global_memory_input(&workspace_id, "prefer X over Y across all repos"),
             )
             .expect("insert global memory");
@@ -67,6 +67,8 @@ fn global_store_persists_across_independent_opens_and_isolates_roots() {
     // Invocation 2: a fresh open of the same on-disk store reads it back.
     let memories = read_global_store_memories(&paths, false).expect("read global store");
     assert_eq!(memories.len(), 1, "global memory persisted across opens");
+    assert_eq!(memories[0].id, "mem_00000000000000000000000001");
+    assert_eq!(memories[0].trust_class, "agent_assertion");
     assert_eq!(memories[0].content, "prefer X over Y across all repos");
 
     // Re-opening is idempotent: the stable global workspace id is unchanged.
@@ -109,6 +111,246 @@ fn stdout_json(output: Output, context: &str) -> Result<serde_json::Value, Strin
         .map_err(|error| format!("{context}: stdout was not UTF-8: {error}"))?;
     serde_json::from_str(&stdout)
         .map_err(|error| format!("{context}: stdout was not JSON: {error}\nstdout: {stdout}"))
+}
+
+#[test]
+fn global_memory_policy_errors_never_enable_promotion_or_retrieval() -> TestResult {
+    let retained = tempfile::Builder::new()
+        .prefix("ee-global-policy-")
+        .tempdir()
+        .map_err(|error| error.to_string())?
+        .keep();
+    let root = std::fs::canonicalize(retained).map_err(|error| error.to_string())?;
+    let workspace = root.join("workspace");
+    let data = root.join("data");
+    std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&data).map_err(|error| error.to_string())?;
+    eprintln!("retained global privacy policy fixture: {}", root.display());
+    let run = |label: &str, args: &[&str]| -> Result<(i32, serde_json::Value), String> {
+        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .current_dir(&workspace)
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("--json")
+            .args(args)
+            .env("XDG_DATA_HOME", &data)
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .env_remove("EE_WORKSPACE")
+            .env_remove("EE_WORKSPACE_REGISTRY")
+            .env_remove("EE_DATABASE_PATH")
+            .env_remove("EE_INDEX_DIR")
+            .env_remove("EE_EMBED_MODEL_DIR")
+            .env_remove("EE_EMBED_MODEL_PATH")
+            .env_remove("FRANKENSEARCH_MODEL_DIR")
+            .output()
+            .map_err(|error| format!("{label}: {error}"))?;
+        std::fs::write(root.join(format!("{label}.stdout.json")), &output.stdout)
+            .map_err(|error| error.to_string())?;
+        std::fs::write(root.join(format!("{label}.stderr")), &output.stderr)
+            .map_err(|error| error.to_string())?;
+        assert!(output.stderr.is_empty(), "{label}: {:?}", output);
+        let value = serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("{label}: {error}; output={output:?}"))?;
+        Ok((output.status.code().ok_or("CLI killed by signal")?, value))
+    };
+    let (code, initialized) = run("init", &["init"])?;
+    assert_eq!(code, 0, "{initialized}");
+    let (code, local) = run(
+        "remember-local",
+        &[
+            "remember",
+            "Local promotion policy fixture.",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+        ],
+    )?;
+    assert_eq!(code, 0, "{local}");
+    let local_id = local["data"]["memory_id"]
+        .as_str()
+        .ok_or("missing local ID")?;
+    let (code, global) = run(
+        "remember-global",
+        &[
+            "remember",
+            "Globalpolicysentinel applies across projects.",
+            "--global",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+        ],
+    )?;
+    assert_eq!(code, 0, "{global}");
+    let global_id = global["data"]["memory_id"]
+        .as_str()
+        .ok_or("missing global ID")?;
+    let (code, indexed) = run("index-local", &["index", "rebuild"])?;
+    assert_eq!(code, 0, "{indexed}");
+
+    let promotion = ["memory", "promote-global", local_id, "--dry-run"];
+    let search = [
+        "search",
+        "Globalpolicysentinel",
+        "--source-mode",
+        "lexical-only",
+    ];
+    let pack = [
+        "pack",
+        "Local promotion policy fixture",
+        "--source-mode",
+        "lexical-only",
+        "--read-only",
+        "--max-tokens",
+        "4000",
+    ];
+    let why_not = [
+        "why-not",
+        local_id,
+        "--task",
+        "Local promotion policy fixture",
+        "--max-tokens",
+        "4000",
+    ];
+    let check_local_retrieval = |label: &str| -> TestResult {
+        let (code, packed) = run(&format!("{label}-pack"), &pack)?;
+        assert_eq!(code, 0, "{packed}");
+        assert_eq!(packed["success"], true, "{packed}");
+        let item = packed
+            .pointer("/data/pack/items")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|items| items.iter().find(|item| item["memoryId"] == local_id))
+            .ok_or_else(|| format!("local memory missing from pack: {packed}"))?;
+        assert_eq!(item["content"], "Local promotion policy fixture.");
+        assert!(
+            item["why"]
+                .as_str()
+                .is_some_and(|why| !why.trim().is_empty()),
+            "{item}"
+        );
+        let (code, explained) = run(&format!("{label}-why-not"), &why_not)?;
+        assert_eq!(code, 0, "{explained}");
+        assert_eq!(explained["success"], true, "{explained}");
+        assert_eq!(explained["data"]["memoryId"], local_id);
+        assert_eq!(explained["data"]["selected"], true, "{explained}");
+        assert_eq!(explained["data"]["reasonSource"], "authoritative");
+        Ok(())
+    };
+    let config = workspace.join(".ee/config.toml");
+    if config.exists() {
+        std::fs::rename(&config, root.join("initial-config.retained.toml"))
+            .map_err(|error| error.to_string())?;
+    }
+    let (code, allowed) = run("missing-policy-promotion", &promotion)?;
+    assert_eq!(code, 0, "{allowed}");
+    assert_eq!(allowed["data"]["report"]["plan"]["verdict"], "allow");
+    assert_eq!(allowed["data"]["report"]["executed"], false);
+    let (code, found) = run("missing-policy-search", &search)?;
+    assert_eq!(code, 0, "{found}");
+    assert!(
+        found["data"]["results"]
+            .as_array()
+            .ok_or("results missing")?
+            .iter()
+            .any(|hit| hit["memoryId"] == global_id),
+        "{found}"
+    );
+    check_local_retrieval("missing-policy")?;
+
+    std::fs::write(
+        &config,
+        "[memory]\ninclude_global = false\nparticipate = false\n",
+    )
+    .map_err(|error| error.to_string())?;
+    let (code, denied) = run("disabled-policy-promotion", &promotion)?;
+    assert_eq!(code, 7, "{denied}");
+    assert_eq!(denied["error"]["code"], "policy_denied");
+    assert_eq!(
+        denied["error"]["details"]["plan"]["detail"]["code"],
+        "global_lane_unavailable"
+    );
+    assert_eq!(denied["error"]["details"]["executed"], false);
+    let (code, excluded) = run("disabled-policy-search", &search)?;
+    assert_eq!(code, 0, "{excluded}");
+    assert!(
+        excluded["data"]["results"]
+            .as_array()
+            .ok_or("results missing")?
+            .iter()
+            .all(|hit| hit["memoryId"] != global_id),
+        "{excluded}"
+    );
+    check_local_retrieval("disabled-policy")?;
+    std::fs::rename(&config, root.join("disabled-config.retained.toml"))
+        .map_err(|error| error.to_string())?;
+
+    let check_refusal = |label: &str| -> TestResult {
+        for (operation, args) in [
+            ("promotion", promotion.as_slice()),
+            ("search", search.as_slice()),
+            ("pack", pack.as_slice()),
+            ("why-not", why_not.as_slice()),
+        ] {
+            let (code, error) = run(&format!("{label}-{operation}"), args)?;
+            assert_eq!(code, 2, "{error}");
+            assert_eq!(error["schema"], "ee.error.v2");
+            assert_eq!(error["error"]["code"], "configuration");
+            assert!(
+                error["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("memory privacy policy")),
+                "{error}"
+            );
+            assert!(
+                error["error"]["repair"]
+                    .as_str()
+                    .is_some_and(|repair| repair.contains("config.toml")),
+                "{error}"
+            );
+            assert!(error.get("data").is_none(), "{error}");
+            assert!(!error.to_string().contains(local_id), "{error}");
+            assert!(!error.to_string().contains(global_id), "{error}");
+            assert!(
+                !error.to_string().contains("private-policy-value"),
+                "{error}"
+            );
+        }
+        Ok(())
+    };
+    std::fs::write(&config, "[memory]\ninclude_global = false\nparticipate = false\ninvalid = [\"private-policy-value\"\n")
+        .map_err(|error| error.to_string())?;
+    check_refusal("malformed-policy")?;
+    std::fs::rename(&config, root.join("malformed-config.retained.toml"))
+        .map_err(|error| error.to_string())?;
+    // A real bounded file read fails for invalid UTF-8 even when tests run as
+    // root, unlike permission-bit fixtures that root can still read.
+    std::fs::write(&config, [0xff, 0xfe]).map_err(|error| error.to_string())?;
+    check_refusal("unreadable-policy")?;
+    std::fs::rename(&config, root.join("unreadable-config.retained.toml"))
+        .map_err(|error| error.to_string())?;
+    std::fs::create_dir(&config).map_err(|error| error.to_string())?;
+    check_refusal("nonfile-policy")?;
+    #[cfg(unix)]
+    {
+        std::fs::rename(&config, root.join("nonfile-config.retained"))
+            .map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(root.join("disabled-config.retained.toml"), &config)
+            .map_err(|error| error.to_string())?;
+        check_refusal("symlink-policy")?;
+    }
+
+    let paths = GlobalStorePaths::from_data_root(&data.join("ee"));
+    let memories = read_global_store_memories(&paths, false)?;
+    assert_eq!(
+        memories.len(),
+        1,
+        "dry-run must never promote the local memory"
+    );
+    assert_eq!(memories[0].id, global_id);
+    Ok(())
 }
 
 #[test]
