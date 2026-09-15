@@ -10813,15 +10813,15 @@ impl DbConnection {
         if !self.migration_table_exists()? {
             return Ok(true);
         }
-        self.validate_applied_migrations()?;
-
-        for migration in MIGRATIONS {
-            if !self.has_migration(migration.version)? {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
+        // Validate and inspect the same ledger snapshot. Re-querying every
+        // compiled version adds a database round trip per migration and can
+        // observe a different ledger from the one whose checksums we checked.
+        let applied = self.applied_migrations()?;
+        validate_applied_migration_records(&applied)?;
+        let versions: BTreeSet<_> = applied.iter().map(MigrationRecord::version).collect();
+        Ok(MIGRATIONS
+            .iter()
+            .any(|migration| !versions.contains(&migration.version)))
     }
 
     /// Return the current schema version (highest applied migration).
@@ -45049,6 +45049,78 @@ mod tests {
             "migrated database does not need migration",
         )?;
 
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn needs_migration_preserves_gaps_drift_and_newer_ledger_refusals() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let complete = connection.applied_migrations()?;
+        ensure(
+            !connection.needs_migration()?,
+            "the complete, validated ledger must be current",
+        )?;
+        ensure_equal(
+            &connection.applied_migrations()?,
+            &complete,
+            "inspection must not change the migration ledger",
+        )?;
+
+        let missing = &complete[1];
+        connection.execute_for(
+            DbOperation::Execute,
+            "DELETE FROM ee_schema_migrations WHERE version = ?1",
+            &[Value::BigInt(i64::from(missing.version()))],
+        )?;
+        ensure(
+            connection.needs_migration()?,
+            "an interior ledger gap must be detected even when the latest version exists",
+        )?;
+
+        let first = &complete[0];
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE ee_schema_migrations SET name = ?1 WHERE version = ?2",
+            &[
+                Value::Text("incorrect migration name".to_owned()),
+                Value::BigInt(i64::from(first.version())),
+            ],
+        )?;
+        ensure_migration_drift(
+            connection.needs_migration(),
+            "drift must be rejected before reporting an otherwise missing migration",
+        )?;
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE ee_schema_migrations SET name = ?1 WHERE version = ?2",
+            &[
+                Value::Text(first.name().to_owned()),
+                Value::BigInt(i64::from(first.version())),
+            ],
+        )?;
+        connection.record_migration(missing)?;
+        ensure(
+            !connection.needs_migration()?,
+            "restoring the authentic ledger row must restore current status",
+        )?;
+
+        let newer_version = complete
+            .last()
+            .ok_or_else(|| TestFailure::new("migrate applied no versions"))?
+            .version()
+            + 1;
+        connection.record_migration(&MigrationRecord::new(
+            newer_version,
+            "migration from a newer producer",
+            "blake3:future",
+            "2026-09-15T00:00:00Z",
+        )?)?;
+        ensure_migration_drift(
+            connection.needs_migration(),
+            "an unknown newer migration must not be accepted as current",
+        )?;
         connection.close()?;
         Ok(())
     }
