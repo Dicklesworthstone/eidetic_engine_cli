@@ -32,8 +32,8 @@ use std::path::{Component, Path, PathBuf};
 use chrono::Utc;
 
 use crate::core::primer::{
-    PrimerFormat, PrimerReport, PrimerSection, primer_settings_from_workspace,
-    run_primer_with_persistence,
+    PrimerFormat, PrimerRedactionSkip, PrimerReport, PrimerSection,
+    primer_settings_from_workspace, run_primer_with_persistence,
 };
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
@@ -851,6 +851,9 @@ pub struct AgentsmdExportReport {
     pub warnings_count: usize,
     /// Primer redaction skip count carried through for honesty.
     pub redaction_skipped: u32,
+    /// The memories behind `redaction_skipped` and the detector keyword that
+    /// withheld each one.
+    pub redaction_skipped_memories: Vec<PrimerRedactionSkip>,
     /// Dry-run block replacement preview; `null` otherwise.
     pub diff: Option<String>,
     pub degraded: Vec<AgentsmdDegradation>,
@@ -874,6 +877,10 @@ impl AgentsmdExportReport {
             "rulesCount": self.rules_count,
             "warningsCount": self.warnings_count,
             "redactionSkipped": self.redaction_skipped,
+            "redactionSkippedMemories": self.redaction_skipped_memories.iter().map(|skip| serde_json::json!({
+                "memoryId": &skip.memory_id,
+                "pattern": &skip.pattern,
+            })).collect::<Vec<_>>(),
             "diff": self.diff,
             "degraded": self.degraded.iter().map(AgentsmdDegradation::data_json).collect::<Vec<_>>(),
         })
@@ -1250,6 +1257,7 @@ pub fn run_agentsmd_export(
         rules_count: section_count("rules"),
         warnings_count: section_count("warnings"),
         redaction_skipped: primer.meta.skipped.redaction,
+        redaction_skipped_memories: primer.meta.redaction_skips.clone(),
         diff: None,
         degraded: Vec::new(),
     };
@@ -2235,10 +2243,29 @@ pub fn run_agentsmd_drift(
     }
 
     // Memory rules absent from the file: primer-selected rules with no
-    // sufficiently similar statement anywhere in the file (managed block
-    // included — presence inside the block counts as presence).
+    // counterpart anywhere in the file (managed block included — presence
+    // inside the block counts as presence). Export writes each rule as its
+    // exact primer line, cut at PRIMER_LINE_MAX_CHARS, so that verbatim line
+    // is presence even when the prefix no longer embeds near the full memory
+    // body; hand-written paraphrases fall back to similarity.
     let primer = assemble_bridge_primer(connection, workspace_id, workspace_path, None)?;
+    let file_lines: BTreeSet<&str> = content
+        .lines()
+        .map(|line| strip_bullet_prefix(line).unwrap_or(line).trim())
+        .collect();
     let all_statements = parse_rule_statements(&content, None);
+    // Re-exporting only helps when it would rewrite the block: an untouched
+    // block already at this generation with the body export would render is
+    // exactly what `ee export agentsmd` writes again.
+    let export_is_noop = match &scan {
+        ManagedBlockScan::Found(block) => {
+            let body_hash = managed_block_body_hash(&block.body);
+            block.generation == Some(primer.db_generation)
+                && block.recorded_hash.as_deref() == Some(body_hash.as_str())
+                && body_hash == managed_block_body_hash(&render_managed_body(&primer.sections))
+        }
+        ManagedBlockScan::Missing => false,
+    };
     let duplicate_threshold = duplicate_similarity_threshold(workspace_path);
     let memory_content_by_id: std::collections::BTreeMap<&str, &str> = memories
         .iter()
@@ -2254,17 +2281,21 @@ pub fn run_agentsmd_drift(
             let Some(memory_content) = memory_content_by_id.get(item.memory_id.as_str()) else {
                 continue;
             };
-            let memory_embedding = embedder.embed_sync(memory_content);
-            let present = all_statements.iter().any(|statement| {
-                let statement_embedding = embedder.embed_sync(&statement.text);
-                cosine_similarity(&memory_embedding, &statement_embedding)
-                    .is_some_and(|similarity| similarity >= duplicate_threshold)
-            });
+            let present = file_lines.contains(item.line.as_str()) || {
+                let memory_embedding = embedder.embed_sync(memory_content);
+                all_statements.iter().any(|statement| {
+                    let statement_embedding = embedder.embed_sync(&statement.text);
+                    cosine_similarity(&memory_embedding, &statement_embedding)
+                        .is_some_and(|similarity| similarity >= duplicate_threshold)
+                })
+            };
             if !present {
-                push_unique(
-                    &mut report.suggested_commands,
-                    "ee export agentsmd --workspace .".to_owned(),
-                );
+                if !export_is_noop {
+                    push_unique(
+                        &mut report.suggested_commands,
+                        "ee export agentsmd --workspace .".to_owned(),
+                    );
+                }
                 report.missing_rules.push(AgentsmdMissingRuleFinding {
                     memory_id: item.memory_id.clone(),
                     line: item.line.clone(),

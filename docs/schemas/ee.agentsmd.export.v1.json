@@ -19,6 +19,7 @@
     "rulesCount",
     "warningsCount",
     "redactionSkipped",
+    "redactionSkippedMemories",
     "diff",
     "degraded"
   ],
@@ -79,6 +80,23 @@
       "type": "integer",
       "minimum": 0,
       "description": "Primer redaction skip count carried through for honesty (skipped, never leaked)."
+    },
+    "redactionSkippedMemories": {
+      "type": "array",
+      "description": "One entry per memory counted in redactionSkipped, in primer candidate order: the memory id and the secret-detector keyword that withheld it. Never carries the memory body.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["memoryId", "pattern"],
+        "properties": {
+          "memoryId": { "type": "string", "minLength": 1 },
+          "pattern": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Detector keyword that matched, for example password, secret, credential, or token."
+          }
+        }
+      }
     },
     "diff": {
       "type": ["string", "null"],
