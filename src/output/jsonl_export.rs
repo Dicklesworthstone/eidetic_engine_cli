@@ -87,11 +87,25 @@ const SENSITIVE_PATH_PREFIXES: &[&str] = &[
 /// Check if content contains patterns that suggest secrets.
 #[must_use]
 pub fn contains_secret_pattern(content: &str) -> bool {
+    secret_pattern_match(content).is_some()
+}
+
+/// The first secret-suggesting keyword `content` matches, if any. The
+/// keyword comes from the fixed detector vocabulary, so callers can report
+/// why a body was withheld without echoing the body itself.
+#[must_use]
+pub fn secret_pattern_match(content: &str) -> Option<&'static str> {
     let lower = content.to_lowercase();
-    SECRET_SUBSTRINGS.iter().any(|pat| lower.contains(pat))
-        || SECRET_CONTEXT_KEYS
-            .iter()
-            .any(|key| contains_secret_key_with_value(&lower, key))
+    SECRET_SUBSTRINGS
+        .iter()
+        .copied()
+        .find(|pat| lower.contains(pat))
+        .or_else(|| {
+            SECRET_CONTEXT_KEYS
+                .iter()
+                .copied()
+                .find(|key| contains_secret_key_with_value(&lower, key))
+        })
 }
 
 fn contains_export_secret_pattern(content: &str) -> bool {

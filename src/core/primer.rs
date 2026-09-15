@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::db::{DbConnection, GraphSnapshotStatus, GraphSnapshotType, MemoryLinkRelation};
-use crate::output::jsonl_export::contains_secret_pattern;
+use crate::output::jsonl_export::secret_pattern_match;
 
 /// Response payload schema carried under `ee.response.v2` `data.primer`.
 pub const PRIMER_SCHEMA_V1: &str = "ee.primer.v1";
@@ -160,12 +160,24 @@ pub struct PrimerSkipped {
     pub budget_floor: u32,
 }
 
+/// One memory withheld by the redaction gate: its id and the detector
+/// keyword that matched, never the body.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PrimerRedactionSkip {
+    pub memory_id: String,
+    /// Secret-detector keyword that matched (for example `password`).
+    pub pattern: String,
+}
+
 /// `ee.primer.v1` `meta`.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PrimerMeta {
     pub tokens_used: u32,
     pub skipped: PrimerSkipped,
     pub floors_engaged: Vec<String>,
+    /// Per-memory detail behind `skipped.redaction`, in candidate order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redaction_skips: Vec<PrimerRedactionSkip>,
 }
 
 /// One `degraded[]` entry the primer pipeline may emit.
@@ -332,6 +344,7 @@ pub fn assemble_primer(
 ) -> PrimerReport {
     let mut degraded = Vec::new();
     let mut skipped = PrimerSkipped::default();
+    let mut redaction_skips = Vec::new();
     let markdown = settings.format == PrimerFormat::Markdown;
 
     // Redaction gate first: a memory whose body would require redaction
@@ -340,12 +353,18 @@ pub fn assemble_primer(
     let admitted: Vec<&PrimerCandidate> = candidates
         .iter()
         .filter(|candidate| {
-            if settings.redact_secrets && contains_secret_pattern(&candidate.content) {
-                skipped.redaction += 1;
-                false
-            } else {
-                true
+            if !settings.redact_secrets {
+                return true;
             }
+            let Some(pattern) = secret_pattern_match(&candidate.content) else {
+                return true;
+            };
+            skipped.redaction += 1;
+            redaction_skips.push(PrimerRedactionSkip {
+                memory_id: candidate.memory_id.clone(),
+                pattern: pattern.to_owned(),
+            });
+            false
         })
         .collect();
 
@@ -560,6 +579,7 @@ pub fn assemble_primer(
             tokens_used,
             skipped,
             floors_engaged,
+            redaction_skips,
         },
         rendered_markdown,
     }
@@ -673,6 +693,9 @@ pub fn run_primer_with_global_lane(
             settings.format.as_str(),
         )?
         && let Ok(mut report) = serde_json::from_str::<PrimerReport>(&cached)
+        // Rows cached before per-memory skip detail existed carry only the
+        // count; reassemble instead of serving a count without its ids.
+        && (report.meta.skipped.redaction == 0 || !report.meta.redaction_skips.is_empty())
     {
         report.cache_hit = true;
         return Ok(report);
