@@ -668,6 +668,11 @@ Machine readers should inspect the JSON contract before trusting a result:
           "priority": 0,
           "kind": "migration",
           "rationale": "Apply pending local schema migrations.",
+          "riskClass": "mutating_local_repair",
+          "requiresHumanApproval": false,
+          "mutatesExternalState": false,
+          "mutatesTrackerState": false,
+          "privacyClass": "bounded_command_no_raw_state",
           "command": "ee migrate run --workspace ."
         }
       ]

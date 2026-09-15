@@ -135,24 +135,22 @@ Adapter fixtures:
 Every data-producing command must have a JSON contract before it is treated as
 stable. Golden files should include both successful and degraded responses.
 
-Required envelope fields for agent-native responses:
+Required fields for successful agent-native responses:
 
-- `schema`: versioned schema name such as `ee.response.v1`.
-- `command`: canonical command path and mode.
-- `success`: boolean success marker.
-- `data`: command-specific data when successful.
-- `error`: structured error when unsuccessful.
+- `schema`: `ee.response.v2`.
+- `success`: `true`.
+- `data`: command-specific data, including command identity and provenance
+  where relevant.
 - `degraded`: structured degradation list, even if empty.
-- `provenance`: references for selected memories, evidence, fixtures, or
-  artifacts where relevant.
 
-Error contracts must include:
+Errors use a separate `ee.error.v2` envelope with an `error` object containing:
 
 - stable `code`
 - human-readable `message`
 - `severity`
-- `repair` or `next_action` when a safe action exists
-- structured `details` for machine inspection
+- `repair` when an action exists
+- structured `details`, including `recovery[]` when repair guidance is present;
+  each recovery action includes its priority, kind, rationale, and safety metadata
 
 Human Markdown, compact text, TOON, Mermaid, MCP, hook, and future renderer
 outputs are adapters over the canonical domain data. They must not change

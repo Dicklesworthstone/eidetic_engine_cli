@@ -157,6 +157,11 @@ journal evidence in the background.
           "priority": 0,
           "kind": "rebuild",
           "rationale": "Rebuild the derived search index from the database.",
+          "riskClass": "idempotent_refresh",
+          "requiresHumanApproval": false,
+          "mutatesExternalState": false,
+          "mutatesTrackerState": false,
+          "privacyClass": "bounded_command_no_raw_state",
           "command": "ee index rebuild --workspace .",
           "resultsIn": "Search and context commands can satisfy indexed retrieval again."
         }
@@ -445,6 +450,11 @@ canonical JSON Schema document for the preflight command family.
           "priority": 0,
           "kind": "none",
           "rationale": "This route intentionally hands interpretation to the documented skill workflow.",
+          "riskClass": "unavailable_or_manual_only",
+          "requiresHumanApproval": true,
+          "mutatesExternalState": false,
+          "mutatesTrackerState": false,
+          "privacyClass": "no_command",
           "resultsIn": "The user follows the skill-owned classification path instead of a fabricated CLI result."
         }
       ]
@@ -481,6 +491,11 @@ canonical JSON Schema document for the preflight command family.
           "priority": 0,
           "kind": "none",
           "rationale": "No CLI recovery can create the missing isolated sandbox implementation.",
+          "riskClass": "unavailable_or_manual_only",
+          "requiresHumanApproval": true,
+          "mutatesExternalState": false,
+          "mutatesTrackerState": false,
+          "privacyClass": "no_command",
           "resultsIn": "Callers stop relying on rehearsal until the feature lands."
         }
       ]

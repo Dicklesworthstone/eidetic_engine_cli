@@ -51,13 +51,23 @@ All errors use this envelope:
 {
   "schema": "ee.error.v2",
   "error": {
-    "code": "error_code",
-    "message": "Human-readable description.",
+    "code": "search_index_unavailable",
+    "message": "Search index is stale or unavailable.",
     "severity": "medium",
-    "repair": "ee command to fix it",
+    "repair": "ee index rebuild --workspace .",
     "details": {
       "recovery": [
-        { "priority": 1, "kind": "command", "command": "ee command to fix it" }
+        {
+          "priority": 1,
+          "kind": "rebuild",
+          "rationale": "Rebuild the derived search index from the database.",
+          "riskClass": "idempotent_refresh",
+          "requiresHumanApproval": false,
+          "mutatesExternalState": false,
+          "mutatesTrackerState": false,
+          "privacyClass": "bounded_command_no_raw_state",
+          "command": "ee index rebuild --workspace ."
+        }
       ]
     }
   }

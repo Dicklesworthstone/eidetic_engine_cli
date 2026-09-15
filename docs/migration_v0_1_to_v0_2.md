@@ -520,8 +520,29 @@ for item in response["data"]["pack"]["items"]:
   "repair":"ee index rebuild --workspace .",
   "details":{
     "recovery":[
-      {"priority":1,"kind":"command","command":"ee index rebuild --workspace ."},
-      {"priority":2,"kind":"env","envName":"EE_INDEX_DIR","envValue":"<absolute path>"}
+      {
+        "priority":1,
+        "kind":"command",
+        "rationale":"Rebuild the derived search index from the database.",
+        "riskClass":"idempotent_refresh",
+        "requiresHumanApproval":false,
+        "mutatesExternalState":false,
+        "mutatesTrackerState":false,
+        "privacyClass":"bounded_command_no_raw_state",
+        "command":"ee index rebuild --workspace ."
+      },
+      {
+        "priority":2,
+        "kind":"env",
+        "rationale":"Select the intended existing index directory.",
+        "riskClass":"read_only_probe",
+        "requiresHumanApproval":false,
+        "mutatesExternalState":false,
+        "mutatesTrackerState":false,
+        "privacyClass":"metadata_only",
+        "envName":"EE_INDEX_DIR",
+        "valueHint":"<absolute path>"
+      }
     ]
   },
   "nonRecoverable":false
@@ -541,7 +562,7 @@ for action in recovery_actions:
         run(action["command"])
         break
     elif action["kind"] == "env":
-        os.environ[action["envName"]] = action["envValue"]
+        print(f'Set {action["envName"]} to a value matching {action["valueHint"]}')
 ```
 
 **Forward-compat.** A v0.1 consumer that ignores unknown fields keeps working against v0.2 because the recovery struct goes into `details`. A v0.1 consumer with `additionalProperties: false` in its own JSON Schema breaks; update the consumer's schema first.

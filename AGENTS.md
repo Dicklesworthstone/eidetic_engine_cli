@@ -594,6 +594,11 @@ Every machine-facing command emits one of:
           "priority": 0,
           "kind": "migration",
           "rationale": "Apply pending local schema migrations.",
+          "riskClass": "mutating_local_repair",
+          "requiresHumanApproval": false,
+          "mutatesExternalState": false,
+          "mutatesTrackerState": false,
+          "privacyClass": "bounded_command_no_raw_state",
           "command": "ee migrate run --workspace ."
         }
       ]
@@ -736,6 +741,11 @@ JSON error shape:
           "priority": 0,
           "kind": "rebuild",
           "rationale": "Rebuild the derived search index from the database generation.",
+          "riskClass": "idempotent_refresh",
+          "requiresHumanApproval": false,
+          "mutatesExternalState": false,
+          "mutatesTrackerState": false,
+          "privacyClass": "bounded_command_no_raw_state",
           "command": "ee index rebuild --workspace .",
           "resultsIn": "Search index generation catches up to the database."
         }
