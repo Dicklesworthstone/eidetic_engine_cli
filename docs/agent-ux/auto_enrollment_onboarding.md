@@ -124,6 +124,11 @@ Error path uses `ee.error.v2`:
           "priority": 0,
           "kind": "command",
           "rationale": "Start the local hello responder before retrying auto-enrollment.",
+          "riskClass": "approval_required_repair",
+          "requiresHumanApproval": true,
+          "mutatesExternalState": false,
+          "mutatesTrackerState": false,
+          "privacyClass": "bounded_command_no_raw_state",
           "command": "ee daemon --foreground"
         }
       ]
