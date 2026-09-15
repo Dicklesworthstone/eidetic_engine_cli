@@ -122,8 +122,19 @@ future changelog pass expands those rows into full capability sections.
   median pack latency of 8.23 seconds versus 16.60 seconds (50.4% lower).
   Responses matched after validating timing-only SLO fields; database/index
   bytes and timestamps stayed unchanged, with essentially unchanged peak memory.
-  A separate 100-candidate request still exceeded an internal deadline; these
-  fixture measurements do not establish a latency guarantee (#49).
+  Subsequent redaction optimizations also remove the larger-pool daemon
+  fallback described below. These fixture measurements do not establish a
+  latency guarantee (#49).
+- Skip impossible secret-key and PII matches before invoking the existing
+  matchers, and reuse lowercase text while it remains unchanged. Encoded keys
+  retain the exhaustive matcher; redaction spans, replacements and reasons
+  remain unchanged. On the same generated 245-note debug fixture, three warm
+  requests per pool measured median pack latency of 3.76 seconds for 20
+  candidates and 9.71 seconds for 100 candidates. The larger pool now completes
+  through the daemon within its existing retrieval deadline, with median peak
+  memory of 216 MiB. Exact handoff/output checks and database/index preservation
+  checks passed; cold startup and reporter-machine performance remain separate
+  measurements (#49).
 - Report elapsed pack SLO overruns through `elapsedStatus` and the aggregate
   `status`, while keeping deterministic resource evidence in `resourceStatus`.
   Timing does not change selected memories or pack hashes (#49).

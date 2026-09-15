@@ -2302,6 +2302,9 @@ fn detect_pii_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
         (r"\b\d{3}-\d{2}-\d{4}\b", "ssn"),
         (PHONE_NUMBER_PATTERN, "phone_number"),
     ] {
+        if !pii_pattern_may_match(input, pattern) {
+            continue;
+        }
         let Ok(regex) = regex_lite::Regex::new(pattern) else {
             continue;
         };
@@ -3645,6 +3648,9 @@ fn redact_regex_matches(
     reason: &'static str,
     reasons: &mut Vec<&'static str>,
 ) -> (String, bool) {
+    if !pii_pattern_may_match(input, pattern) {
+        return (input.to_owned(), false);
+    }
     let Ok(regex) = regex_lite::Regex::new(pattern) else {
         return (input.to_owned(), false);
     };
@@ -3670,6 +3676,35 @@ fn redact_regex_matches(
     } else {
         (input.to_owned(), false)
     }
+}
+
+fn pii_pattern_may_match(input: &str, pattern: &str) -> bool {
+    // These are necessary conditions, never replacement matchers. Bind them
+    // to the exact regex text so changed or additional patterns fall back to
+    // the full regex. regex-lite's \d class contains only ASCII digits.
+    let required_digits = match pattern {
+        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}" => return input.contains('@'),
+        r"\b\d{3}-\d{2}-\d{4}\b" => {
+            if !input.contains('-') {
+                return false;
+            }
+            9
+        }
+        r"\b[2-9]\d{2}[-.]?[2-9]\d{2}[-.]?\d{4}\b" => 10,
+        _ => return true,
+    };
+    let mut digits = 0;
+    for byte in input.bytes() {
+        if byte.is_ascii_digit() {
+            digits += 1;
+            if digits == required_digits {
+                return true;
+            }
+        } else if !matches!(byte, b'-' | b'.') {
+            digits = 0;
+        }
+    }
+    false
 }
 
 fn normalize_for_instruction_detection(content: &str) -> String {
@@ -5979,6 +6014,91 @@ mod tests {
                 .contains(&redaction_placeholder("bearer_token"))
         );
         assert!(!report.content.contains(jwt));
+    }
+
+    #[test]
+    fn pii_prefilters_preserve_unfiltered_regex_matches_and_redaction() {
+        let patterns = [
+            (
+                r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+                "email_address",
+            ),
+            (r"\b\d{3}-\d{2}-\d{4}\b", "ssn"),
+            (super::PHONE_NUMBER_PATTERN, "phone_number"),
+        ]
+        .map(|(pattern, reason)| {
+            (
+                regex_lite::Regex::new(pattern).expect("valid PII regex"),
+                reason,
+            )
+        });
+        let examples = [
+            "",
+            "ordinary release evidence",
+            "a+b_c.d@example.test",
+            "a@b.co",
+            "a@b.c",
+            "123-45-6789",
+            "12-345-6789",
+            "١٢٣-٤٥-٦٧٨٩",
+            "2025550123",
+            "202-555-0123",
+            "202.555.0123",
+            "202-555.0123",
+            "1025550123",
+            "2021550123",
+            "202555012",
+            "２０２５５５０１２３",
+            "12 34 56 78 90",
+            "1\0 234 5678",
+            "1234",
+            "123-45",
+            "2026-09-15",
+            "mail@example.test 123-45-6789 202-555-0123 mail@example.test",
+        ];
+        for example in examples {
+            for prefix in ["", " ", "🦀", "x", "123-"] {
+                for suffix in ["", " end", "x", "\0", "１２３"] {
+                    let input = format!("{prefix}{example}{suffix}");
+                    let mut expected_matches = Vec::new();
+                    let mut expected_content = input.clone();
+                    let mut expected_reasons = Vec::new();
+                    for (regex, reason) in &patterns {
+                        for matched in regex.find_iter(&input) {
+                            expected_matches.push((*reason, matched.start(), matched.end()));
+                        }
+                        if regex.is_match(&expected_content) {
+                            expected_reasons.push(*reason);
+                            expected_content = regex
+                                .replace_all(
+                                    &expected_content,
+                                    redaction_placeholder(reason).as_str(),
+                                )
+                                .into_owned();
+                        }
+                    }
+                    let mut actual_matches = Vec::new();
+                    super::detect_pii_matches(&input, &mut actual_matches);
+                    let actual_matches = actual_matches
+                        .iter()
+                        .map(|matched| (matched.pattern_id, matched.start, matched.end))
+                        .collect::<Vec<_>>();
+                    assert_eq!(actual_matches, expected_matches, "input={input:?}");
+                    let mut actual_reasons = Vec::new();
+                    let (actual_content, changed) =
+                        super::redact_pii_values(&input, &mut actual_reasons);
+                    assert_eq!(actual_content, expected_content, "input={input:?}");
+                    assert_eq!(actual_reasons, expected_reasons, "input={input:?}");
+                    assert_eq!(changed, !expected_reasons.is_empty(), "input={input:?}");
+                }
+            }
+        }
+        for pattern in ["", ".", r"\d", r"\b\d{2}-\d{2}\b", "@?"] {
+            assert!(
+                super::pii_pattern_may_match("", pattern),
+                "unknown patterns must use the regex"
+            );
+        }
     }
 
     #[test]
