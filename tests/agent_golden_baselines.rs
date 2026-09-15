@@ -3106,6 +3106,95 @@ fn schema_flag_matches_golden() -> TestResult {
 // =============================================================================
 
 #[test]
+fn package_version_goldens_reject_stale_live_versions_before_normalizing() -> TestResult {
+    let version = env!("CARGO_PKG_VERSION");
+    for (case_name, historical, actual) in [
+        (
+            "check_json",
+            r#"{"data":{"version":"0.0.0-test","features":["graph"],"dependency":{"version":"9.8.7"}}}"#,
+            format!(
+                r#"{{"data":{{"version":"{version}","features":["graph"],"dependency":{{"version":"9.8.7"}}}}}}"#
+            ),
+        ),
+        (
+            "check_toon",
+            "data:\n  version: 0.0.0-test\n  features[1]: graph\n  dependency:\n    version: 9.8.7",
+            format!(
+                "data:\n  version: {version}\n  features[1]: graph\n  dependency:\n    version: 9.8.7"
+            ),
+        ),
+        ("version_output", "ee 0.0.0-test", format!("ee {version}")),
+    ] {
+        let case = *current_stage_contract_cases()
+            .iter()
+            .find(|case| case.name == case_name)
+            .ok_or_else(|| format!("missing contract case {case_name}"))?;
+        assert_actual_package_version(case.category, case.golden_name, &actual)?;
+        ensure_equal(
+            &normalize_named_golden(case.category, case.golden_name, &actual),
+            &normalize_named_golden(case.category, case.golden_name, historical),
+            "only historical package version differs",
+        )?;
+        for result in [
+            assert_golden(case.category, case.golden_name, historical),
+            validate_contract_golden(case, historical, Some(0)),
+        ] {
+            let Err(error) = result else {
+                return Err(format!(
+                    "{case_name} accepted a stale actual package version"
+                ));
+            };
+            ensure_contains(
+                &error,
+                "package version",
+                "version failed before golden comparison",
+            )?;
+        }
+        for changed in [
+            historical.replace("graph", "wrong-feature"),
+            historical.replace("9.8.7", "changed"),
+        ] {
+            if changed == historical {
+                continue;
+            }
+            ensure(
+                normalize_named_golden(case.category, case.golden_name, &changed)
+                    != normalize_named_golden(case.category, case.golden_name, historical),
+                "feature lists and nested dependency versions must not be normalized",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn package_version_goldens_reject_missing_mistyped_and_duplicate_toon_versions() -> TestResult {
+    for actual in [
+        r#"{"data":{}}"#,
+        r#"{"data":{"version":null}}"#,
+        r#"{"data":{"version":152}}"#,
+        r#"{"data":{"version":["0.0.0-test"]}}"#,
+    ] {
+        ensure(
+            assert_actual_package_version("check", "check_json", actual).is_err(),
+            "package version must remain a present string",
+        )?;
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    for actual in [
+        "data:\n  command: check".to_owned(),
+        format!("data:\n  version: {version}\n  version: {version}"),
+        format!("data:\n  dependency:\n    version: {version}"),
+    ] {
+        ensure(
+            assert_actual_package_version("check", "check_toon", &actual).is_err(),
+            "TOON must carry exactly one version at the command-data level",
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn golden_normalizers_preserve_public_container_and_leaf_types() -> TestResult {
     let status = json!({
         "data": {
