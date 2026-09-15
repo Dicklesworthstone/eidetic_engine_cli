@@ -1306,7 +1306,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         category: "curation",
         command: "ee bootstrap docs --dry-run --json",
         jq: r#"{runId: .data.runId, parserVersion: .data.parserVersion, candidates: (.data.candidates | length), durableMutation: .data.durableMutation, degraded: (.data.degraded // [])}"#,
-        success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.bootstrap.docs.run.v1" and .data.parserVersion == "docs-bootstrap-v1" and .data.durableMutation == false"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.bootstrap.docs.run.v1" and .data.parserVersion == "docs-bootstrap-v2" and .data.durableMutation == false"#,
         failure_branches: DOCS_BOOTSTRAP_RECIPE_FAILURES,
     },
     // EE-DIST-005: Install/Update/Recovery Recipes

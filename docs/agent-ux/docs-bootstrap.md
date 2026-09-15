@@ -73,7 +73,7 @@ producer metadata. Packs and lenses can therefore distinguish curated
 reference material from root policy and session-derived memories without
 discarding byte-span provenance.
 
-The parser version is currently `docs-bootstrap-v1`. Agent consumers should
+The parser version is currently `docs-bootstrap-v2`. Agent consumers should
 branch on that value rather than assuming every future parser extracts the same
 candidate classes.
 

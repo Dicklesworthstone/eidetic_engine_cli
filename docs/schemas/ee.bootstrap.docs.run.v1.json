@@ -31,7 +31,7 @@
       "additionalProperties": false,
       "properties": {
         "schema": {"type": "string", "const": "ee.bootstrap.docs.run.v1"},
-        "parserVersion": {"type": "string", "const": "docs-bootstrap-v1"},
+        "parserVersion": {"type": "string", "const": "docs-bootstrap-v2"},
         "runId": {"type": "string", "minLength": 1},
         "workspacePath": {"type": "string", "minLength": 1},
         "includeGlobs": {

@@ -2095,7 +2095,7 @@ struct SourceLine<'a> {
 }
 
 struct StructuralCandidateInput<'a> {
-    line: SourceLine<'a>,
+    span: BootstrapSourceSpan,
     discriminator: &'a str,
     proposed_content: &'a str,
     level: &'a str,
@@ -2156,9 +2156,25 @@ fn extract_line_structures(
     candidates: &mut Vec<BootstrapCandidate>,
     curate_quarantine: &mut Vec<BootstrapCurateQuarantine>,
 ) {
+    let lines = source_lines(source.content.as_str());
+    // A root policy file can carry an `ee export agentsmd` managed block; its
+    // rules came from memory and must not be bootstrapped back into it.
+    let managed_block = match crate::core::agentsmd::scan_managed_block(source.content.as_str()) {
+        Ok(crate::core::agentsmd::ManagedBlockScan::Found(block)) => {
+            Some((block.begin_index, block.end_index))
+        }
+        _ => None,
+    };
     let mut in_fence = false;
-    for line in source_lines(source.content.as_str()) {
+    let mut table_header: Option<Vec<String>> = None;
+    for (index, line) in lines.iter().copied().enumerate() {
+        if managed_block.is_some_and(|(begin, end)| index >= begin && index <= end) {
+            continue;
+        }
         let trimmed = line.text.trim();
+        if !trimmed.starts_with('|') {
+            table_header = None;
+        }
         if trimmed.starts_with("```") {
             in_fence = !in_fence;
             continue;
@@ -2173,7 +2189,7 @@ fn extract_line_structures(
                 curate_quarantine,
                 source,
                 StructuralCandidateInput {
-                    line,
+                    span: line_span(line),
                     discriminator: "fenced_command",
                     proposed_content: trimmed,
                     level: "procedural",
@@ -2188,64 +2204,37 @@ fn extract_line_structures(
             continue;
         }
 
-        if let Some(heading) = markdown_heading(trimmed) {
-            push_structural_candidate(
-                candidates,
-                curate_quarantine,
-                source,
-                StructuralCandidateInput {
-                    line,
-                    discriminator: "heading",
-                    proposed_content: heading,
-                    level: "semantic",
-                    kind: "fact",
-                    tags: vec!["bootstrap".to_owned(), "heading".to_owned()],
-                    anchors: vec![BootstrapAnchor {
-                        anchor_type: "heading".to_owned(),
-                        value: heading.to_owned(),
-                    }],
-                },
-            );
-        }
-
+        // Headings are section structure, not facts, and a header row only
+        // labels the data rows below it.
         if is_structural_table_row(trimmed) {
-            push_structural_candidate(
-                candidates,
-                curate_quarantine,
-                source,
-                StructuralCandidateInput {
-                    line,
-                    discriminator: "table_row",
-                    proposed_content: trimmed,
-                    level: "semantic",
-                    kind: "fact",
-                    tags: vec!["bootstrap".to_owned(), "table".to_owned()],
-                    anchors: vec![BootstrapAnchor {
-                        anchor_type: "table_row".to_owned(),
-                        value: source.relative_path.clone(),
-                    }],
-                },
-            );
-        }
-
-        if is_explicit_policy_line(trimmed) {
-            push_structural_candidate(
-                candidates,
-                curate_quarantine,
-                source,
-                StructuralCandidateInput {
-                    line,
-                    discriminator: "explicit_policy",
-                    proposed_content: trimmed,
-                    level: "procedural",
-                    kind: "rule",
-                    tags: vec!["bootstrap".to_owned(), "policy".to_owned()],
-                    anchors: vec![BootstrapAnchor {
-                        anchor_type: "policy_language".to_owned(),
-                        value: policy_anchor(trimmed),
-                    }],
-                },
-            );
+            if lines
+                .get(index + 1)
+                .is_some_and(|next| is_table_separator_row(next.text.trim()))
+            {
+                table_header = Some(table_cells(trimmed));
+            } else {
+                let proposed_content = table_header.as_deref().map_or_else(
+                    || trimmed.to_owned(),
+                    |header| labeled_table_row(header, trimmed),
+                );
+                push_structural_candidate(
+                    candidates,
+                    curate_quarantine,
+                    source,
+                    StructuralCandidateInput {
+                        span: line_span(line),
+                        discriminator: "table_row",
+                        proposed_content: &proposed_content,
+                        level: "semantic",
+                        kind: "fact",
+                        tags: vec!["bootstrap".to_owned(), "table".to_owned()],
+                        anchors: vec![BootstrapAnchor {
+                            anchor_type: "table_row".to_owned(),
+                            value: source.relative_path.clone(),
+                        }],
+                    },
+                );
+            }
         }
 
         for schema_id in structural_tokens(trimmed).into_iter().filter(|token| {
@@ -2290,6 +2279,47 @@ fn extract_line_structures(
             );
         }
     }
+
+    // Policy statements are prose: soft-wrapped paragraph, list-item, and
+    // blockquote lines are rejoined so a hard-wrapped rule is one candidate
+    // whose span covers every line it occupies.
+    for sentence in crate::core::agentsmd::markdown_prose_sentences(
+        source.content.as_str(),
+        managed_block,
+        true,
+    ) {
+        if !is_explicit_policy_line(&sentence.text) {
+            continue;
+        }
+        let (Some(first), Some(last)) = (
+            lines.get(sentence.start_line.saturating_sub(1)),
+            lines.get(sentence.end_line.saturating_sub(1)),
+        ) else {
+            continue;
+        };
+        push_structural_candidate(
+            candidates,
+            curate_quarantine,
+            source,
+            StructuralCandidateInput {
+                span: BootstrapSourceSpan {
+                    start_line: first.number,
+                    end_line: last.number,
+                    start_byte: first.start_byte,
+                    end_byte: last.end_byte,
+                },
+                discriminator: "explicit_policy",
+                proposed_content: &sentence.text,
+                level: "procedural",
+                kind: "rule",
+                tags: vec!["bootstrap".to_owned(), "policy".to_owned()],
+                anchors: vec![BootstrapAnchor {
+                    anchor_type: "policy_language".to_owned(),
+                    value: policy_anchor(&sentence.text),
+                }],
+            },
+        );
+    }
 }
 
 fn extract_failure_mode_fixture_code(
@@ -2331,7 +2361,7 @@ fn push_token_candidate(
         curate_quarantine,
         source,
         StructuralCandidateInput {
-            line,
+            span: line_span(line),
             discriminator,
             proposed_content: token,
             level: "semantic",
@@ -2351,12 +2381,7 @@ fn push_structural_candidate(
     source: &BootstrapSourceDocument,
     input: StructuralCandidateInput<'_>,
 ) {
-    let source_span = BootstrapSourceSpan {
-        start_line: input.line.number,
-        end_line: input.line.number,
-        start_byte: input.line.start_byte,
-        end_byte: input.line.end_byte,
-    };
+    let source_span = input.span;
     let screened = match screen_bootstrap_candidate(
         source,
         &source_span,
@@ -2493,13 +2518,79 @@ fn source_lines(content: &str) -> Vec<SourceLine<'_>> {
     lines
 }
 
-fn markdown_heading(trimmed: &str) -> Option<&str> {
-    let hash_count = trimmed.bytes().take_while(|byte| *byte == b'#').count();
-    if hash_count == 0 || hash_count > 6 {
-        return None;
+const fn line_span(line: SourceLine<'_>) -> BootstrapSourceSpan {
+    BootstrapSourceSpan {
+        start_line: line.number,
+        end_line: line.number,
+        start_byte: line.start_byte,
+        end_byte: line.end_byte,
     }
-    let rest = trimmed.get(hash_count..)?.trim();
-    if rest.is_empty() { None } else { Some(rest) }
+}
+
+fn is_table_separator_row(trimmed: &str) -> bool {
+    trimmed.starts_with('|')
+        && trimmed.contains('-')
+        && trimmed
+            .chars()
+            .all(|character| matches!(character, '-' | ':' | '|' | ' '))
+}
+
+/// Cells of one Markdown table row; `\|` is a literal pipe inside a cell.
+fn table_cells(row: &str) -> Vec<String> {
+    let inner = row.trim();
+    let inner = inner.strip_prefix('|').unwrap_or(inner);
+    let inner = inner.strip_suffix('|').unwrap_or(inner);
+    let mut cells = Vec::new();
+    let mut cell = String::new();
+    let mut escaped = false;
+    for character in inner.chars() {
+        if escaped {
+            if character != '|' {
+                cell.push('\\');
+            }
+            cell.push(character);
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '|' {
+            cells.push(cell.trim().to_owned());
+            cell.clear();
+        } else {
+            cell.push(character);
+        }
+    }
+    if escaped {
+        cell.push('\\');
+    }
+    cells.push(cell.trim().to_owned());
+    cells
+}
+
+/// A data row labeled by its header (`Header: cell; ...`), so the candidate
+/// still reads correctly outside the table. Rows whose cell count differs
+/// from the header keep their raw text.
+fn labeled_table_row(header: &[String], row: &str) -> String {
+    let cells = table_cells(row);
+    if cells.len() != header.len() {
+        return row.to_owned();
+    }
+    let labeled = header
+        .iter()
+        .zip(&cells)
+        .filter(|(_, cell)| !cell.is_empty())
+        .map(|(label, cell)| {
+            if label.is_empty() {
+                cell.clone()
+            } else {
+                format!("{label}: {cell}")
+            }
+        })
+        .collect::<Vec<_>>();
+    if labeled.is_empty() {
+        row.to_owned()
+    } else {
+        labeled.join("; ")
+    }
 }
 
 fn looks_like_command_line(trimmed: &str) -> bool {
