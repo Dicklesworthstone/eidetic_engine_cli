@@ -1136,6 +1136,14 @@ mod tests {
         ));
         let report = assemble_primer(&corpus, None, &settings(100_000), 7);
         assert_eq!(report.meta.skipped.redaction, 1);
+        assert_eq!(
+            report.meta.redaction_skips,
+            vec![PrimerRedactionSkip {
+                memory_id: corpus.last().map(|c| c.memory_id.clone()).unwrap_or_default(),
+                pattern: "-----begin".to_owned(),
+            }],
+            "each skip names the memory and the detector keyword, not the body"
+        );
         assert!(
             !report
                 .sections
