@@ -4404,7 +4404,12 @@ fn index_metadata_compatibility_error(
 /// index bytes because a stale generation can contain content that is no
 /// longer admissible.
 pub(crate) fn index_corpus_compatibility_is_current(index_dir: &Path) -> bool {
-    index_generation_is_recoverable(index_dir)
+    validate_index_corpus_compatibility(index_dir).is_ok()
+}
+
+/// Apply the same admission checks while retaining the concrete rebuild reason.
+pub(crate) fn validate_index_corpus_compatibility(index_dir: &Path) -> Result<(), String> {
+    validated_index_generation(index_dir).map(|_| ())
 }
 
 fn unique_index_metadata_temp_path(meta_path: &Path) -> Result<PathBuf, IndexRebuildError> {
@@ -4484,22 +4489,28 @@ fn index_generation_is_recoverable(index_dir: &Path) -> bool {
 }
 
 fn recoverable_index_generation(index_dir: &Path) -> Option<u64> {
-    let Ok(Some(metadata)) = parse_index_metadata(index_dir) else {
-        return None;
-    };
-    if index_metadata_compatibility_error(&index_dir.join(INDEX_METADATA_FILE), &metadata).is_some()
-    {
-        return None;
+    validated_index_generation(index_dir).ok()
+}
+
+fn validated_index_generation(index_dir: &Path) -> Result<u64, String> {
+    let metadata_path = index_dir.join(INDEX_METADATA_FILE);
+    let metadata = parse_index_metadata(index_dir)?.ok_or_else(|| {
+        format!(
+            "index metadata '{}' is missing; a full index rebuild is required",
+            metadata_path.display()
+        )
+    })?;
+    if let Some(error) = index_metadata_compatibility_error(&metadata_path, &metadata) {
+        return Err(error);
     }
-    let Some(document_count) = metadata.document_count else {
-        return None;
-    };
-    let Some(tier_counts) = metadata.tier_document_counts else {
-        return None;
-    };
-    verify_published_tier_counts(index_dir, document_count, tier_counts.quality.is_some())
-        .ok()
-        .map(|()| metadata.generation.unwrap_or(0))
+    let document_count = metadata
+        .document_count
+        .ok_or_else(|| "index metadata is missing documentCount".to_owned())?;
+    let tier_counts = metadata
+        .tier_document_counts
+        .ok_or_else(|| "index metadata is missing tierDocumentCounts".to_owned())?;
+    verify_published_tier_counts(index_dir, document_count, tier_counts.quality.is_some())?;
+    Ok(metadata.generation.unwrap_or(0))
 }
 
 fn retained_generation_sequence(name: &str, retained_prefix: &str) -> Option<u32> {

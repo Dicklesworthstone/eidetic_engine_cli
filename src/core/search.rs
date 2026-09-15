@@ -8787,9 +8787,9 @@ async fn run_search_inner_with_performance(
         trace.record_elapsed("search::indexExists", index_exists_start);
         return Err(SearchError::NoIndex);
     }
-    if !crate::core::index::index_corpus_compatibility_is_current(&index_dir) {
+    if let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&index_dir) {
         trace.record_elapsed("search::indexExists", index_exists_start);
-        return Err(SearchError::NoIndex);
+        return Err(SearchError::IndexIncompatible(reason));
     }
     trace.record_elapsed("search::indexExists", index_exists_start);
 
@@ -9302,8 +9302,8 @@ async fn run_diag_search_with_cx_and_embedder_policy(
     if !index_dir.exists() {
         return Err(SearchError::NoIndex);
     }
-    if !crate::core::index::index_corpus_compatibility_is_current(&index_dir) {
-        return Err(SearchError::NoIndex);
+    if let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&index_dir) {
+        return Err(SearchError::IndexIncompatible(reason));
     }
 
     let (mut degraded, index_freshness) = search_degradations(options, &index_dir);
@@ -17819,7 +17819,7 @@ mod tests {
         };
 
         assert!(
-            matches!(run_search(&options), Err(SearchError::NoIndex)),
+            matches!(run_search(&options), Err(SearchError::IndexIncompatible(reason)) if reason.contains("incompatible corpus revision")),
             "pre-security-epoch index must fail closed before retrieval"
         );
         Ok(())
@@ -23478,8 +23478,10 @@ pub fn run_family_retrieval(
             storage_error(format!("Failed to resolve live family revisions: {error}"))
         })?;
     let current_ids = current_ids_by_logical.values().cloned().collect::<Vec<_>>();
+    // Membership, current revisions, and scope metadata must share the pinned
+    // snapshot; the standalone loader starts a transaction of its own.
     let snapshot_batch = connection
-        .get_attempt_family_membership_snapshots_for_memory_ids(&current_ids)
+        .get_attempt_family_membership_snapshots_for_memory_ids_in_current_snapshot(&current_ids)
         .map_err(|error| {
             storage_error(format!(
                 "Failed to load batched attempt-family membership snapshots: {error}"
