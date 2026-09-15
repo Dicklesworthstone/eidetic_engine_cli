@@ -66,6 +66,13 @@ content hashes, line and byte spans, anchors, trust class, parser version, and
 redaction/quarantine metadata so a reviewer can decide whether a docs excerpt
 belongs in memory.
 
+Policy candidates are sentences: soft-wrapped lines of one paragraph, list
+item, or blockquote are rejoined first, so `sourceSpan.startLine..endLine`
+covers every line of a hard-wrapped rule. Headings and table header rows are
+structure and never become candidates; a table data row is rendered with its
+header labels (`Crate: tokio; Reason: forbidden runtime`). Lines inside an
+`ee export agentsmd` managed block came from memory and are skipped.
+
 Explicitly included files use `sourceKind: "reference_doc"`. Their candidates
 remain conservative `agent_assertion` inputs, and approved derived memories
 carry the `source_kind:reference_doc` tag plus the source kind in evidence and

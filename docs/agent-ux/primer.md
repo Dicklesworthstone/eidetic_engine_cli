@@ -114,14 +114,18 @@ ee import agentsmd --workspace . --apply --json
 
 The parser is precision-first: uppercase hard modality (MUST / MUST NOT /
 NEVER / ALWAYS / DO NOT) anywhere, leading cues (Always/Never/Don't/Avoid/
-Prefer) on bullets only; it skips code fences, headings, tables, comments,
-blockquotes, and the managed block (the bridge never re-imports its own
-export). Extracted statements become pending curation candidates — kind
-`rule`/`convention`, trust class capped at `agent_assertion`, provenance
-`file://<path>#L<n>` with real evidence spans. Near-duplicates of existing
-memories become reinforce proposals (same dedup semantics as journal
-distillation). Candidate ids are text-keyed and deterministic, so re-apply
-abstains with `already_imported` instead of double-inserting.
+Prefer) at the start of a bullet only; it skips code fences, headings, tables,
+comments, blockquotes, and the managed block (the bridge never re-imports its
+own export). Statements are sentences, not physical lines: soft-wrapped lines
+of one paragraph or list item are rejoined before sentence splitting, so a
+rule hard-wrapped at 80 or 100 columns is proposed whole. Extracted statements
+become pending curation candidates — kind `rule`/`convention`, trust class
+capped at `agent_assertion`, provenance `file://<path>#L<n>` (or
+`#L<n>-L<m>` plus `endLineNumber` when the sentence spans lines) with real
+evidence spans. Near-duplicates of existing memories become reinforce
+proposals (same dedup semantics as journal distillation). Candidate ids are
+text-keyed and deterministic, so re-apply abstains with `already_imported`
+instead of double-inserting.
 
 ### Drift: audit the file against memory
 

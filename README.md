@@ -603,8 +603,8 @@ Current top-level groups:
 | `ee orient "<task>" --fast --json` | Fast read-only session-start bundle: bounded swarm brief, install/path posture, workspace hygiene, and explicit follow-up commands for full doctor/pack surfaces |
 | `ee primer [--tokens N] [--refresh] [--json]` | Deterministic, cached workspace charter (~600 tokens): top rules, unresolved warnings, key decisions, load-bearing memories, every line provenance-backed (`ee orient --include-primer` folds it into orientation) |
 | `ee export agentsmd [--file AGENTS.md] [--create] [--dry-run]` | Render the primer rules+warnings into a marker-delimited managed block; never edits outside its markers, backs up before mutating, refuses hand-edited blocks without `--force-managed-block` |
-| `ee import agentsmd [--apply] [--json]` | Parse rule-like statements outside the ee markers into curation candidates (trust capped at agent_assertion, `file://<path>#L<n>` provenance); dry-run by default |
-| `ee diag agentsmd-drift [--json]` | Read-only audit of AGENTS.md vs memory: stale export, file-vs-memory contradictions, missing rules, suggested commands |
+| `ee import agentsmd [--apply] [--json]` | Parse rule-like sentences outside the ee markers (soft-wrapped lines rejoined) into curation candidates (trust capped at agent_assertion, `file://<path>#L<n>` or `#L<n>-L<m>` provenance); dry-run by default |
+| `ee diag agentsmd-drift [--json]` | Read-only audit of AGENTS.md vs memory: stale export, file-vs-memory contradictions, missing rules (an exported rule's exact line counts as present), suggested commands |
 | `ee pack "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the canonical headline command; `ee context "<task>"` remains a soft-deprecated compatibility alias) |
 | `ee lens list --json` / `ee lens explain <id> --json` | Inspect named task lenses such as `bugfix`, `code-review`, and `release-readiness` before applying them |
 | `ee search "<query>" [--limit N] [--explain] [--json]` | Hybrid retrieval over memories, sessions, rules, evidence |
