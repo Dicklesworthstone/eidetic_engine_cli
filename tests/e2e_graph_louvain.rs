@@ -226,7 +226,7 @@ fn graph_louvain_rejects_negative_resolution_with_usage_error() -> TestResult {
         .to_owned();
     init_workspace(&workspace_arg)?;
 
-    let (output, parsed) = run_graph_louvain(&workspace_arg, &["--resolution", "-1.0"])?;
+    let (output, parsed) = run_graph_louvain(&workspace_arg, &["--resolution=-1.0"])?;
     ensure(
         !output.status.success(),
         format!(
@@ -250,7 +250,7 @@ fn graph_louvain_rejects_negative_threshold_with_usage_error() -> TestResult {
         .to_owned();
     init_workspace(&workspace_arg)?;
 
-    let (output, parsed) = run_graph_louvain(&workspace_arg, &["--threshold", "-1.0"])?;
+    let (output, parsed) = run_graph_louvain(&workspace_arg, &["--threshold=-1.0"])?;
     ensure(
         !output.status.success(),
         format!(

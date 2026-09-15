@@ -8,9 +8,8 @@
 //! (src/cli/mod.rs:26255) so future reworks cannot reword them
 //! without a deliberate, reviewed change:
 //!
-//! * Missing database (workspace not initialized) -> Storage repair
-//!   "ee init --workspace ." surfaced via the database-existence
-//!   guard before any export work runs.
+//! * Missing database -> exact addressed-store error and conditional
+//!   initialization guidance before any export work runs.
 //! * `--graph-type garbage_type` -> Usage repair listing all valid
 //!   types (memory_links, session_graph, procedure_graph,
 //!   evidence_graph, composite).
@@ -81,7 +80,7 @@ fn run_graph_export(workspace_arg: &str, extra: &[&str]) -> Result<(Output, Valu
 fn graph_export_surfaces_storage_error_when_database_missing() -> TestResult {
     // Deliberately skip `ee init` so the database-existence guard in
     // handle_graph_export fires before any export work. This pins
-    // the documented Storage repair pointing the user at `ee init`.
+    // exact addressing guidance without creating a new store.
     let workspace = unique_workspace("usage-no-db")?;
     let workspace_arg = workspace
         .to_str()
@@ -90,7 +89,7 @@ fn graph_export_surfaces_storage_error_when_database_missing() -> TestResult {
 
     let (output, parsed) = run_graph_export(&workspace_arg, &[])?;
     ensure(
-        !output.status.success(),
+        output.status.code() == Some(10),
         format!(
             "graph export without ee init must fail; stdout: {}",
             String::from_utf8_lossy(&output.stdout)
@@ -98,20 +97,32 @@ fn graph_export_surfaces_storage_error_when_database_missing() -> TestResult {
     )?;
     let error = &parsed["error"];
     ensure(
-        error.is_object(),
-        format!("response must include an error object; got {parsed}"),
+        parsed["schema"] == "ee.error.v2" && error["code"] == "workspace_store_missing",
+        format!("response must retain the canonical missing-store error; got {parsed}"),
     )?;
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let database = workspace.join(".ee/ee.db");
     let message = error["message"].as_str().unwrap_or_default();
     ensure(
-        message.contains("Database not found at"),
-        format!("error message must explain the missing database; got {message}"),
+        message == format!("Database not found at {}", database.display())
+            && error["details"]["addressedStorePath"] == database.to_string_lossy().as_ref(),
+        format!("missing-store error must identify the exact database; got {error}"),
     )?;
     let repair = error["repair"].as_str().unwrap_or_default();
     ensure(
-        repair.contains("ee init --workspace ."),
-        format!("error repair must point at `ee init --workspace .`; got {repair}"),
+        repair.starts_with("Re-check --workspace addressing")
+            && repair.ends_with(&format!(
+                "Only if you intended to create a NEW store here: ee init --workspace {}",
+                workspace.display()
+            )),
+        format!("repair must check addressing before conditional exact-path init; got {repair}"),
     )?;
-    Ok(())
+    ensure(
+        !workspace.join(".ee").exists(),
+        "missing-store export must not initialize a store",
+    )
 }
 
 #[test]

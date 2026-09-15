@@ -46,9 +46,12 @@ fn graph_e2e_scripts_follow_structured_logging_contract() {
                 || contents.contains("assert_jq"),
             "{path} must record assertions through the structured logger",
         );
+        // Completed surfaces need no todo_assert marker. A recorded failure,
+        // including the deliberate injected diff below, must still fail the driver.
         assert!(
-            contents.contains("todo_assert"),
-            "{path} must record unavailable future graph surfaces structurally",
+            contents
+                .contains("if [ \"${EE_TEST_LOG_ASSERTS_FAIL:-0}\" -gt 0 ]; then\n    exit 1\nfi"),
+            "{path} must exit nonzero when structured assertions record a failure",
         );
         assert!(
             contents.contains("EE_GRAPH_E2E_INJECT_FAILURE"),

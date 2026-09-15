@@ -18,9 +18,8 @@
 //! * `--singleflight-burst N` without `--dry-run` -> Usage repair
 //!   "Use `ee graph feature-enrichment --dry-run --singleflight-burst
 //!   6 --json`." (cross-flag dependency validator)
-//! * Missing database (workspace not initialized) -> Storage repair
-//!   "ee init --workspace ." surfaced via the database-existence
-//!   guard before any algorithm work runs.
+//! * Missing database -> exact addressed-store error and conditional
+//!   initialization guidance before any algorithm work runs.
 //!
 //! The pin test does not exercise the full enrichment algorithm — it
 //! only locks the documented user-facing validation contracts so
@@ -344,8 +343,7 @@ fn graph_feature_enrichment_rejects_negative_max_selection_boost_with_usage_erro
         .to_owned();
     init_workspace(&workspace_arg)?;
 
-    let (output, parsed) =
-        run_feature_enrichment(&workspace_arg, &["--max-selection-boost", "-1.0"])?;
+    let (output, parsed) = run_feature_enrichment(&workspace_arg, &["--max-selection-boost=-1.0"])?;
     ensure(
         !output.status.success(),
         format!(
@@ -389,7 +387,7 @@ fn graph_feature_enrichment_rejects_singleflight_burst_without_dry_run_with_usag
 fn graph_feature_enrichment_surfaces_storage_error_when_database_missing() -> TestResult {
     // Deliberately skip `ee init` so the database-existence guard
     // fires before any validation work. This pins the documented
-    // Storage repair pointing the user at `ee init --workspace .`.
+    // exact addressing guidance without creating a new store.
     let workspace = unique_workspace("usage-no-db")?;
     let workspace_arg = workspace
         .to_str()
@@ -398,7 +396,7 @@ fn graph_feature_enrichment_surfaces_storage_error_when_database_missing() -> Te
 
     let (output, parsed) = run_feature_enrichment(&workspace_arg, &[])?;
     ensure(
-        !output.status.success(),
+        output.status.code() == Some(10),
         format!(
             "graph feature-enrichment without ee init must fail; stdout: {}",
             String::from_utf8_lossy(&output.stdout)
@@ -406,18 +404,30 @@ fn graph_feature_enrichment_surfaces_storage_error_when_database_missing() -> Te
     )?;
     let error = &parsed["error"];
     ensure(
-        error.is_object(),
-        format!("response must include an error object; got {parsed}"),
+        parsed["schema"] == "ee.error.v2" && error["code"] == "workspace_store_missing",
+        format!("response must retain the canonical missing-store error; got {parsed}"),
     )?;
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let database = workspace.join(".ee/ee.db");
     let message = error["message"].as_str().unwrap_or_default();
     ensure(
-        message.contains("Database not found at"),
-        format!("error message must explain the missing database; got {message}"),
+        message == format!("Database not found at {}", database.display())
+            && error["details"]["addressedStorePath"] == database.to_string_lossy().as_ref(),
+        format!("missing-store error must identify the exact database; got {error}"),
     )?;
     let repair = error["repair"].as_str().unwrap_or_default();
     ensure(
-        repair.contains("ee init --workspace ."),
-        format!("error repair must point at `ee init --workspace .`; got {repair}"),
+        repair.starts_with("Re-check --workspace addressing")
+            && repair.ends_with(&format!(
+                "Only if you intended to create a NEW store here: ee init --workspace {}",
+                workspace.display()
+            )),
+        format!("repair must check addressing before conditional exact-path init; got {repair}"),
     )?;
-    Ok(())
+    ensure(
+        !workspace.join(".ee").exists(),
+        "missing-store enrichment must not initialize a store",
+    )
 }

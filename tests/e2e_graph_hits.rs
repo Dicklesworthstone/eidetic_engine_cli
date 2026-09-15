@@ -14,10 +14,10 @@
 //! * a fresh workspace with no links returns `status=computed` with empty
 //!   `hubs` and `authorities` arrays, `command="graph hits"`, and a
 //!   well-formed surface envelope
-//! * a directed two-edge path src -> mid -> dst surfaces hubs ranking src
-//!   first (the only node with outbound shortest paths through mid) and
-//!   authorities ranking dst first (the only node receiving inbound
-//!   paths), proving real HITS evaluation
+//! * a directed triangle src -> mid -> dst plus src -> dst has a unique
+//!   top hub (src) and authority (dst), with independently derived HITS scores
+//! * a two-edge path ties src/mid hubs and mid/dst authorities at 0.5,
+//!   ordered by memory ID rather than by their position in the path
 //! * `--limit 1` truncates BOTH hubs and authorities deterministically:
 //!   each surviving row matches the rank-1 row from the unbounded run
 
@@ -288,6 +288,30 @@ fn assert_score_array_well_formed(scores: &[Value], label: &str) -> TestResult {
     Ok(())
 }
 
+fn assert_expected_scores(scores: &[Value], expected: &[(&str, f64)], label: &str) -> TestResult {
+    ensure(
+        scores.len() == expected.len(),
+        format!(
+            "{label}: expected {} scores; got {scores:?}",
+            expected.len()
+        ),
+    )?;
+    for &(memory_id, expected_score) in expected {
+        // The public graph JSON surface rounds scores to four decimal places.
+        let expected_score = (expected_score * 10_000.0).round() / 10_000.0;
+        let actual = scores
+            .iter()
+            .find(|row| row["memoryId"].as_str() == Some(memory_id))
+            .and_then(|row| row["score"].as_f64())
+            .ok_or_else(|| format!("{label}: missing numeric score for {memory_id}: {scores:?}"))?;
+        ensure(
+            actual.is_finite() && (actual - expected_score).abs() <= 1.0e-7,
+            format!("{label}: {memory_id} must score {expected_score}; got {actual}"),
+        )?;
+    }
+    Ok(())
+}
+
 #[test]
 fn graph_hits_rejects_zero_limit_with_usage_error() -> TestResult {
     let workspace = unique_workspace("usage-zero-limit")?;
@@ -417,7 +441,15 @@ fn graph_hits_returns_empty_score_maps_on_fresh_workspace() -> TestResult {
 
 #[test]
 fn graph_hits_ranks_src_as_top_hub_and_dst_as_top_authority() -> TestResult {
-    let (_workspace, workspace_arg, src, mid, dst) = seed_two_edge_path()?;
+    let (workspace, workspace_arg, src, mid, dst) = seed_two_edge_path()?;
+    insert_link(
+        &workspace.join(".ee").join("ee.db"),
+        "link_00000000000000000000000003",
+        &src,
+        &dst,
+        0.9,
+        0.8,
+    )?;
 
     let (output, parsed) = run_graph_hits(&workspace_arg, &[])?;
     ensure(
@@ -434,8 +466,8 @@ fn graph_hits_ranks_src_as_top_hub_and_dst_as_top_authority() -> TestResult {
         format!("nodeCount must reflect three seeded nodes; got {data}"),
     )?;
     ensure(
-        data["graph"]["edgeCount"].as_u64() == Some(2),
-        format!("edgeCount must reflect two seeded edges; got {data}"),
+        data["graph"]["edgeCount"].as_u64() == Some(3),
+        format!("edgeCount must reflect three seeded edges; got {data}"),
     )?;
 
     let hubs = data["hubs"]
@@ -455,11 +487,22 @@ fn graph_hits_ranks_src_as_top_hub_and_dst_as_top_authority() -> TestResult {
     assert_score_array_well_formed(hubs, "hubs")?;
     assert_score_array_well_formed(authorities, "authorities")?;
 
-    // Classic HITS shape on a directed src -> mid -> dst path: src is the
-    // pure hub (only node with outbound edges that lead to authorities)
-    // and dst is the pure authority (only node receiving inbound edges
-    // from hubs). This proves we are actually evaluating HITS, not a
-    // stub returning uniform or swapped scores.
+    // A = [[0, 1, 1], [0, 0, 1], [0, 0, 0]]. The leading eigenvectors
+    // of A*A^T and A^T*A are (phi, 1, 0) and (0, 1, phi), respectively.
+    // L1 normalization gives (1/phi, 1/phi^2, 0) and its reverse. This
+    // distinguishes real HITS from degree counts, uniform or swapped scores.
+    let dominant_score = (5.0_f64.sqrt() - 1.0) / 2.0;
+    let secondary_score = 1.0 - dominant_score;
+    assert_expected_scores(
+        hubs,
+        &[(&src, dominant_score), (&mid, secondary_score), (&dst, 0.0)],
+        "triangle hubs",
+    )?;
+    assert_expected_scores(
+        authorities,
+        &[(&src, 0.0), (&mid, secondary_score), (&dst, dominant_score)],
+        "triangle authorities",
+    )?;
     let hubs_ids = hubs
         .iter()
         .filter_map(|score| score["memoryId"].as_str().map(str::to_owned))
@@ -482,14 +525,14 @@ fn graph_hits_ranks_src_as_top_hub_and_dst_as_top_authority() -> TestResult {
     ensure(
         hubs[0]["memoryId"].as_str() == Some(src.as_str()),
         format!(
-            "rank-1 hub must be src={src} on a src->mid->dst path; got {}",
+            "rank-1 hub must be src={src} on the directed triangle; got {}",
             hubs[0]
         ),
     )?;
     ensure(
         authorities[0]["memoryId"].as_str() == Some(dst.as_str()),
         format!(
-            "rank-1 authority must be dst={dst} on a src->mid->dst path; got {}",
+            "rank-1 authority must be dst={dst} on the directed triangle; got {}",
             authorities[0]
         ),
     )?;
@@ -498,7 +541,7 @@ fn graph_hits_ranks_src_as_top_hub_and_dst_as_top_authority() -> TestResult {
 
 #[test]
 fn graph_hits_limit_truncates_hubs_and_authorities_deterministically() -> TestResult {
-    let (_workspace, workspace_arg, _src, _mid, _dst) = seed_two_edge_path()?;
+    let (_workspace, workspace_arg, src, mid, dst) = seed_two_edge_path()?;
 
     let (unbounded_output, unbounded_parsed) = run_graph_hits(&workspace_arg, &[])?;
     ensure(
@@ -515,6 +558,20 @@ fn graph_hits_limit_truncates_hubs_and_authorities_deterministically() -> TestRe
         !unbounded_hubs.is_empty() && !unbounded_authorities.is_empty(),
         "unbounded hubs and authorities must not be empty after seeding".to_string(),
     )?;
+    // A path has two independent equally weighted hub-authority pairs;
+    // the uniform HITS initialization preserves the exact 0.5 ties.
+    assert_expected_scores(
+        unbounded_hubs,
+        &[(&src, 0.5), (&mid, 0.5), (&dst, 0.0)],
+        "path hubs",
+    )?;
+    assert_expected_scores(
+        unbounded_authorities,
+        &[(&src, 0.0), (&mid, 0.5), (&dst, 0.5)],
+        "path authorities",
+    )?;
+    assert_score_array_well_formed(unbounded_hubs, "path hubs")?;
+    assert_score_array_well_formed(unbounded_authorities, "path authorities")?;
     let hub_rank_one = &unbounded_hubs[0];
     let authority_rank_one = &unbounded_authorities[0];
 

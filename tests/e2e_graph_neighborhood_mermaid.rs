@@ -325,7 +325,7 @@ fn graph_neighborhood_mermaid_renders_empty_neighborhood_marker() -> TestResult 
         format!("empty neighborhood marker must be present; got: {stdout:.400?}"),
     )?;
     ensure(
-        !stdout.contains(" --> ") && !stdout.contains(" --- "),
+        !stdout.contains(" -->") && !stdout.contains(" ---"),
         format!("empty neighborhood must emit no edge arrows; got: {stdout:.400?}"),
     )?;
     Ok(())
@@ -521,11 +521,20 @@ fn graph_neighborhood_mermaid_limit_emits_truncation_comment() -> TestResult {
     )?;
     let arrow_lines = stdout
         .lines()
-        .filter(|line| line.contains(" --> ") || line.contains(" --- "))
-        .count();
+        .map(str::trim)
+        .filter(|line| line.contains(" -->") || line.contains(" ---"))
+        .collect::<Vec<_>>();
     ensure(
-        arrow_lines == 1,
-        format!("--limit 1 must emit exactly one edge line; got {arrow_lines} in: {stdout}"),
+        arrow_lines.len() == 1,
+        format!("--limit 1 must emit exactly one edge line; got {arrow_lines:?} in: {stdout}"),
+    )?;
+    let expected_edges = [
+        format!("{center} -->|supports| {neighbor_a}"),
+        format!("{center} -->|supports| {neighbor_b}"),
+    ];
+    ensure(
+        expected_edges.iter().any(|edge| edge == arrow_lines[0]),
+        format!("limited edge must retain its real endpoints and relation; got {arrow_lines:?}"),
     )?;
     Ok(())
 }
