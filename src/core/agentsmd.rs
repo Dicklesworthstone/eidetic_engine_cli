@@ -384,10 +384,14 @@ impl RulePolarity {
     }
 }
 
-/// One extracted rule-like statement with its 1-based source line.
+/// One extracted rule-like statement with its 1-based source line span.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedStatement {
+    /// First source line of the statement.
     pub line_number: usize,
+    /// Last source line; later than `line_number` when a hard-wrapped
+    /// sentence continues across lines.
+    pub end_line_number: usize,
     pub text: String,
     /// Proposed memory kind: `rule` for hard modality, `convention` for
     /// soft preference cues.
@@ -488,22 +492,101 @@ pub fn classify_statement(
 
 /// Extract rule-like statements from markdown content, skipping the managed
 /// block (`exclude`, inclusive zero-based marker line range), fenced code,
-/// headings, HTML comments, tables, and blockquotes.
+/// headings, HTML comments, tables, and blockquotes. Soft-wrapped paragraph
+/// and list-item lines are rejoined and split into sentences first, so a
+/// hard-wrapped rule is one statement spanning every line it occupies.
 #[must_use]
 pub fn parse_rule_statements(
     content: &str,
     exclude: Option<(usize, usize)>,
 ) -> Vec<ParsedStatement> {
-    let mut statements = Vec::new();
+    markdown_prose_sentences(content, exclude, false)
+        .into_iter()
+        .filter_map(|sentence| {
+            let (kind, polarity, modality) =
+                classify_statement(&sentence.text, sentence.opens_list_item)?;
+            Some(ParsedStatement {
+                line_number: sentence.start_line,
+                end_line_number: sentence.end_line,
+                text: sentence.text,
+                kind,
+                polarity,
+                modality,
+            })
+        })
+        .collect()
+}
+
+/// One sentence of Markdown prose after soft-wrapped lines are rejoined.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProseSentence {
+    /// 1-based first source line the sentence covers.
+    pub start_line: usize,
+    /// 1-based last source line the sentence covers.
+    pub end_line: usize,
+    pub text: String,
+    /// The sentence opens a bullet or numbered list item, where leading
+    /// imperative cues are reliable rule signals.
+    pub opens_list_item: bool,
+}
+
+/// A paragraph, list item, or blockquote accumulated line by line.
+struct ProseBlock {
+    text: String,
+    /// `(1-based line, byte offset in text where that line's piece starts)`.
+    line_offsets: Vec<(usize, usize)>,
+    list_item: bool,
+    blockquote: bool,
+}
+
+impl ProseBlock {
+    fn new(line_number: usize, piece: &str, list_item: bool, blockquote: bool) -> Self {
+        Self {
+            text: piece.to_owned(),
+            line_offsets: vec![(line_number, 0)],
+            list_item,
+            blockquote,
+        }
+    }
+
+    fn push_line(&mut self, line_number: usize, piece: &str) {
+        self.text.push(' ');
+        self.line_offsets.push((line_number, self.text.len()));
+        self.text.push_str(piece);
+    }
+
+    fn line_at(&self, offset: usize) -> usize {
+        self.line_offsets
+            .iter()
+            .take_while(|(_, start)| *start <= offset)
+            .last()
+            .map_or(1, |(line, _)| *line)
+    }
+}
+
+/// Split Markdown into prose sentences. Soft-wrapped lines of one paragraph,
+/// list item, or (with `include_blockquotes`) blockquote are rejoined before
+/// splitting, and each sentence keeps the source lines it spans. Fenced
+/// code, headings, HTML comment lines, table rows, blank lines, and the
+/// zero-based inclusive `exclude` range end the current block and yield no
+/// sentences; blockquotes do the same unless `include_blockquotes` is set.
+pub(crate) fn markdown_prose_sentences(
+    content: &str,
+    exclude: Option<(usize, usize)>,
+    include_blockquotes: bool,
+) -> Vec<ProseSentence> {
+    let mut sentences = Vec::new();
+    let mut block: Option<ProseBlock> = None;
     let mut in_fence = false;
     for (index, raw_line) in content.lines().enumerate() {
-        if let Some((begin, end)) = exclude {
-            if index >= begin && index <= end {
-                continue;
-            }
-        }
+        let line_number = index + 1;
         let trimmed = raw_line.trim();
+        if exclude.is_some_and(|(begin, end)| index >= begin && index <= end) {
+            flush_prose_block(block.take(), &mut sentences);
+            continue;
+        }
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            flush_prose_block(block.take(), &mut sentences);
             in_fence = !in_fence;
             continue;
         }
@@ -512,29 +595,128 @@ pub fn parse_rule_statements(
             || trimmed.starts_with('#')
             || trimmed.starts_with("<!--")
             || trimmed.starts_with('|')
-            || trimmed.starts_with('>')
         {
+            flush_prose_block(block.take(), &mut sentences);
             continue;
         }
-        let (text, from_bullet) = strip_bullet_prefix(raw_line)
-            .map_or((trimmed, false), |stripped| (stripped.trim(), true));
-        let text = text
+        if let Some(quoted) = trimmed.strip_prefix('>') {
+            let quoted = quoted.trim_start_matches('>').trim();
+            if !include_blockquotes || quoted.is_empty() {
+                flush_prose_block(block.take(), &mut sentences);
+                continue;
+            }
+            if let Some(item) = strip_bullet_prefix(quoted) {
+                flush_prose_block(block.take(), &mut sentences);
+                block = Some(ProseBlock::new(line_number, item.trim(), true, true));
+                continue;
+            }
+            match block.as_mut() {
+                Some(current) if current.blockquote => current.push_line(line_number, quoted),
+                _ => {
+                    flush_prose_block(block.take(), &mut sentences);
+                    block = Some(ProseBlock::new(line_number, quoted, false, true));
+                }
+            }
+            continue;
+        }
+        if let Some(item) = strip_bullet_prefix(raw_line) {
+            flush_prose_block(block.take(), &mut sentences);
+            block = Some(ProseBlock::new(line_number, item.trim(), true, false));
+            continue;
+        }
+        match block.as_mut() {
+            Some(current) if !current.blockquote => current.push_line(line_number, trimmed),
+            _ => {
+                flush_prose_block(block.take(), &mut sentences);
+                block = Some(ProseBlock::new(line_number, trimmed, false, false));
+            }
+        }
+    }
+    flush_prose_block(block.take(), &mut sentences);
+    sentences
+}
+
+fn flush_prose_block(block: Option<ProseBlock>, sentences: &mut Vec<ProseSentence>) {
+    let Some(block) = block else {
+        return;
+    };
+    let mut opens_list_item = block.list_item;
+    for (start, end) in sentence_ranges(&block.text) {
+        let raw = &block.text[start..end];
+        let text = raw
+            .trim()
             .trim_start_matches("**")
             .trim_end_matches("**")
-            .trim()
-            .to_owned();
-        let Some((kind, polarity, modality)) = classify_statement(&text, from_bullet) else {
+            .trim();
+        if text.is_empty() {
             continue;
-        };
-        statements.push(ParsedStatement {
-            line_number: index + 1,
-            text,
-            kind,
-            polarity,
-            modality,
+        }
+        let first_byte = start + (raw.len() - raw.trim_start().len());
+        let last_byte = start + raw.trim_end().len().saturating_sub(1);
+        sentences.push(ProseSentence {
+            start_line: block.line_at(first_byte),
+            end_line: block.line_at(last_byte),
+            text: text.to_owned(),
+            opens_list_item,
         });
+        opens_list_item = false;
     }
-    statements
+}
+
+/// Byte ranges of the sentences in one rejoined prose block. A sentence ends
+/// at `.`, `!`, or `?` (plus any closing brackets, quotes, or emphasis)
+/// followed by whitespace and then an uppercase letter or an opening code
+/// span, emphasis, quote, or bracket. Terminators inside code spans, after
+/// common abbreviations (`e.g.`, `i.e.`, `etc.`, `vs.`), and after a single
+/// capital initial never end a sentence.
+fn sentence_ranges(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    let mut in_code = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'`' {
+            in_code = !in_code;
+            index += 1;
+            continue;
+        }
+        if in_code || !matches!(byte, b'.' | b'!' | b'?') {
+            index += 1;
+            continue;
+        }
+        let mut end = index + 1;
+        while end < bytes.len() && matches!(bytes[end], b')' | b']' | b'"' | b'\'' | b'*' | b'_') {
+            end += 1;
+        }
+        let followed_by_space = bytes.get(end).is_some_and(u8::is_ascii_whitespace);
+        let opens_sentence = text[end..].trim_start().chars().next().is_some_and(|next| {
+            next.is_uppercase() || matches!(next, '`' | '*' | '"' | '(' | '[')
+        });
+        let abbreviation = byte == b'.' && ends_with_abbreviation(&text[start..index]);
+        if followed_by_space && opens_sentence && !abbreviation {
+            ranges.push((start, end));
+            start = end;
+        }
+        index = end;
+    }
+    if start < bytes.len() {
+        ranges.push((start, bytes.len()));
+    }
+    ranges
+}
+
+fn ends_with_abbreviation(before_period: &str) -> bool {
+    let word = before_period
+        .rsplit(|character: char| character.is_whitespace() || character == '(')
+        .next()
+        .unwrap_or_default();
+    (word.len() == 1 && word.bytes().all(|byte| byte.is_ascii_uppercase()))
+        || matches!(
+            word.to_ascii_lowercase().as_str(),
+            "e.g" | "i.e" | "etc" | "vs" | "cf" | "approx" | "incl" | "fig"
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,9 +1352,11 @@ pub struct AgentsmdImportProposal {
     /// `procedural`.
     pub kind: &'static str,
     pub content_draft: String,
-    /// `file://<workspace-relative-path>#L<n>`.
+    /// `file://<workspace-relative-path>#L<n>`, or `#L<n>-L<m>` for a
+    /// statement spanning lines.
     pub evidence: Vec<String>,
     pub line_number: usize,
+    pub end_line_number: usize,
     pub modality: &'static str,
     pub dedup_nearest_memory_id: Option<String>,
     pub dedup_similarity: Option<f32>,
@@ -1190,6 +1374,7 @@ impl AgentsmdImportProposal {
             "contentDraft": &self.content_draft,
             "evidence": &self.evidence,
             "lineNumber": self.line_number,
+            "endLineNumber": self.end_line_number,
             "modality": self.modality,
             "dedup": {
                 "nearestMemoryId": &self.dedup_nearest_memory_id,
@@ -1292,7 +1477,10 @@ impl AgentsmdImportReport {
         for proposal in &self.proposals {
             out.push_str(&format!(
                 "- L{} {} {}: {}\n",
-                proposal.line_number, proposal.kind, proposal.action, proposal.content_draft
+                line_span_label(proposal.line_number, proposal.end_line_number),
+                proposal.kind,
+                proposal.action,
+                proposal.content_draft
             ));
         }
         if let Some(applied) = &self.applied {
@@ -1306,6 +1494,25 @@ impl AgentsmdImportReport {
             out.push_str(&format!("degraded: {} ({})\n", entry.code, entry.severity));
         }
         out
+    }
+}
+
+/// URI fragment for a statement span: `L<n>`, or `L<n>-L<m>` when a
+/// hard-wrapped statement covers several lines.
+fn line_span_anchor(start: usize, end: usize) -> String {
+    if end > start {
+        format!("L{start}-L{end}")
+    } else {
+        format!("L{start}")
+    }
+}
+
+/// Human-summary span label that follows an `L` prefix: `<n>` or `<n>-<m>`.
+fn line_span_label(start: usize, end: usize) -> String {
+    if end > start {
+        format!("{start}-{end}")
+    } else {
+        start.to_string()
     }
 }
 
@@ -1435,8 +1642,12 @@ pub fn run_agentsmd_import(
             target_memory_id,
             kind: statement.kind,
             content_draft: statement.text,
-            evidence: vec![format!("file://{display_path}#L{}", statement.line_number)],
+            evidence: vec![format!(
+                "file://{display_path}#{}",
+                line_span_anchor(statement.line_number, statement.end_line_number)
+            )],
             line_number: statement.line_number,
+            end_line_number: statement.end_line_number,
             modality: statement.modality,
             dedup_nearest_memory_id: neighbor.as_ref().map(|(memory_id, _)| memory_id.clone()),
             dedup_similarity: neighbor.as_ref().map(|(_, similarity)| *similarity),
@@ -1537,9 +1748,9 @@ fn apply_import_proposals(
         let inherited_redaction_classes = screening.redacted_reasons;
         let source_path_hash = format!("blake3:{}", blake3::hash(display_path.as_bytes()).to_hex());
         let canonical_source_ref = format!(
-            "agentsmd://{}#L{}",
+            "agentsmd://{}#{}",
             source_path_hash.trim_start_matches("blake3:"),
-            proposal.line_number
+            line_span_anchor(proposal.line_number, proposal.end_line_number)
         );
         let candidate_id = import_candidate_id(
             workspace_id,
@@ -1680,13 +1891,16 @@ fn apply_import_proposals(
                         });
                     };
                     if connection.get_evidence_span(&span_id)?.is_none() {
-                        let line = u32::try_from(proposal.line_number).unwrap_or(1);
+                        let start_line = u32::try_from(proposal.line_number).unwrap_or(1);
+                        let end_line =
+                            u32::try_from(proposal.end_line_number).unwrap_or(start_line);
                         let metadata_json = serde_json::json!({
                             "schema": AGENTSMD_IMPORT_EVIDENCE_SCHEMA_V1,
                             "command": "ee import agentsmd --apply",
                             "sourceRef": &canonical_source_ref,
                             "sourcePathHash": &source_path_hash,
                             "lineNumber": proposal.line_number,
+                            "endLineNumber": proposal.end_line_number,
                             "modality": proposal.modality,
                         })
                         .to_string();
@@ -1701,8 +1915,8 @@ fn apply_import_proposals(
                                 // distinct evidence; span_id includes screened content.
                                 cass_span_id: span_id.clone(),
                                 span_kind: "summary".to_owned(),
-                                start_line: line,
-                                end_line: line,
+                                start_line,
+                                end_line,
                                 start_byte: None,
                                 end_byte: None,
                                 role: Some("agentsmd_import".to_owned()),

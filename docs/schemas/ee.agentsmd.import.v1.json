@@ -64,6 +64,7 @@
           "contentDraft",
           "evidence",
           "lineNumber",
+          "endLineNumber",
           "modality",
           "dedup"
         ],
@@ -98,13 +99,19 @@
             "minItems": 1,
             "items": {
               "type": "string",
-              "pattern": "^file://.+#L[0-9]+$"
+              "pattern": "^file://.+#L[0-9]+(-L[0-9]+)?$"
             },
-            "description": "file://<workspace-relative-path>#L<n> provenance URI for the source line."
+            "description": "file://<workspace-relative-path>#L<n> provenance URI for a one-line statement, or #L<n>-L<m> when a hard-wrapped statement spans lines n through m."
           },
           "lineNumber": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "description": "First source line of the statement."
+          },
+          "endLineNumber": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Last source line of the statement; greater than lineNumber when soft-wrapped paragraph or list-item lines were rejoined."
           },
           "modality": {
             "type": "string",
