@@ -328,3 +328,18 @@ windsurf.mcp.json
 # routine `git add .beads/` can never republish them.
 .beads/.br-db-write-*.lock
 .beads/.br-jsonl-write-*.lock
+# br opener-set locks are hashed like the write locks above but use a
+# different prefix the write-lock glob does not cover.
+.beads/.br-db-openers-*.lock
+# Vacuum leftover journals (`.beads.vacuum.<pid>.tmp-journal`).
+.beads/.beads.vacuum.*
+# Recovery trees and renamed stale write locks. `.write.lock` in
+# `.beads/.gitignore` is exact-name only and misses `.write.lock.stale-*`.
+.beads/.br_recovery/
+.beads/.write.lock.stale-*
+# Nested checkouts of sibling FrankenSuite repos used by local CI helpers.
+# Not this project's CI config.
+.ci/franken-stack/
+# `ee` refresh tooling writes `Cargo.toml.ee-refresh-bak` (suffix is
+# `-bak`, so `*.bak` does not match).
+*.ee-refresh-bak
