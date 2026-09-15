@@ -193,10 +193,7 @@ impl ContextDeltaEnvelope {
         max_delta_bytes: Option<u64>,
         transport_overhead_bytes: u64,
     ) -> Result<u64, ContextDeltaError> {
-        let measured = measured_total(stable_serialized_len(self)?, transport_overhead_bytes);
-        let token_count = self.data.token_savings.net_pack_tokens;
-        let full_bytes = self.data.token_savings.full_bytes;
-        self.data.token_savings = token_savings(full_bytes, measured, token_count);
+        let measured = stable_serialized_len_with_overhead(self, transport_overhead_bytes)?;
 
         if let Some(budget) = max_delta_bytes
             && measured > budget
@@ -231,10 +228,7 @@ impl ContextDeltaEnvelope {
                 });
                 // The new degraded entry adds bytes; re-measure so
                 // tokenSavings.deltaBytes still matches the emission.
-                let remeasured =
-                    measured_total(stable_serialized_len(self)?, transport_overhead_bytes);
-                self.data.token_savings = token_savings(full_bytes, remeasured, token_count);
-                return Ok(remeasured);
+                return stable_serialized_len_with_overhead(self, transport_overhead_bytes);
             }
         }
 
@@ -584,6 +578,13 @@ fn diff_item_fields(
 }
 
 fn stable_serialized_len(envelope: &mut ContextDeltaEnvelope) -> Result<u64, ContextDeltaError> {
+    stable_serialized_len_with_overhead(envelope, 0)
+}
+
+fn stable_serialized_len_with_overhead(
+    envelope: &mut ContextDeltaEnvelope,
+    transport_overhead_bytes: u64,
+) -> Result<u64, ContextDeltaError> {
     let mut delta_bytes = 0;
     for _ in 0..8 {
         envelope.data.token_savings = token_savings(
@@ -593,13 +594,19 @@ fn stable_serialized_len(envelope: &mut ContextDeltaEnvelope) -> Result<u64, Con
         );
         let serialized = serde_json::to_vec(envelope)
             .map_err(|error| ContextDeltaError::serialize("context delta envelope", error))?;
-        let next_delta_bytes = serialized.len() as u64;
+        let next_delta_bytes = measured_total(serialized.len() as u64, transport_overhead_bytes);
         if next_delta_bytes == delta_bytes {
             return Ok(delta_bytes);
         }
         delta_bytes = next_delta_bytes;
     }
-    Ok(delta_bytes)
+    // Updating savedPercent can change its decimal width and make the total
+    // oscillate. The caller must withhold this delta rather than report an
+    // unverified byte count or enforce a budget against a stale measurement.
+    Err(ContextDeltaError {
+        message: "context delta emission size did not converge after 8 measurements; emit the full pack instead"
+            .to_owned(),
+    })
 }
 
 fn token_savings(
