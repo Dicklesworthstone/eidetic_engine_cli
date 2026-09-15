@@ -95,6 +95,36 @@ future changelog pass expands those rows into full capability sections.
   transaction commits.
 - Probe daemon hot-mode status without creating a workspace database. Detect
   and collapse duplicate EE-managed harness hooks during installation.
+- Wake daemon shutdown through its owned sockets, including shutdown requests
+  that arrive before the accept loop starts waiting. Avoid hanging in accept
+  and reject queued requests after shutdown begins.
+- Generate JSON help and introspection from the actual Clap command tree.
+  Nested `--help-json` and `introspect --command` expose the addressed command's
+  positionals, options, defaults and available value enums (#42–#44).
+- Resolve workspace-root symlinks for migration commands while retaining
+  no-follow checks on internal storage paths. Situation compare/link now run
+  their non-persisting preview by default (#45, #47).
+- Add `--command-timeout-ms` to handoff create/preview, use a two-second default
+  for optional probes, and reuse one coordination collection across capsule
+  summaries. Bound inherited-pipe waits and reject truncated parser input (#48).
+- Report copied-store workspace identity mismatches consistently across read
+  surfaces. Keep memory listing read-only and preserve explicit campaign/store
+  targets through remember, search and indexing. A durable in-place rebind
+  command remains unfinished (#46).
+- Reuse the request's workspace-roster snapshot during pack assembly. Ten
+  interleaved pairs on a 32-note lexical fixture measured median latency of
+  1,755 ms versus 2,478 ms, with unchanged semantic output and DB/index bytes.
+  The separate 245-note neural workload remains under investigation (#49).
+- Report elapsed pack SLO overruns through `elapsedStatus` and the aggregate
+  `status`, while keeping deterministic resource evidence in `resourceStatus`.
+  Timing does not change selected memories or pack hashes (#49).
+- Enable read-only consumers to reuse persisted pack cache entries without
+  touching cache timestamps. Invalidate on query-policy or authoritative-state
+  changes; bypass replay when external freshness inputs lack a bounded cache
+  identity. See [cache configuration](docs/configuration/cache.md) for limits.
+- Recover existing attempt-family pack ledgers using exact JSON number
+  validation for fractional discounts. Preserve validated promotion postures
+  in replay while retaining rejection of unknown values and secret redaction.
 
 ## [0.15.2] - 2026-09-12
 
