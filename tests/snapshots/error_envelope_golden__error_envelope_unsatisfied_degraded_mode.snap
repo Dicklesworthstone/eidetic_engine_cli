@@ -9,6 +9,7 @@ expression: value
     "message": "Semantic search unavailable and lexical fallback disabled.",
     "severity": "medium",
     "repair": "ee doctor --json",
+    "repairKind": "actionable",
     "details": {}
   }
 }

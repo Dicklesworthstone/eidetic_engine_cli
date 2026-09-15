@@ -9,6 +9,7 @@ expression: value
     "message": "CASS session file not found.",
     "severity": "medium",
     "repair": "ee import cass --dry-run",
+    "repairKind": "actionable",
     "details": {}
   }
 }

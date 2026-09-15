@@ -9,6 +9,7 @@ expression: value
     "message": "Graph projection outdated.",
     "severity": "medium",
     "repair": "ee graph snapshot refresh",
+    "repairKind": "actionable",
     "details": {}
   }
 }

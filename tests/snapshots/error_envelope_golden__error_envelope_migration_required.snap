@@ -9,6 +9,7 @@ expression: value
     "message": "Database schema is at version 5, current is 7.",
     "severity": "medium",
     "repair": "ee migrate run",
+    "repairKind": "actionable",
     "details": {
       "recovery": [
         {

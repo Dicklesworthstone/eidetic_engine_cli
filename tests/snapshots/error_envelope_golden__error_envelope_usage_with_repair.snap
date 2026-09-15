@@ -9,6 +9,7 @@ expression: value
     "message": "Unknown command 'xyz'.",
     "severity": "low",
     "repair": "ee --help",
+    "repairKind": "actionable",
     "details": {}
   }
 }

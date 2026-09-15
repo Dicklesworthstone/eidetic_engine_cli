@@ -9,6 +9,7 @@ expression: value
     "message": "memory not found: mem_00000000000000000000000099",
     "severity": "low",
     "repair": "ee search",
+    "repairKind": "actionable",
     "details": {
       "resource": "memory",
       "id": "mem_00000000000000000000000099"

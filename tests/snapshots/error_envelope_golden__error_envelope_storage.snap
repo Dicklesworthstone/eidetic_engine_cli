@@ -9,6 +9,7 @@ expression: value
     "message": "Database file corrupted.",
     "severity": "high",
     "repair": "ee doctor --fix-plan --json",
+    "repairKind": "actionable",
     "details": {}
   }
 }

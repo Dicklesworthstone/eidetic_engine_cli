@@ -9,6 +9,7 @@ expression: value
     "message": "Redaction policy prevents exporting this memory.",
     "severity": "medium",
     "repair": "ee policy show",
+    "repairKind": "actionable",
     "details": {}
   }
 }

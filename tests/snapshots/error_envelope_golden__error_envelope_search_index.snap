@@ -9,6 +9,7 @@ expression: value
     "message": "Index is stale (generation 9, database generation 12).",
     "severity": "medium",
     "repair": "ee index rebuild",
+    "repairKind": "actionable",
     "details": {
       "recovery": [
         {

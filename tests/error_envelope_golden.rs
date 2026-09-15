@@ -11,6 +11,7 @@
 //!     "message": "<description>",
 //!     "severity": "info|low|warning|medium|high|critical",
 //!     "repair": "<optional command>",
+//!     "repairKind": "actionable|template|placeholder|unknown|empty",
 //!     "details": { ... }
 //!   }
 //! }
@@ -47,10 +48,16 @@ fn verify_error_envelope(json: &str) -> TestResult {
 
     let severity = error.get("severity").and_then(|s| s.as_str());
     match severity {
-        Some("info" | "low" | "warning" | "medium" | "high" | "critical") => Ok(()),
-        Some(other) => Err(format!("invalid severity: {other}")),
-        None => Err("severity must be a string".into()),
+        Some("info" | "low" | "warning" | "medium" | "high" | "critical") => {}
+        Some(other) => return Err(format!("invalid severity: {other}")),
+        None => return Err("severity must be a string".into()),
     }
+    if error.contains_key("repair") != error.contains_key("repairKind") {
+        return Err("repair and its classification must appear together".into());
+    }
+    let schema: Value = serde_json::from_str(include_str!("../docs/schemas/ee.error.v2.json"))
+        .map_err(|error| format!("public error schema must parse: {error}"))?;
+    ee::testing::validate_json_schema_instance(&value, &schema)
 }
 
 #[test]
@@ -288,6 +295,62 @@ fn error_envelope_workspace_store_missing_matches_required_fixture() -> TestResu
 #[cfg(test)]
 mod contract_verification {
     use super::*;
+
+    #[test]
+    fn repair_classification_preserves_commands_advice_and_missing_repairs() -> TestResult {
+        fn check_kind(json: &str, expected: Option<&str>) -> TestResult {
+            verify_error_envelope(json)?;
+            let value = parse_error_json(json)?;
+            let actual = value["error"]["repairKind"].as_str();
+            if actual != expected {
+                return Err(format!("expected repairKind {expected:?}, got {actual:?}"));
+            }
+            Ok(())
+        }
+
+        for (repair, expected) in [
+            (Some("ee --help"), Some("actionable")),
+            (Some("ee why <memory-id> --json"), Some("template")),
+            (
+                Some("Review the source evidence before choosing a repair."),
+                Some("unknown"),
+            ),
+            (Some("ee TODO"), Some("placeholder")),
+            (Some(""), Some("empty")),
+            (None, None),
+        ] {
+            let error = DomainError::Usage {
+                message: "Inspect this repair hint.".to_owned(),
+                repair: repair.map(str::to_owned),
+            };
+            let json = error_response_json(&error);
+            check_kind(&json, expected)?;
+            let mut value = parse_error_json(&json)?;
+            if value["error"]["repair"].as_str() != repair {
+                return Err("repair classification must preserve the original hint".into());
+            }
+            if value["error"]["code"] != "usage"
+                || value["error"]["message"] != "Inspect this repair hint."
+                || value["error"]["severity"] != "low"
+                || value["error"]["details"] != serde_json::json!({})
+            {
+                return Err("repair classification changed the structured error".into());
+            }
+            value["error"]["repairKind"] = serde_json::json!(if expected == Some("actionable") {
+                "unknown"
+            } else {
+                "actionable"
+            });
+            if check_kind(&value.to_string(), expected).is_ok() {
+                return Err("a mismatched repair classification must fail".into());
+            }
+            value["error"]["repairKind"] = serde_json::json!("advisory");
+            if verify_error_envelope(&value.to_string()).is_ok() {
+                return Err("an undocumented repairKind must fail the public schema".into());
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn all_error_codes_are_lowercase_snake_case() -> TestResult {
