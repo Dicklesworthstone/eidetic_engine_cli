@@ -18,7 +18,7 @@
 
 use ee::models::{DomainError, RecoveryAction, RecoveryKind};
 use ee::output::error_response_json;
-use insta::assert_json_snapshot;
+use insta::assert_snapshot;
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -62,7 +62,8 @@ fn error_envelope_usage_with_repair() -> TestResult {
     let json = error_response_json(&error);
     verify_error_envelope(&json)?;
     let value: Value = parse_error_json(&json)?;
-    assert_json_snapshot!("error_envelope_usage_with_repair", value);
+    let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+    assert_snapshot!("error_envelope_usage_with_repair", value);
     Ok(())
 }
 
@@ -75,7 +76,8 @@ fn error_envelope_usage_without_repair() -> TestResult {
     let json = error_response_json(&error);
     verify_error_envelope(&json)?;
     let value: Value = parse_error_json(&json)?;
-    assert_json_snapshot!("error_envelope_usage_without_repair", value);
+    let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+    assert_snapshot!("error_envelope_usage_without_repair", value);
     Ok(())
 }
 
@@ -88,7 +90,8 @@ fn error_envelope_configuration() -> TestResult {
     let json = error_response_json(&error);
     verify_error_envelope(&json)?;
     let value: Value = parse_error_json(&json)?;
-    assert_json_snapshot!("error_envelope_configuration", value);
+    let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+    assert_snapshot!("error_envelope_configuration", value);
     Ok(())
 }
 
@@ -101,7 +104,8 @@ fn error_envelope_storage() -> TestResult {
     let json = error_response_json(&error);
     verify_error_envelope(&json)?;
     let value: Value = parse_error_json(&json)?;
-    assert_json_snapshot!("error_envelope_storage", value);
+    let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+    assert_snapshot!("error_envelope_storage", value);
     Ok(())
 }
 
@@ -114,7 +118,8 @@ fn error_envelope_search_index() -> TestResult {
     let json = error_response_json(&error);
     verify_error_envelope(&json)?;
     let value: Value = parse_error_json(&json)?;
-    assert_json_snapshot!("error_envelope_search_index", value);
+    let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+    assert_snapshot!("error_envelope_search_index", value);
     Ok(())
 }
 
@@ -127,7 +132,8 @@ fn error_envelope_graph() -> TestResult {
     let json = error_response_json(&error);
     verify_error_envelope(&json)?;
     let value: Value = parse_error_json(&json)?;
-    assert_json_snapshot!("error_envelope_graph", value);
+    let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+    assert_snapshot!("error_envelope_graph", value);
     Ok(())
 }
 
@@ -140,7 +146,8 @@ fn error_envelope_import() -> TestResult {
     let json = error_response_json(&error);
     verify_error_envelope(&json)?;
     let value: Value = parse_error_json(&json)?;
-    assert_json_snapshot!("error_envelope_import", value);
+    let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+    assert_snapshot!("error_envelope_import", value);
     Ok(())
 }
 
@@ -154,7 +161,8 @@ fn error_envelope_not_found() -> TestResult {
     let json = error_response_json(&error);
     verify_error_envelope(&json)?;
     let value: Value = parse_error_json(&json)?;
-    assert_json_snapshot!("error_envelope_not_found", value);
+    let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+    assert_snapshot!("error_envelope_not_found", value);
     Ok(())
 }
 
@@ -167,7 +175,8 @@ fn error_envelope_unsatisfied_degraded_mode() -> TestResult {
     let json = error_response_json(&error);
     verify_error_envelope(&json)?;
     let value: Value = parse_error_json(&json)?;
-    assert_json_snapshot!("error_envelope_unsatisfied_degraded_mode", value);
+    let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+    assert_snapshot!("error_envelope_unsatisfied_degraded_mode", value);
     Ok(())
 }
 
@@ -180,7 +189,8 @@ fn error_envelope_policy_denied() -> TestResult {
     let json = error_response_json(&error);
     verify_error_envelope(&json)?;
     let value: Value = parse_error_json(&json)?;
-    assert_json_snapshot!("error_envelope_policy_denied", value);
+    let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+    assert_snapshot!("error_envelope_policy_denied", value);
     Ok(())
 }
 
@@ -193,7 +203,8 @@ fn error_envelope_migration_required() -> TestResult {
     let json = error_response_json(&error);
     verify_error_envelope(&json)?;
     let value: Value = parse_error_json(&json)?;
-    assert_json_snapshot!("error_envelope_migration_required", value);
+    let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+    assert_snapshot!("error_envelope_migration_required", value);
     Ok(())
 }
 
@@ -206,7 +217,8 @@ fn error_envelope_migration_drift() -> TestResult {
     let json = error_response_json(&error);
     verify_error_envelope(&json)?;
     let value: Value = parse_error_json(&json)?;
-    assert_json_snapshot!("error_envelope_migration_drift", value);
+    let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+    assert_snapshot!("error_envelope_migration_drift", value);
     Ok(())
 }
 

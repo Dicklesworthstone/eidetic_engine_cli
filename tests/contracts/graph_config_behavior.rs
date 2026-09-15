@@ -71,13 +71,15 @@ fn assert_float_eq(actual: f64, expected: f64, context: &str) -> TestResult {
     }
 }
 
-fn assert_graph_config_snapshot(name: &str, value: Value) {
+fn assert_graph_config_snapshot(name: &str, value: Value) -> TestResult {
+    let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
     let mut settings = insta::Settings::clone_current();
     settings.set_snapshot_path("../snapshots");
     settings.set_prepend_module_to_snapshot(false);
     settings.bind(|| {
-        insta::assert_json_snapshot!(name, value);
+        insta::assert_snapshot!(name, value);
     });
+    Ok(())
 }
 
 #[test]
@@ -131,7 +133,7 @@ alpha = 0.90
             "legacyDiffersFromDefault": legacy != default,
             "defaultDiffersFromStrong": default != strong,
         }),
-    );
+    )?;
     Ok(())
 }
 
@@ -170,7 +172,7 @@ fn pagerank_budgeted_wrapper_is_byte_stable_with_direct_policy_output() -> TestR
             "witnessAlgorithm": wrapped.witness.algorithm,
             "scoreCount": wrapped.scores.len(),
         }),
-    );
+    )?;
     Ok(())
 }
 
@@ -232,7 +234,7 @@ contradiction_threshold = 0.75
                 "exemplars": &cluster.exemplar_memory_ids,
             },
         }),
-    );
+    )?;
     Ok(())
 }
 
@@ -308,7 +310,7 @@ sample_size = 2
                 "result": sampled.result,
             },
         }),
-    );
+    )?;
     Ok(())
 }
 

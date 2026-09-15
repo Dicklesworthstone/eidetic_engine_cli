@@ -969,7 +969,9 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
     let remember_snapshot = error_snapshots
         .remove("remember")
         .ok_or("remember storeless snapshot missing")?;
-    insta::assert_json_snapshot!(remember_snapshot, @r###"
+    let remember_snapshot =
+        serde_json::to_string_pretty(&remember_snapshot).map_err(|error| error.to_string())?;
+    insta::assert_snapshot!(remember_snapshot, @r###"
     {
       "surface": "remember",
       "exitCode": 10,
@@ -983,7 +985,9 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
     let search_snapshot = error_snapshots
         .remove("search")
         .ok_or("search storeless snapshot missing")?;
-    insta::assert_json_snapshot!(search_snapshot, @r###"
+    let search_snapshot =
+        serde_json::to_string_pretty(&search_snapshot).map_err(|error| error.to_string())?;
+    insta::assert_snapshot!(search_snapshot, @r###"
     {
       "surface": "search",
       "exitCode": 10,
@@ -997,7 +1001,9 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
     let orient_snapshot = error_snapshots
         .remove("orient")
         .ok_or("orient storeless snapshot missing")?;
-    insta::assert_json_snapshot!(orient_snapshot, @r###"
+    let orient_snapshot =
+        serde_json::to_string_pretty(&orient_snapshot).map_err(|error| error.to_string())?;
+    insta::assert_snapshot!(orient_snapshot, @r###"
     {
       "surface": "orient",
       "exitCode": 10,

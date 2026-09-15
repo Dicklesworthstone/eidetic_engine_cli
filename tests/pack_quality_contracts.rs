@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::process::Command;
 
-use insta::assert_json_snapshot;
+use insta::assert_snapshot;
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -146,7 +146,8 @@ fn pack_quality_report_has_stable_field_names() -> TestResult {
     }
 
     scrub_pack_quality_report(&mut value);
-    assert_json_snapshot!("pack_quality_report_stable_fields", value);
+    let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+    assert_snapshot!("pack_quality_report_stable_fields", value);
 
     Ok(())
 }

@@ -17,7 +17,7 @@
 use ee::cache::hotset::{GenerationGate, HotsetBudget, HotsetManifestBuilder};
 use ee::pack::{PackHotsetEntry, PackHotsetEntryKind};
 use ee::search::SearchHotsetEntry;
-use insta::assert_json_snapshot;
+use insta::assert_snapshot;
 use serde_json::{Value as JsonValue, json};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -191,7 +191,13 @@ fn cache_hotset_manifest_json_shape_is_stable() -> TestResult {
             .pack_entries([pack_audit])
             .build();
 
-    assert_json_snapshot!("cache_hotset_v1_manifest", manifest.to_json());
+    let manifest_json =
+        serde_json::to_string_pretty(&manifest.to_json()).map_err(|error| error.to_string())?;
+    assert_snapshot!(
+        "cache_hotset_v1_manifest",
+        manifest_json,
+        "manifest.to_json()"
+    );
     Ok(())
 }
 
@@ -208,9 +214,12 @@ fn cache_hotset_manifest_emits_degraded_when_stale_entries_rejected() -> TestRes
             ])
             .build();
 
-    assert_json_snapshot!(
+    let manifest_json =
+        serde_json::to_string_pretty(&manifest.to_json()).map_err(|error| error.to_string())?;
+    assert_snapshot!(
         "cache_hotset_v1_manifest_stale_rejected",
-        manifest.to_json()
+        manifest_json,
+        "manifest.to_json()"
     );
     Ok(())
 }

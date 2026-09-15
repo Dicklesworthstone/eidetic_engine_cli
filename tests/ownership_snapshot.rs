@@ -7,7 +7,7 @@ use ee::core::ownership_snapshot::{
     OwnershipReservationSnapshot, OwnershipSnapshot, RustCompileDiagnostic,
     attribute_compile_blocker, attribute_compile_blocker_diagnostic, ownership_report_for_path,
 };
-use insta::assert_json_snapshot;
+use insta::assert_snapshot;
 use serde_json::json;
 
 type TestResult<T = ()> = Result<T, String>;
@@ -304,6 +304,7 @@ error[E0432]: unresolved import `crate::missing`
         "attributed": attributed,
         "unattributed": unattributed,
     });
-    assert_json_snapshot!("compile_blocker_attribution", value);
+    let value = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+    assert_snapshot!("compile_blocker_attribution", value);
     Ok(())
 }

@@ -257,8 +257,10 @@ fn stale_snapshot_subtree_matches_golden() -> TestResult {
     let report = resume_handoff(&base_resume_options(&fixture))
         .map_err(|error| format!("resume_handoff: {error:?}"))?;
     let normalized = normalized_stale_snapshot_json(&report)?;
+    let normalized =
+        serde_json::to_string_pretty(&normalized).map_err(|error| error.to_string())?;
 
-    insta::assert_json_snapshot!("handoff_resume_stale_snapshot", normalized);
+    insta::assert_snapshot!("handoff_resume_stale_snapshot", normalized);
     Ok(())
 }
 

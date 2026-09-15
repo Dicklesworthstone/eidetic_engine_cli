@@ -18,7 +18,7 @@ use ee::pack::{
     ContextRequest, ContextResponse, PackCandidate, PackCandidateInput, PackProvenance,
     PackSection, PackTrustSignal, TokenBudget, assemble_draft,
 };
-use insta::assert_json_snapshot;
+use insta::assert_snapshot;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
@@ -118,13 +118,16 @@ fn canonical_json(value: Value) -> Value {
     }
 }
 
-fn snapshot_stream_frames(value: Value) {
+fn snapshot_stream_frames(value: Value) -> TestResult {
+    let value =
+        serde_json::to_string_pretty(&canonical_json(value)).map_err(|error| error.to_string())?;
     let mut settings = insta::Settings::clone_current();
     settings.set_snapshot_path("snapshots");
     settings.set_prepend_module_to_snapshot(false);
     settings.bind(|| {
-        assert_json_snapshot!("context_stream", canonical_json(value));
+        assert_snapshot!("context_stream", value, "canonical_json(value)");
     });
+    Ok(())
 }
 
 fn snapshot_contract_frame(frame: &Value) -> Value {
@@ -177,7 +180,7 @@ fn stream_adapter_frames_match_golden_shape() -> TestResult {
 
     snapshot_stream_frames(Value::Array(
         values.iter().map(snapshot_contract_frame).collect(),
-    ));
+    ))?;
     Ok(())
 }
 

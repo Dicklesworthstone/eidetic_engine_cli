@@ -8,7 +8,7 @@ use std::fs;
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use insta::assert_json_snapshot;
+use insta::assert_snapshot;
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -261,13 +261,19 @@ fn normalized_profile_snapshot(profile: &Value, alpha_id: &str, beta_id: &str) -
     value
 }
 
-fn assert_agent_profile_snapshot(value: Value) {
+fn assert_agent_profile_snapshot(value: Value) -> TestResult {
+    // Insta's intermediate serializer exposes serde_json's private number
+    // representation with arbitrary_precision. Snapshot canonical JSON text
+    // directly, preserving numeric tokens and the existing golden.
+    let value = serde_json::to_string_pretty(&value)
+        .map_err(|error| format!("serialize agent profile snapshot: {error}"))?;
     let mut settings = insta::Settings::clone_current();
     settings.set_snapshot_path("snapshots");
     settings.set_prepend_module_to_snapshot(false);
     settings.bind(|| {
-        assert_json_snapshot!("agent_profile", value);
+        assert_snapshot!("agent_profile", value);
     });
+    Ok(())
 }
 
 #[test]
@@ -333,6 +339,6 @@ fn asymmetric_agent_outcomes_bias_context_and_why_without_cross_agent_leakage() 
         alpha_profile,
         &alpha_memory,
         &beta_memory,
-    ));
+    ))?;
     Ok(())
 }

@@ -15,7 +15,7 @@ use ee::core::support_bundle::{
 use ee::models::{
     ArtifactDegradationSeverity, ArtifactKind, RedactionPosture, SummaryDegradationCode,
 };
-use insta::assert_json_snapshot;
+use insta::assert_snapshot;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -220,10 +220,10 @@ fn has_degradation(
     })
 }
 
-fn snapshot_value<T: Serialize>(value: &T) -> Result<Value, String> {
+fn snapshot_value<T: Serialize>(value: &T) -> Result<String, String> {
     let mut value = serde_json::to_value(value).map_err(|error| error.to_string())?;
     scrub_snapshot_value(&mut value);
-    Ok(value)
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
 }
 
 fn scrub_snapshot_value(value: &mut Value) {
@@ -348,7 +348,7 @@ fn complete_bundle_summarizes_redacted_sections_and_hashes() -> TestResult {
         !rendered.contains("sk_live"),
         "summary must not include raw secret-like bundle content"
     );
-    assert_json_snapshot!("support_bundle_complete_summary", snapshot_value(&summary)?);
+    assert_snapshot!("support_bundle_complete_summary", snapshot_value(&summary)?);
 
     Ok(())
 }
@@ -389,7 +389,7 @@ fn partial_bundle_reports_missing_sections_with_repairs() -> TestResult {
             .as_deref()
             .is_some_and(|repair| !repair.is_empty())
     }));
-    assert_json_snapshot!("support_bundle_partial_summary", snapshot_value(&summary)?);
+    assert_snapshot!("support_bundle_partial_summary", snapshot_value(&summary)?);
 
     Ok(())
 }
@@ -428,7 +428,7 @@ fn tampered_bundle_reports_hash_mismatch_before_comparison() -> TestResult {
         degradation.code == SummaryDegradationCode::TamperedHash
             && degradation.severity == ArtifactDegradationSeverity::High
     }));
-    assert_json_snapshot!(
+    assert_snapshot!(
         "support_bundle_tampered_hash_summary",
         snapshot_value(&summary)?
     );
@@ -466,7 +466,7 @@ fn mismatched_profile_bundles_degrade_compare_confidence() -> TestResult {
         !rendered.contains("mixed_read_write_contention"),
         "compare output must not copy raw support-bundle report contents"
     );
-    assert_json_snapshot!(
+    assert_snapshot!(
         "support_bundle_profile_mismatch_compare",
         snapshot_value(&report)?
     );
