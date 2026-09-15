@@ -186,8 +186,52 @@ fn scrub_size_diagnostics_measurements(value: &mut Value) {
     }
 }
 
-fn normalize_named_golden(category: &str, name: &str, text: &str) -> String {
+fn package_version_golden_format(category: &str, name: &str) -> Option<ContractFormat> {
     match (category, name) {
+        ("agent_docs", "agent_docs_json")
+        | ("check", "check_json")
+        | ("capabilities", "capabilities_json")
+        | ("dependencies", "diag_integrity")
+        | ("version", "version") => Some(ContractFormat::Json),
+        ("check", "check_toon") | ("capabilities", "capabilities_toon") => {
+            Some(ContractFormat::Toon)
+        }
+        ("version", "version_output") => Some(ContractFormat::Text),
+        _ => None,
+    }
+}
+
+/// Validate the live output before any historical package-version normalization.
+fn assert_actual_package_version(category: &str, name: &str, actual: &str) -> TestResult {
+    let context = format!("{category}/{name} package version must match the compiled package");
+    match package_version_golden_format(category, name) {
+        Some(ContractFormat::Json) => {
+            let value: Value = serde_json::from_str(actual)
+                .map_err(|error| format!("{context}: invalid JSON: {error}"))?;
+            ensure_equal(
+                &value.pointer("/data/version").and_then(Value::as_str),
+                &Some(env!("CARGO_PKG_VERSION")),
+                &context,
+            )
+        }
+        Some(ContractFormat::Toon) => {
+            let versions: Vec<_> = actual
+                .lines()
+                .filter_map(|line| line.strip_prefix("  version: "))
+                .collect();
+            ensure_equal(&versions, &vec![env!("CARGO_PKG_VERSION")], &context)
+        }
+        Some(ContractFormat::Text) => ensure_equal(
+            &actual.trim(),
+            &format!("ee {}", env!("CARGO_PKG_VERSION")).as_str(),
+            &context,
+        ),
+        None => Ok(()),
+    }
+}
+
+fn normalize_named_golden(category: &str, name: &str, text: &str) -> String {
+    let normalized = match (category, name) {
         ("status", "status_json") => normalize_status_json_for_golden(text),
         ("agent", "doctor.json") => normalize_doctor_json_for_golden(text),
         ("doctor", "missing_db_degradation" | "pending_migration_degradation") => {
@@ -197,6 +241,36 @@ fn normalize_named_golden(category: &str, name: &str, text: &str) -> String {
         ("toon", "status") => normalize_status_toon_for_golden(text),
         ("version", "version") => normalize_version_json_for_golden(text),
         _ => normalize_json_for_golden(text),
+    };
+    match package_version_golden_format(category, name) {
+        Some(ContractFormat::Json) => {
+            let Ok(mut value) = serde_json::from_str::<Value>(&normalized) else {
+                return normalized;
+            };
+            if let Some(version) = value.pointer_mut("/data/version").filter(|v| v.is_string()) {
+                *version = Value::String("<scrubbed:eeVersion>".to_owned());
+            }
+            serde_json::to_string(&value).unwrap_or(normalized)
+        }
+        Some(ContractFormat::Toon) => normalized
+            .lines()
+            .map(|line| {
+                if line.starts_with("  version: ") {
+                    "  version: \"<scrubbed:eeVersion>\""
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Some(ContractFormat::Text) => {
+            let Some(version) = normalized.strip_prefix("ee ") else {
+                return normalized;
+            };
+            let end = version.find(char::is_whitespace).unwrap_or(version.len());
+            format!("ee <scrubbed:eeVersion>{}", &version[end..])
+        }
+        None => normalized,
     }
 }
 
@@ -745,6 +819,7 @@ fn scrub_volatile_fields(value: &mut Value) {
 
 /// Assert that the actual output matches the golden file, or update the golden if UPDATE_GOLDEN=1.
 fn assert_golden(category: &str, name: &str, actual: &str) -> TestResult {
+    assert_actual_package_version(category, name, actual)?;
     let path = golden_path(category, name);
     let update_mode = env::var("UPDATE_GOLDEN").is_ok();
 
@@ -1370,6 +1445,16 @@ fn validate_contract_golden(
     stdout: &str,
     exit_code: Option<i32>,
 ) -> TestResult {
+    assert_actual_package_version(case.category, case.golden_name, stdout).map_err(|error| {
+        contract_failure(
+            case,
+            FailureClass::SchemaMismatch,
+            "/data/version",
+            env!("CARGO_PKG_VERSION"),
+            error,
+            exit_code,
+        )
+    })?;
     let path = case.fixture_path();
     let expected = fs::read_to_string(&path).map_err(|error| {
         contract_failure(
