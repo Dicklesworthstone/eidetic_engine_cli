@@ -117,25 +117,11 @@ mod warm_posture {
     pub const FAILED: u8 = 3;
 }
 
-/// Process-global warm posture. One daemon per process, so a plain static is
-/// the whole state: [`start_daemon`] is the only writer that moves it off
-/// [`warm_posture::COLD`], and the warm thread is the only writer thereafter.
-static DAEMON_SEARCH_WARM_STATE: AtomicU8 = AtomicU8::new(warm_posture::COLD);
-
 /// Query used to drive the warm-up. Deliberately a fixed, content-free token:
 /// warm-up must never depend on, or leak, workspace content.
 const DAEMON_WARM_QUERY: &str = "ee daemon warmup";
 
-/// Wire label for the current warm posture, as advertised by
-/// `ee.daemon.capabilities` under `warm.posture`.
-#[must_use]
-pub fn daemon_search_warm_posture() -> &'static str {
-    warm_posture_label(DAEMON_SEARCH_WARM_STATE.load(Ordering::Acquire))
-}
-
-/// Pure state-to-wire-label mapping. Split out from
-/// [`daemon_search_warm_posture`] so it can be tested without touching the
-/// process-global state that a concurrently starting daemon also writes.
+/// Wire label for an individual daemon's startup search state.
 const fn warm_posture_label(state: u8) -> &'static str {
     match state {
         warm_posture::WARMING => "warming",
@@ -238,6 +224,9 @@ const SEARCH_ADVISORY_SETTLEMENT_RETRY_LIMIT: usize = 64;
 #[derive(Clone, Debug, Default)]
 pub struct DaemonDispatchPolicy {
     bound_workspace_id: Option<String>,
+    /// Owned by one server instance, including its detached startup worker.
+    /// Model caches may be shared, but readiness for another workspace is not.
+    search_warm_state: Arc<AtomicU8>,
     /// Search advisories are emitted once per active workspace condition.
     search_advisory_session: Arc<Mutex<SearchAdvisorySession>>,
     /// Set once at daemon start when the workspace is bound and the long-lived
@@ -535,6 +524,7 @@ fn daemon_echo_env_value_truthy(value: &str) -> bool {
 pub struct DaemonServerHandle {
     socket_path: PathBuf,
     shutdown: Arc<AtomicBool>,
+    search_warm_state: Arc<AtomicU8>,
     pool: Arc<InflightPool>,
     accept_thread: Option<JoinHandle<()>>,
     /// Background steward scheduler thread (bd-2ohzq). `None` when the
@@ -593,6 +583,12 @@ impl DaemonServerHandle {
         &self.socket_path
     }
 
+    /// Startup search posture advertised by this server's capabilities.
+    #[must_use]
+    pub fn search_warm_posture(&self) -> &'static str {
+        warm_posture_label(self.search_warm_state.load(Ordering::Acquire))
+    }
+
     /// Whether any daemon control path has requested shutdown. The
     /// foreground CLI process uses this to turn an RPC shutdown request
     /// into an explicit [`DaemonServerHandle::shutdown`] call so the
@@ -620,6 +616,11 @@ impl DaemonServerHandle {
         }
 
         self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(scheduler) = &self.scheduler_thread {
+            // Wake an idle scheduler immediately. The park token also covers
+            // shutdown racing with the scheduler's check before it parks.
+            scheduler.join.thread().unpark();
+        }
         // The warm-up is a pure optimisation running a single bounded search.
         // It checks `shutdown` before it starts but cannot be interrupted once
         // inside the search, and a cold-cache warm can take tens of seconds.
@@ -1079,7 +1080,11 @@ impl SocketBroker {
 pub fn start_server(
     socket_path: impl Into<PathBuf>,
 ) -> Result<DaemonServerHandle, DaemonStartError> {
-    start_server_with_dispatch_policy(socket_path, DaemonDispatchPolicy::default())
+    start_server_with_dispatch_policy(
+        socket_path,
+        DaemonDispatchPolicy::default(),
+        daemon_warm_enabled(),
+    )
 }
 
 /// Bind a UDS at `socket_path` for a daemon scoped to `workspace_id`.
@@ -1093,13 +1098,23 @@ pub fn start_server_for_workspace(
     start_server_with_dispatch_policy(
         socket_path,
         DaemonDispatchPolicy::for_workspace(workspace_id),
+        daemon_warm_enabled(),
     )
 }
 
 fn start_server_with_dispatch_policy(
     socket_path: impl Into<PathBuf>,
     mut dispatch_policy: DaemonDispatchPolicy,
+    warm_enabled: bool,
 ) -> Result<DaemonServerHandle, DaemonStartError> {
+    // A cloned policy is a configuration template, not a shared server
+    // lifetime. Initialize before the accept loop can advertise capabilities.
+    let should_warm = warm_enabled && dispatch_policy.bound_workspace_id.is_some();
+    dispatch_policy.search_warm_state = Arc::new(AtomicU8::new(if should_warm {
+        warm_posture::WARMING
+    } else {
+        warm_posture::COLD
+    }));
     let broker = SocketBroker::new(socket_path);
     let (listener, _publish_lock) = broker.publish_listener()?;
     let socket_path = broker.socket_path().to_path_buf();
@@ -1240,11 +1255,19 @@ fn start_server_with_dispatch_policy(
     let warm_thread = dispatch_policy
         .bound_workspace_id
         .as_deref()
-        .and_then(|workspace| spawn_search_warm_thread(PathBuf::from(workspace), &shutdown));
+        .filter(|_| should_warm)
+        .and_then(|workspace| {
+            spawn_search_warm_thread(
+                PathBuf::from(workspace),
+                &shutdown,
+                Arc::clone(&dispatch_policy.search_warm_state),
+            )
+        });
 
     Ok(DaemonServerHandle {
         socket_path,
         shutdown,
+        search_warm_state: Arc::clone(&dispatch_policy.search_warm_state),
         pool,
         accept_thread: Some(accept_thread),
         scheduler_thread,
@@ -1307,23 +1330,21 @@ fn warm_daemon_search_stack(workspace_path: &Path) -> Result<(), crate::core::se
 
 /// Spawn the startup warm-up thread for a workspace-bound daemon.
 ///
-/// Returns `None` when warm-up is disabled or the thread cannot be spawned;
-/// neither is fatal, because a cold daemon still serves correctly — just
-/// slowly, which is exactly the state this exists to avoid.
+/// Returns `None` when the thread cannot be spawned. A cold daemon still
+/// serves correctly; callers decide whether startup warming is enabled.
 fn spawn_search_warm_thread(
     workspace_path: PathBuf,
     shutdown: &Arc<AtomicBool>,
+    warm_state: Arc<AtomicU8>,
 ) -> Option<JoinHandle<()>> {
-    if !daemon_warm_enabled() {
-        return None;
-    }
     let shutdown = Arc::clone(shutdown);
-    DAEMON_SEARCH_WARM_STATE.store(warm_posture::WARMING, Ordering::Release);
+    warm_state.store(warm_posture::WARMING, Ordering::Release);
+    let worker_warm_state = Arc::clone(&warm_state);
     let spawned = thread::Builder::new()
         .name("ee-daemon-warm".to_owned())
         .spawn(move || {
             if shutdown.load(Ordering::SeqCst) {
-                DAEMON_SEARCH_WARM_STATE.store(warm_posture::COLD, Ordering::Release);
+                worker_warm_state.store(warm_posture::COLD, Ordering::Release);
                 return;
             }
             let started = Instant::now();
@@ -1334,7 +1355,7 @@ fn spawn_search_warm_thread(
             }));
             match outcome {
                 Ok(Ok(())) => {
-                    DAEMON_SEARCH_WARM_STATE.store(warm_posture::READY, Ordering::Release);
+                    worker_warm_state.store(warm_posture::READY, Ordering::Release);
                     tracing::info!(
                         target: "ee::daemon::warm",
                         elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -1342,7 +1363,7 @@ fn spawn_search_warm_thread(
                     );
                 }
                 Ok(Err(error)) => {
-                    DAEMON_SEARCH_WARM_STATE.store(warm_posture::FAILED, Ordering::Release);
+                    worker_warm_state.store(warm_posture::FAILED, Ordering::Release);
                     tracing::warn!(
                         target: "ee::daemon::warm",
                         error = %error,
@@ -1350,7 +1371,7 @@ fn spawn_search_warm_thread(
                     );
                 }
                 Err(_) => {
-                    DAEMON_SEARCH_WARM_STATE.store(warm_posture::FAILED, Ordering::Release);
+                    worker_warm_state.store(warm_posture::FAILED, Ordering::Release);
                     tracing::warn!(
                         target: "ee::daemon::warm",
                         "daemon search warm-up panicked; daemon still serves from a cold cache"
@@ -1361,7 +1382,7 @@ fn spawn_search_warm_thread(
     match spawned {
         Ok(handle) => Some(handle),
         Err(_) => {
-            DAEMON_SEARCH_WARM_STATE.store(warm_posture::COLD, Ordering::Release);
+            warm_state.store(warm_posture::COLD, Ordering::Release);
             None
         }
     }
@@ -2123,42 +2144,19 @@ fn dispatch_with_policy_and_shutdown(
     dispatch_with_echo_policy_and_workspace_inner(
         request,
         daemon_echo_enabled(),
-        policy.bound_workspace_id(),
+        policy,
         shutdown,
-        policy.write_router(),
-        policy.search_advisory_session(),
         true,
     )
 }
 
 fn dispatch_with_echo_policy(request: &DaemonRequest, echo_enabled: bool) -> DaemonResponse {
     let shutdown = AtomicBool::new(false);
-    let search_advisory_session = Mutex::new(SearchAdvisorySession::default());
-    dispatch_with_echo_policy_and_workspace(
-        request,
-        echo_enabled,
-        None,
-        &shutdown,
-        None,
-        &search_advisory_session,
-    )
-}
-
-fn dispatch_with_echo_policy_and_workspace(
-    request: &DaemonRequest,
-    echo_enabled: bool,
-    bound_workspace_id: Option<&str>,
-    shutdown: &AtomicBool,
-    write_router: Option<&DaemonWriteRouter>,
-    search_advisory_session: &Mutex<SearchAdvisorySession>,
-) -> DaemonResponse {
     dispatch_with_echo_policy_and_workspace_inner(
         request,
         echo_enabled,
-        bound_workspace_id,
-        shutdown,
-        write_router,
-        search_advisory_session,
+        &DaemonDispatchPolicy::default(),
+        &shutdown,
         false,
     )
 }
@@ -2166,12 +2164,13 @@ fn dispatch_with_echo_policy_and_workspace(
 fn dispatch_with_echo_policy_and_workspace_inner(
     request: &DaemonRequest,
     echo_enabled: bool,
-    bound_workspace_id: Option<&str>,
+    policy: &DaemonDispatchPolicy,
     shutdown: &AtomicBool,
-    write_router: Option<&DaemonWriteRouter>,
-    search_advisory_session: &Mutex<SearchAdvisorySession>,
     defer_advisory_until_socket_write: bool,
 ) -> DaemonResponse {
+    let bound_workspace_id = policy.bound_workspace_id();
+    let write_router = policy.write_router();
+    let search_advisory_session = policy.search_advisory_session();
     if request.schema != super::DAEMON_REQUEST_SCHEMA_V1 {
         return DaemonResponse::err(
             request.request_id.clone(),
@@ -2205,7 +2204,7 @@ fn dispatch_with_echo_policy_and_workspace_inner(
             request.request_id.clone(),
             request.agent_id.clone(),
             request.workspace_id.clone(),
-            daemon_capabilities_result(bound_workspace_id),
+            daemon_capabilities_result(policy),
         ),
         // bd-3uev6: echo is the one public dispatch method that returns
         // caller-supplied content, so it MUST route through the same
@@ -5828,7 +5827,8 @@ fn method_unauthorized_response(request: &DaemonRequest, message: &'static str) 
 }
 
 #[allow(clippy::expect_used)]
-fn daemon_capabilities_result(bound_workspace_id: Option<&str>) -> serde_json::Value {
+fn daemon_capabilities_result(policy: &DaemonDispatchPolicy) -> serde_json::Value {
+    let bound_workspace_id = policy.bound_workspace_id();
     serde_json::json!({
         "protocol": "ee.daemon",
         "workspace_path": bound_workspace_id,
@@ -5882,7 +5882,7 @@ fn daemon_capabilities_result(bound_workspace_id: Option<&str>) -> serde_json::V
         // apart from "this daemon cannot serve search", so a bounded fallback
         // can say something actionable instead of a bare deadline message.
         "warm": {
-            "posture": daemon_search_warm_posture()
+            "posture": warm_posture_label(policy.search_warm_state.load(Ordering::Acquire))
         },
         "forward_compat": {
             "v1_unknown_fields": "rejected",
@@ -8257,7 +8257,7 @@ mod tests {
         assert_eq!(
             warm_posture::COLD,
             0,
-            "cold must stay the zero value so the static initialises to it"
+            "cold must stay the zero value so default policies initialize to it"
         );
         assert_eq!(warm_posture_label(warm_posture::COLD), "cold");
         assert_eq!(warm_posture_label(warm_posture::WARMING), "warming");
@@ -8270,7 +8270,9 @@ mod tests {
 
     #[test]
     fn daemon_capabilities_advertise_the_warm_posture() {
-        let capabilities = daemon_capabilities_result(Some("/workspace/warm-test"));
+        let capabilities = daemon_capabilities_result(&DaemonDispatchPolicy::for_workspace(
+            "/workspace/warm-test",
+        ));
         assert_eq!(capabilities["workspace_path"], "/workspace/warm-test");
         let posture = capabilities
             .pointer("/warm/posture")
@@ -8280,6 +8282,174 @@ mod tests {
             matches!(posture, "cold" | "warming" | "ready" | "failed"),
             "unexpected warm posture label: {posture}"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "lexical-bm25")]
+    fn daemon_warm_readiness_is_owned_by_each_server_and_restart() -> Result<(), String> {
+        use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+        use crate::search::{
+            Embedder, EmbedderStack, HashEmbedder, IndexBuilder, IndexableDocument,
+        };
+
+        let workspace = private_tempdir();
+        let root = workspace.path();
+        let ee_dir = root.join(".ee");
+        fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        let database = ee_dir.join("ee.db");
+        let index_dir = ee_dir.join("index");
+        let workspace_id = "wsp_52000000000000000000000001";
+        let memory_id = "mem_52000000000000000000000001";
+        let _embedder_guard =
+            crate::core::index::install_test_hash_workspace_embedder(workspace_id);
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: root.display().to_string(),
+                    name: Some("daemon-warm-owner".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: DAEMON_WARM_QUERY.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: Some("test://daemon-warm-owner".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let generation = connection
+            .get_workspace_generation(workspace_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "warm fixture workspace generation missing".to_owned())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let build_index_dir = index_dir.clone();
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let documents = vec![IndexableDocument::new(memory_id, DAEMON_WARM_QUERY)];
+            IndexBuilder::new(&build_index_dir)
+                .with_embedder_stack(EmbedderStack::from_parts(
+                    Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>,
+                    None,
+                ))
+                .add_documents(documents.clone())
+                .build(&cx)
+                .await
+                .map_err(|error| error.to_string())?;
+            crate::core::index::build_lexical_tier(&cx, &build_index_dir, &documents)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        })
+        .map_err(|error| error.to_string())??;
+        crate::core::index::write_memory_eval_index_metadata_for_generation(
+            &index_dir, generation, 1,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let policy = DaemonDispatchPolicy::for_workspace(root.display().to_string());
+        let socket = root.join("ready.sock");
+        let mut ready = start_server_with_dispatch_policy(&socket, policy.clone(), true)
+            .map_err(|error| error.to_string())?;
+        // Join the actual bounded warm query, rather than fabricating READY or
+        // assuming elapsed time means the workspace has completed startup.
+        ready
+            .warm_thread
+            .take()
+            .expect("enabled bound warm worker")
+            .join()
+            .expect("warm worker catches its search failures");
+        assert_eq!(ready.search_warm_posture(), "ready");
+        assert!(!Arc::ptr_eq(
+            &ready.search_warm_state,
+            &policy.search_warm_state
+        ));
+
+        let capabilities = |handle: &DaemonServerHandle| {
+            let request = DaemonRequest::new(
+                "warm-instance-capabilities",
+                TEST_AGENT_ID,
+                METHOD_CAPABILITIES,
+                serde_json::json!({}),
+            );
+            let response = client_round_trip(handle.socket_path(), &request)
+                .expect("actual endpoint capabilities");
+            assert!(response.error.is_none(), "{response:?}");
+            response.result.expect("capability result")
+        };
+        assert_eq!(capabilities(&ready)["warm"]["posture"], "ready");
+
+        let missing_workspace = private_tempdir();
+        let mut failed = start_server_with_dispatch_policy(
+            missing_workspace.path().join("failed.sock"),
+            DaemonDispatchPolicy::for_workspace(missing_workspace.path().display().to_string()),
+            true,
+        )
+        .map_err(|error| error.to_string())?;
+        failed
+            .warm_thread
+            .take()
+            .expect("missing-index warm worker")
+            .join()
+            .expect("warm worker catches missing-index errors");
+        assert_eq!(capabilities(&failed)["warm"]["posture"], "failed");
+        // An independent real failure must not overwrite this server's READY.
+        assert_eq!(capabilities(&ready)["warm"]["posture"], "ready");
+
+        let mut disabled =
+            start_server_with_dispatch_policy(root.join("disabled.sock"), policy.clone(), false)
+                .map_err(|error| error.to_string())?;
+        let mut unbound = start_server_with_dispatch_policy(
+            root.join("unbound.sock"),
+            DaemonDispatchPolicy::default(),
+            true,
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(disabled.warm_thread.is_none());
+        assert!(unbound.warm_thread.is_none());
+        assert_eq!(capabilities(&disabled)["warm"]["posture"], "cold");
+        assert_eq!(capabilities(&unbound)["warm"]["posture"], "cold");
+        assert_eq!(capabilities(&ready)["warm"]["posture"], "ready");
+        assert_eq!(capabilities(&failed)["warm"]["posture"], "failed");
+
+        let old_state = Arc::clone(&ready.search_warm_state);
+        ready.shutdown().map_err(|error| error.to_string())?;
+        let mut restarted = start_server_with_dispatch_policy(&socket, policy, false)
+            .map_err(|error| error.to_string())?;
+        assert!(!Arc::ptr_eq(&old_state, &restarted.search_warm_state));
+        assert_eq!(capabilities(&restarted)["warm"]["posture"], "cold");
+        // A stopped worker's actual shutdown branch may finish after restart.
+        // It owns only the old instance, even at the identical socket path.
+        spawn_search_warm_thread(root.to_path_buf(), &ready.shutdown, Arc::clone(&old_state))
+            .expect("stopped-instance warm worker")
+            .join()
+            .expect("stopped-instance worker exits");
+        assert_eq!(
+            warm_posture_label(old_state.load(Ordering::Acquire)),
+            "cold"
+        );
+        assert_eq!(capabilities(&restarted)["warm"]["posture"], "cold");
+        assert_eq!(capabilities(&failed)["warm"]["posture"], "failed");
+        restarted.shutdown().map_err(|error| error.to_string())?;
+        disabled.shutdown().map_err(|error| error.to_string())?;
+        unbound.shutdown().map_err(|error| error.to_string())?;
+        failed.shutdown().map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     #[test]
@@ -8348,14 +8518,12 @@ mod tests {
         );
         request.workspace_id = Some("workspace-other".to_owned());
         let shutdown = AtomicBool::new(false);
-        let search_advisory_session = Mutex::new(SearchAdvisorySession::default());
-        let response = dispatch_with_echo_policy_and_workspace(
+        let response = dispatch_with_echo_policy_and_workspace_inner(
             &request,
             false,
-            Some(TEST_WORKSPACE_ID),
+            &DaemonDispatchPolicy::for_workspace(TEST_WORKSPACE_ID),
             &shutdown,
-            None,
-            &search_advisory_session,
+            false,
         );
         let error = response.error.as_ref().expect("must have error");
         assert_eq!(error.code, DAEMON_METHOD_UNAUTHORIZED_CODE);
@@ -8968,14 +9136,12 @@ mod tests {
             serde_json::json!({}),
         );
         let shutdown = AtomicBool::new(false);
-        let search_advisory_session = Mutex::new(SearchAdvisorySession::default());
-        let response = dispatch_with_echo_policy_and_workspace(
+        let response = dispatch_with_echo_policy_and_workspace_inner(
             &request,
             false,
-            None,
+            &DaemonDispatchPolicy::default(),
             &shutdown,
-            None,
-            &search_advisory_session,
+            false,
         );
 
         assert!(response.error.is_none());
@@ -9175,6 +9341,7 @@ mod tests {
                 uuid::Uuid::now_v7()
             )),
             shutdown: Arc::new(AtomicBool::new(false)),
+            search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
             pool,
             accept_thread: None,
             scheduler_thread: None,
@@ -9211,6 +9378,65 @@ mod tests {
     }
 
     #[test]
+    fn daemon_shutdown_unparks_idle_scheduler_before_join() {
+        let workspace = tempfile::tempdir().expect("scheduler workspace");
+        let workspace_path = workspace.path().to_string_lossy().into_owned();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let scheduler_shutdown = Arc::clone(&shutdown);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let join = thread::spawn(move || {
+            entered_tx
+                .send(())
+                .expect("notify scheduler is ready to park");
+            // Deliberately exceed the unchanged join budget: only the handle's
+            // wake notification should release this idle wait. An early wake
+            // must remain available even if it arrives before park_timeout.
+            loop {
+                thread::park_timeout(Duration::from_secs(30));
+                if scheduler_shutdown.load(Ordering::Acquire) {
+                    break;
+                }
+            }
+            crate::steward::run_daemon_background_scheduler(&workspace_path, scheduler_shutdown);
+            done_tx
+                .send(SchedulerThreadExit::Returned)
+                .expect("notify scheduler returned");
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("scheduler thread must reach its idle wait");
+        let mut handle = DaemonServerHandle {
+            socket_path: workspace.path().join("scheduler.sock"),
+            shutdown,
+            search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
+            pool: InflightPool::new(1),
+            accept_thread: None,
+            scheduler_thread: Some(SchedulerThreadHandle { join, done_rx }),
+            warm_thread: None,
+            shutdown_done: AtomicBool::new(false),
+            workers_drained: AtomicBool::new(false),
+            write_handle: None,
+            write_owner_task: None,
+            write_runtime: None,
+        };
+
+        let result = handle.shutdown();
+        if let Some(scheduler) = &handle.scheduler_thread {
+            // Release the owned test thread on failure without replacing the
+            // original shutdown result or reporting its timeout as success.
+            scheduler.join.thread().unpark();
+        }
+        result.expect("shutdown must notify the idle scheduler before its join deadline");
+        assert!(handle.scheduler_thread.is_none());
+        assert!(handle.workers_drained.load(Ordering::Acquire));
+        assert!(
+            !workspace.path().join(".ee").exists(),
+            "shutdown before the first tick must not initialize workspace state"
+        );
+    }
+
+    #[test]
     fn daemon_scheduler_join_timeout_can_be_retried_after_busy_task_exits() {
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -9231,6 +9457,7 @@ mod tests {
                 uuid::Uuid::now_v7()
             )),
             shutdown: Arc::new(AtomicBool::new(false)),
+            search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
             pool: InflightPool::new(1),
             accept_thread: None,
             scheduler_thread: Some(SchedulerThreadHandle { join, done_rx }),

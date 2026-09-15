@@ -7651,8 +7651,8 @@ async fn sleep_daemon_foreground_interval(
 /// construction overhead across many idle workspaces.
 pub const BACKGROUND_SCHEDULER_INTERVAL_MS: u64 = 60_000;
 
-/// Resolution used when polling the shutdown signal during the inter-tick
-/// sleep. 500 ms gives sub-second shutdown latency without busy-waiting.
+/// Polling fallback for callers that set the shutdown flag without unparking
+/// the scheduler thread. The daemon handle also unparks it for prompt shutdown.
 const BACKGROUND_SCHEDULER_SLEEP_SLICE_MS: u64 = 500;
 
 /// Job types run by the background scheduler on every tick. These are the
@@ -7671,8 +7671,8 @@ const BACKGROUND_SCHEDULER_JOB_TYPES: &[JobType] = &[
 ///
 /// The scheduler sleeps FIRST, then ticks (sleep-tick pattern). This ensures
 /// that a daemon that starts and stops within the interval never executes a
-/// steward job, and that `DaemonServerHandle::shutdown` completes promptly
-/// regardless of when it is called.
+/// steward job. The daemon handle wakes the idle thread when shutting down;
+/// an active tick observes the same flag through its runner cancellation checks.
 ///
 /// Each tick builds a fresh Asupersync runtime, runs the configured steward
 /// jobs with `tick_limit = 1`. Per-tick errors are swallowed: the scheduler
@@ -7680,17 +7680,9 @@ const BACKGROUND_SCHEDULER_JOB_TYPES: &[JobType] = &[
 /// failure. The steward's own job rows record per-tick outcomes.
 pub fn run_daemon_background_scheduler(workspace: &str, shutdown: Arc<AtomicBool>) {
     loop {
-        // Sleep first so short-lived daemon processes never run a steward tick
-        // and so shutdown() completes within BACKGROUND_SCHEDULER_SLEEP_SLICE_MS.
+        // Wait first so short-lived daemon processes never run a steward tick.
         let deadline = Instant::now() + Duration::from_millis(BACKGROUND_SCHEDULER_INTERVAL_MS);
-        while Instant::now() < deadline {
-            if shutdown.load(Ordering::Relaxed) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(BACKGROUND_SCHEDULER_SLEEP_SLICE_MS));
-        }
-
-        if shutdown.load(Ordering::Relaxed) {
+        if !wait_for_background_scheduler_tick(&shutdown, deadline) {
             break;
         }
 
@@ -7703,6 +7695,23 @@ pub fn run_daemon_background_scheduler(workspace: &str, shutdown: Arc<AtomicBool
             runner_options: RunnerOptions::new().with_cancellation_flag(Arc::clone(&shutdown)),
         };
         let _ = run_daemon_foreground(&options);
+    }
+}
+
+fn wait_for_background_scheduler_tick(shutdown: &AtomicBool, deadline: Instant) -> bool {
+    loop {
+        if shutdown.load(Ordering::Acquire) {
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        // Unpark before park leaves a token, so shutdown cannot lose its wake
+        // between the flag check and this wait. Spurious wakes recheck both.
+        std::thread::park_timeout(
+            remaining.min(Duration::from_millis(BACKGROUND_SCHEDULER_SLEEP_SLICE_MS)),
+        );
     }
 }
 
@@ -12645,6 +12654,30 @@ mod tests {
     // ========================================================================
     // Background Scheduler (bd-2ohzq)
     // ========================================================================
+
+    #[test]
+    fn background_scheduler_wait_retains_deadline_after_early_unpark() {
+        let worker = std::thread::spawn(|| {
+            let shutdown = AtomicBool::new(false);
+            let deadline = Instant::now() + Duration::from_millis(30);
+            // Queue the token before the scheduler parks. It must consume the
+            // wake and wait again, never treating a wake as permission to tick.
+            std::thread::current().unpark();
+            assert!(wait_for_background_scheduler_tick(&shutdown, deadline));
+            assert!(Instant::now() >= deadline);
+            assert!(!shutdown.load(Ordering::Acquire));
+        });
+        worker.join().expect("scheduler wait must not panic");
+    }
+
+    #[test]
+    fn background_scheduler_wait_checks_shutdown_before_expired_deadline() {
+        let shutdown = AtomicBool::new(true);
+        assert!(
+            !wait_for_background_scheduler_tick(&shutdown, Instant::now()),
+            "shutdown must prevent a tick even when its deadline has arrived"
+        );
+    }
 
     #[test]
     fn background_scheduler_exits_promptly_when_shutdown_fires() {
