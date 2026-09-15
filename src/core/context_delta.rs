@@ -603,6 +603,10 @@ fn stable_serialized_len_with_overhead(
     // Updating savedPercent can change its decimal width and make the total
     // oscillate. The caller must withhold this delta rather than report an
     // unverified byte count or enforce a budget against a stale measurement.
+    if envelope.data.server_decision.fallback_reason.is_none() {
+        envelope.data.server_decision.fallback_reason =
+            Some(ContextDeltaFallbackReason::ComputeBudgetExceeded);
+    }
     Err(ContextDeltaError {
         message: "context delta emission size did not converge after 8 measurements; emit the full pack instead"
             .to_owned(),

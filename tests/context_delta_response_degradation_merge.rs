@@ -514,3 +514,105 @@ fn finalize_with_transport_overhead_holds_emission_at_or_under_budget() -> TestR
     );
     Ok(())
 }
+
+fn decimal_width_boundary_envelope() -> Result<ee::core::context_delta::ContextDeltaEnvelope, String>
+{
+    // Shape and byte widths captured from a real `pack --since --max-tokens 40`
+    // emission: fullBytes=10936 and newline overhead produced a 1213/1214 cycle.
+    let mut envelope = happy_path_envelope_with_one_modified_item()?;
+    envelope.data.prior_pack_hash = format!("blake3:{}", "a".repeat(64));
+    envelope.data.new_pack_hash = format!("blake3:{}", "b".repeat(64));
+    envelope.data.base_db_generation = Some(0);
+    envelope.data.new_db_generation = Some(0);
+    envelope.data.items = serde_json::from_value(serde_json::json!({
+        "added": [],
+        "removed": [
+            "mem_01M2HEXTN0EZ2AVTCVYKYH40CV",
+            "mem_01M2HEXWPDE1VTJM80NJ4ERBA1",
+            "mem_01M2HEY0SFEMQB61MZ7TJCDZSH"
+        ],
+        "modified": [{
+            "id": "mem_01M2HEXYR5EZMVPK7W1F96ZX8B",
+            "fieldChanges": {"estimatedTokens": [10, 8]}
+        }]
+    }))
+    .map_err(|error| error.to_string())?;
+    envelope.data.token_savings.full_bytes = 10_936;
+    envelope.data.token_savings.net_pack_tokens = 20;
+    envelope
+        .data
+        .server_decision
+        .computed_from_server_verified_pack_record = true;
+    envelope.append_response_degradation(
+        "embed_model_unavailable",
+        "warning",
+        "Embedding model unavailable (active embedder source frankensearch_hash_fallback reports semantic=false); semantic similarity is disabled and lexical search remains available.",
+        Some("ee index reembed --workspace .".to_owned()),
+    );
+    envelope.append_response_degradation(
+        "graph_feature_disabled",
+        "medium",
+        "Proximity-to-seed scoring is disabled by graph.feature.proximity.enabled.",
+        Some("ee config set graph.feature.proximity.enabled true".to_owned()),
+    );
+    Ok(envelope)
+}
+
+#[test]
+fn transport_decimal_width_cycle_refuses_an_unverified_delta_size() -> TestResult {
+    let mut envelope = decimal_width_boundary_envelope()?;
+    for (reported, saved, percent, emitted) in [(1213, 9723, 88.91, 1214), (1214, 9722, 88.9, 1213)]
+    {
+        envelope.data.token_savings.delta_bytes = reported;
+        envelope.data.token_savings.saved_bytes = saved;
+        envelope.data.token_savings.saved_percent = percent;
+        assert_eq!(
+            serde_json::to_vec(&envelope)
+                .map_err(|error| error.to_string())?
+                .len() as u64
+                + 1,
+            emitted,
+            "the independently serialized bytes must reproduce the decimal-width cycle",
+        );
+        assert_ne!(reported, emitted);
+    }
+    let error = envelope
+        .finalize_with_budget_and_transport_overhead(None, 1)
+        .expect_err("a non-converging emission must not return a stale size");
+    assert!(error.to_string().contains("did not converge"), "{error}");
+    assert!(
+        !envelope.emits_delta(),
+        "an unmeasured delta must be withheld"
+    );
+    assert_eq!(
+        envelope.data.server_decision.fallback_reason,
+        Some(ee::core::context_delta::ContextDeltaFallbackReason::ComputeBudgetExceeded),
+    );
+    Ok(())
+}
+
+#[test]
+fn transport_decimal_width_fixed_point_reports_exact_emission_bytes() -> TestResult {
+    let mut envelope = decimal_width_boundary_envelope()?;
+    // A nearby full-pack size moves savedPercent away from the decimal-width
+    // discontinuity; this positive case must retain a usable delta.
+    envelope.data.token_savings.full_bytes = 10_940;
+    let measured = envelope
+        .finalize_with_budget_and_transport_overhead(None, 1)
+        .map_err(|error| format!("stable decimal-width envelope: {error}"))?;
+    assert!(envelope.emits_delta());
+    let serialized = serde_json::to_vec(&envelope).map_err(|error| error.to_string())?;
+    assert_eq!(measured, serialized.len() as u64 + 1);
+    assert_eq!(envelope.data.token_savings.delta_bytes, measured);
+    assert_eq!(
+        envelope
+            .finalize_with_budget_and_transport_overhead(Some(measured), 1)
+            .map_err(|error| format!("repeat stable decimal-width envelope: {error}"))?,
+        measured,
+    );
+    assert_eq!(
+        serde_json::to_vec(&envelope).map_err(|error| error.to_string())?,
+        serialized,
+    );
+    Ok(())
+}
