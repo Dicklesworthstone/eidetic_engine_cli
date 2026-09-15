@@ -121,10 +121,12 @@ fn drain_ids(
     base_args: &[&str],
     array_pointer: &str,
     id_field: &str,
-) -> Result<Vec<String>, String> {
+    full_ids: &[String],
+) -> Result<(Vec<String>, usize), String> {
     let mut ids = Vec::new();
     let mut cursor: Option<String> = None;
-    for page in 0..32 {
+    ensure(!full_ids.is_empty(), "cursor drain requires real results")?;
+    for page in 0..full_ids.len() {
         let mut args: Vec<&str> = base_args.to_vec();
         let token;
         if let Some(current) = &cursor {
@@ -142,13 +144,24 @@ fn drain_ids(
             cursor.is_none() || degraded_entry_with_code(&value, "cursor_stale").is_none(),
             format!("page {page} rejected its own cursor as cursor_stale"),
         )?;
+        ensure(
+            !page_ids.is_empty(),
+            format!("page {page} must make progress over real results: {value}"),
+        )?;
         ids.extend(page_ids);
+        ensure(
+            full_ids.get(..ids.len()) == Some(ids.as_slice()),
+            format!("page {page} must preserve the exact result prefix without duplicates"),
+        )?;
         match continuation_cursor(&value) {
             Some(next) => cursor = Some(next),
-            None => return Ok(ids),
+            None => return Ok((ids, page + 1)),
         }
     }
-    Err("page sequence failed to terminate within 32 pages".to_string())
+    Err(format!(
+        "page sequence failed to terminate within {} result-bounded pages",
+        full_ids.len()
+    ))
 }
 
 fn assert_exact_partition(drained: &[String], full: &[String], surface: &str) -> TestResult {
@@ -173,6 +186,14 @@ fn golden_path(name: &str) -> PathBuf {
 }
 
 fn assert_golden(name: &str, actual: &str) -> TestResult {
+    assert_golden_with_additions(name, actual, |_| Ok(()))
+}
+
+fn assert_golden_with_additions(
+    name: &str,
+    actual: &str,
+    update_expected: impl FnOnce(&mut JsonValue) -> TestResult,
+) -> TestResult {
     let path = golden_path(name);
     if env::var("UPDATE_GOLDEN").is_ok() {
         if let Some(parent) = path.parent() {
@@ -188,8 +209,15 @@ fn assert_golden(name: &str, actual: &str) -> TestResult {
             path.display()
         )
     })?;
+    let mut expected_json: JsonValue = serde_json::from_str(&expected)
+        .map_err(|error| format!("invalid golden JSON at {}: {error}", path.display()))?;
+    let actual_json: JsonValue = serde_json::from_str(actual)
+        .map_err(|error| format!("invalid actual JSON for {name}: {error}"))?;
+    update_expected(&mut expected_json)?;
+    let expected = serde_json::to_string_pretty(&expected_json)
+        .map_err(|error| format!("serialize expected {name}: {error}"))?;
     ensure(
-        expected == actual,
+        expected_json == actual_json,
         format!(
             "Golden test '{name}' failed.\nGolden file: {}\nRun with UPDATE_GOLDEN=1 to \
              update.\n--- expected\n{expected}\n+++ actual\n{actual}",
@@ -460,11 +488,16 @@ fn schema_list_cursor_drain_partitions_exactly() -> TestResult {
     let workspace = isolated_workspace("schema-drain")?;
     let full = run_ee_in(&workspace, &["schema", "list", "--json"])?;
     let full_ids = element_ids(&full, "/data/schemas", "id");
-    let drained = drain_ids(
+    let (drained, pages) = drain_ids(
         &workspace,
         &["schema", "list", "--max-output-tokens", "600", "--json"],
         "/data/schemas",
         "id",
+        &full_ids,
+    )?;
+    ensure(
+        pages > 2,
+        "schema list must exercise more than two real pages",
     )?;
     assert_exact_partition(&drained, &full_ids, "schema list")
 }
@@ -522,7 +555,7 @@ fn search_cursor_drain_partitions_exactly() -> TestResult {
             full_ids.len()
         ),
     )?;
-    let drained = drain_ids(
+    let (drained, _) = drain_ids(
         &workspace,
         &[
             "search",
@@ -535,6 +568,7 @@ fn search_cursor_drain_partitions_exactly() -> TestResult {
         ],
         "/data/results",
         "docId",
+        &full_ids,
     )?;
     assert_exact_partition(&drained, &full_ids, "search")
 }
@@ -556,7 +590,7 @@ fn memory_list_cursor_drain_partitions_exactly() -> TestResult {
             full_ids.len()
         ),
     )?;
-    let drained = drain_ids(
+    let (drained, _) = drain_ids(
         &workspace,
         &[
             "memory",
@@ -569,6 +603,7 @@ fn memory_list_cursor_drain_partitions_exactly() -> TestResult {
         ],
         "/data/memories",
         "id",
+        &full_ids,
     )?;
     assert_exact_partition(&drained, &full_ids, "memory list")
 }
@@ -632,7 +667,13 @@ fn journal_list_cursor_drain_partitions_exactly() -> TestResult {
         "a 1600-token ceiling must truncate the seeded journal list and offer a cursor",
     )?;
 
-    let drained = drain_ids(&workspace, &first_page_args, "/data/entries", "entryId")?;
+    let (drained, _) = drain_ids(
+        &workspace,
+        &first_page_args,
+        "/data/entries",
+        "entryId",
+        &full_ids,
+    )?;
     assert_exact_partition(&drained, &full_ids, "journal list")
 }
 
@@ -794,17 +835,17 @@ fn insights_cursor_drain_never_duplicates_section_items() -> TestResult {
 
     let full = run_ee_in(&workspace, &["insights", "--json"])?;
     let full_keys = section_item_keys(&full);
-    if full_keys.len() < 4 {
-        // A tiny corpus can yield too few section items to truncate; the
-        // per-section engine semantics are pinned by unit tests — this
-        // contract run only proves the wired surface when there is enough
-        // material to page.
-        return Ok(());
-    }
+    ensure(
+        full_keys.len() >= 4,
+        "seeded insights must exercise real pagination",
+    )?;
 
     let mut drained: Vec<String> = Vec::new();
     let mut cursor: Option<String> = None;
-    for page in 0..32 {
+    let mut pages = 0;
+    // A tight ceiling can retain just one item. Bound the number of pages
+    // by the real result count, and require progress on every valid page.
+    for page in 0..full_keys.len() {
         let mut args = vec!["insights", "--max-output-tokens", "2500", "--json"];
         let token;
         if let Some(current) = &cursor {
@@ -819,12 +860,27 @@ fn insights_cursor_drain_never_duplicates_section_items() -> TestResult {
                     && degraded_entry_with_code(&value, "cursor_stale").is_none()),
             format!("insights page {page} rejected its own cursor"),
         )?;
-        drained.extend(section_item_keys(&value));
+        ensure(
+            degraded_entry_with_code(&value, "output_budget_unsatisfiable").is_none(),
+            format!("insights page {page} must fit a real item: {value}"),
+        )?;
+        let page_keys = section_item_keys(&value);
+        ensure(
+            !page_keys.is_empty(),
+            format!("insights page {page} made no progress"),
+        )?;
+        drained.extend(page_keys);
+        pages += 1;
         match continuation_cursor(&value) {
             Some(next) => cursor = Some(next),
-            None => break,
+            None => {
+                cursor = None;
+                break;
+            }
         }
     }
+    ensure(cursor.is_none(), "insights page sequence must terminate")?;
+    ensure(pages > 2, "insights must exercise more than two real pages")?;
 
     let mut sorted_drained = drained.clone();
     sorted_drained.sort();
@@ -1335,9 +1391,59 @@ fn insights_rejected_cursor_envelope_matches_golden() -> TestResult {
         degraded_entry_with_code(&value, "cursor_invalid").is_some(),
         "insights must report cursor_invalid for a rejected cursor",
     )?;
-    assert_golden(
+    ensure(
+        continuation_cursor(&value).is_none(),
+        "rejected insights cursor must not resume",
+    )?;
+    let sections = value
+        .pointer("/data/sections")
+        .and_then(JsonValue::as_array)
+        .ok_or("rejected insights response must retain sections")?;
+    ensure(
+        sections.len() == 17,
+        "all 17 sections must survive cursor rejection",
+    )?;
+    ensure(
+        sections.iter().all(|section| {
+            section
+                .get("items")
+                .and_then(JsonValue::as_array)
+                .is_some_and(Vec::is_empty)
+        }),
+        "every rejected insights section must be empty",
+    )?;
+    assert_golden_with_additions(
         "insights_cursor_invalid_empty_page",
         &normalize_surface_golden(&value, &["/data/sections"])?,
+        |expected| {
+            // The golden predates peer-conflict insights and GH#15's bounded
+            // bundle metadata. Assert those additions without dropping any
+            // historical fields or rewriting the fixture.
+            let names = expected["data"]["availableSections"]
+                .as_array_mut()
+                .ok_or("golden must declare available sections")?;
+            names.insert(13, JsonValue::String("peerConflicts".to_owned()));
+            let actual_names: Vec<_> = sections
+                .iter()
+                .map(|section| section["name"].clone())
+                .collect();
+            ensure(
+                actual_names == *names,
+                "rejected insights must retain each declared section in order",
+            )?;
+            let pagination: Vec<_> = names
+                .iter()
+                .map(|name| {
+                    serde_json::json!({
+                        "name": name, "limit": 10, "offset": 0, "returned": 0, "total": 0
+                    })
+                })
+                .collect();
+            expected["data"]["sectionPagination"] = JsonValue::Array(pagination);
+            expected["degraded"][0]["sources"] = serde_json::json!(["insights"]);
+            expected["data"]["degradedSignals"] = expected["degraded"].clone();
+            Ok(())
+        },
     )
 }
 
@@ -1364,6 +1470,10 @@ fn curate_candidates_rejected_cursor_envelope_matches_golden() -> TestResult {
         degraded_entry_with_code(&value, "cursor_invalid").is_some(),
         "curate candidates must report cursor_invalid for a rejected cursor",
     )?;
+    ensure(
+        value["degraded"] == value["data"]["degraded"],
+        "governor rejection must reach both canonical and report-local degraded arrays",
+    )?;
     assert_golden(
         "curate_candidates_cursor_invalid_empty_page",
         &normalize_surface_golden(&value, &["/data/candidates"])?,
@@ -1374,6 +1484,29 @@ fn curate_candidates_rejected_cursor_envelope_matches_golden() -> TestResult {
 fn audit_timeline_paged_report_matches_golden() -> TestResult {
     let workspace = isolated_workspace("audit-golden-page")?;
     seed_memories(&workspace, 6)?;
+    let database = ee::db::DbConnection::open_file_read_only(workspace.join(".ee/ee.db"))
+        .map_err(|error| format!("open audit DB: {error}"))?;
+    // No timeline filters are requested: count the independently loaded DB
+    // rows, including ancillary operations, rather than a historical total
+    // that changes when remember's indexing/linking work changes.
+    let mut audit_rows = database
+        .list_audit_entries(None, None)
+        .map_err(|error| format!("read audit rows: {error}"))?;
+    ensure(
+        audit_rows
+            .iter()
+            .filter(|row| row.action == "memory.create")
+            .count()
+            == 6,
+        "seeding must persist exactly six memory.create audit rows",
+    )?;
+    audit_rows.sort_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| left.workspace_id.cmp(&right.workspace_id))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    drop(database);
     let value = run_ee_in(&workspace, &["audit", "timeline", "--limit", "2", "--json"])?;
     ensure(
         value
@@ -1382,8 +1515,22 @@ fn audit_timeline_paged_report_matches_golden() -> TestResult {
             .is_some(),
         "a 2-row page over >= 6 audit rows must offer a next_cursor",
     )?;
-    assert_golden(
+    let expected_ids: Vec<_> = audit_rows
+        .iter()
+        .take(2)
+        .map(|row| row.id.to_string())
+        .collect();
+    ensure(
+        element_ids(&value, "/data/entries", "id") == expected_ids,
+        "timeline page must contain the first two chronological DB audit rows",
+    )?;
+    assert_golden_with_additions(
         "audit_timeline_paged_report",
         &normalize_surface_golden(&value, &["/data/entries"])?,
+        |expected| {
+            expected["data"]["pagination"]["total_count"] = JsonValue::from(audit_rows.len());
+            expected["data"]["entries"][0]["details"]["attemptFamily"] = JsonValue::Null;
+            Ok(())
+        },
     )
 }

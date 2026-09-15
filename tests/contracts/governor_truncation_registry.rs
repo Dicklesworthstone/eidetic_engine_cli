@@ -10,8 +10,8 @@
 //!
 //! Reverse direction: registry entries must be well-formed (an id or
 //! command, a non-empty array path, a position key), unique per
-//! surface, and reference schemas that exist in `docs/schemas/`
-//! (modulo the pinned, pre-existing documentation gaps).
+//! surface, and reference schemas that exist in `docs/schemas/` and
+//! are exported through the public schema registry.
 //!
 //! Nested truncation points (pack `data.pack.skipped`, recall
 //! `data.recall.items`) sit below the top-level detector by design;
@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-use ee::output::OUTPUT_TRUNCATION_REGISTRY;
+use ee::output::{OUTPUT_TRUNCATION_REGISTRY, public_schemas, render_schema_export_json};
 use serde_json::Value as JsonValue;
 
 type TestResult = Result<(), String>;
@@ -99,11 +99,6 @@ const GOVERNOR_EXEMPT_SCHEMAS: &[(&str, &str)] = &[
          of the governor",
     ),
 ];
-
-/// Registry schema ids whose `docs/schemas/` JSON Schema file does not
-/// exist yet. Pre-existing documentation debt pinned so NEW dangling
-/// ids still fail; shrink this list, never grow it.
-const DOCS_SCHEMA_GAPS: &[&str] = &[];
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
@@ -318,30 +313,205 @@ fn truncation_registry_entries_are_well_formed_and_unique() -> TestResult {
 
 #[test]
 fn registry_schema_ids_reference_documented_schemas() -> TestResult {
-    let dir = schemas_dir();
     for point in OUTPUT_TRUNCATION_REGISTRY {
         if point.schema_id.is_empty() {
             continue;
         }
-        let documented = dir.join(format!("{}.json", point.schema_id)).is_file();
-        let pinned_gap = DOCS_SCHEMA_GAPS.contains(&point.schema_id);
-        ensure(
-            documented || pinned_gap,
-            format!(
-                "truncation point {} references a schema with no docs/schemas/{}.json file and \
-                 no pinned gap entry — add the schema doc or (only for pre-existing debt) pin \
-                 it in DOCS_SCHEMA_GAPS",
-                point.schema_id, point.schema_id
+        documented_public_schema(point.schema_id)?;
+    }
+    Ok(())
+}
+
+fn documented_public_schema(schema_id: &str) -> Result<JsonValue, String> {
+    let path = schemas_dir().join(format!("{schema_id}.json"));
+    let documented = fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "truncation point {schema_id} requires a documented schema at {}: {error}",
+            path.display()
+        )
+    })?;
+    let documented: JsonValue = serde_json::from_str(&documented)
+        .map_err(|error| format!("invalid schema document for {schema_id}: {error}"))?;
+    ensure(
+        public_schemas().iter().any(|entry| entry.id == schema_id),
+        format!("truncation point {schema_id} is missing from the public schema registry"),
+    )?;
+    let exported: JsonValue = serde_json::from_str(&render_schema_export_json(Some(schema_id)))
+        .map_err(|error| format!("invalid public schema export for {schema_id}: {error}"))?;
+    ensure(
+        exported == documented,
+        format!("public schema export for {schema_id} differs from its documented definition"),
+    )?;
+    Ok(exported)
+}
+
+#[test]
+fn registry_rejects_missing_schema_references() -> TestResult {
+    let missing_id = "ee.governor.missing.v1";
+    ensure(
+        documented_public_schema(missing_id).is_err(),
+        "a missing document and registry entry must not be accepted",
+    )?;
+    let exported: JsonValue = serde_json::from_str(&render_schema_export_json(Some(missing_id)))
+        .map_err(|error| error.to_string())?;
+    ensure(
+        exported["schema"] == "ee.error.v2"
+            && exported["error"]["code"] == "schema_not_found"
+            && exported["error"]["details"]["schemaId"] == missing_id,
+        "an unknown public schema must retain its structured error",
+    )
+}
+
+#[test]
+fn audit_schemas_validate_real_renderers_and_reject_malformed_reports() -> TestResult {
+    use ee::core::audit::{
+        AUDIT_DIFF_SCHEMA_V1, AUDIT_VERIFY_SCHEMA_V1, AuditDiffReport, AuditShardVerifyReport,
+        AuditTimelineEntry, AuditVerifyReport, VerificationIssue,
+    };
+    use ee::output::governor::{GovernorContext, govern_response_json};
+    use ee::output::{render_audit_diff_json, render_audit_verify_json};
+    use ee::testing::validate_json_schema_instance;
+
+    let diff = AuditDiffReport {
+        schema: AUDIT_DIFF_SCHEMA_V1.to_owned(),
+        from: "2026-09-01T00:00:00Z".to_owned(),
+        to: "2026-09-02T00:00:00Z".to_owned(),
+        entries: vec![AuditTimelineEntry {
+            id: "audit_fixture".to_owned(),
+            timestamp: "2026-09-01T12:00:00Z".to_owned(),
+            actor: None,
+            surface: "memory".to_owned(),
+            mutation_kind: "memory.create".to_owned(),
+            before_hash: None,
+            after_hash: Some("blake3:fixture-after".to_owned()),
+            prev_row_hash: None,
+            this_row_hash: Some("blake3:fixture-row".to_owned()),
+            workspace_id: None,
+            shard_id: Some("fixture-shard".to_owned()),
+            target_type: Some("memory".to_owned()),
+            target_id: Some("mem_fixture".to_owned()),
+            producer: ee::models::ProducerMetadata::audit_actor(None, None),
+            details: Some(serde_json::json!({"nested": [null, true, 42, "fixture"]})),
+        }],
+        row_count: 1,
+    };
+    let issue = VerificationIssue {
+        code: "row_hash_mismatch".to_owned(),
+        audit_id: Some("audit_fixture".to_owned()),
+        shard_id: Some("fixture-shard".to_owned()),
+        message: "Stored and computed row hashes differ.".to_owned(),
+    };
+    let verify = AuditVerifyReport {
+        schema: AUDIT_VERIFY_SCHEMA_V1.to_owned(),
+        integrity_ok: false,
+        rows: 1,
+        last_hash: None,
+        first_break: Some("audit_fixture".to_owned()),
+        issues: vec![issue.clone()],
+        shard_count: 1,
+        broken_shard_count: 1,
+        shards: vec![AuditShardVerifyReport {
+            shard_id: "fixture-shard".to_owned(),
+            integrity_ok: false,
+            rows: 1,
+            last_hash: None,
+            first_break: Some("audit_fixture".to_owned()),
+            issues: vec![issue],
+        }],
+    };
+    for (schema_id, rendered, count_path) in [
+        (
+            AUDIT_DIFF_SCHEMA_V1,
+            render_audit_diff_json(&diff).map_err(|error| error.to_string())?,
+            "/data/row_count",
+        ),
+        (
+            AUDIT_VERIFY_SCHEMA_V1,
+            render_audit_verify_json(&verify).map_err(|error| error.to_string())?,
+            "/data/rows",
+        ),
+    ] {
+        let schema = documented_public_schema(schema_id)?;
+        let response: JsonValue =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+        validate_json_schema_instance(&response, &schema)?;
+        for count in [serde_json::json!(0), serde_json::json!(u32::MAX)] {
+            let mut boundary = response.clone();
+            *boundary.pointer_mut(count_path).ok_or("count is missing")? = count;
+            validate_json_schema_instance(&boundary, &schema)?;
+        }
+        for (path, invalid) in [
+            (count_path, serde_json::json!(-1)),
+            (count_path, serde_json::json!(4294967296u64)),
+            (count_path, serde_json::json!(1.5)),
+            (count_path, serde_json::json!("1")),
+            ("/data/schema", serde_json::json!("ee.audit.unknown.v1")),
+            ("/success", serde_json::json!(false)),
+            (
+                "/degraded",
+                serde_json::json!([{"code": "fixture", "severity": "danger", "message": "bad tier"}]),
             ),
-        )?;
+        ] {
+            let mut malformed = response.clone();
+            *malformed
+                .pointer_mut(path)
+                .ok_or("fixture field is missing")? = invalid;
+            ensure(
+                validate_json_schema_instance(&malformed, &schema).is_err(),
+                format!("{schema_id} accepted malformed field {path}: {malformed}"),
+            )?;
+        }
+        let mut unexpected = response.clone();
+        unexpected["data"]["unregistered_field"] = serde_json::json!(true);
         ensure(
-            !(documented && pinned_gap),
-            format!(
-                "DOCS_SCHEMA_GAPS still lists {} but docs/schemas/{}.json now exists — delete \
-                 the stale gap entry",
-                point.schema_id, point.schema_id
-            ),
+            validate_json_schema_instance(&unexpected, &schema).is_err(),
+            format!("{schema_id} must reject unknown report fields"),
         )?;
+
+        // Exercise the real governor, including its intentional minimal shell.
+        // These are renderer contracts, not audit-integrity or latency evidence.
+        for ceiling_tokens in [100_000, 1] {
+            let context = GovernorContext {
+                ceiling_tokens,
+                params_hash: "audit-schema-fixture".to_owned(),
+                mac_key: [7; 32],
+                db_generation: &|| 0,
+            };
+            let governed = govern_response_json(&rendered, &context, OUTPUT_TRUNCATION_REGISTRY)
+                .map_err(|error| error.to_string())?;
+            let mut governed: JsonValue =
+                serde_json::from_str(&governed).map_err(|error| error.to_string())?;
+            validate_json_schema_instance(&governed, &schema)?;
+            ensure(
+                governed["meta"]["tokensEstimated"].as_u64().is_some(),
+                "governed output must retain its measured token count",
+            )?;
+            if ceiling_tokens == 1 {
+                ensure(
+                    governed["data"]
+                        .as_object()
+                        .is_some_and(|data| data.len() == 1),
+                    "unsatisfiable budget must emit only the schema identifier",
+                )?;
+                governed["degraded"] = serde_json::json!([]);
+                ensure(
+                    validate_json_schema_instance(&governed, &schema).is_err(),
+                    "a minimal shell without an explicit refusal must not validate",
+                )?;
+                governed["degraded"] = serde_json::json!([{
+                    "code": "cursor_invalid", "severity": "medium", "message": "bad cursor"
+                }]);
+                ensure(
+                    validate_json_schema_instance(&governed, &schema).is_err(),
+                    "an unrelated warning must not authorize a hollow audit report",
+                )?;
+            } else {
+                ensure(
+                    governed["data"] == response["data"],
+                    "fitting report data must survive the governor unchanged",
+                )?;
+            }
+        }
     }
     Ok(())
 }
