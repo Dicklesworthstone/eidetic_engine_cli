@@ -120,6 +120,45 @@ fn seed_bridge_workspace() -> Result<tempfile::TempDir, String> {
     Ok(temp)
 }
 
+fn read_import_rows(workspace: &std::path::Path) -> Result<Value, String> {
+    let connection = ee::db::DbConnection::open_file(&workspace.join(".ee").join("ee.db"))
+        .map_err(|error| format!("open import state: {error}"))?;
+    let mut candidates = connection
+        .list_curation_candidates(FIXTURE_WORKSPACE_ID, None, None, None)
+        .map_err(|error| format!("list import candidates: {error}"))?;
+    let mut audits = connection
+        .list_audit_by_action("agentsmd.import", None)
+        .map_err(|error| format!("list import audits: {error}"))?;
+    let mut evidence = connection
+        .list_evidence_spans_for_workspace(FIXTURE_WORKSPACE_ID)
+        .map_err(|error| format!("list import evidence: {error}"))?;
+    candidates.sort_by(|left, right| left.id.cmp(&right.id));
+    audits.sort_by(|left, right| left.id.cmp(&right.id));
+    evidence.sort_by(|left, right| left.id.cmp(&right.id));
+    connection
+        .close()
+        .map_err(|error| format!("close import state: {error}"))?;
+    let evidence = evidence
+        .iter()
+        .map(|span| {
+            serde_json::json!({
+                "id": span.id,
+                "cassSpanId": span.cass_span_id,
+                "upstreamRefHash": span.upstream_ref_hash,
+                "startLine": span.start_line,
+                "endLine": span.end_line,
+                "excerpt": span.excerpt,
+                "contentHash": span.content_hash,
+                "metadata": span.metadata_json,
+                "redactionClasses": span.redaction_classes_json,
+                "createdAt": span.created_at,
+                "updatedAt": span.updated_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({"candidates": candidates, "audits": audits, "evidence": evidence}))
+}
+
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -485,6 +524,15 @@ fn import_apply_writes_candidates_and_reruns_abstain() -> TestResult {
     connection
         .close()
         .map_err(|error| format!("close db: {error}"))?;
+    let first_rows = read_import_rows(workspace.path())?;
+    if first_rows["candidates"].as_array().map(Vec::len) != Some(6)
+        || first_rows["audits"].as_array().map(Vec::len) != Some(6)
+        || first_rows["evidence"].as_array().map(Vec::len) != Some(5)
+    {
+        return Err(format!(
+            "first apply must persist six candidates, six import audits, and five create-candidate evidence spans: {first_rows}"
+        ));
+    }
 
     // Idempotency: a second apply proposes nothing and abstains per line.
     let second = run_ee_json(&[
@@ -516,6 +564,181 @@ fn import_apply_writes_candidates_and_reruns_abstain() -> TestResult {
         .ok_or("re-apply must still report applied")?;
     if !second_applied.is_empty() {
         return Err("re-apply must not double-insert candidates".to_owned());
+    }
+    if read_import_rows(workspace.path())? != first_rows {
+        return Err("re-apply must preserve every candidate and import audit row".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn import_redacted_statement_reapply_abstains_and_changed_public_content_imports() -> TestResult {
+    let workspace = seed_bridge_workspace()?;
+    let workspace_arg = workspace.path().to_str().unwrap().to_owned();
+    let raw_secret = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let other_secret = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz9876543210";
+    let first_statement =
+        format!("Always rotate staging deploy credentials weekly; API_KEY={raw_secret}");
+    let bridge_path = workspace.path().join("AGENTS.md");
+    std::fs::write(&bridge_path, format!(
+        "- {first_statement}\n- {first_statement}\n- Always rotate staging deploy credentials weekly; API_KEY={other_secret}\n"
+    ))
+        .map_err(|error| format!("write redacted import fixture: {error}"))?;
+    let apply = || {
+        run_ee_json(&[
+            "import",
+            "agentsmd",
+            "--apply",
+            "--workspace",
+            &workspace_arg,
+            "--json",
+        ])
+    };
+
+    let first = apply()?;
+    if first
+        .pointer("/data/applied/candidateIds")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        != Some(1)
+    {
+        return Err("first redacted statement must create one candidate".to_owned());
+    }
+    let first_abstentions = first
+        .pointer("/data/abstentions")
+        .and_then(Value::as_array)
+        .ok_or("first import must report abstentions")?;
+    if first.pointer("/data/proposals/0/lineNumber") != Some(&Value::from(1))
+        || first_abstentions.len() != 2
+        || first_abstentions
+            .iter()
+            .enumerate()
+            .any(|(index, abstention)| {
+                abstention["lineNumber"] != Value::from(index + 2)
+                    || abstention["reason"] != "already_imported"
+            })
+    {
+        return Err(
+            "equivalent lines must preserve the first proposal and abstain on later lines"
+                .to_owned(),
+        );
+    }
+    let first_rows = read_import_rows(workspace.path())?;
+    let candidates = first_rows["candidates"]
+        .as_array()
+        .ok_or("candidate rows must be an array")?;
+    if candidates.len() != 1
+        || first_rows["audits"].as_array().map(Vec::len) != Some(1)
+        || first_rows["evidence"].as_array().map(Vec::len) != Some(1)
+        || first_rows.pointer("/evidence/0/startLine") != Some(&Value::from(1))
+        || first_rows.pointer("/evidence/0/endLine") != Some(&Value::from(1))
+    {
+        return Err("equivalent redacted lines must persist one candidate, one first-line evidence span, and one audit".to_owned());
+    }
+    let proposed_content = candidates[0]["proposedContent"]
+        .as_str()
+        .ok_or("redacted statement must produce a content-bearing candidate")?;
+    if !proposed_content.contains("staging deploy credentials weekly")
+        || !proposed_content.contains("[REDACTED:")
+        || first_rows.to_string().contains(raw_secret)
+        || first_rows.to_string().contains(other_secret)
+        || first_rows.to_string().contains(workspace_arg.as_str())
+    {
+        return Err(
+            "persisted import must retain public content without secret or workspace path leakage"
+                .to_owned(),
+        );
+    }
+
+    let second = apply()?;
+    if second
+        .pointer("/data/proposals")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        != Some(0)
+        || second
+            .pointer("/data/applied/candidateIds")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            != Some(0)
+        || second
+            .pointer("/data/applied/auditIds")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            != Some(0)
+        || second
+            .pointer("/data/abstentions")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            != Some(3)
+        || second
+            .pointer("/data/abstentions")
+            .and_then(Value::as_array)
+            .is_none_or(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| entry["reason"] != "already_imported")
+            })
+    {
+        return Err("redacted re-apply must abstain without proposals or writes".to_owned());
+    }
+    if read_import_rows(workspace.path())? != first_rows {
+        return Err("redacted re-apply must preserve candidate and audit rows exactly".to_owned());
+    }
+
+    let changed_statement =
+        format!("Always rotate production deploy credentials daily; API_KEY={raw_secret}");
+    std::fs::write(&bridge_path, format!("- {changed_statement}\n"))
+        .map_err(|error| format!("write changed public content: {error}"))?;
+    let changed = apply()?;
+    if changed
+        .pointer("/data/applied/candidateIds")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        != Some(1)
+        || changed
+            .pointer("/data/abstentions")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            != Some(0)
+    {
+        return Err("changed non-secret content must remain importable".to_owned());
+    }
+    let changed_rows = read_import_rows(workspace.path())?;
+    let changed_candidates = changed_rows["candidates"]
+        .as_array()
+        .ok_or("changed candidate rows must be an array")?;
+    let changed_evidence = changed_rows["evidence"]
+        .as_array()
+        .ok_or("changed evidence rows must be an array")?;
+    let changed_audits = changed_rows["audits"]
+        .as_array()
+        .ok_or("changed audit rows must be an array")?;
+    if changed_candidates.len() != 2
+        || changed_audits.len() != 2
+        || changed_evidence.len() != 2
+        || !changed_candidates.contains(&candidates[0])
+        || !changed_audits.contains(&first_rows["audits"][0])
+        || !changed_evidence.contains(&first_rows["evidence"][0])
+        || changed_evidence
+            .iter()
+            .any(|span| span["startLine"] != Value::from(1) || span["endLine"] != Value::from(1))
+        || !changed_candidates.iter().any(|candidate| {
+            candidate["proposedContent"]
+                .as_str()
+                .is_some_and(|content| {
+                    content.contains("production deploy credentials daily")
+                        && content.contains("[REDACTED:")
+                })
+        })
+        || changed_rows.to_string().contains(raw_secret)
+        || changed_rows.to_string().contains(other_secret)
+        || changed_rows.to_string().contains(workspace_arg.as_str())
+    {
+        return Err(
+            "changed import must add one redacted candidate and audit, preserving the first"
+                .to_owned(),
+        );
     }
     Ok(())
 }

@@ -22,6 +22,7 @@
 //! Dry-run reports carry no wall-clock timestamps, no absolute paths, and
 //! no binary version, so golden tests stay byte-identical across machines.
 
+use std::collections::BTreeSet;
 #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
 use std::ffi::OsString;
 use std::fs::File;
@@ -1312,8 +1313,8 @@ fn import_candidate_id(
     workspace_id: &str,
     action: &str,
     kind: &str,
-    display_path: &str,
-    text: &str,
+    source_path_hash: &str,
+    screened_content: &str,
 ) -> String {
     deterministic_agentsmd_id(
         "curate_",
@@ -1322,8 +1323,8 @@ fn import_candidate_id(
             "agentsmd_import_candidate",
             action,
             kind,
-            display_path,
-            text,
+            source_path_hash,
+            screened_content,
         ],
     )
 }
@@ -1382,6 +1383,8 @@ pub fn run_agentsmd_import(
     let memories = connection
         .list_memories(workspace_id, None, false)
         .map_err(|error| storage_error("Failed to list memories for agentsmd dedup", error))?;
+    let source_path_hash = format!("blake3:{}", blake3::hash(display_path.as_bytes()).to_hex());
+    let mut seen_candidate_ids = BTreeSet::new();
 
     for statement in statements {
         let neighbor = top_neighbor(&memories, &statement.text);
@@ -1391,17 +1394,23 @@ pub fn run_agentsmd_import(
             }
             _ => ("create_candidate", None),
         };
+        // Use the same privacy-screened identity as the durable phase. Raw
+        // paths or text would miss candidates already persisted by --apply.
+        let screening = crate::policy::screen_external_text_for_ingestion(&statement.text);
         let candidate_id = import_candidate_id(
             workspace_id,
             action,
             statement.kind,
-            &display_path,
-            &statement.text,
+            &source_path_hash,
+            &screening.content,
         );
-        let already_present = connection
-            .get_curation_candidate(workspace_id, &candidate_id)
-            .map_err(|error| storage_error("Failed to check existing agentsmd candidate", error))?
-            .is_some();
+        let already_present = !seen_candidate_ids.insert(candidate_id.clone())
+            || connection
+                .get_curation_candidate(workspace_id, &candidate_id)
+                .map_err(|error| {
+                    storage_error("Failed to check existing agentsmd candidate", error)
+                })?
+                .is_some();
         if already_present {
             report.abstentions.push(AgentsmdImportAbstention {
                 line_number: statement.line_number,
@@ -1688,7 +1697,9 @@ fn apply_import_proposals(
                                 session_id: session_id.to_owned(),
                                 memory_id: None,
                                 producer_kind: EvidenceProducerKind::AgentsmdImport,
-                                cass_span_id: canonical_source_ref.clone(),
+                                // Revisions at the same source line must retain
+                                // distinct evidence; span_id includes screened content.
+                                cass_span_id: span_id.clone(),
                                 span_kind: "summary".to_owned(),
                                 start_line: line,
                                 end_line: line,
