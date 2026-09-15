@@ -4,7 +4,7 @@
 //! it composes several public commands. This module holds reusable read-only
 //! data providers that should not be duplicated by the CLI renderer.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -56,15 +56,13 @@ pub const NEARBY_STORE_SCAN_BUDGET_MS: u64 = 200;
 /// process-local permit until each worker actually exits so repeated timeouts
 /// cannot accumulate an unbounded detached tail.
 const MAX_CONCURRENT_NEARBY_STORE_SCAN_WORKERS: usize = 2;
+/// Includes the registry reader. Each scan keeps only this many unfinished
+/// probes or out-of-order results; the outer permit survives their teardown.
+const MAX_NEARBY_STORE_PROBES_PER_SCAN: usize = 4;
 
 static NEARBY_STORE_SCAN_WORKER_LIMITER: std::sync::OnceLock<
     std::sync::Arc<NearbyStoreScanWorkerLimiter>,
 > = std::sync::OnceLock::new();
-
-#[cfg(test)]
-thread_local! {
-    static NEARBY_STORE_PROFILE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
 
 /// Directory names never descended into during nearby-store discovery.
 const NEARBY_STORE_SKIP_DIRS: &[&str] = &[
@@ -1087,6 +1085,261 @@ struct NearbyStoreCandidate {
 enum NearbyStoreScanUpdate {
     Progress(NearbyStoreScanAssessment),
     Finished(NearbyStoreScanAssessment),
+}
+
+enum NearbyStoreProbeResult {
+    Store(Option<NearbyStore>),
+    Registry(Result<crate::core::workspace::WorkspaceListReport, ()>),
+    Failed,
+}
+
+/// Owns only this scan's blocking reads. The enclosing thread scope joins
+/// them before releasing the outer scan permit, including after cancellation.
+struct NearbyStoreProbes<'scope, 'env, 'scan> {
+    scope: &'scope std::thread::Scope<'scope, 'env>,
+    cx: Cx<NoCaps>,
+    started: std::time::Instant,
+    budget: std::time::Duration,
+    scan: &'scan mut NearbyStoreScanAssessment,
+    publish: &'scan mut dyn FnMut(&NearbyStoreScanAssessment),
+    sender: std::sync::mpsc::Sender<(usize, NearbyStoreProbeResult)>,
+    receiver: std::sync::mpsc::Receiver<(usize, NearbyStoreProbeResult)>,
+    handles: BTreeMap<usize, std::thread::ScopedJoinHandle<'scope, ()>>,
+    pending_databases: BTreeMap<usize, PathBuf>,
+    completed: BTreeMap<usize, Option<NearbyStore>>,
+    seen_databases: BTreeSet<PathBuf>,
+    next_probe: usize,
+    next_publication: usize,
+    registry: Option<Result<crate::core::workspace::WorkspaceListReport, ()>>,
+    #[cfg(test)]
+    profile_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
+    fn new(
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        cx: &Cx<NoCaps>,
+        started: std::time::Instant,
+        budget: std::time::Duration,
+        scan: &'scan mut NearbyStoreScanAssessment,
+        publish: &'scan mut dyn FnMut(&NearbyStoreScanAssessment),
+    ) -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        Self {
+            scope,
+            cx: cx.clone(),
+            started,
+            budget,
+            scan,
+            publish,
+            sender,
+            receiver,
+            handles: BTreeMap::new(),
+            pending_databases: BTreeMap::new(),
+            completed: BTreeMap::new(),
+            seen_databases: BTreeSet::new(),
+            next_probe: 1,
+            next_publication: 1,
+            registry: None,
+            #[cfg(test)]
+            profile_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn should_stop(&mut self) -> bool {
+        nearby_store_scan_should_stop(&self.cx, self.started, self.budget, self.scan)
+    }
+
+    fn spawn(
+        &mut self,
+        id: usize,
+        work: impl FnOnce() -> NearbyStoreProbeResult + Send + 'scope,
+    ) -> bool {
+        let sender = self.sender.clone();
+        let cx = self.cx.clone();
+        match std::thread::Builder::new()
+            .name("ee-nearby-store-probe".to_owned())
+            .spawn_scoped(self.scope, move || {
+                let _ambient_cx = cx.set_current_restricted();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                    .unwrap_or(NearbyStoreProbeResult::Failed);
+                let _ = sender.send((id, result));
+            })
+        {
+            Ok(handle) => {
+                self.handles.insert(id, handle);
+                true
+            }
+            Err(_) => {
+                self.scan.mark_unavailable();
+                false
+            }
+        }
+    }
+
+    fn start_registry(&mut self, registry_path: Option<&Path>) {
+        if self.should_stop() {
+            return;
+        }
+        let options = crate::core::workspace::WorkspaceListOptions {
+            registry_path: registry_path.map(Path::to_path_buf),
+        };
+        let cx = self.cx.clone();
+        if !self.spawn(0, move || {
+            NearbyStoreProbeResult::Registry(if cx.is_cancel_requested() {
+                Err(())
+            } else {
+                crate::core::workspace::list_workspace_registry(&options).map_err(|_| ())
+            })
+        }) {
+            self.registry = Some(Err(()));
+        }
+    }
+
+    fn receive_one(&mut self) {
+        if self.should_stop() {
+            return;
+        }
+        let remaining = self.budget.saturating_sub(self.started.elapsed());
+        // Duration::MAX is used by semantic tests. Bound each wait without
+        // extending the real caller's remaining deadline.
+        match self.receiver.recv_timeout(remaining.min(std::time::Duration::from_secs(1))) {
+            Ok((id, result)) => {
+                // A response is sent after its database connection is dropped.
+                // Reap the thread before admitting another probe into its slot.
+                if let Some(handle) = self.handles.remove(&id)
+                    && handle.join().is_err()
+                {
+                    self.scan.mark_unavailable();
+                }
+                match result {
+                    NearbyStoreProbeResult::Registry(registry) => self.registry = Some(registry),
+                    NearbyStoreProbeResult::Store(store) => {
+                        self.completed.insert(id, store);
+                    }
+                    NearbyStoreProbeResult::Failed => {
+                        self.scan.mark_unavailable();
+                        if id == 0 {
+                            self.registry = Some(Err(()));
+                        } else {
+                            self.completed.insert(id, None);
+                        }
+                    }
+                }
+                self.publish_completed_prefix();
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                self.should_stop();
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                self.scan.mark_unavailable();
+                self.cx.set_cancel_reason(CancelReason::timeout().with_message(
+                    "nearby-store probe workers disconnected",
+                ));
+            }
+        }
+    }
+
+    fn publish_completed_prefix(&mut self) {
+        while !self.should_stop() {
+            let Some(store) = self.completed.remove(&self.next_publication) else {
+                break;
+            };
+            let database = self.pending_databases.remove(&self.next_publication);
+            self.next_publication += 1;
+            if let Some(store) = store {
+                if let Some(database) = database {
+                    self.seen_databases.insert(database);
+                }
+                self.scan.stores.push(store);
+                rank_nearby_stores(self.scan);
+                (self.publish)(self.scan);
+            }
+        }
+    }
+
+    fn inspect(
+        &mut self,
+        candidate: &NearbyStoreCandidate,
+        addressed_database: &Path,
+        addressed_database_canonical: Option<&Path>,
+    ) {
+        for marker in NEARBY_STORE_MARKERS {
+            if self.should_stop() {
+                return;
+            }
+            let store_dir = candidate.workspace_root.join(marker);
+            let database = store_dir.join("ee.db");
+            if nearby_store_is_addressed_database(
+                &database,
+                addressed_database,
+                addressed_database_canonical,
+            ) || !nearby_store_database_is_safe_regular_file(&database)
+            {
+                continue;
+            }
+            let identity = database.canonicalize().unwrap_or_else(|_| database.clone());
+            // An alias cannot suppress a later valid identity merely by being
+            // in flight. Wait for its proof; failed identities remain retryable.
+            while self.pending_databases.values().any(|pending| pending == &identity)
+                && !self.should_stop()
+            {
+                self.receive_one();
+            }
+            if self.should_stop() {
+                return;
+            }
+            if self.seen_databases.contains(&identity) {
+                continue;
+            }
+            while self.handles.len() + self.completed.len() >= MAX_NEARBY_STORE_PROBES_PER_SCAN
+                && !self.should_stop()
+            {
+                self.receive_one();
+            }
+            if self.should_stop() {
+                return;
+            }
+            let candidate = candidate.clone();
+            let cx = self.cx.clone();
+            let id = self.next_probe;
+            #[cfg(test)]
+            let profile_calls = std::sync::Arc::clone(&self.profile_calls);
+            if self.spawn(id, move || {
+                if cx.is_cancel_requested() {
+                    return NearbyStoreProbeResult::Store(None);
+                }
+                #[cfg(test)]
+                profile_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let store = nearby_store_profile(&database, &candidate).and_then(|(documents, last_write)| {
+                    (documents > 0).then(|| NearbyStore {
+                        workspace_root: candidate.workspace_root.display().to_string(),
+                        store_dir: store_dir.display().to_string(),
+                        documents,
+                        last_write,
+                        provenance: candidate.provenance,
+                    })
+                });
+                NearbyStoreProbeResult::Store(store)
+            }) {
+                self.pending_databases.insert(id, identity);
+                self.next_probe += 1;
+            }
+        }
+    }
+
+    fn take_registry(&mut self) -> Option<Result<crate::core::workspace::WorkspaceListReport, ()>> {
+        while self.registry.is_none() && self.handles.contains_key(&0) && !self.should_stop() {
+            self.receive_one();
+        }
+        self.registry.take()
+    }
+
+    fn finish(&mut self) {
+        while (!self.handles.is_empty() || !self.completed.is_empty()) && !self.should_stop() {
+            self.receive_one();
+        }
+    }
 }
 
 /// Source-of-truth population state for one resolved addressed database.
