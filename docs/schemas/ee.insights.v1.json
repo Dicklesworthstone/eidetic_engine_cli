@@ -27,6 +27,22 @@
         "total": {"type": "integer", "minimum": 0}
       }
     },
+    "sectionPagination": {
+      "description": "Per-section counts for the bounded full bundle; omitted for scoped and error responses.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "limit", "offset", "returned", "total"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string"},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+          "offset": {"type": "integer", "minimum": 0},
+          "returned": {"type": "integer", "minimum": 0},
+          "total": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
     "availableSections": {"type": "array", "items": {"type": "string"}},
     "sections": {"type": "array", "items": {"$ref": "#/$defs/section"}},
     "degradedSignals": {"type": "array", "items": {"$ref": "#/$defs/degradedSignal"}}
@@ -43,6 +59,25 @@
       "explainMemoryId": null,
       "explainCommand": null,
       "pagination": null,
+      "sectionPagination": [
+        {"name": "authorities", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "blindSpots", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "bridges", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "causalBottlenecks", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "comprehensiveRules", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "contradictionClusters", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "houseRules", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "hubs", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "kCore", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "kTruss", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "knowledgeGaps", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "knowledgeSkyline", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "loadBearingMemories", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "peerConflicts", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "proximityHotspots", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "revisionFrontiers", "limit": 10, "offset": 0, "returned": 0, "total": 0},
+        {"name": "topMemories", "limit": 10, "offset": 0, "returned": 0, "total": 0}
+      ],
       "availableSections": [
         "authorities",
         "blindSpots",
@@ -57,6 +92,7 @@
         "knowledgeGaps",
         "knowledgeSkyline",
         "loadBearingMemories",
+        "peerConflicts",
         "proximityHotspots",
         "revisionFrontiers",
         "topMemories"
@@ -75,6 +111,7 @@
         {"name": "knowledgeGaps", "title": "Knowledge Gaps", "summary": "Graph-derived gaps that need reflection or curation before agents rely on nearby memories.", "whyItMatters": "Knowledge gaps turn weak graph evidence into deterministic reflection requests instead of silently trusting incomplete memories.", "items": [], "nextCommands": ["ee insights --section knowledgeGaps --workspace . --json"], "section": "knowledgeGaps", "recommendations": []},
         {"name": "knowledgeSkyline", "title": "Knowledge Skyline", "summary": "Composite posture across onion layer, community, age, trust, and graph health signals.", "whyItMatters": "The skyline gives agents a portfolio-level view of memory quality before relying on a workspace.", "items": [], "nextCommands": ["ee insights --section knowledgeSkyline --workspace . --json"]},
         {"name": "loadBearingMemories", "title": "Load-Bearing Memories", "summary": "Memories with high influence in rule-to-source provenance projections.", "whyItMatters": "Load-bearing memories should be preserved or reviewed carefully because many rules depend on them.", "items": [], "nextCommands": ["ee insights --section loadBearingMemories --workspace . --json"]},
+        {"name": "peerConflicts", "title": "Peer Conflicts", "summary": "Local/team/global overlap and evidence-bounded peer contradictions that pack must not rank away.", "whyItMatters": "Team-synced duplicates and contradictions stay visible with provenance so agents do not flatten disagreement into one answer.", "items": [], "nextCommands": ["ee insights --section peerConflicts --workspace . --json"]},
         {"name": "proximityHotspots", "title": "Proximity Hotspots", "summary": "Memory pairs with small min-cut distance in Gomory-Hu proximity projections.", "whyItMatters": "Proximity hotspots surface tightly coupled facts that should be packed, reviewed, or curated together.", "items": [], "nextCommands": ["ee insights --section proximityHotspots --workspace . --json"]},
         {"name": "revisionFrontiers", "title": "Revision Frontiers", "summary": "Top recent revisions ranked by dominance-frontier size in logical memory revision DAGs.", "whyItMatters": "Revision frontiers help agents understand which edits may change downstream context behavior.", "items": [], "nextCommands": ["ee insights --section revisionFrontiers --workspace . --json"]},
         {"name": "topMemories", "title": "Top Memories", "summary": "Top-ranked memories by cached graph centrality and retrieval posture.", "whyItMatters": "Top memories provide an immediate overview of the facts most likely to shape agent behavior.", "items": [], "nextCommands": ["ee insights --section topMemories --workspace . --json"]}

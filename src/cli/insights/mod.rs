@@ -562,17 +562,23 @@ pub fn build_insights_report_with_options(
     let explain_command = explain_memory_id
         .as_ref()
         .map(|memory_id| format!("ee why {memory_id} --json"));
-    let raw_degraded_signals = if gated_degraded_signals.is_empty() {
-        // Load the workspace graph counts so an all-empty bundle can explain *why* it is
-        // empty (no memories vs. memories-but-no-links) instead of returning silent success.
+    let has_executed_section = sections.iter().any(|section| {
+        !gated_degraded_signals
+            .iter()
+            .any(|(source, _)| *source == section.name)
+    });
+    let mut raw_degraded_signals = gated_degraded_signals;
+    if has_executed_section && sections.iter().all(|section| section.items.is_empty()) {
+        // A disabled section does not explain why the executed sections are empty.
+        // Preserve both signals for a mixed bundle, but avoid loading unrelated
+        // graph state when every requested section was gated off.
         let insights_graph_data =
-            load_workspace_insights_graph_data(options.workspace, options.database_path)
-                .ok()
-                .flatten();
-        degraded_signals_for_sections(&sections, insights_graph_data.as_ref())
-    } else {
-        gated_degraded_signals
-    };
+            load_workspace_insights_graph_data(options.workspace, options.database_path)?;
+        raw_degraded_signals.extend(degraded_signals_for_sections(
+            &sections,
+            insights_graph_data.as_ref(),
+        ));
+    }
     let degraded_signals = aggregate_insights_degraded(raw_degraded_signals);
 
     Ok(InsightsReport {
@@ -4662,6 +4668,9 @@ mod tests {
         for (section, message, repair) in cases {
             let workspace = unique_insights_workspace(section)?;
             write_graph_feature_config(&workspace, false)?;
+            // A fully gated request must not open unrelated graph storage.
+            fs::write(workspace.join(".ee").join("ee.db"), b"invalid database")
+                .map_err(|error| error.to_string())?;
             let report = build_insights_report_with_options(
                 &InsightsArgs {
                     section: Some(section.to_owned()),
@@ -4720,6 +4729,20 @@ mod tests {
         .map_err(|error| error.to_string())?;
 
         assert_eq!(report.mode, InsightsMode::FullBundle);
+
+        assert_eq!(report.degraded_signals.len(), 2);
+        let workspace_empty = report
+            .degraded_signals
+            .iter()
+            .find(|signal| signal.code == "graph.workspace_empty")
+            .ok_or_else(|| {
+                format!(
+                    "executed empty sections must retain their workspace signal: {:?}",
+                    report.degraded_signals
+                )
+            })?;
+        assert_eq!(workspace_empty.severity, "info");
+        assert_eq!(workspace_empty.sources, vec!["insights".to_owned()]);
 
         let gated_sources: std::collections::BTreeSet<&str> = report
             .degraded_signals
