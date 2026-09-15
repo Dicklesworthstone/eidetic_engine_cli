@@ -2204,8 +2204,22 @@ fn extract_line_structures(
             continue;
         }
 
-        // Headings are section structure, not facts, and a header row only
-        // labels the data rows below it.
+        // Headings are section structure, not facts: they never become
+        // candidates, but their text still passes the injection screen so an
+        // instruction hidden in a heading stays visible in quarantine.
+        let heading_marks = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+        if (1..=6).contains(&heading_marks) {
+            let heading = trimmed[heading_marks..].trim();
+            let span = line_span(line);
+            if !heading.is_empty()
+                && let CandidateSecurityOutcome::Quarantine(record) =
+                    screen_bootstrap_candidate(source, &span, "heading", heading)
+            {
+                curate_quarantine.push(record);
+            }
+        }
+
+        // A table header row only labels the data rows below it.
         if is_structural_table_row(trimmed) {
             if lines
                 .get(index + 1)
