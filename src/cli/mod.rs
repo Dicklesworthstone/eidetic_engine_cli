@@ -35177,36 +35177,91 @@ where
         // (honestly omitted when cold).
         let workspace_path =
             resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
-        let workspace_id = bound_cli_workspace_id(&conn, &workspace_path).ok();
-        let affinity: Option<BTreeMap<(String, String), f64>> =
-            workspace_id.as_deref().and_then(|workspace_id| {
-                conn.get_latest_graph_snapshot(
-                    workspace_id,
-                    crate::db::GraphSnapshotType::RetrievalAffinity,
-                )
-                .ok()
-                .flatten()
-                .and_then(|snapshot| {
-                    serde_json::from_str::<serde_json::Value>(&snapshot.metrics_json).ok()
-                })
-                .and_then(|metrics| {
+        let workspace_id = match bound_cli_workspace_id(&conn, &workspace_path) {
+            Ok(workspace_id) => workspace_id,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        let snapshot = match conn.get_latest_graph_snapshot(
+            &workspace_id,
+            crate::db::GraphSnapshotType::RetrievalAffinity,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let error = DomainError::Storage {
+                    message: format!("Failed to query retrieval-affinity snapshot: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                };
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        // A present snapshot must be readable in full. Dropping malformed
+        // rows would silently change the evidence used to score suggestions.
+        #[derive(serde::Deserialize)]
+        struct AffinityMetrics {
+            edges: Vec<AffinityEdge>,
+        }
+        #[derive(serde::Deserialize)]
+        struct AffinityEdge {
+            a: String,
+            b: String,
+            weight: f64,
+        }
+        let mut affinity: Option<BTreeMap<(String, String), f64>> = match snapshot {
+            None => None,
+            Some(snapshot) => {
+                let metrics = match serde_json::from_str::<AffinityMetrics>(&snapshot.metrics_json)
+                {
+                    Ok(metrics) => metrics,
+                    Err(error) => {
+                        let error = DomainError::Storage {
+                            message: format!(
+                                "Invalid retrieval-affinity snapshot metrics at line {}, column {}.",
+                                error.line(),
+                                error.column(),
+                            ),
+                            repair: Some(
+                                "ee steward run retrieval_affinity_refresh --workspace . --json"
+                                    .to_owned(),
+                            ),
+                        };
+                        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                    }
+                };
+                Some(
                     metrics
-                        .get("edges")
-                        .and_then(serde_json::Value::as_array)
-                        .map(|edges| {
-                            edges
-                                .iter()
-                                .filter_map(|edge| {
-                                    let a = edge.get("a")?.as_str()?.to_owned();
-                                    let b = edge.get("b")?.as_str()?.to_owned();
-                                    let weight = edge.get("weight")?.as_f64()?;
-                                    Some(((a, b), weight))
-                                })
-                                .collect::<BTreeMap<_, _>>()
-                        })
+                        .edges
+                        .into_iter()
+                        .map(|edge| ((edge.a, edge.b), edge.weight))
+                        .collect(),
+                )
+            }
+        };
+        if let Some(edges) = &mut affinity {
+            // A retained co-retrieval snapshot can outlive its memories.
+            // Respect include_tombstoned=false and omit absent endpoints before
+            // these IDs contribute tags, candidates, or typed content.
+            let endpoint_ids = edges
+                .keys()
+                .flat_map(|(a, b)| [a.as_str(), b.as_str()])
+                .collect::<BTreeSet<_>>();
+            let endpoint_refs = endpoint_ids.into_iter().collect::<Vec<_>>();
+            let endpoints = match conn.get_memories_batch(&endpoint_refs) {
+                Ok(memories) => memories,
+                Err(error) => {
+                    let error = DomainError::Storage {
+                        message: format!("Failed to query suggestion memory content: {error}"),
+                        repair: Some("ee doctor --json".to_owned()),
+                    };
+                    return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                }
+            };
+            edges.retain(|(a, b), _| {
+                [a, b].into_iter().all(|id| {
+                    endpoints
+                        .get(id)
+                        .is_some_and(|memory| memory.tombstoned_at.is_none())
                 })
             });
-        if let Some(edges) = &affinity {
             for (a, b) in edges.keys() {
                 node_ids.insert(a.clone());
                 node_ids.insert(b.clone());
@@ -35215,7 +35270,16 @@ where
 
         // Tags for the node set.
         let node_refs: Vec<&str> = node_ids.iter().map(String::as_str).collect();
-        let tags_raw = conn.get_memory_tags_batch(&node_refs).unwrap_or_default();
+        let tags_raw = match conn.get_memory_tags_batch(&node_refs) {
+            Ok(tags) => tags,
+            Err(error) => {
+                let error = DomainError::Storage {
+                    message: format!("Failed to query suggestion memory tags: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                };
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+        };
         let tags: BTreeMap<String, BTreeSet<String>> = tags_raw
             .into_iter()
             .map(|(memory_id, tags)| (memory_id, tags.into_iter().collect()))
@@ -35300,10 +35364,22 @@ where
                 if content.len() >= CONTENT_FETCH_CAP {
                     break;
                 }
-                if !content.contains_key(memory_id)
-                    && let Ok(Some(memory)) = conn.get_memory(memory_id)
-                {
-                    content.insert(memory_id.clone(), memory.content);
+                if !content.contains_key(memory_id) {
+                    match conn.get_memory(memory_id) {
+                        Ok(Some(memory)) => {
+                            content.insert(memory_id.clone(), memory.content);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            let error = DomainError::Storage {
+                                message: format!(
+                                    "Failed to query suggestion memory content: {error}"
+                                ),
+                                repair: Some("ee doctor --json".to_owned()),
+                            };
+                            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                        }
+                    }
                 }
             }
         }
@@ -35328,93 +35404,103 @@ where
                 "repair": "ee memory link <id> <target-id> --relation related --json  # or add tags; suggestions need some graph evidence",
             }));
         }
-        let workspace_id_for_propose = workspace_id.clone();
         let mut proposed_ids: Vec<Option<String>> = vec![None; report.suggestions.len()];
         if args.propose {
-            let Some(workspace_id) = workspace_id_for_propose.as_deref() else {
-                let domain_error = DomainError::Storage {
-                    message: "Cannot propose candidates: workspace is not registered.".to_owned(),
-                    repair: Some("ee init --workspace .".to_owned()),
-                };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-            };
             let now = chrono::Utc::now().to_rfc3339();
-            for (index, suggestion) in report.suggestions.iter().enumerate() {
-                use crate::core::suggest_links::SuggestedRelation;
-                let candidate_type =
-                    if suggestion.suggested_relation == SuggestedRelation::Contradicts {
-                        "contradiction_review"
-                    } else {
-                        "link_proposal"
-                    };
-                let digest = blake3::hash(
-                    format!(
-                        "{}|{}|{}",
-                        suggestion.memory_a,
-                        suggestion.suggested_relation.as_str(),
-                        suggestion.memory_b
-                    )
-                    .as_bytes(),
-                )
-                .to_hex()
-                .to_string();
-                let candidate_id = format!("curate_{}", &digest[..26]);
-                // Re-proposing the same pair dedups to the existing candidate.
-                if let Ok(Some(_)) = conn.get_curation_candidate(workspace_id, &candidate_id) {
-                    proposed_ids[index] = Some(candidate_id);
-                    continue;
-                }
-                let payload = serde_json::json!({
-                    "schema": "ee.graph.suggest_links.proposal.v1",
-                    "memoryA": suggestion.memory_a,
-                    "memoryB": suggestion.memory_b,
-                    "relation": suggestion.suggested_relation.as_str(),
-                    "score": suggestion.score,
-                    "signals": {
-                        "adamicAdar": suggestion.signals.adamic_adar,
-                        "jaccardTags": suggestion.signals.jaccard_tags,
-                        "ppr": suggestion.signals.ppr,
-                        "affinity": suggestion.signals.affinity,
-                        "preferentialAttachment": suggestion.signals.preferential_attachment,
-                    },
-                })
-                .to_string();
-                let insert = conn.insert_curation_candidate(
-                    &candidate_id,
-                    &crate::db::CreateCurationCandidateInput {
-                        workspace_id: workspace_id.to_owned(),
-                        candidate_type: candidate_type.to_owned(),
-                        target_memory_id: Some(suggestion.memory_a.clone()),
-                        proposed_content: Some(payload),
-                        proposed_confidence: None,
-                        proposed_trust_class: None,
-                        source_type: if candidate_type == "contradiction_review" {
-                            "contradiction_detected".to_owned()
+            let mut failure_context = "Failed to begin suggestion proposal batch";
+            let batch = conn.with_transaction(|| {
+                let mut ids = vec![None; report.suggestions.len()];
+                let mut pending = Vec::new();
+                // Resolve every required dedup read before any insertion, in
+                // the same transaction that will publish the entire batch.
+                for (index, suggestion) in report.suggestions.iter().enumerate() {
+                    use crate::core::suggest_links::SuggestedRelation;
+                    let candidate_type =
+                        if suggestion.suggested_relation == SuggestedRelation::Contradicts {
+                            "contradiction_review"
                         } else {
-                            "agent_inference".to_owned()
-                        },
-                        source_id: Some(format!(
-                            "suggest:{}:{}",
-                            suggestion.memory_a, suggestion.memory_b
-                        )),
-                        reason: suggestion.reason.clone(),
-                        confidence: suggestion.score.clamp(0.0, 1.0) as f32,
-                        status: None,
-                        created_at: Some(now.clone()),
-                        ttl_expires_at: None,
-                        derivation_source_refs_json: None,
-                        derivation_metadata_json: None,
-                    },
-                );
-                match insert {
-                    Ok(()) => proposed_ids[index] = Some(candidate_id),
-                    Err(error) => {
-                        let domain_error = DomainError::Storage {
-                            message: format!("Failed to write suggestion candidate: {error}"),
-                            repair: Some("ee doctor --json".to_owned()),
+                            "link_proposal"
                         };
-                        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                    let digest = blake3::hash(
+                        format!(
+                            "{}|{}|{}",
+                            suggestion.memory_a,
+                            suggestion.suggested_relation.as_str(),
+                            suggestion.memory_b
+                        )
+                        .as_bytes(),
+                    )
+                    .to_hex()
+                    .to_string();
+                    let candidate_id = format!("curate_{}", &digest[..26]);
+                    failure_context = "Failed to query existing suggestion candidate";
+                    if conn
+                        .get_curation_candidate(&workspace_id, &candidate_id)?
+                        .is_some()
+                    {
+                        ids[index] = Some(candidate_id);
+                        continue;
                     }
+                    let payload = serde_json::json!({
+                        "schema": "ee.graph.suggest_links.proposal.v1",
+                        "memoryA": suggestion.memory_a,
+                        "memoryB": suggestion.memory_b,
+                        "relation": suggestion.suggested_relation.as_str(),
+                        "score": suggestion.score,
+                        "signals": {
+                            "adamicAdar": suggestion.signals.adamic_adar,
+                            "jaccardTags": suggestion.signals.jaccard_tags,
+                            "ppr": suggestion.signals.ppr,
+                            "affinity": suggestion.signals.affinity,
+                            "preferentialAttachment": suggestion.signals.preferential_attachment,
+                        },
+                    })
+                    .to_string();
+                    pending.push((
+                        index,
+                        candidate_id,
+                        crate::db::CreateCurationCandidateInput {
+                            workspace_id: workspace_id.to_owned(),
+                            candidate_type: candidate_type.to_owned(),
+                            target_memory_id: Some(suggestion.memory_a.clone()),
+                            proposed_content: Some(payload),
+                            proposed_confidence: None,
+                            proposed_trust_class: None,
+                            source_type: if candidate_type == "contradiction_review" {
+                                "contradiction_detected".to_owned()
+                            } else {
+                                "agent_inference".to_owned()
+                            },
+                            source_id: Some(format!(
+                                "suggest:{}:{}",
+                                suggestion.memory_a, suggestion.memory_b
+                            )),
+                            reason: suggestion.reason.clone(),
+                            confidence: suggestion.score.clamp(0.0, 1.0) as f32,
+                            status: None,
+                            created_at: Some(now.clone()),
+                            ttl_expires_at: None,
+                            derivation_source_refs_json: None,
+                            derivation_metadata_json: None,
+                        },
+                    ));
+                }
+                failure_context = "Failed to write suggestion candidate";
+                for (index, candidate_id, input) in pending {
+                    conn.insert_curation_candidate(&candidate_id, &input)?;
+                    ids[index] = Some(candidate_id);
+                }
+                failure_context = "Failed to commit suggestion proposal batch";
+                Ok(ids)
+            });
+            match batch {
+                Ok(ids) => proposed_ids = ids,
+                Err(error) => {
+                    let domain_error = DomainError::Storage {
+                        message: format!("{failure_context}: {error}"),
+                        repair: Some("ee doctor --json".to_owned()),
+                    };
+                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
                 }
             }
         }
@@ -38715,9 +38801,16 @@ where
     };
     // `[memory] include_global` / `participate` gate the lane; both default
     // to true so unconfigured workspaces keep opt-in-by-presence behavior.
-    let memory_config = crate::config::workspace_config(&workspace)
-        .map(|config| config.memory)
-        .unwrap_or_default();
+    let memory_config = match crate::config::workspace_memory_policy(&workspace) {
+        Ok(config) => config,
+        Err(message) => {
+            let error = DomainError::Configuration {
+                message,
+                repair: Some(crate::config::MEMORY_POLICY_REPAIR.to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
     let options = PromoteGlobalOptions {
         workspace_database_path: &database_path,
         memory_id: &args.memory_id,
@@ -40039,6 +40132,12 @@ fn context_error_to_domain(error: &ContextPackError) -> DomainError {
         },
         ContextPackError::WorkspaceStoreMissing(path) => {
             crate::core::storeless_workspace_error(path)
+        }
+        ContextPackError::Search(SearchError::Configuration(message)) => {
+            DomainError::Configuration {
+                message: message.clone(),
+                repair: error.repair_hint().map(str::to_string),
+            }
         }
         ContextPackError::Search(search_error) => DomainError::SearchIndex {
             message: search_error.to_string(),
@@ -54832,6 +54931,17 @@ where
 {
     if let SearchError::Cancelled(reason) = error {
         return write_cancelled_error(reason, wants_json, stdout, stderr);
+    }
+    if let SearchError::Configuration(message) = error {
+        return write_domain_error(
+            &DomainError::Configuration {
+                message: message.clone(),
+                repair: error.repair_hint().map(str::to_owned),
+            },
+            wants_json,
+            stdout,
+            stderr,
+        );
     }
     let domain_error = DomainError::SearchIndex {
         message: error.to_string(),
@@ -77112,6 +77222,708 @@ mod tests {
         ensure(
             !super::graph_link_matches_read_options(&incomplete, options),
             "incomplete mesh provenance must not enter CLI graph algorithms",
+        )
+    }
+
+    #[cfg(feature = "graph")]
+    struct GraphSuggestLinksFixture {
+        workspace: PathBuf,
+        database: PathBuf,
+        connection: crate::db::DbConnection,
+        workspace_id: String,
+        memories: [String; 3],
+    }
+
+    #[cfg(feature = "graph")]
+    impl GraphSuggestLinksFixture {
+        fn new(with_links: bool) -> Result<Self, String> {
+            let workspace = tempfile::tempdir()
+                .map_err(|error| error.to_string())?
+                .keep()
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            let database = workspace.join("suggest-links.db");
+            let connection =
+                crate::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            let workspace_id =
+                crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_u128(4)).to_string();
+            connection
+                .insert_workspace(
+                    &workspace_id,
+                    &crate::db::CreateWorkspaceInput {
+                        path: workspace.display().to_string(),
+                        name: Some("suggest-links-errors".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            let memories = [1, 2, 3].map(|id| {
+                crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(id)).to_string()
+            });
+            for (index, memory) in memories.iter().enumerate() {
+                connection
+                    .insert_memory(
+                        memory,
+                        &crate::db::CreateMemoryInput {
+                            workspace_id: workspace_id.clone(),
+                            level: "procedural".to_owned(),
+                            kind: "rule".to_owned(),
+                            content: format!(
+                                "Verify release checksums before publishing artifact {index}."
+                            ),
+                            workflow_id: None,
+                            confidence: 0.9,
+                            utility: 0.9,
+                            importance: 0.9,
+                            provenance_uri: Some("file://release-checklist.md".to_owned()),
+                            trust_class: "human_explicit".to_owned(),
+                            trust_subclass: None,
+                            tags: vec!["release".to_owned()],
+                            valid_from: None,
+                            valid_to: None,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            if with_links {
+                for index in [0, 1] {
+                    connection
+                        .insert_memory_link(
+                            &format!("link_suggestion_fixture_{index}"),
+                            &crate::db::CreateMemoryLinkInput {
+                                src_memory_id: memories[index].clone(),
+                                dst_memory_id: memories[2].clone(),
+                                relation: crate::db::MemoryLinkRelation::Related,
+                                weight: 1.0,
+                                confidence: 0.9,
+                                directed: false,
+                                evidence_count: 1,
+                                last_reinforced_at: None,
+                                source: crate::db::MemoryLinkSource::Human,
+                                created_by: None,
+                                metadata_json: None,
+                            },
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            Ok(Self {
+                workspace,
+                database,
+                connection,
+                workspace_id,
+                memories,
+            })
+        }
+
+        fn affinity_snapshot(&self, metrics: &str, version: u32) -> TestResult {
+            self.connection
+                .insert_graph_snapshot(
+                    &format!("snapshot_suggest_links_{version}"),
+                    &crate::db::CreateGraphSnapshotInput {
+                        workspace_id: self.workspace_id.clone(),
+                        snapshot_version: version,
+                        schema_version: crate::core::retrieval_affinity::RETRIEVAL_AFFINITY_SCHEMA_V1.to_owned(),
+                        graph_type: crate::db::GraphSnapshotType::RetrievalAffinity,
+                        node_count: 2,
+                        edge_count: 1,
+                        metrics_json: metrics.to_owned(),
+                        content_hash: blake3::hash(metrics.as_bytes()).to_hex().to_string(),
+                        source_generation: 0,
+                        expires_at: None,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        }
+
+        fn valid_affinity_snapshot(&self) -> TestResult {
+            self.affinity_snapshot(
+                &serde_json::json!({
+                    "schema": crate::core::retrieval_affinity::RETRIEVAL_AFFINITY_SCHEMA_V1,
+                    "asOf": "2026-09-15T00:00:00Z",
+                    "halfLifeDays": 30.0,
+                    "edges": [{"a": self.memories[0], "b": self.memories[1], "weight": 2.5}],
+                })
+                .to_string(),
+                1,
+            )
+        }
+
+        fn three_memory_affinity_snapshot(&self) -> TestResult {
+            let metrics = serde_json::json!({
+                "schema": crate::core::retrieval_affinity::RETRIEVAL_AFFINITY_SCHEMA_V1,
+                "asOf": "2026-09-15T00:00:00Z",
+                "halfLifeDays": 30.0,
+                "edges": [
+                    {"a": self.memories[0], "b": self.memories[1], "weight": 2.5},
+                    {"a": self.memories[0], "b": self.memories[2], "weight": 2.5},
+                    {"a": self.memories[1], "b": self.memories[2], "weight": 2.5},
+                ],
+            })
+            .to_string();
+            self.connection
+                .insert_graph_snapshot(
+                    "snapshot_suggest_links_three",
+                    &crate::db::CreateGraphSnapshotInput {
+                        workspace_id: self.workspace_id.clone(),
+                        snapshot_version: 1,
+                        schema_version: crate::core::retrieval_affinity::RETRIEVAL_AFFINITY_SCHEMA_V1.to_owned(),
+                        graph_type: crate::db::GraphSnapshotType::RetrievalAffinity,
+                        node_count: 3,
+                        edge_count: 3,
+                        metrics_json: metrics.clone(),
+                        content_hash: blake3::hash(metrics.as_bytes()).to_hex().to_string(),
+                        source_generation: 0,
+                        expires_at: None,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        }
+
+        fn run(&self, propose: bool) -> Result<(ProcessExitCode, serde_json::Value), String> {
+            let cli = Cli::try_parse_from([
+                "ee",
+                "--workspace",
+                &self.workspace.display().to_string(),
+                "--json",
+                "graph",
+                "suggest-links",
+            ])
+            .map_err(|error| error.to_string())?;
+            let args = super::GraphSuggestLinksArgs {
+                database: Some(self.database.clone()),
+                limit: 20,
+                min_score: 0.0,
+                propose,
+            };
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = super::handle_graph_suggest_links(&cli, &args, &mut stdout, &mut stderr);
+            let response = serde_json::from_slice(&stdout).map_err(|error| {
+                format!(
+                    "suggest-links JSON: {error}; stdout={}; stderr={}",
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr),
+                )
+            })?;
+            Ok((exit, response))
+        }
+
+        fn assert_storage_failure(&self, expected_message: &str) -> TestResult {
+            let (exit, response) = self.run(true)?;
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Storage,
+                &format!("required read failure: {response}"),
+            )?;
+            ensure_equal(
+                &response["schema"],
+                &serde_json::json!("ee.error.v2"),
+                "error schema",
+            )?;
+            ensure_equal(
+                &response["error"]["code"],
+                &serde_json::json!("storage"),
+                "typed storage error",
+            )?;
+            ensure(
+                response["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(expected_message)),
+                format!("contextual failure missing: {response}"),
+            )?;
+            ensure(
+                response.get("data").is_none(),
+                "failed reads must not emit suggestions",
+            )?;
+            ensure(
+                response["error"]["repair"]
+                    .as_str()
+                    .is_some_and(|repair| !repair.is_empty()),
+                "required read failure needs repair",
+            )
+        }
+
+        fn assert_no_proposals(&self) -> TestResult {
+            let candidates = self
+                .connection
+                .list_curation_candidates(&self.workspace_id, None, None, None)
+                .map_err(|error| error.to_string())?;
+            ensure(
+                candidates.is_empty(),
+                format!("failed or read-only suggestion request wrote candidates: {candidates:?}"),
+            )
+        }
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn graph_suggest_links_absent_and_valid_affinity_preserve_real_suggestions() -> TestResult {
+        let fixture = GraphSuggestLinksFixture::new(true)?;
+        for cold in [true, false] {
+            if !cold {
+                fixture.valid_affinity_snapshot()?;
+            }
+            let (exit, response) = fixture.run(false)?;
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Success,
+                &format!("positive suggestion response: {response}"),
+            )?;
+            ensure_equal(
+                &response["success"],
+                &serde_json::json!(true),
+                "successful graph response",
+            )?;
+            let report = &response["data"]["report"];
+            ensure_equal(
+                &report["candidateCount"],
+                &serde_json::json!(1),
+                "one unlinked pair",
+            )?;
+            ensure_equal(
+                &report["affinityCold"],
+                &serde_json::json!(cold),
+                "only absence is cold",
+            )?;
+            let suggestions = report["suggestions"]
+                .as_array()
+                .ok_or("missing suggestions")?;
+            ensure_equal(&suggestions.len(), &1, "one real suggestion")?;
+            ensure_equal(
+                &suggestions[0]["memoryA"],
+                &serde_json::json!(fixture.memories[0]),
+                "first endpoint",
+            )?;
+            ensure_equal(
+                &suggestions[0]["memoryB"],
+                &serde_json::json!(fixture.memories[1]),
+                "second endpoint",
+            )?;
+            ensure_equal(
+                &suggestions[0]["suggestedRelation"],
+                &serde_json::json!("supports"),
+                "real content supplies relation",
+            )?;
+            ensure_equal(
+                &suggestions[0]["signals"]["jaccardTags"],
+                &serde_json::json!(1.0),
+                "real tags supply signal",
+            )?;
+            ensure_equal(
+                &suggestions[0]["signals"]["affinity"],
+                &serde_json::json!(if cold { 0.0 } else { 2.5 }),
+                "stored affinity weight",
+            )?;
+            let degraded = response["degraded"]
+                .as_array()
+                .ok_or("missing degraded array")?;
+            ensure_equal(
+                &degraded
+                    .iter()
+                    .any(|entry| entry["code"] == "retrieval_affinity_cold"),
+                &cold,
+                "cold degradation agrees with actual absence",
+            )?;
+            fixture.assert_no_proposals()?;
+        }
+        let (first_exit, first) = fixture.run(true)?;
+        let (repeat_exit, repeat) = fixture.run(true)?;
+        ensure_equal(
+            &first_exit,
+            &ProcessExitCode::Success,
+            &format!("propose response: {first}"),
+        )?;
+        ensure_equal(
+            &repeat_exit,
+            &ProcessExitCode::Success,
+            &format!("repeat propose response: {repeat}"),
+        )?;
+        let first_id = &first["data"]["report"]["suggestions"][0]["proposedCandidateId"];
+        ensure(
+            first_id.as_str().is_some(),
+            "proposal must have a persisted candidate ID",
+        )?;
+        ensure_equal(
+            first_id,
+            &repeat["data"]["report"]["suggestions"][0]["proposedCandidateId"],
+            "repeat proposal deduplicates",
+        )?;
+        let candidates = fixture
+            .connection
+            .list_curation_candidates(&fixture.workspace_id, None, None, None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&candidates.len(), &1, "exactly one durable proposal")?;
+        let links = fixture
+            .connection
+            .list_all_memory_links(None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&links.len(), &2, "proposal never creates links directly")
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn graph_suggest_links_required_query_failures_are_not_cold_or_empty() -> TestResult {
+        let fixture = GraphSuggestLinksFixture::new(true)?;
+        for (table, expected) in [
+            ("workspaces", "Failed to query workspace"),
+            (
+                "graph_snapshots",
+                "Failed to query retrieval-affinity snapshot",
+            ),
+            ("memory_tags", "Failed to query suggestion memory tags"),
+            (
+                "curation_candidates",
+                "Failed to query existing suggestion candidate",
+            ),
+        ] {
+            fixture
+                .connection
+                .execute_raw(&format!("ALTER TABLE {table} RENAME TO retained_{table}"))
+                .map_err(|error| format!("plant {table} query failure: {error}"))?;
+            let result = fixture.assert_storage_failure(expected);
+            fixture
+                .connection
+                .execute_raw(&format!("ALTER TABLE retained_{table} RENAME TO {table}"))
+                .map_err(|error| format!("restore retained {table}: {error}"))?;
+            result?;
+            fixture.assert_no_proposals()?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn graph_suggest_links_malformed_present_affinity_is_not_partially_accepted() -> TestResult {
+        let fixture = GraphSuggestLinksFixture::new(true)?;
+        let valid_edge =
+            serde_json::json!({"a": fixture.memories[0], "b": fixture.memories[1], "weight": 2.5});
+        let malformed = [
+            "{".to_owned(),
+            "{}".to_owned(),
+            "{\"edges\":false}".to_owned(),
+            serde_json::json!({"edges": [valid_edge.clone(), {"a": "private_invalid_endpoint", "b": 42, "weight": 1.0}]}).to_string(),
+            serde_json::json!({"edges": [valid_edge, {"a": "a", "b": "b", "weight": "private_invalid_weight"}]}).to_string(),
+        ];
+        for (index, metrics) in malformed.iter().enumerate() {
+            fixture.affinity_snapshot(
+                metrics,
+                u32::try_from(index + 1).map_err(|error| error.to_string())?,
+            )?;
+            fixture.assert_storage_failure("Invalid retrieval-affinity snapshot metrics")?;
+            let (_, response) = fixture.run(false)?;
+            ensure(
+                !response.to_string().contains("private_invalid"),
+                "malformed metrics must not leak stored values",
+            )?;
+            fixture.assert_no_proposals()?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn graph_suggest_links_required_content_error_cannot_change_relation() -> TestResult {
+        // Affinity-only endpoints avoid the graph's earlier tombstone read;
+        // this exercises the actual content read used for relation typing.
+        let fixture = GraphSuggestLinksFixture::new(false)?;
+        fixture.valid_affinity_snapshot()?;
+        fixture
+            .connection
+            .execute_raw(&format!(
+                "UPDATE memories SET content = X'00' WHERE id = '{}'",
+                fixture.memories[0],
+            ))
+            .map_err(|error| format!("plant actual malformed content row: {error}"))?;
+        ensure(
+            fixture.connection.get_memory(&fixture.memories[0]).is_err(),
+            "fixture must cause a real required-content read error",
+        )?;
+        fixture.assert_storage_failure("Failed to query suggestion memory content")?;
+        fixture.assert_no_proposals()
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn graph_suggest_links_affinity_omits_missing_and_tombstoned_endpoints() -> TestResult {
+        let fixture = GraphSuggestLinksFixture::new(false)?;
+        let missing = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(99)).to_string();
+        ensure(
+            fixture
+                .connection
+                .get_memory(&missing)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            "missing endpoint must never have existed",
+        )?;
+        ensure(
+            fixture
+                .connection
+                .tombstone_memory(&fixture.memories[2])
+                .map_err(|error| error.to_string())?,
+            "tombstone the retained third memory",
+        )?;
+        fixture.affinity_snapshot(
+            &serde_json::json!({"edges": [
+                {"a": fixture.memories[0], "b": fixture.memories[1], "weight": 2.5},
+                {"a": fixture.memories[0], "b": fixture.memories[2], "weight": 2.5},
+                {"a": fixture.memories[1], "b": missing, "weight": 2.5},
+            ]})
+            .to_string(),
+            1,
+        )?;
+        for propose in [false, true] {
+            let (exit, response) = fixture.run(propose)?;
+            ensure_equal(&exit, &ProcessExitCode::Success, &format!("{response}"))?;
+            let report = &response["data"]["report"];
+            ensure_equal(
+                &report["affinityCold"],
+                &serde_json::json!(false),
+                "present snapshot stays warm",
+            )?;
+            ensure_equal(
+                &report["candidateCount"],
+                &serde_json::json!(1),
+                "only live pair remains",
+            )?;
+            let suggestions = report["suggestions"]
+                .as_array()
+                .ok_or("missing suggestions")?;
+            ensure_equal(&suggestions.len(), &1, "one valid affinity-only suggestion")?;
+            ensure_equal(
+                &suggestions[0]["memoryA"],
+                &serde_json::json!(fixture.memories[0]),
+                "live first endpoint",
+            )?;
+            ensure_equal(
+                &suggestions[0]["memoryB"],
+                &serde_json::json!(fixture.memories[1]),
+                "live second endpoint",
+            )?;
+            ensure_equal(
+                &suggestions[0]["suggestedRelation"],
+                &serde_json::json!("supports"),
+                "live content still types relation",
+            )?;
+            ensure(
+                !response.to_string().contains(&missing),
+                "missing endpoint must not be emitted",
+            )?;
+            ensure(
+                !response.to_string().contains(&fixture.memories[2]),
+                "tombstoned endpoint must not be emitted",
+            )?;
+        }
+        let candidates = fixture
+            .connection
+            .list_curation_candidates(&fixture.workspace_id, None, None, None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&candidates.len(), &1, "only valid pair persisted")?;
+        ensure_equal(
+            &candidates[0].target_memory_id,
+            &Some(fixture.memories[0].clone()),
+            "proposal targets live endpoint",
+        )?;
+        ensure(
+            fixture
+                .connection
+                .list_all_memory_links(None)
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            "suggestion proposals must not create graph links",
+        )
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn graph_suggest_links_multi_pair_batch_persists_exactly_and_deduplicates() -> TestResult {
+        let fixture = GraphSuggestLinksFixture::new(false)?;
+        fixture.three_memory_affinity_snapshot()?;
+        let (exit, first) = fixture.run(true)?;
+        ensure_equal(&exit, &ProcessExitCode::Success, &format!("{first}"))?;
+        let expected = [(0, 1), (0, 2), (1, 2)];
+        let suggestions = first["data"]["report"]["suggestions"]
+            .as_array()
+            .ok_or("missing suggestions")?;
+        ensure_equal(&suggestions.len(), &3, "three real pair proposals")?;
+        let mut candidate_ids = std::collections::BTreeSet::new();
+        for (suggestion, (left, right)) in suggestions.iter().zip(expected) {
+            ensure_equal(
+                &suggestion["memoryA"],
+                &serde_json::json!(fixture.memories[left]),
+                "ordered first endpoint",
+            )?;
+            ensure_equal(
+                &suggestion["memoryB"],
+                &serde_json::json!(fixture.memories[right]),
+                "ordered second endpoint",
+            )?;
+            ensure_equal(
+                &suggestion["suggestedRelation"],
+                &serde_json::json!("supports"),
+                "real content relation",
+            )?;
+            let id = suggestion["proposedCandidateId"]
+                .as_str()
+                .ok_or("missing persisted candidate ID")?;
+            ensure(
+                candidate_ids.insert(id.to_owned()),
+                "each pair has a distinct proposal",
+            )?;
+            let stored = fixture
+                .connection
+                .get_curation_candidate(&fixture.workspace_id, id)
+                .map_err(|error| error.to_string())?
+                .ok_or("proposal not stored")?;
+            ensure_equal(
+                &stored.target_memory_id,
+                &Some(fixture.memories[left].clone()),
+                "stored target",
+            )?;
+            let payload: serde_json::Value = serde_json::from_str(
+                stored
+                    .proposed_content
+                    .as_deref()
+                    .ok_or("missing stored proposal")?,
+            )
+            .map_err(|error| error.to_string())?;
+            ensure_equal(
+                &payload["memoryA"],
+                &suggestion["memoryA"],
+                "stored first endpoint",
+            )?;
+            ensure_equal(
+                &payload["memoryB"],
+                &suggestion["memoryB"],
+                "stored second endpoint",
+            )?;
+            ensure_equal(
+                &payload["relation"],
+                &suggestion["suggestedRelation"],
+                "stored relation",
+            )?;
+        }
+        let (exit, repeated) = fixture.run(true)?;
+        ensure_equal(&exit, &ProcessExitCode::Success, &format!("{repeated}"))?;
+        ensure_equal(
+            &repeated["data"]["report"]["suggestions"],
+            &first["data"]["report"]["suggestions"],
+            "repeat batch returns identical proposal identities",
+        )?;
+        let stored_ids = fixture
+            .connection
+            .list_curation_candidates(&fixture.workspace_id, None, None, None)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|candidate| candidate.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        ensure_equal(
+            &stored_ids,
+            &candidate_ids,
+            "exactly the emitted proposals exist",
+        )?;
+        ensure(
+            fixture
+                .connection
+                .list_all_memory_links(None)
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            "proposals do not create graph links",
+        )
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn graph_suggest_links_later_dedup_read_failure_publishes_no_partial_batch() -> TestResult {
+        let fixture = GraphSuggestLinksFixture::new(false)?;
+        fixture.three_memory_affinity_snapshot()?;
+        let (exit, control) = fixture.run(true)?;
+        ensure_equal(&exit, &ProcessExitCode::Success, &format!("{control}"))?;
+        let suggestions = control["data"]["report"]["suggestions"]
+            .as_array()
+            .ok_or("missing suggestions")?;
+        ensure_equal(&suggestions.len(), &3, "fault requires later proposal")?;
+        let first = suggestions[0]["proposedCandidateId"]
+            .as_str()
+            .ok_or("missing first proposal")?;
+        let second = suggestions[1]["proposedCandidateId"]
+            .as_str()
+            .ok_or("missing second proposal")?;
+        let retained = format!("retained_{first}");
+        fixture
+            .connection
+            .execute_raw(&format!(
+                "UPDATE curation_candidates SET id = '{retained}' WHERE id = '{first}'"
+            ))
+            .map_err(|error| error.to_string())?;
+        fixture
+            .connection
+            .execute_raw(&format!(
+                "UPDATE curation_candidates SET reason = X'00' WHERE id = '{second}'"
+            ))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            fixture
+                .connection
+                .get_curation_candidate(&fixture.workspace_id, first)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            "first proposal must require insertion",
+        )?;
+        ensure(
+            fixture
+                .connection
+                .get_curation_candidate(&fixture.workspace_id, second)
+                .is_err(),
+            "later existing row must produce a real read error",
+        )?;
+        fixture.assert_storage_failure("Failed to query existing suggestion candidate")?;
+        ensure(
+            fixture
+                .connection
+                .get_curation_candidate(&fixture.workspace_id, first)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            "failed later lookup must not publish earlier proposal",
+        )?;
+        ensure(
+            fixture
+                .connection
+                .get_curation_candidate(&fixture.workspace_id, &retained)
+                .map_err(|error| error.to_string())?
+                .is_some(),
+            "existing retained proposal must survive the failed batch",
+        )
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn graph_suggest_links_later_insert_failure_rolls_back_entire_batch() -> TestResult {
+        let fixture = GraphSuggestLinksFixture::new(false)?;
+        fixture.three_memory_affinity_snapshot()?;
+        fixture
+            .connection
+            .execute_raw(&format!(
+                "CREATE TRIGGER reject_later_suggestion BEFORE INSERT ON curation_candidates \
+             WHEN NEW.source_id = 'suggest:{}:{}' AND EXISTS \
+             (SELECT 1 FROM curation_candidates WHERE source_id = 'suggest:{}:{}') \
+             BEGIN SELECT RAISE(ABORT, 'later_suggestion_insert_failed'); END",
+                fixture.memories[0], fixture.memories[2], fixture.memories[0], fixture.memories[1],
+            ))
+            .map_err(|error| error.to_string())?;
+        let generation = fixture
+            .connection
+            .get_workspace_generation(&fixture.workspace_id)
+            .map_err(|error| error.to_string())?;
+        fixture.assert_storage_failure("later_suggestion_insert_failed")?;
+        fixture.assert_no_proposals()?;
+        ensure_equal(
+            &fixture
+                .connection
+                .get_workspace_generation(&fixture.workspace_id)
+                .map_err(|error| error.to_string())?,
+            &generation,
+            "rollback includes proposal-triggered workspace generation changes",
         )
     }
 
