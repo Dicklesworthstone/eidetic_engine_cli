@@ -403,10 +403,13 @@ fn finalize_with_transport_overhead_holds_emission_at_or_under_budget() -> TestR
     let mut envelope = happy_path_envelope_with_one_modified_item()?;
     merge_realistic_response_degradations(&mut envelope);
 
+    let overhead: u64 = 1; // matches the CLI's trailing `\n`
+    envelope
+        .finalize_with_budget_and_transport_overhead(None, overhead)
+        .map_err(|error| format!("finalize unbounded emission: {error}"))?;
     let serialized_body_bytes = serde_json::to_vec(&envelope)
         .map_err(|error| format!("serialize envelope: {error}"))?
         .len() as u64;
-    let overhead: u64 = 1; // matches the CLI's trailing `\n`
     let exact_budget = serialized_body_bytes + overhead;
 
     // Boundary: budget == body + overhead → the envelope still emits
@@ -438,15 +441,26 @@ fn finalize_with_transport_overhead_holds_emission_at_or_under_budget() -> TestR
         overhead,
         exact_budget,
     );
+    let finalized = serde_json::to_vec(&envelope).map_err(|error| error.to_string())?;
+    assert_eq!(
+        envelope
+            .finalize_with_budget_and_transport_overhead(Some(exact_budget), overhead)
+            .map_err(|error| format!("repeat boundary finalize: {error}"))?,
+        exact_budget,
+    );
+    assert_eq!(
+        serde_json::to_vec(&envelope).map_err(|error| error.to_string())?,
+        finalized,
+        "transport-aware finalization must be byte-identical on repetition",
+    );
 
     // Now squeeze the budget by one byte — finalize must flip to
     // fallback and the marker count must be exactly 1.
     let mut tight = happy_path_envelope_with_one_modified_item()?;
     merge_realistic_response_degradations(&mut tight);
-    let serialized_tight_body = serde_json::to_vec(&tight)
-        .map_err(|error| format!("serialize tight envelope: {error}"))?
-        .len() as u64;
-    let tight_budget = serialized_tight_body; // one byte tighter than body+overhead
+    // This independent copy must be judged against the finalized emission,
+    // including the byte widths changed by post-merge tokenSavings.
+    let tight_budget = exact_budget - 1;
     let tight_final = tight
         .finalize_with_budget_and_transport_overhead(Some(tight_budget), overhead)
         .map_err(|error| format!("finalize tight failed: {error}"))?;
