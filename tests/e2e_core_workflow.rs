@@ -1829,6 +1829,7 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
         "--json",
     ];
     let frozen_pack = run_ee(&pack_args)?;
+    persist_artifact("family_frozen_pack", &frozen_pack);
     ensure_equal(
         &frozen_pack.status.code(),
         &Some(EXIT_SUCCESS),
@@ -1841,7 +1842,9 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
             item.get("memoryId").and_then(serde_json::Value::as_str)
                 == Some(selected_memory_id.as_str())
         }),
-        "short selected sibling must be persisted as a selected pack item",
+        format!(
+            "short selected sibling must be persisted as a selected pack item: {frozen_pack_json}"
+        ),
     )?;
     let frozen_skipped = json_array(
         &frozen_pack_json,
