@@ -686,18 +686,23 @@ function Expand-Tarball {
     # Strategy 1: bsdtar (built into Windows 10 1803+) handles .tar.xz natively.
     $tarCmd = Get-Command tar -ErrorAction SilentlyContinue
     if ($tarCmd) {
-        & tar -xJf $TarballPath -C $DestDir 2>&1 | Out-Null
+        & tar -xJf $TarballPath -C $DestDir | Out-Null
         if ($LASTEXITCODE -eq 0) {
             return
         }
         # Some Windows tars don't have xz; try the dual-tool approach.
         $xz = Get-Command xz -ErrorAction SilentlyContinue
         if ($xz) {
-            $decompressed = Join-Path (Split-Path -Parent $TarballPath) "ee.tar"
-            & xz -d -k -c $TarballPath > $decompressed
-            & tar -xf $decompressed -C $DestDir
-            Remove-Item $decompressed -ErrorAction SilentlyContinue
-            if ($LASTEXITCODE -eq 0) { return }
+            $decompressed = Join-Path (Split-Path -Parent $TarballPath) ([System.IO.Path]::GetFileNameWithoutExtension($TarballPath))
+            # Windows PowerShell redirects native stdout as text. Let xz
+            # write the decompressed TAR directly to preserve binary bytes.
+            & $xz.Path -d -k $TarballPath
+            if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $decompressed -PathType Leaf)) {
+                & tar -xf $decompressed -C $DestDir
+                $tarExitCode = $LASTEXITCODE
+                Remove-Item -LiteralPath $decompressed -ErrorAction SilentlyContinue
+                if ($tarExitCode -eq 0) { return }
+            }
         }
     }
 
@@ -707,12 +712,13 @@ function Expand-Tarball {
         $sevenZip = Get-Command "$env:ProgramFiles\7-Zip\7z.exe" -ErrorAction SilentlyContinue
     }
     if ($sevenZip) {
-        $tarPath = Join-Path (Split-Path -Parent $TarballPath) "ee.tar"
+        $tarPath = Join-Path (Split-Path -Parent $TarballPath) ([System.IO.Path]::GetFileNameWithoutExtension($TarballPath))
         & $sevenZip.Path x $TarballPath "-o$(Split-Path -Parent $TarballPath)" -y | Out-Null
-        if (Test-Path $tarPath) {
+        if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $tarPath -PathType Leaf)) {
             & $sevenZip.Path x $tarPath "-o$DestDir" -y | Out-Null
-            Remove-Item $tarPath -ErrorAction SilentlyContinue
-            return
+            $tarExitCode = $LASTEXITCODE
+            Remove-Item -LiteralPath $tarPath -ErrorAction SilentlyContinue
+            if ($tarExitCode -eq 0) { return }
         }
     }
 

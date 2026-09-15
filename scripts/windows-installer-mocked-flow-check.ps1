@@ -3,7 +3,8 @@ param(
     [string] $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string] $ArtifactRoot = (Join-Path ([System.IO.Path]::GetTempPath()) "ee-windows-installer-mocked-flow"),
     [string] $LogPath = (Join-Path ([System.IO.Path]::GetTempPath()) "ee-windows-installer-mocked-flow.jsonl"),
-    [switch] $ResetLog
+    [switch] $ResetLog,
+    [switch] $ExtractionOnly
 )
 
 Set-StrictMode -Version Latest
@@ -166,12 +167,133 @@ function New-BaseArtifact {
     $tarballPath = Join-Path $baseRoot $tarballName
     $tar = Get-Command "tar" -ErrorAction SilentlyContinue
     if (-not $tar) { throw "tar is required to create installer fixture archive" }
-    & $tar.Source -cJf $tarballPath -C $payloadRoot "ee.exe" 2>&1 | Out-Null
+    & $tar.Source -cJf $tarballPath -C $payloadRoot "ee.exe" | Out-Null
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $tarballPath)) {
         throw "tar failed to create $tarballName"
     }
     $checksum = (Get-FileHash -Path $tarballPath -Algorithm SHA256).Hash.ToLowerInvariant()
     return [pscustomobject]@{ TarballName = $tarballName; TarballPath = $tarballPath; Checksum = $checksum }
+}
+
+function Invoke-RealExtractionChecks {
+    param([Parameter(Mandatory = $true)][pscustomobject] $BaseArtifact)
+
+    $sevenZip = Get-Command (Join-Path $env:ProgramFiles "7-Zip\7z.exe") -ErrorAction SilentlyContinue
+    if (-not $sevenZip) { $sevenZip = Get-Command 7z -ErrorAction SilentlyContinue }
+    if (-not $sevenZip) { throw "actual 7-Zip is required for -ExtractionOnly" }
+
+    # Load only the canonical extractor, never installer setup or PATH updates.
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($installPath, [ref] $tokens, [ref] $parseErrors)
+    if ($parseErrors.Count -ne 0) { throw "install.ps1 failed to parse" }
+    $extractor = $ast.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq "Expand-Tarball"
+    }, $true)
+    if ($null -eq $extractor) { throw "install.ps1 has no Expand-Tarball function" }
+    Invoke-Expression $extractor.Extent.Text
+    function Write-Info { param([string] $Message) Write-Host $Message }
+    function Write-ErrorExit { param([string] $Message) throw $Message }
+    # Retain owned intermediates for diagnosis; cleanup is not qualified here.
+    function Remove-Item {
+        param([string] $LiteralPath, [string] $ErrorAction)
+        Write-Host "Retained extraction intermediate: $LiteralPath"
+    }
+    function Write-ExtractionPass {
+        param([string] $ScenarioId, [string] $BinaryHash = "", [string] $ObservedError = "")
+        [ordered]@{
+            schema = "ee.test_event.v1"
+            kind = "windows_installer_real_extraction"
+            scenario_id = $ScenarioId
+            result = "pass"
+            powershell_version = $PSVersionTable.PSVersion.ToString()
+            script_hash = $scriptHash
+            archive_sha256 = $BaseArtifact.Checksum
+            payload_kind = "local_windows_executable_fixture"
+            available_seven_zip = $sevenZip.Source
+            binary_sha256 = $BinaryHash
+            observed_error = $ObservedError
+            cleanup_qualified = $false
+            installer_setup_invoked = $false
+        } | ConvertTo-Json -Compress | Add-Content -Path $LogPath -Encoding utf8
+    }
+
+    $savedPath = $env:PATH
+    try {
+        $env:PATH = Split-Path -Parent $sevenZip.Source
+        if (Get-Command tar, xz -ErrorAction SilentlyContinue) {
+            throw "7-Zip fallback isolation failed: tar or xz is still available"
+        }
+        $expectedHash = (Get-FileHash -LiteralPath (Join-Path $ArtifactRoot "base\payload\ee.exe") -Algorithm SHA256).Hash
+        $validRoot = Join-Path $ArtifactRoot "real-extraction-valid"
+        New-Item -ItemType Directory -Path $validRoot | Out-Null
+        $validArchive = Join-Path $validRoot $BaseArtifact.TarballName
+        Copy-Item -LiteralPath $BaseArtifact.TarballPath -Destination $validArchive
+        $validDest = Join-Path $validRoot "extracted"
+        Expand-Tarball -TarballPath $validArchive -DestDir $validDest
+        $actualHash = (Get-FileHash -LiteralPath (Join-Path $validDest "ee.exe") -Algorithm SHA256).Hash
+        if ($actualHash -ne $expectedHash) { throw "7-Zip extraction changed the actual payload bytes" }
+        $tarName = [System.IO.Path]::GetFileNameWithoutExtension($BaseArtifact.TarballName)
+        $validTar = Join-Path $validRoot $tarName
+        if (-not (Test-Path -LiteralPath $validTar -PathType Leaf)) {
+            throw "7-Zip did not produce the TAR named after the downloaded target archive"
+        }
+        Write-ExtractionPass -ScenarioId "seven_zip_actual_binary_bytes" -BinaryHash $actualHash.ToLowerInvariant()
+
+        # A real, valid XZ stream whose payload is invalid TAR must fail stage two.
+        $badTarRoot = Join-Path $ArtifactRoot "real-extraction-invalid-tar"
+        New-Item -ItemType Directory -Path $badTarRoot | Out-Null
+        $badTar = Join-Path $badTarRoot $tarName
+        [System.IO.File]::WriteAllBytes($badTar, [byte[]] @(0, 255, 17, 128, 42, 99, 0, 1))
+        $badTarArchive = Join-Path $badTarRoot $BaseArtifact.TarballName
+        & $sevenZip.Source a -txz $badTarArchive $badTar | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "7-Zip failed to create the invalid-TAR control" }
+        & $sevenZip.Source t $badTarArchive | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "invalid-TAR control must contain a valid XZ stream" }
+        $badTarDest = Join-Path $badTarRoot "extracted"
+        $observedError = ""
+        try { Expand-Tarball -TarballPath $badTarArchive -DestDir $badTarDest }
+        catch { $observedError = $_.Exception.Message }
+        if ($observedError -notlike "xz decompression unavailable.*" -or
+            (Test-Path -LiteralPath (Join-Path $badTarDest "ee.exe"))) {
+            throw "invalid TAR was not rejected by the canonical extraction failure path: $observedError"
+        }
+        Write-ExtractionPass -ScenarioId "seven_zip_invalid_tar_rejected" -ObservedError $observedError
+
+        # A stale valid TAR cannot turn a failed first-stage XZ extraction into success.
+        $badXzRoot = Join-Path $ArtifactRoot "real-extraction-invalid-xz"
+        New-Item -ItemType Directory -Path $badXzRoot | Out-Null
+        $badXz = Join-Path $badXzRoot $BaseArtifact.TarballName
+        [System.IO.File]::WriteAllBytes($badXz, [byte[]] @(0, 255, 17, 128, 42, 99, 0, 1))
+        Copy-Item -LiteralPath $validTar -Destination (Join-Path $badXzRoot $tarName)
+        $badXzDest = Join-Path $badXzRoot "extracted"
+        $observedError = ""
+        try { Expand-Tarball -TarballPath $badXz -DestDir $badXzDest }
+        catch { $observedError = $_.Exception.Message }
+        if ($observedError -notlike "xz decompression unavailable.*" -or
+            (Test-Path -LiteralPath (Join-Path $badXzDest "ee.exe"))) {
+            throw "invalid XZ with stale TAR was not rejected by the canonical extraction failure path: $observedError"
+        }
+        Write-ExtractionPass -ScenarioId "seven_zip_invalid_xz_with_stale_tar_rejected" -ObservedError $observedError
+
+        # Exercise the real default tool order too, including GNU tar on hosts
+        # where it precedes Windows bsdtar. Its errors must allow fallback.
+        $env:PATH = $originalProcessEnv["PATH"]
+        Get-Command tar, xz, 7z -ErrorAction SilentlyContinue | Format-Table Name, Source | Out-Host
+        $defaultRoot = Join-Path $ArtifactRoot "real-extraction-default-path"
+        New-Item -ItemType Directory -Path $defaultRoot | Out-Null
+        $defaultArchive = Join-Path $defaultRoot $BaseArtifact.TarballName
+        Copy-Item -LiteralPath $BaseArtifact.TarballPath -Destination $defaultArchive
+        $defaultDest = Join-Path $defaultRoot "extracted"
+        Expand-Tarball -TarballPath $defaultArchive -DestDir $defaultDest
+        $defaultHash = (Get-FileHash -LiteralPath (Join-Path $defaultDest "ee.exe") -Algorithm SHA256).Hash
+        if ($defaultHash -ne $expectedHash) { throw "default-PATH extraction changed the actual payload bytes" }
+        Write-ExtractionPass -ScenarioId "default_path_actual_binary_bytes" -BinaryHash $defaultHash.ToLowerInvariant()
+    } finally {
+        $env:PATH = $savedPath
+    }
+    Write-Host "Windows installer actual extraction checks passed (4 scenarios). Log: $LogPath"
 }
 
 function New-FakeCosign {
@@ -365,6 +487,19 @@ function Invoke-MockedScenario {
 
 if (-not (Test-Path $installPath)) {
     throw "install.ps1 is missing from $RepoRoot"
+}
+
+if ($ExtractionOnly) {
+    $savedPath = $env:PATH
+    try {
+        # Prefer Windows bsdtar for fixture creation; GNU tar treats C: as a host.
+        $env:PATH = "$(Join-Path $env:WINDIR 'System32');$savedPath"
+        $baseArtifact = New-BaseArtifact
+        Invoke-RealExtractionChecks -BaseArtifact $baseArtifact
+    } finally {
+        $env:PATH = $savedPath
+    }
+    exit 0
 }
 
 $baseArtifact = New-BaseArtifact
