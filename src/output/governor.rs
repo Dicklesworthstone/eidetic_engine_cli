@@ -455,7 +455,7 @@ pub fn govern_response_json_with_resume(
     registry: &[TruncationPoint],
     resume_cursor: Option<&str>,
 ) -> Result<String, DomainError> {
-    let Ok(mut original) = serde_json::from_str::<JsonValue>(json) else {
+    let Ok(original) = serde_json::from_str::<JsonValue>(json) else {
         return Ok(json.to_owned());
     };
     if original
@@ -475,13 +475,17 @@ pub fn govern_response_json_with_resume(
     }
 
     if let Some(token) = resume_cursor {
-        apply_resume_to_envelope(&mut original, ctx, registry, token);
+        let mut remainder = original.clone();
+        apply_resume_to_envelope(&mut remainder, ctx, registry, token);
+        govern_envelope(&remainder, &original, ctx, registry)
+    } else {
+        govern_envelope(&original, &original, ctx, registry)
     }
-    govern_envelope(&original, ctx, registry)
 }
 
 fn govern_envelope(
     original: &JsonValue,
+    cursor_source: &JsonValue,
     ctx: &GovernorContext<'_>,
     registry: &[TruncationPoint],
 ) -> Result<String, DomainError> {
@@ -542,8 +546,15 @@ fn govern_envelope(
     let mut best: Option<u64> = None;
     while low <= high {
         let mid = low + (high - low) / 2;
-        let (_, candidate_serialized, candidate_estimate) =
-            candidate_with_drops(original, point, mid, ctx, db_generation, &mut estimator)?;
+        let (_, candidate_serialized, candidate_estimate) = candidate_with_drops(
+            original,
+            cursor_source,
+            point,
+            mid,
+            ctx,
+            db_generation,
+            &mut estimator,
+        )?;
         if fits(
             candidate_estimate,
             candidate_serialized.len(),
@@ -575,8 +586,15 @@ fn govern_envelope(
     // the candidate truly fits (bounded by max_drops, already known to be
     // reachable or we fail closed above).
     loop {
-        let (_, candidate_serialized, candidate_estimate) =
-            candidate_with_drops(original, point, drops, ctx, db_generation, &mut estimator)?;
+        let (_, candidate_serialized, candidate_estimate) = candidate_with_drops(
+            original,
+            cursor_source,
+            point,
+            drops,
+            ctx,
+            db_generation,
+            &mut estimator,
+        )?;
         if fits(
             candidate_estimate,
             candidate_serialized.len(),
@@ -707,6 +725,7 @@ fn resolve_data_path_mut<'v>(
 /// `output_truncated_budget` entry (with cursor), and stamp meta.
 fn candidate_with_drops(
     original: &JsonValue,
+    cursor_source: &JsonValue,
     point: &TruncationPoint,
     drops: u64,
     ctx: &GovernorContext<'_>,
@@ -714,7 +733,7 @@ fn candidate_with_drops(
     estimator: &mut TokenEstimator,
 ) -> Result<(JsonValue, String, u64), DomainError> {
     let mut candidate = original.clone();
-    let position_key = apply_drops(&mut candidate, point, drops)?;
+    let position_key = apply_drops(&mut candidate, cursor_source, point, drops)?;
 
     let payload = CursorPayload {
         schema: CURSOR_SCHEMA_V1.to_string(),
@@ -753,6 +772,7 @@ fn cursor_target_schema(original: &JsonValue, point: &TruncationPoint) -> String
 /// least one element.
 fn apply_drops(
     candidate: &mut JsonValue,
+    cursor_source: &JsonValue,
     point: &TruncationPoint,
     drops: u64,
 ) -> Result<String, DomainError> {
@@ -760,9 +780,12 @@ fn apply_drops(
         message: "Declared truncation point is missing from the response payload.".to_string(),
         repair: Some("Re-run without --max-output-tokens and report the failure.".to_string()),
     };
+    let full_target =
+        resolve_data_path(cursor_source, point.array_path).ok_or_else(missing_point)?;
     let target = resolve_data_path_mut(candidate, point.array_path).ok_or_else(missing_point)?;
     if point.per_section_items {
         let sections = target.as_array_mut().ok_or_else(missing_point)?;
+        let full_sections = full_target.as_array().ok_or_else(missing_point)?;
         // Round-robin from the last section backwards (ADR 0063 §2). The
         // per-section positionKey names the last DROPPED element in the
         // engine's deterministic drop order — unlike a "last kept" key it
@@ -776,10 +799,19 @@ fn apply_drops(
                     .get(section_index)?
                     .get("items")
                     .and_then(JsonValue::as_array)?;
+                // A resumed section has already lost a prefix. Its fallback
+                // index must still name the boundary in the complete result
+                // set, which is what the next invocation authenticates.
+                let full_len = full_sections
+                    .get(section_index)?
+                    .get("items")
+                    .and_then(JsonValue::as_array)?
+                    .len();
+                let original_index = full_len.checked_sub(items.len())? + item_index;
                 Some(element_position_key(
                     items.get(item_index)?,
                     point,
-                    item_index,
+                    original_index,
                 ))
             })
             .unwrap_or_default();
@@ -791,12 +823,17 @@ fn apply_drops(
         Ok(position_key)
     } else {
         let items = target.as_array_mut().ok_or_else(missing_point)?;
+        let full_items = full_target.as_array().ok_or_else(missing_point)?;
         let total = items.len() as u64;
         let kept = total.saturating_sub(drops) as usize;
+        let original_index = full_items
+            .len()
+            .saturating_sub(drops as usize)
+            .saturating_sub(1);
         items.truncate(kept);
         let position_key = items
             .last()
-            .map(|element| element_position_key(element, point, kept.saturating_sub(1)))
+            .map(|element| element_position_key(element, point, original_index))
             .unwrap_or_default();
         Ok(position_key)
     }
@@ -1023,26 +1060,43 @@ fn empty_truncation_point(envelope: &mut JsonValue, point: &TruncationPoint) {
     }
 }
 
-/// Append a degraded entry where the surface already reports degradations:
-/// `data.degraded[]` when present, else the top-level envelope `degraded[]`
-/// (created when absent).
+/// Keep governor warnings visible in the canonical envelope and in an
+/// existing report-local degraded array. Rendering precedes governing, so
+/// the renderer cannot mirror warnings added here afterward.
 fn append_degraded_entry(envelope: &mut JsonValue, entry: JsonValue) {
     if let Some(data_degraded) = envelope
         .get_mut("data")
         .and_then(|data| data.get_mut("degraded"))
         .and_then(JsonValue::as_array_mut)
     {
-        data_degraded.push(entry);
-        return;
+        push_degraded_entry(data_degraded, entry.clone());
     }
     let Some(object) = envelope.as_object_mut() else {
         return;
     };
     match object.get_mut("degraded") {
-        Some(JsonValue::Array(degraded)) => degraded.push(entry),
+        Some(JsonValue::Array(degraded)) => push_degraded_entry(degraded, entry),
         _ => {
             object.insert("degraded".to_string(), JsonValue::Array(vec![entry]));
         }
+    }
+}
+
+/// An upstream report can already carry this warning with extra provenance.
+/// Keep that richer entry only when every incoming field agrees, including
+/// details and repair text; sharing a code alone never establishes identity.
+fn push_degraded_entry(entries: &mut Vec<JsonValue>, entry: JsonValue) {
+    let already_reported =
+        entries
+            .iter()
+            .any(|existing| match (existing.as_object(), entry.as_object()) {
+                (Some(existing), Some(incoming)) => incoming
+                    .iter()
+                    .all(|(key, value)| existing.get(key) == Some(value)),
+                _ => existing == &entry,
+            });
+    if !already_reported {
+        entries.push(entry);
     }
 }
 
@@ -1082,17 +1136,14 @@ fn fail_closed_unsatisfiable(
             object.get("data").and_then(|data| data.get("degraded")),
         ] {
             if let Some(entries) = degraded.and_then(JsonValue::as_array) {
-                degraded_entries.extend(
-                    entries
-                        .iter()
-                        .filter(|entry| {
-                            matches!(
-                                entry.get("code").and_then(JsonValue::as_str),
-                                Some(CURSOR_INVALID_CODE) | Some(CURSOR_STALE_CODE)
-                            )
-                        })
-                        .cloned(),
-                );
+                for entry in entries.iter().filter(|entry| {
+                    matches!(
+                        entry.get("code").and_then(JsonValue::as_str),
+                        Some(CURSOR_INVALID_CODE) | Some(CURSOR_STALE_CODE)
+                    )
+                }) {
+                    push_degraded_entry(&mut degraded_entries, entry.clone());
+                }
             }
         }
     }
@@ -1948,6 +1999,83 @@ mod tests {
     }
 
     #[test]
+    fn rejected_cursor_mirrors_warning_without_losing_existing_degradations() -> TestResult {
+        let mut original = parse(&list_envelope(12))?;
+        let mut prior_warning = cursor_invalid_degraded_entry();
+        prior_warning["message"] = json!("A different cursor failed validation.");
+        prior_warning["details"] = json!({"source": "prior operation"});
+        original["degraded"] = json!([prior_warning]);
+        original["data"]["degraded"] = json!([prior_warning]);
+        let generation = || 7u64;
+        let ctx = test_context(100_000, &generation);
+        let governed = govern_response_json_with_resume(
+            &original.to_string(),
+            &ctx,
+            TEST_REGISTRY,
+            Some("not-a-valid-cursor"),
+        )
+        .map_err(|error| format!("govern: {error:?}"))?;
+        let value = parse(&governed)?;
+        assert!(kept_item_ids(&value).is_empty());
+        let expected = json!([prior_warning, cursor_invalid_degraded_entry()]);
+        assert_eq!(value["degraded"], expected);
+        assert_eq!(value["data"]["degraded"], expected);
+
+        let repeated = govern_response_json_with_resume(
+            &governed,
+            &ctx,
+            TEST_REGISTRY,
+            Some("not-a-valid-cursor"),
+        )
+        .map_err(|error| format!("govern repeated rejection: {error:?}"))?;
+        assert_eq!(
+            parse(&repeated)?,
+            value,
+            "same rejection must be idempotent"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejected_cursor_preserves_richer_warning_once_even_when_budget_cannot_fit() -> TestResult {
+        let mut original = parse(&list_envelope(12))?;
+        let mut warning = cursor_invalid_degraded_entry();
+        warning["sources"] = json!(["insights"]);
+        warning["details"] = json!({"stage": "query validation"});
+        original["degraded"] = json!([warning]);
+        original["data"]["degraded"] = json!([warning]);
+        let generation = || 7u64;
+        for ceiling in [100_000, 1] {
+            let ctx = test_context(ceiling, &generation);
+            let governed = govern_response_json_with_resume(
+                &original.to_string(),
+                &ctx,
+                TEST_REGISTRY,
+                Some("not-a-valid-cursor"),
+            )
+            .map_err(|error| format!("govern at {ceiling}: {error:?}"))?;
+            let value = parse(&governed)?;
+            assert!(kept_item_ids(&value).is_empty());
+            let entries = value["degraded"]
+                .as_array()
+                .ok_or("missing degraded array")?;
+            let rejections: Vec<_> = entries
+                .iter()
+                .filter(|entry| entry["code"] == CURSOR_INVALID_CODE)
+                .collect();
+            assert_eq!(rejections, vec![&warning]);
+            if ceiling == 1 {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[1]["code"], OUTPUT_BUDGET_UNSATISFIABLE_CODE);
+            } else {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(value["data"]["degraded"], json!([warning]));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn generation_advance_mid_sequence_is_an_empty_stale_page() -> TestResult {
         let json = list_envelope(40);
         let issue_generation = || 7u64;
@@ -2037,6 +2165,106 @@ mod tests {
             return Err("a dishonest fallback positionKey must yield an empty page".to_string());
         }
         degraded_entry_with_code(&second, CURSOR_INVALID_CODE)?;
+        Ok(())
+    }
+
+    #[test]
+    fn keyless_flat_and_section_cursors_drain_multiple_pages_in_original_coordinates() -> TestResult
+    {
+        let flat = parse(&list_envelope_without_item_ids(40))?;
+        let sections: Vec<_> = [12, 0, 4, 9]
+            .into_iter()
+            .enumerate()
+            .map(|(section, length)| {
+                let items: Vec<_> = (0..length)
+                    .map(|item| json!({
+                        "content": format!("section {section} item {item}: release workflow evidence; ").repeat(4)
+                    }))
+                    .collect();
+                json!({"name": format!("section_{section}"), "items": items})
+            })
+            .collect();
+        let sectioned = json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": {
+                "command": "test sections",
+                "schema": "ee.test.sections.v1",
+                "sections": sections,
+            },
+            "degraded": [],
+        });
+        let generation = || 7u64;
+        let ctx = test_context(600, &generation);
+        for (original, per_section) in [(flat, false), (sectioned, true)] {
+            let original_json = original.to_string();
+            let mut drained = vec![Vec::new(); if per_section { 4 } else { 1 }];
+            let mut cursor = None;
+            let mut pages = 0;
+            loop {
+                assert!(pages < 64, "keyless page sequence must terminate");
+                let governed = govern_response_json_with_resume(
+                    &original_json,
+                    &ctx,
+                    TEST_REGISTRY,
+                    cursor.as_deref(),
+                )
+                .map_err(|error| format!("keyless page {pages}: {error:?}"))?;
+                let page = parse(&governed)?;
+                let mut estimator = TokenEstimator::new();
+                assert!(fits(estimator.estimate(&governed), governed.len(), 600));
+                assert!(
+                    degraded_entries(&page)
+                        .iter()
+                        .all(|entry| entry["code"] == OUTPUT_TRUNCATED_BUDGET_CODE),
+                    "valid keyless cursor must not be rejected or lose its payload: {page}"
+                );
+                let before: usize = drained.iter().map(Vec::len).sum();
+                if per_section {
+                    let sections = page["data"]["sections"]
+                        .as_array()
+                        .ok_or("missing sections")?;
+                    assert_eq!(sections.len(), drained.len());
+                    for (index, section) in sections.iter().enumerate() {
+                        drained[index].extend(
+                            section["items"]
+                                .as_array()
+                                .ok_or("missing items")?
+                                .iter()
+                                .cloned(),
+                        );
+                    }
+                } else {
+                    drained[0].extend(
+                        page["data"]["items"]
+                            .as_array()
+                            .ok_or("missing items")?
+                            .iter()
+                            .cloned(),
+                    );
+                }
+                assert!(drained.iter().map(Vec::len).sum::<usize>() > before);
+                pages += 1;
+                cursor = continuation_cursor(&page);
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            assert!(pages > 2, "regression must exercise more than two pages");
+            if per_section {
+                for (index, items) in drained.iter().enumerate() {
+                    assert_eq!(
+                        JsonValue::Array(items.clone()),
+                        original["data"]["sections"][index]["items"]
+                    );
+                }
+            } else {
+                assert_eq!(
+                    JsonValue::Array(drained[0].clone()),
+                    original["data"]["items"]
+                );
+            }
+        }
         Ok(())
     }
 
