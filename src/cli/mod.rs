@@ -81614,6 +81614,38 @@ mod tests {
         ensure(stderr.is_empty(), "insights help stderr must be empty")
     }
 
+    /// GH #53: `--help` and the unknown-section error must advertise every
+    /// section the registry serves, not a hand-maintained subset.
+    #[test]
+    fn insights_help_and_unknown_section_error_list_every_registry_section() -> TestResult {
+        let sections = super::insights::available_section_names();
+        ensure(
+            sections.contains(&"houseRules") && sections.contains(&"comprehensiveRules"),
+            "registry must include the sections GH #53 found missing",
+        )?;
+        let (help_exit, help_stdout, _) = invoke(&["ee", "insights", "--help"]);
+        ensure_equal(&help_exit, &ProcessExitCode::Success, "insights help exit")?;
+        let (_, error_stdout, _) = invoke(&["ee", "--json", "insights", "--section", "bogus"]);
+        let error: serde_json::Value = serde_json::from_str(&error_stdout)
+            .map_err(|error| format!("unknown section stdout must be JSON: {error}"))?;
+        let message = error["error"]["message"].as_str().unwrap_or_default();
+        for section in sections {
+            ensure(
+                help_stdout
+                    .split(|character: char| !character.is_ascii_alphanumeric())
+                    .any(|word| word == section),
+                format!("insights --help must list section {section}"),
+            )?;
+            ensure(
+                message
+                    .split(|character: char| !character.is_ascii_alphanumeric())
+                    .any(|word| word == section),
+                format!("unknown-section error must list section {section}"),
+            )?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn rule_help_lists_provenance() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "rule", "--help"]);

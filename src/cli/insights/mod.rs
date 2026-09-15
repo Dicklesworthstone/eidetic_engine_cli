@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -67,15 +68,29 @@ const KNOWLEDGE_GAP_LOW_CONFIDENCE_MAX: f32 = 0.50;
 type SectionBuilder = fn() -> InsightsSection;
 type SectionRegistryEntry = (&'static str, &'static str, SectionBuilder);
 
+/// `--section` help, generated from the section registry so the names it
+/// advertises cannot drift from what the bundle and the unknown-section error
+/// actually serve (GH #53).
+static INSIGHTS_SECTION_HELP: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "Emit only one insight section by name. Names are case-insensitive and accept both \
+         lowercase and canonical-camelCase form. Available: {}.",
+        available_section_names().join(", ")
+    )
+});
+
+/// Canonical names of every insights section, in registry order.
+#[must_use]
+pub fn available_section_names() -> Vec<&'static str> {
+    section_registry()
+        .iter()
+        .map(|(_, name, _)| *name)
+        .collect()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Args)]
 pub struct InsightsArgs {
-    /// Emit only one insight section by name. Names are case-insensitive and
-    /// accept both lowercase and canonical-camelCase form. Available:
-    /// authorities, blindSpots, bridges, causalBottlenecks, comprehensiveRules,
-    /// contradictionClusters, hubs, kCore, kTruss, knowledgeGaps,
-    /// knowledgeSkyline, loadBearingMemories, peerConflicts, proximityHotspots,
-    /// revisionFrontiers, topMemories.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", help = INSIGHTS_SECTION_HELP.as_str())]
     pub section: Option<String>,
 
     /// Frame the insights bundle around a memory explanation target.
