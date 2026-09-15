@@ -527,6 +527,9 @@ pub struct DaemonServerHandle {
     search_warm_state: Arc<AtomicU8>,
     pool: Arc<InflightPool>,
     accept_thread: Option<JoinHandle<()>>,
+    /// Closing this private endpoint wakes accept even if the public socket
+    /// pathname has disappeared or has been replaced.
+    accept_wakeup: Option<UnixStream>,
     /// Background steward scheduler thread (bd-2ohzq). `None` when the
     /// daemon was started without a bound workspace (e.g. via the bare
     /// `start_server` entry point). The thread runs until `shutdown` fires.
@@ -630,11 +633,10 @@ impl DaemonServerHandle {
         drop(self.warm_thread.take());
         let first_teardown = !self.shutdown_done.swap(true, Ordering::AcqRel);
         let unlink_result = if first_teardown {
-            // Wake the accept loop by connecting to the socket from the
-            // current process; the loop checks the shutdown flag between
-            // accepts but blocks inside `accept()` itself. The connect-
-            // and-immediately-drop pattern unblocks the listener cheaply.
-            let _ = UnixStream::connect(&self.socket_path);
+            // Peer closure is durable readiness: it wakes an already-blocked
+            // poll and is still visible if shutdown raced ahead of that poll.
+            // Never depend on connecting through the replaceable public path.
+            self.accept_wakeup.take();
             if let Some(handle) = self.accept_thread.take() {
                 handle
                     .join()
@@ -1118,6 +1120,11 @@ fn start_server_with_dispatch_policy(
     let broker = SocketBroker::new(socket_path);
     let (listener, _publish_lock) = broker.publish_listener()?;
     let socket_path = broker.socket_path().to_path_buf();
+    let (listener, accept_wakeup) =
+        DaemonListener::new(listener).map_err(|source| DaemonStartError::Bind {
+            path: socket_path.clone(),
+            source,
+        })?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_in_thread = Arc::clone(&shutdown);
@@ -1270,6 +1277,7 @@ fn start_server_with_dispatch_policy(
         search_warm_state: Arc::clone(&dispatch_policy.search_warm_state),
         pool,
         accept_thread: Some(accept_thread),
+        accept_wakeup: Some(accept_wakeup),
         scheduler_thread,
         warm_thread,
         shutdown_done: AtomicBool::new(false),
@@ -1422,8 +1430,63 @@ impl ConnectionWorkerSpawner for ThreadConnectionWorkerSpawner {
     }
 }
 
-fn run_accept_loop(
+/// A descriptor-owned shutdown path, independent of the published pathname.
+struct DaemonListener {
     listener: UnixListener,
+    shutdown: UnixStream,
+}
+
+impl DaemonListener {
+    fn new(listener: UnixListener) -> io::Result<(Self, UnixStream)> {
+        listener.set_nonblocking(true)?;
+        let (shutdown, wakeup) = UnixStream::pair()?;
+        Ok((Self { listener, shutdown }, wakeup))
+    }
+
+    fn accept(&self) -> Option<io::Result<UnixStream>> {
+        use rustix::event::{PollFd, PollFlags, poll};
+
+        loop {
+            let mut descriptors = [
+                PollFd::new(&self.listener, PollFlags::IN),
+                PollFd::new(&self.shutdown, PollFlags::IN),
+            ];
+            match poll(&mut descriptors, None) {
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(error) => return Some(Err(error.into())),
+                Ok(_) => {}
+            }
+            let shutting_down = !descriptors[1].revents().is_empty();
+            if descriptors[0].revents().contains(PollFlags::NVAL) {
+                return Some(Err(rustix::io::Errno::BADF.into()));
+            }
+            match self.listener.accept() {
+                // Preserve the existing bounded refusal for one already
+                // queued peer when listener and shutdown are both ready.
+                // This accept is nonblocking: an idle listener still exits
+                // immediately, and the shutdown branch in the accept loop
+                // replies once and stops without draining the backlog.
+                Err(error) if shutting_down && error.kind() == io::ErrorKind::WouldBlock => {
+                    return None;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Some(Err(error)),
+                Ok((stream, _)) => {
+                    // Accepted descriptors inherit nonblocking mode on some
+                    // Unix platforms. Connection workers retain their existing
+                    // blocking I/O plus explicit read/write timeout contract.
+                    if let Err(error) = stream.set_nonblocking(false) {
+                        return Some(Err(error));
+                    }
+                    return Some(Ok(stream));
+                }
+            }
+        }
+    }
+}
+
+fn run_accept_loop(
+    listener: DaemonListener,
     socket_path: PathBuf,
     shutdown: Arc<AtomicBool>,
     pool: Arc<InflightPool>,
@@ -1443,7 +1506,7 @@ fn run_accept_loop(
 }
 
 fn run_accept_loop_with_spawner<S>(
-    listener: UnixListener,
+    listener: DaemonListener,
     socket_path: PathBuf,
     shutdown: Arc<AtomicBool>,
     pool: Arc<InflightPool>,
@@ -1453,17 +1516,15 @@ fn run_accept_loop_with_spawner<S>(
 ) where
     S: ConnectionWorkerSpawner,
 {
-    for incoming in listener.incoming() {
+    while let Some(incoming) = listener.accept() {
         if shutdown.load(Ordering::SeqCst) {
             // We've been signalled to stop, but `incoming` may still be
-            // a freshly accepted connection: the shutdown wake itself
-            // connects to unblock `accept`, and a legitimate client can
-            // race in between the shutdown signal and the listener
-            // teardown. Hand that peer a framed `daemon_shutting_down`
+            // a freshly accepted connection: a legitimate client can race
+            // in between the shutdown signal and listener teardown.
+            // Hand that peer a framed `daemon_shutting_down`
             // envelope before we stop, rather than dropping the stream
             // and leaving the client to interpret a bare connection
-            // reset. The wake connection (which drops its end without
-            // reading) just sees the best-effort write fail, harmlessly.
+            // reset.
             // bd-36dp2.
             if let Ok(mut stream) = incoming {
                 write_shutting_down_response(&mut stream);
@@ -9344,6 +9405,7 @@ mod tests {
             search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
             pool,
             accept_thread: None,
+            accept_wakeup: None,
             scheduler_thread: None,
             warm_thread: None,
             shutdown_done: AtomicBool::new(false),
@@ -9412,6 +9474,7 @@ mod tests {
             search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
             pool: InflightPool::new(1),
             accept_thread: None,
+            accept_wakeup: None,
             scheduler_thread: Some(SchedulerThreadHandle { join, done_rx }),
             warm_thread: None,
             shutdown_done: AtomicBool::new(false),
@@ -9460,6 +9523,7 @@ mod tests {
             search_warm_state: Arc::new(AtomicU8::new(warm_posture::COLD)),
             pool: InflightPool::new(1),
             accept_thread: None,
+            accept_wakeup: None,
             scheduler_thread: Some(SchedulerThreadHandle { join, done_rx }),
             warm_thread: None,
             shutdown_done: AtomicBool::new(false),
@@ -9922,10 +9986,168 @@ mod tests {
         handle.shutdown().expect("shutdown winning daemon");
     }
 
+    #[test]
+    fn daemon_accept_wakeup_before_poll_is_not_lost() {
+        let temp = private_tempdir();
+        let socket_path = temp.path().join("early-wakeup.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind real listener");
+        let (listener, wakeup) = DaemonListener::new(listener).expect("wakeable listener");
+        // Close before the thread even starts: the notification must remain
+        // visible without requiring an already-blocked poll or client traffic.
+        drop(wakeup);
+        let (done_tx, done_rx) = mpsc::channel();
+        let runner = thread::spawn(move || {
+            done_tx
+                .send(listener.accept().is_none())
+                .expect("report listener shutdown");
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(5));
+        if result.is_err() {
+            // Unblock a regressed implementation without accepting its late
+            // response as success or leaving an owned fixture thread alive.
+            let _rescue = UnixStream::connect(&socket_path);
+        }
+        runner.join().expect("listener worker must exit");
+        assert!(result.expect("early shutdown must wake accept"));
+    }
+
+    #[test]
+    fn daemon_shutdown_refuses_queued_request_when_control_is_already_ready() {
+        use std::io::Write;
+
+        let temp = private_tempdir();
+        let socket_path = temp.path().join("queued-shutdown.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind real listener");
+        let (listener, wakeup) = DaemonListener::new(listener).expect("wakeable listener");
+        let mut client = UnixStream::connect(&socket_path).expect("queue real connection");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bound response read");
+        client
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .expect("bound request write");
+        let request = DaemonRequest::new(
+            "queued-before-shutdown",
+            TEST_AGENT_ID,
+            METHOD_CAPABILITIES,
+            serde_json::json!({}),
+        );
+        let body = serde_json::to_vec(&request).expect("encode real request");
+        client
+            .write_all(
+                &u32::try_from(body.len())
+                    .expect("small request")
+                    .to_be_bytes(),
+            )
+            .expect("write request length");
+        client.write_all(&body).expect("write request body");
+
+        // Both descriptors are ready before polling starts. This fixes the
+        // interleaving deterministically without waiting for scheduler timing.
+        let shutdown = Arc::new(AtomicBool::new(true));
+        let pool = InflightPool::new(1);
+        drop(wakeup);
+        run_accept_loop(
+            listener,
+            socket_path,
+            shutdown,
+            Arc::clone(&pool),
+            Arc::new(DaemonDispatchPolicy::default()),
+        );
+
+        let response = read_framed_daemon_response(&mut client);
+        assert_eq!(response.schema, super::super::DAEMON_RESPONSE_SCHEMA_V1);
+        assert_eq!(response.request_id, "<shutdown>");
+        assert_eq!(response.agent_id, "<unknown>");
+        assert!(
+            response.result.is_none(),
+            "shutdown must not dispatch the request"
+        );
+        assert_eq!(
+            response.error.as_ref().expect("structured refusal").code,
+            crate::daemon::DAEMON_SHUTTING_DOWN_CODE
+        );
+        assert!(
+            response
+                .degraded_codes
+                .contains(&crate::daemon::DAEMON_SHUTTING_DOWN_CODE.to_owned())
+        );
+        assert!(pool.wait_until_idle(Duration::ZERO));
+    }
+
+    #[test]
+    fn daemon_shutdown_survives_missing_or_replaced_public_socket_path() {
+        for replace_with_file in [false, true] {
+            let temp = private_tempdir();
+            let socket_path = temp.path().join("public.sock");
+            let retained_path = temp.path().join("retained.sock");
+            let mut handle = start_server(&socket_path).expect("real server starts");
+            let request = DaemonRequest::new(
+                "before-path-change",
+                TEST_AGENT_ID,
+                METHOD_CAPABILITIES,
+                serde_json::json!({}),
+            );
+            let response =
+                client_round_trip(&socket_path, &request).expect("real RPC before rename");
+            assert!(response.error.is_none());
+            assert_eq!(response.request_id, "before-path-change");
+            let capabilities = response.result.expect("real capabilities response");
+            assert_eq!(capabilities["protocol"], "ee.daemon");
+            assert!(
+                capabilities["methods"]
+                    .as_array()
+                    .expect("advertised method list")
+                    .iter()
+                    .any(|method| method.as_str() == Some(METHOD_CAPABILITIES))
+            );
+            // Remove the public name by rename, preserving the original
+            // socket artifact for inspection and failure-only worker rescue.
+            fs::rename(&socket_path, &retained_path)
+                .expect("retain original socket under another name");
+            assert!(!socket_path.exists());
+            if replace_with_file {
+                fs::write(&socket_path, b"operator data").expect("plant replacement regular file");
+            }
+            let (done_tx, done_rx) = mpsc::channel();
+            let runner = thread::spawn(move || {
+                done_tx
+                    .send(handle.shutdown())
+                    .expect("report real server shutdown");
+            });
+            let result = done_rx.recv_timeout(Duration::from_secs(5));
+            if result.is_err() {
+                // The former pathname-based wake deadlocked here. Connecting
+                // through the retained name releases that old accept without
+                // changing the original timeout result into a passing test.
+                let _rescue = UnixStream::connect(&retained_path);
+            }
+            runner.join().expect("real server owner exits");
+            let shutdown = result.expect("shutdown cannot depend on the public socket pathname");
+            if replace_with_file {
+                assert_eq!(
+                    shutdown
+                        .expect_err("replacement file must be refused")
+                        .kind(),
+                    io::ErrorKind::InvalidInput
+                );
+                assert_eq!(
+                    fs::read(&socket_path).expect("replacement survives"),
+                    b"operator data"
+                );
+            } else {
+                shutdown.expect("missing pathname is already unlinked");
+                assert!(!socket_path.exists());
+            }
+            assert!(
+                retained_path.exists(),
+                "shutdown must not chase renamed artifacts"
+            );
+        }
+    }
+
     /// bd-2z3e8: shutdown cleanup must never turn a swapped daemon
-    /// socket path into an arbitrary-file unlink. The helper is tested
-    /// directly so the test can simulate hostile path state without
-    /// deadlocking the accept thread's wakeup connection.
+    /// socket path into an arbitrary-file unlink.
     #[test]
     fn guarded_socket_unlink_refuses_regular_file() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -10727,6 +10949,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let socket_path = temp.path().join("ee-daemon-spawn-fails.sock");
         let listener = UnixListener::bind(&socket_path).expect("bind daemon socket");
+        let (listener, accept_wakeup) = DaemonListener::new(listener).expect("wakeable listener");
         let shutdown = Arc::new(AtomicBool::new(false));
         let pool = InflightPool::new(1);
         let runner_shutdown = Arc::clone(&shutdown);
@@ -10766,7 +10989,7 @@ mod tests {
         );
 
         shutdown.store(true, Ordering::SeqCst);
-        let _ = UnixStream::connect(&socket_path);
+        drop(accept_wakeup);
         runner.join().expect("accept loop thread must not panic");
         let failures = metrics
             .worker_spawn_failures

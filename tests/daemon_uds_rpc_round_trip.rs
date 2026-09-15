@@ -2815,25 +2815,30 @@ fn daemon_shutdown_during_connected_client_returns_structured_response() -> Test
 
     let mut stream = connect_client(handle.socket_path())?;
 
-    let shutdown = thread::spawn(move || {
-        handle
-            .shutdown()
-            .map_err(|error| format!("shutdown thread: {error}"))
-    });
-    thread::sleep(Duration::from_millis(25));
-
     let request = context_request(
         "req-shutdown-race",
         TEST_AGENT_ID,
         serde_json::json!({"race": "shutdown"}),
     );
     let body = serde_json::to_vec(&request).map_err(|error| format!("encode request: {error}"))?;
+    // Submit the complete frame before requesting shutdown. A connected socket
+    // alone does not prove accept has run, and writing after shutdown already
+    // removed the listener would test a closed socket rather than this contract.
     write_raw_frame(&mut stream, &body)?;
-    let response = read_response_frame(&mut stream)?;
+    let shutdown = thread::spawn(move || {
+        handle
+            .shutdown()
+            .map_err(|error| format!("shutdown thread: {error}"))
+    });
+    let response = read_response_frame(&mut stream);
+    // Release the peer and join the owner even if decoding fails. An EOF or
+    // BrokenPipe remains a failure, without leaving a shutdown thread behind.
+    drop(stream);
 
     shutdown
         .join()
         .map_err(|_| "shutdown thread panicked".to_owned())??;
+    let response = response?;
 
     ensure(
         response.schema == DAEMON_RESPONSE_SCHEMA_V1,

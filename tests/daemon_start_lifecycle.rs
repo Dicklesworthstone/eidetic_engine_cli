@@ -88,6 +88,15 @@ fn run_daemon_stop(socket_path: &Path) -> Result<Value, String> {
         .output()
         .map_err(|error| format!("failed to run `ee daemon stop`: {error}"))?;
 
+    ensure(
+        output.status.success(),
+        format!(
+            "daemon stop exited with {}; stdout={:?}; stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let line = stdout
         .lines()
@@ -103,9 +112,11 @@ fn run_daemon_stop(socket_path: &Path) -> Result<Value, String> {
 }
 
 fn daemon_pids_for_socket_path(socket_path: &Path) -> Result<Vec<u32>, String> {
-    let needle = socket_path.display().to_string();
+    let executable = Path::new(env!("CARGO_BIN_EXE_ee"))
+        .canonicalize()
+        .map_err(|error| format!("resolve test CLI executable: {error}"))?;
     let output = Command::new("ps")
-        .args(["-eo", "pid=,command="])
+        .args(["-ww", "-eo", "pid=,command="])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -123,12 +134,12 @@ fn daemon_pids_for_socket_path(socket_path: &Path) -> Result<Vec<u32>, String> {
     let current_pid = std::process::id();
     let mut pids = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if !line.contains(&needle) {
-            continue;
-        }
-        let Some(pid_field) = line.split_whitespace().next() else {
+        let Some((pid_field, command)) = line.trim().split_once(char::is_whitespace) else {
             continue;
         };
+        if !is_owned_detached_daemon_command(command.trim_start(), &executable, socket_path) {
+            continue;
+        }
         let pid = pid_field
             .parse::<u32>()
             .map_err(|error| format!("failed to parse ps pid {pid_field:?}: {error}"))?;
@@ -141,12 +152,28 @@ fn daemon_pids_for_socket_path(socket_path: &Path) -> Result<Vec<u32>, String> {
     Ok(pids)
 }
 
+fn is_owned_detached_daemon_command(command: &str, executable: &Path, socket_path: &Path) -> bool {
+    command
+        .strip_prefix(executable.to_string_lossy().as_ref())
+        .and_then(|arguments| arguments.strip_prefix(" --workspace "))
+        .is_some_and(|arguments| {
+            arguments.ends_with(&format!(
+                " daemon start --foreground --detached-session-child --socket {}",
+                socket_path.display()
+            ))
+        })
+}
+
 fn wait_for_detached_daemon_pid(socket_path: &Path, timeout: Duration) -> Result<u32, String> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         let pids = daemon_pids_for_socket_path(socket_path)?;
-        if let Some(pid) = pids.first() {
-            return Ok(*pid);
+        if !pids.is_empty() {
+            ensure(
+                pids.len() == 1,
+                format!("expected one owned daemon, found {pids:?}"),
+            )?;
+            return Ok(pids[0]);
         }
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -191,34 +218,63 @@ fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Result<ExitStatu
 }
 
 fn terminate_process(pid: u32, signal: &str) -> Result<(), String> {
-    let status = Command::new("kill")
+    let output = Command::new("kill")
         .arg(signal)
         .arg(pid.to_string())
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .status()
+        .output()
         .map_err(|error| format!("failed to invoke kill {signal} {pid}: {error}"))?;
     ensure(
-        status.success(),
-        format!("kill {signal} {pid} exited with {status}"),
+        output.status.success(),
+        format!(
+            "kill {signal} {pid} exited with {}; stdout={:?}; stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
     )
 }
 
-/// Best-effort teardown: kill any detached daemon child still listening
-/// on `socket_path`. The child's argv contains the unique tempdir
-/// socket path, so a `pkill -f` match is precise. Also unlinks the
-/// socket file so the tempdir drop is clean.
-fn teardown_daemon(socket_path: &Path) {
-    let needle = socket_path.display().to_string();
-    let _ = Command::new("pkill")
-        .arg("-f")
-        .arg(&needle)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    if socket_path.exists() {
-        let _ = fs::remove_file(socket_path);
+/// Stop only the detached child belonging to this test's executable and
+/// complete socket argument. Cleanup is part of the test result, not a hint.
+fn teardown_daemon(socket_path: &Path) -> TestResult {
+    let graceful = (|| {
+        if !daemon_pids_for_socket_path(socket_path)?.is_empty() {
+            let stopped = run_daemon_stop(socket_path)?;
+            ensure(
+                stopped.pointer("/success").and_then(Value::as_bool) == Some(true),
+                format!("owned daemon cleanup must report success:true; got {stopped}"),
+            )?;
+        }
+        wait_for_no_daemon_pids(socket_path, Duration::from_secs(5))?;
+        ensure(
+            !socket_path.exists(),
+            "daemon cleanup must remove its own socket",
+        )
+    })();
+    if graceful.is_err() {
+        // Emergency cleanup cannot turn a failed graceful shutdown into a
+        // passing test. Re-identify exact owned PIDs before signaling them.
+        let emergency = (|| {
+            for pid in daemon_pids_for_socket_path(socket_path)? {
+                terminate_process(pid, "-KILL")?;
+            }
+            wait_for_no_daemon_pids(socket_path, Duration::from_secs(5))
+        })();
+        return combine_test_results(graceful, emergency);
+    }
+    graceful
+}
+
+fn combine_test_results(result: TestResult, cleanup: TestResult) -> TestResult {
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup)) => {
+            Err(format!("{error}; additionally cleanup failed: {cleanup}"))
+        }
     }
 }
 
@@ -236,19 +292,19 @@ fn daemon_start_foreground_sigterm_shuts_down_and_unlinks_socket() -> TestResult
         .spawn()
         .map_err(|error| format!("spawn foreground daemon: {error}"))?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "foreground daemon stdout was not piped".to_owned())?;
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(|error| format!("read startup envelope: {error}"))?;
-    let envelope: Value = serde_json::from_str(line.trim())
-        .map_err(|error| format!("startup envelope is not valid JSON: {error}; line={line:?}"))?;
-
     let result: TestResult = (|| {
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "foreground daemon stdout was not piped".to_owned())?;
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .map_err(|error| format!("read startup envelope: {error}"))?;
+        let envelope: Value = serde_json::from_str(line.trim()).map_err(|error| {
+            format!("startup envelope is not valid JSON: {error}; line={line:?}")
+        })?;
         ensure(
             envelope.pointer("/success").and_then(Value::as_bool) == Some(true),
             format!("foreground start must report success:true; got {envelope}"),
@@ -277,12 +333,21 @@ fn daemon_start_foreground_sigterm_shuts_down_and_unlinks_socket() -> TestResult
         )
     })();
 
-    if result.is_err() {
-        let _ = terminate_process(child.id(), "-KILL");
-        let _ = child.wait();
-    }
-    teardown_daemon(&socket_path);
-    result
+    let cleanup = (|| {
+        if child
+            .try_wait()
+            .map_err(|error| format!("inspect foreground child exit: {error}"))?
+            .is_none()
+        {
+            terminate_process(child.id(), "-KILL")?;
+            wait_for_child_exit(&mut child, Duration::from_secs(5))?;
+        }
+        ensure(
+            !socket_path.exists(),
+            "foreground shutdown must remove its socket",
+        )
+    })();
+    combine_test_results(result, cleanup)
 }
 
 #[test]
@@ -290,8 +355,8 @@ fn daemon_start_detached_socket_is_connectable_before_success() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     let socket_path = temp.path().join("ee-daemon-lifecycle.sock");
 
-    let envelope = run_daemon_start(&socket_path)?;
     let result: TestResult = (|| {
+        let envelope = run_daemon_start(&socket_path)?;
         ensure(
             envelope
                 .pointer("/success")
@@ -349,8 +414,7 @@ fn daemon_start_detached_socket_is_connectable_before_success() -> TestResult {
         Ok(())
     })();
 
-    teardown_daemon(&socket_path);
-    result
+    combine_test_results(result, teardown_daemon(&socket_path))
 }
 
 #[test]
@@ -358,8 +422,8 @@ fn daemon_stop_detached_child_exits_and_unlinks_socket() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     let socket_path = temp.path().join("ee-daemon-stop-detached.sock");
 
-    let envelope = run_daemon_start(&socket_path)?;
     let result: TestResult = (|| {
+        let envelope = run_daemon_start(&socket_path)?;
         ensure(
             envelope.pointer("/success").and_then(Value::as_bool) == Some(true),
             format!("detached start must report success:true; got {envelope}"),
@@ -386,8 +450,7 @@ fn daemon_stop_detached_child_exits_and_unlinks_socket() -> TestResult {
         )
     })();
 
-    teardown_daemon(&socket_path);
-    result
+    combine_test_results(result, teardown_daemon(&socket_path))
 }
 
 #[test]
@@ -395,12 +458,13 @@ fn daemon_start_reports_daemon_already_running_when_socket_is_live() -> TestResu
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     let socket_path = temp.path().join("ee-daemon-already-running.sock");
 
-    let first = run_daemon_start(&socket_path)?;
     let result: TestResult = (|| {
+        let first = run_daemon_start(&socket_path)?;
         ensure(
             first.pointer("/success").and_then(Value::as_bool) == Some(true),
             format!("first detached start must report success:true; got {first}"),
         )?;
+        let original_pid = wait_for_detached_daemon_pid(&socket_path, Duration::from_secs(2))?;
 
         let second = run_daemon_start(&socket_path)?;
         ensure(
@@ -418,11 +482,14 @@ fn daemon_start_reports_daemon_already_running_when_socket_is_live() -> TestResu
                 .is_some(),
             format!("daemon_already_running error must include repair guidance; got {second}"),
         )?;
+        ensure(
+            daemon_pids_for_socket_path(&socket_path)? == vec![original_pid],
+            "rejected second start must preserve exactly the original child",
+        )?;
         Ok(())
     })();
 
-    teardown_daemon(&socket_path);
-    result
+    combine_test_results(result, teardown_daemon(&socket_path))
 }
 
 #[test]
@@ -435,25 +502,50 @@ fn daemon_start_emits_daemon_start_failed_on_unbindable_socket() -> TestResult {
     fs::write(&blocker, b"blocker").map_err(|error| format!("write blocker: {error}"))?;
     let socket_path = blocker.join("daemon.sock");
 
-    let envelope = run_daemon_start(&socket_path)?;
+    let result = (|| {
+        let envelope = run_daemon_start(&socket_path)?;
+        ensure(
+            envelope.pointer("/success").and_then(Value::as_bool) == Some(false),
+            format!("unbindable start must report success:false; got {envelope}"),
+        )?;
+        let codes: Vec<&str> = envelope
+            .pointer("/degraded")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.pointer("/code").and_then(Value::as_str))
+                    .collect()
+            })
+            .unwrap_or_default();
+        ensure(
+            codes.contains(&"daemon_start_failed"),
+            format!(
+                "unbindable start must carry daemon_start_failed; got degraded codes {codes:?}"
+            ),
+        )?;
+        Ok(())
+    })();
+    combine_test_results(result, teardown_daemon(&socket_path))
+}
 
-    ensure(
-        envelope.pointer("/success").and_then(Value::as_bool) == Some(false),
-        format!("unbindable start must report success:false; got {envelope}"),
-    )?;
-    let codes: Vec<&str> = envelope
-        .pointer("/degraded")
-        .and_then(Value::as_array)
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| entry.pointer("/code").and_then(Value::as_str))
-                .collect()
-        })
-        .unwrap_or_default();
-    ensure(
-        codes.contains(&"daemon_start_failed"),
-        format!("unbindable start must carry daemon_start_failed; got degraded codes {codes:?}"),
-    )?;
-    Ok(())
+#[test]
+fn detached_daemon_process_identity_requires_exact_executable_and_socket() {
+    let executable = Path::new("/owned build/ee");
+    let socket = Path::new("/tmp/owned/daemon.sock");
+    let prefix = "/owned build/ee --workspace /workspace daemon start --foreground --detached-session-child --socket ";
+    assert!(is_owned_detached_daemon_command(
+        &format!("{prefix}{}", socket.display()),
+        executable,
+        socket
+    ));
+    for command in [
+        format!("{prefix}/tmp/owned/daemon.sock.other"),
+        format!("{prefix}/tmp/owned/daemon.sock --other"),
+        "/different/ee --workspace /workspace daemon start --foreground --detached-session-child --socket /tmp/owned/daemon.sock".to_owned(),
+        "/owned build/ee --workspace /workspace daemon start --foreground --socket /tmp/owned/daemon.sock".to_owned(),
+        "/owned build/ee --workspace /workspace search /tmp/owned/daemon.sock".to_owned(),
+    ] {
+        assert!(!is_owned_detached_daemon_command(&command, executable, socket), "unowned argv matched: {command}");
+    }
 }
