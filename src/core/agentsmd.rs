@@ -643,11 +643,7 @@ fn flush_prose_block(block: Option<ProseBlock>, sentences: &mut Vec<ProseSentenc
     let mut opens_list_item = block.list_item;
     for (start, end) in sentence_ranges(&block.text) {
         let raw = &block.text[start..end];
-        let text = raw
-            .trim()
-            .trim_start_matches("**")
-            .trim_end_matches("**")
-            .trim();
+        let text = strip_statement_emphasis(raw);
         if text.is_empty() {
             continue;
         }
@@ -656,11 +652,34 @@ fn flush_prose_block(block: Option<ProseBlock>, sentences: &mut Vec<ProseSentenc
         sentences.push(ProseSentence {
             start_line: block.line_at(first_byte),
             end_line: block.line_at(last_byte),
-            text: text.to_owned(),
+            text,
             opens_list_item,
         });
         opens_list_item = false;
     }
+}
+
+/// Remove the emphasis markers around a statement's opening label or the
+/// whole statement (`**Label:** text`, `**Rule.**`) as a matched pair, and
+/// drop a leading or trailing marker whose partner fell into another
+/// sentence, so a stored statement never carries a dangling `**` or `__`
+/// (GH #54).
+fn strip_statement_emphasis(raw: &str) -> String {
+    let mut text = raw.trim().to_owned();
+    for marker in ["**", "__"] {
+        if let Some(rest) = text.strip_prefix(marker) {
+            text = match rest.find(marker) {
+                Some(close) => format!("{}{}", &rest[..close], &rest[close + marker.len()..]),
+                None => rest.to_owned(),
+            };
+        }
+        if let Some(rest) = text.strip_suffix(marker)
+            && rest.matches(marker).count() % 2 == 0
+        {
+            text = rest.to_owned();
+        }
+    }
+    text.trim().to_owned()
 }
 
 /// Byte ranges of the sentences in one rejoined prose block. A sentence ends
@@ -850,6 +869,11 @@ pub struct AgentsmdExportReport {
     pub block_hash: String,
     pub rules_count: usize,
     pub warnings_count: usize,
+    /// Effective primer token budget that bounded the exported sections.
+    pub budget_tokens: u32,
+    /// True when ranked rules did not all fit `budget_tokens`, so
+    /// `rules_count` is a budget cut rather than every eligible rule.
+    pub rules_truncated_by_budget: bool,
     /// Primer redaction skip count carried through for honesty.
     pub redaction_skipped: u32,
     /// The memories behind `redaction_skipped` and the detector keyword that
@@ -877,6 +901,8 @@ impl AgentsmdExportReport {
             "blockHash": self.block_hash,
             "rulesCount": self.rules_count,
             "warningsCount": self.warnings_count,
+            "budgetTokens": self.budget_tokens,
+            "rulesTruncatedByBudget": self.rules_truncated_by_budget,
             "redactionSkipped": self.redaction_skipped,
             "redactionSkippedMemories": self.redaction_skipped_memories.iter().map(|skip| serde_json::json!({
                 "memoryId": &skip.memory_id,
@@ -906,6 +932,12 @@ impl AgentsmdExportReport {
             self.warnings_count,
             self.redaction_skipped,
         );
+        if self.rules_truncated_by_budget {
+            out.push_str(&format!(
+                "rules truncated by the {}-token primer budget; raise --tokens to export more\n",
+                self.budget_tokens
+            ));
+        }
         for skip in &self.redaction_skipped_memories {
             out.push_str(&format!(
                 "redaction skipped: {} (matched `{}`)\n",
@@ -1185,9 +1217,11 @@ fn assemble_bridge_primer(
 ) -> Result<PrimerReport, DomainError> {
     // The block is markdown, so the primer always renders markdown-form
     // lines (with the §4 short provenance refs) regardless of the CLI
-    // output format. Read-only: never warms the primer cache.
+    // output format. Read-only: never warms the primer cache. Always
+    // assembles fresh: budget-truncation and redaction-skip detail are not
+    // (fully) carried by cached primer rows, and export reports both.
     let settings = primer_settings_from_workspace(workspace_path, PrimerFormat::Markdown, tokens);
-    run_primer_with_persistence(connection, workspace_id, &settings, false, false)
+    run_primer_with_persistence(connection, workspace_id, &settings, true, false)
         .map_err(|error| storage_error("Failed to assemble primer for agentsmd export", error))
 }
 
@@ -1263,6 +1297,12 @@ pub fn run_agentsmd_export(
         block_hash,
         rules_count: section_count("rules"),
         warnings_count: section_count("warnings"),
+        budget_tokens: primer.budget_tokens,
+        rules_truncated_by_budget: primer
+            .meta
+            .budget_truncated_sections
+            .iter()
+            .any(|name| name == "rules"),
         redaction_skipped: primer.meta.skipped.redaction,
         redaction_skipped_memories: primer.meta.redaction_skips.clone(),
         diff: None,
@@ -2601,6 +2641,56 @@ failure otherwise. Other prose follows e.g. this aside.
             .map(|(start, end)| text[start..end].trim())
             .collect();
         assert_eq!(sentences, vec!["Use tools e.g. Cargo here.", "Then stop."]);
+    }
+
+    #[test]
+    fn statement_emphasis_markers_are_stripped_as_pairs() {
+        assert_eq!(
+            strip_statement_emphasis(
+                "**Prefer macros for speed:** use `macro_start_session` first."
+            ),
+            "Prefer macros for speed: use `macro_start_session` first."
+        );
+        assert_eq!(
+            strip_statement_emphasis("**NEVER** push to main."),
+            "NEVER push to main."
+        );
+        assert_eq!(
+            strip_statement_emphasis("**Whole rule is bold.**"),
+            "Whole rule is bold."
+        );
+        assert_eq!(
+            strip_statement_emphasis("**First sentence of a bold span."),
+            "First sentence of a bold span."
+        );
+        assert_eq!(
+            strip_statement_emphasis("Last sentence of a bold span.**"),
+            "Last sentence of a bold span."
+        );
+        assert_eq!(
+            strip_statement_emphasis("Keep **inner** emphasis intact."),
+            "Keep **inner** emphasis intact."
+        );
+        assert_eq!(
+            strip_statement_emphasis("Ends with **bold**"),
+            "Ends with **bold**"
+        );
+        assert_eq!(
+            strip_statement_emphasis("__Label:__ underscore form."),
+            "Label: underscore form."
+        );
+
+        let content = "- **Long HTTPS calls from the operations machine:** MUST consume provider-native streaming whenever it\n  exists. A fallback follows.\n";
+        let statements = parse_rule_statements(content, None);
+        assert_eq!(statements.len(), 1);
+        assert_eq!(
+            statements[0].text,
+            "Long HTTPS calls from the operations machine: MUST consume provider-native streaming whenever it exists."
+        );
+        assert_eq!(
+            (statements[0].line_number, statements[0].end_line_number),
+            (1, 2)
+        );
     }
 
     #[test]

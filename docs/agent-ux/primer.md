@@ -105,6 +105,14 @@ inside the markers, the next export refuses with
 `--force-managed-block` after reviewing with `--dry-run`, and the hand edit
 is preserved in the backup. Content outside the markers is never at risk.
 
+The export JSON explains what it did not write. `budgetTokens` is the
+effective primer budget and `rulesTruncatedByBudget` is `true` when ranked
+rules did not all fit it (raise `--tokens` to export more).
+`redactionSkippedMemories[]` names each memory the secret gate withheld and
+the detector keyword that matched (`password`, `secret`, `credential`,
+`token`, …); the gate is keyword-based, so a rule that merely mentions one of
+those words is withheld too.
+
 ### Import: hand-written rules become candidates, never memories
 
 ```bash

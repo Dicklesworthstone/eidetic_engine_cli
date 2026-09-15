@@ -1233,6 +1233,123 @@ fn import_and_drift_rejoin_hard_wrapped_rules_with_line_spans() -> TestResult {
     Ok(())
 }
 
+/// GH-55: the export states the primer budget and whether it, rather than
+/// eligibility, capped the exported rule count.
+#[test]
+fn export_reports_budget_and_whether_it_truncated_rules() -> TestResult {
+    let workspace = seed_bridge_workspace()?;
+    let workspace_arg = workspace.path().to_str().unwrap().to_owned();
+    let connection = ee::db::DbConnection::open_file(&workspace.path().join(".ee").join("ee.db"))
+        .map_err(|error| format!("open db: {error}"))?;
+    for index in 0..40 {
+        insert_rule_memory(
+            &connection,
+            &format!("mem_000000000000000000000001{index:02}"),
+            "procedural",
+            "rule",
+            &format!(
+                "Always run verification lane {index} before merging changes that touch subsystem {index}."
+            ),
+            0.9,
+        )?;
+    }
+    connection
+        .close()
+        .map_err(|error| format!("close db: {error}"))?;
+
+    let export = |tokens: Option<&str>| {
+        let mut args = vec![
+            "export",
+            "agentsmd",
+            "--create",
+            "--dry-run",
+            "--workspace",
+            &workspace_arg,
+            "--json",
+        ];
+        if let Some(tokens) = tokens {
+            args.extend(["--tokens", tokens]);
+        }
+        run_ee_json(&args)
+    };
+
+    let default_budget = export(None)?;
+    let default_rules = default_budget
+        .pointer("/data/rulesCount")
+        .and_then(Value::as_u64)
+        .ok_or("rulesCount must be a number")?;
+    if default_budget.pointer("/data/budgetTokens") != Some(&Value::from(600))
+        || default_budget.pointer("/data/rulesTruncatedByBudget") != Some(&Value::Bool(true))
+        || default_rules >= 41
+    {
+        return Err(format!(
+            "41 rules cannot fit the default 600-token primer; export must say the budget cut them: {default_budget}"
+        ));
+    }
+
+    let wide_budget = export(Some("20000"))?;
+    if wide_budget.pointer("/data/budgetTokens") != Some(&Value::from(20000))
+        || wide_budget.pointer("/data/rulesTruncatedByBudget") != Some(&Value::Bool(false))
+        || wide_budget.pointer("/data/rulesCount") != Some(&Value::from(41))
+    {
+        return Err(format!(
+            "a budget that fits every rule exports all 41 and reports no truncation: {wide_budget}"
+        ));
+    }
+    Ok(())
+}
+
+/// GH-54: a bullet's bold label or bold cue never leaves a dangling `**` in
+/// the extracted statement.
+#[test]
+fn import_strips_bold_label_markers_as_a_pair() -> TestResult {
+    let workspace = seed_bridge_workspace()?;
+    let workspace_arg = workspace.path().to_str().unwrap().to_owned();
+    std::fs::write(
+        workspace.path().join("AGENTS.md"),
+        "- **Prefer macros for speed:** use the session macro before granular tools.\n- **NEVER** push directly to the release branch without review.\n",
+    )
+    .map_err(|error| format!("seed file: {error}"))?;
+    let import = run_ee_json(&[
+        "import",
+        "agentsmd",
+        "--workspace",
+        &workspace_arg,
+        "--json",
+    ])?;
+    let drafts = import
+        .pointer("/data/proposals")
+        .and_then(Value::as_array)
+        .ok_or("proposals must be an array")?
+        .iter()
+        .map(|proposal| {
+            (
+                proposal["contentDraft"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                proposal["modality"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected = vec![
+        (
+            "Prefer macros for speed: use the session macro before granular tools.".to_owned(),
+            "Prefer".to_owned(),
+        ),
+        (
+            "NEVER push directly to the release branch without review.".to_owned(),
+            "NEVER".to_owned(),
+        ),
+    ];
+    if drafts != expected {
+        return Err(format!(
+            "bold labels and cues must be stripped as a pair, got {drafts:?}"
+        ));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Schema contract (structural, mirrors primer_cli_golden.rs)
 // ---------------------------------------------------------------------------

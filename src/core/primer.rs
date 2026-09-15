@@ -178,6 +178,11 @@ pub struct PrimerMeta {
     /// Per-memory detail behind `skipped.redaction`, in candidate order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redaction_skips: Vec<PrimerRedactionSkip>,
+    /// Sections whose ranked candidates did not all fit the token budget.
+    /// Computed at assembly for the AGENTS.md export (GH #55); never part of
+    /// the cached primer bytes or the `ee.primer.v1` payload.
+    #[serde(skip)]
+    pub budget_truncated_sections: Vec<String>,
 }
 
 /// One `degraded[]` entry the primer pipeline may emit.
@@ -564,6 +569,12 @@ pub fn assemble_primer(
         }
     }
 
+    let budget_truncated_sections = ranked_sections
+        .iter()
+        .zip(&sections)
+        .filter(|(ranked, section)| section.items.len() < ranked.candidates.len())
+        .map(|(ranked, _)| ranked.name.to_owned())
+        .collect();
     let rendered_markdown = markdown.then(|| render_markdown(&sections));
 
     PrimerReport {
@@ -580,6 +591,7 @@ pub fn assemble_primer(
             skipped,
             floors_engaged,
             redaction_skips,
+            budget_truncated_sections,
         },
         rendered_markdown,
     }
@@ -1160,6 +1172,40 @@ mod tests {
         open_settings.redact_secrets = false;
         let open = assemble_primer(&corpus, None, &open_settings, 7);
         assert_eq!(open.meta.skipped.redaction, 0);
+    }
+
+    #[test]
+    fn budget_truncation_names_sections_that_did_not_fit() {
+        let corpus: Vec<PrimerCandidate> = (0..30)
+            .map(|index| {
+                candidate(
+                    index,
+                    "procedural",
+                    "rule",
+                    &format!(
+                        "Always run verification lane {index} before merging subsystem {index} changes."
+                    ),
+                )
+            })
+            .collect();
+        let tight = assemble_primer(&corpus, None, &settings(200), 7);
+        assert_eq!(
+            tight.meta.budget_truncated_sections,
+            vec!["rules".to_owned()],
+            "thirty rules cannot fit a 200-token rules quota"
+        );
+        assert!(tight.sections[0].items.len() < corpus.len());
+        let wide = assemble_primer(&corpus, None, &settings(100_000), 7);
+        assert!(
+            wide.meta.budget_truncated_sections.is_empty(),
+            "a budget that fits every rule truncates nothing"
+        );
+        assert_eq!(wide.sections[0].items.len(), corpus.len());
+        assert!(
+            serde_json::to_string(&tight)
+                .is_ok_and(|json| !json.contains("budget_truncated_sections")),
+            "truncation detail stays out of the cached primer bytes"
+        );
     }
 
     #[test]

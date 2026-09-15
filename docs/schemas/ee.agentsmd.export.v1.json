@@ -18,6 +18,8 @@
     "blockHash",
     "rulesCount",
     "warningsCount",
+    "budgetTokens",
+    "rulesTruncatedByBudget",
     "redactionSkipped",
     "redactionSkippedMemories",
     "diff",
@@ -75,6 +77,15 @@
     "warningsCount": {
       "type": "integer",
       "minimum": 0
+    },
+    "budgetTokens": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Effective primer token budget (--tokens, else [primer] default_tokens, else 600) that bounded the exported rules and warnings."
+    },
+    "rulesTruncatedByBudget": {
+      "type": "boolean",
+      "description": "true when ranked primer rules did not all fit budgetTokens, so rulesCount is a budget cut; raise --tokens to export more."
     },
     "redactionSkipped": {
       "type": "integer",
