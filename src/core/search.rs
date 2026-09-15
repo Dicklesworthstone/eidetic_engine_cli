@@ -6479,6 +6479,23 @@ pub enum SearchError {
     },
 }
 
+fn index_compatibility_search_error(index_dir: &Path, reason: String) -> SearchError {
+    // An empty directory has no derived assets to admit. Keep its established
+    // missing-index fallback, but never treat rejected published bytes or an
+    // unreadable/symlink directory as an empty index.
+    let empty_directory = crate::core::index::ensure_index_path_has_no_symlinks(
+        index_dir,
+        "inspect missing search index",
+    )
+    .is_ok()
+        && std::fs::read_dir(index_dir).is_ok_and(|mut entries| entries.next().is_none());
+    if empty_directory {
+        SearchError::NoIndex
+    } else {
+        SearchError::IndexIncompatible(reason)
+    }
+}
+
 impl SearchError {
     #[must_use]
     pub fn repair_hint(&self) -> Option<&str> {
@@ -8826,7 +8843,7 @@ async fn run_search_inner_with_performance(
     }
     if let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&index_dir) {
         trace.record_elapsed("search::indexExists", index_exists_start);
-        return Err(SearchError::IndexIncompatible(reason));
+        return Err(index_compatibility_search_error(&index_dir, reason));
     }
     trace.record_elapsed("search::indexExists", index_exists_start);
 
@@ -9341,7 +9358,7 @@ async fn run_diag_search_with_cx_and_embedder_policy(
         return Err(SearchError::NoIndex);
     }
     if let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&index_dir) {
-        return Err(SearchError::IndexIncompatible(reason));
+        return Err(index_compatibility_search_error(&index_dir, reason));
     }
 
     let (mut degraded, index_freshness) = search_degradations(options, &index_dir);
@@ -17828,15 +17845,10 @@ mod tests {
         let workspace = unique_test_dir("pre-security-epoch-index");
         let index_dir = workspace.join("index");
         std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
-        std::fs::write(
-            index_dir.join("meta.json"),
-            r#"{"schema":"ee.index_metadata.v1","generation":0,"sourceGeneration":0}"#,
-        )
-        .map_err(|error| error.to_string())?;
         let options = SearchOptions {
             workspace_path: workspace.clone(),
             database_path: Some(workspace.join("missing.db")),
-            index_dir: Some(index_dir),
+            index_dir: Some(index_dir.clone()),
             query: "must not open stale evidence".to_owned(),
             limit: 10,
             speed: SpeedMode::Default,
@@ -17854,6 +17866,54 @@ mod tests {
             strict_scope: false,
         };
 
+        assert!(
+            matches!(run_search(&options), Err(SearchError::NoIndex)),
+            "an empty index directory must retain stored-memory fallback"
+        );
+        assert!(matches!(
+            super::run_diag_search(&options),
+            Err(SearchError::NoIndex)
+        ));
+        #[cfg(unix)]
+        {
+            let link = workspace.join("index-link");
+            std::os::unix::fs::symlink(&index_dir, &link).map_err(|error| error.to_string())?;
+            let mut linked_options = options.clone();
+            linked_options.index_dir = Some(link);
+            assert!(
+                matches!(
+                    run_search(&linked_options),
+                    Err(SearchError::IndexIncompatible(_))
+                ),
+                "a symlink must not authorize the empty-directory fallback"
+            );
+            let parent_link = workspace.join("linked-parent");
+            std::os::unix::fs::symlink(&workspace, &parent_link)
+                .map_err(|error| error.to_string())?;
+            linked_options.index_dir = Some(parent_link.join("index"));
+            assert!(
+                matches!(
+                    run_search(&linked_options),
+                    Err(SearchError::IndexIncompatible(_))
+                ),
+                "a symlinked ancestor must not authorize the empty-directory fallback"
+            );
+        }
+        std::fs::write(index_dir.join("fast.idx"), b"unadmitted index bytes")
+            .map_err(|error| error.to_string())?;
+        assert!(
+            matches!(run_search(&options), Err(SearchError::IndexIncompatible(reason)) if reason.contains("missing")),
+            "published bytes without metadata must not become a missing-index fallback"
+        );
+        assert!(matches!(
+            super::run_diag_search(&options),
+            Err(SearchError::IndexIncompatible(reason)) if reason.contains("missing")
+        ));
+        std::fs::write(
+            index_dir.join("meta.json"),
+            r#"{"schema":"ee.index_metadata.v1","generation":0,"sourceGeneration":0}"#,
+        )
+        .map_err(|error| error.to_string())?;
         assert!(
             matches!(run_search(&options), Err(SearchError::IndexIncompatible(reason)) if reason.contains("incompatible corpus revision")),
             "pre-security-epoch index must fail closed before retrieval"
