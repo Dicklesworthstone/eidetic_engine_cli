@@ -2884,14 +2884,18 @@ fn shadow_policy_summary_json(workspace: &Path) -> String {
     stable_json(&collect_shadow_policy_summary(workspace))
 }
 
-pub(crate) fn collect_regression_causality_summary(workspace: &Path) -> Value {
+pub(crate) fn collect_regression_causality_summary(
+    workspace: &Path,
+    swarm_brief_summary: &Value,
+    environment_attestation_summary: &Value,
+) -> Value {
     let status = StatusReport::gather_for_workspace(workspace);
     let swarm_reports = discover_swarm_report_summaries(workspace);
     let verification_evidence_summary_json = verification_evidence_summary_json(workspace, 100);
     let proof_broker_summary_json = proof_broker_summary_json(workspace);
     let pack_replay_summary_json = pack_replay_summary_json(workspace);
     let swarm_replay_summary_json = swarm_replay_summary_json(workspace);
-    let swarm_brief_summary_json = swarm_brief_summary_json(workspace);
+    let swarm_brief_summary_json = stable_json(swarm_brief_summary);
     let swarm_incident_summary_json = swarm_incident_summary_json(workspace);
     let performance_explain_samples_json = performance_explain_samples_json(workspace);
     let scale_benchmark_summary_json = scale_benchmark_summary_json(workspace, &swarm_reports);
@@ -2899,7 +2903,7 @@ pub(crate) fn collect_regression_causality_summary(workspace: &Path) -> Value {
     let coordination_fallback_summary_json = coordination_fallback_summary_json(workspace);
     let local_cargo_tripwire_json = local_cargo_tripwire_json(workspace);
     let install_freshness_summary_json = install_freshness_summary_json();
-    let environment_attestation_summary_json = environment_attestation_summary_json(workspace);
+    let environment_attestation_summary_json = stable_json(environment_attestation_summary);
     let shadow_policy_summary_json = shadow_policy_summary_json(workspace);
 
     regression_causality_summary_value(&regression_causality_support_sections(

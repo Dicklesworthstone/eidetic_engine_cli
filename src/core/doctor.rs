@@ -2807,10 +2807,10 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
                     "Database opened but schema migrations are pending.",
                     error_codes::MIGRATION_REQUIRED,
                 ),
-                Ok(false) => match crate::core::workspace::select_existing_workspace_row(
+                Ok(false) => match crate::core::workspace::addressed_workspace_row(
                     &connection,
-                    &stable_workspace_id(workspace_path),
-                    &[workspace_path],
+                    workspace_path,
+                    &database_path,
                 ) {
                     Ok(Some(_)) => CheckResult::ok(
                         "database",
@@ -2827,12 +2827,21 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
                         ),
                         error_codes::WORKSPACE_ROW_MISSING,
                     ),
-                    Err(_) => CheckResult::ok(
+                    Err(error @ crate::models::DomainError::WorkspaceIdentityMismatch { .. }) => {
+                        CheckResult::warning(
+                            "database",
+                            format!(
+                                "{} Read recovery: {}",
+                                error.message(),
+                                error.repair().unwrap_or_default()
+                            ),
+                            error_codes::WORKSPACE_IDENTITY_MISMATCH,
+                        )
+                    }
+                    Err(error) => CheckResult::error(
                         "database",
-                        format!(
-                            "Database opened and schema is current at {}.",
-                            database_path.display()
-                        ),
+                        format!("Failed to inspect workspace binding: {error}"),
+                        error_codes::DATABASE_CORRUPTED,
                     ),
                 },
                 Err(error) => CheckResult::error(

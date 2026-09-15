@@ -213,6 +213,128 @@ fn migrate_run_dry_run_does_not_mutate_database() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn migrate_workspace_symlink_resolves_root_and_preserves_read_only_storage() -> TestResult {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let root = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let workspace = root.join("real workspace");
+    fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+    init_workspace(&workspace)?;
+    let alias = root.join("workspace alias");
+    symlink(&workspace, &alias).map_err(|error| error.to_string())?;
+    let database = workspace.join(".ee/ee.db");
+    let snapshot = || -> Result<Vec<Option<Vec<u8>>>, String> {
+        ["ee.db", "ee.db-wal", "ee.db-shm"]
+            .into_iter()
+            .map(|name| match fs::read(workspace.join(".ee").join(name)) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.to_string()),
+            })
+            .collect()
+    };
+    let before = snapshot()?;
+    for command in [&["status"][..], &["run", "--dry-run"][..], &["run"][..]] {
+        let mut args = vec!["--workspace", alias.to_str().unwrap(), "migrate"];
+        args.extend_from_slice(command);
+        args.push("--json");
+        let result = run_ee(&args)?;
+        let json = parse_stdout(&result, "migration through workspace alias")?;
+        if result.status.code() != Some(0)
+            || json["success"] != true
+            || json["data"]["databasePath"] != database.to_string_lossy().as_ref()
+        {
+            return Err(format!(
+                "migration {command:?} must address the canonical store: {json}"
+            ));
+        }
+        if command == ["status"] && json["data"]["upToDate"] != true {
+            return Err(format!(
+                "aliased status must report the actual current schema: {json}"
+            ));
+        }
+        if command == ["run", "--dry-run"]
+            && (json["data"]["dryRun"] != true || json["data"]["wouldApplyCount"] != 0)
+        {
+            return Err(format!(
+                "aliased preview must report no pending migrations: {json}"
+            ));
+        }
+        if command != ["run"] && snapshot()? != before {
+            return Err(format!(
+                "migration {command:?} changed database/WAL/SHM bytes"
+            ));
+        }
+        if command == ["run"] && json["data"]["appliedCount"] != 0 {
+            return Err(format!("aliased migration must remain idempotent: {json}"));
+        }
+    }
+    if !fs::symlink_metadata(&alias)
+        .map_err(|error| error.to_string())?
+        .file_type()
+        .is_symlink()
+    {
+        return Err("migration must preserve the workspace alias".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn migrate_workspace_symlink_resolution_does_not_follow_storage_symlinks() -> TestResult {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let root = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let workspace = root.join("real");
+    fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+    init_workspace(&workspace)?;
+    let database = workspace.join(".ee/ee.db");
+    let before = fs::read(&database).map_err(|error| error.to_string())?;
+    let linked_directory = root.join("linked-directory");
+    let linked_file = root.join("linked-file");
+    fs::create_dir(&linked_directory).map_err(|error| error.to_string())?;
+    fs::create_dir_all(linked_file.join(".ee")).map_err(|error| error.to_string())?;
+    symlink(workspace.join(".ee"), linked_directory.join(".ee"))
+        .map_err(|error| error.to_string())?;
+    symlink(&database, linked_file.join(".ee/ee.db")).map_err(|error| error.to_string())?;
+    for address in [&linked_directory, &linked_file] {
+        for command in ["status", "run"] {
+            let result = run_ee(&[
+                "--workspace",
+                address.to_str().unwrap(),
+                "migrate",
+                command,
+                "--json",
+            ])?;
+            let json = parse_stdout(&result, "migration refuses storage symlink")?;
+            if result.status.code() != Some(3)
+                || json["error"]["code"] != "storage"
+                || !json["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("symbolic link"))
+            {
+                return Err(format!(
+                    "migration must preserve storage no-follow checks: {json}"
+                ));
+            }
+        }
+    }
+    if fs::read(&database).map_err(|error| error.to_string())? != before {
+        return Err("refused storage aliases changed the real database".to_owned());
+    }
+    Ok(())
+}
+
 #[test]
 fn migrate_run_is_idempotent_on_up_to_date_workspace() -> TestResult {
     let tmpdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;

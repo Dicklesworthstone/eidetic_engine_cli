@@ -472,9 +472,11 @@ impl SimilarOptions {
     }
 
     fn resolve_index_dir(&self) -> PathBuf {
-        self.index_dir
-            .clone()
-            .unwrap_or_else(|| default_workspace_index_dir(&self.workspace_path))
+        crate::config::workspace::resolve_store_index_dir(
+            &self.workspace_path,
+            self.database_path.as_deref(),
+            self.index_dir.as_deref(),
+        )
     }
 }
 
@@ -745,9 +747,11 @@ impl SearchOptions {
     }
 
     fn resolve_index_dir(&self) -> PathBuf {
-        self.index_dir
-            .clone()
-            .unwrap_or_else(|| default_workspace_index_dir(&self.workspace_path))
+        crate::config::workspace::resolve_store_index_dir(
+            &self.workspace_path,
+            self.database_path.as_deref(),
+            self.index_dir.as_deref(),
+        )
     }
 
     #[cfg(test)]
@@ -806,12 +810,6 @@ fn bound_search_workspace_id(
         .unwrap_or(requested),
         Err(_) => requested,
     }
-}
-
-fn default_workspace_index_dir(workspace_path: &Path) -> PathBuf {
-    default_workspace_root(workspace_path)
-        .join(".ee")
-        .join(DEFAULT_INDEX_SUBDIR)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -6471,6 +6469,7 @@ pub enum SearchError {
     Index(String),
     IndexIncompatible(String),
     Configuration(String),
+    WorkspaceBinding(Box<crate::models::DomainError>),
     InvalidOptions(String),
     NoIndex,
     Cancelled(asupersync::CancelReason),
@@ -6487,6 +6486,7 @@ impl SearchError {
             Self::Index(_) => Some("Check index directory and permissions"),
             Self::IndexIncompatible(_) => Some("ee index rebuild --workspace ."),
             Self::Configuration(_) => Some(crate::config::MEMORY_POLICY_REPAIR),
+            Self::WorkspaceBinding(error) => error.repair(),
             Self::InvalidOptions(_) => Some("Pass --relevance-floor between 0.0 and 1.0"),
             Self::NoIndex => Some("ee index rebuild --workspace ."),
             Self::Cancelled(_) => None,
@@ -6503,6 +6503,7 @@ impl std::fmt::Display for SearchError {
             Self::Index(e) => write!(f, "Index error: {e}"),
             Self::IndexIncompatible(e) => write!(f, "Search index rebuild required: {e}"),
             Self::Configuration(message) => write!(f, "Configuration error: {message}"),
+            Self::WorkspaceBinding(error) => write!(f, "{error}"),
             Self::InvalidOptions(message) => write!(f, "Invalid search options: {message}"),
             Self::NoIndex => write!(f, "Search index not found"),
             Self::Cancelled(reason) => f.write_str(&crate::core::outcome::cancel_message(reason)),
@@ -8769,6 +8770,32 @@ async fn run_search_inner_with_performance(
         preloaded_memories = Some(&mut transient_preloaded_memories);
     }
     search_checkpoint(cx)?;
+    // Seeded/library callers may supply only paths. Use the same authoritative
+    // file connection for binding and visibility instead of leaving this entry
+    // point able to retrieve a copied index without checking its store.
+    let owned_read_connection = if read_connection.is_none() {
+        let database = options.resolve_database_path();
+        if database.exists() {
+            Some(
+                DbConnection::open_file_read_only(&database).map_err(|error| {
+                    SearchError::Index(format!("Failed to open search source database: {error}"))
+                })?,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let read_connection = read_connection.or(owned_read_connection.as_ref());
+    if let Some(connection) = read_connection {
+        crate::core::workspace::addressed_workspace_row(
+            connection,
+            &options.workspace_path,
+            &options.resolve_database_path(),
+        )
+        .map_err(|error| SearchError::WorkspaceBinding(Box::new(error)))?;
+    }
     let start = Instant::now();
     let mut trace = SearchPerformanceTrace::default();
     let setup_start = Instant::now();
@@ -12441,10 +12468,11 @@ fn apply_memory_scope_visibility_with_metadata_mode_collecting(
     include_passthrough_analysis_metadata: bool,
     mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
 ) -> (Vec<SearchHit>, MemoryScopeStats) {
-    let scope_context = MemoryScopeContext::for_workspace(
+    let scope_context = MemoryScopeContext::for_workspace_with_connection(
         &options.workspace_path,
         options.memory_scope,
         options.strict_scope,
+        read_connection,
     );
     let mut stats = scope_context.stats();
     if hits.is_empty() {
@@ -18501,6 +18529,48 @@ mod tests {
             options.resolve_index_dir(),
             PathBuf::from("/home/user/project/.ee/index")
         );
+
+        for (database, explicit_index, expected) in [
+            ("selected/.ee/ee.db", None, "selected/.ee/index"),
+            (
+                "selected/.ee-campaign/ee.db",
+                None,
+                "selected/.ee-campaign/index",
+            ),
+            ("external/ee.db", None, "/home/user/project/.ee/index"),
+            (
+                "selected/.ee-campaign/ee.db",
+                Some("custom-index"),
+                "custom-index",
+            ),
+        ] {
+            let selected = SearchOptions {
+                database_path: Some(PathBuf::from(database)),
+                index_dir: explicit_index.map(PathBuf::from),
+                ..options.clone()
+            };
+            assert_eq!(selected.resolve_database_path(), Path::new(database));
+            assert_eq!(selected.resolve_index_dir(), Path::new(expected));
+            let similar = SimilarOptions {
+                workspace_path: selected.workspace_path.clone(),
+                database_path: selected.database_path.clone(),
+                index_dir: selected.index_dir.clone(),
+                memory_id: "selected-memory".to_owned(),
+                limit: 5,
+                min_score: None,
+                speed: SpeedMode::Default,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                memory_scope: MemoryScope::Swarm,
+                strict_scope: false,
+            };
+            assert_eq!(similar.resolve_database_path(), Path::new(database));
+            assert_eq!(similar.resolve_index_dir(), Path::new(expected));
+        }
     }
 
     #[cfg(unix)]
@@ -18615,6 +18685,48 @@ mod tests {
         };
 
         assert_eq!(options.resolve_index_dir(), PathBuf::from("/custom/index"));
+    }
+
+    #[test]
+    fn seeded_search_checks_relocated_store_without_supplied_connection() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let copied = temp.path().join("copied");
+        std::fs::create_dir_all(copied.join(".ee")).map_err(|error| error.to_string())?;
+        let original = temp.path().join("original");
+        let database = copied.join(".ee/ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &crate::core::workspace::stable_workspace_id(&original),
+                &crate::db::CreateWorkspaceInput {
+                    path: original.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let mut options = source_mode_test_options(SearchSourceMode::LexicalOnly, true);
+        options.workspace_path = copied.clone();
+        options.database_path = Some(database.clone());
+        options.index_dir = Some(copied.join(".ee/index"));
+        let error = run_search_seeded(&options, &Deterministic::from_seed(0))
+            .expect_err("binding must be checked before an index-only fallback");
+        assert!(matches!(&error, SearchError::WorkspaceBinding(error)
+            if error.code() == "workspace_identity_mismatch"));
+        let connection =
+            DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+        let supplied = run_search_with_read_connection(&options, &connection)
+            .expect_err("supplied connection must enforce the same boundary");
+        assert_eq!(supplied.to_string(), error.to_string());
+        assert_eq!(
+            connection
+                .list_workspaces()
+                .map_err(|error| error.to_string())?
+                .len(),
+            1
+        );
+        Ok(())
     }
 
     #[test]

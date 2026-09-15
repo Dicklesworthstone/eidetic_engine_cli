@@ -18,7 +18,8 @@ pub use test_log::{
     hash_bytes, log_event, log_level, log_path, note, test_id_or,
 };
 pub use volatile_fields::{
-    VOLATILE_FIELD_NAMES, VolatileStripReport, is_volatile_field_name, strip_volatile_fields,
+    VOLATILE_FIELD_NAMES, VolatileStripReport, is_volatile_field_name,
+    normalize_pack_slo_measurements, strip_volatile_fields,
 };
 
 #[must_use]

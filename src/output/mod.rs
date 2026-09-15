@@ -4112,6 +4112,8 @@ fn build_pack_assembly_slo(obj: &mut JsonBuilder, slo: &PackAssemblySlo) {
             &slo.actuals.memory_bytes_peak.to_string(),
         );
     });
+    obj.field_str("resourceStatus", slo.resource_status.as_str());
+    obj.field_str("elapsedStatus", slo.elapsed_status.as_str());
     obj.field_str("status", slo.status.as_str());
     obj.field_array_of_objects("degradations", &slo.degradations, |entry_obj, entry| {
         entry_obj.field_str("code", entry.code);
@@ -8629,6 +8631,9 @@ pub fn render_memory_show_toon(report: &MemoryShowReport) -> String {
 /// Render a memory list report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_memory_list_json(report: &MemoryListReport) -> String {
+    if let Some(error) = &report.error {
+        return error_response_json(error);
+    }
     let mut b = JsonBuilder::with_capacity(2048);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.error.is_none());
@@ -8665,10 +8670,6 @@ pub fn render_memory_list_json(report: &MemoryListReport) -> String {
             obj.field_str("validity_window_kind", &m.validity_window_kind);
             obj.field_str("created_at", &m.created_at);
         });
-
-        if let Some(ref err) = report.error {
-            d.field_str("error", err);
-        }
     });
     b.field_raw("degraded", "[]");
     b.finish()
@@ -13400,8 +13401,75 @@ pub fn schema_json() -> String {
     b.finish()
 }
 
+/// Public command metadata supplied by the CLI parser, without depending on
+/// the CLI layer or resolving argument/environment values in the renderer.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliHelpCommand {
+    pub name: String,
+    pub path: Vec<String>,
+    pub usage: String,
+    pub description: String,
+    pub available: bool,
+    pub aliases: Vec<String>,
+    pub args: Vec<CliHelpArgument>,
+    pub options: Vec<CliHelpArgument>,
+    /// IDs whose definitions are in an ancestor's options. Selected-command
+    /// help expands inherited globals locally; recursive inventories share them.
+    pub inherited_global_options: Vec<String>,
+    pub subcommands: Vec<CliHelpCommand>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliHelpArgument {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub long: Option<String>,
+    pub short: Option<String>,
+    pub aliases: Vec<String>,
+    pub short_aliases: Vec<String>,
+    pub index: Option<usize>,
+    pub required: bool,
+    pub global: bool,
+    pub action: String,
+    pub value_names: Vec<String>,
+    pub min_values: usize,
+    /// Null means unbounded values per occurrence.
+    pub max_values: Option<usize>,
+    /// Null means the parser does not declare a closed set of values.
+    pub possible_values: Option<Vec<String>>,
+    pub default_values: Vec<String>,
+    pub value_delimiter: Option<char>,
+    pub value_terminator: Option<String>,
+    pub require_equals: bool,
+    pub allow_hyphen_values: bool,
+    pub last: bool,
+    pub trailing_var_arg: bool,
+}
+
+fn render_cli_help_command_fields(
+    builder: &mut JsonBuilder,
+    command: &CliHelpCommand,
+    children_field: &str,
+) {
+    builder.field_str("name", &command.name);
+    builder.field_array_of_strings("path", &command.path);
+    builder.field_str("usage", &command.usage);
+    builder.field_str("description", &command.description);
+    builder.field_bool("available", command.available);
+    builder.field_array_of_strings("aliases", &command.aliases);
+    builder.field_raw("args", &serde_json::json!(command.args).to_string());
+    builder.field_raw("options", &serde_json::json!(command.options).to_string());
+    builder.field_array_of_strings("inheritedGlobalOptions", &command.inherited_global_options);
+    builder.field_array_of_objects(children_field, &command.subcommands, |child, metadata| {
+        render_cli_help_command_fields(child, metadata, "subcommands");
+    });
+}
+
 #[must_use]
-pub fn help_json() -> String {
+pub fn help_json(command: &CliHelpCommand) -> String {
     let mut b = JsonBuilder::with_capacity(4096);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
@@ -13409,150 +13477,18 @@ pub fn help_json() -> String {
         d.field_str("command", "help");
         d.field_str("binary", "ee");
         d.field_str("version", env!("CARGO_PKG_VERSION"));
-        d.field_str("usage", "ee [OPTIONS] [COMMAND]");
-        d.field_str(
-            "description",
-            "Durable, local-first, explainable memory for coding agents.",
-        );
-
-        d.field_array_of_objects("globalOptions", GLOBAL_OPTIONS, |obj, opt| {
-            obj.field_str("name", opt.name);
-            obj.field_str("short", opt.short);
-            obj.field_str("description", opt.description);
-            obj.field_str("type", opt.opt_type);
-        });
-
-        d.field_array_of_objects("commands", COMMAND_MANIFEST, |obj, cmd| {
-            obj.field_str("name", cmd.name);
-            obj.field_str("description", cmd.description);
-            obj.field_bool("available", cmd.available);
-            if !cmd.subcommands.is_empty() {
-                obj.field_array_of_objects("subcommands", cmd.subcommands, |sub, sc| {
-                    sub.field_str("name", sc.name);
-                    sub.field_str("description", sc.description);
-                });
-            }
-            if !cmd.args.is_empty() {
-                obj.field_array_of_objects("args", cmd.args, |arg, a| {
-                    arg.field_str("name", a.name);
-                    arg.field_str("description", a.description);
-                    arg.field_bool("required", a.required);
-                    if let Some(def) = a.default {
-                        arg.field_str("default", def);
-                    }
-                });
-            }
-        });
+        d.field_raw("metadataVersion", "1");
+        render_cli_help_command_fields(d, command, "commands");
+        let globals = command
+            .options
+            .iter()
+            .filter(|arg| arg.global)
+            .collect::<Vec<_>>();
+        d.field_raw("globalOptions", &serde_json::json!(globals).to_string());
     });
     b.field_raw("degraded", "[]");
     b.finish()
 }
-
-struct GlobalOption {
-    name: &'static str,
-    short: &'static str,
-    description: &'static str,
-    opt_type: &'static str,
-}
-
-const GLOBAL_OPTIONS: &[GlobalOption] = &[
-    GlobalOption {
-        name: "--json",
-        short: "-j",
-        description: "Emit JSON output",
-        opt_type: "flag",
-    },
-    GlobalOption {
-        name: "--workspace",
-        short: "",
-        description: "Workspace root to operate on",
-        opt_type: "path",
-    },
-    GlobalOption {
-        name: "--no-color",
-        short: "",
-        description: "Disable colored diagnostics",
-        opt_type: "flag",
-    },
-    GlobalOption {
-        name: "--robot",
-        short: "",
-        description: "Use agent-oriented output defaults",
-        opt_type: "flag",
-    },
-    GlobalOption {
-        name: "--format",
-        short: "",
-        description: "Select output renderer (human|json|toon|jsonl|compact|hook|markdown|mermaid)",
-        opt_type: "enum",
-    },
-    GlobalOption {
-        name: "--fields",
-        short: "",
-        description: "Control output verbosity (minimal|summary|standard|full)",
-        opt_type: "enum",
-    },
-    GlobalOption {
-        name: "--max-output-tokens",
-        short: "",
-        description: "Cap estimated response tokens for machine output (ADR 0063 governor; env mirror EE_MAX_OUTPUT_TOKENS)",
-        opt_type: "integer",
-    },
-    GlobalOption {
-        name: "--schema",
-        short: "",
-        description: "Print JSON schema for response envelope",
-        opt_type: "flag",
-    },
-    GlobalOption {
-        name: "--help-json",
-        short: "",
-        description: "Print JSON-formatted help",
-        opt_type: "flag",
-    },
-    GlobalOption {
-        name: "--agent-docs",
-        short: "",
-        description: "Print agent-oriented documentation",
-        opt_type: "flag",
-    },
-    GlobalOption {
-        name: "--meta",
-        short: "",
-        description: "Include additional metadata in response",
-        opt_type: "flag",
-    },
-    GlobalOption {
-        name: "--shadow",
-        short: "",
-        description: "Shadow mode for decision plane tracking (off|compare|record)",
-        opt_type: "enum",
-    },
-    GlobalOption {
-        name: "--policy",
-        short: "",
-        description: "Policy ID to use for decision plane operations",
-        opt_type: "string",
-    },
-    GlobalOption {
-        name: "--cards",
-        short: "",
-        description: "Control cards output verbosity (none|summary|math|full)",
-        opt_type: "enum",
-    },
-    GlobalOption {
-        name: "--schema-version",
-        short: "",
-        description: "Select the response envelope schema version (v0|v1)",
-        opt_type: "enum",
-    },
-    GlobalOption {
-        name: "--legacy-schema",
-        short: "",
-        description: "Shortcut for `--schema-version v0` during the v0 compatibility window",
-        opt_type: "flag",
-    },
-];
 
 struct CommandArg {
     name: &'static str,
@@ -14603,28 +14539,19 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
 ];
 
 #[must_use]
-pub fn render_introspect_json() -> String {
+pub fn render_introspect_json(commands: &CliHelpCommand) -> String {
     let mut b = JsonBuilder::with_capacity(8192);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "introspect");
         d.field_str("version", env!("CARGO_PKG_VERSION"));
+        d.field_raw("metadataVersion", "1");
 
         d.field_object("commands", |c| {
-            for cmd in COMMAND_MANIFEST {
-                c.field_object(cmd.name, |obj| {
-                    obj.field_str("description", cmd.description);
-                    obj.field_bool("available", cmd.available);
-                    if !cmd.subcommands.is_empty() {
-                        obj.field_array_of_objects("subcommands", cmd.subcommands, |sub, sc| {
-                            sub.field_str("name", sc.name);
-                            sub.field_str("description", sc.description);
-                        });
-                    }
-                    if !cmd.args.is_empty() {
-                        obj.field_raw("argCount", &cmd.args.len().to_string());
-                    }
+            for cmd in &commands.subcommands {
+                c.field_object(&cmd.name, |obj| {
+                    render_cli_help_command_fields(obj, cmd, "subcommands");
                 });
             }
         });
@@ -14650,14 +14577,8 @@ pub fn render_introspect_json() -> String {
         });
 
         d.field_object("globalOptions", |g| {
-            for opt in GLOBAL_OPTIONS {
-                g.field_object(opt.name, |obj| {
-                    if !opt.short.is_empty() {
-                        obj.field_str("short", opt.short);
-                    }
-                    obj.field_str("description", opt.description);
-                    obj.field_str("type", opt.opt_type);
-                });
+            for opt in commands.options.iter().filter(|arg| arg.global) {
+                g.field_raw(&opt.id, &serde_json::json!(opt).to_string());
             }
         });
     });
@@ -14666,11 +14587,11 @@ pub fn render_introspect_json() -> String {
 }
 
 #[must_use]
-pub fn render_introspect_human() -> String {
+pub fn render_introspect_human(commands: &CliHelpCommand) -> String {
     let mut output = format!("ee introspect (v{})\n\n", env!("CARGO_PKG_VERSION"));
 
     output.push_str("Commands:\n");
-    for cmd in COMMAND_MANIFEST {
+    for cmd in &commands.subcommands {
         let status = if cmd.available { "✓" } else { "○" };
         output.push_str(&format!(
             "  {} {} — {}\n",
@@ -14696,8 +14617,8 @@ pub fn render_introspect_human() -> String {
 }
 
 #[must_use]
-pub fn render_introspect_toon() -> String {
-    render_toon_from_json(&render_introspect_json())
+pub fn render_introspect_toon(commands: &CliHelpCommand) -> String {
+    render_toon_from_json(&render_introspect_json(commands))
 }
 
 struct ErrorCodeEntry {
@@ -15493,6 +15414,7 @@ fn domain_error_severity(error: &DomainError) -> &'static str {
         | DomainError::WorkspaceStoreMissing { .. }
         | DomainError::MigrationDrift { .. } => "high",
         DomainError::Configuration { .. }
+        | DomainError::WorkspaceIdentityMismatch { .. }
         | DomainError::SearchIndex { .. }
         | DomainError::Graph { .. }
         | DomainError::Import { .. }
@@ -15515,7 +15437,8 @@ fn domain_error_details(
         | DomainError::UsageCodeWithDetails { details_json, .. }
         | DomainError::ImportWithDetails { details_json, .. }
         | DomainError::PolicyDeniedWithDetails { details_json, .. }
-        | DomainError::WorkspaceStoreMissing { details_json, .. } => {
+        | DomainError::WorkspaceStoreMissing { details_json, .. }
+        | DomainError::WorkspaceIdentityMismatch { details_json, .. } => {
             append_domain_error_details(details, details_json);
         }
         _ => {}
@@ -20918,6 +20841,20 @@ mod tests {
             version: env!("CARGO_PKG_VERSION"),
         };
         let eval = crate::eval::EvaluationReport::new();
+        // This test checks the renderer envelope; CLI tests exercise the real
+        // parser tree and its argument definitions.
+        let help = super::CliHelpCommand {
+            name: "ee".to_owned(),
+            path: Vec::new(),
+            usage: "ee [OPTIONS] [COMMAND]".to_owned(),
+            description: "Renderer envelope fixture".to_owned(),
+            available: true,
+            aliases: Vec::new(),
+            args: Vec::new(),
+            options: Vec::new(),
+            inherited_global_options: Vec::new(),
+            subcommands: Vec::new(),
+        };
         for (context, json) in [
             ("capabilities JSON", render_capabilities_json(&capabilities)),
             (
@@ -20937,8 +20874,8 @@ mod tests {
             ("evaluation JSON", render_eval_report_json(&eval, None)),
             ("evaluation list JSON", render_eval_list_json(&[], None)),
             ("MCP manifest JSON", render_mcp_manifest_json()),
-            ("help JSON", help_json()),
-            ("introspect JSON", render_introspect_json()),
+            ("help JSON", help_json(&help)),
+            ("introspect JSON", render_introspect_json(&help)),
             ("schema list JSON", render_schema_list_json()),
         ] {
             let value = parse_rendered_json(&json, context)?;

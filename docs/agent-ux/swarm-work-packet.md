@@ -205,7 +205,8 @@ Ownership is relative only to the fresh authoritative snapshot identity:
 `unassigned | self | peer | unknown`. Self-held reservations and the selected
 Bead's own ID in related collision evidence do not compete with that lane;
 peer or mixed self/peer evidence still blocks. If `editScope.state=unknown`,
-do not apply global checkout collisions to the candidate and do not claim it.
+the gate reports `candidate_edit_scope_unknown`; do not apply global checkout
+collisions to the candidate and do not claim it.
 Run the emitted read-only `br show` action, resolve a bounded nonempty path
 scope, and rerun the gate. The stable
 `candidate_edit_scope.no_matching_bounded_surface` source ref explains why the

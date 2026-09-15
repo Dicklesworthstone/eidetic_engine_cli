@@ -28,8 +28,8 @@ use sqlmodel_core::Value as SqlValue;
 
 use crate::core::memory_scope::MemoryScopeContext;
 use crate::core::orient::{
-    AddressedStoreState, NEARBY_STORE_REPORT_LIMIT, NearbyStoreScanAssessment,
-    NearbyStoreScanOutcome, addressed_store_state, discover_nearby_stores_for_database,
+    NEARBY_STORE_REPORT_LIMIT, NearbyStoreScanAssessment, NearbyStoreScanOutcome,
+    discover_nearby_stores_for_database,
 };
 use crate::db::{DbConnection, StoredMemory};
 use crate::models::memory::typed_memory_fields_from_json;
@@ -789,9 +789,7 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
         }
         Ok(_) => {}
     }
-    if addressed_store_state(options.workspace_path, options.database_path)
-        == AddressedStoreState::Unavailable
-    {
+    if !crate::core::orient::nearby_store_database_is_safe_regular_file(options.database_path) {
         return Err(DomainError::Storage {
             message: format!(
                 "Addressed workspace database {} exists but is unsafe, unreadable, or incompatible.",
@@ -812,15 +810,32 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
             )),
         }
     })?;
+    if connection
+        .needs_migration()
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to inspect addressed workspace schema: {error}"),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
+        })?
+    {
+        return Err(DomainError::MigrationRequired {
+            message: "The addressed workspace database requires migration before resume."
+                .to_owned(),
+            repair: Some("ee migrate run --workspace . --json".to_owned()),
+        });
+    }
     let canonical_workspace = options
         .workspace_path
         .canonicalize()
         .unwrap_or_else(|_| options.workspace_path.to_path_buf());
-    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+    let workspace_id = crate::core::workspace::addressed_workspace_row(
         &connection,
-        &crate::core::workspace::stable_workspace_id(&canonical_workspace),
-        &[options.workspace_path, canonical_workspace.as_path()],
-    )?;
+        options.workspace_path,
+        options.database_path,
+    )?
+    .map_or_else(
+        || crate::core::workspace::stable_workspace_id(&canonical_workspace),
+        |row| row.id,
+    );
     let now = Utc::now();
     let current_memories = connection
         .list_recent_current_memories_for_retrieval(&workspace_id, &now.to_rfc3339(), u32::MAX)

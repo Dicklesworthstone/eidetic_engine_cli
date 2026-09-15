@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use asupersync::types::CancelReason;
 use clap::error::ErrorKind;
-use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 
 use crate::cass::{
@@ -560,6 +560,177 @@ fn public_cli_command_available(path: &str) -> bool {
     }
 }
 
+/// Describe the actual public parser tree without opening a workspace or
+/// resolving environment values. Renderers receive this typed projection.
+#[must_use]
+pub fn root_cli_help() -> output::CliHelpCommand {
+    let mut command = Cli::command();
+    command.build();
+    collect_cli_help(&command, Vec::new(), &BTreeSet::new())
+}
+
+fn collect_cli_help(
+    command: &clap::Command,
+    path: Vec<String>,
+    inherited_globals: &BTreeSet<String>,
+) -> output::CliHelpCommand {
+    let visible_args = command.get_arguments().filter(|arg| !arg.is_hide_set());
+    let mut args = Vec::new();
+    let mut options = Vec::new();
+    let mut inherited_global_options = Vec::new();
+    let mut child_globals = inherited_globals.clone();
+    for arg in visible_args {
+        if arg.is_global_set() {
+            child_globals.insert(arg.get_id().to_string());
+            if inherited_globals.contains(arg.get_id().as_str()) {
+                inherited_global_options.push(arg.get_id().to_string());
+                continue;
+            }
+        }
+        let metadata = cli_help_argument(arg);
+        if arg.is_positional() {
+            args.push(metadata);
+        } else {
+            options.push(metadata);
+        }
+    }
+    args.sort_by_key(|arg| arg.index);
+    options.sort_by(|left, right| left.name.cmp(&right.name));
+    inherited_global_options.sort();
+    let mut subcommands = command
+        .get_subcommands()
+        .filter(|child| !child.is_hide_set())
+        .map(|child| {
+            let mut child_path = path.clone();
+            child_path.push(child.get_name().to_owned());
+            collect_cli_help(child, child_path, &child_globals)
+        })
+        .collect::<Vec<_>>();
+    subcommands.sort_by(|left, right| left.name.cmp(&right.name));
+    let usage = command.clone().render_usage().to_string();
+    output::CliHelpCommand {
+        name: command.get_name().to_owned(),
+        available: public_cli_command_available(&path.join(" ")),
+        path,
+        usage: usage.strip_prefix("Usage: ").unwrap_or(&usage).to_owned(),
+        description: command
+            .get_about()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        aliases: command.get_visible_aliases().map(str::to_owned).collect(),
+        args,
+        options,
+        inherited_global_options,
+        subcommands,
+    }
+}
+
+fn cli_help_argument(arg: &clap::Arg) -> output::CliHelpArgument {
+    let takes_values = arg.get_action().takes_values();
+    let default_arity: usize = usize::from(takes_values);
+    let range = arg.get_num_args().unwrap_or(default_arity.into());
+    let value_names = if takes_values {
+        arg.get_value_names()
+            .map(|names| names.iter().map(ToString::to_string).collect())
+            .unwrap_or_else(|| vec![arg.get_id().to_string()])
+    } else {
+        Vec::new()
+    };
+    let possible_values = arg
+        .get_value_parser()
+        .possible_values()
+        .filter(|_| takes_values)
+        .map(|values| {
+            values
+                .filter(|value| !value.is_hide_set())
+                .map(|value| value.get_name().to_owned())
+                .collect()
+        });
+    output::CliHelpArgument {
+        id: arg.get_id().to_string(),
+        name: arg
+            .get_long()
+            .map(|long| format!("--{long}"))
+            .or_else(|| arg.get_short().map(|short| format!("-{short}")))
+            .unwrap_or_else(|| {
+                value_names
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| arg.get_id().to_string())
+            }),
+        description: arg
+            .get_long_help()
+            .or_else(|| arg.get_help())
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        long: arg.get_long().map(|long| format!("--{long}")),
+        short: arg.get_short().map(|short| format!("-{short}")),
+        aliases: arg
+            .get_visible_aliases()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|alias| format!("--{alias}"))
+            .collect(),
+        short_aliases: arg
+            .get_visible_short_aliases()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|alias| format!("-{alias}"))
+            .collect(),
+        index: arg.get_index(),
+        required: arg.is_required_set(),
+        global: arg.is_global_set(),
+        action: format!("{:?}", arg.get_action()),
+        value_names,
+        min_values: range.min_values(),
+        max_values: (range.max_values() != usize::MAX).then_some(range.max_values()),
+        possible_values,
+        default_values: arg
+            .get_default_values()
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect(),
+        value_delimiter: arg.get_value_delimiter(),
+        value_terminator: arg.get_value_terminator().map(ToString::to_string),
+        require_equals: arg.is_require_equals_set(),
+        allow_hyphen_values: arg.is_allow_hyphen_values_set(),
+        last: arg.is_last_set(),
+        trailing_var_arg: arg.is_trailing_var_arg_set(),
+    }
+}
+
+fn cli_help_for_matches(
+    mut command: clap::Command,
+    matches: &clap::ArgMatches,
+) -> Result<output::CliHelpCommand, clap::Error> {
+    command.build();
+    let mut selected = &command;
+    let mut selected_matches = matches;
+    let mut path = Vec::new();
+    while let Some((name, child_matches)) = selected_matches.subcommand() {
+        selected = selected.find_subcommand(name).ok_or_else(|| {
+            clap::Error::raw(
+                ErrorKind::InvalidSubcommand,
+                format!("Unknown help command {name}"),
+            )
+        })?;
+        path.push(selected.get_name().to_owned());
+        selected_matches = child_matches;
+    }
+    // A selected command must contain the inherited definitions itself;
+    // descendants can refer to these definitions instead of repeating them.
+    Ok(collect_cli_help(selected, path, &BTreeSet::new()))
+}
+
+fn matches_request_json_help(matches: &clap::ArgMatches) -> bool {
+    matches
+        .try_get_one::<bool>("help_json")
+        .ok()
+        .flatten()
+        .copied()
+        == Some(true)
+}
+
 /// How the workspace path was discovered (D7).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceSource {
@@ -822,7 +993,8 @@ struct ActiveOutputGovernor {
     /// the governor (the resumed remainder is then emitted unbounded).
     ceiling_tokens: Option<u64>,
     params_hash: String,
-    workspace_root: PathBuf,
+    /// None for parser-only metadata; these renders never resolve a store.
+    workspace_root: Option<PathBuf>,
     /// `ee.cursor.v1` resume token registered by a wired surface handler
     /// via [`set_governor_resume_cursor`] (bd-7lvbg.3). Surfaces with
     /// non-governor `--cursor` flags (subscribe's monotonic delta cursor,
@@ -2569,7 +2741,8 @@ pub struct DbReindexArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    /// Index directory override. Otherwise use the index beside an explicit
+    /// .ee/ee.db or .ee-campaign/ee.db; other layouts use <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
 
@@ -3081,7 +3254,8 @@ pub struct ContextArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Index directory. Defaults to <workspace>/.ee/index/.
+    /// Index directory override. Otherwise use the index beside an explicit
+    /// .ee/ee.db or .ee-campaign/ee.db; other layouts use <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
 
@@ -3371,6 +3545,10 @@ pub struct PackArgs {
     #[arg(long)]
     pub candidate_pool: Option<u32>,
 
+    /// Minimum score (0.0..=1.0) for a search hit before packing; defaults to 0.0.
+    #[arg(long, value_name = "FLOAT", value_parser = parse_relevance_floor_arg)]
+    pub relevance_floor: Option<f32>,
+
     /// Retrieval speed/quality budget. Overrides query-file speed.
     #[arg(long, value_parser = parse_speed_mode_arg)]
     pub speed: Option<crate::search::SpeedMode>,
@@ -3464,7 +3642,8 @@ pub struct PackArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Index directory. Defaults to <workspace>/.ee/index/.
+    /// Index directory override. Otherwise use the index beside an explicit
+    /// .ee/ee.db or .ee-campaign/ee.db; other layouts use <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
 
@@ -3561,6 +3740,10 @@ pub struct PackBuildArgs {
     #[arg(long)]
     pub candidate_pool: Option<u32>,
 
+    /// Minimum score (0.0..=1.0) for a search hit before packing; defaults to 0.0.
+    #[arg(long, value_name = "FLOAT", value_parser = parse_relevance_floor_arg)]
+    pub relevance_floor: Option<f32>,
+
     /// Retrieval speed/quality budget. Overrides query-file speed.
     #[arg(long, value_parser = parse_speed_mode_arg)]
     pub speed: Option<crate::search::SpeedMode>,
@@ -3649,7 +3832,8 @@ pub struct PackBuildArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Index directory. Defaults to <workspace>/.ee/index/.
+    /// Index directory override. Otherwise use the index beside an explicit
+    /// .ee/ee.db or .ee-campaign/ee.db; other layouts use <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
 
@@ -3718,6 +3902,7 @@ impl PackArgs {
             error_log: self.error_log.clone(),
             max_tokens: self.max_tokens,
             candidate_pool: self.candidate_pool,
+            relevance_floor: self.relevance_floor,
             speed: self.speed,
             source_mode: self.source_mode,
             strict_source_mode: self.strict_source_mode,
@@ -4973,7 +5158,8 @@ pub struct DiagSearchArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    /// Index directory override. Otherwise use the index beside an explicit
+    /// .ee/ee.db or .ee-campaign/ee.db; other layouts use <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
 
@@ -5655,7 +5841,8 @@ pub struct IndexRebuildArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    /// Index directory override. Otherwise use the index beside an explicit
+    /// .ee/ee.db or .ee-campaign/ee.db; other layouts use <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
 
@@ -5671,7 +5858,8 @@ pub struct IndexReembedArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    /// Index directory override. Otherwise use the index beside an explicit
+    /// .ee/ee.db or .ee-campaign/ee.db; other layouts use <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
 
@@ -5687,7 +5875,8 @@ pub struct IndexStatusArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    /// Index directory override. Otherwise use the index beside an explicit
+    /// .ee/ee.db or .ee-campaign/ee.db; other layouts use <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
 }
@@ -5699,7 +5888,8 @@ pub struct IndexVacuumArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    /// Index directory override. Otherwise use the index beside an explicit
+    /// .ee/ee.db or .ee-campaign/ee.db; other layouts use <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
 }
@@ -5876,6 +6066,10 @@ pub struct HandoffPreviewArgs {
     /// Include token and byte estimates.
     #[arg(long, action = ArgAction::SetTrue)]
     pub estimates: bool,
+
+    /// Per-command timeout for optional coordination probes; increase for large trackers.
+    #[arg(long, default_value_t = DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, value_name = "MS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub command_timeout_ms: u64,
 }
 
 /// Arguments for `ee handoff create`.
@@ -5904,6 +6098,10 @@ pub struct HandoffCreateArgs {
     /// Bind capsule integrity to this machine's local handoff salt.
     #[arg(long = "bind-to-machine", action = ArgAction::SetTrue)]
     pub bind_to_machine: bool,
+
+    /// Per-command timeout for optional coordination probes; increase for large trackers.
+    #[arg(long, default_value_t = DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, value_name = "MS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub command_timeout_ms: u64,
 }
 
 /// Arguments for `ee handoff inspect`.
@@ -9045,7 +9243,8 @@ pub struct SearchArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    /// Index directory override. Otherwise use the index beside an explicit
+    /// .ee/ee.db or .ee-campaign/ee.db; other layouts use <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
 
@@ -9162,7 +9361,8 @@ pub struct SimilarArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    /// Index directory override. Otherwise use the index beside an explicit
+    /// .ee/ee.db or .ee-campaign/ee.db; other layouts use <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
 
@@ -9251,7 +9451,8 @@ pub struct ImpactArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Index output directory. Defaults to <workspace>/.ee/index/.
+    /// Index directory override. Otherwise use the index beside an explicit
+    /// .ee/ee.db or .ee-campaign/ee.db; other layouts use <workspace>/.ee/index/.
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
 
@@ -9685,6 +9886,10 @@ pub struct RememberArgs {
     /// Store this memory in the user-global memory tier instead of the workspace store.
     #[arg(long, action = ArgAction::SetTrue)]
     pub global: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH", conflicts_with = "global")]
+    pub database: Option<PathBuf>,
 
     /// Persist secret-like content with an explicit policy-bypass audit signal.
     #[arg(long = "allow-secret-mention", action = ArgAction::SetTrue)]
@@ -12555,7 +12760,7 @@ pub struct SituationCompareArgs {
     #[arg(long = "evidence-id", value_name = "EVIDENCE_ID")]
     pub evidence_ids: Vec<String>,
 
-    /// Enforce non-mutating dry-run execution.
+    /// Explicitly request a preview; comparisons never persist changes.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 }
@@ -12587,7 +12792,7 @@ pub struct SituationLinkArgs {
     #[arg(long, value_name = "RFC3339")]
     pub created_at: Option<String>,
 
-    /// Enforce non-mutating dry-run execution.
+    /// Explicitly request a preview; link plans never persist changes.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 }
@@ -13126,13 +13331,50 @@ where
         version.set(output::ResponseSchemaVersion::V1);
     });
     let args: Vec<OsString> = normalize_outcome_quarantine_args(args.into_iter().collect());
-    let mut cli = match Cli::try_parse_from(&args) {
+    let mut parser = Cli::command();
+    let matches = match parser.try_get_matches_from_mut(&args) {
+        Ok(matches) => matches,
+        Err(error) => {
+            // Missing required values must not obstruct help for a real command.
+            // Recover only these two validation errors, and only when Clap parsed
+            // the help flag itself (not a positional/value containing its text).
+            if matches!(
+                error.kind(),
+                ErrorKind::MissingRequiredArgument | ErrorKind::MissingSubcommand
+            ) {
+                if let Ok(recovered) = Cli::command()
+                    .ignore_errors(true)
+                    .try_get_matches_from(&args)
+                    && matches_request_json_help(&recovered)
+                {
+                    recovered
+                } else {
+                    return write_parse_error(error, &args, stdout, stderr);
+                }
+            } else {
+                return write_parse_error(error, &args, stdout, stderr);
+            }
+        }
+    };
+    let mut global_matches = matches.clone();
+    if matches_request_json_help(&matches) {
+        // Cli's optional command can be omitted while deriving the already
+        // parsed global settings. Keep the original match tree for help scope.
+        let _ = global_matches.remove_subcommand();
+    }
+    let mut cli = match Cli::from_arg_matches(&global_matches) {
         Ok(cli) => cli,
         Err(error) => return write_parse_error(error, &args, stdout, stderr),
     };
     cli.format_explicit = args_contain_format_flag(&args);
     cli.fields_explicit = args_contain_fields_flag(&args);
-    resolve_workspace_alias_global(&mut cli);
+    let parser_metadata_only = cli.schema
+        || cli.help_json
+        || cli.agent_docs
+        || matches!(&cli.command, Some(Command::Introspect));
+    if !parser_metadata_only {
+        resolve_workspace_alias_global(&mut cli);
+    }
     ACTIVE_RESPONSE_SCHEMA_VERSION.with(|version| {
         version.set(cli.response_schema_version());
     });
@@ -13157,7 +13399,8 @@ where
                 params_hash: output::governor::hash_invocation_params(governor_params_for_hash(
                     &args,
                 )),
-                workspace_root: resolve_workspace_for_cli(cli.workspace.as_deref()).0,
+                workspace_root: (!parser_metadata_only)
+                    .then(|| resolve_workspace_for_cli(cli.workspace.as_deref()).0),
                 resume_cursor: None,
             });
     });
@@ -13166,7 +13409,10 @@ where
         return write_stdout(stdout, &(output::schema_json() + "\n"));
     }
     if cli.help_json {
-        return write_stdout(stdout, &(output::help_json() + "\n"));
+        return match cli_help_for_matches(parser, &matches) {
+            Ok(command) => write_stdout(stdout, &(output::help_json(&command) + "\n")),
+            Err(error) => write_parse_error(error, &args, stdout, stderr),
+        };
     }
     if cli.agent_docs {
         return write_stdout(stdout, &(output::agent_docs() + "\n"));
@@ -13847,6 +14093,7 @@ where
                     since: args.since.clone(),
                     include_estimates: args.estimates,
                     task_frame_id: None,
+                    command_timeout_ms: args.command_timeout_ms,
                 };
                 match preview_handoff(&options) {
                     Ok(report) => match cli.renderer() {
@@ -13891,6 +14138,7 @@ where
                     bind_to_machine: args.bind_to_machine,
                     machine_salt_path: None,
                     redaction_level: redaction.level,
+                    command_timeout_ms: args.command_timeout_ms,
                 };
                 match create_handoff(&options) {
                     Ok(report) => match cli.renderer() {
@@ -14223,20 +14471,23 @@ where
         Some(Command::Insights(ref args)) => handle_insights(&cli, args, stdout, stderr),
         Some(Command::Conflict(ref cmd)) => handle_conflict(&cli, cmd, stdout, stderr),
         Some(Command::Sandbox(ref cmd)) => handle_sandbox(&cli, cmd, stdout, stderr),
-        Some(Command::Introspect) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &output::render_introspect_human())
+        Some(Command::Introspect) => {
+            let commands = root_cli_help();
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &output::render_introspect_human(&commands))
+                }
+                output::Renderer::Toon => {
+                    write_stdout(stdout, &(output::render_introspect_toon(&commands) + "\n"))
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    write_stdout(stdout, &(output::render_introspect_json(&commands) + "\n"))
+                }
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_introspect_toon() + "\n"))
-            }
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_introspect_json() + "\n"))
-            }
-        },
+        }
         Some(Command::Memory(MemoryCommand::Expire(ref args))) => {
             handle_memory_expire(&cli, args, stdout, stderr)
         }
@@ -21667,14 +21918,26 @@ fn response_schema_stdout(
     // ceiling pass (bd-7lvbg.3); resume without a ceiling emits the
     // remainder unbounded (modeled as a u64::MAX ceiling).
     let governed = if let Some(active) = governor.filter(|active| active.engaged()) {
-        let workspace_root = active.workspace_root.clone();
-        let db_generation = move || governed_db_generation(&workspace_root);
+        let db_generation = || {
+            active
+                .workspace_root
+                .as_deref()
+                .map_or(0, governed_db_generation)
+        };
+        let cursor_scope = active.workspace_root.as_ref().map_or_else(
+            || {
+                format!(
+                    "ee.cli.metadata:{}:{}",
+                    env!("CARGO_PKG_VERSION"),
+                    blake3::hash(selected.as_bytes())
+                )
+            },
+            |workspace_root| workspace_root.to_string_lossy().into_owned(),
+        );
         let ctx = output::governor::GovernorContext {
             ceiling_tokens: active.ceiling_tokens.unwrap_or(u64::MAX),
             params_hash: active.params_hash.clone(),
-            mac_key: output::governor::derive_workspace_mac_key(
-                &active.workspace_root.to_string_lossy(),
-            ),
+            mac_key: output::governor::derive_workspace_mac_key(&cursor_scope),
             db_generation: &db_generation,
         };
         output::governor::govern_response_json_with_resume(
@@ -21736,7 +21999,7 @@ fn governed_db_generation(workspace_root: &Path) -> u64 {
     if !database_path.exists() {
         return 0;
     }
-    let Ok(connection) = crate::db::DbConnection::open_file(&database_path) else {
+    let Ok(connection) = crate::db::DbConnection::open_file_read_only(&database_path) else {
         return 0;
     };
     let Ok(workspace_id) = bound_cli_workspace_id(&connection, workspace_root) else {
@@ -37728,12 +37991,8 @@ where
 
     let report = list_memories(&options);
 
-    if report.error.is_some() {
-        let domain_error = DomainError::Storage {
-            message: report.error.clone().unwrap_or_default(),
-            repair: Some("ee doctor".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    if let Some(domain_error) = &report.error {
+        return write_domain_error(domain_error, cli.renderer(), stdout, stderr);
     }
 
     match cli.renderer() {
@@ -39931,13 +40190,11 @@ fn context_json_cache_enabled(cli: &Cli, args: &ContextArgs, deprecated_alias: b
         && !deprecated_alias
         && !args.explain
         && !args.explain_gaps
-        && !args.explain_performance
         && !args.stream
         && args.since.is_none()
         && args.mesh_mode == MeshCommandMode::Off
         && args.changed_symbols.is_empty()
         && !args.changed_symbols_from_git
-        && !args.read_only
 }
 
 fn write_context_stream_tail<W>(
@@ -40139,6 +40396,7 @@ fn context_error_to_domain(error: &ContextPackError) -> DomainError {
                 repair: error.repair_hint().map(str::to_string),
             }
         }
+        ContextPackError::Search(SearchError::WorkspaceBinding(error)) => error.as_ref().clone(),
         ContextPackError::Search(search_error) => DomainError::SearchIndex {
             message: search_error.to_string(),
             repair: error.repair_hint().map(str::to_string),
@@ -43681,7 +43939,8 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.resolve_workspace();
+    let workspace_path =
+        crate::config::workspace::canonical_workspace_root_or_lexical(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -44221,7 +44480,8 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = cli.resolve_workspace();
+    let workspace_path =
+        crate::config::workspace::canonical_workspace_root_or_lexical(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -44237,7 +44497,12 @@ where
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
-    let conn = match crate::db::DbConnection::open_file(&database_path) {
+    let connection = if args.dry_run {
+        crate::db::DbConnection::open_schema_only(&database_path)
+    } else {
+        crate::db::DbConnection::open_file(&database_path)
+    };
+    let conn = match connection {
         Ok(conn) => conn,
         Err(error) => {
             let domain_error = DomainError::Storage {
@@ -44446,7 +44711,8 @@ where
         apply_shard_fanout_migration, plan_shard_fanout_migration_from_database,
     };
 
-    let workspace_path = cli.resolve_workspace();
+    let workspace_path =
+        crate::config::workspace::canonical_workspace_root_or_lexical(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -44829,7 +45095,7 @@ where
             include_expired: args.include_expired,
             include_future: args.include_future,
             include_stale: args.include_stale,
-            relevance_floor: None,
+            relevance_floor: args.relevance_floor,
             mesh_mode: args.mesh_mode,
             memory_scope: args
                 .memory_scope
@@ -45046,7 +45312,7 @@ where
         include_expired: args.include_expired,
         include_future: args.include_future,
         include_stale: args.include_stale,
-        relevance_floor: None,
+        relevance_floor: args.relevance_floor,
         redaction_level: task_lens_redaction(resolved_lens.as_ref())
             .unwrap_or(BackupRedaction::Minimal)
             .to_model(),
@@ -45434,6 +45700,11 @@ fn redact_public_projection_strings(value: &mut serde_json::Value, field: Option
                     crate::policy::redact_public_replay_field("entityRevisionHash", text).content,
                 ),
                 Some("trustSubclass") if text == "imported_transcript_excerpt" => {
+                    Some(text.clone())
+                }
+                Some("promotionPosture")
+                    if crate::db::is_attempt_family_promotion_posture(text) =>
+                {
                     Some(text.clone())
                 }
                 Some("familyAlias")
@@ -54932,6 +55203,9 @@ where
     if let SearchError::Cancelled(reason) = error {
         return write_cancelled_error(reason, wants_json, stdout, stderr);
     }
+    if let SearchError::WorkspaceBinding(error) = error {
+        return write_domain_error(error, wants_json, stdout, stderr);
+    }
     if let SearchError::Configuration(message) = error {
         return write_domain_error(
             &DomainError::Configuration {
@@ -56070,6 +56344,7 @@ fn note_to_remember_args(args: &NoteArgs) -> RememberArgs {
         confidence: args.confidence,
         source: args.source.clone(),
         global: false,
+        database: None,
         allow_secret_mention: args.allow_secret_mention,
         valid_from: args.valid_from.clone(),
         valid_to: args.valid_to.clone(),
@@ -56701,7 +56976,7 @@ fn handle_remember(
         let source = args.source.as_deref().unwrap_or(candidate.source.as_str());
         let options = RememberMemoryOptions {
             workspace_path: &workspace_path,
-            database_path: None,
+            database_path: args.database.as_deref(),
             content: candidate.content.as_str(),
             workflow_id: args.workflow.as_deref(),
             level: &args.level,
@@ -56767,7 +57042,7 @@ fn handle_remember(
     };
     let options = RememberMemoryOptions {
         workspace_path: &workspace_path,
-        database_path: None,
+        database_path: args.database.as_deref(),
         content: stored_content,
         workflow_id: args.workflow.as_deref(),
         level: &args.level,
@@ -57062,7 +57337,10 @@ where
     }
 
     let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
-    let database_path = workspace_path.join(".ee").join("ee.db");
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     if !args.dry_run
         && let Err(error) = crate::core::ensure_addressed_database_exists(&database_path)
     {
@@ -59119,13 +59397,6 @@ where
     ProcessExitCode::Success
 }
 
-fn situation_dry_run_required_error() -> DomainError {
-    DomainError::PolicyDenied {
-        message: "Situation compare/link currently supports dry-run mode only.".to_string(),
-        repair: Some("Re-run with `--dry-run`.".to_string()),
-    }
-}
-
 fn handle_situation_compare<W, E>(
     cli: &Cli,
     args: &SituationCompareArgs,
@@ -59136,15 +59407,6 @@ where
     W: Write,
     E: Write,
 {
-    if !args.dry_run {
-        return write_domain_error(
-            &situation_dry_run_required_error(),
-            cli.wants_json(),
-            stdout,
-            stderr,
-        );
-    }
-
     let _ = stderr;
     let options = crate::core::situation::SituationCompareOptions {
         source_situation_id: args.source_situation_id.clone(),
@@ -59191,15 +59453,6 @@ where
     W: Write,
     E: Write,
 {
-    if !args.dry_run {
-        return write_domain_error(
-            &situation_dry_run_required_error(),
-            cli.wants_json(),
-            stdout,
-            stderr,
-        );
-    }
-
     let _ = stderr;
     let options = crate::core::situation::SituationCompareOptions {
         source_situation_id: args.source_situation_id.clone(),
@@ -68646,8 +68899,8 @@ fn is_adjacent_transposition(left: &str, right: &str) -> bool {
 // ============================================================================
 
 /// Known global flags (long form without dashes). Kept in sync with the
-/// `Cli` struct in `src/cli/mod.rs` and the `GLOBAL_OPTIONS` table in
-/// `src/output/mod.rs`. The Levenshtein-based unknown-long-flag detector
+/// `Cli` struct in `src/cli/mod.rs`. JSON help introspects Clap directly.
+/// The Levenshtein-based unknown-long-flag detector
 /// (`detect_unknown_long_flag`) relies on this list being the canonical
 /// set of "things an agent likely meant to type."
 const GLOBAL_FLAGS: &[&str] = &[
@@ -77229,7 +77482,6 @@ mod tests {
     struct GraphSuggestLinksFixture {
         workspace: PathBuf,
         database: PathBuf,
-        connection: crate::db::DbConnection,
         workspace_id: String,
         memories: [String; 3],
     }
@@ -77310,14 +77562,20 @@ mod tests {
             Ok(Self {
                 workspace,
                 database,
-                connection,
                 workspace_id,
                 memories,
             })
         }
 
+        fn connection(&self) -> Result<crate::db::DbConnection, String> {
+            // Setup and inspection use fresh connections around the handler's
+            // independently owned transaction. A retained setup connection must
+            // not supply an old snapshot to a later fault or restoration write.
+            crate::db::DbConnection::open_file(&self.database).map_err(|error| error.to_string())
+        }
+
         fn affinity_snapshot(&self, metrics: &str, version: u32) -> TestResult {
-            self.connection
+            self.connection()?
                 .insert_graph_snapshot(
                     &format!("gsnap_{version:025}"),
                     &crate::db::CreateGraphSnapshotInput {
@@ -77328,7 +77586,7 @@ mod tests {
                         node_count: 2,
                         edge_count: 1,
                         metrics_json: metrics.to_owned(),
-                        content_hash: blake3::hash(metrics.as_bytes()).to_hex().to_string(),
+                        content_hash: format!("blake3:{}", blake3::hash(metrics.as_bytes()).to_hex()),
                         source_generation: 0,
                         expires_at: None,
                     },
@@ -77361,7 +77619,7 @@ mod tests {
                 ],
             })
             .to_string();
-            self.connection
+            self.connection()?
                 .insert_graph_snapshot(
                     "gsnap_0000000000000000000000001",
                     &crate::db::CreateGraphSnapshotInput {
@@ -77372,7 +77630,7 @@ mod tests {
                         node_count: 3,
                         edge_count: 3,
                         metrics_json: metrics.clone(),
-                        content_hash: blake3::hash(metrics.as_bytes()).to_hex().to_string(),
+                        content_hash: format!("blake3:{}", blake3::hash(metrics.as_bytes()).to_hex()),
                         source_generation: 0,
                         expires_at: None,
                     },
@@ -77446,7 +77704,7 @@ mod tests {
 
         fn assert_no_proposals(&self) -> TestResult {
             let candidates = self
-                .connection
+                .connection()?
                 .list_curation_candidates(&self.workspace_id, None, None, None)
                 .map_err(|error| error.to_string())?;
             ensure(
@@ -77550,12 +77808,12 @@ mod tests {
             "repeat proposal deduplicates",
         )?;
         let candidates = fixture
-            .connection
+            .connection()?
             .list_curation_candidates(&fixture.workspace_id, None, None, None)
             .map_err(|error| error.to_string())?;
         ensure_equal(&candidates.len(), &1, "exactly one durable proposal")?;
         let links = fixture
-            .connection
+            .connection()?
             .list_all_memory_links(None)
             .map_err(|error| error.to_string())?;
         ensure_equal(&links.len(), &2, "proposal never creates links directly")
@@ -77578,14 +77836,21 @@ mod tests {
             ),
         ] {
             fixture
-                .connection
+                .connection()?
                 .execute_raw(&format!("ALTER TABLE {table} RENAME TO retained_{table}"))
                 .map_err(|error| format!("plant {table} query failure: {error}"))?;
             let result = fixture.assert_storage_failure(expected);
-            fixture
-                .connection
-                .execute_raw(&format!("ALTER TABLE retained_{table} RENAME TO {table}"))
-                .map_err(|error| format!("restore retained {table}: {error}"))?;
+            let restoration = fixture
+                .connection()
+                .and_then(|connection| {
+                    connection
+                        .execute_raw(&format!("ALTER TABLE retained_{table} RENAME TO {table}"))
+                        .map_err(|error| error.to_string())
+                })
+                .map_err(|error| format!("restore retained {table}: {error}"));
+            if let Err(error) = restoration {
+                return Err(format!("{error}; handler assertion: {result:?}"));
+            }
             result?;
             fixture.assert_no_proposals()?;
         }
@@ -77596,10 +77861,29 @@ mod tests {
     #[test]
     fn graph_suggest_links_malformed_present_affinity_is_not_partially_accepted() -> TestResult {
         let fixture = GraphSuggestLinksFixture::new(true)?;
+        let malformed_json = match fixture.affinity_snapshot("{", 1) {
+            Err(error) => error,
+            Ok(()) => return Err("invalid JSON bypassed the snapshot constraint".to_owned()),
+        };
+        ensure(
+            malformed_json.contains("json_valid(metrics_json)"),
+            format!("invalid JSON must fail its own constraint: {malformed_json}"),
+        )?;
+        ensure(
+            fixture
+                .connection()?
+                .get_latest_graph_snapshot(
+                    &fixture.workspace_id,
+                    crate::db::GraphSnapshotType::RetrievalAffinity,
+                )
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            "invalid JSON must not create a snapshot",
+        )?;
         let valid_edge =
             serde_json::json!({"a": fixture.memories[0], "b": fixture.memories[1], "weight": 2.5});
         let malformed = [
-            "{".to_owned(),
+            "null".to_owned(),
             "{}".to_owned(),
             "{\"edges\":false}".to_owned(),
             serde_json::json!({"edges": [valid_edge.clone(), {"a": "private_invalid_endpoint", "b": 42, "weight": 1.0}]}).to_string(),
@@ -77624,20 +77908,25 @@ mod tests {
     #[cfg(feature = "graph")]
     #[test]
     fn graph_suggest_links_required_content_error_cannot_change_relation() -> TestResult {
-        // Affinity-only endpoints avoid the graph's earlier tombstone read;
-        // this exercises the actual content read used for relation typing.
+        // Affinity-only endpoints reach the suggestion endpoint read. A
+        // nonempty BLOB satisfies the length CHECK but is not typed content.
         let fixture = GraphSuggestLinksFixture::new(false)?;
         fixture.valid_affinity_snapshot()?;
         fixture
-            .connection
+            .connection()?
             .execute_raw(&format!(
-                "UPDATE memories SET content = X'00' WHERE id = '{}'",
+                "UPDATE memories SET content = X'626164' WHERE id = '{}'",
                 fixture.memories[0],
             ))
             .map_err(|error| format!("plant actual malformed content row: {error}"))?;
+        let read = fixture.connection()?.get_memory(&fixture.memories[0]);
         ensure(
-            fixture.connection.get_memory(&fixture.memories[0]).is_err(),
-            "fixture must cause a real required-content read error",
+            matches!(
+                &read,
+                Err(crate::db::DbError::MalformedRow { message, .. })
+                    if message == "content column at index 4 is not text"
+            ),
+            format!("stored BLOB must fail typed content decoding: {read:?}"),
         )?;
         fixture.assert_storage_failure("Failed to query suggestion memory content")?;
         fixture.assert_no_proposals()
@@ -77650,7 +77939,7 @@ mod tests {
         let missing = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(99)).to_string();
         ensure(
             fixture
-                .connection
+                .connection()?
                 .get_memory(&missing)
                 .map_err(|error| error.to_string())?
                 .is_none(),
@@ -77658,7 +77947,7 @@ mod tests {
         )?;
         ensure(
             fixture
-                .connection
+                .connection()?
                 .tombstone_memory(&fixture.memories[2])
                 .map_err(|error| error.to_string())?,
             "tombstone the retained third memory",
@@ -77715,7 +78004,7 @@ mod tests {
             )?;
         }
         let candidates = fixture
-            .connection
+            .connection()?
             .list_curation_candidates(&fixture.workspace_id, None, None, None)
             .map_err(|error| error.to_string())?;
         ensure_equal(&candidates.len(), &1, "only valid pair persisted")?;
@@ -77726,7 +78015,7 @@ mod tests {
         )?;
         ensure(
             fixture
-                .connection
+                .connection()?
                 .list_all_memory_links(None)
                 .map_err(|error| error.to_string())?
                 .is_empty(),
@@ -77771,7 +78060,7 @@ mod tests {
                 "each pair has a distinct proposal",
             )?;
             let stored = fixture
-                .connection
+                .connection()?
                 .get_curation_candidate(&fixture.workspace_id, id)
                 .map_err(|error| error.to_string())?
                 .ok_or("proposal not stored")?;
@@ -77811,7 +78100,7 @@ mod tests {
             "repeat batch returns identical proposal identities",
         )?;
         let stored_ids = fixture
-            .connection
+            .connection()?
             .list_curation_candidates(&fixture.workspace_id, None, None, None)
             .map_err(|error| error.to_string())?
             .into_iter()
@@ -77824,7 +78113,7 @@ mod tests {
         )?;
         ensure(
             fixture
-                .connection
+                .connection()?
                 .list_all_memory_links(None)
                 .map_err(|error| error.to_string())?
                 .is_empty(),
@@ -77849,38 +78138,50 @@ mod tests {
         let second = suggestions[1]["proposedCandidateId"]
             .as_str()
             .ok_or("missing second proposal")?;
-        let retained = format!("retained_{first}");
+        let retained = "curate_00000000000000000000000099";
+        ensure(
+            fixture
+                .connection()?
+                .get_curation_candidate(&fixture.workspace_id, retained)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            "valid retained candidate identity must be unused",
+        )?;
         fixture
-            .connection
+            .connection()?
             .execute_raw(&format!(
                 "UPDATE curation_candidates SET id = '{retained}' WHERE id = '{first}'"
             ))
             .map_err(|error| error.to_string())?;
         fixture
-            .connection
+            .connection()?
             .execute_raw(&format!(
-                "UPDATE curation_candidates SET reason = X'00' WHERE id = '{second}'"
+                "UPDATE curation_candidates SET reason = X'626164' WHERE id = '{second}'"
             ))
             .map_err(|error| error.to_string())?;
         ensure(
             fixture
-                .connection
+                .connection()?
                 .get_curation_candidate(&fixture.workspace_id, first)
                 .map_err(|error| error.to_string())?
                 .is_none(),
             "first proposal must require insertion",
         )?;
+        let read = fixture
+            .connection()?
+            .get_curation_candidate(&fixture.workspace_id, second);
         ensure(
-            fixture
-                .connection
-                .get_curation_candidate(&fixture.workspace_id, second)
-                .is_err(),
-            "later existing row must produce a real read error",
+            matches!(
+                &read,
+                Err(crate::db::DbError::MalformedRow { message, .. })
+                    if message == "reason column at index 9 is not text"
+            ),
+            format!("later stored BLOB must fail typed reason decoding: {read:?}"),
         )?;
         fixture.assert_storage_failure("Failed to query existing suggestion candidate")?;
         ensure(
             fixture
-                .connection
+                .connection()?
                 .get_curation_candidate(&fixture.workspace_id, first)
                 .map_err(|error| error.to_string())?
                 .is_none(),
@@ -77888,8 +78189,8 @@ mod tests {
         )?;
         ensure(
             fixture
-                .connection
-                .get_curation_candidate(&fixture.workspace_id, &retained)
+                .connection()?
+                .get_curation_candidate(&fixture.workspace_id, retained)
                 .map_err(|error| error.to_string())?
                 .is_some(),
             "existing retained proposal must survive the failed batch",
@@ -77902,7 +78203,7 @@ mod tests {
         let fixture = GraphSuggestLinksFixture::new(false)?;
         fixture.three_memory_affinity_snapshot()?;
         fixture
-            .connection
+            .connection()?
             .execute_raw(&format!(
                 "CREATE TRIGGER reject_later_suggestion BEFORE INSERT ON curation_candidates \
              WHEN NEW.source_id = 'suggest:{}:{}' AND EXISTS \
@@ -77912,14 +78213,14 @@ mod tests {
             ))
             .map_err(|error| error.to_string())?;
         let generation = fixture
-            .connection
+            .connection()?
             .get_workspace_generation(&fixture.workspace_id)
             .map_err(|error| error.to_string())?;
         fixture.assert_storage_failure("later_suggestion_insert_failed")?;
         fixture.assert_no_proposals()?;
         ensure_equal(
             &fixture
-                .connection
+                .connection()?
                 .get_workspace_generation(&fixture.workspace_id)
                 .map_err(|error| error.to_string())?,
             &generation,
@@ -79133,34 +79434,116 @@ mod tests {
     }
 
     #[test]
-    fn situation_compare_without_dry_run_is_policy_error() -> TestResult {
-        let (exit, stdout, stderr) = invoke(&[
-            "ee",
-            "--json",
-            "situation",
-            "compare",
-            "fix failing release workflow",
-            "fix broken login crash",
-        ]);
-
-        ensure_equal(
-            &exit,
-            &ProcessExitCode::PolicyDenied,
-            "situation compare policy exit",
-        )?;
-        ensure(stderr.is_empty(), "situation compare policy stderr clean")?;
-        let value: serde_json::Value =
-            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
-        ensure_equal(
-            &value["schema"],
-            &serde_json::json!("ee.error.v2"),
-            "error schema",
-        )?;
-        ensure_equal(
-            &value["error"]["code"],
-            &serde_json::json!("policy_denied"),
-            "policy code",
-        )
+    fn situation_default_previews_match_explicit_dry_run_without_storage_changes() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        for initialized in [false, true] {
+            let workspace_path = root.join(if initialized {
+                "initialized"
+            } else {
+                "storeless"
+            });
+            std::fs::create_dir(&workspace_path).map_err(|error| error.to_string())?;
+            let workspace = workspace_path.to_str().ok_or("workspace is not UTF-8")?;
+            if initialized {
+                let (exit, stdout, _) = invoke(&["ee", "init", "--workspace", workspace, "--json"]);
+                ensure_equal(&exit, &ProcessExitCode::Success, &format!("init: {stdout}"))?;
+            }
+            let snapshot = || -> Result<Vec<Option<Vec<u8>>>, String> {
+                ["ee.db", "ee.db-wal", "ee.db-shm"]
+                    .into_iter()
+                    .map(
+                        |name| match std::fs::read(workspace_path.join(".ee").join(name)) {
+                            Ok(bytes) => Ok(Some(bytes)),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                            Err(error) => Err(error.to_string()),
+                        },
+                    )
+                    .collect()
+            };
+            let before = snapshot()?;
+            for command in ["compare", "link"] {
+                let mut args = vec![
+                    "ee",
+                    "--json",
+                    "--workspace",
+                    workspace,
+                    "situation",
+                    command,
+                    "fix failing release workflow",
+                    "fix broken login crash",
+                    "--source-situation-id",
+                    "sit.release_bug",
+                    "--target-situation-id",
+                    "sit.login_bug",
+                    "--evidence-id",
+                    "feat.shared.fix",
+                ];
+                if command == "link" {
+                    args.extend(["--created-at", "2026-05-01T00:00:00Z"]);
+                }
+                let mut default_preview = None;
+                for explicit in [false, true] {
+                    if explicit {
+                        args.push("--dry-run");
+                    }
+                    let (exit, stdout, stderr) = invoke(&args);
+                    ensure_equal(
+                        &exit,
+                        &ProcessExitCode::Success,
+                        &format!("{command}: {stdout}"),
+                    )?;
+                    ensure(stderr.is_empty(), "preview stderr clean")?;
+                    let value: serde_json::Value =
+                        serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+                    ensure_equal(
+                        &value["success"],
+                        &serde_json::json!(true),
+                        "preview success",
+                    )?;
+                    ensure_equal(
+                        &value["data"]["dryRun"],
+                        &serde_json::json!(true),
+                        "preview only",
+                    )?;
+                    if command == "compare" {
+                        ensure(
+                            value["data"]["relation"].is_string(),
+                            "comparison has relation",
+                        )?;
+                    } else {
+                        ensure_equal(
+                            &value["data"]["wouldWrite"],
+                            &serde_json::json!(false),
+                            "link does not write",
+                        )?;
+                        ensure(
+                            value["data"]["curationCandidate"].is_object(),
+                            "link has curation plan",
+                        )?;
+                    }
+                    if let Some(default) = &default_preview {
+                        ensure_equal(&value, default, "default and explicit previews match")?;
+                    } else {
+                        default_preview = Some(value);
+                    }
+                    ensure_equal(
+                        &snapshot()?,
+                        &before,
+                        "preview preserves database and sidecars",
+                    )?;
+                    ensure_equal(
+                        &workspace_path.join(".ee").exists(),
+                        &initialized,
+                        "preview never initializes store",
+                    )?;
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -81592,6 +81975,394 @@ mod tests {
         )?;
         ensure_contains(&stdout, "\"command\":\"help\"", "help-json command field")?;
         ensure(stderr.is_empty(), "help-json stderr must be empty")
+    }
+
+    fn parsed_help_for_test(args: &[&str]) -> Result<serde_json::Value, String> {
+        let (exit, stdout, stderr) = invoke(args);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            &format!("JSON help {args:?}"),
+        )?;
+        ensure(stderr.is_empty(), format!("JSON help stderr: {stderr}"))?;
+        serde_json::from_str(&stdout).map_err(|error| error.to_string())
+    }
+
+    fn help_option_for_test<'a>(
+        help: &'a serde_json::Value,
+        id: &str,
+    ) -> Result<&'a serde_json::Value, String> {
+        help.pointer("/data/options")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|options| options.iter().find(|option| option["id"] == id))
+            .ok_or_else(|| format!("missing help option {id}"))
+    }
+
+    #[test]
+    fn json_help_and_introspect_inventory_match_public_clap_without_store_access() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("absent-workspace");
+        let workspace_arg = workspace.to_string_lossy();
+        let help = parsed_help_for_test(&["ee", "--workspace", &workspace_arg, "--help-json"])?;
+        let introspect =
+            parsed_help_for_test(&["ee", "--workspace", &workspace_arg, "introspect", "--json"])?;
+        for route in [vec!["--help-json"], vec!["introspect", "--json"]] {
+            let mut args = vec![
+                "ee",
+                "--workspace",
+                "campaign",
+                "--max-output-tokens",
+                "2000000",
+            ];
+            args.extend(route.iter().copied());
+            let governed = parsed_help_for_test(&args)?;
+            let expected_data = if route[0] == "--help-json" {
+                &help["data"]
+            } else {
+                &introspect["data"]
+            };
+            ensure_equal(
+                &governed["data"],
+                expected_data,
+                "governed metadata preserves the complete parser inventory",
+            )?;
+            ensure(
+                super::ACTIVE_OUTPUT_GOVERNOR.with(|state| {
+                    state
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|active| active.workspace_root.is_none())
+                }),
+                "metadata governor must not resolve a workspace or registry alias",
+            )?;
+            args[4] = "1";
+            let bounded = parsed_help_for_test(&args)?;
+            ensure(
+                bounded["degraded"].as_array().is_some_and(|entries| {
+                    entries
+                        .iter()
+                        .any(|entry| entry["code"] == "output_budget_unsatisfiable")
+                }),
+                "metadata-only routing must still enforce a ceiling too small for its payload",
+            )?;
+            ensure(
+                bounded.pointer("/data/commands").is_none(),
+                "an unsatisfiable ceiling must not emit the full metadata inventory",
+            )?;
+        }
+        let mut parser = Cli::command();
+        parser.build();
+        let expected = parser
+            .get_subcommands()
+            .filter(|command| !command.is_hide_set())
+            .map(|command| command.get_name().to_owned())
+            .collect::<BTreeSet<_>>();
+        let help_commands = help
+            .pointer("/data/commands")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "help command array missing".to_owned())?;
+        let help_names = help_commands
+            .iter()
+            .map(|command| {
+                command["name"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "help command name missing".to_owned())
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let introspect_commands = introspect
+            .pointer("/data/commands")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| "introspect command map missing".to_owned())?;
+        let introspect_names = introspect_commands.keys().cloned().collect::<BTreeSet<_>>();
+        let capabilities = super::public_cli_command_entries();
+        let capability_roots = capabilities
+            .iter()
+            .filter(|entry| !entry.name.contains(' '))
+            .map(|entry| entry.name.clone())
+            .collect::<BTreeSet<_>>();
+        ensure_equal(
+            &help_names,
+            &expected,
+            "JSON help exact public root inventory",
+        )?;
+        ensure_equal(
+            &introspect_names,
+            &expected,
+            "introspect exact public root inventory",
+        )?;
+        ensure_equal(
+            &capability_roots,
+            &expected,
+            "capabilities exact public root inventory",
+        )?;
+        ensure_equal(
+            &help_commands.len(),
+            &expected.len(),
+            "no duplicate root commands",
+        )?;
+        for command in help_commands {
+            let name = command["name"]
+                .as_str()
+                .ok_or_else(|| "command name missing".to_owned())?;
+            ensure_equal(
+                &introspect_commands[name],
+                command,
+                "shared full command metadata",
+            )?;
+        }
+        let remember = &introspect_commands["remember"];
+        ensure(
+            remember["options"].as_array().is_some_and(|options| {
+                options
+                    .iter()
+                    .any(|option| option["id"] == "attempt_outcome")
+            }),
+            "introspect includes actual attempt outcome option",
+        )?;
+        ensure(
+            remember["inheritedGlobalOptions"]
+                .as_array()
+                .is_some_and(|ids| ids.iter().any(|id| id == "json")),
+            "recursive inventory references global json definition",
+        )?;
+        ensure(
+            !remember["options"]
+                .as_array()
+                .is_some_and(|options| options.iter().any(|option| option["id"] == "json")),
+            "recursive inventory does not repeat inherited global definitions",
+        )?;
+        ensure(
+            introspect.pointer("/data/globalOptions/json/long")
+                == Some(&serde_json::json!("--json")),
+            "inherited global ID resolves to a real definition",
+        )?;
+        ensure(
+            !workspace.exists(),
+            "introspection must not create the absent workspace",
+        )?;
+        ensure_equal(
+            &fs::read_dir(temp.path())
+                .map_err(|error| error.to_string())?
+                .count(),
+            &0,
+            "introspection creates no stores or side files",
+        )
+    }
+
+    #[test]
+    fn json_help_scopes_required_positionals_enums_defaults_and_inherited_flags() -> TestResult {
+        let help = parsed_help_for_test(&["ee", "situation", "compare", "--help-json"])?;
+        ensure_equal(
+            &help["data"]["path"],
+            &serde_json::json!(["situation", "compare"]),
+            "canonical nested help path",
+        )?;
+        let usage = help["data"]["usage"]
+            .as_str()
+            .ok_or_else(|| "usage missing".to_owned())?;
+        ensure_contains(usage, "ee situation compare", "scoped usage")?;
+        ensure_contains(
+            usage,
+            "<SOURCE_TEXT> <TARGET_TEXT>",
+            "real required positional usage",
+        )?;
+        let args = help["data"]["args"]
+            .as_array()
+            .ok_or_else(|| "positional arguments missing".to_owned())?;
+        ensure_equal(&args.len(), &2, "two required comparison arguments")?;
+        for (index, name) in ["SOURCE_TEXT", "TARGET_TEXT"].iter().enumerate() {
+            ensure_equal(
+                &args[index]["name"],
+                &serde_json::json!(name),
+                "real positional name",
+            )?;
+            ensure_equal(
+                &args[index]["index"],
+                &serde_json::json!(index + 1),
+                "positional order",
+            )?;
+            ensure_equal(
+                &args[index]["required"],
+                &serde_json::json!(true),
+                "required positional",
+            )?;
+            ensure_equal(
+                &args[index]["minValues"],
+                &serde_json::json!(1),
+                "positional minimum arity",
+            )?;
+            ensure_equal(
+                &args[index]["maxValues"],
+                &serde_json::json!(1),
+                "positional maximum arity",
+            )?;
+        }
+        let json = help_option_for_test(&help, "json")?;
+        ensure_equal(
+            &json["short"],
+            &serde_json::json!("-j"),
+            "inherited short flag",
+        )?;
+        ensure_equal(
+            &json["global"],
+            &serde_json::json!(true),
+            "inherited global marker",
+        )?;
+        ensure_equal(
+            &json["maxValues"],
+            &serde_json::json!(0),
+            "boolean flag takes no values",
+        )?;
+        let cards = help_option_for_test(&help, "cards")?;
+        ensure_equal(
+            &cards["possibleValues"],
+            &serde_json::json!(["none", "summary", "math", "full"]),
+            "declared enum values",
+        )?;
+        ensure_equal(
+            &cards["defaultValues"],
+            &serde_json::json!(["math"]),
+            "actual enum default",
+        )?;
+        let source_id = help_option_for_test(&help, "source_situation_id")?;
+        ensure_equal(
+            &source_id["valueNames"],
+            &serde_json::json!(["SITUATION_ID"]),
+            "real option value name",
+        )?;
+        ensure(
+            !help["data"]["options"]
+                .as_array()
+                .is_some_and(|options| options.iter().any(|option| option["long"] == "--against")),
+            "help must not invent an unsupported comparison flag",
+        )?;
+        let group = parsed_help_for_test(&["ee", "situation", "--help-json"])?;
+        ensure_equal(
+            &group["data"]["path"],
+            &serde_json::json!(["situation"]),
+            "missing subcommand permits scoped help",
+        )?;
+        ensure(
+            group["data"]["commands"]
+                .as_array()
+                .is_some_and(|commands| {
+                    commands.iter().any(|command| command["name"] == "compare")
+                }),
+            "group help includes real child commands",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn json_help_preserves_visible_aliases_and_optional_value_arity() -> TestResult {
+        let alias = parsed_help_for_test(&["ee", "robot-docs", "--help-json"])?;
+        ensure_equal(
+            &alias["data"]["path"],
+            &serde_json::json!(["agent-docs"]),
+            "Clap resolves command alias canonically",
+        )?;
+        ensure_equal(
+            &alias["data"]["aliases"],
+            &serde_json::json!(["robot-docs"]),
+            "visible command alias",
+        )?;
+        let audit = parsed_help_for_test(&["ee", "audit", "timeline", "--help-json"])?;
+        ensure_equal(
+            &help_option_for_test(&audit, "action")?["aliases"],
+            &serde_json::json!(["--event-type"]),
+            "visible option alias",
+        )?;
+        let pack = parsed_help_for_test(&["ee", "pack", "--help-json"])?;
+        let no_meta = help_option_for_test(&pack, "no_meta")?;
+        ensure_equal(
+            &no_meta["minValues"],
+            &serde_json::json!(0),
+            "optional boolean minimum arity",
+        )?;
+        ensure_equal(
+            &no_meta["maxValues"],
+            &serde_json::json!(1),
+            "optional boolean maximum arity",
+        )?;
+        ensure_equal(
+            &no_meta["requireEquals"],
+            &serde_json::json!(true),
+            "optional boolean equals requirement",
+        )?;
+        let remember = parsed_help_for_test(&["ee", "remember", "--help-json"])?;
+        ensure_equal(
+            &help_option_for_test(&remember, "level")?["defaultValues"],
+            &serde_json::json!(["episodic"]),
+            "real remember default",
+        )?;
+        // Kind intentionally accepts project-specific extensions; do not turn
+        // descriptive examples into a fabricated closed value set.
+        ensure_equal(
+            &help_option_for_test(&remember, "kind")?["possibleValues"],
+            &serde_json::Value::Null,
+            "open string remains open",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn json_help_never_masks_invalid_arguments_or_literal_flag_values() -> TestResult {
+        for args in [
+            vec!["ee", "--json", "not-a-command", "--help-json"],
+            vec![
+                "ee",
+                "--json",
+                "situation",
+                "compare",
+                "--help-json",
+                "--unknown-option",
+            ],
+            vec![
+                "ee",
+                "--json",
+                "situation",
+                "compare",
+                "--help-json",
+                "--cards",
+                "invalid",
+            ],
+            vec!["ee", "--json", "situation", "compare"],
+            vec!["ee", "--json", "situation", "compare", "--", "--help-json"],
+            vec![
+                "ee",
+                "--json",
+                "--policy=--help-json",
+                "situation",
+                "compare",
+            ],
+            vec![
+                "ee",
+                "--json",
+                "situation",
+                "compare",
+                "--source-situation-id=--help-json",
+            ],
+        ] {
+            let (exit, stdout, stderr) = invoke(&args);
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Usage,
+                &format!("strict parsing {args:?}"),
+            )?;
+            let error: serde_json::Value = serde_json::from_str(&stdout)
+                .map_err(|error| format!("{error}: {stdout}; stderr={stderr}"))?;
+            ensure_equal(
+                &error["schema"],
+                &serde_json::json!("ee.error.v2"),
+                "invalid invocation stays an error",
+            )?;
+            ensure(
+                error.get("data").is_none(),
+                "invalid invocation must not return successful help",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -86161,6 +86932,11 @@ mod tests {
         match default_parsed.command {
             Some(Command::Handoff(HandoffCommand::Create(args))) => {
                 ensure_equal(&args.redaction, &None, "default redaction")?;
+                ensure_equal(
+                    &args.command_timeout_ms,
+                    &2_000,
+                    "interactive probe default",
+                )?;
             }
             _ => return Err("expected handoff create command".to_string()),
         }
@@ -86181,6 +86957,31 @@ mod tests {
             }
             _ => Err("expected handoff create command".to_string()),
         }
+    }
+
+    #[test]
+    fn handoff_probe_timeouts_parse_override_and_reject_zero() -> TestResult {
+        for (surface, extra) in [
+            ("preview", Vec::new()),
+            ("create", vec!["--out", "handoff.json"]),
+        ] {
+            let mut args = vec!["ee", "handoff", surface];
+            args.extend(extra);
+            args.extend(["--command-timeout-ms", "35000"]);
+            let parsed = Cli::try_parse_from(&args).map_err(|error| error.to_string())?;
+            let timeout = match parsed.command {
+                Some(Command::Handoff(HandoffCommand::Preview(args))) => args.command_timeout_ms,
+                Some(Command::Handoff(HandoffCommand::Create(args))) => args.command_timeout_ms,
+                _ => return Err("expected handoff preview/create".to_owned()),
+            };
+            ensure_equal(&timeout, &35_000, "explicit long source budget")?;
+            *args.last_mut().ok_or("timeout argument")? = "0";
+            ensure(
+                Cli::try_parse_from(&args).is_err(),
+                "zero source timeout must be rejected",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -86967,6 +87768,49 @@ mod tests {
                 super::parse_relevance_floor_arg(raw).is_ok(),
                 format!("relevance floor {raw} should be accepted"),
             )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_pack_relevance_floor_reaches_task_and_query_file_arguments() -> TestResult {
+        for prefix in [
+            vec!["ee", "pack", "task"],
+            vec!["ee", "pack", "--query-file", "task.eeq.json"],
+            vec!["ee", "pack", "build", "--query-file", "task.eeq.json"],
+        ] {
+            for raw in ["0", "0.5", "1"] {
+                let mut argv = prefix.clone();
+                argv.extend(["--relevance-floor", raw]);
+                let parsed = Cli::try_parse_from(argv).map_err(|error| error.to_string())?;
+                let Some(Command::Pack(args)) = parsed.command else {
+                    return Err("expected canonical pack".to_owned());
+                };
+                let value = match &args.command {
+                    Some(super::PackCommand::Build(build)) => build.relevance_floor,
+                    None if args.query_file.is_some() => {
+                        args.legacy_build_args()
+                            .map_err(|error| error.to_string())?
+                            .relevance_floor
+                    }
+                    None => args.relevance_floor,
+                    _ => return Err("unexpected pack mode".to_owned()),
+                };
+                ensure_equal(
+                    &value,
+                    &Some(raw.parse::<f32>().map_err(|error| error.to_string())?),
+                    "pack relevance floor",
+                )?;
+            }
+            for raw in ["-0.1", "1.1", "NaN", "inf"] {
+                let flag = format!("--relevance-floor={raw}");
+                let mut argv = prefix.clone();
+                argv.push(&flag);
+                ensure(
+                    Cli::try_parse_from(argv).is_err(),
+                    format!("invalid canonical pack floor {raw}"),
+                )?;
+            }
         }
         Ok(())
     }
@@ -91960,6 +92804,43 @@ demos:
     }
 
     #[test]
+    fn remember_database_target_parses_for_all_modes_and_conflicts_with_global() -> TestResult {
+        let database = "selected campaign/.ee-campaign/ee.db";
+        for mode in [
+            vec!["Explicit target memory"],
+            vec!["--batch", "--stdin"],
+            vec!["--from-commit", "HEAD"],
+        ] {
+            let mut invocation = vec!["ee", "remember", "--database", database];
+            invocation.extend(mode);
+            let parsed = Cli::try_parse_from(invocation)
+                .map_err(|error| format!("explicit remember target: {error}"))?;
+            let Some(Command::Remember(args)) = parsed.command else {
+                return Err("expected Remember command".to_owned());
+            };
+            ensure_equal(
+                &args.database.as_deref(),
+                &Some(Path::new(database)),
+                "remember retains the exact selected database",
+            )?;
+        }
+        let conflict = Cli::try_parse_from([
+            "ee",
+            "remember",
+            "Ambiguous target",
+            "--global",
+            "--database",
+            database,
+        ])
+        .expect_err("global and an explicit local database are conflicting targets");
+        ensure_equal(
+            &conflict.kind(),
+            &clap::error::ErrorKind::ArgumentConflict,
+            "conflicting targets must fail during parsing",
+        )
+    }
+
+    #[test]
     fn remember_command_accepts_workflow_flag() -> TestResult {
         let parsed = Cli::try_parse_from([
             "ee",
@@ -95228,6 +96109,68 @@ demos:
     }
 
     #[test]
+    fn public_pack_ledger_projection_preserves_only_canonical_promotion_postures() {
+        for posture in [
+            "eligible",
+            "blocked_undeclared",
+            "blocked_invalid_declared_size",
+            "blocked_duplicate_slots",
+            "blocked_duplicate_members",
+            "blocked_multiple_families",
+            "blocked_overfull",
+            "blocked_out_of_range_slots",
+            "blocked_unslotted_members",
+            "blocked_incomplete",
+            "blocked_invalid_composition",
+        ] {
+            let fields = serde_json::json!({
+                "promotionPosture": posture,
+                "memberships": [{"promotionPosture": posture}],
+                "unrelatedField": "blocked_incomplete"
+            });
+            let projected = super::public_pack_ledger_projection(&fields);
+            assert_eq!(projected["promotionPosture"], serde_json::json!(posture));
+            assert_eq!(
+                projected["memberships"][0]["promotionPosture"],
+                serde_json::json!(posture)
+            );
+            assert!(
+                projected["unrelatedField"]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("[REDACTED:public_replay_text:")),
+                "posture vocabulary must not bypass redaction in unrelated fields"
+            );
+        }
+
+        const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+        let embedded_secret = format!("blocked_{SECRET}");
+        let embedded_placeholder = format!(
+            "[REDACTED:public_replay_text:{}]",
+            blake3::hash(embedded_secret.as_bytes()).to_hex()
+        );
+        for (unknown, expected) in [
+            (SECRET.to_owned(), "[REDACTED:aws_access_key]".to_owned()),
+            (embedded_secret, embedded_placeholder),
+        ] {
+            let fields = serde_json::json!({
+                "promotionPosture": unknown,
+                "memberships": [{"promotionPosture": unknown}]
+            });
+            let projected = super::public_pack_ledger_projection(&fields);
+            for pointer in ["/promotionPosture", "/memberships/0/promotionPosture"] {
+                assert_eq!(
+                    projected
+                        .pointer(pointer)
+                        .and_then(serde_json::Value::as_str),
+                    Some(expected.as_str()),
+                    "unknown {pointer} uses the exact scanner-specific redaction contract"
+                );
+            }
+            assert!(!projected.to_string().contains(SECRET));
+        }
+    }
+
+    #[test]
     fn public_pack_ledger_projection_redacts_every_unbounded_replay_string() {
         const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
         let secret_memory_id = format!("mem_{SECRET}000000");
@@ -95392,6 +96335,13 @@ demos:
             serde_json::json!(family_alias),
             "omitted replay preserves the same frozen public family alias"
         );
+        for field in ["selectedItems", "omittedItems"] {
+            assert_eq!(
+                public[field][0]["attemptFamilyMultiplicity"],
+                ledger[field][0]["attemptFamilyMultiplicity"],
+                "replay preserves the full validated {field} family snapshot"
+            );
+        }
         assert!(public["selectedItems"][0].get("diversityKey").is_none());
         assert!(
             public["selectedItems"][0]["diversityKeyHash"]

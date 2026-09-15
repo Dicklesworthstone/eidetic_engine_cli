@@ -9,9 +9,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -107,7 +105,9 @@ const AGENT_MAIL_HEALTH_PROBE_TIMEOUT_MS: u64 = 75;
 pub const AGENT_MAIL_SNAPSHOT_TEMPLATE_AGENT: &str = "<AGENT_NAME>";
 pub const AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH: &str = "/private/tmp/ee-agent-mail-snapshot.json";
 pub const AGENT_MAIL_SNAPSHOT_PRODUCER_COMMAND: &str = "scripts/agent_mail_snapshot.sh --project . --agent <AGENT_NAME> --json --output /private/tmp/ee-agent-mail-snapshot.json";
-pub const DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS: u64 = 35_000;
+/// Interactive probes fail open promptly; callers can explicitly budget longer
+/// for large trackers using `--command-timeout-ms`.
+pub const DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS: u64 = 2_000;
 const MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE: &str =
     super::memory_drift::MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE;
 const MEMORY_DRIFT_REPORT_UNAVAILABLE_MESSAGE_PREFIX: &str =
@@ -130,7 +130,6 @@ const MAX_SWARM_REPLAY_DEGRADED_CODES: usize = 12;
 const MAX_SWARM_REPLAY_ARTIFACT_HASHES: usize = 12;
 const MEMORY_DRIFT_SWARM_BRIEF_LIMIT: u32 = 16;
 const SWARM_BRIEF_COMMAND_OUTPUT_LIMIT_BYTES: usize = 10 * 1024 * 1024;
-const SWARM_BRIEF_COMMAND_PIPE_BUFFER_BYTES: usize = 8192;
 const STALLED_BEAD_ACTIVE_WINDOW_SECONDS: i64 = 6 * 60 * 60;
 const STALLED_BEAD_QUIET_WINDOW_SECONDS: i64 = 24 * 60 * 60;
 
@@ -1241,88 +1240,44 @@ impl SwarmBriefCommandRunner for SystemSwarmBriefCommandRunner {
         cwd: &Path,
         timeout_ms: u64,
     ) -> Result<SwarmBriefCommandOutput, SwarmBriefCommandError> {
-        let timeout_ms = timeout_ms.max(1);
-        let timeout = Duration::from_millis(timeout_ms);
-        let mut child = Command::new(program)
-            .args(args)
-            .current_dir(cwd)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    SwarmBriefCommandError::Unavailable(format!("{program} was not found on PATH."))
-                } else {
-                    SwarmBriefCommandError::Unavailable(error.to_string())
-                }
-            })?;
-
-        let mut stdout_handle = child.stdout.take().ok_or_else(|| {
-            SwarmBriefCommandError::Unavailable("Failed to capture stdout pipe".to_string())
-        })?;
-        let mut stderr_handle = child.stderr.take().ok_or_else(|| {
-            SwarmBriefCommandError::Unavailable("Failed to capture stderr pipe".to_string())
-        })?;
-
-        let stdout_thread = thread::spawn(move || {
-            read_swarm_brief_pipe_limited(
-                &mut stdout_handle,
-                SWARM_BRIEF_COMMAND_OUTPUT_LIMIT_BYTES,
-            )
-        });
-
-        let stderr_thread = thread::spawn(move || {
-            read_swarm_brief_pipe_limited(
-                &mut stderr_handle,
-                SWARM_BRIEF_COMMAND_OUTPUT_LIMIT_BYTES,
-            )
-        });
-
-        let started_at = Instant::now();
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => {
-                    let elapsed = started_at.elapsed();
-                    if elapsed >= timeout {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        // Reap drain threads even on timeout to prevent resource leak
-                        // (detached threads accumulate under repeated timeouts from flaky
-                        // external tools like br/bv/cass in swarm scenarios).
-                        let _ = stdout_thread.join();
-                        let _ = stderr_thread.join();
-                        return Err(SwarmBriefCommandError::TimedOut { timeout_ms });
-                    }
-                    thread::sleep(Duration::from_millis(10).min(timeout.saturating_sub(elapsed)));
-                }
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    // Reap drain threads to prevent leak on I/O errors.
-                    let _ = stdout_thread.join();
-                    let _ = stderr_thread.join();
-                    return Err(SwarmBriefCommandError::Unavailable(error.to_string()));
-                }
-            }
+        use crate::core::source_run::{
+            SourceRunExecution, SourceRunExecutor, SourceRunKind, SystemSourceRunExecutor,
         };
-
-        let stdout_bytes = join_swarm_brief_pipe_reader(stdout_thread, "stdout")?;
-        let stderr_bytes = join_swarm_brief_pipe_reader(stderr_thread, "stderr")?;
-
-        let stdout = String::from_utf8(stdout_bytes)
-            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-        let stderr = String::from_utf8(stderr_bytes)
-            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-
-        if status.success() {
-            Ok(SwarmBriefCommandOutput { stdout, stderr })
-        } else {
-            Err(SwarmBriefCommandError::Failed {
-                status: status.code(),
+        let timeout_ms = timeout_ms.max(1);
+        let request = SourceRunSwarmBriefRunner::new(SourceRunKind::SwarmCollector)
+            .build_request(program, args, cwd, timeout_ms);
+        // Use the shared watchdog's raw capture. Its public evidence renderer
+        // redacts text and keeps diagnostic tails, neither of which is safe to
+        // feed back into source JSON parsers as a complete successful response.
+        match SystemSourceRunExecutor.execute(&request) {
+            SourceRunExecution::Completed {
+                exit_code,
                 stdout,
                 stderr,
-            })
+                ..
+            } => {
+                let stdout = stdout
+                    .into_complete_output()
+                    .map_err(SwarmBriefCommandError::Unavailable)?;
+                let stderr = stderr
+                    .into_complete_output()
+                    .map_err(SwarmBriefCommandError::Unavailable)?;
+                if exit_code == Some(0) {
+                    Ok(SwarmBriefCommandOutput { stdout, stderr })
+                } else {
+                    Err(SwarmBriefCommandError::Failed {
+                        status: exit_code,
+                        stdout,
+                        stderr,
+                    })
+                }
+            }
+            SourceRunExecution::TimedOut { .. } => {
+                Err(SwarmBriefCommandError::TimedOut { timeout_ms })
+            }
+            SourceRunExecution::SpawnFailed { error, .. } => Err(
+                SwarmBriefCommandError::Unavailable(format!("{program} spawn failed: {error}")),
+            ),
         }
     }
 }
@@ -1330,13 +1285,10 @@ impl SwarmBriefCommandRunner for SystemSwarmBriefCommandRunner {
 /// Bridge `SwarmBriefCommandRunner` calls onto the unified
 /// `source_run::run_source_command` watchdog (bd-12v87.3).
 ///
-/// This is the harness seam that lets swarm-brief / work-packet / doctor
-/// source collectors share the same bounded-subprocess machinery as the
-/// rest of `ee` instead of reinventing timeout + pipe-drain logic each
-/// place. Wiring the existing call sites onto this adapter is deferred to
-/// follow-up integration slices; the seam exists so those slices can land
-/// behind a single API change rather than scattering source-run plumbing
-/// across every collector.
+/// `SystemSwarmBriefCommandRunner` shares this request builder and the raw
+/// executor for complete source parsing. This evidence adapter returns redacted
+/// diagnostic tails; it is useful when the consumer needs an evidence summary
+/// rather than original source JSON.
 ///
 /// `kind` labels every spawned subprocess with its caller class so the
 /// emitted `SourceRunEvidence` carries enough provenance for the watchdog
@@ -1368,12 +1320,9 @@ impl SourceRunSwarmBriefRunner {
             program.to_string(),
             "swarm_brief_command".to_string(),
         );
-        // Match `SystemSwarmBriefCommandRunner`'s 10 MiB cap so the
-        // adapter is a behavior-compatible drop-in for the existing
-        // collectors. Without raising `tail_bytes_max`, source_run's
-        // default 8 KiB tail would silently truncate long `git log`
-        // / `br ready` outputs that the consuming parsers expect to
-        // see in full.
+        // Retain the production parser's 10 MiB cap. The system runner rejects
+        // incomplete captures instead of parsing the default 8 KiB diagnostic
+        // tail as a complete git log or br response.
         crate::core::source_run::SourceRunRequest::new(
             source,
             command,
@@ -1385,9 +1334,8 @@ impl SourceRunSwarmBriefRunner {
 
 /// Translate a `SourceRunEvidence` into the legacy
 /// `Result<SwarmBriefCommandOutput, SwarmBriefCommandError>` shape every
-/// swarm-brief source adapter already consumes. Capped output tails carry
-/// the same semantics as `SystemSwarmBriefCommandRunner` (truncate-and-
-/// keep) so consumers do not need to learn a new partial-read contract.
+/// swarm-brief source adapter already consumes. These are redacted diagnostic
+/// tails; production source parsers use the complete raw executor capture.
 fn translate_source_run_evidence(
     evidence: crate::core::source_run::SourceRunEvidence,
 ) -> Result<SwarmBriefCommandOutput, SwarmBriefCommandError> {
@@ -1436,39 +1384,6 @@ impl SwarmBriefCommandRunner for SourceRunSwarmBriefRunner {
         let evidence = crate::core::source_run::run_source_command(&request);
         translate_source_run_evidence(evidence)
     }
-}
-
-fn join_swarm_brief_pipe_reader(
-    handle: thread::JoinHandle<io::Result<Vec<u8>>>,
-    stream_name: &str,
-) -> Result<Vec<u8>, SwarmBriefCommandError> {
-    match handle.join() {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(error)) => Err(SwarmBriefCommandError::Unavailable(format!(
-            "source command {stream_name} pipe read failed: {error}"
-        ))),
-        Err(_panic) => Err(SwarmBriefCommandError::Unavailable(format!(
-            "source command {stream_name} reader thread panicked"
-        ))),
-    }
-}
-
-fn read_swarm_brief_pipe_limited<R: io::Read>(reader: &mut R, limit: usize) -> io::Result<Vec<u8>> {
-    let mut output = Vec::new();
-    let mut buffer = [0_u8; SWARM_BRIEF_COMMAND_PIPE_BUFFER_BYTES];
-    loop {
-        let read = match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => read,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        };
-        let remaining = limit.saturating_sub(output.len());
-        if remaining > 0 {
-            output.extend_from_slice(&buffer[..read.min(remaining)]);
-        }
-    }
-    Ok(output)
 }
 
 /// Output from one source adapter.
@@ -3215,7 +3130,7 @@ fn parse_miss_audit_observation(entry: &StoredAuditEntry) -> Option<MissAuditObs
 /// workspace DB leaves `knowledge_gaps` empty rather than failing the brief.
 fn attach_knowledge_gaps(report: &mut SwarmBriefReport, workspace: &Path) {
     let database_path = workspace.join(".ee").join("ee.db");
-    let Ok(connection) = DbConnection::open_file(&database_path) else {
+    let Ok(connection) = DbConnection::open_file_read_only(&database_path) else {
         return;
     };
     let Ok(entries) = connection.list_audit_by_action(
@@ -10432,12 +10347,91 @@ fn redact_path_label_with_home(path: &Path, home: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::collections::BTreeMap;
-    use std::rc::Rc;
 
     use super::*;
     use crate::testing::{TestResult, ensure_equal};
+
+    #[test]
+    fn knowledge_gap_inspection_does_not_create_a_missing_store() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let marker = workspace.path().join(".ee");
+        let mut report = SwarmBriefReport::empty(workspace.path());
+        attach_knowledge_gaps(&mut report, workspace.path());
+        ensure_equal(&marker.exists(), &false, "missing marker stays absent")?;
+        std::fs::create_dir(&marker).map_err(|error| error.to_string())?;
+        attach_knowledge_gaps(&mut report, workspace.path());
+        let entries = std::fs::read_dir(&marker)
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&entries.len(), &0, "empty marker remains empty")?;
+        ensure_equal(
+            &report.knowledge_gaps.len(),
+            &0,
+            "no invented knowledge gaps",
+        )
+    }
+
+    #[test]
+    fn knowledge_gap_inspection_reads_existing_audits_without_mutating_them() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let marker = workspace.path().join(".ee");
+        std::fs::create_dir(&marker).map_err(|error| error.to_string())?;
+        let database = marker.join("ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        for _ in 0..3 {
+            connection
+                .insert_audit(
+                    &crate::db::generate_audit_id(),
+                    &crate::db::CreateAuditInput {
+                        workspace_id: None,
+                        actor: None,
+                        action: audit_actions::SEARCH_MISS_RECORDED.to_owned(),
+                        target_type: Some("search".to_owned()),
+                        target_id: None,
+                        details: Some(
+                            json!({"queryHash": "fixture-query", "reason": "no_results"})
+                                .to_string(),
+                        ),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let before = connection
+            .list_audit_by_action(audit_actions::SEARCH_MISS_RECORDED, None)
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let mut report = SwarmBriefReport::empty(workspace.path());
+        attach_knowledge_gaps(&mut report, workspace.path());
+        ensure_equal(
+            &report.knowledge_gaps.len(),
+            &1,
+            "one real repeated miss cluster",
+        )?;
+        ensure_equal(
+            &report.knowledge_gaps[0].query_hash,
+            &"fixture-query".to_owned(),
+            "query hash",
+        )?;
+        ensure_equal(
+            &report.knowledge_gaps[0].miss_count,
+            &3,
+            "exact persisted miss count",
+        )?;
+        let connection =
+            DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+        let after = connection
+            .list_audit_by_action(audit_actions::SEARCH_MISS_RECORDED, None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &after,
+            &before,
+            "read-only inspection preserves every audit row",
+        )
+    }
 
     #[derive(Default)]
     struct FakeRunner {
@@ -10513,74 +10507,67 @@ mod tests {
         }
     }
 
-    struct DrainCountingReader {
-        remaining: usize,
-        chunk_size: usize,
-        consumed: Rc<Cell<usize>>,
-    }
-
-    impl io::Read for DrainCountingReader {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            if self.remaining == 0 {
-                return Ok(0);
-            }
-            let read = self.remaining.min(self.chunk_size).min(buf.len());
-            buf[..read].fill(b'x');
-            self.remaining -= read;
-            self.consumed.set(self.consumed.get() + read);
-            Ok(read)
-        }
-    }
-
-    struct FailingReader;
-
-    impl io::Read for FailingReader {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::other("synthetic pipe failure"))
-        }
-    }
-
+    #[cfg(unix)]
     #[test]
-    fn swarm_brief_pipe_limit_drains_after_retained_cap() {
-        let consumed = Rc::new(Cell::new(0));
-        let mut reader = DrainCountingReader {
-            remaining: 32,
-            chunk_size: 5,
-            consumed: Rc::clone(&consumed),
-        };
-
-        let output = read_swarm_brief_pipe_limited(&mut reader, 7).expect("pipe drains");
-
-        assert_eq!(output, b"xxxxxxx");
-        assert_eq!(consumed.get(), 32);
+    fn swarm_brief_system_runner_bounds_inherited_pipes_after_parent_exit() {
+        let started = std::time::Instant::now();
+        let result = SystemSwarmBriefCommandRunner.run(
+            "/bin/sh",
+            &["-c", "(sleep 2) & printf 'ready\\n'; exit 0"],
+            Path::new("."),
+            50,
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "inherited pipe exceeded source deadline: {result:?}"
+        );
+        assert_eq!(
+            result,
+            Err(SwarmBriefCommandError::TimedOut { timeout_ms: 50 })
+        );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn swarm_brief_pipe_reader_reports_read_errors() {
-        let mut reader = FailingReader;
-
-        let error = read_swarm_brief_pipe_limited(&mut reader, 7)
-            .expect_err("pipe read failures must not become empty output");
-
-        assert_eq!(error.kind(), io::ErrorKind::Other);
-        assert!(error.to_string().contains("synthetic pipe failure"));
-    }
-
-    #[test]
-    fn swarm_brief_pipe_reader_thread_panic_is_unavailable() {
-        let handle = thread::spawn(|| -> io::Result<Vec<u8>> {
-            panic!("synthetic pipe reader panic");
-        });
-
-        let error = join_swarm_brief_pipe_reader(handle, "stdout")
-            .expect_err("reader thread panics must not become empty output");
-
-        match error {
-            SwarmBriefCommandError::Unavailable(message) => {
-                assert!(message.contains("stdout reader thread panicked"));
-            }
-            other => panic!("expected Unavailable, got {other:?}"),
-        }
+    fn swarm_brief_system_runner_preserves_raw_output_and_failed_exit() {
+        let raw = r#"{"path":"/private/source/file.rs","content":"password=fixture-only"}"#;
+        let result = SystemSwarmBriefCommandRunner
+            .run(
+                "/bin/sh",
+                &["-c", "printf '%s' \"$1\"", "probe", raw],
+                Path::new("."),
+                2_000,
+            )
+            .expect("real source command succeeds");
+        assert_eq!(
+            result.stdout, raw,
+            "source parsing must precede output redaction"
+        );
+        assert!(result.stderr.is_empty());
+        let failure = SystemSwarmBriefCommandRunner.run(
+            "/bin/sh",
+            &["-c", "printf 'partial'; printf 'reason' >&2; exit 7"],
+            Path::new("."),
+            2_000,
+        );
+        assert_eq!(
+            failure,
+            Err(SwarmBriefCommandError::Failed {
+                status: Some(7),
+                stdout: "partial".to_owned(),
+                stderr: "reason".to_owned(),
+            })
+        );
+        let missing = SystemSwarmBriefCommandRunner.run(
+            "/ee-test-nonexistent-source/bin/missing",
+            &[],
+            Path::new("."),
+            2_000,
+        );
+        assert!(matches!(
+            missing,
+            Err(SwarmBriefCommandError::Unavailable(_))
+        ));
     }
 
     fn bead(id: &str, title: &str, source_bucket: &str) -> SwarmBriefBead {

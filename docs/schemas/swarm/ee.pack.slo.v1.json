@@ -2,14 +2,26 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://eidetic-engine/schemas/swarm/ee.pack.slo.v1.json",
   "title": "ee.pack.slo.v1",
-  "description": "Context pack assembly SLO result, including selected resource profile, budgets, actuals, and degradations.",
+  "description": "Context pack assembly SLO result. status is the worst of deterministic resourceStatus and measured elapsedStatus. Timing describes the producer assembly, including on cache hits; only resource degradations enter pack identity.",
   "type": "object",
-  "required": ["schema", "profile", "budgetClass", "actuals", "status", "degradations"],
+  "required": ["schema", "profile", "budgetClass", "actuals", "resourceStatus", "elapsedStatus", "status", "degradations"],
   "additionalProperties": false,
   "properties": {
     "schema": {"type": "string", "const": "ee.pack.slo.v1"},
     "profile": {"type": "string", "enum": ["lean", "standard", "swarm_heavy"]},
     "budgetClass": {"$ref": "ee.resource.profile.v1.json#/properties/budgetClass"},
+    "admission": {
+      "type": ["object", "null"],
+      "required": ["outcome", "queueDepth", "concurrentPackMax", "retryAfterMs", "waitedMs"],
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {"type": "string", "enum": ["admitted", "backoff"]},
+        "queueDepth": {"type": "integer", "minimum": 0},
+        "concurrentPackMax": {"type": "integer", "minimum": 1},
+        "retryAfterMs": {"type": ["integer", "null"], "minimum": 0},
+        "waitedMs": {"type": "integer", "minimum": 0}
+      }
+    },
     "actuals": {
       "type": "object",
       "required": ["candidateCount", "scannedCount", "indexGeneration", "graphGeneration", "graphEdgesTraversed", "elapsedMs", "memoryBytesPeak"],
@@ -24,8 +36,11 @@
         "memoryBytesPeak": {"type": "integer", "minimum": 0}
       }
     },
-    "status": {"type": "string", "enum": ["within_budget", "warning", "failure"]},
+    "resourceStatus": {"type": "string", "enum": ["within_budget", "warning", "failure"], "description": "Deterministic candidate/graph/admission posture; compared across fresh and cached responses."},
+    "elapsedStatus": {"type": "string", "enum": ["within_budget", "warning", "failure"], "description": "failure at or above elapsedMsFailure, warning at or above elapsedMsWarning, otherwise within_budget. Unsigned producer measurement."},
+    "status": {"type": "string", "enum": ["within_budget", "warning", "failure"], "description": "Worst of resourceStatus and elapsedStatus; a latency breach does not change selected content or command success."},
     "degradations": {
+      "description": "Deterministic resource/admission degradations. elapsedStatus reports timing breaches without changing signed pack content.",
       "type": "array",
       "items": {
         "type": "object",
@@ -61,6 +76,8 @@
         "elapsedMs": 18,
         "memoryBytesPeak": 65536
       },
+      "resourceStatus": "within_budget",
+      "elapsedStatus": "within_budget",
       "status": "within_budget",
       "degradations": []
     }

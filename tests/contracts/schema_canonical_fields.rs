@@ -537,10 +537,11 @@ fn search_surface_normalizes_legacy_content_preview_metadata() -> TestResult {
 
 #[test]
 fn introspect_command_manifest_has_no_field_name_drift() -> TestResult {
-    // No fixture required — `render_introspect_json()` enumerates every
-    // command in COMMAND_MANIFEST, so this single scan covers the
-    // self-description surface for every subcommand at once.
-    assert_no_drift("introspect", &render_introspect_json())
+    // Scan real recursive Clap metadata, including argument definitions.
+    assert_no_drift(
+        "introspect",
+        &render_introspect_json(&ee::cli::root_cli_help()),
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────

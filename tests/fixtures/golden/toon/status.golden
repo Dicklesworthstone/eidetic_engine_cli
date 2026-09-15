@@ -368,7 +368,7 @@ data:
     formatVersion: 1
     summary:
       detectedCount: 0
-      totalCount: 26
+      totalCount: 32
     inspectionCommand: ee agent status --json
     degraded[0]:
   degraded[3]:

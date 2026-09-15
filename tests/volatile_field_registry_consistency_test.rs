@@ -7,6 +7,61 @@ use ee::obs::VOLATILE_FIELD_NAMES;
 
 type TestResult<T = ()> = Result<T, String>;
 
+#[cfg(unix)]
+#[test]
+fn bash_pack_slo_normalization_rejects_false_green_and_preserves_other_statuses() -> TestResult {
+    let base = serde_json::json!({
+        "status": "outside",
+        "data": {"pack": {"hash": "blake3:keep", "slo": {
+            "schema": "ee.pack.slo.v1",
+            "budgetClass": {"elapsedMsTarget": 200, "elapsedMsWarning": 500, "elapsedMsFailure": 2000},
+            "actuals": {"elapsedMs": 24457, "scannedCount": 12},
+            "resourceStatus": "within_budget", "elapsedStatus": "failure", "status": "failure",
+            "degradations": []
+        }}},
+        "unrelated": {"elapsedStatus": "preserve", "status": "failure"}
+    });
+    for (status, valid) in [("failure", true), ("within_budget", false)] {
+        let mut input = base.clone();
+        input["data"]["pack"]["slo"]["status"] = status.into();
+        input["data"]["pack"]["slo"]["elapsedStatus"] = status.into();
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg("source \"$1\"; printf '%s' \"$2\" | strip_variable_fields")
+            .arg("ee-slo-normalization-test")
+            .arg(repo_file("scripts/e2e_overhaul/determinism.sh"))
+            .arg(input.to_string())
+            .output()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            output.status.success(),
+            valid,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if valid {
+            let normalized: serde_json::Value =
+                serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+            let mut expected = base.clone();
+            assert!(ee::obs::normalize_pack_slo_measurements(&mut expected)?);
+            assert_eq!(
+                normalized, expected,
+                "Bash and Rust retain all semantic fields"
+            );
+        } else {
+            assert!(
+                output.stdout.is_empty(),
+                "invalid SLO must not emit a comparable normalized body"
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("measured classification disagrees")
+            );
+        }
+    }
+    Ok(())
+}
+
 fn repo_file(path: impl AsRef<Path>) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
 }

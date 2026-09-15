@@ -523,6 +523,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `search_not_ready` | medium | bd-17c65.10.6 (J6) |
 | `search_waiting_for_storage` | medium | bd-17c65.10.6 (J6) |
 | `storage_degraded` | medium | bd-17c65.10.6 (J6) |
+| `workspace_identity_mismatch` | medium | bd-cv8sv (GH46): copied local store has no matching workspace binding; inspect explicit read recovery without reassigning ownership |
 | `storage_not_inspected` | low | bd-17c65.10.6 (J6) |
 | `storage_not_initialized` | medium | bd-17c65.10.6 (J6) |
 | `storage_not_ready` | medium | bd-17c65.10.6 (J6) |

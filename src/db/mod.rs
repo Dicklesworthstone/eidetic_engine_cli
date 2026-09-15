@@ -33204,17 +33204,15 @@ fn pack_attempt_family_multiplicity_is_valid(snapshot: &serde_json::Value) -> bo
                 .get("familyAlias")
                 .and_then(serde_json::Value::as_str)
     });
-    let effective_factor = object
-        .get("effectiveDiscountFactor")
-        .and_then(serde_json::Value::as_f64);
+    let effective_factor = object.get("effectiveDiscountFactor");
     let minimum_member_factor = memberships
         .iter()
         .filter_map(|membership| {
-            membership
-                .get("memberDiscountFactor")
-                .and_then(serde_json::Value::as_f64)
+            let factor = membership.get("memberDiscountFactor")?;
+            Some((factor.as_f64()?, factor))
         })
-        .reduce(f64::min);
+        .min_by(|(left, _), (right, _)| left.total_cmp(right))
+        .map(|(_, factor)| factor);
     !memberships.is_empty()
         && aliases_are_strictly_sorted
         && effective_factor == minimum_member_factor
@@ -33246,9 +33244,7 @@ fn pack_attempt_family_membership_is_valid(membership: &serde_json::Value) -> bo
     let disposition = object
         .get("memberDisposition")
         .and_then(serde_json::Value::as_str);
-    let member_factor = object
-        .get("memberDiscountFactor")
-        .and_then(serde_json::Value::as_f64);
+    let member_factor = object.get("memberDiscountFactor");
     let declared_size = object
         .get("declaredSize")
         .and_then(serde_json::Value::as_u64);
@@ -33301,7 +33297,7 @@ fn member_discount_factor_is_canonical(
     disposition: Option<&str>,
     declared_size: Option<u64>,
     posture: Option<&str>,
-    factor: Option<f64>,
+    factor: Option<&serde_json::Value>,
 ) -> bool {
     let Some(factor) = factor else {
         return false;
@@ -33312,15 +33308,20 @@ fn member_discount_factor_is_canonical(
                 let declared = u32::try_from(declared).unwrap_or(u32::MAX);
                 #[allow(clippy::cast_possible_truncation)]
                 let discounted = (1.0_f64 / f64::from(declared)) as f32;
-                f64::from(discounted)
+                discounted
             }
             _ => 1.0,
         },
         Some("rejected" | "unslotted") => 1.0,
-        Some("conflicted") => return (0.0..=1.0).contains(&factor),
+        Some("conflicted") => return json_unit_score(Some(factor)),
         _ => return false,
     };
-    factor == expected
+    // The snapshot is emitted as a JSON f32. With arbitrary_precision enabled,
+    // serde_json preserves its shortest f32 decimal (e.g. 0.33333334), which
+    // differs from first widening that f32 to f64 (0.3333333432674408). Validate
+    // the JSON number itself: converting back to f64 would also admit distinct
+    // arbitrary-precision decimals that round to the same binary64 value.
+    *factor == serde_json::Value::from(expected)
 }
 
 fn json_unit_score(value: Option<&serde_json::Value>) -> bool {
@@ -33337,7 +33338,7 @@ fn is_attempt_family_alias(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
-fn is_attempt_family_promotion_posture(value: &str) -> bool {
+pub(crate) fn is_attempt_family_promotion_posture(value: &str) -> bool {
     attempt_family_promotion_reason(value).is_some()
 }
 
@@ -56791,9 +56792,9 @@ mod tests {
         let (ledger_json, ledger_hash) = super::build_pack_selection_ledger(
             pack_id,
             &input,
-            &[selected],
+            std::slice::from_ref(&selected),
             &[],
-            &[omitted],
+            std::slice::from_ref(&omitted),
             "2026-08-08T00:00:00Z",
             None,
         )?;
@@ -56823,6 +56824,160 @@ mod tests {
             "frozen multiplicity participates in the canonical ledger hash",
         )?;
 
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_pack_test_memory(&connection)?;
+        insert_pack_test_memory(
+            &connection,
+            &omitted.memory_id,
+            "Rejected family evidence remains in the omission ledger",
+        )?;
+        connection.insert_pack_record_at(
+            pack_id,
+            &input,
+            std::slice::from_ref(&selected),
+            std::slice::from_ref(&omitted),
+            "2026-08-08T00:00:00Z",
+        )?;
+        let record = connection
+            .get_pack_record(pack_id)?
+            .ok_or_else(|| TestFailure::new("persisted family pack missing"))?;
+        let parsed = super::parse_stored_pack_ledger(&record);
+        ensure_equal(
+            &parsed.status,
+            &super::PackLedgerStatus::Available,
+            "real persisted non-binary family discount passes every integrity gate",
+        )?;
+        let restored_ledger = parsed
+            .available_ledger()
+            .ok_or_else(|| TestFailure::new("verified family ledger missing"))?;
+        ensure_equal(
+            &restored_ledger["selectedItems"][0]["attemptFamilyMultiplicity"],
+            &snapshot,
+            "persisted selected snapshot is recoverable unchanged",
+        )?;
+        ensure_equal(
+            &restored_ledger["omittedItems"][0]["attemptFamilyMultiplicity"],
+            &snapshot,
+            "persisted omitted snapshot is recoverable unchanged",
+        )?;
+
+        let mut incorrect_discount = snapshot.clone();
+        incorrect_discount["effectiveDiscountFactor"] = serde_json::json!(0.5);
+        incorrect_discount["memberships"][0]["memberDiscountFactor"] = serde_json::json!(0.5);
+        ensure(
+            !super::pack_attempt_family_multiplicity_is_valid(&incorrect_discount),
+            "self-consistent but incorrect selected discount remains invalid",
+        )?;
+        let mut incorrect_selected = selected.clone();
+        incorrect_selected.attempt_family_multiplicity = Some(incorrect_discount);
+        let (incorrect_json, incorrect_hash) = super::build_pack_selection_ledger(
+            pack_id,
+            &input,
+            &[incorrect_selected],
+            &[],
+            std::slice::from_ref(&omitted),
+            "2026-08-08T00:00:00Z",
+            None,
+        )?;
+        let incorrect =
+            super::parse_pack_ledger_fields(pack_id, Some(&incorrect_json), Some(&incorrect_hash));
+        ensure_equal(
+            &incorrect.status,
+            &super::PackLedgerStatus::Malformed,
+            "incorrect discount remains rejected even with a valid ledger hash",
+        )?;
+        ensure_equal(
+            &incorrect.degraded[0]["details"]["ledgerInvariantMismatches"],
+            &serde_json::json!(["selectedItems.attemptFamilyMultiplicity"]),
+            "wrong selected discount reaches the unchanged semantic invariant gate",
+        )?;
+
+        let too_precise: serde_json::Value = serde_json::from_str("0.333333340000000001")
+            .map_err(|error| TestFailure::new(format!("decimal fixture malformed: {error}")))?;
+        ensure_equal(
+            &too_precise.as_f64(),
+            &snapshot["effectiveDiscountFactor"].as_f64(),
+            "negative control deliberately rounds to the writer's binary64 value",
+        )?;
+        ensure(
+            too_precise != snapshot["effectiveDiscountFactor"],
+            "negative control preserves a distinct arbitrary-precision JSON number",
+        )?;
+        for pointers in [
+            vec!["/effectiveDiscountFactor"],
+            vec!["/memberships/0/memberDiscountFactor"],
+            vec![
+                "/effectiveDiscountFactor",
+                "/memberships/0/memberDiscountFactor",
+            ],
+        ] {
+            let mut overprecise_snapshot = snapshot.clone();
+            for pointer in pointers {
+                *overprecise_snapshot
+                    .pointer_mut(pointer)
+                    .ok_or_else(|| TestFailure::new("fixture discount missing"))? =
+                    too_precise.clone();
+            }
+            let mut overprecise_selected = selected.clone();
+            overprecise_selected.attempt_family_multiplicity = Some(overprecise_snapshot);
+            let (overprecise_json, overprecise_hash) = super::build_pack_selection_ledger(
+                pack_id,
+                &input,
+                &[overprecise_selected],
+                &[],
+                std::slice::from_ref(&omitted),
+                "2026-08-08T00:00:00Z",
+                None,
+            )?;
+            let overprecise = super::parse_pack_ledger_fields(
+                pack_id,
+                Some(&overprecise_json),
+                Some(&overprecise_hash),
+            );
+            ensure_equal(
+                &overprecise.status,
+                &super::PackLedgerStatus::Malformed,
+                "noncanonical decimal is rejected even with a valid ledger hash",
+            )?;
+            ensure_equal(
+                &overprecise.degraded[0]["details"]["ledgerInvariantMismatches"],
+                &serde_json::json!(["selectedItems.attemptFamilyMultiplicity"]),
+                "member and effective factors independently retain exact-number admission",
+            )?;
+        }
+
+        for pointer in ["/promotionPosture", "/memberships/0/promotionPosture"] {
+            let mut unknown_posture = snapshot.clone();
+            *unknown_posture
+                .pointer_mut(pointer)
+                .ok_or_else(|| TestFailure::new("fixture promotion posture missing"))? =
+                serde_json::json!("blocked_AKIAIOSFODNN7EXAMPLE");
+            let mut unknown_selected = selected.clone();
+            unknown_selected.attempt_family_multiplicity = Some(unknown_posture);
+            let (unknown_json, unknown_hash) = super::build_pack_selection_ledger(
+                pack_id,
+                &input,
+                &[unknown_selected],
+                &[],
+                std::slice::from_ref(&omitted),
+                "2026-08-08T00:00:00Z",
+                None,
+            )?;
+            let unknown =
+                super::parse_pack_ledger_fields(pack_id, Some(&unknown_json), Some(&unknown_hash));
+            ensure_equal(
+                &unknown.status,
+                &super::PackLedgerStatus::Malformed,
+                "unknown promotion posture is rejected even with a valid ledger hash",
+            )?;
+            ensure_equal(
+                &unknown.degraded[0]["details"]["ledgerInvariantMismatches"],
+                &serde_json::json!(["selectedItems.attemptFamilyMultiplicity"]),
+                "unknown posture reaches the same closed-vocabulary semantic gate",
+            )?;
+        }
+
         let mut hostile = snapshot.clone();
         hostile["memberships"][0]["familyAlias"] = serde_json::json!("AKIAIOSFODNN7EXAMPLE");
         ensure(
@@ -56843,6 +56998,70 @@ mod tests {
             !super::pack_attempt_family_multiplicity_is_valid(&unstable_reason),
             "ledger validation binds each posture to its stable reason",
         )
+    }
+
+    #[test]
+    fn pack_family_discount_validation_matches_exact_f32_json_not_nearby_values() {
+        for (declared, discount) in [
+            (1, 1.0_f32),
+            (2, 0.5_f32),
+            (3, 1.0_f32 / 3.0_f32),
+            (7, 1.0_f32 / 7.0_f32),
+            (10, 0.1_f32),
+            (1_000_000, 1.0_f32 / 1_000_000.0_f32),
+        ] {
+            let canonical = serde_json::Value::from(discount);
+            assert!(
+                super::member_discount_factor_is_canonical(
+                    Some("selected"),
+                    Some(declared),
+                    Some("blocked_incomplete"),
+                    Some(&canonical),
+                ),
+                "canonical JSON f32 discount for {declared}"
+            );
+            for incorrect in [discount.next_down(), discount.next_up()] {
+                assert!(
+                    !super::member_discount_factor_is_canonical(
+                        Some("selected"),
+                        Some(declared),
+                        Some("blocked_incomplete"),
+                        Some(&serde_json::Value::from(incorrect)),
+                    ),
+                    "adjacent f32 value must not be accepted for {declared}"
+                );
+            }
+        }
+        for disposition in ["rejected", "unslotted"] {
+            assert!(super::member_discount_factor_is_canonical(
+                Some(disposition),
+                Some(3),
+                Some("blocked_incomplete"),
+                Some(&serde_json::json!(1.0)),
+            ));
+            assert!(!super::member_discount_factor_is_canonical(
+                Some(disposition),
+                Some(3),
+                Some("blocked_incomplete"),
+                Some(&serde_json::Value::from(1.0_f32 / 3.0_f32)),
+            ));
+        }
+        for factor in [0.0, 0.123_456_789, 1.0] {
+            assert!(super::member_discount_factor_is_canonical(
+                Some("conflicted"),
+                Some(3),
+                Some("blocked_incomplete"),
+                Some(&serde_json::json!(factor)),
+            ));
+        }
+        for factor in [-0.1, 1.1] {
+            assert!(!super::member_discount_factor_is_canonical(
+                Some("conflicted"),
+                Some(3),
+                Some("blocked_incomplete"),
+                Some(&serde_json::json!(factor)),
+            ));
+        }
     }
 
     #[test]

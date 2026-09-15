@@ -494,23 +494,23 @@ fn canonical_content_field_appears_in_every_renderer_for_known_surfaces() -> Tes
             rendered: render_learn_uncertainty_human(&learn_uncertainty),
             must_contain: vec!["Procedure needs more replay evidence."],
         },
-        // introspect (no fixture)
+        // Introspect the actual parser tree, shared by all renderers.
         ParityRow {
             surface: "introspect",
             renderer: "json",
-            rendered: render_introspect_json(),
+            rendered: render_introspect_json(&ee::cli::root_cli_help()),
             must_contain: vec!["\"commands\""],
         },
         ParityRow {
             surface: "introspect",
             renderer: "toon",
-            rendered: render_introspect_toon(),
+            rendered: render_introspect_toon(&ee::cli::root_cli_help()),
             must_contain: vec!["introspect"],
         },
         ParityRow {
             surface: "introspect",
             renderer: "human",
-            rendered: render_introspect_human(),
+            rendered: render_introspect_human(&ee::cli::root_cli_help()),
             must_contain: vec!["introspect"],
         },
     ];

@@ -337,6 +337,7 @@ pub struct SourceRunPipeCapture {
     total_bytes: usize,
     tail: Vec<u8>,
     full_hash: Option<String>,
+    read_error: Option<String>,
 }
 
 impl SourceRunPipeCapture {
@@ -353,7 +354,30 @@ impl SourceRunPipeCapture {
             total_bytes: 0,
             tail: Vec::new(),
             full_hash: None,
+            read_error: None,
         }
+    }
+
+    /// Return complete source data for a parser, before evidence redaction.
+    /// Diagnostic tails are intentionally unsuitable as successful JSON input.
+    pub(crate) fn into_complete_output(self) -> Result<String, String> {
+        if let Some(error) = self.read_error {
+            return Err(error);
+        }
+        if self.total_bytes != self.tail.len() {
+            return Err(format!(
+                "source command output exceeded the {} byte capture limit ({} bytes received)",
+                self.tail.len(),
+                self.total_bytes
+            ));
+        }
+        Ok(String::from_utf8_lossy(&self.tail).into_owned())
+    }
+
+    fn failed(message: String, tail_bytes_max: usize) -> Self {
+        let mut capture = Self::from_bytes(message.as_bytes(), tail_bytes_max);
+        capture.read_error = Some(message);
+        capture
     }
 }
 
@@ -404,6 +428,7 @@ impl TailCapture {
             } else {
                 Some(format!("blake3:{}", self.hasher.finalize().to_hex()))
             },
+            read_error: None,
         }
     }
 }
@@ -1157,12 +1182,12 @@ fn join_capture_reader(
     };
     match handle.join() {
         Ok(Ok(capture)) => capture,
-        Ok(Err(error)) => SourceRunPipeCapture::from_bytes(
-            format!("source command pipe read failed: {error}").as_bytes(),
+        Ok(Err(error)) => SourceRunPipeCapture::failed(
+            format!("source command pipe read failed: {error}"),
             tail_bytes_max,
         ),
-        Err(_panic) => SourceRunPipeCapture::from_bytes(
-            b"source command pipe reader thread panicked",
+        Err(_panic) => SourceRunPipeCapture::failed(
+            "source command pipe reader thread panicked".to_owned(),
             tail_bytes_max,
         ),
     }
@@ -1178,8 +1203,8 @@ fn join_finished_capture_reader(
     if reader.is_finished() {
         return join_capture_reader(handle, tail_bytes_max);
     }
-    SourceRunPipeCapture::from_bytes(
-        b"source command pipe drain timed out; output tail unavailable",
+    SourceRunPipeCapture::failed(
+        "source command pipe drain timed out; output tail unavailable".to_owned(),
         tail_bytes_max,
     )
 }
@@ -1216,6 +1241,7 @@ fn append_capture_error(capture: &mut SourceRunPipeCapture, message: &str, tail_
     rebuilt.push(&capture.tail);
     rebuilt.push(message.as_bytes());
     *capture = rebuilt.finish();
+    capture.read_error = Some(message.to_owned());
 }
 
 #[cfg(unix)]
@@ -1662,6 +1688,59 @@ mod tests {
         assert_eq!(evidence.status, SourceRunStatus::TimedOut);
         assert!(evidence.exit.killed_own_child);
         assert!(!evidence.exit.killed_peer_processes);
+    }
+
+    #[test]
+    fn complete_source_capture_drains_but_rejects_truncated_parser_input() {
+        let mut reader = io::Cursor::new(b"abcdefghijklmnopqrstuvwxyz");
+        let capture = read_tail_pipe(&mut reader, 7).expect("pipe drains");
+        assert_eq!(reader.position(), 26);
+        assert_eq!(capture.total_bytes, 26);
+        assert_eq!(capture.tail, b"tuvwxyz");
+        assert!(
+            capture
+                .into_complete_output()
+                .expect_err("truncated JSON is not complete input")
+                .contains("capture limit")
+        );
+        let raw = b"password=fixture-only";
+        assert_eq!(
+            SourceRunPipeCapture::from_bytes(raw, raw.len())
+                .into_complete_output()
+                .unwrap(),
+            "password=fixture-only"
+        );
+    }
+
+    #[test]
+    fn complete_source_capture_preserves_read_errors_and_reader_panics() {
+        struct FailingReader;
+        impl Read for FailingReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("synthetic pipe failure"))
+            }
+        }
+        let error = read_tail_pipe(FailingReader, 7).expect_err("read failure is not empty output");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(error.to_string().contains("synthetic pipe failure"));
+        let mut handle = Some(thread::spawn(|| read_tail_pipe(FailingReader, 7)));
+        let capture = join_capture_reader(&mut handle, 7);
+        assert!(
+            capture
+                .into_complete_output()
+                .unwrap_err()
+                .contains("synthetic pipe failure")
+        );
+        let mut handle = Some(thread::spawn(|| -> io::Result<SourceRunPipeCapture> {
+            panic!("synthetic pipe reader panic");
+        }));
+        let capture = join_capture_reader(&mut handle, 7);
+        assert!(
+            capture
+                .into_complete_output()
+                .unwrap_err()
+                .contains("reader thread panicked")
+        );
     }
 
     #[test]

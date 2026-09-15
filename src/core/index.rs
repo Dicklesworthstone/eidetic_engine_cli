@@ -622,9 +622,11 @@ impl IndexRebuildOptions {
     }
 
     fn resolve_index_dir(&self) -> PathBuf {
-        self.index_dir
-            .clone()
-            .unwrap_or_else(|| default_workspace_index_dir(&self.workspace_path))
+        crate::config::workspace::resolve_store_index_dir(
+            &self.workspace_path,
+            self.database_path.as_deref(),
+            self.index_dir.as_deref(),
+        )
     }
 }
 
@@ -903,9 +905,11 @@ impl IndexReembedOptions {
     }
 
     fn resolve_index_dir(&self) -> PathBuf {
-        self.index_dir
-            .clone()
-            .unwrap_or_else(|| default_workspace_index_dir(&self.workspace_path))
+        crate::config::workspace::resolve_store_index_dir(
+            &self.workspace_path,
+            self.database_path.as_deref(),
+            self.index_dir.as_deref(),
+        )
     }
 }
 
@@ -951,9 +955,11 @@ impl IndexProcessingOptions {
     }
 
     fn resolve_index_dir(&self) -> PathBuf {
-        self.index_dir
-            .clone()
-            .unwrap_or_else(|| default_workspace_index_dir(&self.workspace_path))
+        crate::config::workspace::resolve_store_index_dir(
+            &self.workspace_path,
+            self.database_path.as_deref(),
+            self.index_dir.as_deref(),
+        )
     }
 }
 
@@ -965,12 +971,6 @@ fn default_workspace_database_path(workspace_path: &Path) -> PathBuf {
     default_workspace_root(workspace_path)
         .join(".ee")
         .join("ee.db")
-}
-
-fn default_workspace_index_dir(workspace_path: &Path) -> PathBuf {
-    default_workspace_root(workspace_path)
-        .join(".ee")
-        .join(DEFAULT_INDEX_SUBDIR)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4689,7 +4689,10 @@ fn ensure_index_publish_target_is_directory_or_missing(
     }
 }
 
-fn ensure_index_path_has_no_symlinks(path: &Path, action: &str) -> Result<(), IndexRebuildError> {
+pub(crate) fn ensure_index_path_has_no_symlinks(
+    path: &Path,
+    action: &str,
+) -> Result<(), IndexRebuildError> {
     if let Some(component) = first_existing_index_symlink_component(path)? {
         return Err(IndexRebuildError::Index(format!(
             "Refusing to {action} through symlinked index path component: {}",
@@ -7457,9 +7460,11 @@ impl IndexStatusOptions {
     }
 
     fn resolve_index_dir(&self) -> PathBuf {
-        self.index_dir
-            .clone()
-            .unwrap_or_else(|| default_workspace_index_dir(&self.workspace_path))
+        crate::config::workspace::resolve_store_index_dir(
+            &self.workspace_path,
+            self.database_path.as_deref(),
+            self.index_dir.as_deref(),
+        )
     }
 }
 
@@ -7479,9 +7484,11 @@ impl IndexVacuumOptions {
     }
 
     fn resolve_index_dir(&self) -> PathBuf {
-        self.index_dir
-            .clone()
-            .unwrap_or_else(|| default_workspace_index_dir(&self.workspace_path))
+        crate::config::workspace::resolve_store_index_dir(
+            &self.workspace_path,
+            self.database_path.as_deref(),
+            self.index_dir.as_deref(),
+        )
     }
 }
 
@@ -14868,6 +14875,70 @@ mod tests {
             options.resolve_index_dir(),
             PathBuf::from("/home/user/project/.ee/index")
         );
+    }
+
+    #[test]
+    fn index_options_resolve_selected_standard_store_and_explicit_index_consistently() {
+        let workspace = PathBuf::from("/home/user/project");
+        for (database, explicit_index, expected) in [
+            ("selected/.ee/ee.db", None, "selected/.ee/index"),
+            (
+                "selected/.ee-campaign/ee.db",
+                None,
+                "selected/.ee-campaign/index",
+            ),
+            ("external/ee.db", None, "/home/user/project/.ee/index"),
+            (
+                "selected/.ee-campaign/ee.db",
+                Some("custom-index"),
+                "custom-index",
+            ),
+        ] {
+            let database_path = Some(PathBuf::from(database));
+            let index_dir = explicit_index.map(PathBuf::from);
+            let rebuild = IndexRebuildOptions {
+                workspace_path: workspace.clone(),
+                database_path: database_path.clone(),
+                index_dir: index_dir.clone(),
+                dry_run: false,
+            };
+            let reembed = IndexReembedOptions {
+                workspace_path: workspace.clone(),
+                database_path: database_path.clone(),
+                index_dir: index_dir.clone(),
+                dry_run: false,
+            };
+            let processing = IndexProcessingOptions {
+                workspace_path: workspace.clone(),
+                database_path: database_path.clone(),
+                index_dir: index_dir.clone(),
+                dry_run: false,
+                job_limit: None,
+            };
+            let status = IndexStatusOptions {
+                workspace_path: workspace.clone(),
+                database_path: database_path.clone(),
+                index_dir: index_dir.clone(),
+            };
+            let vacuum = IndexVacuumOptions {
+                workspace_path: workspace.clone(),
+                database_path,
+                index_dir,
+            };
+            for (resolved_database, resolved_index) in [
+                (rebuild.resolve_database_path(), rebuild.resolve_index_dir()),
+                (reembed.resolve_database_path(), reembed.resolve_index_dir()),
+                (
+                    processing.resolve_database_path(),
+                    processing.resolve_index_dir(),
+                ),
+                (status.resolve_database_path(), status.resolve_index_dir()),
+                (vacuum.resolve_database_path(), vacuum.resolve_index_dir()),
+            ] {
+                assert_eq!(resolved_database, Path::new(database));
+                assert_eq!(resolved_index, Path::new(expected));
+            }
+        }
     }
 
     #[cfg(unix)]

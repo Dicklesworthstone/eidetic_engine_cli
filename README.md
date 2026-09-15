@@ -2403,6 +2403,15 @@ restoring memory does not recreate a Git checkout. Metadata follows the backup's
 redaction policy. Archives missing this metadata must be recreated. A backup of
 one workspace in a database containing additional workspace rows remains partial.
 
+Copying `.ee` to another directory does not rebind its stored workspace identity.
+List, search, resume, and workspace resolution report `workspace_identity_mismatch`
+when a local store belongs to another path; status and doctor explain the same
+recoverable condition. Follow the returned `ee memory list --workspace ...
+--database ... --json` command to read the existing identity explicitly. Neither
+`ee init` nor `ee workspace alias` relocates old memories. Durable relocation uses
+authenticated backup restoration to a fresh side path and requires the source
+authentication material; automatic or in-place rebind is not provided.
+
 Authenticated backup assets also preserve memory seals (including reveal
 history), source quarantine and release history, certificate records, and the
 durable agent registry. Restore retains their original chronology. Sealed

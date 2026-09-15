@@ -2378,16 +2378,38 @@ impl StatusReport {
         options: &StatusOptions,
         status_connection_ref: Option<&DbConnection>,
     ) -> Self {
+        let binding_error = options
+            .workspace_path
+            .as_deref()
+            .zip(status_connection_ref)
+            .and_then(|(workspace, connection)| {
+                super::workspace::addressed_workspace_row(
+                    connection,
+                    workspace,
+                    &workspace_database_path(workspace),
+                )
+                .err()
+            });
+        let identity_mismatch = binding_error.as_ref().filter(|error| {
+            matches!(
+                error,
+                crate::models::DomainError::WorkspaceIdentityMismatch { .. }
+            )
+        });
         let index_status = timed_gather("index_status", || {
             gather_status_index_status(options.workspace_path.as_deref(), status_connection_ref)
         });
-        let capabilities = timed_gather("capabilities", || {
+        let mut capabilities = timed_gather("capabilities", || {
             CapabilityReport::gather_with_workspace_connection_and_index(
                 options.workspace_path.as_deref(),
                 status_connection_ref,
                 index_status.as_ref(),
             )
         });
+        if identity_mismatch.is_some() {
+            capabilities.storage = CapabilityStatus::Degraded;
+            capabilities.search = CapabilityStatus::Degraded;
+        }
         let runtime = timed_gather("runtime", RuntimeReport::gather);
         let read_pool = timed_gather("read_pool", || {
             ReadPoolStatusReport::gather_for_workspace(options.workspace_path.as_deref())
@@ -2445,9 +2467,25 @@ impl StatusReport {
                 status_connection_ref,
             )
         });
-        let workspace = timed_gather("workspace", || {
+        let mut workspace = timed_gather("workspace", || {
             gather_workspace_status(options.workspace_path.as_deref())
         });
+        if let (Some(workspace), Some(error)) = (workspace.as_mut(), identity_mismatch) {
+            workspace.diagnostics.push(WorkspaceDiagnosticReport {
+                code: super::workspace::WORKSPACE_IDENTITY_MISMATCH_CODE,
+                severity: WorkspaceDiagnosticSeverity::Warning,
+                message: error.message(),
+                repair: error
+                    .repair()
+                    .unwrap_or(super::workspace::WORKSPACE_IDENTITY_MISMATCH_INSPECT)
+                    .to_owned(),
+                selected_source: Some(workspace.source),
+                selected_root: Some(workspace.root.clone()),
+                conflicting_source: None,
+                conflicting_root: None,
+                marker_roots: Vec::new(),
+            });
+        }
         let graph_compute = timed_gather("graph_compute", || {
             gather_graph_compute_with_connection(
                 options.workspace_path.as_deref(),
@@ -2525,16 +2563,25 @@ impl StatusReport {
         let mut degradations = Vec::new();
 
         push_runtime_capability_degradation(&mut degradations, capabilities.runtime);
-        push_storage_capability_degradation(
-            &mut degradations,
-            capabilities.storage,
-            options.workspace_path.as_deref(),
-        );
-        push_search_capability_degradation(
-            &mut degradations,
-            capabilities.search,
-            options.workspace_path.as_deref(),
-        );
+        if identity_mismatch.is_some() {
+            degradations.push(DegradationReport {
+                code: super::workspace::WORKSPACE_IDENTITY_MISMATCH_CODE,
+                severity: "medium",
+                message: super::workspace::WORKSPACE_IDENTITY_MISMATCH_MESSAGE,
+                repair: super::workspace::WORKSPACE_IDENTITY_MISMATCH_INSPECT,
+            });
+        } else {
+            push_storage_capability_degradation(
+                &mut degradations,
+                capabilities.storage,
+                options.workspace_path.as_deref(),
+            );
+            push_search_capability_degradation(
+                &mut degradations,
+                capabilities.search,
+                options.workspace_path.as_deref(),
+            );
+        }
         push_graph_capability_degradation(&mut degradations, graph_compute.status);
         push_status_skyline_feature_disabled_degradation(
             &mut degradations,
@@ -3588,9 +3635,19 @@ fn status_posture_report(
     let workspace_path = options.workspace_path.as_deref();
     let write_replay_required =
         workspace_path.is_some_and(super::write_owner::workspace_write_replay_required);
-    let storage_status =
-        storage_posture_status(capabilities.storage, workspace_path, write_replay_required);
-    let search_status = search_posture_status(capabilities.search, storage_status);
+    let identity_mismatch = degradations
+        .iter()
+        .any(|entry| entry.code == super::workspace::WORKSPACE_IDENTITY_MISMATCH_CODE);
+    let storage_status = if identity_mismatch {
+        SubsystemPostureStatus::DegradedRecoverable
+    } else {
+        storage_posture_status(capabilities.storage, workspace_path, write_replay_required)
+    };
+    let search_status = if identity_mismatch {
+        SubsystemPostureStatus::DegradedRecoverable
+    } else {
+        search_posture_status(capabilities.search, storage_status)
+    };
     let graph_status = graph_compute_posture_status(graph_compute.status);
     let rch_worker_pressure_status = rch_worker_pressure_posture_status(rch_worker_pressure);
 
@@ -3604,8 +3661,16 @@ fn status_posture_report(
         posture_row(
             "storage",
             storage_status,
-            storage_posture_reason(capabilities.storage, workspace_path, write_replay_required),
-            storage_posture_fallback(capabilities.storage, workspace_path),
+            if identity_mismatch {
+                Some(super::workspace::WORKSPACE_IDENTITY_MISMATCH_CODE)
+            } else {
+                storage_posture_reason(capabilities.storage, workspace_path, write_replay_required)
+            },
+            if identity_mismatch {
+                Some(super::workspace::WORKSPACE_IDENTITY_MISMATCH_INSPECT)
+            } else {
+                storage_posture_fallback(capabilities.storage, workspace_path)
+            },
         ),
         posture_row(
             "shard_fanout",
@@ -3616,8 +3681,16 @@ fn status_posture_report(
         posture_row(
             "search",
             search_status,
-            search_posture_reason(capabilities.search, storage_status),
-            search_posture_fallback(capabilities.search, storage_status),
+            if identity_mismatch {
+                Some(super::workspace::WORKSPACE_IDENTITY_MISMATCH_CODE)
+            } else {
+                search_posture_reason(capabilities.search, storage_status)
+            },
+            if identity_mismatch {
+                Some(super::workspace::WORKSPACE_IDENTITY_MISMATCH_INSPECT)
+            } else {
+                search_posture_fallback(capabilities.search, storage_status)
+            },
         ),
         posture_row(
             "memory",
@@ -3634,8 +3707,16 @@ fn status_posture_report(
         posture_row(
             "pack",
             pack_posture_status(storage_status, search_status),
-            pack_posture_reason(storage_status, search_status),
-            pack_posture_fallback(storage_status, search_status),
+            if identity_mismatch {
+                Some(super::workspace::WORKSPACE_IDENTITY_MISMATCH_CODE)
+            } else {
+                pack_posture_reason(storage_status, search_status)
+            },
+            if identity_mismatch {
+                Some(super::workspace::WORKSPACE_IDENTITY_MISMATCH_INSPECT)
+            } else {
+                pack_posture_fallback(storage_status, search_status)
+            },
         ),
         posture_row(
             "curate",

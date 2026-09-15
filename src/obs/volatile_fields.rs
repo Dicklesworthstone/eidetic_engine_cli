@@ -111,7 +111,7 @@ pub const VOLATILE_FIELD_NAMES: &[&str] = &[
 pub struct VolatileStripReport {
     /// Number of distinct volatile field names removed.
     pub fields_stripped_count: usize,
-    /// Distinct volatile field names removed, in registry order.
+    /// Distinct volatile names in registry order, followed by validated SLO paths.
     pub fields_stripped: Vec<&'static str>,
     /// JSON byte size before stripping, or 0 if serialization failed.
     pub input_bytes: usize,
@@ -125,18 +125,91 @@ pub fn is_volatile_field_name(field_name: &str) -> bool {
     canonical_field_name(field_name).is_some()
 }
 
+/// Validate and remove only the unsigned producer measurements in a pack SLO.
+/// All deterministic resource evidence and every unrelated status remain intact.
+/// Returns false for a response without a pack SLO; invalid measurements are
+/// rejected before any field is changed.
+pub fn normalize_pack_slo_measurements(value: &mut Value) -> Result<bool, String> {
+    let Some(slo) = value.pointer("/data/pack/slo") else {
+        return Ok(false);
+    };
+    if slo.get("schema").and_then(Value::as_str) != Some("ee.pack.slo.v1") {
+        return Err("pack SLO schema is missing or unsupported".to_owned());
+    }
+    let numeric = |pointer: &str| {
+        slo.pointer(pointer)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("pack SLO {pointer} must be an unsigned integer"))
+    };
+    let target = numeric("/budgetClass/elapsedMsTarget")?;
+    let warning = numeric("/budgetClass/elapsedMsWarning")?;
+    let failure = numeric("/budgetClass/elapsedMsFailure")?;
+    let elapsed = numeric("/actuals/elapsedMs")?;
+    if target == 0 || target > warning || warning >= failure {
+        return Err("pack SLO elapsed thresholds must be positive and ordered".to_owned());
+    }
+    let statuses = ["within_budget", "warning", "failure"];
+    let resource = slo.get("resourceStatus").and_then(Value::as_str);
+    let resource_rank = statuses
+        .iter()
+        .position(|status| Some(*status) == resource)
+        .ok_or_else(|| "pack SLO resourceStatus is missing or invalid".to_owned())?;
+    let elapsed_rank = if elapsed >= failure {
+        2
+    } else if elapsed >= warning {
+        1
+    } else {
+        0
+    };
+    if slo.get("elapsedStatus").and_then(Value::as_str) != Some(statuses[elapsed_rank]) {
+        return Err(format!(
+            "pack SLO elapsedStatus disagrees with elapsedMs={elapsed}, warning={warning}, failure={failure}"
+        ));
+    }
+    if slo.get("status").and_then(Value::as_str) != Some(statuses[resource_rank.max(elapsed_rank)])
+    {
+        return Err(
+            "pack SLO status must be the worst of resourceStatus and elapsedStatus".to_owned(),
+        );
+    }
+    // Validation above guarantees the object shapes; mutate only after every check.
+    if let Some(object) = value
+        .pointer_mut("/data/pack/slo")
+        .and_then(Value::as_object_mut)
+    {
+        object.remove("status");
+        object.remove("elapsedStatus");
+        if let Some(actuals) = object.get_mut("actuals").and_then(Value::as_object_mut) {
+            actuals.remove("elapsedMs");
+        }
+    }
+    Ok(true)
+}
+
 /// Recursively remove volatile fields from a JSON value and emit a structured
 /// test-log event when the J1 log harness is configured.
 pub fn strip_volatile_fields(value: &mut Value) -> VolatileStripReport {
     let input_bytes = serialized_len(value);
     let mut stripped = BTreeSet::new();
-    strip_volatile_fields_inner(value, &mut stripped);
+    let pack_measurements = normalize_pack_slo_measurements(value);
+    // A malformed SLO is evidence of a defect, not volatility. Preserve it
+    // verbatim, including elapsedMs, so normalization cannot conceal the defect.
+    if pack_measurements.is_ok() {
+        strip_volatile_fields_inner(value, &mut stripped);
+    }
     let output_bytes = serialized_len(value);
-    let fields_stripped = VOLATILE_FIELD_NAMES
+    let mut fields_stripped = VOLATILE_FIELD_NAMES
         .iter()
         .copied()
         .filter(|field| stripped.contains(field))
         .collect::<Vec<_>>();
+    if pack_measurements == Ok(true) {
+        fields_stripped.extend([
+            "/data/pack/slo/actuals/elapsedMs",
+            "/data/pack/slo/elapsedStatus",
+            "/data/pack/slo/status",
+        ]);
+    }
     let report = VolatileStripReport {
         fields_stripped_count: fields_stripped.len(),
         fields_stripped,
@@ -437,6 +510,89 @@ mod tests {
                 ));
             }
         }
+        Ok(())
+    }
+    #[test]
+    fn pack_slo_normalization_validates_measurements_and_preserves_semantics() -> TestResult {
+        let baseline = serde_json::json!({
+            "status": "outside",
+            "data": {"pack": {
+                "hash": "blake3:unchanged", "items": [{"status": "selected"}],
+                "slo": {
+                    "schema": "ee.pack.slo.v1",
+                    "budgetClass": {"elapsedMsTarget": 200, "elapsedMsWarning": 500, "elapsedMsFailure": 2000},
+                    "actuals": {"elapsedMs": 18, "scannedCount": 12},
+                    "resourceStatus": "within_budget", "elapsedStatus": "within_budget",
+                    "status": "within_budget", "degradations": []
+                }
+            }},
+            "unrelated": {"elapsedStatus": "keep", "status": "failure"}
+        });
+        let mut canonical = baseline.clone();
+        assert!(super::normalize_pack_slo_measurements(&mut canonical)?);
+        assert_eq!(canonical["status"], "outside");
+        assert_eq!(canonical["unrelated"], baseline["unrelated"]);
+        assert_eq!(canonical["data"]["pack"]["hash"], "blake3:unchanged");
+        assert_eq!(
+            canonical["data"]["pack"]["slo"]["resourceStatus"],
+            "within_budget"
+        );
+        for (elapsed, status) in [
+            (499, "within_budget"),
+            (500, "warning"),
+            (1999, "warning"),
+            (2000, "failure"),
+            (24457, "failure"),
+        ] {
+            let mut value = baseline.clone();
+            value["data"]["pack"]["slo"]["actuals"]["elapsedMs"] = elapsed.into();
+            value["data"]["pack"]["slo"]["elapsedStatus"] = status.into();
+            value["data"]["pack"]["slo"]["status"] = status.into();
+            assert!(super::normalize_pack_slo_measurements(&mut value)?);
+            assert_eq!(value, canonical);
+        }
+        for (pointer, replacement) in [
+            ("/data/pack/slo/elapsedStatus", serde_json::json!("failure")),
+            ("/data/pack/slo/status", serde_json::json!("warning")),
+            ("/data/pack/slo/actuals/elapsedMs", serde_json::json!(-1)),
+            ("/data/pack/slo/actuals/elapsedMs", serde_json::json!("18")),
+            (
+                "/data/pack/slo/budgetClass/elapsedMsWarning",
+                serde_json::json!(2000),
+            ),
+            (
+                "/data/pack/slo/resourceStatus",
+                serde_json::json!("unknown"),
+            ),
+        ] {
+            let mut invalid = baseline.clone();
+            *invalid
+                .pointer_mut(pointer)
+                .ok_or_else(|| format!("missing fixture path {pointer}"))? = replacement;
+            let original = invalid.clone();
+            assert!(
+                super::normalize_pack_slo_measurements(&mut invalid).is_err(),
+                "{pointer}"
+            );
+            assert_eq!(invalid, original, "rejection cannot mutate evidence");
+            assert_eq!(strip_volatile_fields(&mut invalid).fields_stripped_count, 0);
+            assert_eq!(
+                invalid, original,
+                "generic stripping must preserve invalid SLO evidence"
+            );
+        }
+        let mut resource_failure = baseline;
+        resource_failure["data"]["pack"]["slo"]["resourceStatus"] = "failure".into();
+        resource_failure["data"]["pack"]["slo"]["status"] = "failure".into();
+        resource_failure["data"]["pack"]["slo"]["degradations"] =
+            serde_json::json!([{"code": "pack_assembly_budget_exceeded"}]);
+        strip_volatile_fields(&mut resource_failure);
+        assert_ne!(
+            resource_failure, canonical,
+            "resource failures cannot normalize away"
+        );
+        assert!(!is_volatile_field_name("status"));
+        assert!(!is_volatile_field_name("elapsedStatus"));
         Ok(())
     }
 }

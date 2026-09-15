@@ -620,6 +620,14 @@ pub enum DomainError {
         details_json: String,
         recovery_actions: Vec<RecoveryAction>,
     },
+    /// A local store exists, but its stored workspace paths do not identify
+    /// the addressed root. Reads must not silently adopt another workspace.
+    WorkspaceIdentityMismatch {
+        message: String,
+        repair: Option<String>,
+        details_json: String,
+        recovery_actions: Vec<RecoveryAction>,
+    },
     SearchIndex {
         message: String,
         repair: Option<String>,
@@ -680,6 +688,9 @@ impl std::fmt::Display for DomainError {
             Self::Storage { message, .. } => write!(f, "storage error: {message}"),
             Self::WorkspaceStoreMissing { message, .. } => {
                 write!(f, "workspace store missing: {message}")
+            }
+            Self::WorkspaceIdentityMismatch { message, .. } => {
+                write!(f, "workspace identity mismatch: {message}")
             }
             Self::SearchIndex { message, .. } => write!(f, "search index error: {message}"),
             Self::Graph { message, .. } => write!(f, "graph error: {message}"),
@@ -1386,6 +1397,11 @@ pub fn degraded_recovery_actions(code: &str) -> Vec<RecoveryAction> {
             "ee index rebuild --workspace . --json",
             "Rebuild the derived search index with this binary and its active embedding model before retrying retrieval.",
         )],
+        "workspace_identity_mismatch" => vec![recovery_command(
+            1,
+            "ee workspace resolve --workspace . --json",
+            "Inspect the stored workspace identities and exact database read recovery; this does not rebind the store.",
+        )],
         "index_missing" => vec![
             recovery_command(
                 1,
@@ -1864,6 +1880,7 @@ impl DomainError {
             Self::Configuration { .. } => "configuration",
             Self::Storage { .. } => "storage",
             Self::WorkspaceStoreMissing { .. } => "workspace_store_missing",
+            Self::WorkspaceIdentityMismatch { .. } => "workspace_identity_mismatch",
             Self::SearchIndex { .. } => "search_index",
             Self::Graph { .. } => "graph",
             Self::Import { .. } | Self::ImportWithDetails { .. } => "import",
@@ -1885,6 +1902,7 @@ impl DomainError {
             | Self::Configuration { message, .. }
             | Self::Storage { message, .. }
             | Self::WorkspaceStoreMissing { message, .. }
+            | Self::WorkspaceIdentityMismatch { message, .. }
             | Self::SearchIndex { message, .. }
             | Self::Graph { message, .. }
             | Self::Import { message, .. }
@@ -1910,6 +1928,7 @@ impl DomainError {
             | Self::Configuration { repair, .. }
             | Self::Storage { repair, .. }
             | Self::WorkspaceStoreMissing { repair, .. }
+            | Self::WorkspaceIdentityMismatch { repair, .. }
             | Self::SearchIndex { repair, .. }
             | Self::Graph { repair, .. }
             | Self::Import { repair, .. }
@@ -1937,6 +1956,9 @@ impl DomainError {
     #[must_use]
     pub fn recovery_actions(&self) -> Vec<RecoveryAction> {
         if let Self::WorkspaceStoreMissing {
+            recovery_actions, ..
+        }
+        | Self::WorkspaceIdentityMismatch {
             recovery_actions, ..
         } = self
         {
@@ -2016,13 +2038,18 @@ impl DomainError {
                 },
             ],
             // Migration required.
-            Self::MigrationRequired { .. } => vec![RecoveryAction::migration(
+            Self::MigrationRequired { repair, .. } => vec![RecoveryAction::migration(
                 1,
-                "ee migrate run --workspace . --to v0.2",
+                repair
+                    .as_deref()
+                    .filter(|command| {
+                        *command == "ee migrate run" || command.starts_with("ee migrate run ")
+                    })
+                    .unwrap_or("ee migrate run --workspace ."),
                 "Apply outstanding migrations; idempotent and audit-logged.",
             )],
             // Migration drift.
-            Self::MigrationDrift { .. } => vec![RecoveryAction {
+            Self::MigrationDrift { repair, .. } => vec![RecoveryAction {
                 priority: 1,
                 kind: RecoveryKind::Migration,
                 rationale: "Inspect drift details before deciding repair path.".to_owned(),
@@ -2031,7 +2058,16 @@ impl DomainError {
                 config_path: None,
                 config_key: None,
                 flag_name: None,
-                command: Some("ee migrate status --workspace . --json".to_owned()),
+                command: Some(
+                    repair
+                        .as_deref()
+                        .filter(|command| {
+                            *command == "ee migrate status"
+                                || command.starts_with("ee migrate status ")
+                        })
+                        .unwrap_or("ee migrate status --workspace . --json")
+                        .to_owned(),
+                ),
                 results_in: None,
                 example: None,
             }],
@@ -2199,6 +2235,7 @@ impl DomainError {
             Self::Configuration { .. } => ProcessExitCode::Configuration,
             Self::Storage { .. } => ProcessExitCode::Storage,
             Self::WorkspaceStoreMissing { .. } => ProcessExitCode::WorkspaceStoreMissing,
+            Self::WorkspaceIdentityMismatch { .. } => ProcessExitCode::Configuration,
             Self::SearchIndex { .. } => ProcessExitCode::SearchIndex,
             Self::Graph { .. } => ProcessExitCode::SearchIndex,
             Self::Import { .. } | Self::ImportWithDetails { .. } => ProcessExitCode::Import,
@@ -2898,12 +2935,45 @@ mod tests {
         let actions = error.recovery_actions();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].kind, super::RecoveryKind::Migration);
-        assert!(
-            actions[0]
-                .command
-                .as_deref()
-                .is_some_and(|cmd| cmd.contains("ee migrate run"))
+        assert_eq!(
+            actions[0].command.as_deref(),
+            Some("ee migrate run --workspace .")
         );
+    }
+
+    #[test]
+    fn domain_error_recovery_for_migration_required_preserves_addressed_command() {
+        let command = "ee migrate run --workspace '/tmp/original workspace' --database '/tmp/copied store/ee.db' --json";
+        let error = super::DomainError::MigrationRequired {
+            message: "The addressed store needs migration.".to_owned(),
+            repair: Some(command.to_owned()),
+        };
+        let actions = error.recovery_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, super::RecoveryKind::Migration);
+        assert_eq!(actions[0].command.as_deref(), Some(command));
+
+        let prose = super::DomainError::MigrationRequired {
+            message: "Schema migration is required.".to_owned(),
+            repair: Some("Inspect the backup before choosing a migration.".to_owned()),
+        };
+        assert_eq!(
+            prose.recovery_actions()[0].command.as_deref(),
+            Some("ee migrate run --workspace .")
+        );
+    }
+
+    #[test]
+    fn domain_error_recovery_for_migration_drift_preserves_addressed_inspection() {
+        let command = "ee migrate status --workspace '/tmp/original workspace' --database '/tmp/copied store/ee.db' --json";
+        let error = super::DomainError::MigrationDrift {
+            message: "The addressed migration ledger differs from its definition.".to_owned(),
+            repair: Some(command.to_owned()),
+        };
+        let actions = error.recovery_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, super::RecoveryKind::Migration);
+        assert_eq!(actions[0].command.as_deref(), Some(command));
     }
 
     #[test]

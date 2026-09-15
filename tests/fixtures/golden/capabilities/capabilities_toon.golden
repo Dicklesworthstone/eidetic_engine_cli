@@ -23,7 +23,7 @@ data:
   unimplemented[2]{code,featureFlag,shipTarget,trackingBead}:
     diagram_backend_unavailable,franken-mermaid-adapter,v0.3,bd-17c65.5.5
     mcp_feature_disabled,mcp,v0.2,bd-17c65.5.5
-  commands[551]{name,available}:
+  commands[555]{name,available}:
     agent,true
     agent detect,true
     agent scan,true
@@ -52,6 +52,9 @@ data:
     backup,true
     backup create,true
     backup inspect,true
+    backup keys,true
+    backup keys export,true
+    backup keys import,true
     backup list,true
     backup restore,true
     backup verify,true
@@ -360,6 +363,7 @@ data:
     plan goal,true
     plan recipe,true
     plan recipe list,true
+    plan recipe save,true
     plan recipe show,true
     plan recommend,true
     playbook,true
@@ -580,7 +584,7 @@ data:
       source: missing
       error: "cass binary 'tests/fixtures/missing-ee-workspace/no-cass' is not allowed: CASS import binary must be configured as an absolute path"
       trusted: false
-  envOverrides[121]:
+  envOverrides[130]:
     - name: EE_AGENT_NAME
       category: output
       controls: Identify the current agent for scoped memory retrieval.
@@ -684,6 +688,18 @@ data:
       defaultValue: "32"
       isSet: false
       source: registry_default
+    - name: EE_DAEMON_SEARCH_TIMEOUT_MS
+      category: performance
+      controls: Override the bounded deadline `ee search --use-daemon` gives the daemon before falling back to in-process search.
+      defaultValue: "5000"
+      isSet: false
+      source: registry_default
+    - name: EE_DAEMON_WARM
+      category: performance
+      controls: Set to `off` to stop a workspace-bound `ee daemon` from warming its search stack at startup.
+      defaultValue: on
+      isSet: false
+      source: registry_default
     - name: EE_DATABASE_PATH
       category: paths
       controls: Override the configured storage database path.
@@ -732,6 +748,12 @@ data:
       defaultValue: null
       isSet: false
       source: unset
+    - name: EE_EMBED_BACKEND
+      category: embeddings
+      controls: "Select the embedding backend: local for the bundled model, or remote for an OpenAI-compatible endpoint."
+      defaultValue: local
+      isSet: false
+      source: registry_default
     - name: EE_EMBED_DEDUP_COSINE_FLOOR
       category: embeddings
       controls: Set the cosine-similarity floor for insert-time embedding dedup confirmation.
@@ -762,9 +784,39 @@ data:
       defaultValue: null
       isSet: false
       source: unset
+    - name: EE_EMBED_MODEL_FIXTURE_DIR
+      category: diagnostics
+      controls: Select the real Potion model fixture for explicitly invoked model tests; does not configure normal retrieval.
+      defaultValue: null
+      isSet: false
+      source: unset
     - name: EE_EMBED_MODEL_PATH
       category: embeddings
       controls: Fault-injection path used to simulate an unavailable search embedder; this does not load alternate models.
+      defaultValue: null
+      isSet: false
+      source: unset
+    - name: EE_EMBED_REMOTE_API_KEY
+      category: embeddings
+      controls: Optional bearer token sent to the remote embedding endpoint; the value is never printed.
+      defaultValue: null
+      isSet: false
+      source: unset
+    - name: EE_EMBED_REMOTE_DIMENSION
+      category: embeddings
+      controls: Pin the remote embedding dimension instead of discovering it from the first response.
+      defaultValue: null
+      isSet: false
+      source: unset
+    - name: EE_EMBED_REMOTE_MODEL
+      category: embeddings
+      controls: "Model tag requested from the remote embedding endpoint, for example all-minilm."
+      defaultValue: null
+      isSet: false
+      source: unset
+    - name: EE_EMBED_REMOTE_URL
+      category: embeddings
+      controls: Base URL or full endpoint of an OpenAI-compatible /v1/embeddings server.
       defaultValue: null
       isSet: false
       source: unset
@@ -1146,6 +1198,12 @@ data:
       defaultValue: "50"
       isSet: false
       source: registry_default
+    - name: EE_RERANK_MODEL_FIXTURE_DIR
+      category: diagnostics
+      controls: Select the real reranker fixture for explicitly invoked model tests; does not configure normal retrieval.
+      defaultValue: null
+      isSet: false
+      source: unset
     - name: EE_SECURITY_PROFILE
       category: policy
       controls: Select security profile.
@@ -1341,14 +1399,17 @@ data:
       resumeFlag: "--cursor"
       cursorSchema: ee.cursor.v1
       degradedCodes[4]: output_truncated_budget,output_budget_unsatisfiable,cursor_stale,cursor_invalid
-      truncationPoints[8]{schemaId,command,arrayPath,perSectionItems,positionKeyField}:
+      truncationPoints[11]{schemaId,command,arrayPath,perSectionItems,positionKeyField}:
         ee.search.v1,search,data.results,false,docId
         "",memory list,data.memories,false,id
+        ee.audit.diff.v1,audit diff,data.entries,false,id
+        ee.audit.verify.v1,audit verify,data.issues,false,audit_id
         ee.insights.v1,insights,data.sections,true,id
         ee.curate.candidates.v1,curate candidates,data.candidates,false,id
         ee.pack.v2,pack,data.pack.skipped,false,id
         ee.recall.v1,recall,data.recall.items,false,memoryId
         "",journal list,data.entries,false,entryId
+        ee.mesh.import_ledger.v1,mesh ledger,data.events,false,eventId
         "",schema list,data.schemas,false,id
     sizeDiagnostics[2]:
       - command: status
@@ -1383,6 +1444,6 @@ data:
     enabledFeatures: 4
     totalFeatures: 8
     unimplementedCapabilities: 2
-    availableCommands: 550
-    totalCommands: 551
+    availableCommands: 554
+    totalCommands: 555
 degraded[0]:

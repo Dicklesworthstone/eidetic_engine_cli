@@ -100,7 +100,17 @@ assert_pack_slo() {
     local label="${4:?label required}"
     assert_jq "$json" '.data.pack.slo.schema' "ee.pack.slo.v1" "${label}_schema"
     assert_jq "$json" '.data.pack.slo.profile' "$profile" "${label}_profile"
-    assert_jq "$json" '.data.pack.slo.status' "$status" "${label}_status"
+    assert_jq "$json" '.data.pack.slo.resourceStatus' "$status" "${label}_resource_status"
+    assert_jq "$json" '
+        .data.pack.slo as $s |
+        ["within_budget", "warning", "failure"] as $statuses |
+        (if $s.actuals.elapsedMs >= $s.budgetClass.elapsedMsFailure then 2
+         elif $s.actuals.elapsedMs >= $s.budgetClass.elapsedMsWarning then 1
+         else 0 end) as $elapsed |
+        ($statuses | index($s.resourceStatus)) as $resource |
+        $resource != null and $s.elapsedStatus == $statuses[$elapsed]
+        and $s.status == $statuses[([$resource, $elapsed] | max)]
+    ' "true" "${label}_measured_classification"
 }
 
 # Calibrated under-budget corpora for all three profiles.
@@ -133,9 +143,9 @@ assert_jq "$LEAN_FAILURE_JSON" \
     "true" \
     "s4_lean_failure_code"
 
-# SLO determinism: timing fields may vary, but status/categorization must not.
+# SLO resource decisions are deterministic; measured classification is checked above.
 signature() {
-    jq -c '{status: .data.pack.slo.status, codes: [.data.pack.slo.degradations[]?.code] | sort}' \
+    jq -c '{resourceStatus: .data.pack.slo.resourceStatus, codes: [.data.pack.slo.degradations[]?.code] | sort}' \
         2>/dev/null
 }
 

@@ -128,6 +128,13 @@ pub const CONFIG_INVALID_VALUE: ErrorCode = ErrorCode {
     default_repair: Some("ee doctor --fix-plan --json"),
 };
 
+pub const WORKSPACE_IDENTITY_MISMATCH: ErrorCode = ErrorCode {
+    id: "EE-E103",
+    category: ErrorCategory::Configuration,
+    description: "Addressed local store contains a different workspace identity",
+    default_repair: Some("ee workspace resolve --workspace . --json"),
+};
+
 // Storage errors (EE-E200 - EE-E299)
 pub const DATABASE_NOT_FOUND: ErrorCode = ErrorCode {
     id: "EE-E200",
@@ -336,6 +343,7 @@ pub const ALL_ERROR_CODES: &[ErrorCode] = &[
     CONFIG_FILE_NOT_FOUND,
     CONFIG_PARSE_ERROR,
     CONFIG_INVALID_VALUE,
+    WORKSPACE_IDENTITY_MISMATCH,
     // Storage
     DATABASE_NOT_FOUND,
     DATABASE_LOCKED,

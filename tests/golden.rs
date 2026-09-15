@@ -3157,7 +3157,7 @@ mod tests {
             "context item provenance must be present",
         )?;
 
-        let normalized = normalize_context_pack_json(&stdout);
+        let normalized = normalize_context_pack_json(&stdout)?;
         assert_golden("agent", "context_pack.json", &normalized)
     }
 
@@ -3342,7 +3342,7 @@ mod tests {
             "legacy pack output must still omit guaranteeStatus",
         )?;
 
-        let normalized = normalize_context_pack_json(&stdout);
+        let normalized = normalize_context_pack_json(&stdout)?;
         assert_golden("agent", "query_file_context_pack.json", &normalized)
     }
 
@@ -3431,7 +3431,7 @@ mod tests {
             "graph neighbor item rank",
         )?;
 
-        let normalized = normalize_context_pack_json(&stdout);
+        let normalized = normalize_context_pack_json(&stdout)?;
         assert_golden("agent", "query_file_graph_context_pack.json", &normalized)
     }
 
@@ -4499,11 +4499,12 @@ mod tests {
         assert_json_golden("steward", "manual_runner_consolidation_pass", &pretty)
     }
 
-    fn normalize_context_pack_json(json: &str) -> String {
-        let mut value: serde_json::Value = match serde_json::from_str(json) {
-            Ok(v) => v,
-            Err(_) => return json.to_string(),
-        };
+    fn normalize_context_pack_json(json: &str) -> Result<String, String> {
+        let mut value: serde_json::Value = serde_json::from_str(json)
+            .map_err(|error| format!("pack golden output must be JSON: {error}"))?;
+        if !ee::obs::normalize_pack_slo_measurements(&mut value)? {
+            return Err("pack golden output missing producer SLO measurements".to_owned());
+        }
 
         normalize_context_pack_json_strings(&mut value);
 
@@ -4512,16 +4513,15 @@ mod tests {
                 if pack.get("elapsedMs").is_some() {
                     pack["elapsedMs"] = serde_json::json!(0.0);
                 }
-                if let Some(elapsed_ms) = pack.pointer_mut("/slo/actuals/elapsedMs") {
-                    *elapsed_ms = serde_json::json!(0);
-                }
                 if pack.get("hash").is_some() {
                     pack["hash"] = serde_json::json!("blake3:normalized-context-pack-hash");
                 }
             }
         }
 
-        serde_json::to_string_pretty(&value).unwrap_or_else(|_| json.to_string()) + "\n"
+        serde_json::to_string_pretty(&value)
+            .map(|serialized| serialized + "\n")
+            .map_err(|error| error.to_string())
     }
 
     fn normalize_context_pack_json_strings(value: &mut serde_json::Value) {

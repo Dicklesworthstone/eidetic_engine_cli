@@ -1,0 +1,19 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "workspace_identity_mismatch",
+  "introduced_by": { "bead": "bd-cv8sv", "epic_letter": "G" },
+  "surfaces": ["status"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A copied or relocated local .ee/ee.db contains workspace rows for its previous path but none for the addressed root. Status reports recoverable identity mismatch; memory list, search, resume and workspace resolve return the corresponding typed error with explicit read recovery. No row is adopted or rebound.",
+    "setup_commands": [],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "workspace_identity_mismatch",
+    "severity": "medium",
+    "message_contains": ["different workspace identity", "No workspace identity was reassigned"],
+    "repair_contains": "ee workspace resolve"
+  }
+}

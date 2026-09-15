@@ -147,9 +147,26 @@ fn cass_import_redacts_sensitive_spans_and_rerun_is_idempotent() -> TestResult {
     )
     .map_err(|error| format!("span metadata should be JSON: {error}"))?;
     ensure_equal(
-        &metadata["redactionStatus"],
+        &metadata["schema"],
+        &serde_json::json!(ee::db::EVIDENCE_SECURITY_METADATA_SCHEMA_V1),
+        "canonical evidence security metadata schema",
+    )?;
+    ensure_equal(
+        &metadata["secretRedactionStatus"],
         &serde_json::json!("redacted"),
         "span redaction metadata",
+    )?;
+    ensure_equal(
+        &span.secret_redaction_status.as_str(),
+        &"redacted",
+        "durable span redaction status",
+    )?;
+    let stored_classes: serde_json::Value = serde_json::from_str(&span.redaction_classes_json)
+        .map_err(|error| format!("stored redaction classes should be JSON: {error}"))?;
+    ensure_equal(
+        &metadata["redactionClasses"],
+        &stored_classes,
+        "canonical metadata agrees with durable redaction classes",
     )?;
     for class in &sensitive.redaction_classes {
         ensure(
@@ -329,6 +346,37 @@ fn parallel_cass_imports_preserve_ledger_counters() -> TestResult {
         &u64::from(ledger.imported_span_count),
         &spans_imported,
         "ledger imported span count equals subprocess contributions",
+    )?;
+    let spans = connection
+        .list_evidence_spans_for_session(&sessions[0].id)
+        .map_err(|error| error.to_string())?;
+    ensure_equal(
+        &spans.len(),
+        &1,
+        "one stored clean span after parallel imports",
+    )?;
+    let span = spans
+        .first()
+        .ok_or_else(|| "clean evidence span missing".to_owned())?;
+    ensure_equal(
+        &span.secret_redaction_status.as_str(),
+        &"clean",
+        "ordinary CASS content must not acquire a redaction classification",
+    )?;
+    let classes: serde_json::Value = serde_json::from_str(&span.redaction_classes_json)
+        .map_err(|error| format!("clean span classes must be JSON: {error}"))?;
+    ensure_equal(
+        &classes,
+        &serde_json::json!([]),
+        "clean span has no redaction classes",
+    )?;
+    let redaction_audits = connection
+        .list_audit_by_action("cass.evidence.redacted", None)
+        .map_err(|error| error.to_string())?;
+    ensure_equal(
+        &redaction_audits.len(),
+        &0,
+        "clean imports do not emit redaction audits",
     )?;
     connection.close().map_err(|e| e.to_string())
 }

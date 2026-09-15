@@ -1176,11 +1176,23 @@ pub fn decide_mesh_outbound_policy(
 impl MemoryScopeContext {
     #[must_use]
     pub fn for_workspace(workspace_path: &Path, scope: MemoryScope, strict_scope: bool) -> Self {
+        Self::for_workspace_with_connection(workspace_path, scope, strict_scope, None)
+    }
+
+    /// Reuse the request's database snapshot when it addresses the workspace
+    /// roster. An explicit campaign or external store cannot supply that roster.
+    #[must_use]
+    pub(crate) fn for_workspace_with_connection(
+        workspace_path: &Path,
+        scope: MemoryScope,
+        strict_scope: bool,
+        connection: Option<&crate::db::DbConnection>,
+    ) -> Self {
         Self {
             scope,
             strict_scope,
             current_agent: current_agent_name(),
-            team_members: load_team_members(workspace_path),
+            team_members: load_team_members(workspace_path, connection),
         }
     }
 
@@ -1260,17 +1272,33 @@ pub fn is_verified_memory(memory: &StoredMemory) -> bool {
     )
 }
 
-fn load_team_members(workspace_path: &Path) -> BTreeSet<String> {
+fn load_team_members(
+    workspace_path: &Path,
+    read_connection: Option<&crate::db::DbConnection>,
+) -> BTreeSet<String> {
     let mut members = BTreeSet::new();
     // Bound-read config so symlink/oversize paths stay fail-closed. The
     // unauthenticated [trust] team_members list is not an authorization
     // source; Team scope admits only durable team_members rows.
     let _ = read_memory_scope_config(&workspace_path.join(".ee").join("config.toml"));
     let database_path = workspace_path.join(".ee").join("ee.db");
-    if database_path.is_file()
-        && let Ok(connection) = crate::db::DbConnection::open_file_read_only(&database_path)
-        && let Ok(rows) = connection.list_all_team_members()
-    {
+    if !database_path.is_file() {
+        return members;
+    }
+    // Exact lexical identity is deliberately conservative. A different store
+    // (or an unrecognized alias) retains the normal workspace-roster lookup.
+    let supplied = read_connection.filter(|connection| {
+        matches!(connection.location(), crate::db::DatabaseLocation::File(path) if path == &database_path)
+    });
+    let owned = if supplied.is_none() {
+        crate::db::DbConnection::open_file_read_only(&database_path).ok()
+    } else {
+        None
+    };
+    let Some(connection) = supplied.or(owned.as_ref()) else {
+        return members;
+    };
+    if let Ok(rows) = connection.list_all_team_members() {
         for row in rows {
             if row.state == "active" {
                 if let Some(name) = normalized_non_empty(row.display_name) {
@@ -2115,6 +2143,179 @@ mod tests {
             TrustClass::HumanExplicit,
             Some("agent=RedStone")
         )));
+    }
+
+    #[test]
+    fn team_scope_reuses_addressed_roster_and_observes_later_revocation() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let store = temp.path().join(".ee");
+        std::fs::create_dir(&store).map_err(|error| error.to_string())?;
+        let database = store.join("ee.db");
+        let connection =
+            crate::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(crate::db::V106_TEAM_MEMBERS.sql())
+            .map_err(|error| error.to_string())?;
+        let member_id = "mbr_00000000000000000000000000000001";
+        connection
+            .insert_team_member(&crate::db::InsertTeamMemberInput {
+                member_id: member_id.to_owned(),
+                team_id: "team_scope_probe".to_owned(),
+                workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                display_name: "GreenField".to_owned(),
+                state: "active".to_owned(),
+                is_self: false,
+                origin_node_id: "node_scope_probe".to_owned(),
+                bound_via: "team_genesis".to_owned(),
+                joined_at: "2026-09-15T00:00:00Z".to_owned(),
+            })
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let pool = crate::db::read_pool::ReadConnectionPool::new(
+            crate::db::DatabaseConfig::read_only_file(&database),
+            crate::db::read_pool::PoolConfig::default_single(),
+        );
+        let read = pool.pin_snapshot().map_err(|error| error.to_string())?;
+        let slot = read.slot_id();
+        assert!(slot.is_some());
+        let before = std::fs::read(&database).map_err(|error| error.to_string())?;
+        let observed = MemoryScopeContext::for_workspace_with_connection(
+            temp.path(),
+            MemoryScope::Team,
+            false,
+            Some(
+                read.checked_connection()
+                    .map_err(|error| error.to_string())?,
+            ),
+        );
+        assert_eq!(
+            observed,
+            MemoryScopeContext::for_workspace(temp.path(), MemoryScope::Team, false)
+        );
+        assert_eq!(
+            observed.team_members,
+            BTreeSet::from(["GreenField".to_owned(), "node_scope_probe".to_owned(),])
+        );
+        assert!(observed.memory_in_scope(&memory_with_scope(
+            TrustClass::HumanExplicit,
+            Some("agent=GreenField")
+        )));
+        assert_eq!(
+            std::fs::read(&database).map_err(|error| error.to_string())?,
+            before
+        );
+        read.rollback().map_err(|error| error.to_string())?;
+        assert_eq!(pool.stats().idle, 1);
+
+        let writer =
+            crate::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        assert!(
+            writer
+                .set_team_member_state(member_id, "removed")
+                .map_err(|error| error.to_string())?
+        );
+        writer.close().map_err(|error| error.to_string())?;
+        let next_read = pool.pin_snapshot().map_err(|error| error.to_string())?;
+        assert_eq!(
+            next_read.slot_id(),
+            slot,
+            "reuse the same resident connection"
+        );
+        let next = MemoryScopeContext::for_workspace_with_connection(
+            temp.path(),
+            MemoryScope::Team,
+            false,
+            Some(
+                next_read
+                    .checked_connection()
+                    .map_err(|error| error.to_string())?,
+            ),
+        );
+        assert!(
+            next.team_members.is_empty(),
+            "request reuse must not cache membership across requests"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn team_scope_never_uses_an_explicit_other_store_as_the_workspace_roster() -> Result<(), String>
+    {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let store = temp.path().join(".ee");
+        std::fs::create_dir(&store).map_err(|error| error.to_string())?;
+        let database = store.join("ee.db");
+        let local =
+            crate::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        local
+            .execute_raw(crate::db::V106_TEAM_MEMBERS.sql())
+            .map_err(|error| error.to_string())?;
+        local
+            .insert_team_member(&crate::db::InsertTeamMemberInput {
+                member_id: "mbr_00000000000000000000000000000003".to_owned(),
+                team_id: "team_local".to_owned(),
+                workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                display_name: "LocalAgent".to_owned(),
+                state: "active".to_owned(),
+                is_self: false,
+                origin_node_id: "node_local".to_owned(),
+                bound_via: "team_genesis".to_owned(),
+                joined_at: "2026-09-15T00:00:00Z".to_owned(),
+            })
+            .map_err(|error| error.to_string())?;
+        local.close().map_err(|error| error.to_string())?;
+        let other_path = temp.path().join("external.db");
+        let other =
+            crate::db::DbConnection::open_file(&other_path).map_err(|error| error.to_string())?;
+        other
+            .execute_raw(crate::db::V106_TEAM_MEMBERS.sql())
+            .map_err(|error| error.to_string())?;
+        other
+            .insert_team_member(&crate::db::InsertTeamMemberInput {
+                member_id: "mbr_00000000000000000000000000000002".to_owned(),
+                team_id: "team_external".to_owned(),
+                workspace_id: "wsp_98765432109876543210987654".to_owned(),
+                display_name: "OutsideAgent".to_owned(),
+                state: "active".to_owned(),
+                is_self: false,
+                origin_node_id: "node_external".to_owned(),
+                bound_via: "team_genesis".to_owned(),
+                joined_at: "2026-09-15T00:00:00Z".to_owned(),
+            })
+            .map_err(|error| error.to_string())?;
+        let context = MemoryScopeContext::for_workspace_with_connection(
+            temp.path(),
+            MemoryScope::Team,
+            false,
+            Some(&other),
+        );
+        assert_eq!(
+            context.team_members,
+            BTreeSet::from(["LocalAgent".to_owned(), "node_local".to_owned()]),
+            "an external connection must still load only the local workspace roster"
+        );
+        // Test roster admission independently of the test runner's agent identity.
+        let context = MemoryScopeContext {
+            current_agent: None,
+            ..context
+        };
+        assert!(context.memory_in_scope(&memory_with_scope(
+            TrustClass::HumanExplicit,
+            Some("agent=LocalAgent")
+        )));
+        assert!(!context.memory_in_scope(&memory_with_scope(
+            TrustClass::HumanExplicit,
+            Some("agent=OutsideAgent")
+        )));
+        assert_eq!(
+            other
+                .list_all_team_members()
+                .map_err(|error| error.to_string())?
+                .len(),
+            1
+        );
+        Ok(())
     }
 
     #[test]

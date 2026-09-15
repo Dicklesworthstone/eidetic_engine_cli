@@ -1610,7 +1610,7 @@ fn storeless_same_root_default_and_campaign_retargets_are_database_exact() -> Te
     )?;
 
     let executed = run_emitted_ee_command_with_registry(
-        &format!("ee {campaign_retarget} search 'campaign same-root fact' --json"),
+        &format!("ee search {campaign_retarget} 'campaign same-root fact' --json"),
         &registry,
     )?;
     ensure(
@@ -1636,6 +1636,118 @@ fn storeless_same_root_default_and_campaign_retargets_are_database_exact() -> Te
         }),
         format!("campaign retarget must read campaign content: {results:?}"),
     )?;
+    ensure(
+        results.iter().all(|result| {
+            !result["content"]
+                .as_str()
+                .is_some_and(|content| content.starts_with("default same-root fact"))
+        }),
+        format!("campaign retarget must exclude default-store memories: {results:?}"),
+    )?;
+
+    let default_before = DbConnection::open_file_read_only(&default_database)
+        .map_err(|error| error.to_string())?
+        .count_table_rows("memories")
+        .map_err(|error| error.to_string())?;
+    let remembered = run_emitted_ee_command_with_registry(
+        &format!(
+            "ee remember {campaign_retarget} 'Campaign retargeted heliotrope ledger persists independently.' --json"
+        ),
+        &registry,
+    )?;
+    ensure(
+        remembered.status.success(),
+        format!(
+            "campaign remember failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&remembered.stdout),
+            String::from_utf8_lossy(&remembered.stderr)
+        ),
+    )?;
+    let remembered_json = stdout_json(&remembered, "campaign retargeted remember")?;
+    let memory_id = string_at(
+        &remembered_json,
+        "/data/memoryId",
+        "campaign retargeted remember",
+    )?;
+    for rebuild_first in [false, true] {
+        if rebuild_first {
+            let rebuilt = run_emitted_ee_command_with_registry(
+                &format!("ee index rebuild {campaign_retarget} --json"),
+                &registry,
+            )?;
+            ensure(
+                rebuilt.status.success(),
+                format!(
+                    "campaign rebuild failed: stdout={} stderr={}",
+                    String::from_utf8_lossy(&rebuilt.stdout),
+                    String::from_utf8_lossy(&rebuilt.stderr)
+                ),
+            )?;
+        }
+        let searched = run_emitted_ee_command_with_registry(
+            &format!(
+                "ee search {campaign_retarget} 'heliotrope ledger' --source-mode lexical-only --relevance-floor 0 --json"
+            ),
+            &registry,
+        )?;
+        ensure(
+            searched.status.success(),
+            format!(
+                "campaign search after rebuild={rebuild_first} failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&searched.stdout),
+                String::from_utf8_lossy(&searched.stderr)
+            ),
+        )?;
+        let searched_json = stdout_json(&searched, "campaign write search")?;
+        let hits = array_at(&searched_json, "/data/results", "campaign write search")?;
+        ensure(
+            hits.iter().any(|hit| {
+                hit["docId"].as_str() == Some(memory_id)
+                    && hit["content"].as_str()
+                        == Some("Campaign retargeted heliotrope ledger persists independently.")
+            }),
+            format!(
+                "campaign write must be searchable before and after rebuild={rebuild_first}: {hits:?}"
+            ),
+        )?;
+        let default_connection = DbConnection::open_file_read_only(&default_database)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            default_connection
+                .count_table_rows("memories")
+                .map_err(|error| error.to_string())?
+                == default_before
+                && default_connection
+                    .get_memory(memory_id)
+                    .map_err(|error| error.to_string())?
+                    .is_none(),
+            "campaign write and rebuild must preserve the separate default database",
+        )?;
+        default_connection
+            .close()
+            .map_err(|error| error.to_string())?;
+        let default_search = run_emitted_ee_command_with_registry(
+            &format!(
+                "ee search {default_retarget} 'heliotrope ledger' --source-mode lexical-only --relevance-floor 0 --json"
+            ),
+            &registry,
+        )?;
+        ensure(
+            default_search.status.success(),
+            format!(
+                "default isolation search failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&default_search.stdout),
+                String::from_utf8_lossy(&default_search.stderr)
+            ),
+        )?;
+        let default_json = stdout_json(&default_search, "default isolation search")?;
+        ensure(
+            array_at(&default_json, "/data/results", "default isolation search")?
+                .iter()
+                .all(|hit| hit["docId"].as_str() != Some(memory_id)),
+            "default search must never return the new campaign memory",
+        )?;
+    }
     ensure(
         !missing_database.exists(),
         "same-root miss and retarget must not create the addressed database".to_owned(),
@@ -2532,6 +2644,10 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
     ])?;
     let addressed_campaign_json =
         stdout_json(&addressed_campaign, "orient addressed .ee-campaign store")?;
+    ensure(
+        !child.join(".ee").join("ee.db").exists(),
+        "read-only campaign orientation must not create a competing default database",
+    )?;
     let addressed_recent = array_at(
         &addressed_campaign_json,
         "/data/fastContent/recent",
@@ -2634,6 +2750,10 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
     let addressed_campaign_full_json = stdout_json(
         &addressed_campaign_full,
         "full orient addressed .ee-campaign store",
+    )?;
+    ensure(
+        !child.join(".ee").join("ee.db").exists(),
+        "full read-only campaign orientation must not create a competing default database",
     )?;
     let addressed_full_items = array_at(
         &addressed_campaign_full_json,
@@ -2819,6 +2939,13 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         ),
     )?;
     let nonmatching_task = "zzzz_ft1z5_no_matching_orient_content_zzzz";
+    let expected_thin_next = format!(
+        "ee pack --workspace {} --database {} --index-dir {} --read-only --source-mode lexical_only --max-tokens 4000 --json -- {}",
+        shell_quote_cli_arg(campaign_workspace.to_string_lossy().as_ref()),
+        shell_quote_cli_arg(campaign_database.to_string_lossy().as_ref()),
+        shell_quote_cli_arg(campaign_index.to_string_lossy().as_ref()),
+        shell_quote_cli_arg(nonmatching_task),
+    );
     let thin = run_ee(&[
         "--workspace".to_owned(),
         root_str.clone(),
@@ -2851,9 +2978,10 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
             && thin_nearby.len() == 1
             && thin_discovery["nearbyStores"][0]["workspaceRoot"] == serde_json::json!(best_path)
             && thin_discovery["nearbyStores"][0]["documents"] == serde_json::json!(best_documents)
-            && thin_json["data"]["nextCommands"][0] == serde_json::json!(first_next_command),
+            && thin_json["data"]["nextCommands"][0] == serde_json::json!(expected_thin_next),
         format!(
-            "a two-memory root must exclude the one-document child and retarget only the three-document child: {thin_discovery}"
+            "a two-memory root must exclude the one-document child and retarget only the three-document child with the current task: discovery={thin_discovery}, command={}",
+            thin_json["data"]["nextCommands"][0]
         ),
     )?;
 
@@ -2876,7 +3004,7 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         thin_human.contains("thin: 2 live memories; discovery threshold 3")
             && thin_human.contains("This store is thin, and richer stores exist nearby")
             && !thin_human.contains("smaller_ft1z5")
-            && thin_human.contains(first_next_command),
+            && thin_human.contains(&expected_thin_next),
         format!("thin-root human output must retain posture and retarget: {thin_human}"),
     )?;
 
@@ -3217,6 +3345,369 @@ fn empty_workspace_discovers_registered_remote_store_and_skips_bad_rows() -> Tes
         format!(
             "executing the registered-store command must read content from its exact database/index: {emitted_items:?}"
         ),
+    )?;
+    Ok(())
+}
+
+/// Listing an old schema leaves it intact and supplies a parseable, addressed repair.
+#[test]
+fn memory_list_pending_migration_preserves_store_and_emits_executable_targeted_repair() -> TestResult
+{
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = temp.path().join("original workspace's path");
+    std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let database = temp.path().join("explicit store's.db");
+    let migration = &ee::db::V001_INIT_SCHEMA;
+    let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    connection
+        .ensure_migration_table()
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute_raw(migration.sql())
+        .map_err(|error| error.to_string())?;
+    connection
+        .record_migration(
+            &ee::db::MigrationRecord::new(
+                migration.version(),
+                migration.name(),
+                migration.checksum(),
+                "2026-09-15T00:00:00Z",
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    connection.close().map_err(|error| error.to_string())?;
+    let paths = [
+        database.clone(),
+        sqlite_sidecar_path(&database, "-wal"),
+        sqlite_sidecar_path(&database, "-shm"),
+    ];
+    let before = paths
+        .iter()
+        .map(|path| snapshot_file(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let output = run_ee_with_registry(
+        &[
+            "memory".to_owned(),
+            "list".to_owned(),
+            "--workspace".to_owned(),
+            workspace.to_string_lossy().into_owned(),
+            "--database".to_owned(),
+            database.to_string_lossy().into_owned(),
+            "--json".to_owned(),
+        ],
+        &temp.path().join("registry.db"),
+    )?;
+    let json = stdout_json(&output, "old-schema memory list")?;
+    ensure(
+        output.status.code() == Some(8) && json["error"]["code"] == "migration_required",
+        format!(
+            "old schema must require migration: {json}; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    let repair = string_at(&json, "/error/repair", "migration repair")?;
+    let expected = format!(
+        "ee migrate run --workspace {} --database {} --json",
+        shell_quote_cli_arg(&workspace.to_string_lossy()),
+        shell_quote_cli_arg(&database.to_string_lossy()),
+    );
+    ensure(
+        repair == expected,
+        format!("repair must retain both explicit paths: {repair}"),
+    )?;
+    ensure(
+        string_at(
+            &json,
+            "/error/details/recovery/0/command",
+            "structured migration repair",
+        )? == repair,
+        "structured recovery must execute the same addressed repair",
+    )?;
+    ensure(
+        paths
+            .iter()
+            .map(|path| snapshot_file(path))
+            .collect::<Result<Vec<_>, _>>()?
+            == before,
+        "old-schema list must preserve DB, WAL, and SHM bytes and metadata",
+    )?;
+    // The real command traverses Clap and the migration handler, with its
+    // existing dry-run flag preventing the test from applying the repair.
+    let dry_run = run_emitted_ee_command_with_registry(
+        &format!("{repair} --dry-run"),
+        &temp.path().join("registry.db"),
+    )?;
+    let plan = stdout_json(&dry_run, "parse and plan exact migration repair")?;
+    let expected_pending =
+        u64::try_from(ee::db::MIGRATIONS.len() - 1).map_err(|error| error.to_string())?;
+    ensure(
+        dry_run.status.success()
+            && plan["data"]["dryRun"] == true
+            && plan["data"]["databasePath"].as_str() == Some(database.to_string_lossy().as_ref())
+            && plan["data"]["schemaVersion"] == 1
+            && plan["data"]["wouldApplyCount"].as_u64() == Some(expected_pending),
+        format!(
+            "exact repair must parse and address the real old database: {plan}; stderr={}",
+            String::from_utf8_lossy(&dry_run.stderr)
+        ),
+    )?;
+    ensure(
+        paths
+            .iter()
+            .map(|path| snapshot_file(path))
+            .collect::<Result<Vec<_>, _>>()?
+            == before,
+        "migration dry-run must retain the unchanged old store",
+    )?;
+    Ok(())
+}
+
+/// A copied real store retains its identity and offers executable read recovery.
+#[test]
+fn relocated_store_reports_identity_mismatch_and_executes_explicit_read_recovery() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let original = temp.path().join("original workspace");
+    let copied = temp.path().join("copied workspace");
+    std::fs::create_dir_all(&original).map_err(|error| error.to_string())?;
+    let original = original.canonicalize().map_err(|error| error.to_string())?;
+    let run = |workspace: &Path, args: &[&str]| -> Result<Output, String> {
+        Command::new(env!("CARGO_BIN_EXE_ee"))
+            .arg("--workspace")
+            .arg(workspace)
+            .args(args)
+            .arg("--json")
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .env("XDG_DATA_HOME", temp.path().join("data"))
+            .env("XDG_CACHE_HOME", temp.path().join("cache"))
+            .env("XDG_STATE_HOME", temp.path().join("state"))
+            .env("EE_WORKSPACE_REGISTRY", temp.path().join("registry.db"))
+            .output()
+            .map_err(|error| error.to_string())
+    };
+    let expect_success = |output: &Output, label: &str| -> Result<serde_json::Value, String> {
+        ensure(
+            output.status.success(),
+            format!(
+                "{label}: {:?}; stdout={}; stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ),
+        )?;
+        stdout_json(output, label)
+    };
+    expect_success(&run(&original, &["init"])?, "initialize original")?;
+    for content in [
+        "quasar relocation first stored memory",
+        "quasar relocation second stored memory",
+    ] {
+        expect_success(
+            &run(
+                &original,
+                &["remember", content, "--level", "semantic", "--kind", "fact"],
+            )?,
+            "remember original",
+        )?;
+    }
+    expect_success(
+        &run(&original, &["index", "rebuild"])?,
+        "build real original index",
+    )?;
+    let original_search = expect_success(
+        &run(
+            &original,
+            &[
+                "search",
+                "quasar relocation",
+                "--source-mode",
+                "lexical_only",
+                "--strict-source-mode",
+            ],
+        )?,
+        "original indexed search",
+    )?;
+    ensure(
+        array_at(&original_search, "/data/results", "original search")?.len() == 2,
+        format!("real original index must retrieve both stored memories: {original_search}"),
+    )?;
+
+    // Copy the complete quiescent store, including derived indexes and keys.
+    // Each CLI child has exited before its files enter the copied fixture.
+    let mut pending = vec![(original.clone(), copied.clone())];
+    while let Some((source, destination)) = pending.pop() {
+        std::fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
+        for entry in std::fs::read_dir(&source).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let target = destination.join(entry.file_name());
+            let kind = entry.file_type().map_err(|error| error.to_string())?;
+            if kind.is_dir() {
+                pending.push((entry.path(), target));
+            } else {
+                ensure(
+                    kind.is_file(),
+                    "owned fixture must contain only regular files and directories",
+                )?;
+                std::fs::copy(entry.path(), target).map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    let copied = copied.canonicalize().map_err(|error| error.to_string())?;
+    let database = copied.join(".ee/ee.db");
+    let database_before = snapshot_file(&database)?.ok_or("copied DB missing")?;
+    let mut recovery_command = None;
+    for (label, args) in [
+        ("memory list", vec!["memory", "list"]),
+        (
+            "search",
+            vec![
+                "search",
+                "quasar relocation",
+                "--source-mode",
+                "lexical_only",
+                "--strict-source-mode",
+            ],
+        ),
+        ("resume", vec!["resume"]),
+        ("workspace resolve", vec!["workspace", "resolve"]),
+    ] {
+        let output = run(&copied, &args)?;
+        let value = stdout_json(&output, label)?;
+        ensure(
+            output.status.code() == Some(2),
+            format!("{label} must report configuration mismatch: {value}"),
+        )?;
+        ensure(
+            value["schema"] == "ee.error.v2"
+                && value["error"]["code"] == "workspace_identity_mismatch",
+            format!("{label} lost typed identity error: {value}"),
+        )?;
+        ensure(
+            value["error"]["severity"] == "medium",
+            format!("{label} mislabeled corruption: {value}"),
+        )?;
+        ensure(
+            value["error"]["details"]["rebindPerformed"] == false,
+            "diagnosis must not claim reassignment",
+        )?;
+        ensure(
+            value["error"]["details"]["storedWorkspaceCount"] == 1,
+            "must identify the real stored workspace",
+        )?;
+        let repair = string_at(&value, "/error/details/recovery/0/command", label)?.to_owned();
+        ensure(
+            !repair.contains("ee init"),
+            "copied identity recovery must not initialize another row",
+        )?;
+        if let Some(previous) = recovery_command.as_ref() {
+            ensure(
+                previous == &repair,
+                "all surfaces must return identical concrete recovery",
+            )?;
+        } else {
+            recovery_command = Some(repair);
+        }
+    }
+    let status = expect_success(&run(&copied, &["status"])?, "copied status")?;
+    ensure(
+        status["data"]["posture"]["overall"] == "degraded_recoverable",
+        format!("copied status must not be green: {status}"),
+    )?;
+    ensure(
+        array_at(&status, "/degraded", "status")?
+            .iter()
+            .any(|entry| entry["code"] == "workspace_identity_mismatch"),
+        "status envelope must preserve the identity diagnostic",
+    )?;
+    ensure(
+        array_at(&status, "/data/workspace/diagnostics", "status")?
+            .iter()
+            .any(|entry| entry["code"] == "workspace_identity_mismatch"),
+        "status workspace diagnostics must explain the mismatch",
+    )?;
+    let doctor = expect_success(&run(&copied, &["doctor"])?, "copied doctor")?;
+    ensure(
+        array_at(&doctor, "/data/coreChecks", "doctor")?
+            .iter()
+            .any(|entry| {
+                entry["name"] == "database"
+                    && entry["severity"] == "warning"
+                    && entry["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("different workspace identity"))
+            }),
+        format!("doctor must explain identity mismatch: {doctor}"),
+    )?;
+    ensure(
+        array_at(&doctor, "/data/actionable", "doctor")?
+            .iter()
+            .any(|entry| entry["errorCode"] == "EE-E103"),
+        "doctor must retain the stable identity error code",
+    )?;
+    let recovery = recovery_command.ok_or("no concrete read recovery")?;
+    let read_store_paths = [
+        database.clone(),
+        sqlite_sidecar_path(&database, "-wal"),
+        sqlite_sidecar_path(&database, "-shm"),
+    ];
+    let read_store_before = read_store_paths
+        .iter()
+        .map(|path| snapshot_file(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let restored_read =
+        run_emitted_ee_command_with_registry(&recovery, &temp.path().join("registry.db"))?;
+    let recovered = expect_success(&restored_read, "execute exact suggested recovery")?;
+    ensure(
+        recovered["data"]["total_count"] == 2,
+        format!("recovery must retrieve both real records: {recovered}"),
+    )?;
+    let contents = array_at(&recovered, "/data/memories", "recovery")?
+        .iter()
+        .filter_map(|memory| memory["content"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    ensure(
+        contents
+            == std::collections::BTreeSet::from([
+                "quasar relocation first stored memory",
+                "quasar relocation second stored memory",
+            ]),
+        "recovered content must match both stored originals",
+    )?;
+    // Relocation may leave the original path absent. The explicit database
+    // command must still use the recorded identity without creating that path.
+    std::fs::rename(&original, temp.path().join("retained original"))
+        .map_err(|error| error.to_string())?;
+    let relocated_read =
+        run_emitted_ee_command_with_registry(&recovery, &temp.path().join("registry.db"))?;
+    let relocated = expect_success(&relocated_read, "read with original path absent")?;
+    ensure(
+        relocated["data"]["total_count"] == 2 && !original.exists(),
+        "explicit identity recovery must neither lose records nor recreate the original workspace",
+    )?;
+    ensure(
+        snapshot_file(&database)?.as_ref() == Some(&database_before),
+        "mismatch diagnostics and explicit reads must not change the copied database",
+    )?;
+    ensure(
+        read_store_paths
+            .iter()
+            .map(|path| snapshot_file(path))
+            .collect::<Result<Vec<_>, _>>()?
+            == read_store_before,
+        "explicit copied-store reads must preserve DB, WAL, and SHM bytes and metadata",
+    )?;
+    let connection =
+        DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+    let rows = connection
+        .list_workspaces()
+        .map_err(|error| error.to_string())?;
+    ensure(
+        rows.len() == 1 && rows[0].id == stable_workspace_id(&original),
+        "diagnosis/recovery must preserve the original workspace identity",
     )?;
     Ok(())
 }

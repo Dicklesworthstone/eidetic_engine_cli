@@ -61,6 +61,9 @@ pub const WORKSPACE_RESOLVE_SCHEMA_V1: &str = "ee.workspace.resolve.v1";
 pub const WORKSPACE_HYGIENE_SCHEMA_V1: &str = "ee.workspace_hygiene.v1";
 pub const WORKSPACE_HYGIENE_SYMBOL_RISK_SCHEMA_V1: &str = "ee.workspace_hygiene.symbol_risk.v1";
 pub const WORKSPACE_REGISTRY_ENV_VAR: &str = EnvVar::WorkspaceRegistry.name();
+pub const WORKSPACE_IDENTITY_MISMATCH_CODE: &str = "workspace_identity_mismatch";
+pub const WORKSPACE_IDENTITY_MISMATCH_MESSAGE: &str = "The addressed local store contains a different workspace identity. No workspace identity was reassigned.";
+pub const WORKSPACE_IDENTITY_MISMATCH_INSPECT: &str = "ee workspace resolve --workspace . --json";
 
 const WORKSPACE_ALIAS_SET_ACTION: &str = "workspace.alias.set";
 const WORKSPACE_ALIAS_CLEAR_ACTION: &str = "workspace.alias.clear";
@@ -482,15 +485,25 @@ pub fn resolve_workspace_alias_for_cli(raw: &Path) -> Option<PathBuf> {
 pub fn list_workspace_registry(
     options: &WorkspaceListOptions,
 ) -> Result<WorkspaceListReport, DomainError> {
+    list_workspace_registry_with(options, std::convert::identity)
+}
+
+/// Consume the validated registry rows before closing their read connection.
+/// Discovery can publish the owned rows while its bounded worker tears down
+/// storage; ordinary callers still wait for cleanup before returning.
+pub(crate) fn list_workspace_registry_with<T>(
+    options: &WorkspaceListOptions,
+    consume: impl FnOnce(WorkspaceListReport) -> T,
+) -> Result<T, DomainError> {
     let registry_path = registry_database_path_override(options.registry_path.as_deref());
     if !registry_file_exists(&registry_path)? {
-        return Ok(WorkspaceListReport {
+        return Ok(consume(WorkspaceListReport {
             schema: WORKSPACE_REGISTRY_SCHEMA_V1,
             command: "workspace list",
             registry_path: registry_path.display().to_string(),
             registry_exists: false,
             workspaces: Vec::new(),
-        });
+        }));
     }
 
     let conn = open_registry_read_only(&registry_path)?;
@@ -501,13 +514,13 @@ pub fn list_workspace_registry(
         .map(WorkspaceEntry::from)
         .collect();
 
-    Ok(WorkspaceListReport {
+    Ok(consume(WorkspaceListReport {
         schema: WORKSPACE_REGISTRY_SCHEMA_V1,
         command: "workspace list",
         registry_path: registry_path.display().to_string(),
         registry_exists: true,
         workspaces,
-    })
+    }))
 }
 
 pub fn resolve_workspace_report(
@@ -2207,11 +2220,7 @@ fn resolve_path_report(
                 )),
             });
         }
-        select_existing_workspace_row(
-            &connection,
-            &requested_id,
-            &[&resolution.location.root, &resolution.canonical_root],
-        )?
+        addressed_workspace_row(&connection, &resolution.location.root, &database)?
     } else {
         None
     };
@@ -2810,6 +2819,101 @@ pub(crate) fn bound_workspace_id_or_hash(
     )
 }
 
+/// Resolve a read's workspace binding without creating or adopting a row.
+///
+/// A copied `.ee`/`.ee-campaign` store is distinguishable from an empty local
+/// store: it contains workspace rows, but none for the addressed root. External
+/// shared/global stores may legitimately have no row for a particular caller;
+/// retain that empty scope instead of adopting one of their other workspaces.
+pub(crate) fn addressed_workspace_row(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    database_path: &Path,
+) -> Result<Option<StoredWorkspace>, DomainError> {
+    let canonical = canonical_or_lexical(workspace_path);
+    let requested = stable_workspace_id(&canonical);
+    let matched = select_existing_workspace_row(
+        connection,
+        &requested,
+        &[workspace_path, canonical.as_path()],
+    )?;
+    let crate::db::DatabaseLocation::File(connection_path) = connection.location() else {
+        return Ok(matched);
+    };
+    let database = canonical_or_lexical(connection_path);
+    if canonical_or_lexical(database_path) != database {
+        return Err(DomainError::Storage {
+            message: "The supplied read connection does not address the requested database."
+                .to_owned(),
+            repair: Some("Pass the requested database's own read connection.".to_owned()),
+        });
+    }
+    if matched.is_some() {
+        return Ok(matched);
+    }
+    let is_addressed_local = [WORKSPACE_MARKER, ".ee-campaign"]
+        .iter()
+        .any(|marker| canonical_or_lexical(&canonical.join(marker).join("ee.db")) == database);
+    if !is_addressed_local {
+        return Ok(None);
+    }
+    let mut stored = connection
+        .list_workspaces()
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to inspect addressed workspace binding: {error}"),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
+        })?;
+    if stored.is_empty() {
+        return Ok(None);
+    }
+    stored.sort_by(|left, right| left.id.cmp(&right.id));
+    let recovery_actions = stored.iter().take(8).enumerate().filter_map(|(index, row)| {
+        // Stored metadata is untrusted. Only offer shell-quoted absolute paths;
+        // control characters must not become prompt-facing command text.
+        if !Path::new(&row.path).is_absolute() || row.path.chars().any(char::is_control) {
+            return None;
+        }
+        Some(crate::models::RecoveryAction {
+            priority: u8::try_from(index).unwrap_or(u8::MAX),
+            kind: crate::models::RecoveryKind::Broaden,
+            rationale: "Read this stored workspace explicitly from the addressed database; this does not rebind or relocate it.".to_owned(),
+            env_name: None,
+            value_hint: None,
+            config_path: None,
+            config_key: None,
+            flag_name: None,
+            command: Some(format!(
+                "ee memory list --workspace {} --database {} --json",
+                shell_quote_command_arg(&row.path),
+                shell_quote_path_arg(&database),
+            )),
+            results_in: None,
+            example: None,
+        })
+    }).collect::<Vec<_>>();
+    let repair = recovery_actions.first().and_then(|action| action.command.clone()).or_else(|| {
+        Some("Keep the addressed store unchanged. Backup restoration into a fresh side path requires the source authentication material; automatic rebind is not available.".to_owned())
+    });
+    Err(DomainError::WorkspaceIdentityMismatch {
+        message: WORKSPACE_IDENTITY_MISMATCH_MESSAGE.to_owned(),
+        repair,
+        details_json: serde_json::json!({
+            "requestedWorkspace": canonical,
+            "requestedWorkspaceId": requested,
+            "database": database,
+            "storedWorkspaceCount": stored.len(),
+            "storedWorkspaces": stored.iter().take(8).map(|row| serde_json::json!({
+                "id": row.id,
+                "path": row.path,
+            })).collect::<Vec<_>>(),
+            "storedWorkspacesTruncated": stored.len() > 8,
+            "rebindPerformed": false,
+        })
+        .to_string(),
+        recovery_actions,
+    })
+}
+
 pub(crate) fn select_existing_workspace_row(
     connection: &DbConnection,
     requested_workspace_id: &str,
@@ -3381,6 +3485,105 @@ mod tests {
             slashed.iter().any(|key| key == "/tmp/ee-lookup/campaign"),
             "lookup keys should include the trailing-slash-trimmed path, got {slashed:?}"
         );
+    }
+
+    #[test]
+    fn addressed_binding_distinguishes_relocated_empty_and_shared_stores() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let original = temp.path().join("original workspace");
+        let other = temp.path().join("other workspace");
+        let copied = temp.path().join("copied workspace");
+        for path in [&original, &other, &copied] {
+            fs::create_dir_all(path.join(".ee")).map_err(|error| error.to_string())?;
+        }
+        let original = canonical_or_lexical(&original);
+        let other = canonical_or_lexical(&other);
+        let copied = canonical_or_lexical(&copied);
+        let shared_database = temp.path().join("shared.db");
+        let copied_database = copied.join(".ee/ee.db");
+        let connection =
+            DbConnection::open_file(&shared_database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        assert!(
+            addressed_workspace_row(&connection, &copied, &shared_database)
+                .map_err(|error| error.message())?
+                .is_none()
+        );
+        for path in [&original, &other] {
+            connection
+                .insert_workspace(
+                    &stable_workspace_id(path),
+                    &CreateWorkspaceInput {
+                        path: path.to_string_lossy().into_owned(),
+                        name: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        // A shared database with no requested row remains empty-scoped.
+        assert!(
+            addressed_workspace_row(&connection, &copied, &shared_database)
+                .map_err(|error| error.message())?
+                .is_none()
+        );
+        connection.close().map_err(|error| error.to_string())?;
+        fs::copy(&shared_database, &copied_database).map_err(|error| error.to_string())?;
+        for suffix in ["-wal", "-shm"] {
+            let mut source = shared_database.as_os_str().to_os_string();
+            source.push(suffix);
+            let source = PathBuf::from(source);
+            if source.exists() {
+                let mut destination = copied_database.as_os_str().to_os_string();
+                destination.push(suffix);
+                fs::copy(source, PathBuf::from(destination)).map_err(|error| error.to_string())?;
+            }
+        }
+        let before = fs::read(&copied_database).map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_file_read_only(&copied_database)
+            .map_err(|error| error.to_string())?;
+        let error = addressed_workspace_row(&connection, &copied, &copied_database)
+            .expect_err("a copied local store must not adopt either stored identity");
+        assert!(matches!(
+            error,
+            DomainError::WorkspaceIdentityMismatch { .. }
+        ));
+        assert_eq!(error.code(), WORKSPACE_IDENTITY_MISMATCH_CODE);
+        assert_eq!(error.recovery_actions().len(), 2);
+        assert!(!error.repair().unwrap_or_default().contains("ee init"));
+        for path in [&original, &other] {
+            let alias = path.join(".");
+            let row = addressed_workspace_row(&connection, &alias, &copied_database)
+                .map_err(|error| error.message())?
+                .ok_or("explicit stored identity disappeared")?;
+            assert_eq!(row.id, stable_workspace_id(path));
+        }
+        assert_eq!(
+            connection
+                .list_workspaces()
+                .map_err(|error| error.to_string())?
+                .len(),
+            2
+        );
+        connection.close().map_err(|error| error.to_string())?;
+        assert_eq!(
+            fs::read(&copied_database).map_err(|error| error.to_string())?,
+            before
+        );
+
+        let empty_root = temp.path().join("empty");
+        fs::create_dir_all(empty_root.join(".ee")).map_err(|error| error.to_string())?;
+        let empty_database = empty_root.join(".ee/ee.db");
+        let empty = DbConnection::open_file(&empty_database).map_err(|error| error.to_string())?;
+        let error = addressed_workspace_row(&empty, &empty_root, &empty_database)
+            .expect_err("an unavailable schema must not masquerade as identity mismatch");
+        assert!(matches!(error, DomainError::Storage { .. }));
+        empty.migrate().map_err(|error| error.to_string())?;
+        assert!(
+            addressed_workspace_row(&empty, &empty_root, &empty_database)
+                .map_err(|error| error.message())?
+                .is_none()
+        );
+        Ok(())
     }
 
     #[test]

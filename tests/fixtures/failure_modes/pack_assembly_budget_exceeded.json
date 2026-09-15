@@ -12,7 +12,7 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "A context pack exceeds the candidate, graph traversal, or elapsed hard budget for the selected resource profile.",
+    "description": "A context pack exceeds the candidate or graph traversal hard budget for the selected resource profile. Elapsed breaches are reported separately in pack.slo.elapsedStatus and aggregate status, without changing signed content degradations.",
     "setup_commands": [
       "ee init --workspace .",
       "seed a corpus or graph expansion larger than the selected --resource-profile budget"

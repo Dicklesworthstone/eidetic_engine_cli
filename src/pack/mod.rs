@@ -3629,7 +3629,7 @@ impl PackAssemblySloActuals {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PackAssemblySloStatus {
     WithinBudget,
     Warning,
@@ -3637,6 +3637,16 @@ pub enum PackAssemblySloStatus {
 }
 
 impl PackAssemblySloStatus {
+    fn for_elapsed_ms(elapsed_ms: u64, budget: &PackSloBudgetClass) -> Self {
+        if elapsed_ms >= budget.elapsed_ms_failure {
+            Self::Failure
+        } else if elapsed_ms >= budget.elapsed_ms_warning {
+            Self::Warning
+        } else {
+            Self::WithinBudget
+        }
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -3662,7 +3672,13 @@ pub struct PackAssemblySlo {
     pub budget_class: PackSloBudgetClass,
     pub admission: Option<PackAdmissionPosture>,
     pub actuals: PackAssemblySloActuals,
+    /// Deterministic work/admission posture; its degradations enter pack identity.
+    pub resource_status: PackAssemblySloStatus,
+    /// Unsigned measurement of the assembly that produced this response.
+    pub elapsed_status: PackAssemblySloStatus,
+    /// Worst of resource_status and elapsed_status; never controls pack selection.
     pub status: PackAssemblySloStatus,
+    /// Resource degradations only. Timing is reported separately by elapsed_status.
     pub degradations: Vec<PackAssemblySloDegradation>,
 }
 
@@ -3675,7 +3691,7 @@ impl PackAssemblySlo {
         let graph_over_budget =
             actuals.graph_edges_traversed > budget_class.graph_traversal_max_edges;
 
-        let status = if scanned_over_budget || graph_over_budget {
+        let resource_status = if scanned_over_budget || graph_over_budget {
             degradations.push(pack_assembly_budget_exceeded_degradation(
                 profile,
                 &budget_class,
@@ -3692,6 +3708,8 @@ impl PackAssemblySlo {
         } else {
             PackAssemblySloStatus::WithinBudget
         };
+        let elapsed_status =
+            PackAssemblySloStatus::for_elapsed_ms(actuals.elapsed_ms, &budget_class);
 
         Self {
             schema: PACK_ASSEMBLY_SLO_SCHEMA_V1,
@@ -3702,7 +3720,9 @@ impl PackAssemblySlo {
                 budget_class.concurrent_pack_max,
             )),
             actuals,
-            status,
+            resource_status,
+            elapsed_status,
+            status: resource_status.max(elapsed_status),
             degradations,
         }
     }
@@ -3715,6 +3735,9 @@ impl PackAssemblySlo {
         queue_depth: usize,
     ) -> Self {
         let budget_class = profile.budget_class();
+        let resource_status = PackAssemblySloStatus::Warning;
+        let elapsed_status =
+            PackAssemblySloStatus::for_elapsed_ms(actuals.elapsed_ms, &budget_class);
         Self {
             schema: PACK_ASSEMBLY_SLO_SCHEMA_V1,
             profile,
@@ -3725,7 +3748,9 @@ impl PackAssemblySlo {
                 retry_after_ms,
             )),
             actuals,
-            status: PackAssemblySloStatus::Warning,
+            resource_status,
+            elapsed_status,
+            status: resource_status.max(elapsed_status),
             degradations: vec![pack_concurrent_limit_reached_degradation(
                 profile,
                 &budget_class,
@@ -5143,11 +5168,10 @@ fn pack_assembly_slow_degradation(
         code: PACK_ASSEMBLY_SLOW_CODE,
         severity: ContextResponseSeverity::Low,
         message: format!(
-            "Pack assembly reached the {} resource-profile warning threshold: scanned {} candidate{} in {} ms.",
+            "Pack assembly reached the {} resource-profile warning threshold: scanned {} candidate{}.",
             profile.as_str(),
             actuals.scanned_count,
-            plural_s(actuals.scanned_count),
-            actuals.elapsed_ms
+            plural_s(actuals.scanned_count)
         ),
         repair: Some(format!(
             "Use --resource-profile swarm_heavy or reduce --candidate-pool below {}.",
@@ -5165,13 +5189,12 @@ fn pack_assembly_budget_exceeded_degradation(
         code: PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE,
         severity: ContextResponseSeverity::Medium,
         message: format!(
-            "Pack assembly exceeded the {} resource-profile budget: scanned {}/{} candidates, traversed {}/{} graph edges, elapsed {} ms.",
+            "Pack assembly exceeded the {} resource-profile budget: scanned {}/{} candidates, traversed {}/{} graph edges.",
             profile.as_str(),
             actuals.scanned_count,
             budget.candidates_scanned_max,
             actuals.graph_edges_traversed,
-            budget.graph_traversal_max_edges,
-            actuals.elapsed_ms
+            budget.graph_traversal_max_edges
         ),
         repair: Some(
             "Use --resource-profile swarm_heavy, reduce --candidate-pool, or narrow the query."

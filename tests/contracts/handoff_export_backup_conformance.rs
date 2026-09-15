@@ -114,6 +114,7 @@ fn create_capsule(fixture: &Fixture, name: &str) -> Result<(PathBuf, Value), Str
     let output = fixture.workspace.join(format!("{name}.handoff.json"));
     let report = create_handoff(&HandoffCreateOptions {
         workspace: fixture.workspace.clone(),
+        command_timeout_ms: ee::core::swarm_brief::DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         output: output.clone(),
         profile: CapsuleProfile::Resume,
         since: None,
@@ -174,6 +175,7 @@ fn schema_family_covers_handoff_export_and_backup_surfaces() -> TestResult {
 
     let preview = preview_handoff(&HandoffPreviewOptions {
         workspace: fixture.workspace.clone(),
+        command_timeout_ms: ee::core::swarm_brief::DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         profile: CapsuleProfile::Resume,
         since: None,
         include_estimates: true,
@@ -360,6 +362,7 @@ fn redaction_and_content_hash_contracts_are_explicit() -> TestResult {
     let output = fixture.workspace.join("redaction-summary.handoff.json");
     let handoff_report = create_handoff(&HandoffCreateOptions {
         workspace: fixture.workspace.clone(),
+        command_timeout_ms: ee::core::swarm_brief::DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         output,
         profile: CapsuleProfile::Resume,
         since: None,

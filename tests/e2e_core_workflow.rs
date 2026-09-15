@@ -1644,6 +1644,21 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
     let mut rejected_memory_id =
         rejected_memory_id.ok_or_else(|| "rejected partial-family memory id missing".to_owned())?;
 
+    // Semantic facts use the artifacts section. Compact reserves only 5% of
+    // the unchanged 60-token budget for it, so the selected body must fit three
+    // tokens independently of the much larger overall pack budget.
+    let selected_revision_content = "Frozen ledger";
+    let selected_revision_tokens = ee::pack::estimate_tokens_default(selected_revision_content);
+    let artifact_quota = ee::pack::SectionQuotas::compact(60).get(ee::pack::PackSection::Artifacts);
+    ensure_equal(
+        &artifact_quota.max_tokens,
+        &3,
+        "compact family artifact quota",
+    )?;
+    ensure(
+        selected_revision_tokens > 0 && selected_revision_tokens <= artifact_quota.max_tokens,
+        "short selected fixture must actually fit its compact section quota",
+    )?;
     let revise = run_ee(&[
         "--workspace",
         &workspace,
@@ -1651,7 +1666,7 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
         "revise",
         &selected_memory_id,
         "--content",
-        "Frozen multiplicity ledger selected member",
+        selected_revision_content,
         "--actor",
         "literal-closure-auditor",
         "--reason",
@@ -1699,6 +1714,10 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
     )?;
 
     let rejected_revision_content = "Frozen multiplicity ledger rejected evidence carries a deliberately oversized body so the public pack selector records it in the omitted ledger while the short selected sibling still fits. This planted negative is intentionally repetitive: frozen multiplicity ledger rejected evidence must remain visible, preserve its unchanged rejection discount, and stay attached to the same attempt slot across revision, backup, restore, replay, and why inspection even after later siblings change the live family posture.";
+    ensure(
+        ee::pack::estimate_tokens_default(rejected_revision_content) > 60,
+        "rejected fixture must exceed even the entire pack budget",
+    )?;
     let revise_rejected = run_ee(&[
         "--workspace",
         &workspace,
@@ -1798,7 +1817,7 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
     ensure(
         restored_members.iter().any(|member| {
             member.get("content").and_then(serde_json::Value::as_str)
-                == Some("Frozen multiplicity ledger selected member")
+                == Some(selected_revision_content)
                 && member
                     .get("attemptIndex")
                     .and_then(serde_json::Value::as_u64)
@@ -1813,6 +1832,24 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
         &Some(EXIT_SUCCESS),
         "family pack index rebuild",
     )?;
+    // Persisted calls populate the derived cache; read-only consumers share
+    // this explicit temporal snapshot without skipping any ledger/audit work.
+    let pack_as_of = chrono::Utc::now().to_rfc3339();
+    let pack_cache_dir = temp.path().join("pack-cache");
+    let run_pack = |args: &[&str], cache_disabled: bool| {
+        Command::new(env!("CARGO_BIN_EXE_ee"))
+            .args(args)
+            .env_remove("EE_WORKSPACE")
+            .env_remove("EE_WORKSPACE_REGISTRY")
+            .env_remove("EE_AGENT_NAME")
+            .env("EE_L2_PACK_CACHE_DIR", &pack_cache_dir)
+            .env(
+                "EE_L2_PACK_CACHE_DISABLE",
+                if cache_disabled { "true" } else { "false" },
+            )
+            .output()
+            .map_err(|error| format!("family pack command failed: {error}"))
+    };
     let pack_args = [
         "--workspace",
         workspace.as_str(),
@@ -1826,9 +1863,11 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
         "compact",
         "--source-mode",
         "lexical-only",
+        "--as-of",
+        pack_as_of.as_str(),
         "--json",
     ];
-    let frozen_pack = run_ee(&pack_args)?;
+    let frozen_pack = run_pack(&pack_args, false)?;
     persist_artifact("family_frozen_pack", &frozen_pack);
     ensure_equal(
         &frozen_pack.status.code(),
@@ -1846,6 +1885,34 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
             "short selected sibling must be persisted as a selected pack item: {frozen_pack_json}"
         ),
     )?;
+    let selected_item = frozen_items
+        .iter()
+        .find(|item| {
+            item.get("memoryId").and_then(serde_json::Value::as_str)
+                == Some(selected_memory_id.as_str())
+        })
+        .ok_or_else(|| "selected family pack item missing after inclusion check".to_owned())?;
+    ensure_equal(
+        &selected_item
+            .get("content")
+            .and_then(serde_json::Value::as_str),
+        &Some(selected_revision_content),
+        "selected family body is retained without truncation",
+    )?;
+    ensure_equal(
+        &selected_item
+            .get("section")
+            .and_then(serde_json::Value::as_str),
+        &Some("artifacts"),
+        "semantic family fact keeps its actual section assignment",
+    )?;
+    ensure_equal(
+        &selected_item
+            .get("estimatedTokens")
+            .and_then(serde_json::Value::as_u64),
+        &Some(u64::from(selected_revision_tokens)),
+        "selected family token cost matches the independent tokenizer",
+    )?;
     let frozen_skipped = json_array(
         &frozen_pack_json,
         "/data/pack/skipped",
@@ -1855,21 +1922,310 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
         frozen_skipped.iter().any(|item| {
             item.get("memoryId").and_then(serde_json::Value::as_str)
                 == Some(rejected_memory_id.as_str())
+                && item.get("reason").and_then(serde_json::Value::as_str)
+                    == Some("token_budget_exceeded")
+                && item
+                    .get("tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|tokens| tokens > 60)
         }),
-        "oversized rejected sibling must be persisted as an omitted pack item",
+        "oversized rejected sibling must be persisted as an omitted pack item with its budget reason and oversized cost",
     )?;
 
     let mut performance_args = pack_args.to_vec();
     performance_args.insert(performance_args.len() - 1, "--explain-performance");
-    let warm_performance = run_ee(&performance_args)?;
+    performance_args.insert(performance_args.len() - 1, "--read-only");
+    let warm_performance = run_pack(&performance_args, false)?;
+    persist_artifact("family_warm_cache_performance", &warm_performance);
     let warm_performance_json = stdout_json(&warm_performance)?;
+    let expected_cache_status = if cfg!(unix) { "hit" } else { "fallback" };
     ensure_equal(
         &warm_performance_json
             .pointer("/data/cache/status")
             .and_then(serde_json::Value::as_str),
-        &Some("hit"),
-        "identical pack request warms the L2 cache",
+        &Some(expected_cache_status),
+        "matching fixed-time read-only request hits the persisted producer's L2 entry",
     )?;
+    if !cfg!(unix) {
+        ensure(
+            json_array(
+                &warm_performance_json,
+                "/data/fallbacks",
+                "unsupported platform cache fallback",
+            )?
+            .iter()
+            .all(|entry| {
+                entry.get("code").and_then(serde_json::Value::as_str)
+                    != Some("l2_pack_cache_unavailable")
+            }),
+            "unsupported file identity is a conservative bypass, not a storage failure",
+        )?;
+    }
+
+    let cache_snapshot =
+        || -> Result<BTreeMap<PathBuf, (Vec<u8>, std::time::SystemTime)>, String> {
+            let mut pending = vec![pack_cache_dir.clone()];
+            let mut files = BTreeMap::new();
+            while let Some(directory) = pending.pop() {
+                for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+                    let path = entry.map_err(|error| error.to_string())?.path();
+                    let metadata =
+                        fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+                    if metadata.is_dir() {
+                        pending.push(path);
+                    } else {
+                        ensure(
+                            metadata.is_file(),
+                            "cache fixture contains only regular files",
+                        )?;
+                        files.insert(
+                            path.clone(),
+                            (
+                                fs::read(&path).map_err(|error| error.to_string())?,
+                                metadata.modified().map_err(|error| error.to_string())?,
+                            ),
+                        );
+                    }
+                }
+            }
+            Ok(files)
+        };
+    let pack_database_snapshot = || -> Result<Vec<i64>, String> {
+        let connection = ee::db::DbConnection::open_file_read_only(temp.path().join(".ee/ee.db"))
+            .map_err(|error| error.to_string())?;
+        ["pack_records", "pack_items", "pack_omissions", "audit_log"]
+            .into_iter()
+            .map(|table| {
+                connection
+                    .count_table_rows(table)
+                    .map_err(|error| error.to_string())
+            })
+            .collect()
+    };
+    let normalize_pack_elapsed =
+        |mut value: serde_json::Value| -> Result<serde_json::Value, String> {
+            ensure_equal(
+                &value
+                    .pointer("/data/pack/slo/resourceStatus")
+                    .and_then(serde_json::Value::as_str),
+                &Some("within_budget"),
+                "cache equivalence requires a real within-budget resource decision",
+            )?;
+            ensure_equal(
+                &value
+                    .pointer("/data/pack/slo/admission/outcome")
+                    .and_then(serde_json::Value::as_str),
+                &Some("admitted"),
+                "cache equivalence retains successful pack admission",
+            )?;
+            ensure(
+                json_array(
+                    &value,
+                    "/data/pack/slo/degradations",
+                    "pack SLO degradations",
+                )?
+                .is_empty(),
+                "cache equivalence cannot erase an SLO degradation",
+            )?;
+            ensure(
+                ee::obs::normalize_pack_slo_measurements(&mut value)?,
+                "cache equivalence requires a validated producer SLO measurement",
+            )?;
+            Ok(value)
+        };
+    let mut readonly_args = pack_args.to_vec();
+    readonly_args.insert(readonly_args.len() - 1, "--read-only");
+    if cfg!(unix) {
+        let cache_before_readonly = cache_snapshot()?;
+        ensure_equal(
+            &cache_before_readonly.len(),
+            &1,
+            "one real persisted producer cache entry",
+        )?;
+        let database_before_readonly = pack_database_snapshot()?;
+        let cached_pack = run_pack(&readonly_args, false)?;
+        let fresh_readonly_pack = run_pack(&readonly_args, true)?;
+        for (label, output) in [
+            ("cached read-only pack", &cached_pack),
+            ("fresh read-only pack", &fresh_readonly_pack),
+        ] {
+            ensure_equal(&output.status.code(), &Some(EXIT_SUCCESS), label)?;
+            assert_stderr_empty(output, label)?;
+        }
+        ensure_equal(
+            &normalize_pack_elapsed(stdout_json(&cached_pack)?)?,
+            &normalize_pack_elapsed(stdout_json(&fresh_readonly_pack)?)?,
+            "cache hit preserves every fresh read-only field except the three validated producer SLO measurements",
+        )?;
+        ensure_equal(
+            &pack_database_snapshot()?,
+            &database_before_readonly,
+            "read-only hit and miss preserve all pack/item/omission/audit rows",
+        )?;
+        ensure_equal(
+            &cache_snapshot()?,
+            &cache_before_readonly,
+            "read-only hit and miss preserve cache bytes, names and mtimes",
+        )?;
+
+        let mut strict_floor_args = readonly_args.clone();
+        strict_floor_args.insert(strict_floor_args.len() - 1, "--relevance-floor");
+        strict_floor_args.insert(strict_floor_args.len() - 1, "1");
+        let strict_floor_pack = run_pack(&strict_floor_args, false)?;
+        ensure_equal(
+            &strict_floor_pack.status.code(),
+            &Some(EXIT_SUCCESS),
+            "strict relevance floor pack",
+        )?;
+        assert_stderr_empty(&strict_floor_pack, "strict relevance floor pack")?;
+        let strict_floor_json = stdout_json(&strict_floor_pack)?;
+        ensure(
+            json_array(&strict_floor_json, "/data/pack/items", "strict floor items")?
+                .iter()
+                .all(|item| {
+                    item.get("memoryId").and_then(serde_json::Value::as_str)
+                        != Some(selected_memory_id.as_str())
+                }),
+            "changed relevance floor must not replay the cached low-score selected memory",
+        )?;
+        ensure_equal(
+            &cache_snapshot()?,
+            &cache_before_readonly,
+            "stricter read-only request cannot populate another cache key",
+        )?;
+
+        let cache_entry = cache_before_readonly
+            .keys()
+            .next()
+            .ok_or_else(|| "producer cache entry missing".to_owned())?;
+        fs::write(cache_entry, b"planted corrupt cache payload")
+            .map_err(|error| error.to_string())?;
+        let corrupt_cache = cache_snapshot()?;
+        let corrupt_lookup = run_pack(&performance_args, false)?;
+        ensure_equal(
+            &corrupt_lookup.status.code(),
+            &Some(EXIT_SUCCESS),
+            "corrupt cache retains positive fresh pack fallback",
+        )?;
+        assert_stderr_empty(&corrupt_lookup, "corrupt cache fallback")?;
+        let corrupt_json = stdout_json(&corrupt_lookup)?;
+        ensure_equal(
+            &corrupt_json
+                .pointer("/data/cache/status")
+                .and_then(serde_json::Value::as_str),
+            &Some("fallback"),
+            "corrupt cache must not be a hit",
+        )?;
+        ensure(
+            json_array(
+                &corrupt_json,
+                "/data/fallbacks",
+                "corrupt cache degradations",
+            )?
+            .iter()
+            .any(|entry| {
+                entry.get("code").and_then(serde_json::Value::as_str)
+                    == Some("l2_pack_cache_corruption")
+            }),
+            "cache corruption remains an explicit typed degradation",
+        )?;
+        ensure_equal(
+            &cache_snapshot()?,
+            &corrupt_cache,
+            "read-only corruption rejection cannot delete, rewrite or touch the bad cache entry",
+        )?;
+        ensure_equal(
+            &pack_database_snapshot()?,
+            &database_before_readonly,
+            "read-only corruption fallback cannot append pack or audit rows",
+        )?;
+        let repair_producer = run_pack(&pack_args, false)?;
+        ensure_equal(
+            &repair_producer.status.code(),
+            &Some(EXIT_SUCCESS),
+            "persisted producer refreshes the corrupted cache",
+        )?;
+        assert_stderr_empty(&repair_producer, "persisted cache repair producer")?;
+        let repaired_hit = stdout_json(&run_pack(&performance_args, false)?)?;
+        ensure_equal(
+            &repaired_hit
+                .pointer("/data/cache/status")
+                .and_then(serde_json::Value::as_str),
+            &Some("hit"),
+            "real writable producer restores the read-only hit",
+        )?;
+
+        let metadata_path = temp.path().join(".ee/index/meta.json");
+        let metadata_original = fs::read(&metadata_path).map_err(|error| error.to_string())?;
+        let metadata_json: serde_json::Value =
+            serde_json::from_slice(&metadata_original).map_err(|error| error.to_string())?;
+        let timestamp = json_str(
+            &metadata_json,
+            "/lastRebuildAt",
+            "index publication timestamp",
+        )?;
+        let metadata_text =
+            std::str::from_utf8(&metadata_original).map_err(|error| error.to_string())?;
+        let second_digit = metadata_text
+            .find(timestamp)
+            .ok_or_else(|| "index timestamp bytes missing".to_owned())?
+            + timestamp.len()
+            - 2;
+        ensure(
+            metadata_original[second_digit].is_ascii_digit(),
+            "index fixture timestamp ends in a seconds digit and Z",
+        )?;
+        let metadata_modified = fs::metadata(&metadata_path)
+            .and_then(|metadata| metadata.modified())
+            .map_err(|error| error.to_string())?;
+        let mut metadata_changed = metadata_original.clone();
+        metadata_changed[second_digit] = if metadata_changed[second_digit] == b'0' {
+            b'1'
+        } else {
+            b'0'
+        };
+        fs::write(&metadata_path, &metadata_changed).map_err(|error| error.to_string())?;
+        fs::File::options()
+            .write(true)
+            .open(&metadata_path)
+            .and_then(|file| file.set_times(fs::FileTimes::new().set_modified(metadata_modified)))
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &fs::metadata(&metadata_path)
+                .and_then(|metadata| metadata.modified())
+                .map_err(|error| error.to_string())?,
+            &metadata_modified,
+            "index mutation restores the exact original mtime",
+        )?;
+        let index_change_cache = cache_snapshot()?;
+        let changed_index = stdout_json(&run_pack(&performance_args, false)?)?;
+        ensure_equal(
+            &changed_index
+                .pointer("/data/cache/status")
+                .and_then(serde_json::Value::as_str),
+            &Some("fallback"),
+            "same-generation same-length restored-mtime index bytes invalidate the cache",
+        )?;
+        ensure_equal(
+            &cache_snapshot()?,
+            &index_change_cache,
+            "index-invalidated read-only request cannot populate cache",
+        )?;
+        fs::write(&metadata_path, &metadata_original).map_err(|error| error.to_string())?;
+        fs::File::options()
+            .write(true)
+            .open(&metadata_path)
+            .and_then(|file| file.set_times(fs::FileTimes::new().set_modified(metadata_modified)))
+            .map_err(|error| error.to_string())?;
+        let original_index = stdout_json(&run_pack(&performance_args, false)?)?;
+        ensure_equal(
+            &original_index
+                .pointer("/data/cache/status")
+                .and_then(serde_json::Value::as_str),
+            &Some("hit"),
+            "restoring identical published bytes makes the original complete cache entry usable",
+        )?;
+    }
 
     for index in 0..10 {
         let source_id = format!("public-family-promotion-{index}");
@@ -1977,19 +2333,137 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
         "override audit keeps the reason and aliases the family id",
     )?;
 
-    let rewarm_after_outcomes = run_ee(&performance_args)?;
+    // Feedback and trust promotion advance source generation without queuing
+    // document-index work. Preserve that invalidation before establishing a
+    // fresh index for the independent family-sidecar cache control below.
+    let outcome_index = run_ee(&["--workspace", &workspace, "index", "status", "--json"])?;
+    ensure_equal(
+        &outcome_index.status.code(),
+        &Some(EXIT_SUCCESS),
+        "post-outcome index status",
+    )?;
+    let outcome_index_json = stdout_json(&outcome_index)?;
+    ensure_equal(
+        &outcome_index_json
+            .pointer("/data/health")
+            .and_then(serde_json::Value::as_str),
+        &Some("stale"),
+        "feedback and promotion invalidate the previously ready index",
+    )?;
+    let outcome_generation = outcome_index_json
+        .pointer("/data/dbGeneration")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "post-outcome database generation missing".to_owned())?;
+    let stale_generation = outcome_index_json
+        .pointer("/data/indexGeneration")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "post-outcome index generation missing".to_owned())?;
+    ensure(
+        outcome_generation > stale_generation,
+        "post-outcome source generation exceeds the index",
+    )?;
+    let stale_cache_before = cfg!(unix).then(&cache_snapshot).transpose()?;
+    let stale_database_before = pack_database_snapshot()?;
+    let stale_after_outcomes = run_pack(&performance_args, false)?;
+    persist_artifact("family_after_outcomes_stale_cache", &stale_after_outcomes);
+    ensure_equal(
+        &stale_after_outcomes.status.code(),
+        &Some(EXIT_SUCCESS),
+        "stale post-outcome pack remains usable",
+    )?;
+    assert_stderr_empty(&stale_after_outcomes, "stale post-outcome pack")?;
+    let stale_after_outcomes_json = stdout_json(&stale_after_outcomes)?;
+    ensure_equal(
+        &stale_after_outcomes_json
+            .pointer("/data/cache/status")
+            .and_then(serde_json::Value::as_str),
+        &Some("fallback"),
+        "post-outcome stale index cannot replay the old cache entry",
+    )?;
+    ensure(
+        json_array(
+            &stale_after_outcomes_json,
+            "/data/fallbacks",
+            "post-outcome fallbacks",
+        )?
+        .iter()
+        .any(|entry| entry["code"] == "search_index_stale"),
+        "post-outcome fallback retains the actual stale-index diagnosis",
+    )?;
+    ensure_equal(
+        &pack_database_snapshot()?,
+        &stale_database_before,
+        "post-outcome readonly fallback leaves pack and audit rows unchanged",
+    )?;
+    if let Some(stale_cache_before) = stale_cache_before {
+        ensure_equal(
+            &cache_snapshot()?,
+            &stale_cache_before,
+            "post-outcome readonly fallback leaves cache files unchanged",
+        )?;
+    }
+    let outcome_rebuild = run_ee(&["--workspace", &workspace, "index", "rebuild", "--json"])?;
+    ensure_equal(
+        &outcome_rebuild.status.code(),
+        &Some(EXIT_SUCCESS),
+        "rebuild after feedback and promotion",
+    )?;
+    assert_stderr_empty(&outcome_rebuild, "post-outcome index rebuild")?;
+    let ready_index = run_ee(&["--workspace", &workspace, "index", "status", "--json"])?;
+    ensure_equal(
+        &ready_index.status.code(),
+        &Some(EXIT_SUCCESS),
+        "rebuilt post-outcome index status",
+    )?;
+    let ready_index_json = stdout_json(&ready_index)?;
+    ensure_equal(
+        &ready_index_json
+            .pointer("/data/health")
+            .and_then(serde_json::Value::as_str),
+        &Some("ready"),
+        "family-sidecar cache control starts with a genuinely ready index",
+    )?;
+    for pointer in ["/data/dbGeneration", "/data/indexGeneration"] {
+        ensure_equal(
+            &ready_index_json
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_u64),
+            &Some(outcome_generation),
+            "rebuild catches up to the exact post-outcome source generation",
+        )?;
+    }
+
+    let rewarm_after_outcomes = run_pack(&pack_args, false)?;
+    persist_artifact(
+        "family_after_outcomes_cache_producer",
+        &rewarm_after_outcomes,
+    );
     ensure_equal(
         &rewarm_after_outcomes.status.code(),
         &Some(EXIT_SUCCESS),
         "rewarm pack after outcome generation changes",
     )?;
-    let hot_immediately_before_family_write = run_ee(&performance_args)?;
+    assert_stderr_empty(&rewarm_after_outcomes, "post-outcome cache producer")?;
+    let hot_immediately_before_family_write = run_pack(&performance_args, false)?;
+    persist_artifact(
+        "family_before_sidecar_cache_hit",
+        &hot_immediately_before_family_write,
+    );
+    ensure_equal(
+        &hot_immediately_before_family_write.status.code(),
+        &Some(EXIT_SUCCESS),
+        "read-only hit before family sidecar write",
+    )?;
+    assert_stderr_empty(
+        &hot_immediately_before_family_write,
+        "read-only hit before family sidecar write",
+    )?;
     let hot_before_family_json = stdout_json(&hot_immediately_before_family_write)?;
     ensure_equal(
         &hot_before_family_json
             .pointer("/data/cache/status")
             .and_then(serde_json::Value::as_str),
-        &Some("hit"),
+        &Some(expected_cache_status),
         "L2 entry is confirmed hot immediately before the family-sidecar write",
     )?;
 
@@ -2041,6 +2515,7 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
         &selected_memory_id,
         "--json",
     ])?;
+    persist_artifact("family_frozen_why", &frozen_why);
     let frozen_why_json = stdout_json(&frozen_why)?;
     let frozen_selection = frozen_why_json
         .pointer("/data/selection/latestPackSelection")
@@ -2124,7 +2599,7 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
         "pack replay must never expose the raw secret-shaped family id",
     )?;
 
-    let invalidated_performance = run_ee(&performance_args)?;
+    let invalidated_performance = run_pack(&performance_args, false)?;
     let invalidated_performance_json = stdout_json(&invalidated_performance)?;
     ensure_equal(
         &invalidated_performance_json
@@ -2234,7 +2709,80 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
         &search_json.pointer("/data/members/0/disposition"),
         &Some(&serde_json::Value::Null),
         "unslotted member does not invent a disposition",
-    )
+    )?;
+
+    if cfg!(unix) {
+        let final_producer = run_pack(&pack_args, false)?;
+        ensure_equal(
+            &final_producer.status.code(),
+            &Some(EXIT_SUCCESS),
+            "config invalidation producer",
+        )?;
+        let final_hit = stdout_json(&run_pack(&performance_args, false)?)?;
+        ensure_equal(
+            &final_hit
+                .pointer("/data/cache/status")
+                .and_then(serde_json::Value::as_str),
+            &Some("hit"),
+            "config negative starts from a real hot entry",
+        )?;
+        let before_config_cache = cache_snapshot()?;
+        let before_config_database = pack_database_snapshot()?;
+        let config_path = temp.path().join(".ee/config.toml");
+        ensure(
+            !config_path.exists(),
+            "config fixture starts with the supported absent config",
+        )?;
+        fs::write(&config_path, "[search]\nrerank = \"off\"\n")
+            .map_err(|error| error.to_string())?;
+        let configured_pack = run_pack(&performance_args, false)?;
+        ensure_equal(
+            &configured_pack.status.code(),
+            &Some(EXIT_SUCCESS),
+            "new config still permits real fresh pack assembly",
+        )?;
+        assert_stderr_empty(&configured_pack, "configured fresh pack")?;
+        let configured_json = stdout_json(&configured_pack)?;
+        ensure_equal(
+            &configured_json
+                .pointer("/data/cache/status")
+                .and_then(serde_json::Value::as_str),
+            &Some("fallback"),
+            "present config bypasses the old hot cache",
+        )?;
+        fs::write(&config_path, "[policy.workspace_memory\nenabled = false\n")
+            .map_err(|error| error.to_string())?;
+        let malformed_pack = run_pack(&readonly_args, false)?;
+        ensure_equal(
+            &malformed_pack.status.code(),
+            &Some(2),
+            "malformed policy cannot be bypassed by a cached pack",
+        )?;
+        assert_stderr_empty(&malformed_pack, "malformed policy typed response")?;
+        let malformed_json = stdout_json(&malformed_pack)?;
+        ensure_equal(
+            &malformed_json
+                .pointer("/error/code")
+                .and_then(serde_json::Value::as_str),
+            &Some("configuration"),
+            "cached pack preserves typed policy failure",
+        )?;
+        ensure(
+            malformed_json.get("data").is_none(),
+            "malformed policy cannot emit cached memory data",
+        )?;
+        ensure_equal(
+            &cache_snapshot()?,
+            &before_config_cache,
+            "config bypass/error leaves cache bytes and mtimes unchanged",
+        )?;
+        ensure_equal(
+            &pack_database_snapshot()?,
+            &before_config_database,
+            "config bypass/error leaves pack and audit rows unchanged",
+        )?;
+    }
+    Ok(())
 }
 
 #[test]

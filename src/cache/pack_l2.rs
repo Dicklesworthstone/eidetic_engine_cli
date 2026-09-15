@@ -101,6 +101,20 @@ impl PackL2Cache {
         key: &str,
         now_epoch_seconds: u64,
     ) -> Result<PackL2CacheLookup, PackL2CacheError> {
+        self.lookup_at(key, now_epoch_seconds, true)
+    }
+
+    /// Inspect an entry without updating LRU timestamps or removing corrupt files.
+    pub fn peek(&self, key: &str) -> Result<PackL2CacheLookup, PackL2CacheError> {
+        self.lookup_at(key, system_time_seconds(SystemTime::now())?, false)
+    }
+
+    fn lookup_at(
+        &self,
+        key: &str,
+        now_epoch_seconds: u64,
+        allow_mutations: bool,
+    ) -> Result<PackL2CacheLookup, PackL2CacheError> {
         let fallback_path = self.entry_path(key);
         let candidates = self.entry_candidates(key)?;
         if candidates.is_empty() {
@@ -113,7 +127,7 @@ impl PackL2Cache {
 
         let mut last_miss = None;
         for path in candidates {
-            match self.get_candidate_at(key, path, now_epoch_seconds)? {
+            match self.get_candidate_at(key, path, now_epoch_seconds, allow_mutations)? {
                 PackL2CacheLookup::Hit(hit) => return Ok(PackL2CacheLookup::Hit(hit)),
                 PackL2CacheLookup::Miss(miss) => {
                     last_miss = Some(miss);
@@ -135,6 +149,7 @@ impl PackL2Cache {
         key: &str,
         path: PathBuf,
         now_epoch_seconds: u64,
+        allow_mutations: bool,
     ) -> Result<PackL2CacheLookup, PackL2CacheError> {
         ensure_no_symlink_components(&path, "inspect_entry")?;
         let bytes = match read_cache_entry_file(&path, self.options.max_entry_bytes) {
@@ -158,7 +173,9 @@ impl PackL2Cache {
         if let Some(expected_body_hash_prefix) = body_hash_prefix_from_path(&path) {
             let actual_body_hash_prefix = body_hash_prefix(&bytes);
             if actual_body_hash_prefix != expected_body_hash_prefix {
-                remove_cache_entry_best_effort(&path);
+                if allow_mutations {
+                    remove_cache_entry_best_effort(&path);
+                }
                 return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
                     key: key.to_owned(),
                     path,
@@ -172,7 +189,9 @@ impl PackL2Cache {
 
         let byte_len = bytes.len() as u64;
         if byte_len > self.options.max_entry_bytes {
-            remove_cache_entry_best_effort(&path);
+            if allow_mutations {
+                remove_cache_entry_best_effort(&path);
+            }
             return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
                 key: key.to_owned(),
                 path,
@@ -186,7 +205,9 @@ impl PackL2Cache {
         let entry = match decode_pack_l2_cache_entry(&bytes, self.options.max_entry_bytes) {
             Ok(entry) => entry,
             Err(reason) => {
-                remove_cache_entry_best_effort(&path);
+                if allow_mutations {
+                    remove_cache_entry_best_effort(&path);
+                }
                 return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
                     key: key.to_owned(),
                     path,
@@ -196,7 +217,9 @@ impl PackL2Cache {
         };
 
         if entry.key != key {
-            remove_cache_entry_best_effort(&path);
+            if allow_mutations {
+                remove_cache_entry_best_effort(&path);
+            }
             return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
                 key: key.to_owned(),
                 path,
@@ -219,7 +242,9 @@ impl PackL2Cache {
             }));
         }
 
-        touch_cache_entry_mtime_best_effort(&path, now_epoch_seconds);
+        if allow_mutations {
+            touch_cache_entry_mtime_best_effort(&path, now_epoch_seconds);
+        }
         Ok(PackL2CacheLookup::Hit(PackL2CacheHit {
             key: entry.key,
             path,
@@ -1416,7 +1441,14 @@ fn open_cache_entry_file_for_read(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     configure_pack_l2_open_no_follow(&mut options);
-    options.open(path)
+    let file = options.open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "pack L2 entry is not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 fn open_cache_temp_file_for_create(path: &Path) -> io::Result<File> {
@@ -1444,7 +1476,8 @@ fn open_cache_directory_for_sync(path: &Path) -> io::Result<File> {
 fn configure_pack_l2_open_no_follow(options: &mut OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
 
-    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+    options
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32);
 }
 
 #[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
@@ -1902,6 +1935,80 @@ mod tests {
             modified_epoch_seconds(&report.path)? >= 150,
             "read path should advance mtime for portable LRU accounting"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn peek_preserves_valid_and_corrupt_entries_without_mutation() -> TestResult {
+        let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
+        let key = "blake3:read-only";
+        let payload =
+            json!({"items": [{"memoryId": "mem_read_only", "content": "Keep evidence."}]});
+        let report = cache
+            .put_compressed(key, &payload)
+            .map_err(|error| error.to_string())?;
+        touch_cache_entry_mtime_best_effort(&report.path, 100);
+        assert_eq!(modified_epoch_seconds(&report.path)?, 100);
+        let bytes_before = fs::read(&report.path).map_err(|error| error.to_string())?;
+
+        let lookup = cache.peek(key).map_err(|error| error.to_string())?;
+        match lookup {
+            PackL2CacheLookup::Hit(hit) => assert_eq!(hit.pack_json, payload),
+            PackL2CacheLookup::Miss(miss) => return Err(format!("fresh entry missed: {miss:?}")),
+        }
+        assert_eq!(modified_epoch_seconds(&report.path)?, 100);
+        assert_eq!(
+            fs::read(&report.path).map_err(|error| error.to_string())?,
+            bytes_before,
+        );
+
+        let corrupt_bytes = b"planted corrupt cache body";
+        fs::write(&report.path, corrupt_bytes).map_err(|error| error.to_string())?;
+        touch_cache_entry_mtime_best_effort(&report.path, 101);
+        assert_eq!(modified_epoch_seconds(&report.path)?, 101);
+        assert!(matches!(
+            cache.peek(key).map_err(|error| error.to_string())?,
+            PackL2CacheLookup::Miss(PackL2CacheMiss {
+                reason: PackL2CacheMissReason::BodyHashMismatch { .. },
+                ..
+            })
+        ));
+        assert_eq!(modified_epoch_seconds(&report.path)?, 101);
+        assert_eq!(
+            fs::read(&report.path).map_err(|error| error.to_string())?,
+            corrupt_bytes,
+            "read-only corruption rejection must retain the original file",
+        );
+        assert_eq!(
+            fs::read_dir(cache.root())
+                .map_err(|error| error.to_string())?
+                .count(),
+            1,
+            "read-only lookup must not create replacement entries",
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peek_rejects_fifo_entries_without_waiting_for_a_writer() -> TestResult {
+        let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
+        fs::create_dir_all(cache.root()).map_err(|error| error.to_string())?;
+        let path = cache.entry_path("blake3:fifo");
+        let created = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .output()
+            .map_err(|error| error.to_string())?;
+        assert!(
+            created.status.success(),
+            "mkfifo failed: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        assert!(matches!(
+            cache.peek("blake3:fifo"),
+            Err(PackL2CacheError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput
+        ));
+        assert!(path.exists(), "read-only rejection must retain the FIFO");
         Ok(())
     }
 

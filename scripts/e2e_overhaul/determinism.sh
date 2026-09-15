@@ -131,7 +131,31 @@ VOLATILE_FIELD_NAMES=(
 )
 
 volatile_field_delete_filter() {
-    local filter='walk(if type == "object" then del('
+    local filter='
+        if (.data.pack? | type) == "object" and (.data.pack | has("slo")) then
+            .data.pack.slo as $s |
+            ["within_budget", "warning", "failure"] as $statuses |
+            ($statuses | index($s.resourceStatus)) as $resource |
+            if $s.schema != "ee.pack.slo.v1" or $resource == null
+                or ([$s.actuals.elapsedMs, $s.budgetClass.elapsedMsTarget,
+                     $s.budgetClass.elapsedMsWarning, $s.budgetClass.elapsedMsFailure]
+                    | all(type == "number" and . >= 0 and floor == .) | not)
+                or $s.budgetClass.elapsedMsTarget == 0
+                or $s.budgetClass.elapsedMsTarget > $s.budgetClass.elapsedMsWarning
+                or $s.budgetClass.elapsedMsWarning >= $s.budgetClass.elapsedMsFailure
+            then error("invalid pack SLO measurement")
+            else
+                (if $s.actuals.elapsedMs >= $s.budgetClass.elapsedMsFailure then 2
+                 elif $s.actuals.elapsedMs >= $s.budgetClass.elapsedMsWarning then 1
+                 else 0 end) as $elapsed |
+                if $s.elapsedStatus != $statuses[$elapsed]
+                    or $s.status != $statuses[([$resource, $elapsed] | max)]
+                then error("pack SLO measured classification disagrees with actuals")
+                else del(.data.pack.slo.actuals.elapsedMs, .data.pack.slo.elapsedStatus, .data.pack.slo.status)
+                end
+            end
+        else . end |
+        walk(if type == "object" then del('
     local separator=""
     local field
 

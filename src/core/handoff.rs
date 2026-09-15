@@ -30,22 +30,24 @@ use sha2::{Digest, Sha256};
 use crate::core::focus::{focus_state_hash, read_active_focus_state};
 use crate::core::singleflight::singleflight_posture_report;
 use crate::core::support_bundle::{
-    collect_contention_summary, collect_environment_attestation_summary,
-    collect_pack_replay_summary, collect_proof_broker_summary,
+    collect_contention_summary, collect_pack_replay_summary, collect_proof_broker_summary,
     collect_regression_causality_summary, collect_shadow_policy_summary,
     contention_summary_evidence_id, environment_attestation_summary_evidence_id,
-    pack_replay_summary_evidence_id, proof_broker_summary_evidence_id,
-    redact_support_bundle_swarm_brief_summary, regression_causality_summary_evidence_id,
-    render_contention_summary_for_handoff, render_environment_attestation_summary_for_handoff,
-    render_pack_replay_summary_for_handoff, render_proof_broker_summary_for_handoff,
-    render_regression_causality_summary_for_handoff, render_shadow_policy_summary_for_handoff,
-    shadow_policy_summary_evidence_id,
+    environment_attestation_summary_from_report, pack_replay_summary_evidence_id,
+    proof_broker_summary_evidence_id, redact_support_bundle_swarm_brief_summary,
+    regression_causality_summary_evidence_id, render_contention_summary_for_handoff,
+    render_environment_attestation_summary_for_handoff, render_pack_replay_summary_for_handoff,
+    render_proof_broker_summary_for_handoff, render_regression_causality_summary_for_handoff,
+    render_shadow_policy_summary_for_handoff, shadow_policy_summary_evidence_id,
 };
 use crate::core::swarm_brief::{
-    collect_swarm_brief_summary, collect_swarm_incident_summary, collect_swarm_replay_summary,
+    DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, SwarmBriefCollectOptions,
+    SystemSwarmBriefCommandRunner, all_swarm_brief_sources, collect_swarm_brief,
+    collect_swarm_incident_summary, collect_swarm_replay_summary,
     render_swarm_brief_summary_for_handoff, render_swarm_incident_summary_for_handoff,
-    render_swarm_replay_summary_for_handoff, swarm_brief_summary_evidence_id,
-    swarm_incident_summary_evidence_id, swarm_replay_summary_evidence_id,
+    render_swarm_replay_summary_for_handoff, summarize_swarm_brief_report,
+    swarm_brief_summary_evidence_id, swarm_incident_summary_evidence_id,
+    swarm_replay_summary_evidence_id,
 };
 use crate::core::task_frame::{
     NON_EXECUTING_CONTRACT, TaskFrameRecord, TaskFrameShowOptions, show_task_frame,
@@ -102,10 +104,34 @@ const HANDOFF_HMAC_KEY_MODE_MACHINE_BOUND: &str = "workspace_secret_machine_boun
 const HANDOFF_WORKSPACE_SECRET_FILE: &str = "handoff_hmac_key";
 const HANDOFF_MACHINE_SALT_FILE: &str = "handoff_machine_salt";
 
-fn collect_handoff_swarm_brief_summary(workspace: &Path) -> serde_json::Value {
-    let mut summary = collect_swarm_brief_summary(workspace);
+fn collect_handoff_coordination_summaries(
+    workspace: &Path,
+    command_timeout_ms: u64,
+    runner: &impl super::swarm_brief::SwarmBriefCommandRunner,
+) -> (serde_json::Value, serde_json::Value) {
+    let mut options = SwarmBriefCollectOptions::for_workspace(workspace);
+    options.include_rch = true;
+    options.enabled_sources = all_swarm_brief_sources();
+    options.command_timeout_ms = command_timeout_ms.max(1);
+    let report = collect_swarm_brief(&options, runner);
+    let mut summary = summarize_swarm_brief_report(&report);
     redact_support_bundle_swarm_brief_summary(&mut summary);
-    summary
+    // All capsule sections describe one observation. Recollecting the same
+    // optional tools for attestation and causality used to multiply their waits.
+    let process_scan = super::support_bundle::local_cargo_tripwire_process_scan_json(workspace);
+    let attestation = super::environment_attestation::environment_attestation_from_swarm_brief_with_inputs(
+        &report,
+        super::environment_attestation::EnvironmentAttestationInputs {
+            generated_at: Utc::now(),
+            local_cargo_process_scan: Some(&process_scan),
+            local_cargo_process_scan_origin: super::environment_attestation::EnvironmentAttestationLocalCargoScanOrigin::LiveProbe,
+            ci_proof_lane_snapshot: None,
+        },
+    );
+    (
+        summary,
+        environment_attestation_summary_from_report(&attestation),
+    )
 }
 
 /// Hard upper bound on the byte length of a handoff capsule file or key
@@ -461,6 +487,8 @@ pub struct PreviewOptions {
     pub include_estimates: bool,
     /// Optional task-frame scope to include.
     pub task_frame_id: Option<String>,
+    /// Deadline for each optional source command; bounded pipe cleanup follows.
+    pub command_timeout_ms: u64,
 }
 
 impl Default for PreviewOptions {
@@ -471,6 +499,7 @@ impl Default for PreviewOptions {
             since: None,
             include_estimates: true,
             task_frame_id: None,
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         }
     }
 }
@@ -633,6 +662,8 @@ pub struct CreateOptions {
     pub machine_salt_path: Option<PathBuf>,
     /// Redaction level requested for capsule content.
     pub redaction_level: RedactionLevel,
+    /// Deadline for each optional source command; bounded pipe cleanup follows.
+    pub command_timeout_ms: u64,
 }
 
 impl Default for CreateOptions {
@@ -647,6 +678,7 @@ impl Default for CreateOptions {
             bind_to_machine: false,
             machine_salt_path: None,
             redaction_level: RedactionLevel::Standard,
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         }
     }
 }
@@ -3675,14 +3707,19 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
         token_estimate: actions_section.token_estimate,
     });
 
-    let swarm_brief_summary = collect_handoff_swarm_brief_summary(&options.workspace);
+    let (swarm_brief_summary, environment_attestation_summary) =
+        collect_handoff_coordination_summaries(
+            &options.workspace,
+            options.command_timeout_ms,
+            &SystemSwarmBriefCommandRunner,
+        );
     let swarm_brief_evidence = vec![swarm_brief_summary_evidence_id(&swarm_brief_summary)];
     let swarm_brief_section = CapsuleSection::new("swarm_brief_summary", "Swarm Brief Summary")
         .with_content(render_swarm_brief_summary_for_handoff(&swarm_brief_summary))
         .with_confidence(EvidenceConfidence::Verified)
         .with_evidence(swarm_brief_evidence.clone());
     report.evidence_ids.extend(swarm_brief_evidence);
-    report.swarm_brief_summary = Some(swarm_brief_summary);
+    report.swarm_brief_summary = Some(swarm_brief_summary.clone());
     report.planned_sections.push(PlannedSection {
         id: swarm_brief_section.id.clone(),
         title: swarm_brief_section.title.clone(),
@@ -3744,8 +3781,6 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
     });
     report.pack_replay_summary = Some(pack_replay_summary);
 
-    let environment_attestation_summary =
-        collect_environment_attestation_summary(&options.workspace);
     let environment_attestation_evidence = vec![environment_attestation_summary_evidence_id(
         &environment_attestation_summary,
     )];
@@ -3759,7 +3794,7 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
     .with_confidence(EvidenceConfidence::Verified)
     .with_evidence(environment_attestation_evidence.clone());
     report.evidence_ids.extend(environment_attestation_evidence);
-    report.environment_attestation_summary = Some(environment_attestation_summary);
+    report.environment_attestation_summary = Some(environment_attestation_summary.clone());
     report.planned_sections.push(PlannedSection {
         id: environment_attestation_section.id.clone(),
         title: environment_attestation_section.title.clone(),
@@ -3789,7 +3824,11 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
         token_estimate: proof_broker_section.token_estimate,
     });
 
-    let regression_causality_summary = collect_regression_causality_summary(&options.workspace);
+    let regression_causality_summary = collect_regression_causality_summary(
+        &options.workspace,
+        &swarm_brief_summary,
+        &environment_attestation_summary,
+    );
     let regression_causality_evidence = vec![regression_causality_summary_evidence_id(
         &regression_causality_summary,
     )];
@@ -4010,7 +4049,12 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
     }
     report.task_frame = task_frame_json.clone();
 
-    let swarm_brief_summary = collect_handoff_swarm_brief_summary(&options.workspace);
+    let (swarm_brief_summary, environment_attestation_summary) =
+        collect_handoff_coordination_summaries(
+            &options.workspace,
+            options.command_timeout_ms,
+            &SystemSwarmBriefCommandRunner,
+        );
     let swarm_brief_evidence = vec![swarm_brief_summary_evidence_id(&swarm_brief_summary)];
     sections.push(
         CapsuleSection::new("swarm_brief_summary", "Swarm Brief Summary")
@@ -4066,8 +4110,6 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         .saturating_add(pack_replay_evidence.len());
     report.pack_replay_summary = Some(pack_replay_summary.clone());
 
-    let environment_attestation_summary =
-        collect_environment_attestation_summary(&options.workspace);
     let environment_attestation_evidence = vec![environment_attestation_summary_evidence_id(
         &environment_attestation_summary,
     )];
@@ -4102,7 +4144,11 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         .saturating_add(proof_broker_evidence.len());
     report.proof_broker_summary = Some(proof_broker_summary.clone());
 
-    let regression_causality_summary = collect_regression_causality_summary(&options.workspace);
+    let regression_causality_summary = collect_regression_causality_summary(
+        &options.workspace,
+        &swarm_brief_summary,
+        &environment_attestation_summary,
+    );
     let regression_causality_evidence = vec![regression_causality_summary_evidence_id(
         &regression_causality_summary,
     )];
@@ -5954,6 +6000,134 @@ memories_revised = 3
         )
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn handoff_coordination_collects_once_with_real_git_and_bounded_optional_process() -> TestResult
+    {
+        use super::super::swarm_brief::{
+            SwarmBriefCommandError, SwarmBriefCommandOutput, SwarmBriefCommandRunner,
+        };
+        use std::cell::RefCell;
+        struct ObservedRunner {
+            calls: RefCell<Vec<(String, Vec<String>, u64)>>,
+        }
+        impl SwarmBriefCommandRunner for ObservedRunner {
+            fn run(
+                &self,
+                program: &str,
+                args: &[&str],
+                cwd: &Path,
+                timeout_ms: u64,
+            ) -> Result<SwarmBriefCommandOutput, SwarmBriefCommandError> {
+                self.calls.borrow_mut().push((
+                    program.to_owned(),
+                    args.iter().map(|arg| (*arg).to_owned()).collect(),
+                    timeout_ms,
+                ));
+                if program == "am" {
+                    // A real hanging subprocess tests the watchdog; it is not
+                    // evidence about availability of an Agent Mail service.
+                    SystemSwarmBriefCommandRunner.run(
+                        "/bin/sh",
+                        &["-c", "sleep 4"],
+                        cwd,
+                        timeout_ms,
+                    )
+                } else {
+                    SystemSwarmBriefCommandRunner.run(program, args, cwd, timeout_ms)
+                }
+            }
+        }
+        let dir = repo_tempdir()?;
+        let runner = SystemSwarmBriefCommandRunner;
+        runner
+            .run("git", &["init", "--initial-branch=main"], dir.path(), 2_000)
+            .map_err(|error| format!("git init: {error:?}"))?;
+        runner
+            .run(
+                "git",
+                &[
+                    "-c",
+                    "user.name=EE fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "real handoff probe fixture",
+                ],
+                dir.path(),
+                2_000,
+            )
+            .map_err(|error| format!("git commit: {error:?}"))?;
+        fs::write(dir.path().join("pending.rs"), "// pending fixture change\n")
+            .map_err(|error| error.to_string())?;
+        let observed = ObservedRunner {
+            calls: RefCell::new(Vec::new()),
+        };
+        let (brief, attestation) =
+            collect_handoff_coordination_summaries(dir.path(), 2_000, &observed);
+        assert_eq!(
+            brief
+                .pointer("/counts/recentCommitCount")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            brief
+                .pointer("/counts/dirtyFileCount")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        assert!(
+            brief["degradedCodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "agent_mail_unavailable")
+        );
+        assert!(
+            attestation["degradedCodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "agent_mail_unavailable")
+        );
+        let calls_before = observed.calls.borrow().clone();
+        assert_eq!(
+            calls_before
+                .iter()
+                .filter(|(program, _, _)| program == "am")
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls_before
+                .iter()
+                .filter(|(program, _, _)| program == "git")
+                .map(|(_, args, _)| args.iter().map(String::as_str).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            vec![
+                vec!["status", "--short", "--branch", "--untracked-files=all"],
+                vec!["log", "-n", "8", "--format=%H%x1f%ct%x1f%s"],
+                vec!["status", "--porcelain=v2", "--branch"],
+                vec!["--version"],
+            ],
+            "dirty-file, recent-commit, ahead-status and toolchain-version probes must each run exactly once"
+        );
+        assert!(calls_before.iter().all(|(_, _, timeout)| *timeout == 2_000));
+        let causality = collect_regression_causality_summary(dir.path(), &brief, &attestation);
+        assert_eq!(*observed.calls.borrow(), calls_before);
+        let serialized = serde_json::to_string(&causality).map_err(|error| error.to_string())?;
+        assert!(serialized.contains("support_bundle:swarm_brief_summary"));
+        assert!(serialized.contains("support_bundle:environment_attestation_summary"));
+        assert!(serialized.contains("agent_mail_unavailable"));
+        assert!(!serialized.contains(dir.path().to_string_lossy().as_ref()));
+        Ok(())
+    }
+
     #[test]
     fn handoff_create_dry_run_does_not_write_capsule_or_hmac_keys() -> TestResult {
         let dir = repo_tempdir()?;
@@ -5970,6 +6144,7 @@ memories_revised = 3
             bind_to_machine: true,
             machine_salt_path: Some(machine_salt_path.clone()),
             redaction_level: RedactionLevel::Standard,
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         })
         .map_err(|error| error.message())?;
 
@@ -6027,6 +6202,7 @@ memories_revised = 3
             since: None,
             include_estimates: true,
             task_frame_id: None,
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         })
         .map_err(|error| error.message())?;
         ensure(preview.active_focus.is_some(), "preview includes focus")?;
@@ -6049,6 +6225,7 @@ memories_revised = 3
             bind_to_machine: false,
             machine_salt_path: None,
             redaction_level: RedactionLevel::Standard,
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         })
         .map_err(|error| error.message())?;
         ensure(create.active_focus.is_some(), "create includes focus")?;
@@ -6111,6 +6288,7 @@ memories_revised = 3
             since: None,
             include_estimates: true,
             task_frame_id: Some(frame_id.clone()),
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         })
         .map_err(|error| error.message())?;
         ensure(preview.task_frame.is_some(), "preview includes task frame")?;
@@ -6133,6 +6311,7 @@ memories_revised = 3
             bind_to_machine: false,
             machine_salt_path: None,
             redaction_level: RedactionLevel::Standard,
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         })
         .map_err(|error| error.message())?;
         ensure(create.task_frame.is_some(), "create includes task frame")?;
@@ -6211,6 +6390,7 @@ memories_revised = 3
             since: None,
             include_estimates: true,
             task_frame_id: Some(frame_id.clone()),
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         })
         .map_err(|error| error.message())?;
         let preview_text = serde_json::to_string(&preview.to_json())
@@ -6231,6 +6411,7 @@ memories_revised = 3
             bind_to_machine: false,
             machine_salt_path: None,
             redaction_level: RedactionLevel::Standard,
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         })
         .map_err(|error| error.message())?;
         let create_text = serde_json::to_string(&create.to_json())
@@ -6313,6 +6494,7 @@ memories_revised = 3
             bind_to_machine,
             machine_salt_path,
             redaction_level: RedactionLevel::Standard,
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         })
         .map_err(|error| error.message())?;
         Ok(output)
@@ -6338,6 +6520,7 @@ memories_revised = 3
                 bind_to_machine: false,
                 machine_salt_path: None,
                 redaction_level: RedactionLevel::Standard,
+                command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
             }),
             "create handoff through symlinked parent",
         )
@@ -6398,6 +6581,7 @@ memories_revised = 3
             bind_to_machine: true,
             machine_salt_path: Some(machine_salt_dir),
             redaction_level: RedactionLevel::Standard,
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         }) {
             Ok(report) => return Err(format!("unexpected handoff report: {report:?}")),
             Err(error) => error,
@@ -7167,6 +7351,7 @@ memories_revised = 3
             since: None,
             include_estimates: true,
             task_frame_id: None,
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         };
 
         let result = preview_handoff(&options);
@@ -7231,6 +7416,7 @@ memories_revised = 3
             since: None,
             include_estimates: true,
             task_frame_id: None,
+            command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         };
 
         let report = preview_handoff(&options).map_err(|error| error.message())?;

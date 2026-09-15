@@ -701,6 +701,7 @@ fn handoff_create_inspect_resume_preserve_integrity_contract() -> TestResult {
     let capsule_path = handoff_dir.path().join("capsule.json");
     let create_report = create_handoff(&HandoffCreateOptions {
         workspace: src_workspace.clone(),
+        command_timeout_ms: ee::core::swarm_brief::DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
         output: capsule_path.clone(),
         profile: CapsuleProfile::Resume,
         since: None,

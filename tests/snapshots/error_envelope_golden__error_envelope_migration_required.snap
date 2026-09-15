@@ -17,7 +17,7 @@ expression: value
           "kind": "migration",
           "rationale": "Apply outstanding migrations; idempotent and audit-logged.",
           "riskClass": "mutating_local_repair",
-          "preflightCommand": "ee preflight check --cmd 'ee migrate run --workspace . --to v0.2' --workspace . --json",
+          "preflightCommand": "ee preflight check --cmd 'ee migrate run' --workspace . --json",
           "requiresHumanApproval": false,
           "mutatesExternalState": false,
           "mutatesTrackerState": false,
@@ -29,7 +29,7 @@ expression: value
           "preconditions": [
             "workspace_must_be_explicit"
           ],
-          "command": "ee migrate run --workspace . --to v0.2"
+          "command": "ee migrate run"
         }
       ]
     }

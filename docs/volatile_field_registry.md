@@ -47,6 +47,14 @@ The registry is intentionally field-name based, not JSON-pointer based. These
 fields may appear at multiple nesting depths across command responses, golden
 fixtures, and E2E support logs.
 
+Pack SLO has one narrow exception: at `/data/pack/slo`, `actuals/elapsedMs`,
+`elapsedStatus`, and aggregate `status` are producer measurements. Determinism
+comparisons must first validate elapsed status against the warning/failure
+thresholds and aggregate status against both component statuses, then normalize
+only those three paths. `resourceStatus`, budgets, admission, degradations,
+selection, provenance, and hashes remain compared. Never strip `status` or
+`elapsedStatus` by field name elsewhere.
+
 See `docs/agent-ux/float-determinism.md` for the graph-specific contract around
 same-machine byte determinism, cross-architecture float drift, and stable rank
 ordering for float-bearing surfaces.

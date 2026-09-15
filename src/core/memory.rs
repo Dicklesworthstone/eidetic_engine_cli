@@ -21,8 +21,8 @@ use super::audit_lane::{
 use super::bayes::BetaPosterior;
 use super::config_surface::{ConfigSurfaceOptions, get_config, merged_workspace_config};
 use super::index::{
-    DEFAULT_INDEX_SUBDIR, IndexHealth, IndexProcessingJobReport, IndexRebuildError,
-    IndexStatusOptions, get_index_status_with_connection, process_index_job_for_connection,
+    IndexHealth, IndexProcessingJobReport, IndexRebuildError, IndexStatusOptions,
+    get_index_status_with_connection, process_index_job_for_connection,
     process_pending_index_jobs_coalesced,
 };
 use super::memory_lifecycle::{
@@ -3219,7 +3219,13 @@ fn prepare_remember_memory_with_store(
         .unwrap_or_else(|| stable_workspace_id(&workspace_path));
     let index_dir = store_override
         .map(|store| store.index_dir.clone())
-        .unwrap_or_else(|| workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR));
+        .unwrap_or_else(|| {
+            crate::config::workspace::resolve_store_index_dir(
+                &workspace_path,
+                Some(&database_path),
+                None,
+            )
+        });
     let content = MemoryContent::parse(options.content)
         .map_err(|error| remember_usage_error(error.to_string()))?
         .as_str()
@@ -6029,12 +6035,7 @@ fn remember_search_neighbor_ids(
     let report = run_search(&SearchOptions {
         workspace_path: prepared.workspace_path.clone(),
         database_path: Some(prepared.database_path.clone()),
-        index_dir: Some(
-            prepared
-                .workspace_path
-                .join(".ee")
-                .join(DEFAULT_INDEX_SUBDIR),
-        ),
+        index_dir: Some(prepared.index_dir.clone()),
         query: memory_input.content.clone(),
         limit: u32::try_from(REMEMBER_CURATION_NEIGHBOR_LIMIT + 1).unwrap_or(u32::MAX),
         speed: crate::search::SpeedMode::Default,
@@ -8674,7 +8675,11 @@ where
             .database_path
             .map(absolute_path_from_cwd)
             .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
-        let index_dir = workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR);
+        let index_dir = crate::config::workspace::resolve_store_index_dir(
+            &workspace_path,
+            Some(&database_path),
+            None,
+        );
         let connection = open_remember_database_with_retry(&database_path)?;
         let canonical = workspace_path
             .canonicalize()
@@ -8898,8 +8903,8 @@ pub struct MemoryListReport {
     pub truncated: bool,
     /// Filter applied.
     pub filter: MemoryListFilter,
-    /// Error message if retrieval failed.
-    pub error: Option<String>,
+    /// Typed failure, including addressed-store identity and recovery details.
+    pub error: Option<DomainError>,
 }
 
 /// Summary of a memory for list output.
@@ -8968,13 +8973,21 @@ impl MemoryListReport {
     /// Create an error report.
     #[must_use]
     pub fn error(message: String) -> Self {
+        Self::domain_error(DomainError::Storage {
+            message,
+            repair: Some("ee doctor".to_owned()),
+        })
+    }
+
+    #[must_use]
+    pub fn domain_error(error: DomainError) -> Self {
         Self {
             version: env!("CARGO_PKG_VERSION"),
             memories: Vec::new(),
             total_count: 0,
             truncated: false,
             filter: MemoryListFilter::default(),
-            error: Some(message),
+            error: Some(error),
         }
     }
 }
@@ -9001,10 +9014,40 @@ fn truncate_content(content: &str) -> (String, bool) {
 
 /// List memories matching the given criteria.
 pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
-    let conn = match open_migrated_memory_database(options.database_path) {
+    if let Err(error) = super::ensure_addressed_database_exists(options.database_path) {
+        return MemoryListReport::domain_error(error);
+    }
+    let conn = match DbConnection::open_file_read_only(options.database_path) {
         Ok(c) => c,
-        Err(message) => return MemoryListReport::error(message),
+        Err(error) => {
+            return MemoryListReport::error(format!("Failed to open database read-only: {error}"));
+        }
     };
+    let addressed_args = format!(
+        "--workspace {} --database {} --json",
+        super::shell_quote_repair_arg(&options.workspace_path.to_string_lossy()),
+        super::shell_quote_repair_arg(&options.database_path.to_string_lossy()),
+    );
+    match conn.needs_migration() {
+        Ok(false) => {}
+        Ok(true) => {
+            return MemoryListReport::domain_error(DomainError::MigrationRequired {
+                message: "Database schema migration is required before listing memories. The store was not changed.".to_owned(),
+                repair: Some(format!("ee migrate run {addressed_args}")),
+            });
+        }
+        Err(error @ crate::db::DbError::MigrationDrift { .. }) => {
+            return MemoryListReport::domain_error(DomainError::MigrationDrift {
+                message: format!("Failed to inspect memory database schema: {error}"),
+                repair: Some(format!("ee migrate status {addressed_args}")),
+            });
+        }
+        Err(error) => {
+            return MemoryListReport::error(format!(
+                "Failed to inspect memory database schema: {error}"
+            ));
+        }
+    }
 
     let filter = MemoryListFilter {
         level: options.level.map(String::from),
@@ -9016,7 +9059,20 @@ pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
     // relative paths, symlinked paths, and the user-global store root all
     // address the same records (GH#23: prefers the DB's own path-keyed
     // workspace row, falling back to the canonical-path hash).
-    let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
+    let workspace_id = match crate::core::workspace::addressed_workspace_row(
+        &conn,
+        options.workspace_path,
+        options.database_path,
+    ) {
+        Ok(Some(workspace)) => workspace.id,
+        Ok(None) => stable_workspace_id(
+            &options
+                .workspace_path
+                .canonicalize()
+                .unwrap_or_else(|_| options.workspace_path.to_path_buf()),
+        ),
+        Err(error) => return MemoryListReport::domain_error(error),
+    };
 
     // If filtering by tag, get memory IDs first
     let memory_ids: Option<Vec<String>> = if let Some(tag) = options.tag {
@@ -11530,9 +11586,11 @@ where
             );
         }
     };
-    let index_dir = PathBuf::from(workspace.path)
-        .join(".ee")
-        .join(DEFAULT_INDEX_SUBDIR);
+    let index_dir = crate::config::workspace::resolve_store_index_dir(
+        Path::new(&workspace.path),
+        Some(options.database_path),
+        None,
+    );
 
     // N15.2 (bd-17c65.14.15.3): turn on the immutable-revision write path.
     //
@@ -12516,6 +12574,7 @@ pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckRepo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::index::DEFAULT_INDEX_SUBDIR;
     use crate::search::simhash::simhash_128;
 
     type TestResult = Result<(), String>;
@@ -12841,6 +12900,39 @@ mod tests {
         }
     }
 
+    #[derive(Debug, PartialEq)]
+    struct MemoryListFileSnapshot {
+        bytes: Vec<u8>,
+        modified: std::time::SystemTime,
+        readonly: bool,
+    }
+
+    fn memory_list_store_snapshot(
+        database: &Path,
+    ) -> Result<std::collections::BTreeMap<PathBuf, MemoryListFileSnapshot>, String> {
+        let mut snapshot = std::collections::BTreeMap::new();
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = database.as_os_str().to_os_string();
+            path.push(suffix);
+            let path = PathBuf::from(path);
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(format!("read {}: {error}", path.display())),
+            };
+            let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+            snapshot.insert(
+                path,
+                MemoryListFileSnapshot {
+                    bytes,
+                    modified: metadata.modified().map_err(|error| error.to_string())?,
+                    readonly: metadata.permissions().readonly(),
+                },
+            );
+        }
+        Ok(snapshot)
+    }
+
     fn setup_remember_test_workspace(connection: &DbConnection) -> Result<String, String> {
         let workspace_id = "wsp_01234567890123456789012345".to_owned();
         connection
@@ -12932,6 +13024,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
 
+        let store_before = memory_list_store_snapshot(&database_path)?;
         let report = list_memories(&ListMemoriesOptions {
             database_path: &database_path,
             workspace_path: &lexical_workspace,
@@ -12954,6 +13047,172 @@ mod tests {
             report.memories[0].id.as_str(),
             "mem_00000000000000000000000001",
             "canonical workspace first memory",
+        )?;
+        ensure(
+            report.memories[0].content.as_str(),
+            "canonical memory one",
+            "read-only list preserves real content",
+        )?;
+        ensure(
+            memory_list_store_snapshot(&database_path)?,
+            store_before,
+            "current-schema list preserves DB, WAL, and SHM bytes and metadata",
+        )
+    }
+
+    #[test]
+    fn list_memories_preserves_old_schema_and_distinguishes_migration_drift() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("older store's.db");
+        let migration = &crate::db::V001_INIT_SCHEMA;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection
+            .ensure_migration_table()
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(migration.sql())
+            .map_err(|error| error.to_string())?;
+        connection
+            .record_migration(
+                &crate::db::MigrationRecord::new(
+                    migration.version(),
+                    migration.name(),
+                    migration.checksum(),
+                    "2026-09-15T00:00:00Z",
+                )
+                .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let options = ListMemoriesOptions {
+            database_path: &database_path,
+            workspace_path: temp.path(),
+            level: None,
+            tag: None,
+            limit: 10,
+            include_tombstoned: false,
+        };
+        let before = memory_list_store_snapshot(&database_path)?;
+        let report = list_memories(&options);
+        let error = report.error.ok_or("old schema must require migration")?;
+        ensure(error.code(), "migration_required", "pending schema code")?;
+        let addressed_args = format!(
+            "--workspace {} --database {} --json",
+            crate::core::shell_quote_repair_arg(&temp.path().to_string_lossy()),
+            crate::core::shell_quote_repair_arg(&database_path.to_string_lossy()),
+        );
+        let repair = format!("ee migrate run {addressed_args}");
+        ensure(
+            error.repair(),
+            Some(repair.as_str()),
+            "exact migration target",
+        )?;
+        ensure(
+            error.recovery_actions()[0].command.as_deref(),
+            Some(repair.as_str()),
+            "structured migration retains the explicit target",
+        )?;
+        ensure(
+            report.memories.is_empty(),
+            true,
+            "no partial old-schema list",
+        )?;
+        ensure(
+            memory_list_store_snapshot(&database_path)?,
+            before,
+            "pending schema refusal preserves DB, WAL, and SHM",
+        )?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .applied_migrations()
+                .map_err(|error| error.to_string())?
+                .len(),
+            1,
+            "list must not append migrations",
+        )?;
+        connection
+            .execute_raw("UPDATE ee_schema_migrations SET name = 'tampered' WHERE version = 1")
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let before_drift = memory_list_store_snapshot(&database_path)?;
+        let error = list_memories(&options)
+            .error
+            .ok_or("tampered ledger must report drift")?;
+        ensure(
+            error.code(),
+            "migration_drift",
+            "drift is not a pending migration",
+        )?;
+        let inspect = format!("ee migrate status {addressed_args}");
+        ensure(
+            error.repair(),
+            Some(inspect.as_str()),
+            "exact drift inspection target",
+        )?;
+        ensure(
+            error.recovery_actions()[0].command.as_deref(),
+            Some(inspect.as_str()),
+            "structured drift inspection retains the explicit target",
+        )?;
+        ensure(
+            memory_list_store_snapshot(&database_path)?,
+            before_drift,
+            "drift refusal preserves DB, WAL, and SHM",
+        )
+    }
+
+    #[test]
+    fn list_memories_never_creates_missing_store_or_repairs_corrupt_store() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("absent workspace");
+        let database_path = workspace.join(".ee/ee.db");
+        let missing = list_memories(&ListMemoriesOptions {
+            database_path: &database_path,
+            workspace_path: &workspace,
+            level: None,
+            tag: None,
+            limit: 10,
+            include_tombstoned: false,
+        });
+        ensure(
+            missing.error.ok_or("missing store must fail")?.code(),
+            "workspace_store_missing",
+            "missing store preserves its typed diagnosis",
+        )?;
+        ensure(
+            workspace.exists(),
+            false,
+            "list must not create the workspace",
+        )?;
+        ensure(
+            memory_list_store_snapshot(&database_path)?.is_empty(),
+            true,
+            "list must not create DB, WAL, or SHM",
+        )?;
+
+        let corrupt = temp.path().join("corrupt.db");
+        std::fs::write(&corrupt, b"not a SQLite database\n").map_err(|error| error.to_string())?;
+        let before = memory_list_store_snapshot(&corrupt)?;
+        let report = list_memories(&ListMemoriesOptions {
+            database_path: &corrupt,
+            workspace_path: temp.path(),
+            level: None,
+            tag: None,
+            limit: 10,
+            include_tombstoned: false,
+        });
+        ensure(
+            report.error.ok_or("corrupt store must fail")?.code(),
+            "storage",
+            "corrupt bytes are not an empty store or migration request",
+        )?;
+        ensure(
+            memory_list_store_snapshot(&corrupt)?,
+            before,
+            "corrupt-store refusal preserves all addressed files",
         )
     }
 
@@ -19943,6 +20202,62 @@ mod tests {
             auto_link: false,
             propose_candidates: false,
         }
+    }
+
+    #[test]
+    fn remember_preparation_uses_selected_standard_store_and_preserves_explicit_override()
+    -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let workspace = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let base_options = upgrade_remember_options(
+            &workspace,
+            "Campaign memory uses its own derived index.",
+            0.9,
+            None,
+            true,
+        );
+        for marker in [".ee", ".ee-campaign"] {
+            let database = workspace.join(marker).join("ee.db");
+            let options = RememberMemoryOptions {
+                database_path: Some(&database),
+                ..base_options.clone()
+            };
+            let prepared =
+                prepare_remember_memory(&options, MemoryId::from_uuid(uuid::Uuid::from_u128(1)))
+                    .map_err(|error| error.message())?;
+            assert_eq!(prepared.database_path, database);
+            assert_eq!(prepared.index_dir, workspace.join(marker).join("index"));
+            let store_override = RememberStoreOverride {
+                workspace_id: prepared.workspace_id.clone(),
+                workspace_path: workspace.clone(),
+                database_path: database.clone(),
+                index_dir: workspace.join("explicit-index"),
+            };
+            let overridden = prepare_remember_memory_with_store(
+                &options,
+                MemoryId::from_uuid(uuid::Uuid::from_u128(2)),
+                Some(&store_override),
+                &[],
+                None,
+            )
+            .map_err(|error| error.message())?;
+            assert_eq!(overridden.database_path, database);
+            assert_eq!(overridden.index_dir, store_override.index_dir);
+        }
+        let external_database = workspace.join("external.db");
+        let options = RememberMemoryOptions {
+            database_path: Some(&external_database),
+            ..base_options
+        };
+        let prepared =
+            prepare_remember_memory(&options, MemoryId::from_uuid(uuid::Uuid::from_u128(3)))
+                .map_err(|error| error.message())?;
+        assert_eq!(prepared.database_path, external_database);
+        assert_eq!(prepared.index_dir, workspace.join(".ee/index"));
+        Ok(())
     }
 
     fn upgrade_batch_options(workspace_path: &Path, dry_run: bool) -> RememberBatchOptions<'_> {

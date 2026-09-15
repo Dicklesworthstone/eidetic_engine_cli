@@ -21,7 +21,7 @@
 
 #![forbid(unsafe_code)]
 
-use ee::db::{CreateCurationCandidateInput, CreateWorkspaceInput, DbConnection};
+use ee::db::{CreateCurationCandidateInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 
 type TestResult = Result<(), String>;
 
@@ -95,12 +95,27 @@ fn v062_preserves_insert_curation_candidate_api_for_ordinary_types() -> TestResu
     // Regression: V060's `insert_curation_candidate` API must still accept a
     // standard target-mutating candidate after V062 renames the table again.
     let connection = migrated_connection()?;
-    // Seed the target required by the candidate's foreign key, using valid
-    // 30-character memory and workspace IDs from the current schema.
+    // Seed the foreign-key target through the public memory API so its
+    // provenance fields satisfy the same invariants as an ordinary memory.
     connection
-        .execute_raw(
-            "INSERT INTO memories (id, workspace_id, level, kind, content, confidence, utility, importance, provenance_chain_hash_version, provenance_verification_status, trust_class, valid_from, created_at, updated_at) \
-             VALUES ('mem_00000000000000000000000062', 'wsp_00000000000000000000000062', 'episodic', 'fact', 'v062-regression', 0.9, 0.5, 0.5, 1, 'pending', 'agent_assertion', '2026-05-23T07:00:00Z', '2026-05-23T07:00:00Z', '2026-05-23T07:00:00Z')",
+        .insert_memory(
+            "mem_00000000000000000000000062",
+            &CreateMemoryInput {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                level: "episodic".to_owned(),
+                kind: "fact".to_owned(),
+                content: "v062-regression".to_owned(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.5,
+                importance: 0.5,
+                provenance_uri: None,
+                trust_class: "agent_assertion".to_owned(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: Some(CREATED_AT.to_owned()),
+                valid_to: None,
+            },
         )
         .map_err(|error| format!("seed target memory: {error}"))?;
 

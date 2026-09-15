@@ -64,6 +64,52 @@ fn actuals(
     }
 }
 
+fn assert_published_slo_fields(value: &Value) -> TestResult {
+    let schema: Value =
+        serde_json::from_str(include_str!("../docs/schemas/swarm/ee.pack.slo.v1.json"))
+            .map_err(|error| error.to_string())?;
+    for (instance, definition) in [
+        (value, &schema),
+        (&value["admission"], &schema["properties"]["admission"]),
+    ] {
+        let object = instance
+            .as_object()
+            .ok_or_else(|| "rendered SLO/admission must be an object".to_owned())?;
+        let properties = definition["properties"]
+            .as_object()
+            .ok_or_else(|| "published SLO properties missing".to_owned())?;
+        assert_eq!(definition["additionalProperties"], false);
+        for key in object.keys() {
+            assert!(
+                properties.contains_key(key),
+                "rendered field {key} absent from published SLO schema"
+            );
+        }
+        for required in definition["required"]
+            .as_array()
+            .ok_or_else(|| "published SLO required fields missing".to_owned())?
+        {
+            let key = required
+                .as_str()
+                .ok_or_else(|| "schema field name must be a string".to_owned())?;
+            assert!(
+                object.contains_key(key),
+                "rendered SLO misses required {key}"
+            );
+        }
+    }
+    for field in ["resourceStatus", "elapsedStatus", "status"] {
+        let vocabulary = schema["properties"][field]["enum"]
+            .as_array()
+            .ok_or_else(|| format!("published {field} vocabulary missing"))?;
+        assert!(
+            vocabulary.contains(&value[field]),
+            "{field} violates published vocabulary"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn resource_profile_budget_table_matches_s4_contract() -> TestResult {
     let lean = PackResourceProfile::Lean.budget_class();
@@ -162,10 +208,13 @@ fn pack_slo_warns_when_profile_scan_limit_is_hit() {
 }
 
 #[test]
-fn pack_slo_reports_elapsed_time_without_changing_status() {
+fn pack_slo_warns_at_elapsed_threshold_without_changing_resource_status() {
     let slo = PackAssemblySlo::evaluate(PackResourceProfile::Lean, actuals(20, 0, 100));
-    assert_eq!(slo.status, PackAssemblySloStatus::WithinBudget);
+    assert_eq!(slo.status, PackAssemblySloStatus::Warning);
+    assert_eq!(slo.elapsed_status, PackAssemblySloStatus::Warning);
+    assert_eq!(slo.resource_status, PackAssemblySloStatus::WithinBudget);
     assert!(slo.degradations.is_empty());
+    assert!(slo.context_degradations().is_empty());
     assert_eq!(slo.actuals.elapsed_ms, 100);
 }
 
@@ -182,11 +231,167 @@ fn pack_slo_fails_when_graph_budget_is_exceeded() {
 }
 
 #[test]
-fn pack_slo_does_not_fail_on_elapsed_time_alone() {
+fn pack_slo_reports_elapsed_failure_without_degrading_pack_content() {
     let slo = PackAssemblySlo::evaluate(PackResourceProfile::Lean, actuals(20, 0, 200));
-    assert_eq!(slo.status, PackAssemblySloStatus::WithinBudget);
+    assert_eq!(slo.status, PackAssemblySloStatus::Failure);
+    assert_eq!(slo.elapsed_status, PackAssemblySloStatus::Failure);
+    assert_eq!(slo.resource_status, PackAssemblySloStatus::WithinBudget);
     assert!(slo.degradations.is_empty());
+    assert!(slo.context_degradations().is_empty());
     assert_eq!(slo.actuals.elapsed_ms, 200);
+}
+
+#[test]
+fn pack_slo_elapsed_threshold_edges_and_resource_precedence() {
+    for profile in [
+        PackResourceProfile::Lean,
+        PackResourceProfile::Standard,
+        PackResourceProfile::SwarmHeavy,
+    ] {
+        let budget = profile.budget_class();
+        for (elapsed, expected) in [
+            (0, PackAssemblySloStatus::WithinBudget),
+            (
+                budget.elapsed_ms_target,
+                PackAssemblySloStatus::WithinBudget,
+            ),
+            (
+                budget.elapsed_ms_warning - 1,
+                PackAssemblySloStatus::WithinBudget,
+            ),
+            (budget.elapsed_ms_warning, PackAssemblySloStatus::Warning),
+            (
+                budget.elapsed_ms_warning + 1,
+                PackAssemblySloStatus::Warning,
+            ),
+            (
+                budget.elapsed_ms_failure - 1,
+                PackAssemblySloStatus::Warning,
+            ),
+            (budget.elapsed_ms_failure, PackAssemblySloStatus::Failure),
+            (
+                budget.elapsed_ms_failure + 1,
+                PackAssemblySloStatus::Failure,
+            ),
+            (u64::MAX, PackAssemblySloStatus::Failure),
+        ] {
+            let slo = PackAssemblySlo::evaluate(profile, actuals(1, 0, elapsed));
+            assert_eq!(slo.elapsed_status, expected, "{profile} elapsed={elapsed}");
+            assert_eq!(slo.status, expected, "{profile} elapsed={elapsed}");
+            assert_eq!(slo.resource_status, PackAssemblySloStatus::WithinBudget);
+            assert!(slo.context_degradations().is_empty());
+        }
+        for elapsed in [0, budget.elapsed_ms_failure] {
+            let over = PackAssemblySlo::evaluate(
+                profile,
+                actuals(budget.candidates_scanned_max + 1, 0, elapsed),
+            );
+            assert_eq!(over.resource_status, PackAssemblySloStatus::Failure);
+            assert_eq!(over.status, PackAssemblySloStatus::Failure);
+            let at = PackAssemblySlo::evaluate(
+                profile,
+                actuals(budget.candidates_scanned_max, 0, elapsed),
+            );
+            assert_eq!(at.resource_status, PackAssemblySloStatus::Warning);
+            assert_eq!(
+                at.status,
+                if elapsed == 0 {
+                    PackAssemblySloStatus::Warning
+                } else {
+                    PackAssemblySloStatus::Failure
+                }
+            );
+            let backoff = PackAssemblySlo::concurrent_limit_reached(
+                profile,
+                actuals(0, 0, elapsed),
+                250,
+                budget.concurrent_pack_max,
+            );
+            assert_eq!(backoff.resource_status, PackAssemblySloStatus::Warning);
+            assert_eq!(backoff.status, at.status);
+            assert_eq!(
+                backoff.context_degradations()[0].code,
+                PACK_CONCURRENT_LIMIT_REACHED_CODE
+            );
+        }
+    }
+}
+
+#[test]
+fn pack_slo_measured_failure_preserves_signed_resource_evidence_and_cached_producer() -> TestResult
+{
+    let request = ContextRequest::from_query("resource-aware pack assembly")
+        .map_err(|error| error.to_string())?;
+    let draft = assemble_draft_with_profile_and_options(
+        ContextPackProfile::Balanced,
+        request.query.clone(),
+        request.budget,
+        vec![candidate(
+            1,
+            "Keep pack assembly bounded for large workspaces.",
+        )],
+        PackAssemblyOptions::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    for scanned in [12, 240, 241] {
+        let fast =
+            PackAssemblySlo::evaluate(PackResourceProfile::Standard, actuals(scanned, 0, 18));
+        let slow =
+            PackAssemblySlo::evaluate(PackResourceProfile::Standard, actuals(scanned, 0, 24_457));
+        assert_eq!(slow.status, PackAssemblySloStatus::Failure);
+        assert_eq!(fast.resource_status, slow.resource_status);
+        assert_eq!(fast.context_degradations(), slow.context_degradations());
+        let mut responses = Vec::new();
+        for slo in [fast, slow] {
+            let degraded = slo.context_degradations();
+            let mut measured_draft = draft.clone();
+            measured_draft.hash = Some(ee::core::context::compute_pack_hash(
+                &request,
+                &measured_draft,
+                &degraded,
+            ));
+            let mut response = ContextResponse::new(request.clone(), measured_draft, degraded)
+                .map_err(|error| error.to_string())?;
+            response.data.slo = Some(slo);
+            responses.push(response);
+        }
+        assert_eq!(responses[0].data.pack.hash, responses[1].data.pack.hash);
+        assert_eq!(
+            ee::output::render_context_response_markdown(&responses[0]),
+            ee::output::render_context_response_markdown(&responses[1])
+        );
+        let produced = render_context_response_json(&responses[1]);
+        let parsed: Value = serde_json::from_str(&produced).map_err(|error| error.to_string())?;
+        assert_published_slo_fields(&parsed["data"]["pack"]["slo"])?;
+        assert_eq!(
+            parsed.pointer("/data/pack/slo/actuals/elapsedMs"),
+            Some(&Value::from(24_457))
+        );
+        assert_eq!(
+            parsed
+                .pointer("/data/pack/slo/elapsedStatus")
+                .and_then(Value::as_str),
+            Some("failure")
+        );
+        assert_eq!(
+            parsed
+                .pointer("/data/pack/slo/status")
+                .and_then(Value::as_str),
+            Some("failure")
+        );
+        let cached = ContextResponse::from_cached_json_with_command(
+            request.clone(),
+            produced.clone(),
+            "pack",
+        );
+        let cached_json: Value = serde_json::from_str(&render_context_response_json(&cached))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            cached_json, parsed,
+            "cached body preserves producer measurement, not current hit timing"
+        );
+    }
+    Ok(())
 }
 
 #[test]
@@ -242,6 +447,7 @@ fn context_json_renders_pack_slo_surface() -> TestResult {
 
     let json: Value = serde_json::from_str(&render_context_response_json(&response))
         .map_err(|error| error.to_string())?;
+    assert_published_slo_fields(&json["data"]["pack"]["slo"])?;
     assert_eq!(
         json.pointer("/data/pack/slo/schema"),
         Some(&Value::String(PACK_ASSEMBLY_SLO_SCHEMA_V1.to_owned()))
@@ -253,6 +459,16 @@ fn context_json_renders_pack_slo_surface() -> TestResult {
     assert_eq!(
         json.pointer("/data/pack/slo/status"),
         Some(&Value::String("within_budget".to_owned()))
+    );
+    assert_eq!(
+        json.pointer("/data/pack/slo/resourceStatus")
+            .and_then(Value::as_str),
+        Some("within_budget")
+    );
+    assert_eq!(
+        json.pointer("/data/pack/slo/elapsedStatus")
+            .and_then(Value::as_str),
+        Some("within_budget")
     );
     assert_eq!(
         json.pointer("/data/pack/slo/budgetClass/concurrentPackMax"),

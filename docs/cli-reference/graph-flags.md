@@ -366,7 +366,7 @@ bead or runs an RCH-gated verification.
 | `ee swarm next-action`, `ee swarm work-packet` | `--verifier-evidence <PATH>` | `ee.rch.verify.v1` proof JSON path | omitted | Includes recent compile-health evidence for work-allocation and work-packet preflight. |
 | `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet` | `--agent-inventory-only <SLUGS>` | comma-separated connector slugs | omitted | Limits agent inventory inspection to selected connectors when inventory is enabled. |
 | `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet` | `--max-recent-commits <N>` | integer | `8` | Caps recent git commits included by the git source. |
-| `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet` | `--command-timeout-ms <MS>` | integer milliseconds | `35000` | Sets the timeout budget for each selected source probe. |
+| `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet`, `ee handoff preview`, `ee handoff create` | `--command-timeout-ms <MS>` | integer milliseconds | `2000` | Sets the timeout budget for each selected source probe. Increase explicitly for large trackers. Handoff collects coordination evidence once and reuses it for its summaries. |
 | `ee swarm brief`, `ee swarm next-action`, `ee swarm work-packet` | `--require-sources` | boolean | false | Exits 6 when any selected source is unavailable, unconfigured, or skipped. |
 | `ee diag host-profile` | `--full-paths` | boolean | false | Includes absolute host paths in path probes; omit for redacted labels. |
 | `ee profile config plan` | `--profile <PROFILE>` | `constrained`, `portable`, `workstation`, `swarm` | host-adaptive recommendation | Plans exact `.ee/config.toml` profile changes without writing. |

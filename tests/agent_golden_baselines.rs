@@ -1998,6 +1998,48 @@ fn capabilities_json_output_matches_golden() -> TestResult {
             .is_some_and(Value::is_number),
         "capabilities readySubsystems must remain numeric",
     )?;
+    let env_entries = value
+        .pointer("/data/envOverrides")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "capabilities envOverrides must be an array".to_owned())?;
+    let actual_env_names: Vec<_> = env_entries
+        .iter()
+        .map(|entry| entry.get("name").and_then(Value::as_str))
+        .collect();
+    let registered_env_names: Vec<_> = ee::config::env_registry::EnvVar::all()
+        .iter()
+        .map(|variable| Some(variable.name()))
+        .collect();
+    ensure_equal(
+        &actual_env_names,
+        &registered_env_names,
+        "capabilities lists every registered environment variable exactly once and in order",
+    )?;
+    for (array, summary, enabled_flag) in [
+        ("commands", "totalCommands", None),
+        ("commands", "availableCommands", Some("available")),
+        ("features", "totalFeatures", None),
+        ("features", "enabledFeatures", Some("enabled")),
+    ] {
+        let entries = value
+            .pointer(&format!("/data/{array}"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("capabilities {array} must be an array"))?;
+        let actual_count = entries
+            .iter()
+            .filter(|entry| {
+                enabled_flag
+                    .is_none_or(|flag| entry.get(flag).and_then(Value::as_bool) == Some(true))
+            })
+            .count();
+        ensure_equal(
+            &value
+                .pointer(&format!("/data/summary/{summary}"))
+                .and_then(Value::as_u64),
+            &Some(actual_count as u64),
+            &format!("capabilities {summary} agrees with its complete emitted inventory"),
+        )?;
+    }
 
     assert_golden("capabilities", "capabilities_json", &stdout)
 }
@@ -2974,6 +3016,18 @@ fn version_json_advertises_supported_schemas_exactly() -> TestResult {
         &actual,
         &expected,
         "version --json data.schemas must match ee::core::supported_schemas()",
+    )?;
+    let migration_versions: Vec<_> = ee::db::MIGRATIONS
+        .iter()
+        .map(ee::db::Migration::version)
+        .collect();
+    ensure_equal(
+        &value.pointer("/data/database/supportedMigrationRange"),
+        &Some(&json!({
+            "min": migration_versions.iter().min(),
+            "max": migration_versions.iter().max(),
+        })),
+        "version advertises the bounds of the actual registered migration catalog",
     )
 }
 

@@ -27,8 +27,8 @@
 //! - **MR4 — three-invocation envelope stability across cold
 //!   processes.** Mirrors the existing pack-hash test but tightens
 //!   the assertion from `data.pack.hash` equality to full-envelope
-//!   byte equality after normalizing only the registered wall-clock field
-//!   `data.pack.slo.actuals.elapsedMs`; see `docs/volatile_field_registry.md`.
+//!   byte equality after validating and normalizing only producer SLO elapsedMs,
+//!   elapsedStatus and aggregate status; see `docs/volatile_field_registry.md`.
 //!   Catches drift in fields outside pack.hash that the existing test
 //!   silently tolerates, without requiring identical assembly durations.
 //! - **MR5 — `graph.ppr.alpha = 0` invariance.** With the graph
@@ -344,19 +344,12 @@ fn normalize_pack_envelope(stdout: &str) -> Result<String, String> {
         ));
     }
 
-    // Pack SLO diagnostics expose real assembly time, registered as volatile
-    // in ee::obs::VOLATILE_FIELD_NAMES. Normalize this exact numeric field;
-    // preserve all other diagnostics, hashes, item order, scores and provenance.
+    // Independently validate measured classification before normalizing only
+    // the three producer diagnostics; resource evidence remains compared.
     // serde_json's preserve_order feature retains object insertion order too.
-    let elapsed_ms = envelope
-        .pointer_mut("/data/pack/slo/actuals/elapsedMs")
-        .ok_or_else(|| "pack envelope missing SLO elapsedMs".to_owned())?;
-    if !elapsed_ms.is_u64() {
-        return Err(format!(
-            "pack SLO elapsedMs must be an unsigned integer, got {elapsed_ms}"
-        ));
+    if !ee::obs::normalize_pack_slo_measurements(&mut envelope)? {
+        return Err("pack envelope missing SLO measurements".to_owned());
     }
-    *elapsed_ms = JsonValue::from(0_u64);
     serde_json::to_string(&envelope)
         .map_err(|error| format!("serialize normalized pack envelope: {error}"))
 }
@@ -372,7 +365,12 @@ fn pack_envelope_normalization_preserves_semantic_drift() -> TestResult {
                     "content": "Preserve release provenance.",
                     "provenance": [{"uri": "ee://memory/original"}]
                 }],
-                "slo": {"actuals": {"elapsedMs": 21, "scannedCount": 6}}
+                "slo": {
+                    "schema": "ee.pack.slo.v1",
+                    "budgetClass": {"elapsedMsTarget": 200, "elapsedMsWarning": 500, "elapsedMsFailure": 2000},
+                    "actuals": {"elapsedMs": 21, "scannedCount": 6},
+                    "resourceStatus": "within_budget", "elapsedStatus": "within_budget", "status": "within_budget"
+                }
             }
         },
         "degraded": []
@@ -382,6 +380,17 @@ fn pack_envelope_normalization_preserves_semantic_drift() -> TestResult {
     different_timing["data"]["pack"]["slo"]["actuals"]["elapsedMs"] = JsonValue::from(34);
     if normalize_pack_envelope(&different_timing.to_string())? != baseline {
         return Err("registered assembly timing must not cause semantic drift".to_owned());
+    }
+    different_timing["data"]["pack"]["slo"]["actuals"]["elapsedMs"] = JsonValue::from(24_457);
+    if normalize_pack_envelope(&different_timing.to_string()).is_ok() {
+        return Err(
+            "falsely green elapsed breach must be rejected before normalization".to_owned(),
+        );
+    }
+    different_timing["data"]["pack"]["slo"]["elapsedStatus"] = JsonValue::from("failure");
+    different_timing["data"]["pack"]["slo"]["status"] = JsonValue::from("failure");
+    if normalize_pack_envelope(&different_timing.to_string())? != baseline {
+        return Err("correct measured failure must preserve semantic pack identity".to_owned());
     }
     for (pointer, replacement) in [
         ("/data/pack/hash", serde_json::json!("blake3:changed")),

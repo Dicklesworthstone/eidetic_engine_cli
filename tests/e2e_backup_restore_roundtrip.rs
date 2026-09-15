@@ -535,7 +535,9 @@ fn remove_json_pointer(value: &mut JsonValue, pointer: &str) {
 }
 
 fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
-    remove_json_pointer(&mut value, "/data/pack/slo/actuals/elapsedMs");
+    if !ee::obs::normalize_pack_slo_measurements(&mut value)? {
+        return Err("backup context output missing producer SLO measurements".to_owned());
+    }
     // A side-path restore is a new store. Trust is deliberately capped at the
     // transport boundary, index publication may select a different available
     // embedding backend, and graph source generations are store-local. Those
@@ -562,6 +564,19 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
         }
     }
     serde_json::to_vec(&value).map_err(|error| format!("canonicalize context JSON: {error}"))
+}
+
+#[test]
+fn context_comparison_requires_producer_slo() {
+    let missing_slo = serde_json::json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "data": {"pack": {"schema": "ee.pack.v2", "items": []}}
+    });
+    assert_eq!(
+        canonical_context_stdout(missing_slo),
+        Err("backup context output missing producer SLO measurements".to_owned())
+    );
 }
 
 fn json_str<'a>(value: &'a JsonValue, pointer: &str, context: &str) -> Result<&'a str, String> {

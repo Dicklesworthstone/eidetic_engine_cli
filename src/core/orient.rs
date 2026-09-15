@@ -1091,6 +1091,7 @@ enum NearbyStoreProbeResult {
     Store(Option<NearbyStore>),
     Registry(Result<crate::core::workspace::WorkspaceListReport, ()>),
     Failed,
+    Finished { panicked: bool },
 }
 
 /// Owns only this scan's blocking reads. The enclosing thread scope joins
@@ -1105,6 +1106,7 @@ struct NearbyStoreProbes<'scope, 'env, 'scan> {
     sender: std::sync::mpsc::Sender<(usize, NearbyStoreProbeResult)>,
     receiver: std::sync::mpsc::Receiver<(usize, NearbyStoreProbeResult)>,
     handles: BTreeMap<usize, std::thread::ScopedJoinHandle<'scope, ()>>,
+    finished: BTreeSet<usize>,
     pending_databases: BTreeMap<usize, PathBuf>,
     completed: BTreeMap<usize, Option<NearbyStore>>,
     seen_databases: BTreeSet<PathBuf>,
@@ -1135,6 +1137,7 @@ impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
             sender,
             receiver,
             handles: BTreeMap::new(),
+            finished: BTreeSet::new(),
             pending_databases: BTreeMap::new(),
             completed: BTreeMap::new(),
             seen_databases: BTreeSet::new(),
@@ -1150,16 +1153,55 @@ impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
         nearby_store_scan_should_stop(&self.cx, self.started, self.budget, self.scan)
     }
 
+    fn poll(&mut self) -> bool {
+        self.reap_finished();
+        // Filesystem enumeration can outlast a completed read without filling
+        // every slot. Publish that proved prefix as traversal progresses.
+        while !self.should_stop() {
+            let Ok((id, result)) = self.receiver.try_recv() else {
+                break;
+            };
+            self.accept_result(id, result);
+        }
+        self.should_stop()
+    }
+
+    fn reap_finished(&mut self) {
+        let finished: Vec<_> = self
+            .handles
+            .iter()
+            .filter_map(|(id, handle)| {
+                (self.finished.contains(id) && handle.is_finished()).then_some(*id)
+            })
+            .collect();
+        for id in finished {
+            self.finished.remove(&id);
+            if let Some(handle) = self.handles.remove(&id)
+                && handle.join().is_err()
+            {
+                self.scan.mark_unavailable();
+            }
+        }
+    }
+
+    fn occupied_slots(&self) -> usize {
+        self.handles.len()
+            + self
+                .completed
+                .keys()
+                .filter(|id| !self.handles.contains_key(*id))
+                .count()
+    }
+
     fn spawn(
         &mut self,
         id: usize,
-        work: impl FnOnce() -> NearbyStoreProbeResult + Send + 'scope,
+        work: impl FnOnce(&mut dyn FnMut(NearbyStoreProbeResult)) + Send + 'scope,
     ) -> bool {
         // Completed results waiting for an earlier candidate still occupy a
         // slot, so a slow first probe cannot create an unbounded reorder queue.
-        while self.handles.len() + self.completed.len() >= MAX_NEARBY_STORE_PROBES_PER_SCAN
-            && !self.should_stop()
-        {
+        self.reap_finished();
+        while self.occupied_slots() >= MAX_NEARBY_STORE_PROBES_PER_SCAN && !self.should_stop() {
             self.receive_one();
         }
         if self.should_stop() {
@@ -1171,9 +1213,23 @@ impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
             .name("ee-nearby-store-probe".to_owned())
             .spawn_scoped(self.scope, move || {
                 let _ambient_cx = cx.set_current_restricted();
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
-                    .unwrap_or(NearbyStoreProbeResult::Failed);
-                let _ = sender.send((id, result));
+                let mut published = false;
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    work(&mut |result| {
+                        assert!(!published, "a nearby-store probe must publish only once");
+                        published = true;
+                        let _ = sender.send((id, result));
+                    });
+                }));
+                if !published {
+                    let _ = sender.send((id, NearbyStoreProbeResult::Failed));
+                }
+                let _ = sender.send((
+                    id,
+                    NearbyStoreProbeResult::Finished {
+                        panicked: result.is_err(),
+                    },
+                ));
             }) {
             Ok(handle) => {
                 self.handles.insert(id, handle);
@@ -1194,52 +1250,35 @@ impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
             registry_path: registry_path.map(Path::to_path_buf),
         };
         let cx = self.cx.clone();
-        if !self.spawn(0, move || {
-            NearbyStoreProbeResult::Registry(if cx.is_cancel_requested() {
-                Err(())
-            } else {
-                crate::core::workspace::list_workspace_registry(&options).map_err(|_| ())
+        if !self.spawn(0, move |publish| {
+            if cx.is_cancel_requested() {
+                publish(NearbyStoreProbeResult::Registry(Err(())));
+            } else if crate::core::workspace::list_workspace_registry_with(&options, |report| {
+                publish(NearbyStoreProbeResult::Registry(Ok(report)));
             })
+            .is_err()
+            {
+                publish(NearbyStoreProbeResult::Registry(Err(())));
+            }
         }) {
             self.registry = Some(Err(()));
         }
     }
 
     fn receive_one(&mut self) {
+        self.reap_finished();
         if self.should_stop() {
             return;
         }
         let remaining = self.budget.saturating_sub(self.started.elapsed());
-        // Duration::MAX is used by semantic tests. Bound each wait without
-        // extending the real caller's remaining deadline.
+        // A worker may already have published its read while it closes the
+        // connection. Poll for actual thread exit before freeing its slot;
+        // joining an unfinished worker here would consume the caller's budget.
         match self
             .receiver
-            .recv_timeout(remaining.min(std::time::Duration::from_secs(1)))
+            .recv_timeout(remaining.min(std::time::Duration::from_millis(1)))
         {
-            Ok((id, result)) => {
-                // A response is sent after its database connection is dropped.
-                // Reap the thread before admitting another probe into its slot.
-                if let Some(handle) = self.handles.remove(&id)
-                    && handle.join().is_err()
-                {
-                    self.scan.mark_unavailable();
-                }
-                match result {
-                    NearbyStoreProbeResult::Registry(registry) => self.registry = Some(registry),
-                    NearbyStoreProbeResult::Store(store) => {
-                        self.completed.insert(id, store);
-                    }
-                    NearbyStoreProbeResult::Failed => {
-                        self.scan.mark_unavailable();
-                        if id == 0 {
-                            self.registry = Some(Err(()));
-                        } else {
-                            self.completed.insert(id, None);
-                        }
-                    }
-                }
-                self.publish_completed_prefix();
-            }
+            Ok((id, result)) => self.accept_result(id, result),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 self.should_stop();
             }
@@ -1250,6 +1289,32 @@ impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
                 );
             }
         }
+    }
+
+    fn accept_result(&mut self, id: usize, result: NearbyStoreProbeResult) {
+        // Results describe completed reads. The still-running worker remains
+        // counted until reap_finished observes that its cleanup has exited.
+        match result {
+            NearbyStoreProbeResult::Registry(registry) => self.registry = Some(registry),
+            NearbyStoreProbeResult::Store(store) => {
+                self.completed.insert(id, store);
+            }
+            NearbyStoreProbeResult::Failed => {
+                self.scan.mark_unavailable();
+                if id == 0 {
+                    self.registry = Some(Err(()));
+                } else if id >= self.next_publication {
+                    self.completed.insert(id, None);
+                }
+            }
+            NearbyStoreProbeResult::Finished { panicked } => {
+                self.finished.insert(id);
+                if panicked {
+                    self.scan.mark_unavailable();
+                }
+            }
+        }
+        self.publish_completed_prefix();
     }
 
     fn publish_completed_prefix(&mut self) {
@@ -1277,7 +1342,7 @@ impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
         addressed_database_canonical: Option<&Path>,
     ) {
         for marker in NEARBY_STORE_MARKERS {
-            if self.should_stop() {
+            if self.poll() {
                 return;
             }
             let store_dir = candidate.workspace_root.join(marker);
@@ -1312,14 +1377,15 @@ impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
             let id = self.next_probe;
             #[cfg(test)]
             let profile_calls = std::sync::Arc::clone(&self.profile_calls);
-            if self.spawn(id, move || {
+            if self.spawn(id, move |publish| {
                 if cx.is_cancel_requested() {
-                    return NearbyStoreProbeResult::Store(None);
+                    publish(NearbyStoreProbeResult::Store(None));
+                    return;
                 }
                 #[cfg(test)]
                 profile_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let store = nearby_store_profile(&database, &candidate).and_then(
-                    |(documents, last_write)| {
+                nearby_store_profile(&database, &candidate, |profile| {
+                    let store = profile.and_then(|(documents, last_write)| {
                         (documents > 0).then(|| NearbyStore {
                             workspace_root: candidate.workspace_root.display().to_string(),
                             store_dir: store_dir.display().to_string(),
@@ -1327,9 +1393,9 @@ impl<'scope, 'env, 'scan> NearbyStoreProbes<'scope, 'env, 'scan> {
                             last_write,
                             provenance: candidate.provenance,
                         })
-                    },
-                );
-                NearbyStoreProbeResult::Store(store)
+                    });
+                    publish(NearbyStoreProbeResult::Store(store));
+                });
             }) {
                 self.pending_databases.insert(id, identity);
                 self.next_probe += 1;
@@ -1631,7 +1697,7 @@ fn scan_nearby_stores_with_registry(
         // publication priority over every registry candidate.
         let mut frontier = VecDeque::from([(scan_root.clone(), 0_usize)]);
         'frontier: while let Some((dir, depth)) = frontier.pop_front() {
-            if probes.should_stop() {
+            if probes.poll() {
                 break;
             }
             if depth > 0 {
@@ -1654,7 +1720,7 @@ fn scan_nearby_stores_with_registry(
             let Ok(read_dir) = std::fs::read_dir(&dir) else {
                 continue;
             };
-            if probes.should_stop() {
+            if probes.poll() {
                 break;
             }
             let mut entries = Vec::new();
@@ -1663,7 +1729,7 @@ fn scan_nearby_stores_with_registry(
                 // wall-clock bound while we enumerate it. Checking only between
                 // directories lets one directory with millions of entries turn
                 // this read-only recovery hint into an unbounded walk.
-                if probes.should_stop() {
+                if probes.poll() {
                     break 'frontier;
                 }
                 entries.push(entry);
@@ -1673,7 +1739,7 @@ fn scan_nearby_stores_with_registry(
             // bounded prefix selected under a time limit are deterministic.
             entries.sort_by_key(std::fs::DirEntry::file_name);
             for entry in entries {
-                if probes.should_stop() {
+                if probes.poll() {
                     break 'frontier;
                 }
                 let path = entry.path();
@@ -1683,7 +1749,7 @@ fn scan_nearby_stores_with_registry(
                 let Ok(file_type) = entry.file_type() else {
                     continue;
                 };
-                if probes.should_stop() {
+                if probes.poll() {
                     break 'frontier;
                 }
                 if !file_type.is_dir() {
@@ -1706,7 +1772,7 @@ fn scan_nearby_stores_with_registry(
             scan_root.parent()
         };
         while let Some(dir) = parent {
-            if probes.should_stop() {
+            if probes.poll() {
                 break;
             }
             if let Some(candidate) = add_nearby_store_candidate(
@@ -1733,7 +1799,7 @@ fn scan_nearby_stores_with_registry(
         // no local proof, discovery is globally unavailable and must not imply an
         // actionable candidate or a complete no-store conclusion.
         let mut registry_failed = false;
-        if !probes.should_stop() {
+        if !probes.poll() {
             match probes.take_registry() {
                 Some(Ok(registry)) => {
                     for workspace in registry.workspaces {
@@ -1842,7 +1908,7 @@ fn nearby_store_is_addressed_database(
         })
 }
 
-fn nearby_store_database_is_safe_regular_file(database: &Path) -> bool {
+pub(crate) fn nearby_store_database_is_safe_regular_file(database: &Path) -> bool {
     if crate::core::path_safety::path_has_symlink_component(database).unwrap_or(true) {
         return false;
     }
@@ -1875,17 +1941,20 @@ pub(crate) fn store_memory_row_count(workspace_path: &Path, database: &Path) -> 
 
 /// Read `(live workspace memory heads, newest db/WAL mtime)` from a candidate
 /// store, skipping quietly on any identity or storage failure.
-fn nearby_store_profile(
+fn nearby_store_profile<T>(
     database: &Path,
     candidate: &NearbyStoreCandidate,
-) -> Option<(u64, Option<String>)> {
-    let connection = DbConnection::open_file_read_only(database).ok()?;
-    let workspace = nearby_store_workspace_identity(&connection, candidate)?;
-    let documents = connection
-        .count_live_memories_for_workspace(&workspace.id)
-        .ok()?;
-    let last_write = nearby_store_last_write(database);
-    Some((documents, last_write))
+    consume: impl FnOnce(Option<(u64, Option<String>)>) -> T,
+) -> T {
+    let connection = DbConnection::open_file_read_only(database).ok();
+    let profile = connection.as_ref().and_then(|connection| {
+        let workspace = nearby_store_workspace_identity(connection, candidate)?;
+        let documents = connection
+            .count_live_memories_for_workspace(&workspace.id)
+            .ok()?;
+        Some((documents, nearby_store_last_write(database)))
+    });
+    consume(profile)
 }
 
 fn nearby_store_workspace_identity(
@@ -2979,17 +3048,22 @@ mod tests {
         )?;
 
         ensure(
-            nearby_store_profile(&database, &wrong_workspace).is_none()
-                && nearby_store_profile(&database, &wrong_repository).is_none(),
+            nearby_store_profile(&database, &wrong_workspace, std::convert::identity).is_none()
+                && nearby_store_profile(&database, &wrong_repository, std::convert::identity)
+                    .is_none(),
             "mismatched registry workspace/repository identity must be rejected".to_owned(),
         )?;
         ensure_equal(
-            &nearby_store_profile(&database, &matching_registry).map(|profile| profile.0),
+            &nearby_store_profile(&database, &matching_registry, |profile| {
+                profile.map(|profile| profile.0)
+            }),
             &Some(1_u64),
             "matching registry identity",
         )?;
         ensure_equal(
-            &nearby_store_profile(&database, &local).map(|profile| profile.0),
+            &nearby_store_profile(&database, &local, |profile| {
+                profile.map(|profile| profile.0)
+            }),
             &Some(1_u64),
             "local path identity remains independently discoverable",
         )?;
@@ -3046,6 +3120,8 @@ mod tests {
         let temp = orient_test_tempdir()?;
         let first = temp.path().join("first");
         let second = temp.path().join("second");
+        std::fs::create_dir_all(&first).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&second).map_err(|error| error.to_string())?;
         remember_fixture(&first, "First independently stored fact.", "nearby", None)?;
         remember_fixture(&second, "Second independently stored fact.", "nearby", None)?;
         let candidates = [first, second].map(|workspace_root| NearbyStoreCandidate {
@@ -3077,14 +3153,15 @@ mod tests {
                 probes.pending_databases.insert(id, database.clone());
                 let release = first_wait.take();
                 ensure(
-                    probes.spawn(id, move || {
+                    probes.spawn(id, move |publish| {
                         if let Some(release) = release
                             && release.recv_timeout(scan_budget()).is_err()
                         {
-                            return NearbyStoreProbeResult::Failed;
+                            publish(NearbyStoreProbeResult::Failed);
+                            return;
                         }
-                        NearbyStoreProbeResult::Store(
-                            nearby_store_profile(&database, &candidate).map(
+                        nearby_store_profile(&database, &candidate, |profile| {
+                            publish(NearbyStoreProbeResult::Store(profile.map(
                                 |(documents, last_write)| NearbyStore {
                                     workspace_root: candidate.workspace_root.display().to_string(),
                                     store_dir: store_dir.display().to_string(),
@@ -3092,36 +3169,64 @@ mod tests {
                                     last_write,
                                     provenance: candidate.provenance,
                                 },
-                            ),
-                        )
+                            )));
+                        });
                     }),
                     "real store probe must start".to_owned(),
                 )?;
             }
             // The first probe cannot complete until this thread releases it.
             // Receive the second actual database read, with no scheduler guess.
-            probes.receive_one();
+            let waiting_since = std::time::Instant::now();
+            while !probes.completed.contains_key(&2) && waiting_since.elapsed() < scan_budget() {
+                probes.receive_one();
+            }
             ensure(
-                probes.completed.get(&2).is_some_and(|store| {
-                    store.as_ref().is_some_and(|store| store.documents == 1)
-                }) && probes.scan.stores.is_empty()
+                probes
+                    .completed
+                    .get(&2)
+                    .is_some_and(|store| store.as_ref().is_some_and(|store| store.documents == 1))
+                    && probes.scan.stores.is_empty()
                     && probes.next_publication == 1,
                 "a completed later store must wait for the earlier candidate".to_owned(),
             )?;
             release_first.send(()).map_err(|error| error.to_string())?;
+            // Join only to establish that the actual first read's response is
+            // queued. A normal traversal checkpoint must publish it without
+            // waiting for more candidate admissions or end-of-scan draining.
+            probes
+                .handles
+                .remove(&1)
+                .ok_or_else(|| "first probe handle must remain owned".to_owned())?
+                .join()
+                .map_err(|_| "first real store probe panicked".to_owned())?;
+            ensure(
+                probes.scan.stores.is_empty() && !probes.poll() && probes.scan.stores.len() == 2,
+                "traversal polling must publish an already-completed ordered prefix".to_owned(),
+            )?;
             probes.finish();
-            ensure_equal(&probes.scan.outcome, &NearbyStoreScanOutcome::Complete, "probe completion")
+            ensure_equal(
+                &probes.scan.outcome,
+                &NearbyStoreScanOutcome::Complete,
+                "probe completion",
+            )
         })?;
         ensure_equal(&publications.len(), &2, "one publication per proved store")?;
         ensure_equal(
-            &publications[0].iter().map(|store| store.workspace_root.clone()).collect::<Vec<_>>(),
+            &publications[0]
+                .iter()
+                .map(|store| store.workspace_root.clone())
+                .collect::<Vec<_>>(),
             &vec![candidates[0].workspace_root.display().to_string()],
             "first publication uses admission order despite reversed completion",
         )?;
         ensure_equal(&publications[1], &scan.stores, "final ranked publication")?;
         ensure(
             scan.stores.len() == 2 && scan.stores.iter().all(|store| store.documents == 1),
-            format!("both actual stored memories remain discoverable: {:?}", scan.stores),
+            format!(
+                "both actual stored memories remain discoverable: {:?}",
+                scan.stores
+            ),
         )
     }
 
@@ -3531,6 +3636,227 @@ mod tests {
             &scan.stores.len(),
             &0_usize,
             "zero-budget scan must not inspect candidates",
+        )
+    }
+
+    #[test]
+    fn discovery_publishes_real_store_before_teardown_and_retains_ownership() -> TestResult {
+        let temp = orient_test_tempdir()?;
+        let workspace = temp.path().join("published-before-close");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        remember_fixture(
+            &workspace,
+            "Proved before storage teardown.",
+            "nearby",
+            None,
+        )?;
+        let candidate = NearbyStoreCandidate {
+            workspace_root: workspace.clone(),
+            registry_identity: None,
+            provenance: NearbyStoreProvenance::ChildScan,
+        };
+        let limiter = std::sync::Arc::new(NearbyStoreScanWorkerLimiter::new(1));
+        let permit = NearbyStoreScanWorkerLimiter::try_acquire(&limiter)
+            .ok_or_else(|| "scan permit must be available".to_owned())?;
+        let (release, wait_release) = std::sync::mpsc::channel();
+        let (observed, wait_observed) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || -> TestResult {
+            let _permit = permit;
+            let cx = Cx::detached_cancel_context();
+            let mut scan = NearbyStoreScanAssessment::default();
+            let mut publication_count = 0;
+            let mut publish = |_: &NearbyStoreScanAssessment| publication_count += 1;
+            std::thread::scope(|scope| -> TestResult {
+                let mut probes = NearbyStoreProbes::new(
+                    scope,
+                    &cx,
+                    std::time::Instant::now(),
+                    std::time::Duration::MAX,
+                    &mut scan,
+                    &mut publish,
+                );
+                let store_dir = candidate.workspace_root.join(".ee");
+                let database = store_dir.join("ee.db");
+                probes.pending_databases.insert(1, database.clone());
+                ensure(
+                    probes.spawn(1, move |publish| {
+                        nearby_store_profile(&database, &candidate, |profile| {
+                            publish(NearbyStoreProbeResult::Store(profile.map(
+                                |(documents, last_write)| NearbyStore {
+                                    workspace_root: candidate.workspace_root.display().to_string(),
+                                    store_dir: store_dir.display().to_string(),
+                                    documents,
+                                    last_write,
+                                    provenance: candidate.provenance,
+                                },
+                            )));
+                            // Keep the real read connection alive after its
+                            // proof is published. The parent always releases
+                            // this wait before checking observations or joining.
+                            let _ = wait_release.recv();
+                        });
+                    }),
+                    "real store probe must start".to_owned(),
+                )?;
+                while probes.scan.stores.is_empty() && !probes.handles.is_empty() {
+                    probes.receive_one();
+                }
+                observed
+                    .send((probes.scan.stores.clone(), probes.occupied_slots()))
+                    .map_err(|error| error.to_string())?;
+                probes.finish();
+                ensure(
+                    probes.handles.is_empty() && probes.finished.is_empty(),
+                    "all owned probe threads must be reaped after release".to_owned(),
+                )
+            })?;
+            ensure_equal(&publication_count, &1, "exactly one real store publication")
+        });
+        let observation = wait_observed.recv_timeout(scan_budget());
+        let retained = limiter.active_count() == 1 && !worker.is_finished();
+        let refused = NearbyStoreScanWorkerLimiter::try_acquire(&limiter).is_none();
+        let _ = release.send(());
+        let completed = worker
+            .join()
+            .map_err(|_| "controlled teardown worker panicked".to_owned());
+        let (stores, occupied) = observation
+            .map_err(|error| format!("read proof was withheld until teardown: {error}"))?;
+        completed??;
+        ensure(
+            stores.len() == 1
+                && stores[0].documents == 1
+                && Path::new(&stores[0].workspace_root) == workspace
+                && occupied == 1
+                && retained
+                && refused,
+            format!(
+                "published real store must retain both probe slot and outer permit during teardown: stores={stores:?}, occupied={occupied}, retained={retained}, refused={refused}"
+            ),
+        )?;
+        ensure_equal(
+            &limiter.active_count(),
+            &0,
+            "outer permit released after cleanup",
+        )
+    }
+
+    #[test]
+    fn discovery_probe_limit_and_cancellation_retain_owned_worker_tails() -> TestResult {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let limiter = std::sync::Arc::new(NearbyStoreScanWorkerLimiter::new(1));
+        let permit = NearbyStoreScanWorkerLimiter::try_acquire(&limiter)
+            .ok_or_else(|| "initial scan permit must be available".to_owned())?;
+        let cx = Cx::detached_cancel_context();
+        let worker_cx = cx.clone();
+        let (admitted, wait_admitted) = std::sync::mpsc::channel();
+        let (refused, wait_refused) = std::sync::mpsc::channel();
+        let mut releases = Vec::new();
+        let mut waits = Vec::new();
+        for _ in 0..MAX_NEARBY_STORE_PROBES_PER_SCAN {
+            let (release, wait) = std::sync::mpsc::channel();
+            releases.push(release);
+            waits.push(wait);
+        }
+        let fifth_ran = std::sync::Arc::new(AtomicBool::new(false));
+        let worker_fifth = std::sync::Arc::clone(&fifth_ran);
+        let publications = std::sync::Arc::new(AtomicUsize::new(0));
+        let worker_publications = std::sync::Arc::clone(&publications);
+        let worker = std::thread::spawn(move || -> TestResult {
+            let _permit = permit;
+            let mut scan = NearbyStoreScanAssessment::default();
+            let mut publish = |_: &NearbyStoreScanAssessment| {
+                worker_publications.fetch_add(1, Ordering::Relaxed);
+            };
+            std::thread::scope(|scope| -> TestResult {
+                let mut probes = NearbyStoreProbes::new(
+                    scope,
+                    &worker_cx,
+                    std::time::Instant::now(),
+                    std::time::Duration::MAX,
+                    &mut scan,
+                    &mut publish,
+                );
+                for (offset, wait) in waits.into_iter().enumerate() {
+                    ensure(
+                        probes.spawn(offset + 1, move |publish| {
+                            publish(if wait.recv_timeout(scan_budget()).is_err() {
+                                NearbyStoreProbeResult::Failed
+                            } else {
+                                NearbyStoreProbeResult::Store(None)
+                            });
+                        }),
+                        "bounded worker must be admitted before cancellation".to_owned(),
+                    )?;
+                }
+                admitted
+                    .send(probes.handles.len())
+                    .map_err(|error| error.to_string())?;
+                // With every slot occupied, admission must wait for a result
+                // or cancellation. No worker below is released before refusal.
+                let fifth_started =
+                    probes.spawn(MAX_NEARBY_STORE_PROBES_PER_SCAN + 1, move |publish| {
+                        worker_fifth.store(true, Ordering::Release);
+                        publish(NearbyStoreProbeResult::Store(None));
+                    });
+                refused
+                    .send((fifth_started, probes.handles.len()))
+                    .map_err(|error| error.to_string())?;
+                probes.finish();
+                ensure_equal(
+                    &probes.scan.outcome,
+                    &NearbyStoreScanOutcome::Truncated,
+                    "cancelled scan",
+                )
+            })
+        });
+        let active = wait_admitted
+            .recv_timeout(scan_budget())
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &active,
+            &MAX_NEARBY_STORE_PROBES_PER_SCAN,
+            "bounded active probes",
+        )?;
+        cx.set_cancel_reason(
+            CancelReason::timeout().with_message("probe admission cancellation control"),
+        );
+        let (fifth_started, retained) = wait_refused
+            .recv_timeout(scan_budget())
+            .map_err(|error| error.to_string())?;
+        ensure(
+            !fifth_started && !fifth_ran.load(Ordering::Acquire),
+            "cancellation must refuse the queued probe without running it".to_owned(),
+        )?;
+        ensure_equal(
+            &retained,
+            &MAX_NEARBY_STORE_PROBES_PER_SCAN,
+            "unreleased probe handles",
+        )?;
+        ensure_equal(
+            &limiter.active_count(),
+            &1,
+            "scan permit retained across scoped worker teardown",
+        )?;
+        ensure(
+            NearbyStoreScanWorkerLimiter::try_acquire(&limiter).is_none(),
+            "another scan must not escape the cap while cancelled probes still run".to_owned(),
+        )?;
+        for release in releases {
+            release.send(()).map_err(|error| error.to_string())?;
+        }
+        worker
+            .join()
+            .map_err(|_| "scoped scan worker panicked".to_owned())??;
+        ensure_equal(
+            &limiter.active_count(),
+            &0,
+            "permit released only after all probes exit",
+        )?;
+        ensure_equal(
+            &publications.load(Ordering::Relaxed),
+            &0,
+            "cancelled late results are never published",
         )
     }
 

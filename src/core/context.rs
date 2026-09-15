@@ -2290,10 +2290,11 @@ pub fn explain_why_not(
         return Err(ContextPackError::WorkspaceStoreMissing(database_path));
     }
 
-    let index_dir = options
-        .index_dir
-        .clone()
-        .unwrap_or_else(|| options.workspace_path.join(".ee").join("index"));
+    let index_dir = crate::config::workspace::resolve_store_index_dir(
+        &options.workspace_path,
+        options.database_path.as_deref(),
+        options.index_dir.as_deref(),
+    );
     let fast_embedder_override = if options.source_mode.uses_embeddings()
         && index_dir.exists()
         && index_corpus_compatibility_is_current(&index_dir)
@@ -2680,10 +2681,11 @@ async fn run_context_pack_with_performance_inner(
 
     let mut degraded = Vec::new();
 
-    let index_dir = options
-        .index_dir
-        .clone()
-        .unwrap_or_else(|| options.workspace_path.join(".ee").join("index"));
+    let index_dir = crate::config::workspace::resolve_store_index_dir(
+        &options.workspace_path,
+        options.database_path.as_deref(),
+        options.index_dir.as_deref(),
+    );
     let search_options = SearchOptions {
         workspace_path: options.workspace_path.clone(),
         database_path: Some(database_path.clone()),
@@ -2723,7 +2725,7 @@ async fn run_context_pack_with_performance_inner(
     } else {
         None
     };
-    if remote_search.is_none() {
+    if remote_search.is_none() && options.persist_pack {
         reconcile_search_index_before_read_with_cx(control.cx, &search_options).await;
     }
     let embedder_preparation = if remote_search.is_none()
@@ -3161,12 +3163,13 @@ async fn run_context_pack_with_performance_inner(
 
     let scope_filter_input_count =
         candidate_filter_input_count.saturating_add(trace.focus_candidate_count);
-    let scope_context = MemoryScopeContext::for_workspace(
+    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+    let scope_context = MemoryScopeContext::for_workspace_with_connection(
         &options.workspace_path,
         options.memory_scope,
         options.strict_scope,
+        Some(read_connection),
     );
-    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let global_store_memory_ids = global_store_search_memory_ids(&search_report);
     let scope_stats = filter_candidates_by_memory_scope(
         read_connection,
@@ -3751,26 +3754,6 @@ async fn run_context_pack_with_performance_inner(
     }
 
     control.check()?;
-    if let Some(l2_context) = &l2_cache_context {
-        let degraded_count_before_l2_store = response.data.degraded.len();
-        context_pack_l2_store(l2_context, options, &search_report, &mut response);
-        if response.data.degraded.len() != degraded_count_before_l2_store {
-            refresh_context_pack_hash(
-                &response.data.request,
-                &mut response.data.pack,
-                &response.data.degraded,
-                options.output_options,
-                response.data.coordination.as_ref(),
-                read_snapshot_generation,
-                options.task_lens.as_ref(),
-            );
-            if let Some(profile) = response.data.agent_profile.as_mut() {
-                set_agent_profile_base_pack_hash(profile, response.data.pack.hash.as_deref());
-            }
-        }
-    }
-
-    control.check()?;
     // Bead bd-17c65.7.7 (G8): best-effort audit-log instrumentation for
     // pack assembly. One `pack.assembled` row per call + one
     // `pack.included_mem` row per selected item. Privacy: only the
@@ -3789,6 +3772,34 @@ async fn run_context_pack_with_performance_inner(
         }
     }
     trace.pack_persistence.audit = audit_start.elapsed();
+    // A persisted call always performs its ledger and audit work. Only that
+    // successful producer may populate L2; read-only calls never write or
+    // repair cache entries, even when their lookup misses.
+    control.check()?;
+    if persist_succeeded
+        && let Some(l2_context) = &l2_cache_context
+        && let Some(connection) = persist_connection.as_ref()
+        && context_pack_l2_database_generation(connection, Some(&l2_context.key_input.workspace_id))
+            .ok()
+            == Some(l2_context.key_input.database_generation)
+    {
+        let degraded_count_before_l2_store = response.data.degraded.len();
+        context_pack_l2_store(l2_context, options, &search_report, &mut response);
+        if response.data.degraded.len() != degraded_count_before_l2_store {
+            refresh_context_pack_hash(
+                &response.data.request,
+                &mut response.data.pack,
+                &response.data.degraded,
+                options.output_options,
+                response.data.coordination.as_ref(),
+                read_snapshot_generation,
+                options.task_lens.as_ref(),
+            );
+            if let Some(profile) = response.data.agent_profile.as_mut() {
+                set_agent_profile_base_pack_hash(profile, response.data.pack.hash.as_deref());
+            }
+        }
+    }
     trace.record_pack_persistence_subspans();
     trace.record_elapsed("total", total_start);
 
@@ -4214,6 +4225,8 @@ fn pack_assembly_slo_json(slo: &PackAssemblySlo) -> serde_json::Value {
             "elapsedMs": slo.actuals.elapsed_ms,
             "memoryBytesPeak": slo.actuals.memory_bytes_peak,
         },
+        "resourceStatus": slo.resource_status.as_str(),
+        "elapsedStatus": slo.elapsed_status.as_str(),
         "status": slo.status.as_str(),
         "degradations": slo.degradations.iter().map(|entry| {
             serde_json::json!({
@@ -6472,7 +6485,8 @@ fn open_context_file_for_read_no_follow(path: &Path) -> io::Result<File> {
 fn configure_context_file_read_options(options: &mut OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
 
-    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+    options
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32);
 }
 
 #[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
@@ -6562,6 +6576,9 @@ fn context_pack_l2_bypass_reason(
     options: &ContextPackOptions,
     filters: &crate::models::QueryFilters,
 ) -> Option<&'static str> {
+    if read_env_bool(EnvVar::L2PackCacheDisable) == Some(true) {
+        return Some("disabled_by_environment");
+    }
     if context_validity_reference_time(options, filters).is_none() {
         return Some("implicit_validity_reference_time");
     }
@@ -6580,8 +6597,8 @@ fn context_pack_l2_bypass_reason(
     if options.changed_symbols_from_git {
         return Some("git_derived_changed_symbols");
     }
-    if let Some(reason) = context_pack_l2_side_effect_bypass_reason(options) {
-        return Some(reason);
+    if options.baseline_write.is_some() {
+        return Some("baseline_write");
     }
     // There is no immutable store UUID in the current schema. Explicit paths
     // can address divergent stores that intentionally share a workspace ID and
@@ -6595,6 +6612,9 @@ fn context_pack_l2_bypass_reason(
     }
     if crate::core::memory_scope::current_agent_name().is_some() {
         return Some("current_agent_identity");
+    }
+    if !cfg!(unix) {
+        return Some("platform_file_identity_unavailable");
     }
 
     context_pack_l2_mutable_state_bypass_reason(options)
@@ -6623,17 +6643,6 @@ fn context_pack_l2_mutable_state_bypass_reason(
     }
     if !context_pack_l2_path_is_definitely_absent(&focus_state_path(&options.workspace_path)) {
         return Some("focus_state");
-    }
-
-    // The current L2 index generation is based on directory metadata and can
-    // collide across same-second publications. Until the key uses the bounded
-    // manifest-content fingerprint, cache only the definitely-absent state.
-    let index_dir = options
-        .index_dir
-        .clone()
-        .unwrap_or_else(|| options.workspace_path.join(".ee").join("index"));
-    if !context_pack_l2_path_is_definitely_absent(&index_dir) {
-        return Some("index_state");
     }
 
     if matches!(
@@ -6668,6 +6677,43 @@ fn context_pack_l2_prepare(
             reason,
         );
         return None;
+    }
+    // File-backed evidence and live code anchors are checked during assembly,
+    // independently of database generations. Do not replay their freshness
+    // until those external inputs have a bounded cache identity as well.
+    let external_freshness = connection.query(
+        "SELECT EXISTS(SELECT 1 FROM memories WHERE provenance_uri LIKE 'file:%'), \
+                EXISTS(SELECT 1 FROM memory_anchors)",
+        &[],
+    );
+    if !external_freshness.is_ok_and(|rows| {
+        rows.first().is_some_and(|row| {
+            row.get(0).and_then(SqlValue::as_i64) == Some(0)
+                && row.get(1).and_then(SqlValue::as_i64) == Some(0)
+        })
+    }) {
+        tracing::debug!(target: "ee::pack_l2", event = "pack_l2_cache_bypassed", reason = "external_evidence_freshness");
+        return None;
+    }
+    let index_generation = match context_pack_l2_index_generation(options) {
+        Ok(generation) => generation,
+        Err(reason) => {
+            tracing::debug!(target: "ee::pack_l2", event = "pack_l2_cache_bypassed", reason = %reason);
+            return None;
+        }
+    };
+    if index_generation != 0 {
+        let index_options = crate::core::index::IndexStatusOptions {
+            workspace_path: options.workspace_path.clone(),
+            database_path: options.database_path.clone(),
+            index_dir: options.index_dir.clone(),
+        };
+        if !crate::core::index::get_index_status_in_current_snapshot(&index_options, connection)
+            .is_ok_and(|status| status.health == crate::core::index::IndexHealth::Ready)
+        {
+            tracing::debug!(target: "ee::pack_l2", event = "pack_l2_cache_bypassed", reason = "index_not_ready");
+            return None;
+        }
     }
     let database_identity = match context_pack_l2_database_identity(options) {
         Ok(identity) => identity,
@@ -6724,7 +6770,7 @@ fn context_pack_l2_prepare(
         workspace_id,
         database_identity,
         database_generation,
-        index_generation: context_pack_l2_index_generation(options),
+        index_generation,
         graph_generation,
         embed_backend,
         redaction_level: options.redaction_level,
@@ -6763,6 +6809,9 @@ fn context_pack_l2_try_hit(
     trace: &mut ContextPerformanceTrace,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<ContextPackPerformanceRun> {
+    if !degraded.is_empty() {
+        return None;
+    }
     if let Some(reason) = context_pack_l2_side_effect_bypass_reason(options) {
         tracing::debug!(
             target: "ee::pack_l2",
@@ -6773,8 +6822,15 @@ fn context_pack_l2_try_hit(
         return None;
     }
     let lookup_start = Instant::now();
-    match l2_context.cache.get(&l2_context.key) {
+    match l2_context.cache.peek(&l2_context.key) {
         Ok(PackL2CacheLookup::Hit(hit)) => {
+            if context_pack_l2_mutable_state_bypass_reason(options).is_some()
+                || context_pack_l2_index_generation(options).ok()
+                    != Some(l2_context.key_input.index_generation)
+            {
+                tracing::debug!(target: "ee::pack_l2", event = "pack_l2_cache_hit_ignored", reason = "source_state_changed");
+                return None;
+            }
             match context_pack_l2_cached_response_json(
                 &hit.pack_json,
                 command,
@@ -6910,12 +6966,20 @@ fn context_pack_l2_store(
     search_report: &SearchReport,
     response: &mut ContextResponse,
 ) {
+    if !options.persist_pack {
+        return;
+    }
     if let Some(reason) = context_pack_l2_mutable_state_bypass_reason(options) {
         tracing::debug!(
             target: "ee::pack_l2",
             event = "pack_l2_cache_write_skipped",
             reason,
         );
+        return;
+    }
+    if context_pack_l2_index_generation(options).ok() != Some(l2_context.key_input.index_generation)
+    {
+        tracing::debug!(target: "ee::pack_l2", event = "pack_l2_cache_write_skipped", reason = "index_changed_during_assembly");
         return;
     }
     if let Some(code) = response
@@ -6929,6 +6993,8 @@ fn context_pack_l2_store(
                 "context_pack_persist_failed"
                     | "pack_concurrent_limit_reached"
                     | "pack_slot_lock_unavailable"
+                    | "read_pool_acquire_timeout"
+                    | "read_pool_undersized"
             )
         })
     {
@@ -7072,6 +7138,12 @@ fn context_pack_l2_workspace_id(connection: &DbConnection, workspace_path: &Path
         .unwrap_or(requested)
 }
 
+#[cfg(not(unix))]
+fn context_pack_l2_database_identity(_options: &ContextPackOptions) -> Result<Vec<u8>, String> {
+    Err("L2 pack cache requires a stable filesystem file identity on this platform".to_owned())
+}
+
+#[cfg(unix)]
 fn context_pack_l2_database_identity(options: &ContextPackOptions) -> Result<Vec<u8>, String> {
     let database_path = options.workspace_path.join(".ee").join("ee.db");
     let canonical = database_path.canonicalize().map_err(|error| {
@@ -7094,19 +7166,21 @@ fn context_pack_l2_database_identity(options: &ContextPackOptions) -> Result<Vec
             .to_le_bytes(),
     );
     identity.extend_from_slice(path_bytes);
-    identity.extend_from_slice(&metadata.len().to_le_bytes());
+    // The source generation tracks logical content. File size and mtime also
+    // change when this request persists its pack and audit, so they cannot be
+    // part of the addressed-store identity shared with a read-only consumer.
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         identity.extend_from_slice(&metadata.dev().to_le_bytes());
         identity.extend_from_slice(&metadata.ino().to_le_bytes());
     }
-    for timestamp in [metadata.created().ok(), metadata.modified().ok()] {
-        let nanos = timestamp
-            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(u128::MAX, |duration| duration.as_nanos());
-        identity.extend_from_slice(&nanos.to_le_bytes());
-    }
+    let created_nanos = metadata
+        .created()
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(u128::MAX, |duration| duration.as_nanos());
+    identity.extend_from_slice(&created_nanos.to_le_bytes());
     Ok(identity)
 }
 
@@ -7221,31 +7295,108 @@ fn context_pack_l2_query_generation(connection: &DbConnection, sql: &str) -> Res
     Ok(blake3_u64(hasher))
 }
 
-fn context_pack_l2_index_generation(options: &ContextPackOptions) -> u64 {
-    let index_dir = options
-        .index_dir
-        .clone()
-        .unwrap_or_else(|| options.workspace_path.join(".ee").join("index"));
-    let Ok(metadata) = fs::metadata(&index_dir) else {
-        return 0;
-    };
+fn context_pack_l2_index_generation(options: &ContextPackOptions) -> Result<u64, String> {
+    let started = Instant::now();
+    // Result-cache admission needs the actual published bytes, not directory
+    // timestamps or a manifest-only digest that misses segment corruption.
+    // Larger indexes still assemble normally; never hash a truncated prefix.
+    const MAX_BYTES: u64 = 64 * 1024 * 1024;
+    const MAX_ENTRIES: usize = 4096;
+    let index_dir = crate::config::workspace::resolve_store_index_dir(
+        &options.workspace_path,
+        options.database_path.as_deref(),
+        options.index_dir.as_deref(),
+    );
+    crate::core::index::ensure_index_path_has_no_symlinks(
+        &index_dir,
+        "fingerprint pack cache index",
+    )
+    .map_err(|error| error.to_string())?;
+    if context_pack_l2_path_is_definitely_absent(&index_dir) {
+        return Ok(0);
+    }
+    let mut pending = vec![index_dir.clone()];
+    let mut entries = Vec::new();
+    while let Some(directory) = pending.pop() {
+        if !fs::symlink_metadata(&directory)
+            .map_err(|error| error.to_string())?
+            .file_type()
+            .is_dir()
+        {
+            return Err("index fingerprint requires regular directories".to_owned());
+        }
+        for entry in fs::read_dir(&directory).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if entries.len() == MAX_ENTRIES {
+                return Err("index fingerprint exceeds 4096 entries".to_owned());
+            }
+            let path = entry.path();
+            let kind = entry.file_type().map_err(|error| error.to_string())?;
+            if kind.is_dir() {
+                pending.push(path.clone());
+            } else if !kind.is_file() {
+                return Err("index fingerprint rejects symlinks and special files".to_owned());
+            }
+            entries.push((path, kind.is_dir()));
+        }
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
     let mut hasher = blake3::Hasher::new();
+    hash_labeled_bytes(&mut hasher, "index_fingerprint", b"bounded-content-v1");
     hash_labeled_bytes(
         &mut hasher,
         "index_dir",
-        index_dir.to_string_lossy().as_bytes(),
+        index_dir.as_os_str().as_encoded_bytes(),
     );
-    hash_labeled_u64(&mut hasher, "len", metadata.len());
-    hash_labeled_u64(
-        &mut hasher,
-        "modified",
-        metadata
-            .modified()
-            .ok()
-            .and_then(system_time_epoch_seconds)
-            .unwrap_or(0),
+    let mut total_bytes = 0_u64;
+    let mut buffer = [0_u8; 16 * 1024];
+    let entry_count = entries.len();
+    for (path, is_directory) in entries {
+        crate::core::index::ensure_index_path_has_no_symlinks(
+            &path,
+            "fingerprint pack cache index",
+        )
+        .map_err(|error| error.to_string())?;
+        let relative = path
+            .strip_prefix(&index_dir)
+            .map_err(|error| error.to_string())?;
+        hash_labeled_bytes(&mut hasher, "path", relative.as_os_str().as_encoded_bytes());
+        hash_labeled_bool(&mut hasher, "directory", is_directory);
+        if is_directory {
+            continue;
+        }
+        let mut file =
+            open_context_file_for_read_no_follow(&path).map_err(|error| error.to_string())?;
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_BYTES - total_bytes {
+            return Err("index fingerprint exceeds 64 MiB or contains a special file".to_owned());
+        }
+        hash_labeled_u64(&mut hasher, "length", metadata.len());
+        let mut file_bytes = 0_u64;
+        loop {
+            let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+            if read == 0 {
+                break;
+            }
+            total_bytes += read as u64;
+            file_bytes += read as u64;
+            if total_bytes > MAX_BYTES {
+                return Err("index fingerprint grew beyond 64 MiB".to_owned());
+            }
+            hasher.update(&buffer[..read]);
+        }
+        if file_bytes != metadata.len() {
+            return Err("index file changed while computing its fingerprint".to_owned());
+        }
+    }
+    tracing::debug!(
+        target: "ee::pack_l2",
+        event = "pack_l2_index_fingerprint",
+        bytes_read = total_bytes,
+        entry_count,
+        elapsed_us = started.elapsed().as_micros() as u64,
     );
-    blake3_u64(hasher)
+    Ok(blake3_u64(hasher).max(1))
 }
 
 fn context_pack_l2_feature_flags_hash(
@@ -7257,6 +7408,9 @@ fn context_pack_l2_feature_flags_hash(
     let mut hasher = blake3::Hasher::new();
     // Packs produced before the authority guard must never bypass it via L2.
     hash_labeled_bytes(&mut hasher, "instruction_authority_policy", b"v1");
+    // Older responses classify elapsed breaches as within_budget and include
+    // elapsed time in signed resource warnings. They cannot satisfy this policy.
+    hash_labeled_bytes(&mut hasher, "pack_slo_diagnostics_policy", b"v2");
     hash_labeled_bool(
         &mut hasher,
         "output_redaction_enabled",
@@ -7291,6 +7445,25 @@ fn context_pack_l2_feature_flags_hash(
             .as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "filters", format!("{filters:?}").as_bytes());
+    hash_labeled_bytes(
+        &mut hasher,
+        "requested_max_tokens",
+        format!("{:?}", options.max_tokens).as_bytes(),
+    );
+    hash_labeled_bytes(
+        &mut hasher,
+        "requested_candidate_pool",
+        format!("{:?}", options.candidate_pool).as_bytes(),
+    );
+    hash_labeled_bytes(
+        &mut hasher,
+        "relevance_floor",
+        &options
+            .relevance_floor
+            .unwrap_or(0.0)
+            .to_bits()
+            .to_le_bytes(),
+    );
     hash_labeled_bytes(
         &mut hasher,
         "ppr_weight",
@@ -7603,12 +7776,6 @@ fn push_pack_l2_corruption(degraded: &mut Vec<ContextResponseDegradation>, messa
         message,
         Some("Remove the corrupt cache entry or lower the L2 cache TTL.".to_string()),
     );
-}
-
-fn system_time_epoch_seconds(time: std::time::SystemTime) -> Option<u64> {
-    time.duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_secs())
 }
 
 fn blake3_u64(hasher: blake3::Hasher) -> u64 {
@@ -14031,6 +14198,196 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn readonly_pack_preserves_stale_queued_index_while_writable_pack_reconciles() -> TestResult {
+        fn index_bytes(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
+            let mut files = BTreeMap::new();
+            let mut pending = vec![root.to_path_buf()];
+            while let Some(directory) = pending.pop() {
+                for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
+                    let entry = entry.map_err(|error| error.to_string())?;
+                    let kind = entry.file_type().map_err(|error| error.to_string())?;
+                    let path = entry.path();
+                    if kind.is_dir() {
+                        pending.push(path);
+                    } else if kind.is_file() {
+                        let relative = path
+                            .strip_prefix(root)
+                            .map_err(|error| error.to_string())?
+                            .to_path_buf();
+                        files.insert(
+                            relative,
+                            std::fs::read(path).map_err(|error| error.to_string())?,
+                        );
+                    } else {
+                        return Err(format!("unexpected index fixture file: {}", path.display()));
+                    }
+                }
+            }
+            Ok(files)
+        }
+
+        let (mut options, workspace_id, memory_id, _guard) = daemon_pack_retrieval_fixture()?;
+        let database = options.database_path.clone().ok_or("fixture database")?;
+        let index_dir = options.workspace_path.join(".ee").join("index");
+        let job_id = "sidx_00000000000000000000000002";
+        {
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            assert!(
+                connection
+                    .apply_memory_score_update_audited(
+                        &memory_id,
+                        &crate::db::ApplyMemoryScoreUpdateInput {
+                            workspace_id: workspace_id.clone(),
+                            confidence: 0.8,
+                            utility: 0.7,
+                            importance: 0.7,
+                            updated_at: Utc::now().to_rfc3339(),
+                            actor: None,
+                            details: "{}".to_owned(),
+                            feedback_event_ids: Vec::new(),
+                        },
+                    )
+                    .map_err(|error| error.to_string())?
+                    .is_some(),
+                "a real memory update must invalidate the existing index generation"
+            );
+            connection
+                .insert_search_index_job(
+                    job_id,
+                    &crate::db::CreateSearchIndexJobInput {
+                        workspace_id: workspace_id.clone(),
+                        job_type: crate::db::SearchIndexJobType::SingleDocument,
+                        document_source: Some("memory".to_owned()),
+                        document_id: Some(memory_id.clone()),
+                        documents_total: 1,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let status_options = crate::core::index::IndexStatusOptions {
+            workspace_path: options.workspace_path.clone(),
+            database_path: Some(database.clone()),
+            index_dir: None,
+        };
+        let before_status = crate::core::index::get_index_status(&status_options)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(before_status.health, crate::core::index::IndexHealth::Stale);
+        let generation_gap = before_status
+            .db_generation
+            .zip(before_status.index_generation)
+            .map(|(database, index)| database.saturating_sub(index))
+            .ok_or("known index generation gap")?;
+        assert!(
+            (1..=crate::core::search::SEARCH_INDEX_LARGE_GAP_THRESHOLD).contains(&generation_gap),
+            "the real pending work must remain eligible for bounded automatic repair"
+        );
+        assert_eq!(before_status.db_memory_count, 1);
+
+        let snapshot = || -> Result<_, String> {
+            let connection =
+                DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+            Ok((
+                connection
+                    .list_search_index_jobs(&workspace_id, None)
+                    .map_err(|error| error.to_string())?,
+                connection
+                    .list_audit_entries(Some(&workspace_id), None)
+                    .map_err(|error| error.to_string())?,
+                connection
+                    .count_table_rows("pack_records")
+                    .map_err(|error| error.to_string())?,
+                connection
+                    .get_workspace_generation(&workspace_id)
+                    .map_err(|error| error.to_string())?,
+            ))
+        };
+        let before = snapshot()?;
+        assert!(
+            before
+                .0
+                .iter()
+                .any(|job| job.id == job_id && job.status == "pending"),
+            "the queued job must actually be pending before read-only retrieval"
+        );
+        let index_before = index_bytes(&index_dir)?;
+        assert!(!index_before.is_empty(), "exercise a real built index");
+
+        assert!(!options.persist_pack);
+        let readonly = super::run_context_pack_with_performance(&options, PACK_COMMAND)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            readonly.response.data.pack.items.iter().any(|item| {
+                item.memory_id.to_string() == memory_id
+                    && item.content == "Check quasar release checksums before publication."
+                    && !item.provenance.is_empty()
+            }),
+            "read-only stale retrieval must still return the actual stored memory with provenance"
+        );
+        assert!(readonly.response.data.pack.used_tokens <= 800);
+        assert!(
+            readonly.response.data.degraded.iter().any(|entry| {
+                entry.code == "search_index_stale"
+                    && entry.repair.as_deref() == Some("ee index rebuild --workspace .")
+            }),
+            "unrepaired source-generation drift must retain the truthful rebuild advisory"
+        );
+        assert_eq!(
+            snapshot()?,
+            before,
+            "read-only pack must not mutate durable state"
+        );
+        assert_eq!(index_bytes(&index_dir)?, index_before);
+        let readonly_status = crate::core::index::get_index_status(&status_options)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            readonly_status.health,
+            crate::core::index::IndexHealth::Stale
+        );
+        assert_eq!(
+            readonly_status.index_generation,
+            before_status.index_generation
+        );
+
+        options.persist_pack = true;
+        let writable = super::run_context_pack_with_performance(&options, PACK_COMMAND)
+            .map_err(|error| error.to_string())?;
+        assert!(writable.response.data.pack.items.iter().any(|item| {
+            item.memory_id.to_string() == memory_id
+                && item.content == "Check quasar release checksums before publication."
+                && !item.provenance.is_empty()
+        }));
+        assert!(writable.response.data.pack.used_tokens <= 800);
+        let after_status = crate::core::index::get_index_status(&status_options)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(after_status.health, crate::core::index::IndexHealth::Ready);
+        assert_eq!(after_status.index_generation, after_status.db_generation);
+        let after = snapshot()?;
+        assert!(
+            after
+                .0
+                .iter()
+                .any(|job| job.id == job_id && job.status == "completed")
+        );
+        assert_eq!(
+            after.2,
+            before.2 + 1,
+            "the writable pack must really persist"
+        );
+        assert!(
+            after.1.len() > before.1.len(),
+            "the writable pack must be audited"
+        );
+        assert_ne!(
+            index_bytes(&index_dir)?,
+            index_before,
+            "the writable request must publish the repaired index"
+        );
+        Ok(())
+    }
+
     #[test]
     fn context_pack_l2_bypasses_unkeyed_selection_inputs() {
         let mut options = context_options_with_coordination_snapshot(PathBuf::from("snapshot"));
@@ -14091,7 +14448,7 @@ mod tests {
         options.memory_scope = MemoryScope::SelfOnly;
 
         assert_eq!(
-            super::context_pack_l2_bypass_reason(&options, &filters),
+            super::context_pack_l2_side_effect_bypass_reason(&options),
             Some("pack_persistence"),
             "a cache hit must never skip pack persistence or its per-call audit"
         );
@@ -14118,6 +14475,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn context_pack_l2_database_identity_separates_divergent_default_stores() -> Result<(), String>
     {
@@ -14167,6 +14525,91 @@ mod tests {
         assert_ne!(
             before, after,
             "replacing a database at the same path must invalidate prior L2 entries"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_pack_l2_index_fingerprint_detects_same_length_restored_mtime_edits()
+    -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let index_dir = tempdir.path().join("index");
+        let lexical_dir = index_dir.join("lexical");
+        std::fs::create_dir_all(&lexical_dir).map_err(|error| error.to_string())?;
+        let manifest = index_dir.join("meta.json");
+        let segment = lexical_dir.join("segment.store");
+        std::fs::write(&manifest, br#"{"generation":1}"#).map_err(|error| error.to_string())?;
+        std::fs::write(&segment, b"original").map_err(|error| error.to_string())?;
+        let mut options = context_options_with_coordination_snapshot(PathBuf::new());
+        options.index_dir = Some(index_dir);
+        let original = super::context_pack_l2_index_generation(&options)?;
+        assert_ne!(original, 0);
+        assert_eq!(original, super::context_pack_l2_index_generation(&options)?);
+
+        for (path, replacement) in [
+            (&segment, b"modified".as_slice()),
+            (&manifest, br#"{"generation":2}"#.as_slice()),
+        ] {
+            let old_bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+            assert_eq!(old_bytes.len(), replacement.len());
+            let old_modified = std::fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .map_err(|error| error.to_string())?;
+            let before = super::context_pack_l2_index_generation(&options)?;
+            std::fs::write(path, replacement).map_err(|error| error.to_string())?;
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .and_then(|file| {
+                    file.set_times(std::fs::FileTimes::new().set_modified(old_modified))
+                })
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                std::fs::metadata(path)
+                    .and_then(|metadata| metadata.modified())
+                    .map_err(|error| error.to_string())?,
+                old_modified,
+            );
+            assert_ne!(
+                before,
+                super::context_pack_l2_index_generation(&options)?,
+                "changed bytes must invalidate even when length and mtime are restored"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn context_pack_l2_index_fingerprint_refuses_oversize_instead_of_hashing_a_prefix()
+    -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let index_dir = tempdir.path().join("index");
+        std::fs::create_dir(&index_dir).map_err(|error| error.to_string())?;
+        std::fs::File::create(index_dir.join("large.segment"))
+            .and_then(|file| file.set_len(64 * 1024 * 1024 + 1))
+            .map_err(|error| error.to_string())?;
+        let mut options = context_options_with_coordination_snapshot(PathBuf::new());
+        options.index_dir = Some(index_dir);
+        assert!(super::context_pack_l2_index_generation(&options).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_pack_l2_index_fingerprint_rejects_symlinked_segments() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let index_dir = tempdir.path().join("index");
+        std::fs::create_dir(&index_dir).map_err(|error| error.to_string())?;
+        let target = tempdir.path().join("outside.segment");
+        std::fs::write(&target, b"private source").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&target, index_dir.join("segment"))
+            .map_err(|error| error.to_string())?;
+        let mut options = context_options_with_coordination_snapshot(PathBuf::new());
+        options.index_dir = Some(index_dir);
+        assert!(super::context_pack_l2_index_generation(&options).is_err());
+        assert_eq!(
+            std::fs::read(&target).map_err(|error| error.to_string())?,
+            b"private source"
         );
         Ok(())
     }
@@ -18136,7 +18579,7 @@ pub fn unrelated_context() -> u64 {{
             workspace_id: "wsp_l2_reranker_refresh".to_owned(),
             database_identity: database_path.as_os_str().as_encoded_bytes().to_vec(),
             database_generation: 1,
-            index_generation: 1,
+            index_generation: super::context_pack_l2_index_generation(&options)?,
             graph_generation: None,
             embed_backend: EmbedBackend::HashFallback,
             redaction_level: options.redaction_level,
@@ -18812,7 +19255,7 @@ pub fn unrelated_context() -> u64 {{
                 .as_encoded_bytes()
                 .to_vec(),
             database_generation: 1,
-            index_generation: 1,
+            index_generation: super::context_pack_l2_index_generation(&options)?,
             graph_generation: None,
             embed_backend: crate::models::EmbedBackend::HashFallback,
             redaction_level: options.redaction_level,
@@ -18910,7 +19353,7 @@ pub fn unrelated_context() -> u64 {{
                 .as_encoded_bytes()
                 .to_vec(),
             database_generation: 1,
-            index_generation: 1,
+            index_generation: super::context_pack_l2_index_generation(&options)?,
             graph_generation: None,
             embed_backend: EmbedBackend::HashFallback,
             redaction_level: options.redaction_level,

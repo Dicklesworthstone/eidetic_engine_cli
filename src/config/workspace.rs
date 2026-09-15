@@ -1226,6 +1226,36 @@ pub fn canonical_workspace_root_or_lexical(path: &Path) -> PathBuf {
     canonical_or_lexical(path)
 }
 
+/// Resolve an index alongside an explicitly selected standard store, or use
+/// the workspace default for other database layouts. An explicit index wins.
+///
+/// Selected paths remain lexical: database and index callers must still apply
+/// their component-level symlink and identity checks before opening anything.
+#[must_use]
+pub fn resolve_store_index_dir(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+    index_dir: Option<&Path>,
+) -> PathBuf {
+    if let Some(index_dir) = index_dir {
+        return index_dir.to_path_buf();
+    }
+    if let Some(database_path) = database_path
+        && database_path
+            .file_name()
+            .is_some_and(|name| name == "ee.db")
+        && let Some(store_dir) = database_path.parent()
+        && store_dir
+            .file_name()
+            .is_some_and(|name| name == WORKSPACE_MARKER || name == ".ee-campaign")
+    {
+        return store_dir.join("index");
+    }
+    canonical_workspace_root_or_lexical(workspace_path)
+        .join(WORKSPACE_MARKER)
+        .join("index")
+}
+
 /// Compute a stable workspace fingerprint from a canonical root path.
 ///
 /// Returns the first 24 hex chars of BLAKE3 over the path's string
@@ -1372,6 +1402,63 @@ mod tests {
         installation_salt_path_from_env, resolve_workspace, workspace_fingerprint,
         workspace_scope_from_repository_root,
     };
+
+    #[test]
+    fn standard_store_index_resolution_preserves_precedence_and_external_layouts() {
+        let workspace = Path::new("absent-index-resolution-workspace");
+        let default_index = super::canonical_workspace_root_or_lexical(workspace).join(".ee/index");
+        assert_eq!(
+            super::resolve_store_index_dir(workspace, None, None),
+            default_index
+        );
+        for store in [".ee", ".ee-campaign"] {
+            let database = Path::new("selected-root").join(store).join("ee.db");
+            assert_eq!(
+                super::resolve_store_index_dir(workspace, Some(&database), None),
+                Path::new("selected-root").join(store).join("index")
+            );
+            let explicit = Path::new("explicit-index");
+            assert_eq!(
+                super::resolve_store_index_dir(workspace, Some(&database), Some(explicit)),
+                explicit
+            );
+        }
+        for database in [
+            "external/ee.db",
+            "external/.ee/custom.db",
+            "external/.ee-campaign/custom.db",
+            "external/.ee-other/ee.db",
+            "external/.ee-campaign/nested/ee.db",
+        ] {
+            assert_eq!(
+                super::resolve_store_index_dir(workspace, Some(Path::new(database)), None),
+                default_index,
+                "unrecognized database layout {database} must retain the workspace default"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standard_store_index_resolution_preserves_symlinks_for_open_time_rejection() -> TestResult {
+        let scratch = ScratchDir::new("store-index-symlink")?;
+        let target = scratch.make_dir("target")?;
+        let selected_store = scratch.path().join(".ee-campaign");
+        std::os::unix::fs::symlink(&target, &selected_store).map_err(|error| error.to_string())?;
+        let resolved = super::resolve_store_index_dir(
+            scratch.path(),
+            Some(&selected_store.join("ee.db")),
+            None,
+        );
+        assert_eq!(resolved, selected_store.join("index"));
+        assert_ne!(resolved, target.join("index"));
+        assert!(
+            fs::symlink_metadata(selected_store)
+                .map_err(|error| error.to_string())?
+                .is_symlink()
+        );
+        Ok(())
+    }
 
     #[test]
     fn windows_verbatim_and_drive_paths_share_a_workspace_fingerprint() {

@@ -99,6 +99,7 @@ fn build_capsule() -> Result<CapsuleFixture, String> {
         bind_to_machine: false,
         machine_salt_path: None,
         redaction_level: RedactionLevel::Standard,
+        command_timeout_ms: ee::core::swarm_brief::DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
     })
     .map_err(|error| format!("create_handoff: {error:?}"))?;
 
