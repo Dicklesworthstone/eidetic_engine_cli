@@ -90,7 +90,10 @@ workspace `[privacy]` defaults are skipped with a counted skip reason in
   never direct memories; near-duplicates of existing rules become REINFORCE
   proposals (same dedup semantics as ADR 0062 distillation). Parser bias is
   precision over recall: a missed rule costs little; a false extraction
-  pollutes the curation queue.
+  pollutes the curation queue. Amended (GH #50): statements are sentences,
+  not physical lines — soft-wrapped paragraph and list-item lines are
+  rejoined first, and a statement spanning lines carries
+  `file://<path>#L<n>-L<m>` provenance.
 - **Drift diagnostic**: `ee diag agentsmd-drift` (read-only) reports three
   finding classes: stale export (managed-block generation < DB generation),
   file-vs-memory contradictions (file mandates X, high-confidence memory
