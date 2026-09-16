@@ -5091,7 +5091,7 @@ fn canonical_derivation_source_refs_key(raw: Option<&str>) -> String {
             serde_json::Value::Object(object)
         })
         .collect::<Vec<_>>();
-    serde_json::to_string(&payload).unwrap_or_default()
+    serde_json::Value::Array(payload).to_string()
 }
 
 fn canonical_derivation_memory_spec_key(raw: Option<&str>) -> String {
@@ -5106,7 +5106,7 @@ fn canonical_derivation_memory_spec_key(raw: Option<&str>) -> String {
         .or_else(|| value.get("memory_spec"))
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    serde_json::to_string(&canonicalize_json_for_key(memory_spec)).unwrap_or_default()
+    canonicalize_json_for_key(memory_spec).to_string()
 }
 
 fn canonical_json_key(raw: Option<&str>) -> Option<String> {
