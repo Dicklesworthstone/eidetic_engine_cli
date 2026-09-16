@@ -165,6 +165,20 @@ static WRITE_GROUP_COMMIT_COUNTERS: OnceLock<
     Mutex<HashMap<Option<PathBuf>, WriteGroupCommitCounters>>,
 > = OnceLock::new();
 
+/// Key a telemetry bucket by the identity the PRODUCT already uses for a
+/// workspace, rather than by whatever `&Path` a caller happened to pass.
+///
+/// `canonical_workspace_root_or_lexical` is the same helper the daemon, the CLI
+/// workspace resolver, trust reports and impact reports use, and its own doc
+/// states why: platform aliases such as macOS `/var -> /private/var` must
+/// address the same storage. Keying on the raw path would have filed
+/// `--workspace .` and `--workspace /abs/path` as two different workspaces and
+/// under-reported both -- a new notion of identity invented for telemetry,
+/// which is exactly what this must not be.
+fn telemetry_workspace_key(workspace: Option<&Path>) -> Option<PathBuf> {
+    workspace.map(crate::config::workspace::canonical_workspace_root_or_lexical)
+}
+
 fn write_group_commit_counters()
 -> &'static Mutex<HashMap<Option<PathBuf>, WriteGroupCommitCounters>> {
     WRITE_GROUP_COMMIT_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -176,11 +190,8 @@ fn read_write_group_commit_counters(workspace: Option<&Path>) -> WriteGroupCommi
     let Ok(store) = write_group_commit_counters().lock() else {
         return WriteGroupCommitCounters::default();
     };
-    match workspace {
-        Some(path) => store
-            .get(&Some(path.to_path_buf()))
-            .copied()
-            .unwrap_or_default(),
+    match telemetry_workspace_key(workspace) {
+        Some(key) => store.get(&Some(key)).copied().unwrap_or_default(),
         None => {
             let mut total = WriteGroupCommitCounters::default();
             for counters in store.values() {
@@ -1504,7 +1515,7 @@ fn record_write_group_commit_global(
 
     if let Ok(mut store) = write_group_commit_counters().lock() {
         let counters = store
-            .entry(workspace.map(Path::to_path_buf))
+            .entry(telemetry_workspace_key(workspace))
             .or_insert_with(WriteGroupCommitCounters::default);
         counters.fsync_count = counters.fsync_count.saturating_add(1);
         counters.latency_total_us = counters.latency_total_us.saturating_add(latency_us);
@@ -3260,13 +3271,28 @@ mod tests {
         // written to cure it. The per-workspace assertions above are immune
         // because their keys are unique to this test, and they are the ones
         // that fail against the old code.
+        // Two spellings of the SAME workspace must land in one bucket. This is
+        // the property the ruling is about: key by the identity the product
+        // already uses, not by whatever `&Path` a caller passed. Under the
+        // raw-path keying this replaced, `/w/.` and `/w` were two buckets and
+        // both under-reported. Holds whether or not the path exists --
+        // canonicalize() resolves it when it does, normalize_lexical drops the
+        // `.` component when it does not, and record and read use one helper.
+        let spelled_with_curdir = workspace_a.join(".");
+        record_write_group_commit_global(Some(&spelled_with_curdir), false, 1, 10, None, false);
+        let a_aliased = read_write_group_commit_counters(Some(&workspace_a));
+        assert_eq!(
+            a_aliased.fsync_count, 3,
+            "an alias of the same workspace must share its bucket, not open a new one"
+        );
+
         let total = read_write_group_commit_counters(None);
         assert!(
-            total.fsync_count >= a.fsync_count + b.fsync_count + 1,
+            total.fsync_count >= a_aliased.fsync_count + b.fsync_count + 1,
             "aggregate must include both workspaces and the unattributed write; \
              got {} with a={} b={}",
             total.fsync_count,
-            a.fsync_count,
+            a_aliased.fsync_count,
             b.fsync_count
         );
 
