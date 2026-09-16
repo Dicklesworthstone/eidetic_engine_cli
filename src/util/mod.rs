@@ -100,7 +100,7 @@ mod tests {
 /// and `/root/` reached exactly one of them, so a provenance URI naming
 /// `/root/.ssh/id_rsa` was redacted on one surface and emitted verbatim by
 /// nineteen (bd-redactor-prefix-divergence-lsy52).
-const SENSITIVE_PATH_PREFIXES: &[&str] = &[
+pub(crate) const SENSITIVE_PATH_PREFIXES: &[&str] = &[
     "/Users/",
     "/Volumes/",
     "/__w/",

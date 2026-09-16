@@ -1252,53 +1252,13 @@ fn redact_search_projection_ref(value: &str) -> String {
 
 pub(crate) fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
     const REDACTED_PATH: &str = "[REDACTED_PATH]";
-    const UNIX_PATH_PREFIXES: &[&str] = &[
-        "/home/",
-        "/Users/",
-        "/data/",
-        "/workspace/",
-        "/workspaces/",
-        "/Volumes/",
-        "/var/run/",
-        "/run/",
-        "/var/lib/docker/",
-        "/var/lib/kubelet/",
-        "/var/folders/",
-        "/var/log/",
-        "/var/tmp/",
-        "/proc/",
-        "/sys/",
-        "/dev/",
-        "/etc/ssh/",
-        "/etc/kubernetes/",
-        "/etc/ssl/",
-        "/etc/letsencrypt/",
-        "/etc/secrets/",
-        "/mnt/",
-        "/media/",
-        "/app/",
-        "/github/workspace/",
-        "/__w/",
-        "/root/",
-        "/tmp/",
-        "/private/var/run/",
-        "/private/var/log/",
-        "/private/var/tmp/",
-        "/private/var/folders/",
-        "/private/etc/ssh/",
-        "/private/etc/kubernetes/",
-        "/private/etc/ssl/",
-        "/private/etc/letsencrypt/",
-        "/private/etc/secrets/",
-        "/private/tmp/",
-    ];
 
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0usize;
     while cursor < input.len() {
         let remaining = &input[cursor..];
         if let Some(prefix_len) =
-            search_projection_path_prefix_len(input, cursor, UNIX_PATH_PREFIXES)
+            search_projection_path_prefix_len(input, cursor, crate::util::SENSITIVE_PATH_PREFIXES)
         {
             output.push_str(REDACTED_PATH);
             cursor += prefix_len;
