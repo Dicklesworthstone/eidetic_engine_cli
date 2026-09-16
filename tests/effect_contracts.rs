@@ -66,7 +66,11 @@ fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
     Ok(output)
 }
 
-fn command_paths_from_cli_extract_function() -> Result<Vec<String>, String> {
+/// Slice the body of `extract_command_path` out of the CLI source.
+///
+/// Split out so the extractor below and the shape gate that guards it read the
+/// SAME body, and so both can be driven against a synthetic fixture.
+fn cli_extract_command_path_body() -> Result<&'static str, String> {
     let start_marker = "fn extract_command_path(cli: &Cli) -> String {";
     let end_marker = "\n    /// Returns a stable identifier";
     let start = CLI_SOURCE
@@ -76,7 +80,13 @@ fn command_paths_from_cli_extract_function() -> Result<Vec<String>, String> {
     let end = rest
         .find(end_marker)
         .ok_or_else(|| "extract_command_path function end marker must exist".to_owned())?;
-    let function = &rest[..end];
+    Ok(&rest[..end])
+}
+
+/// Recover the command paths a function body emits as quoted literals.
+///
+/// Unchanged logic, lifted verbatim so it can also run against a fixture.
+fn command_paths_in(function: &str) -> Vec<String> {
     let mut commands = Vec::new();
 
     for line in function.lines() {
@@ -95,7 +105,120 @@ fn command_paths_from_cli_extract_function() -> Result<Vec<String>, String> {
 
     commands.sort();
     commands.dedup();
-    Ok(commands)
+    commands
+}
+
+fn command_paths_from_cli_extract_function() -> Result<Vec<String>, String> {
+    Ok(command_paths_in(cli_extract_command_path_body()?))
+}
+
+/// Lines inside a command-path function that build a `String` by any means
+/// OTHER than a quoted literal.
+///
+/// `command_paths_in` recovers a path only when it appears as
+/// `"literal".to_string()`. That recovery is complete exactly while the
+/// function builds every path that way. A computed path -- `format!("team
+/// {sub}")`, a variable, a concatenation -- would still be emitted by the CLI,
+/// would be invisible to the extractor, and so would never be checked for an
+/// effect declaration. The consequence is not a red test: `src/core/effect.rs`
+/// is the classification an agent consults before running something, so an
+/// unseen command is one that can be mis-declared with nothing noticing.
+///
+/// Deliberately errs toward flagging. For this gate a false positive costs an
+/// author one edit or one justification; a false negative costs an agent a
+/// destructive command reported as read-only.
+fn non_literal_path_constructions(function: &str) -> Vec<(usize, String)> {
+    let mut hits = Vec::new();
+    for (index, line) in function.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        let quote_count = trimmed.matches('"').count();
+        let is_quoted_literal = trimmed.contains(".to_string()") && quote_count >= 2;
+        let builds_a_string = trimmed.contains("format!")
+            || trimmed.contains(".to_owned()")
+            || trimmed.contains("String::from")
+            || trimmed.contains(".into()")
+            || trimmed.contains(".join(")
+            || trimmed.contains("concat")
+            || trimmed.contains("push_str")
+            || (trimmed.contains(".to_string()") && quote_count < 2);
+        if builds_a_string && !is_quoted_literal {
+            hits.push((index + 1, trimmed.to_owned()));
+        }
+    }
+    hits
+}
+
+/// A command path the extractor cannot see is a command the effect-coverage
+/// test never checks. Pin the SHAPE instead of trusting it.
+#[test]
+fn extract_command_path_builds_every_path_from_a_quoted_literal() -> TestResult {
+    let body = cli_extract_command_path_body()?;
+    let hits = non_literal_path_constructions(body);
+    if hits.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "extract_command_path must build every command path from a quoted literal, \
+         or command_paths_in cannot see it and the effect manifest is never checked \
+         for it. Non-literal construction(s): {hits:?}"
+    ))
+}
+
+/// Prove the gate above can fail, and that the extractor alone could not.
+///
+/// The fixture is a command-path function whose `team` arm is computed. The
+/// OLD behaviour -- extraction alone -- silently returns only the literal arm,
+/// so `team ...` would never be checked for an effect declaration. The gate
+/// catches it.
+#[test]
+fn shape_gate_catches_a_computed_path_the_extractor_misses() -> TestResult {
+    const COMPUTED_PATH_FIXTURE: &str = concat!(
+        "fn extract_command_path(cli: &Cli) -> String {\n",
+        "    match cli.command {\n",
+        "        Some(Command::Backup(_)) => \"backup create\".to_string(),\n",
+        "        Some(Command::Team(team)) => format!(\"team {}\", team.verb()),\n",
+        "    }\n",
+        "}\n",
+    );
+
+    // Before: extraction alone sees only the literal arm and reports success.
+    let extracted = command_paths_in(COMPUTED_PATH_FIXTURE);
+    ensure(
+        extracted,
+        vec!["backup create".to_owned()],
+        "extractor alone must miss the computed path (this is the gap being closed)",
+    )?;
+
+    // After: the shape gate names the line the extractor could not see.
+    let hits = non_literal_path_constructions(COMPUTED_PATH_FIXTURE);
+    ensure(
+        hits.len(),
+        1,
+        &format!("shape gate must flag exactly the computed arm, got {hits:?}"),
+    )?;
+    ensure(
+        hits[0].1.contains("format!"),
+        true,
+        &format!("flagged line must be the computed one, got {:?}", hits[0]),
+    )?;
+
+    // Control: the same gate must NOT fire on an all-literal body, or it would
+    // be flagging everything and proving nothing.
+    const LITERAL_ONLY_FIXTURE: &str = concat!(
+        "fn extract_command_path(cli: &Cli) -> String {\n",
+        "    match cli.command {\n",
+        "        Some(Command::Backup(_)) => \"backup create\".to_string(),\n",
+        "    }\n",
+        "}\n",
+    );
+    ensure(
+        non_literal_path_constructions(LITERAL_ONLY_FIXTURE).len(),
+        0,
+        "shape gate must not fire on an all-literal body",
+    )
 }
 
 // ============================================================================
