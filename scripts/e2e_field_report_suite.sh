@@ -490,7 +490,9 @@ arm_pack_banner_names_its_scope() {
     assert_jq "$pack_json" \
         '(.data.pack.advisoryBanner.status // "") == "degraded"' \
         "$bead: precondition — the pack banner is in its degraded state"
-    assert_contains "$summary" "this pack" \
+    # Same correction as the cross-surface arm: "this pack" alone also matches
+    # the pre-fix prose, so it is not a discriminating assertion.
+    assert_contains "$summary" "this pack only" \
         "$bead: banner names the pack invocation as its scope"
     assert_contains "$summary" "not workspace health" \
         "$bead: banner disclaims workspace-health scope"
@@ -506,6 +508,92 @@ arm_pack_banner_names_its_scope() {
         duration_ms "$(( $(now_ms) - started ))"
 }
 
+# ---------------------------------------------------------------------------
+# Arm: bd-pack-doctor-posture-disagreement-nts29, acceptance bullet 3.
+#
+# "Same fixture workspace evaluated by both surfaces yields consistent verdict
+# vocabulary." Bullet 1 (the scope-named banner) is covered by
+# arm_pack_banner_names_its_scope, but that arm never runs `ee doctor`, so
+# nothing until now evaluated BOTH surfaces against ONE workspace - which is
+# precisely the arm that catches them drifting apart again.
+#
+# What this deliberately does NOT assert: that the two surfaces produce the
+# SAME verdict. They legitimately differ. `ee doctor` excludes advisory-tier
+# findings from its top line; `ee pack` counts the degradations of a single
+# invocation. Asserting equality would encode a bug as a contract and would
+# force a future fix to weaken this test.
+#
+# What it asserts instead: both verdicts come from their own CLOSED
+# vocabulary rather than free prose, and when they diverge - which is the
+# condition this bead exists for - the pack banner NAMES ITS SCOPE so an agent
+# is not sent to repair a workspace that doctor reports healthy.
+# ---------------------------------------------------------------------------
+arm_cross_surface_verdict_vocabulary() {
+    local bead="bd-pack-doctor-posture-disagreement-nts29"
+    local ws started empty_index pack_json doctor_json pack_status pack_summary doctor_posture
+    ws="$(arm_workspace "$bead" cross_surface_verdict_vocabulary)"
+    started="$(now_ms)"
+
+    step "[$bead] one workspace, both surfaces, consistent verdict vocabulary"
+    ee_in "$ws" init --json >/dev/null
+    ee_in "$ws" remember "Run cargo fmt --check before cutting a release." \
+        --level procedural --kind rule --json >/dev/null
+
+    empty_index="$ws/empty-index"
+    mkdir -p "$empty_index"
+    pack_json="$( export EE_INDEX_DIR="$empty_index"; ee_in "$ws" pack "release checklist" --max-tokens 2000 --json )"
+    # THE SAME workspace, no index override: doctor reports static workspace
+    # health, which is the whole point of the comparison.
+    doctor_json="$(ee_in "$ws" doctor --json)"
+
+    pack_status="$(printf '%s' "$pack_json" | jq -r '.data.pack.advisoryBanner.status // ""')"
+    pack_summary="$(printf '%s' "$pack_json" | jq -r '.data.pack.advisoryBanner.summary // ""')"
+    doctor_posture="$(printf '%s' "$doctor_json" | jq -r '.data.posture // ""')"
+
+    log_event arm_act bead_id "$bead" phase act check cross_surface_probe \
+        workspace "$ws" host "$SUITE_HOST" \
+        pack_status "$pack_status" doctor_posture "$doctor_posture"
+
+    # 1. Consistent VOCABULARY: each surface emits a token from its own closed
+    #    enumeration. A free-prose verdict is the drift this bullet guards.
+    assert_jq "$(printf '{"v":"%s"}' "$pack_status")" \
+        '.v == "clear" or .v == "advisory" or .v == "degraded"' \
+        "$bead: pack verdict is from the closed advisory vocabulary"
+    assert_jq "$(printf '{"v":"%s"}' "$doctor_posture")" \
+        '.v == "ok" or .v == "initializing" or .v == "degraded_recoverable"
+         or .v == "degraded_required" or .v == "blocked"' \
+        "$bead: doctor verdict is from the closed posture vocabulary"
+
+    # 2. NON-VACUITY, and the condition this bead exists for: on this workspace
+    #    the two surfaces genuinely diverge. Without this the arm would pass on
+    #    a healthy workspace where both agree and prove nothing. If they ever
+    #    stop diverging here, this fails loudly and someone re-reads the bead -
+    #    which is correct, not brittle.
+    assert_eq "$pack_status" "degraded" \
+        "$bead: precondition - pack reports degraded on this workspace"
+    assert_eq "$doctor_posture" "ok" \
+        "$bead: precondition - doctor reports ok on the SAME workspace"
+
+    # 3. LOAD-BEARING: given that divergence, the pack banner must name its own
+    #    scope. This is the assertion that catches the surfaces drifting apart
+    #    again, because it fails the moment the scope language is removed.
+    # "this pack" ALONE is satisfied by the pre-fix prose, which ended
+    # "...before relying on this pack." Verified by running this arm against
+    # v0.15.2: that assertion passed while the two below failed. Assert the
+    # actual scope CLAIM, which exists only in the fixed text.
+    assert_contains "$pack_summary" "this pack only" \
+        "$bead: diverging pack verdict names its per-invocation scope"
+    assert_contains "$pack_summary" "not workspace health" \
+        "$bead: diverging pack verdict disclaims workspace-health scope"
+    assert_contains "$pack_summary" "ee doctor" \
+        "$bead: diverging pack verdict points at the workspace-health surface"
+
+    log_event arm_done bead_id "$bead" phase assert check cross_surface_verdict_vocabulary \
+        verdict recorded workspace "$ws" host "$SUITE_HOST" \
+        pack_status "$pack_status" doctor_posture "$doctor_posture" \
+        duration_ms "$(( $(now_ms) - started ))"
+}
+
 arm_status_lexical_honesty
 arm_auto_index_rebuild_request
 arm_fallback_relevance_floor
@@ -513,6 +601,7 @@ arm_ns_gate_first_open_race
 arm_tag_case_roundtrip
 arm_cik_accession_false_positive
 arm_pack_banner_names_its_scope
+arm_cross_surface_verdict_vocabulary
 
 printf '[suite] artifacts retained under %s\n' "$SUITE_ROOT" >&2
 harness_summary
