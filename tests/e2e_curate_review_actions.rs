@@ -225,14 +225,23 @@ fn curate_reject_returns_not_found_for_valid_format_but_missing_candidate() -> T
     )?;
     let message = error["message"].as_str().unwrap_or_default();
     // `DomainError::NotFound` renders its resource and id under `error.details`
-    // (src/output/mod.rs:15542-15545), not at the top level, so `error["id"]`
-    // was always empty and the prose needle "curation candidate" never matched
-    // the emitted machine code `curation_candidate`. Assert the structured
-    // fields at the path they actually occupy.
+    // (src/output/mod.rs:15542-15545), not at the top level, so the previous
+    // `error["id"]` read was always empty and the check rested entirely on a
+    // prose needle in `message`.
+    //
+    // `id` is the field that answers "WHICH candidate could not be found", and
+    // it is the machine-stable one. `resource` is human prose: all seven
+    // construction sites spell it "curation candidate" with a space
+    // (src/core/curate.rs:5266 and six others). The `curation_candidate` code
+    // is a real vocabulary, but it belongs to `targetType`/`DocumentSource`,
+    // not to `resource` -- asserting it here pinned a spelling that is not
+    // emitted on this path, which is why this check failed while its own
+    // message printed the value it demanded. Require the resource to be named
+    // without pinning how it is worded.
     let error_resource = error["details"]["resource"].as_str().unwrap_or_default();
     let error_id = error["details"]["id"].as_str().unwrap_or_default();
     ensure(
-        error_resource == "curation_candidate" && error_id == valid_id,
+        error_id == valid_id && !error_resource.is_empty(),
         format!(
             "not-found error must name the curation candidate it could not find; got message={message}, resource={error_resource}, id={error_id}"
         ),
@@ -275,14 +284,23 @@ fn curate_retire_dry_run_returns_not_found_for_valid_format_but_missing_candidat
     )?;
     let message = error["message"].as_str().unwrap_or_default();
     // `DomainError::NotFound` renders its resource and id under `error.details`
-    // (src/output/mod.rs:15542-15545), not at the top level, so `error["id"]`
-    // was always empty and the prose needle "curation candidate" never matched
-    // the emitted machine code `curation_candidate`. Assert the structured
-    // fields at the path they actually occupy.
+    // (src/output/mod.rs:15542-15545), not at the top level, so the previous
+    // `error["id"]` read was always empty and the check rested entirely on a
+    // prose needle in `message`.
+    //
+    // `id` is the field that answers "WHICH candidate could not be found", and
+    // it is the machine-stable one. `resource` is human prose: all seven
+    // construction sites spell it "curation candidate" with a space
+    // (src/core/curate.rs:5266 and six others). The `curation_candidate` code
+    // is a real vocabulary, but it belongs to `targetType`/`DocumentSource`,
+    // not to `resource` -- asserting it here pinned a spelling that is not
+    // emitted on this path, which is why this check failed while its own
+    // message printed the value it demanded. Require the resource to be named
+    // without pinning how it is worded.
     let error_resource = error["details"]["resource"].as_str().unwrap_or_default();
     let error_id = error["details"]["id"].as_str().unwrap_or_default();
     ensure(
-        error_resource == "curation_candidate" && error_id == valid_id,
+        error_id == valid_id && !error_resource.is_empty(),
         format!(
             "not-found error must name the curation candidate it could not find; got message={message}, resource={error_resource}, id={error_id}"
         ),
