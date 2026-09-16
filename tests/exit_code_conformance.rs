@@ -998,6 +998,10 @@ fn all_exit_codes_are_in_documented_range() -> TestResult {
         EXIT_DEGRADED,
         EXIT_POLICY_DENIED,
         EXIT_MIGRATION,
+        // Added by 63418ec04 alongside the constant at the top of this file and
+        // two AGENTS.md table rows (:672, :772); the array it belongs in was
+        // the one place that commit did not update.
+        EXIT_WORKSPACE_STORE_MISSING,
         130, // SIGINT
     ];
 
