@@ -133,6 +133,7 @@
     ],
     "workspace": "<workspace>"
   },
+  "degraded": [],
   "schema": "ee.response.v2",
   "success": true
 }
