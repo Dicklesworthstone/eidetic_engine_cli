@@ -24711,7 +24711,7 @@ where
     } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -38318,7 +38318,7 @@ where
     } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -38369,7 +38369,7 @@ where
     } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -38385,7 +38385,7 @@ where
 
     let report = match expire_memory(&options) {
         Ok(report) => report,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     match cli.renderer() {
@@ -38415,13 +38415,13 @@ where
     } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
     let mode = match memory_drift_mode_from_args(args) {
         Ok(mode) => mode,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let options = crate::core::memory_drift::MemoryDriftReportOptions {
         database_path: &database_path,
@@ -38434,7 +38434,7 @@ where
     };
     let report = match crate::core::memory_drift::build_memory_drift_report_read_only(&options) {
         Ok(report) => report,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     match cli.renderer() {
@@ -38515,7 +38515,7 @@ where
     } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -38533,7 +38533,7 @@ where
 
     let report = match update_memory_level(&options) {
         Ok(report) => report,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     match cli.renderer() {
@@ -38814,13 +38814,13 @@ where
     } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
     let mode = match memory_link_mode_from_args(args) {
         Ok(mode) => mode,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let options = MemoryLinkOptions {
@@ -38835,7 +38835,7 @@ where
 
     let report = match update_memory_link(&options) {
         Ok(report) => report,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     match cli.renderer() {
@@ -38870,7 +38870,7 @@ where
     } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -38887,7 +38887,7 @@ where
             message: report.error.clone().unwrap_or_default(),
             repair: Some("ee doctor".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     if !report.found {
@@ -38896,7 +38896,7 @@ where
             id: args.memory_id.clone(),
             repair: Some("ee memory list".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     match cli.renderer() {
@@ -38933,7 +38933,7 @@ where
     } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -38950,7 +38950,7 @@ where
             message: report.error.clone().unwrap_or_default(),
             repair: Some("ee doctor".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     if !report.memory_exists {
@@ -38959,7 +38959,7 @@ where
             id: args.memory_id.clone(),
             repair: Some("ee memory list".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
@@ -39003,13 +39003,13 @@ where
     } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
     let confidence = match parse_memory_revise_confidence(args.confidence.as_deref()) {
         Ok(value) => value,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let tags = args.tags.as_deref().map(parse_memory_revise_tags);
     let reason = ReviseReason::parse(args.reason.trim());
@@ -39031,7 +39031,7 @@ where
     let report = revise_memory(&options);
     if !report.success {
         let domain_error = memory_revise_error_to_domain(&report, &args.memory_id);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     match cli.renderer() {
@@ -39068,7 +39068,7 @@ where
     } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let content = match std::fs::read(&args.content_file) {
@@ -39081,7 +39081,7 @@ where
                 ),
                 repair: Some("Pass the file holding the exact bytes that were sealed.".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let connection = match DbConnection::open_file(&database_path) {
@@ -39094,7 +39094,7 @@ where
                 ),
                 repair: Some("ee doctor --workspace . --json".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let seal = match connection.get_memory_seal(&args.memory_id) {
@@ -39107,14 +39107,14 @@ where
                     "Only memories written with `ee remember --seal` can be revealed.".to_owned(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         Err(error) => {
             let domain_error = DomainError::Storage {
                 message: format!("Failed to load memory seal: {error}"),
                 repair: Some("ee doctor --workspace . --json".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let memory = match connection.get_memory(&args.memory_id) {
@@ -39127,14 +39127,14 @@ where
                 ),
                 repair: Some("ee doctor --workspace . --json".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         Err(error) => {
             let domain_error = DomainError::Storage {
                 message: format!("Failed to load sealed memory: {error}"),
                 repair: Some("ee doctor --workspace . --json".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     if !seal.is_sealed() {
@@ -39146,7 +39146,7 @@ where
             ),
             repair: Some(format!("ee why {} --json", args.memory_id)),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     let supplied_commitment = crate::models::memory_seal_commitment(&content);
     let now = chrono::Utc::now().to_rfc3339();
@@ -39174,7 +39174,7 @@ where
                 message: format!("Failed to record mismatched reveal attempt: {error}"),
                 repair: Some("ee doctor --workspace . --json".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         let domain_error = DomainError::Usage {
             message: format!(
@@ -39188,7 +39188,7 @@ where
                     .to_owned(),
             ),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     let content_text = match String::from_utf8(content) {
         Ok(text) => text,
@@ -39199,7 +39199,7 @@ where
                 ),
                 repair: Some("Seal and reveal UTF-8 protocol text in v1.".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     // Publish through the canonical revise machinery and extend that exact
@@ -39261,14 +39261,14 @@ where
     );
     if !report.success {
         let domain_error = memory_revise_error_to_domain(&report, &args.memory_id);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     let Some(revealed_at) = revealed_at else {
         let domain_error = DomainError::Storage {
             message: "Reveal transaction committed without a reveal timestamp.".to_owned(),
             repair: Some("ee doctor --workspace . --json".to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     };
     let data = serde_json::json!({
         "schema": crate::models::MEMORY_SEAL_SCHEMA_V1,
@@ -39391,13 +39391,13 @@ where
     } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let global_paths = match global_store_paths_for_memory_lane() {
         Ok(paths) => paths,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     // `[memory] include_global` / `participate` gate the lane; both default
@@ -39409,7 +39409,7 @@ where
                 message,
                 repair: Some(crate::config::MEMORY_POLICY_REPAIR.to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
     let options = PromoteGlobalOptions {
@@ -39428,7 +39428,7 @@ where
                 message,
                 repair: Some("ee doctor".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     if !report.plan.allowed() {
@@ -39440,7 +39440,7 @@ where
             )),
             details_json: report.data_json().to_string(),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     let human = format!(
         "Global promotion\n  Memory: {}\n  Executed: {}\n  Global memory: {}\n  Already promoted: {}\n  Index status: {}\n",
@@ -39477,13 +39477,13 @@ where
     } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let global_paths = match global_store_paths_for_memory_lane() {
         Ok(paths) => paths,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let options = DemoteGlobalOptions {
@@ -39500,7 +39500,7 @@ where
                 message,
                 repair: Some("ee doctor".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let (origin_workspace, origin_memory) = report
@@ -39551,7 +39551,7 @@ where
                     "ee memory outcome-global <GLOBAL_MEMORY_ID> --signal helpful".to_owned(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let MemoryStoreTarget {
@@ -39560,13 +39560,13 @@ where
     } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let global_paths = match global_store_paths_for_memory_lane() {
         Ok(paths) => paths,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let options = BackflowOptions {
@@ -39587,7 +39587,7 @@ where
                 message,
                 repair: Some("ee doctor".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let (origin_workspace, origin_memory) = report
@@ -39659,7 +39659,7 @@ where
     } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let canonical_workspace = workspace
@@ -39806,7 +39806,7 @@ where
     } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let canonical_workspace = workspace
@@ -39920,13 +39920,13 @@ where
     } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
     let mode = match memory_tags_mode_from_args(args) {
         Ok(mode) => mode,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let options = MemoryTagsOptions {
@@ -39941,7 +39941,7 @@ where
 
     let report = match update_memory_tags(&options) {
         Ok(report) => report,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     match cli.renderer() {
@@ -49180,7 +49180,7 @@ where
     } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let connection = match crate::db::DbConnection::open_file_read_only(&database_path) {
@@ -55965,6 +55965,46 @@ mod error_render_routing_tests {
         let (toon_stdout, toon_stderr) = render(output::Renderer::Toon);
         assert!(bool_stdout.is_empty() && !bool_stderr.is_empty());
         assert!(!toon_stdout.is_empty() && toon_stderr.is_empty());
+    }
+
+    /// Every machine-facing renderer must route failures to stdout; only the
+    /// two human-facing ones may use stderr.
+    ///
+    /// The migrated call sites pass `cli.renderer()` directly, so they inherit
+    /// whatever this mapping says. Pinning the whole enum here means a new
+    /// renderer variant cannot quietly default a surface back to prose — the
+    /// exhaustive match in `From<Renderer> for ErrorRenderMode` would have to
+    /// be updated, and this test states what the answer must be.
+    #[test]
+    fn every_machine_renderer_routes_failures_to_stdout() {
+        for renderer in [
+            output::Renderer::Json,
+            output::Renderer::Jsonl,
+            output::Renderer::Compact,
+            output::Renderer::Hook,
+            output::Renderer::Toon,
+        ] {
+            let (stdout, stderr) = render(renderer);
+            assert!(
+                !stdout.is_empty(),
+                "{renderer:?} must write the failure envelope to stdout"
+            );
+            assert!(
+                stderr.is_empty(),
+                "{renderer:?} must not write prose to stderr: {stderr:?}"
+            );
+        }
+        for renderer in [output::Renderer::Human, output::Renderer::Markdown] {
+            let (stdout, stderr) = render(renderer);
+            assert!(
+                stdout.is_empty(),
+                "{renderer:?} must not write an envelope to stdout"
+            );
+            assert!(
+                !stderr.is_empty(),
+                "{renderer:?} must report the failure on stderr"
+            );
+        }
     }
 }
 
