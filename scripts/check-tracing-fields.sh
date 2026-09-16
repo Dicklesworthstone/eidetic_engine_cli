@@ -975,19 +975,49 @@ for bead in beads:
                 "reason": "TRACING paragraph does not name any standard phase",
             })
 
+    # Structured tracing is emitted at a surface's DISPATCH BOUNDARY, not in
+    # every file a bead happened to touch. `FILE SURFACE:` is a change
+    # manifest -- new leaf modules, extended dispatch files, schemas, tests,
+    # docs -- so requiring every declared Rust file to carry tracing demanded
+    # request-scoped fields (workspace_id, request_id, elapsed_ms) from two
+    # kinds of file that structurally cannot supply them:
+    #
+    #   * tests/** and benches/** -- a benchmark has no request and no
+    #     workspace; instrumenting one would measure the harness, not ee.
+    #   * pure leaf helpers -- e.g. src/util/radix_ulid_sort.rs (integer-only
+    #     hot-path sort) or src/core/influence.rs, which documents that it
+    #     "keeps the counterfactual math independent from storage". Threading
+    #     a request context into those to satisfy a grep would damage the
+    #     purity their own contracts declare.
+    #
+    # The obligation is therefore per-BEAD, not per-file: the surface must be
+    # traced somewhere in its own declared production code. A bead that
+    # declares no production Rust file (a docs/CI/test-harness surface) has no
+    # runtime boundary to instrument.
+    runtime_candidates = []
     for declared in declared_file_surfaces(bead):
         if not declared.endswith(".rs") or "*" in declared or "?" in declared:
+            continue
+        if not declared.startswith("src/"):
             continue
         path = root / declared
         if not path.exists():
             continue
-        ok, missing = source_has_tracing_evidence(path)
-        if not ok:
+        runtime_candidates.append((declared, path))
+
+    if runtime_candidates:
+        evidence = [source_has_tracing_evidence(path) for _, path in runtime_candidates]
+        if not any(ok for ok, _ in evidence):
+            missing = sorted(
+                {field for _, fields in evidence for field in fields},
+                key=required_fields.index,
+            )
             violations.append({
                 "bead": bead_id,
                 "surface": impl_surfaces[0],
-                "path": declared,
-                "reason": "Rust FILE SURFACE lacks structured tracing evidence",
+                "path": runtime_candidates[0][0],
+                "declaredRuntimeFiles": [name for name, _ in runtime_candidates],
+                "reason": "no declared production FILE SURFACE carries structured tracing evidence",
                 "missingFields": missing,
             })
 
@@ -1022,6 +1052,9 @@ if [ "$SELF_TEST" = true ]; then
     cat > "$tmp_dir/issues.jsonl" <<'JSONL'
 {"id":"bd-3usjw.good","title":"[implements-surface:good_surface] example","labels":["implements-surface:good_surface"],"description":"FILE SURFACE: src/good.rs\nTRACING: surface=good_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
 {"id":"bd-3usjw.bad","title":"[implements-surface:bad_surface] example","labels":["implements-surface:bad_surface"],"description":"FILE SURFACE: src/bad.rs"}
+{"id":"bd-3usjw.dispatch","title":"[implements-surface:dispatch_surface] example","labels":["implements-surface:dispatch_surface"],"description":"FILE SURFACE: src/leaf.rs, src/dispatch.rs\nTRACING: surface=dispatch_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
+{"id":"bd-3usjw.harness","title":"[implements-surface:harness_surface] example","labels":["implements-surface:harness_surface"],"description":"FILE SURFACE: tests/harness.rs, benches/harness.rs\nTRACING: surface=harness_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
+{"id":"bd-3usjw.untraced","title":"[implements-surface:untraced_surface] example","labels":["implements-surface:untraced_surface"],"description":"FILE SURFACE: src/untraced.rs\nTRACING: surface=untraced_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
 JSONL
     mkdir -p "$tmp_dir/src"
     cat > "$tmp_dir/src/good.rs" <<'RS'
@@ -1040,10 +1073,61 @@ RS
     cat > "$tmp_dir/src/bad.rs" <<'RS'
 fn demo() {}
 RS
+    # A surface traced at its dispatch boundary: the pure leaf carries no
+    # tracing and must not be required to.
+    cat > "$tmp_dir/src/leaf.rs" <<'RS'
+pub fn pure_helper(values: &mut [u8]) {
+    values.sort_unstable();
+}
+RS
+    cat > "$tmp_dir/src/dispatch.rs" <<'RS'
+fn demo() {
+    tracing::info!(
+        workspace_id = "wsp",
+        request_id = "req",
+        surface = "dispatch_surface",
+        phase = "response",
+        elapsed_ms = 1_u64,
+        degraded_codes = ?Vec::<String>::new(),
+        "done"
+    );
+}
+RS
+    # A docs/CI/test-harness surface: no production Rust file at all.
+    mkdir -p "$tmp_dir/tests" "$tmp_dir/benches"
+    cat > "$tmp_dir/tests/harness.rs" <<'RS'
+#[test]
+fn harness() {}
+RS
+    cat > "$tmp_dir/benches/harness.rs" <<'RS'
+fn bench() {}
+RS
+    # A genuinely untraced production surface must STILL fail.
+    cat > "$tmp_dir/src/untraced.rs" <<'RS'
+pub fn handler() {}
+RS
     report=$(run_checker "$tmp_dir/issues.jsonl" "$tmp_dir" "" "false")
     printf '%s\n' "$report" > "$tmp_dir/self-test-report.json"
-    if ! printf '%s\n' "$report" | jq -e '.status == "fail" and .violationCount == 2' >/dev/null; then
-        echo "error: self-test expected two violations" >&2
+    if ! printf '%s\n' "$report" | jq -e '.status == "fail" and .violationCount == 3' >/dev/null; then
+        echo "error: self-test expected three violations" >&2
+        printf '%s\n' "$report" >&2
+        exit 1
+    fi
+    # bd-3usjw.dispatch: leaf untraced but dispatch boundary traced -> clean.
+    if ! printf '%s\n' "$report" | jq -e '[.violations[] | select(.bead == "bd-3usjw.dispatch")] | length == 0' >/dev/null; then
+        echo "error: a surface traced at its dispatch boundary must not be flagged for its pure leaf module" >&2
+        printf '%s\n' "$report" >&2
+        exit 1
+    fi
+    # bd-3usjw.harness: tests/** and benches/** are not runtime surfaces.
+    if ! printf '%s\n' "$report" | jq -e '[.violations[] | select(.bead == "bd-3usjw.harness")] | length == 0' >/dev/null; then
+        echo "error: tests/benches must not be required to emit request-scoped tracing fields" >&2
+        printf '%s\n' "$report" >&2
+        exit 1
+    fi
+    # bd-3usjw.untraced: the rule must still catch a real gap.
+    if ! printf '%s\n' "$report" | jq -e '[.violations[] | select(.bead == "bd-3usjw.untraced")] | length == 1' >/dev/null; then
+        echo "error: a production surface with no tracing evidence must still fail" >&2
         printf '%s\n' "$report" >&2
         exit 1
     fi
