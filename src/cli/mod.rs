@@ -15725,40 +15725,74 @@ fn render_hook_git_readiness_human(report: &crate::hooks::GitHookReadinessReport
 ///     `ee mcp validate` succeeded at validating; the answer was "no". That
 ///     is reported through `valid` and `validation_error_count` rather than
 ///     laundered into a degraded code.
+/// The report-derived values `trace_mcp_validate` emits.
+///
+/// Split out from the emission so the derivation is unit-testable without a
+/// tracing subscriber. The macro itself is trivially correct; the defaults and
+/// the unbound-workspace fallback below are where a wrong value would hide.
+#[derive(Debug, PartialEq, Eq)]
+struct McpValidateTraceFields {
+    workspace_id: String,
+    valid: bool,
+    adapter_feature_enabled: bool,
+    validation_error_count: usize,
+    schema_source: String,
+}
+
+/// Derive the traced values from the validate report.
+///
+/// Every fallback is deliberately pessimistic: a report missing `valid` or
+/// `adapterFeatureEnabled` reports `false` rather than assuming success, and
+/// an unreadable `schemaSource` reports `"unknown"` rather than guessing
+/// `"embedded"`. A trace that overstates health is worse than one that admits
+/// it could not tell.
+fn mcp_validate_trace_fields(
+    workspace: Option<&Path>,
+    report: &serde_json::Value,
+) -> McpValidateTraceFields {
+    McpValidateTraceFields {
+        // `ee mcp validate` reads the embedded manifest and an optional schema
+        // path; it opens no workspace store, so an absent --workspace is
+        // reported as "unbound" rather than resolved to a default that was
+        // never consulted.
+        workspace_id: workspace
+            .map_or_else(|| "unbound".to_owned(), |path| path.display().to_string()),
+        valid: report
+            .get("valid")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        adapter_feature_enabled: report
+            .get("adapterFeatureEnabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        validation_error_count: report
+            .get("validationErrors")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len),
+        schema_source: report
+            .get("schemaSource")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned(),
+    }
+}
+
 fn trace_mcp_validate(cli: &Cli, report: &serde_json::Value, elapsed: Duration) {
-    let workspace_id = cli
-        .workspace
-        .as_ref()
-        .map_or_else(|| "unbound".to_owned(), |path| path.display().to_string());
-    // `ee mcp validate` reads the embedded manifest and an optional schema
-    // path; it opens no workspace store, so an absent --workspace is reported
-    // as "unbound" rather than resolved to a default that was never used.
+    let fields = mcp_validate_trace_fields(cli.workspace.as_deref(), report);
     let degraded_codes: [&str; 0] = [];
     tracing::info!(
         target: "ee::mcp::validate",
-        workspace_id = %workspace_id,
+        workspace_id = %fields.workspace_id,
         request_id = "ee_mcp_validate",
         bead_id = "bd-3usjw.70",
         surface = "mcp_validate_subcommand",
         phase = "response",
         elapsed_ms = elapsed.as_secs_f64() * 1000.0,
         degraded_codes = ?degraded_codes,
-        valid = report
-            .get("valid")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-        adapter_feature_enabled = report
-            .get("adapterFeatureEnabled")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-        validation_error_count = report
-            .get("validationErrors")
-            .and_then(serde_json::Value::as_array)
-            .map_or(0, Vec::len),
-        schema_source = report
-            .get("schemaSource")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown"),
+        valid = fields.valid,
+        adapter_feature_enabled = fields.adapter_feature_enabled,
+        validation_error_count = fields.validation_error_count,
+        schema_source = %fields.schema_source,
         "mcp manifest validation completed"
     );
 }
@@ -70156,8 +70190,8 @@ mod tests {
         GraphSnapshotCommand, HandoffCommand, HookCommand, HotsetCollectOptions, LabCommand,
         LabSwarmCommand, LabSwarmWorkloadProfile, LearnCommand, LearnExperimentCommand,
         LensCommand, MIGRATION_REPAIR_COMMAND, MaintenanceCommand, MaintenanceWalCheckpointArgs,
-        MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat, PackCommand,
-        PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
+        MaintenanceWalCheckpointMode, McpValidateTraceFields, MemoryCommand, OutputFormat,
+        PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
         ReflectRequestLedgerCommand, RegressCommand, RegressExplainArgs, RegressionSurfaceArg,
         RevivalObservationMode, RuleCommand, SESSION_BUDGET_PLAN_SCHEMA_V1, ShadowMode,
         SituationCommand, StatusArgs, StatusProbeMode, SupportCommand, SwarmBriefArgs,
@@ -70175,7 +70209,7 @@ mod tests {
         format_search_json_with_mesh_and_recalibration_in_process,
         hook_git_readiness_response_json, hook_status_response_json,
         hotset_bounded_regular_file_read, hotset_bv_signals_from_robot_json, init_report_exit_code,
-        json_with_data_result_path, mesh, orient_next_commands,
+        json_with_data_result_path, mcp_validate_trace_fields, mesh, orient_next_commands,
         parse_completion_audit_evidence_input, parse_context_profile,
         parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
@@ -97320,4 +97354,100 @@ demos:
     // Note: EE_WORKSPACE env-var path is exercised by integration tests
     // that spawn a subprocess (the lib crate forbids unsafe and thus
     // cannot mutate env in-process tests).
+
+    // ---- bd-3usjw.70: ee mcp validate trace-field derivation ----
+
+    #[test]
+    fn mcp_validate_trace_fields_reports_unbound_workspace() {
+        // This subcommand opens no workspace store, so an absent --workspace
+        // must be reported as such rather than resolved to a path that was
+        // never consulted.
+        let report = serde_json::json!({
+            "valid": true,
+            "adapterFeatureEnabled": false,
+            "validationErrors": [],
+            "schemaSource": "embedded",
+        });
+
+        let fields = mcp_validate_trace_fields(None, &report);
+
+        assert_eq!(
+            fields,
+            McpValidateTraceFields {
+                workspace_id: "unbound".to_owned(),
+                valid: true,
+                adapter_feature_enabled: false,
+                validation_error_count: 0,
+                schema_source: "embedded".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn mcp_validate_trace_fields_reports_a_supplied_workspace() {
+        let report = serde_json::json!({"valid": true});
+        let workspace = PathBuf::from("/tmp/ee-mcp-validate-trace");
+
+        let fields = mcp_validate_trace_fields(Some(workspace.as_path()), &report);
+
+        assert_eq!(fields.workspace_id, "/tmp/ee-mcp-validate-trace");
+    }
+
+    #[test]
+    fn mcp_validate_trace_fields_counts_validation_errors() {
+        let report = serde_json::json!({
+            "valid": false,
+            "adapterFeatureEnabled": true,
+            "validationErrors": ["schema_id_matches_manifest", "manifest_response_success"],
+            "schemaSource": "/tmp/custom.json",
+        });
+
+        let fields = mcp_validate_trace_fields(None, &report);
+
+        assert!(!fields.valid);
+        assert!(fields.adapter_feature_enabled);
+        assert_eq!(fields.validation_error_count, 2);
+        assert_eq!(fields.schema_source, "/tmp/custom.json");
+    }
+
+    #[test]
+    fn mcp_validate_trace_fields_fall_back_pessimistically() {
+        // A report missing these keys must not be traced as healthy. An empty
+        // object is the worst case: nothing is known, so nothing is claimed.
+        let fields = mcp_validate_trace_fields(None, &serde_json::json!({}));
+
+        assert!(
+            !fields.valid,
+            "a report with no `valid` key must not trace as valid"
+        );
+        assert!(
+            !fields.adapter_feature_enabled,
+            "a report with no `adapterFeatureEnabled` key must not trace as enabled"
+        );
+        assert_eq!(fields.validation_error_count, 0);
+        assert_eq!(
+            fields.schema_source, "unknown",
+            "an unreadable schemaSource must not be guessed as `embedded`"
+        );
+    }
+
+    #[test]
+    fn mcp_validate_trace_fields_ignore_wrongly_typed_values() {
+        // Defensive: the report is built in-process today, but a wrong TYPE
+        // must degrade to the pessimistic default rather than panic or be
+        // silently coerced into a healthy-looking value.
+        let report = serde_json::json!({
+            "valid": "yes",
+            "adapterFeatureEnabled": 1,
+            "validationErrors": "two",
+            "schemaSource": 42,
+        });
+
+        let fields = mcp_validate_trace_fields(None, &report);
+
+        assert!(!fields.valid);
+        assert!(!fields.adapter_feature_enabled);
+        assert_eq!(fields.validation_error_count, 0);
+        assert_eq!(fields.schema_source, "unknown");
+    }
 }
