@@ -42255,6 +42255,12 @@ where
     if args.explain_performance {
         return match run_pack() {
             Ok(run) => write_stdout(stdout, &(run.performance.to_string() + "\n")),
+            // Literal `true` kept deliberately: this arm is inside
+            // `if args.explain_performance`, whose success path writes raw
+            // performance output regardless of --format. Forcing a machine-readable
+            // error matches `cli.wants_json() || args.explain_performance` used
+            // elsewhere for the same condition; swapping in the renderer would send
+            // prose to stderr for `--explain-performance` without `--json`.
             Err(error) => write_context_pack_error(&error, true, stdout, stderr),
         };
     }
@@ -42262,7 +42268,9 @@ where
     if args.stream && !args.explain_gaps {
         let request = match context_request_from_options(&options) {
             Ok(request) => request,
-            Err(error) => return write_context_pack_error(&error, true, stdout, stderr),
+            Err(error) => {
+                return write_context_pack_error(&error, cli.context_renderer(), stdout, stderr);
+            }
         };
         let mut frame_options =
             context_stream_options_for_request(&request, &options, &workspace_path);
@@ -45877,6 +45885,12 @@ where
     if args.explain_performance {
         return match run_pack() {
             Ok(run) => write_stdout(stdout, &(run.performance.to_string() + "\n")),
+            // Literal `true` kept deliberately: this arm is inside
+            // `if args.explain_performance`, whose success path writes raw
+            // performance output regardless of --format. Forcing a machine-readable
+            // error matches `cli.wants_json() || args.explain_performance` used
+            // elsewhere for the same condition; swapping in the renderer would send
+            // prose to stderr for `--explain-performance` without `--json`.
             Err(error) => write_context_pack_error(&error, true, stdout, stderr),
         };
     }
@@ -49593,6 +49607,12 @@ where
                 }
                 write_stdout(stdout, &(payload.to_string() + "\n"))
             }
+            // Literal `true` kept deliberately: this arm is inside
+            // `if args.explain_performance`, whose success path writes raw
+            // performance output regardless of --format. Forcing a machine-readable
+            // error matches `cli.wants_json() || args.explain_performance` used
+            // elsewhere for the same condition; swapping in the renderer would send
+            // prose to stderr for `--explain-performance` without `--json`.
             Err(error) => write_search_error(&error, true, stdout, stderr),
         };
     }
