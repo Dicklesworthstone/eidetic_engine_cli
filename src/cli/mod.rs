@@ -968,6 +968,21 @@ where
 {
     if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
         let error = unsupported_mermaid_format_error(command);
+        // The literal `true` here is DELIBERATE and must not be migrated to
+        // cli.renderer() by a bd-oqrjn-style sweep. Two reasons, both checked:
+        //
+        // 1. It cannot carry that bead's defect. The guard above requires
+        //    `format == Mermaid`, so `--format toon` never reaches this line
+        //    and it can never emit JSON where toon was asked for.
+        // 2. Migrating it would REGRESS a working surface. `output::Renderer`
+        //    has no Mermaid variant, so cli.renderer() resolves the Mermaid
+        //    path to a non-JSON renderer and ErrorRenderMode turns today's
+        //    machine-readable JSON error into prose on stderr. Anything
+        //    parsing this rejection would break.
+        //
+        // The bd-oqrjn closing countermetric is therefore "production
+        // hardcoded sites REACHABLE UNDER toon == 0", not "hardcoded == 0" --
+        // a metric that could only be satisfied by breaking this contract.
         return Some(write_domain_error(&error, true, stdout, stderr));
     }
     None
