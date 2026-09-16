@@ -2454,6 +2454,72 @@ fn database_open_error_is_retryable(error: &DbError) -> bool {
     }
 
     sqlmodel_error_is_transient_sqlite_contention(source.as_ref())
+        || sqlmodel_error_is_namespace_sidecar_admission_race(source.as_ref())
+}
+
+/// Classify a FrankenSQLite namespace-sidecar admission failure as a transient
+/// first-open race.
+///
+/// FrankenSQLite binds an opened database to its pathname namespace through two
+/// persistent sidecars, `<db>-fsqlite-ns-gate` and `<db>-fsqlite-ns-use`
+/// (`fsqlite-vfs::namespace`). A read-only/existing-companion admission first
+/// probes both sidecars for existence and then opens them; a read-write
+/// admission creates them with `O_CREAT|O_EXCL`. Those two paths race on the
+/// very first open of a workspace: the reader can observe the gate that the
+/// creating peer just published and still lose the subsequent open (or the
+/// companion probe) while the peer is mid-publication. `open_secure_lock_file`
+/// / `open_existing_secure_lock_file` report that as
+/// `FrankenError::CannotOpen { path: <sidecar> }`, which
+/// `sqlmodel-frankensqlite::franken_to_conn_error` maps verbatim to
+/// `Error::Connection { kind: Connect, message: "unable to open database file:
+/// '<db>-fsqlite-ns-gate'" }`.
+///
+/// Before this classification the message matched none of the four literals in
+/// [`sqlite_contention_message_is_retryable`], so the first `ee pack` of a
+/// session could fail outright on a race that the very next invocation won —
+/// the field report behind `bd-ns-gate-open-retry-classifier-wg18a` ("fine on
+/// manual retry" meant the *user* retried; `ee` did not).
+///
+/// Narrowness matters, because `CannotOpen` on the *database* path is a genuine
+/// fatal error (missing file, bad permissions) that must never spin:
+///
+/// - the message must be FrankenSQLite's `CannotOpen` rendering, and
+/// - the named path must be one of the two namespace sidecars.
+///
+/// A `CannotOpen` naming `<db>` itself, or any other message, stays fatal. This
+/// predicate is deliberately wired only into
+/// [`database_open_error_is_retryable`] (the bounded
+/// `FILE_DATABASE_OPEN_MAX_ATTEMPTS` open ladder) and not into
+/// [`db_error_is_transient_sqlite_contention`]: namespace admission happens at
+/// open, so widening the query/write retry surface would buy nothing and hide
+/// real faults. A sidecar that is permanently unopenable (for example
+/// `chmod 000`, or an ownership/exposure refusal) still surfaces the identical
+/// error after the ladder is exhausted, so the honest failure is delayed by the
+/// bounded backoff, never suppressed.
+///
+/// Mirrors the bd-d67os.26 precedent that added the flock-gate message shape to
+/// [`write_owner_flock_contention_message_is_retryable`].
+fn sqlmodel_error_is_namespace_sidecar_admission_race(error: &sqlmodel_core::Error) -> bool {
+    let sqlmodel_core::Error::Connection(connection) = error else {
+        return false;
+    };
+    matches!(
+        connection.kind,
+        sqlmodel_core::error::ConnectionErrorKind::Connect
+    ) && namespace_sidecar_admission_message_is_retryable(&connection.message)
+}
+
+/// Message-shape half of [`sqlmodel_error_is_namespace_sidecar_admission_race`].
+///
+/// The suffixes are the `GATE_SUFFIX` / `USE_SUFFIX` constants of
+/// `fsqlite-vfs::namespace`; the prefix is the `FrankenError::CannotOpen`
+/// `#[error]` rendering. Both are matched case-insensitively because the
+/// embedded path is host-supplied, while the literals FrankenSQLite appends are
+/// themselves lowercase.
+fn namespace_sidecar_admission_message_is_retryable(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("unable to open database file")
+        && (message.contains("-fsqlite-ns-gate") || message.contains("-fsqlite-ns-use"))
 }
 
 /// Detect the "cannot start a transaction within a transaction" error returned
@@ -42925,6 +42991,205 @@ mod tests {
         ensure(
             super::database_open_error_is_retryable(&read_only_busy),
             "read-only open should retry transient busy",
+        )
+    }
+
+    /// Build the namespace sidecar path exactly the way `fsqlite-vfs`'s
+    /// `sidecar_path` does: append the suffix to the database path's `OsStr`,
+    /// with no extension handling.
+    fn namespace_sidecar_path(database: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+        let mut path = std::ffi::OsString::from(database.as_os_str());
+        path.push(suffix);
+        std::path::PathBuf::from(path)
+    }
+
+    /// Render the message a real namespace-sidecar admission failure produces.
+    ///
+    /// Deliberately not a hand-typed string: this constructs the genuine
+    /// `fsqlite::FrankenError` variant that `open_secure_lock_file` /
+    /// `open_existing_secure_lock_file` return and takes its real `Display`,
+    /// then wraps it the way `sqlmodel-frankensqlite::franken_to_conn_error`
+    /// does. If FrankenSQLite's rendering ever drifts, these tests fail instead
+    /// of the classifier silently going dead in production.
+    fn frankensqlite_sidecar_cannot_open_error(path: &std::path::Path) -> DbError {
+        let produced = fsqlite::FrankenError::CannotOpen {
+            path: path.to_path_buf(),
+        };
+        DbError::sqlmodel(
+            DbOperation::OpenReadOnly,
+            sqlmodel_connection_error(
+                sqlmodel_core::error::ConnectionErrorKind::Connect,
+                &produced.to_string(),
+            ),
+        )
+    }
+
+    #[test]
+    fn ns_gate_first_open_race_classifies_retryable_wg18a() -> TestResult {
+        // The first `ee pack` of a session can lose a race against a peer that
+        // is publishing the FrankenSQLite namespace sidecars, and the resulting
+        // `CannotOpen` on `<db>-fsqlite-ns-gate` was classified fatal — so ee
+        // failed the command on a race the next invocation won
+        // (bd-ns-gate-open-retry-classifier-wg18a).
+        let database = std::path::Path::new("/tmp/ee-ns-gate-race/.ee/ee.db");
+        let gate_path = namespace_sidecar_path(database, "-fsqlite-ns-gate");
+
+        let rendered = fsqlite::FrankenError::CannotOpen {
+            path: gate_path.clone(),
+        }
+        .to_string();
+        ensure(
+            rendered.starts_with("unable to open database file: "),
+            format!("fsqlite CannotOpen rendering drifted from the classified shape: {rendered}"),
+        )?;
+        ensure(
+            rendered.contains("ee.db-fsqlite-ns-gate"),
+            format!("sidecar path missing from the rendered message: {rendered}"),
+        )?;
+
+        let gate_race = frankensqlite_sidecar_cannot_open_error(&gate_path);
+        ensure(
+            super::database_open_error_is_retryable(&gate_race),
+            "ns-gate first-open race must retry through the open ladder",
+        )?;
+
+        // The companion `-ns-use` sidecar loses the same race: a reader can see
+        // the gate the creating peer just published and still find the `use`
+        // record absent or unopenable mid-publication.
+        let use_path = namespace_sidecar_path(database, "-fsqlite-ns-use");
+        let use_race = frankensqlite_sidecar_cannot_open_error(&use_path);
+        ensure(
+            super::database_open_error_is_retryable(&use_race),
+            "ns-use companion race must retry through the open ladder",
+        )?;
+
+        // A read-write admission creates the sidecars and races the same way.
+        let read_write_gate_race = DbError::sqlmodel(
+            DbOperation::OpenReadWrite,
+            sqlmodel_connection_error(
+                sqlmodel_core::error::ConnectionErrorKind::Connect,
+                &fsqlite::FrankenError::CannotOpen { path: gate_path }.to_string(),
+            ),
+        );
+        ensure(
+            super::database_open_error_is_retryable(&read_write_gate_race),
+            "read-write ns-gate race must retry through the open ladder",
+        )
+    }
+
+    #[test]
+    fn ns_gate_classifier_stays_narrow_wg18a() -> TestResult {
+        // `CannotOpen` on the DATABASE path is a genuine fatal error (missing
+        // file, bad permissions). Retrying it would spin the open ladder on
+        // every real misconfiguration, so it must stay non-retryable.
+        let database = std::path::Path::new("/tmp/ee-ns-gate-race/.ee/ee.db");
+        let database_failure = frankensqlite_sidecar_cannot_open_error(database);
+        ensure(
+            !super::database_open_error_is_retryable(&database_failure),
+            "CannotOpen on the database path must stay fatal",
+        )?;
+
+        let gate_path = namespace_sidecar_path(database, "-fsqlite-ns-gate");
+        let gate_message = fsqlite::FrankenError::CannotOpen {
+            path: gate_path.clone(),
+        }
+        .to_string();
+
+        // Namespace admission only happens at open. A sidecar-shaped message
+        // arriving on a query/execute operation is not an admission race, and
+        // widening the query retry surface would hide real faults.
+        let query_shaped = DbError::sqlmodel(
+            DbOperation::Query,
+            sqlmodel_connection_error(
+                sqlmodel_core::error::ConnectionErrorKind::Connect,
+                &gate_message,
+            ),
+        );
+        ensure(
+            !super::database_open_error_is_retryable(&query_shaped),
+            "non-open operations must not adopt the admission-race classification",
+        )?;
+
+        // The write/query contention classifier must NOT have been widened:
+        // `retry_sqlite_contention` keeps its own policy.
+        let open_shaped = frankensqlite_sidecar_cannot_open_error(&gate_path);
+        ensure(
+            !super::db_error_is_transient_sqlite_contention(&open_shaped),
+            "the query/write contention classifier must stay unchanged",
+        )?;
+
+        // Only a `Connect`-kind connection error qualifies; an authentication
+        // or configuration connection error carrying the same text does not.
+        let wrong_kind = DbError::sqlmodel(
+            DbOperation::OpenReadOnly,
+            sqlmodel_connection_error(
+                sqlmodel_core::error::ConnectionErrorKind::Authentication,
+                &gate_message,
+            ),
+        );
+        ensure(
+            !super::database_open_error_is_retryable(&wrong_kind),
+            "only Connect-kind connection errors are admission races",
+        )?;
+
+        // A message naming a sidecar without the CannotOpen shape is some other
+        // failure (corrupt record, exposure refusal) and stays fatal.
+        let other_sidecar_failure = DbError::sqlmodel(
+            DbOperation::OpenReadOnly,
+            sqlmodel_connection_error(
+                sqlmodel_core::error::ConnectionErrorKind::Connect,
+                "namespace record is malformed: '/tmp/ee-ns-gate-race/.ee/ee.db-fsqlite-ns-gate'",
+            ),
+        );
+        ensure(
+            !super::database_open_error_is_retryable(&other_sidecar_failure),
+            "non-CannotOpen sidecar failures must stay fatal",
+        )
+    }
+
+    #[test]
+    fn file_database_open_retry_absorbs_ns_gate_race_wg18a() -> TestResult {
+        // End of the ladder: the predicate change must actually make
+        // `retry_file_database_open` absorb the race instead of surfacing it.
+        let gate_path = namespace_sidecar_path(
+            std::path::Path::new("/tmp/ee-ns-gate-race/.ee/ee.db"),
+            "-fsqlite-ns-gate",
+        );
+        let mut attempts = 0;
+        let value = super::retry_file_database_open(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(frankensqlite_sidecar_cannot_open_error(&gate_path))
+            } else {
+                Ok(attempts)
+            }
+        })?;
+
+        ensure_equal(&value, &3, "ns-gate retry value")?;
+        ensure_equal(&attempts, &3, "ns-gate retry attempts")?;
+
+        // The ladder stays bounded: a sidecar that is permanently unopenable
+        // (chmod 000, ownership refusal) surfaces the honest error after
+        // `FILE_DATABASE_OPEN_MAX_ATTEMPTS` rather than spinning forever.
+        let mut permanent_attempts = 0;
+        let result: super::Result<usize> = super::retry_file_database_open(|| {
+            permanent_attempts += 1;
+            Err(frankensqlite_sidecar_cannot_open_error(&gate_path))
+        });
+        ensure(
+            matches!(
+                result,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::OpenReadOnly,
+                    ..
+                })
+            ),
+            "a permanently unopenable sidecar must surface the honest error",
+        )?;
+        ensure_equal(
+            &permanent_attempts,
+            &super::FILE_DATABASE_OPEN_MAX_ATTEMPTS,
+            "ns-gate retry ladder attempt bound",
         )
     }
 
