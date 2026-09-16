@@ -41098,10 +41098,7 @@ where
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            let _ = write_stdout(
-                stdout,
-                &(serde_json::to_string(&envelope).unwrap_or_default() + "\n"),
-            );
+            let _ = write_stdout(stdout, &(envelope.to_string() + "\n"));
         }
         _ => {
             let mut out = String::new();
@@ -43242,10 +43239,7 @@ fn write_db_status_output<W: Write>(
                 },
                 "degraded": degraded
             });
-            let write_exit = write_stdout(
-                stdout,
-                &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
-            );
+            let write_exit = write_stdout(stdout, &(json.to_string() + "\n"));
             if write_exit == ProcessExitCode::Success {
                 exit_code
             } else {
@@ -43567,10 +43561,7 @@ fn write_db_inspect_output<W: Write>(
                 },
                 "degraded": degraded
             });
-            let _ = write_stdout(
-                stdout,
-                &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
-            );
+            let _ = write_stdout(stdout, &(json.to_string() + "\n"));
             exit_code
         }
         _ => {
@@ -43946,10 +43937,7 @@ fn write_db_reindex_output<W: Write>(
                 },
                 "degraded": degraded
             });
-            let _ = write_stdout(
-                stdout,
-                &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
-            );
+            let _ = write_stdout(stdout, &(json.to_string() + "\n"));
             exit_code
         }
         _ => {
@@ -44270,10 +44258,7 @@ fn write_db_check_output<W: Write>(
                 },
                 "degraded": degraded
             });
-            let _ = write_stdout(
-                stdout,
-                &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
-            );
+            let _ = write_stdout(stdout, &(json.to_string() + "\n"));
             exit_code
         }
         _ => {
@@ -44519,10 +44504,7 @@ where
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            let _ = write_stdout(
-                stdout,
-                &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
-            );
+            let _ = write_stdout(stdout, &(json.to_string() + "\n"));
         }
         _ => {
             let mut out = String::new();
@@ -45073,10 +45055,7 @@ where
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => {
-                let _ = write_stdout(
-                    stdout,
-                    &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
-                );
+                let _ = write_stdout(stdout, &(json.to_string() + "\n"));
             }
             _ => {
                 let mut out = String::new();
@@ -45184,10 +45163,7 @@ where
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            let _ = write_stdout(
-                stdout,
-                &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
-            );
+            let _ = write_stdout(stdout, &(json.to_string() + "\n"));
         }
         _ => {
             let mut out = String::new();
@@ -45427,10 +45403,7 @@ fn write_db_migrations_output<W: Write>(
                 },
                 "degraded": []
             });
-            let _ = write_stdout(
-                stdout,
-                &(serde_json::to_string(&json).unwrap_or_default() + "\n"),
-            );
+            let _ = write_stdout(stdout, &(json.to_string() + "\n"));
             exit_code
         }
         _ => {
