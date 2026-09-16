@@ -755,6 +755,27 @@ pub struct ContextPackOutputOptions {
     /// per profile only in the Verbose profile (true), to match the
     /// existing "verbose surfaces everything" convention.
     pub include_non_affecting_degradations: bool,
+    /// bd-pack-compact-mode-ibksx: emit `pack.selectionAudit`.
+    ///
+    /// The single largest block in a pack response — `selectedItems[]` plus
+    /// `steps[]` — and the main reason field reports measured pack metadata
+    /// outweighing the returned memories roughly 10:1. `false` under
+    /// [`ContextPackOutputProfile::Lean`].
+    pub include_selection_audit: bool,
+    /// bd-pack-compact-mode-ibksx: emit `pack.quality`.
+    ///
+    /// Walks every section plus the omission set to build its metrics, so it
+    /// is both large and non-trivial to produce. `false` under `Lean`.
+    pub include_quality_metrics: bool,
+    /// bd-pack-compact-mode-ibksx: emit the `pack.budget.adaptiveBudget`
+    /// sub-object, including `classifierContributions`.
+    ///
+    /// Deliberately narrower than "emit `pack.budget`": `maxTokens`,
+    /// `usedTokens` and `utilization` are three scalars an agent needs in
+    /// order to decide whether to re-pack, so suppressing them would cost
+    /// real utility for almost no bytes. The adaptive-budget explanation is
+    /// the part that is large and diagnostic. `false` under `Lean`.
+    pub include_budget_detail: bool,
 }
 
 impl Default for ContextPackOutputOptions {
@@ -777,6 +798,13 @@ impl ContextPackOutputOptions {
                 include_meta: true,
                 include_verbose_meta: false,
                 include_non_affecting_degradations: false,
+                // bd-pack-compact-mode-ibksx: this is the whole point of the
+                // Lean profile. Before this, Lean dropped only coverage_fill,
+                // rendered_text and skipped[] while still emitting every heavy
+                // diagnostic block, so it barely shrank the response.
+                include_selection_audit: false,
+                include_quality_metrics: false,
+                include_budget_detail: false,
             },
             ContextPackOutputProfile::Standard => Self {
                 profile,
@@ -788,6 +816,11 @@ impl ContextPackOutputOptions {
                 include_meta: true,
                 include_verbose_meta: false,
                 include_non_affecting_degradations: false,
+                // Standard is the default profile, so these stay true: nobody
+                // who did not ask for Lean sees a field disappear.
+                include_selection_audit: true,
+                include_quality_metrics: true,
+                include_budget_detail: true,
             },
             ContextPackOutputProfile::Verbose => Self {
                 profile,
@@ -799,6 +832,9 @@ impl ContextPackOutputOptions {
                 include_meta: true,
                 include_verbose_meta: true,
                 include_non_affecting_degradations: true,
+                include_selection_audit: true,
+                include_quality_metrics: true,
+                include_budget_detail: true,
             },
         }
     }
@@ -823,6 +859,12 @@ impl ContextPackOutputOptions {
             include_non_affecting_degradations: overrides
                 .include_non_affecting_degradations
                 .unwrap_or(self.include_non_affecting_degradations),
+            // bd-pack-compact-mode-ibksx: carried through from the profile.
+            // These have no per-call override flag of their own — `--compact`
+            // selects the Lean profile rather than adding four more knobs.
+            include_selection_audit: self.include_selection_audit,
+            include_quality_metrics: self.include_quality_metrics,
+            include_budget_detail: self.include_budget_detail,
         }
     }
 
@@ -3619,12 +3661,27 @@ async fn run_context_pack_with_performance_inner(
 
     trace.record_elapsed("packAssembly", pack_start);
     control.check()?;
+    // GH49 / bd-jikgj: classify the SLO against the elapsed time the CALLER
+    // actually waited, not against the `packAssembly` phase alone.
+    //
+    // `packAssembly` is a minority of a pack request — profiling on this bead
+    // measured candidateConstruction ~370ms, scopeVisibility ~252ms and
+    // queryAssist ~247ms against a packAssembly of 92-250ms — so a pack could
+    // blow the published 2s Standard failure threshold end to end and still
+    // report `elapsedStatus: within_budget`, which is precisely the defect
+    // this bead was filed for.
+    //
+    // Measured from `total_start` rather than read back via
+    // `trace.elapsed_ms("total")`: the `"total"` span is not recorded until
+    // after this point, and `elapsed_ms` answers 0 for an unknown span, so the
+    // by-name form would silently restore the same false `within_budget`.
+    let observed_elapsed_ms = duration_millis_u64(total_start.elapsed());
     let slo = if let Some(retry_after_ms) = concurrent_limit_retry_after_ms {
         let actuals = PackAssemblySloActuals::from_pack_run(
             &draft,
             0,
             trace.candidate_resolution.graph_traversed_edges,
-            trace.elapsed_ms("packAssembly"),
+            observed_elapsed_ms,
         );
         PackAssemblySlo::concurrent_limit_reached(
             options.output_options.resource_profile,
@@ -3646,6 +3703,7 @@ async fn run_context_pack_with_performance_inner(
             &draft,
             &search_report,
             &trace,
+            observed_elapsed_ms,
         );
         slo.admission = admission_posture;
         slo
@@ -4060,11 +4118,20 @@ fn context_performance_json(
     })
 }
 
+/// Build the pack SLO for one run.
+///
+/// `observed_elapsed_ms` is the elapsed time the caller waited for the whole
+/// request, and is supplied by the caller rather than looked up from `trace`
+/// by span name: `ContextPerformanceTrace::elapsed_ms` answers 0 for a span it
+/// does not hold, so a by-name lookup here would report a comfortable
+/// `within_budget` for a request that had in fact blown its budget
+/// (GH49 / bd-jikgj).
 fn pack_assembly_slo_for_run(
     profile: PackResourceProfile,
     draft: &crate::pack::PackDraft,
     search_report: &SearchReport,
     trace: &ContextPerformanceTrace,
+    observed_elapsed_ms: u64,
 ) -> PackAssemblySlo {
     let scanned_count = trace
         .candidate_resolution
@@ -4075,7 +4142,7 @@ fn pack_assembly_slo_for_run(
         draft,
         scanned_count,
         trace.candidate_resolution.graph_traversed_edges,
-        trace.elapsed_ms("packAssembly"),
+        observed_elapsed_ms,
     );
     PackAssemblySlo::evaluate(profile, actuals)
 }
@@ -18526,6 +18593,7 @@ pub fn unrelated_context() -> u64 {{
             &draft,
             &search_report,
             &trace,
+            3,
         );
 
         let json = context_performance_json(
