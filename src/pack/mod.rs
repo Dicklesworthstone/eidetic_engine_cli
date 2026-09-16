@@ -5919,7 +5919,7 @@ fn advisory_summary(
                 .any(|entry| entry.code == "embed_model_unavailable")
             {
                 return format!(
-                    "Context includes {} degraded signal{}; semantic embedding is unavailable, so treat retrieval ranking as lexical-only until a semantic model is available.",
+                    "Context includes {} degraded signal{}; semantic embedding is unavailable, so treat retrieval ranking as lexical-only until a semantic model is available. `ee doctor` reports this as advisory and keeps workspace posture ok, because the memory loop still works on the deterministic-hash tier.",
                     degradation_count,
                     plural_s(degradation_count)
                 );
@@ -16403,11 +16403,25 @@ mod tests {
         )
     }
 
-    /// Companion to `degraded_banner_names_its_per_invocation_scope`: the
-    /// `embed_model_unavailable` arm describes a real workspace-level
-    /// condition that `ee doctor` also reports, so it does NOT produce the
-    /// cross-surface disagreement and keeps its own wording. This pins that
-    /// the scope rewording did not swallow the more specific message.
+    /// Companion to `degraded_banner_names_its_per_invocation_scope`.
+    ///
+    /// This arm was previously exempted from the scope rewording on the
+    /// grounds that it "describes a real workspace-level condition that
+    /// `ee doctor` also reports, so it does NOT produce the cross-surface
+    /// disagreement". That premise was false. Doctor reports embedding
+    /// fallback through `embedding_posture_check_result`
+    /// (`src/core/doctor.rs:2898`), whose non-semantic branch builds a
+    /// `CheckResult` with `tier: CheckTier::Advisory` and then calls
+    /// `.advisory()` under the comment "this check never participates in
+    /// top-line health". Advisory rows are skipped by `Posture::from_checks`
+    /// and counted healthy by `is_topline_healthy`, so doctor reports this
+    /// in `checks[]` and NEVER in its verdict.
+    ///
+    /// So this arm produced exactly the field-observed disagreement the bead
+    /// was filed for: pack says degraded, `ee doctor` says `posture: ok`. The
+    /// arm keeps its specific cause and ranking guidance -- both pinned below
+    /// -- and now also reconciles the two surfaces rather than leaving an
+    /// agent to conclude one of them is lying.
     #[test]
     fn embed_model_unavailable_banner_keeps_its_specific_wording() -> TestResult {
         let degraded = vec![
@@ -16432,6 +16446,10 @@ mod tests {
         ensure(
             summary.contains("lexical-only"),
             format!("embed arm must keep its ranking guidance, got: {summary}"),
+        )?;
+        ensure(
+            summary.contains("keeps workspace posture ok"),
+            format!("embed arm must reconcile with doctor's advisory-tier verdict, got: {summary}"),
         )
     }
 }

@@ -8,7 +8,7 @@
 
 **Status:** `degraded`
 
-Context includes 3 degraded signals; semantic embedding is unavailable, so treat retrieval ranking as lexical-only until a semantic model is available.
+Context includes 3 degraded signals; semantic embedding is unavailable, so treat retrieval ranking as lexical-only until a semantic model is available. `ee doctor` reports this as advisory and keeps workspace posture ok, because the memory loop still works on the deterministic-hash tier.
 
 ## procedural_rules
 
