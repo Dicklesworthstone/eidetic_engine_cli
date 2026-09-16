@@ -107,13 +107,18 @@ pub const EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING: &str = "neural_local_pend
 /// Embedding posture mode: a local neural model is DECLARED semantic, but no
 /// available registry entry confirms it is the embedder retrieval actually uses.
 ///
-/// bd-7hsgy. The posture path verifies that a model directory exists; it
-/// deliberately does not load the weights (see `workspace_embedder_descriptors`).
-/// The retrieval path DOES load, and can fall back to the hash tier when the
-/// load fails. So a directory-only check can only support a CONFIGURED-INTENT
-/// claim, never an ACTUAL-CAPABILITY one, and reporting it as `neural_local`
-/// told consumers semantic search was active while `ee search` reported
+/// bd-7hsgy. The posture path once verified only that a model directory
+/// existed and deliberately never loaded the weights, while the retrieval path
+/// DID load and could fall back to the hash tier when the load failed. A
+/// directory-only check can support a CONFIGURED-INTENT claim, never an
+/// ACTUAL-CAPABILITY one, and reporting it as `neural_local` told consumers
+/// semantic search was active while `ee search` reported
 /// `embed_backend: hash_fallback` in the same workspace seconds later.
+/// `workspace_embedder_descriptors` now shares retrieval's one-time resolution,
+/// so neither path can observe a load the other did not. This mode remains for
+/// the case the rename always described: an embedder that is DECLARED semantic
+/// with no available registry entry confirming it is the one retrieval indexed
+/// with.
 pub const EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_UNCONFIRMED: &str = "neural_local_unconfirmed";
 /// Embedding posture mode: deterministic hash fallback is active.
 pub const EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH: &str = "deterministic_hash";

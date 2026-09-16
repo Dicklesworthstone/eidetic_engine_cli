@@ -7039,16 +7039,27 @@ fn workspace_embedder_descriptors(
             | RegisteredModel2VecResolution::BundledDefaultDeclared => {}
         }
     }
-    if let Some(selection) = DEFAULT_SEARCH_EMBEDDER.get() {
-        // Preserve an already-observed load failure or completed download.
-        return Ok(stack_descriptors(&selection.stack));
-    }
-    Ok((
-        default_embedder_descriptor(&default_embedder_settings()),
-        None,
-    ))
+    // Inspection shares execution's one-time resolution rather than answering
+    // from discovery alone. A verified model directory establishes that the
+    // files are present, never that the weights load: the retrieval path warns
+    // and falls to the hash tier when the load fails, which is how `ee model
+    // status` came to report a neural backend seconds after `ee search`
+    // reported `hash_fallback` for the same workspace (bd-7hsgy). The
+    // resolution is memoised process-wide, so sharing it here costs the first
+    // caller what retrieval would have paid anyway and costs later callers
+    // nothing.
+    let selection = DEFAULT_SEARCH_EMBEDDER.get_or_init(detect_default_search_embedder);
+    Ok(stack_descriptors(&selection.stack))
 }
 
+/// The weight-free descriptor a set of embedder settings implies.
+///
+/// Production no longer consults this: a directory check cannot establish that
+/// a model is ready, so `workspace_embedder_descriptors` reports the resolution
+/// retrieval actually performed instead (bd-7hsgy). It is retained because the
+/// settings-to-descriptor mapping is still the pinned contract for what
+/// inspection may infer without loading weights.
+#[cfg(test)]
 fn default_embedder_descriptor(settings: &EeEmbedderSettings) -> EmbedderDescriptor {
     if verified_default_model_dir(settings).is_some() {
         return EmbedderDescriptor::potion();
