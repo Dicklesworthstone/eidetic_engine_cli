@@ -14148,13 +14148,13 @@ where
                 let objective = match read_completion_audit_objective(args) {
                     Ok(objective) => objective,
                     Err(error) => {
-                        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                        return write_domain_error(&error, cli.renderer(), stdout, stderr);
                     }
                 };
                 let evidence_bundle = match read_completion_audit_evidence_bundle(args) {
                     Ok(bundle) => bundle,
                     Err(error) => {
-                        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                        return write_domain_error(&error, cli.renderer(), stdout, stderr);
                     }
                 };
                 let report = build_completion_audit_report_for_workspace(
@@ -14214,7 +14214,7 @@ where
                             &(output::render_handoff_preview_json(&report) + "\n"),
                         ),
                     },
-                    Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
+                    Err(e) => write_domain_error(&e, cli.renderer(), stdout, stderr),
                 }
             }
             HandoffCommand::Create(args) => {
@@ -14269,7 +14269,7 @@ where
                             ) + "\n"),
                         ),
                     },
-                    Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
+                    Err(e) => write_domain_error(&e, cli.renderer(), stdout, stderr),
                 }
             }
             HandoffCommand::Inspect(args) => {
@@ -14295,7 +14295,7 @@ where
                             &(output::render_handoff_inspect_json(&report) + "\n"),
                         ),
                     },
-                    Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
+                    Err(e) => write_domain_error(&e, cli.renderer(), stdout, stderr),
                 }
             }
             HandoffCommand::Resume(args) => {
@@ -14335,7 +14335,7 @@ where
                             &(output::render_handoff_resume_json(&report) + "\n"),
                         ),
                     },
-                    Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
+                    Err(e) => write_domain_error(&e, cli.renderer(), stdout, stderr),
                 }
             }
             HandoffCommand::RotateKey(args) => {
@@ -14362,7 +14362,7 @@ where
                             &(output::render_handoff_rotate_key_json(&report) + "\n"),
                         ),
                     },
-                    Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
+                    Err(e) => write_domain_error(&e, cli.renderer(), stdout, stderr),
                 }
             }
         },
@@ -14395,7 +14395,7 @@ where
                         &(output::render_health_scorecard_json(&report) + "\n"),
                     ),
                 },
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
         Some(Command::Health(ref args)) if args.robot_insights => {
@@ -14407,7 +14407,7 @@ where
                 Ok(false) => StructuralHealthReport::disabled_by_feature_flag(),
                 Err(error) => {
                     let domain_error = config_surface_error_to_domain(error);
-                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                    return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
                 }
             };
             match cli.renderer() {
@@ -14518,7 +14518,7 @@ where
                                 "Use `ee eval run --pack-quality --scenario <id>` or pass a fixture/family positional filter.".into(),
                             ),
                         };
-                        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                        return write_domain_error(&error, cli.renderer(), stdout, stderr);
                     }
                     handle_eval_run(
                         &cli,
@@ -15439,7 +15439,7 @@ where
     let report = match crate::hooks::generate_harness_hook_install(&options) {
         Ok(report) => report,
         Err(error) => {
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
     match cli.renderer() {
@@ -15483,7 +15483,7 @@ where
     };
     let report = match crate::hooks::generate_harness_hook_install(&options) {
         Ok(report) => report,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
@@ -15696,7 +15696,7 @@ where
     let report = match crate::hooks::check_git_hook_readiness(&options) {
         Ok(report) => report,
         Err(error) => {
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -16400,7 +16400,7 @@ where
             }
             ProcessExitCode::Success
         }
-        Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
+        Err(e) => write_domain_error(&e, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -16512,7 +16512,7 @@ where
             return write_cancelled_error(&reason, cli.wants_json(), stdout, stderr);
         }
         Err(CancellationAwareCliError::Domain(error)) => {
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
     let passed = reports
@@ -16610,7 +16610,7 @@ where
             return write_cancelled_error(&reason, cli.wants_json(), stdout, stderr);
         }
         Err(CancellationAwareCliError::Domain(error)) => {
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
     let summary = eval_report_summary(&reports);
@@ -16808,7 +16808,7 @@ where
 
     let fixtures = match crate::eval::discover_fixtures(dir) {
         Ok(fixtures) => fixtures,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     if fixtures.is_empty() {
@@ -16816,7 +16816,7 @@ where
             message: "No fixtures found in fixture directory".into(),
             repair: Some(format!("Add fixtures to {}", dir.display())),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let target_fixtures: Vec<_> = if let Some(filter) = fixture_filter {
@@ -16834,7 +16834,7 @@ where
             id: fixture_filter.unwrap_or("*").into(),
             repair: Some("ee eval list --json".into()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let mut reports = Vec::new();
@@ -16844,14 +16844,14 @@ where
     for fixture in &target_fixtures {
         let scenario = match crate::eval::load_scenario(&fixture.scenario_path) {
             Ok(scenario) => scenario,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         let source = match crate::eval::load_source_memories(&fixture.source_memory_path) {
             Ok(source) => source,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         if let Err(error) = crate::eval::validate_fixture_scenario(&scenario, &source) {
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
 
         let Some(expectations) = &scenario.pack_quality_expectations else {
@@ -16872,7 +16872,7 @@ where
 
         let materialized = match crate::eval::materialize_source_memories(&source) {
             Ok(memories) => memories,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         let (actuals, observed_artifacts) = match pack_quality_actuals_for_cases(
             &fixture.path,
@@ -16886,7 +16886,7 @@ where
                 return write_cancelled_error(&reason, cli.wants_json(), stdout, stderr);
             }
             Err(CancellationAwareCliError::Domain(error)) => {
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
         };
 
@@ -16914,7 +16914,7 @@ where
             id: id.into(),
             repair: Some("ee eval run --pack-quality --json".into()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let passed = reports
@@ -17789,14 +17789,14 @@ where
             };
             return match crate::core::focus_suggest::suggest_focus(&options) {
                 Ok(report) => write_focus_suggest_report(cli, &report, stdout),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             };
         }
     };
 
     match result {
         Ok(report) => write_focus_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -18110,7 +18110,7 @@ where
 
     match result {
         Ok(report) => write_task_frame_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -18285,7 +18285,7 @@ where
     };
     let surface = match surface {
         Ok(surface) => surface,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     match cli.renderer() {
@@ -18335,7 +18335,7 @@ where
         sessions: args.sessions,
     }) {
         Ok(report) => report,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let mut degraded: Vec<serde_json::Value> = Vec::new();
@@ -18520,11 +18520,11 @@ where
             message: format!("Unknown resolution verb `{}`.", args.verb),
             repair: Some("--verb supersede | reject-one | scope-split | both-valid".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     };
     let surface = match conflict::build_conflict_surface(workspace) {
         Ok(surface) => surface,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     fn split_tags(raw: Option<&String>) -> Vec<String> {
@@ -18568,21 +18568,21 @@ where
                 ),
                 details_json: serde_json::json!({ "currentPairs": current_pairs }).to_string(),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
         ConflictResolutionOutcome::PolicyDenied { message, repair } => {
             let error = DomainError::PolicyDenied {
                 message,
                 repair: Some(repair),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
         ConflictResolutionOutcome::InvalidRequest { message, repair } => {
             let error = DomainError::Usage {
                 message,
                 repair: Some(repair),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -18601,7 +18601,7 @@ where
                 results = Some(applied);
                 status = "applied";
             }
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     }
 
@@ -18672,7 +18672,7 @@ where
                     stdout,
                     &(sandbox::render_propose_json("sandbox remember", &outcome) + "\n"),
                 ),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
         sandbox::SandboxCommand::Import(args) => match sandbox::propose_import(&workspace, args) {
@@ -18683,7 +18683,7 @@ where
                 stdout,
                 &(sandbox::render_propose_json("sandbox import", &outcome) + "\n"),
             ),
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         },
         sandbox::SandboxCommand::Curate(args) => match sandbox::propose_curate(&workspace, args) {
             Ok(outcome) if human => {
@@ -18693,7 +18693,7 @@ where
                 stdout,
                 &(sandbox::render_propose_json("sandbox curate", &outcome) + "\n"),
             ),
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         },
         sandbox::SandboxCommand::Diff(args) => match sandbox::build_diff(&workspace, args) {
             Ok((name, surface)) if human => {
@@ -18702,12 +18702,12 @@ where
             Ok((name, surface)) => {
                 write_stdout(stdout, &(sandbox::render_diff_json(&name, &surface) + "\n"))
             }
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         },
         sandbox::SandboxCommand::Apply(args) => match sandbox::apply_session(&workspace, args) {
             Ok(outcome) if human => write_stdout(stdout, &sandbox::render_apply_human(&outcome)),
             Ok(outcome) => write_stdout(stdout, &(sandbox::render_apply_json(&outcome) + "\n")),
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         },
     }
 }
@@ -18733,7 +18733,7 @@ where
         },
     ) {
         Ok(report) => report,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     if args.json_stream {
@@ -18746,7 +18746,7 @@ where
                         .to_owned(),
                 ),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
         return write_stdout(stdout, &insights::render_insights_json_stream(&report));
     }
@@ -19218,7 +19218,7 @@ where
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -19252,7 +19252,7 @@ where
 
     match create_backup(&options) {
         Ok(report) => write_export_report(cli, &report, &redaction, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -19391,7 +19391,7 @@ where
                 | output::Renderer::Hook => write_stdout(stdout, &(json.to_string() + "\n")),
             }
         }
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -19456,7 +19456,7 @@ where
                 | output::Renderer::Hook => write_stdout(stdout, &(json.to_string() + "\n")),
             }
         }
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -19523,7 +19523,7 @@ where
                 output_status
             }
         }
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -19562,7 +19562,7 @@ where
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -19625,7 +19625,7 @@ fn handle_backup_keys<W: Write, E: Write>(
     };
     let passphrase = match read_backup_key_passphrase(std::io::stdin().lock()) {
         Ok(bytes) => bytes,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let options = BackupKeyRecoveryOptions {
         workspace_path: cli.resolve_workspace(),
@@ -19658,7 +19658,7 @@ fn handle_backup_keys<W: Write, E: Write>(
                 _ => write_stdout(stdout, &(json.to_string() + "\n")),
             }
         }
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -19710,7 +19710,7 @@ where
                     .to_owned(),
             repair: Some("ee update --artifact-root <path> --manifest <path>".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     };
 
     let result = execute_install_plan(&report, artifact_root);
@@ -19760,7 +19760,7 @@ where
                 .unwrap_or_else(|| "update apply failed".to_owned()),
             repair: Some("ee update --dry-run --json --manifest <path>".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     if cli.wants_json() {
@@ -21053,7 +21053,7 @@ where
             }
             render_cache_prewarm(cli, &data, stdout)
         }
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -21372,7 +21372,7 @@ where
     };
     match decide_record(&options) {
         Ok(report) => write_decide_record_report(cli, &report, &workspace_path, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -21397,7 +21397,7 @@ where
     };
     match decide_list(&options) {
         Ok(report) => write_decide_list_report(cli, &report, &workspace_path, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -21421,7 +21421,7 @@ where
     };
     match decide_revisit(&options) {
         Ok(report) => write_decide_revisit_report(cli, &report, &workspace_path, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -21573,7 +21573,7 @@ where
     let workspace_path = cli.resolve_workspace();
     let filter = match parse_subscribe_filter(args.filter.as_deref()) {
         Ok(filter) => filter,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let options = SubscribePollOptions {
         workspace_path: &workspace_path,
@@ -21585,7 +21585,7 @@ where
 
     match poll_memory_deltas(&options) {
         Ok(report) => write_subscribe_poll_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -21600,7 +21600,7 @@ where
     E: Write,
 {
     if let Err(error) = validate_subscribe_stream_request(cli) {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     if args.max_events == Some(0) {
         return ProcessExitCode::Success;
@@ -21609,7 +21609,7 @@ where
     let workspace_path = cli.resolve_workspace();
     let filter = match parse_subscribe_filter(args.filter.as_deref()) {
         Ok(filter) => filter,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     stream_subscribe_deltas(cli, args, &workspace_path, filter, stdout, stderr)
 }
@@ -21650,7 +21650,7 @@ where
         };
         let report = match poll_memory_deltas(&options) {
             Ok(report) => report,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         cursor = report.next_cursor;
         for delta in &report.deltas {
@@ -21663,7 +21663,7 @@ where
                             "Retry the stream or use `ee subscribe poll --json`.".to_owned(),
                         ),
                     };
-                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                    return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
                 }
             };
             if stdout.write_all(line.as_bytes()).is_err() || stdout.write_all(b"\n").is_err() {
@@ -21739,7 +21739,7 @@ where
             };
             match workspace_core::resolve_workspace_report(&options) {
                 Ok(report) => render_workspace_resolve(cli, &report, stdout),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
         WorkspaceCommand::List(_args) => {
@@ -21748,13 +21748,13 @@ where
             };
             match workspace_core::list_workspace_registry(&options) {
                 Ok(report) => render_workspace_list(cli, &report, stdout),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
         WorkspaceCommand::Alias(args) => {
             let alias = match workspace_alias_name(args) {
                 Ok(alias) => alias,
-                Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
             };
             let options = workspace_core::WorkspaceAliasOptions {
                 workspace_path: cli.workspace.clone(),
@@ -21766,7 +21766,7 @@ where
             };
             match workspace_core::alias_workspace(&options) {
                 Ok(report) => render_workspace_alias(cli, &report, stdout),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
         WorkspaceCommand::Hygiene(args) => {
@@ -21801,7 +21801,7 @@ where
                         rendered
                     }
                 }
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
     }
@@ -23622,7 +23622,7 @@ where
                     ),
                     repair: Some("ee agent-docs".to_string()),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         },
         None => None,
@@ -23681,7 +23681,7 @@ where
             })
             .to_string(),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let workspace_path = cli.resolve_workspace();
@@ -23723,7 +23723,7 @@ where
 
     match apply_docs_bootstrap(&options) {
         Ok(report) => write_bootstrap_apply_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -23860,7 +23860,7 @@ where
                     message: error.to_string(),
                     repair: error.repair_hint().map(str::to_string),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         },
         None => None,
@@ -23881,7 +23881,7 @@ where
                 message: error.to_string(),
                 repair: error.repair_hint().map(str::to_string),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let cass_client = match resolve_cass_subprocess_timeout(
@@ -23915,7 +23915,7 @@ where
         }
         Err(error) => {
             let domain_error = cass_import_domain_error(&error);
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -24180,7 +24180,7 @@ where
                 message: error.to_string(),
                 repair: error.repair_hint().map(str::to_string),
             };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -24246,7 +24246,7 @@ where
                 message: error.to_string(),
                 repair: error.repair_hint().map(str::to_string),
             };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -24650,7 +24650,7 @@ where
                 message: error.to_string(),
                 repair: error.repair_hint().map(str::to_string),
             };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -24705,7 +24705,7 @@ where
                 message: error.to_string(),
                 repair: error.repair_hint().map(str::to_string),
             };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -24743,7 +24743,7 @@ where
 
     let report = match run_backfill(&options) {
         Ok(report) => report,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     match cli.renderer() {
@@ -25028,7 +25028,7 @@ where
 
     match capture_episode(&options) {
         Ok(report) => write_lab_capture_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25050,7 +25050,7 @@ where
         };
         return match replay_agent_workload_trace(&options) {
             Ok(report) => write_lab_agent_workload_replay_report(cli, &report, stdout),
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     }
 
@@ -25062,7 +25062,7 @@ where
                     .to_owned(),
             ),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     };
 
     let options = LabReplayOptions {
@@ -25077,7 +25077,7 @@ where
 
     match replay_episode(&options) {
         Ok(report) => write_lab_replay_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25102,7 +25102,7 @@ where
 
     match replay_swarm_workload_trace(&options) {
         Ok(report) => write_lab_swarm_replay_result(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25157,7 +25157,7 @@ where
     E: Write,
 {
     if let Err(error) = validate_lab_swarm_fixture_seed(&args.fixture_seed) {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let options = SwarmWorkloadFixtureOptions::new(args.profile.into(), args.fixture_seed.clone());
@@ -25183,7 +25183,7 @@ where
 
     match promote_agent_workload_trace_to_swarm_workload(&options) {
         Ok(trace) => write_lab_swarm_workload_trace(cli, &trace, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25221,17 +25221,17 @@ where
 {
     let mut interventions = match lab_counterfactual_interventions(args) {
         Ok(interventions) => interventions,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let swap_revision = match parse_lab_counterfactual_swap_revision(args.swap_revision.as_deref())
     {
         Ok(revision) => revision,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     for raw_swap in &args.swap {
         let intervention = match parse_lab_counterfactual_swap(raw_swap, &swap_revision) {
             Ok(intervention) => intervention,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         interventions.push(intervention);
     }
@@ -25254,7 +25254,7 @@ where
                     .to_string(),
             ),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let options = LabCounterfactualOptions {
@@ -25267,7 +25267,7 @@ where
 
     match run_counterfactual(&options) {
         Ok(report) => write_lab_counterfactual_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25428,7 +25428,7 @@ where
                 write_stdout(stdout, &(output::render_learn_agenda_json(&report) + "\n"))
             }
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25452,7 +25452,7 @@ where
                 ),
                 repair: Some("Use --min-uncertainty 0.3".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -25480,7 +25480,7 @@ where
                 &(output::render_learn_uncertainty_json(&report) + "\n"),
             ),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25504,7 +25504,7 @@ where
                     ),
                     repair: Some("Use --threshold 0.55".to_owned()),
                 };
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
         },
         None => None,
@@ -25532,7 +25532,7 @@ where
                 write_stdout(stdout, &(output::render_learn_cluster_json(&report) + "\n"))
             }
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25566,7 +25566,7 @@ where
                 write_stdout(stdout, &(output::render_learn_gaps_json(&report) + "\n"))
             }
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25590,7 +25590,7 @@ where
                 ),
                 repair: Some("Use --min-expected-value 0.0".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -25605,7 +25605,7 @@ where
                 ),
                 repair: Some("Use --safety-boundary dry_run_only".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -25637,7 +25637,7 @@ where
                 &(output::render_learn_experiment_proposal_json(&report) + "\n"),
             ),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25658,7 +25658,7 @@ where
                 "Use ee learn experiment run --id <experiment-id> --dry-run --json".to_string(),
             ),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let options = LearnExperimentRunOptions {
@@ -25686,7 +25686,7 @@ where
                 &(output::render_learn_experiment_run_json(&report) + "\n"),
             ),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25711,7 +25711,7 @@ where
                 ),
                 repair: Some("Use --signal positive".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let measurement_value = match parse_learn_float_option(
@@ -25720,7 +25720,7 @@ where
         "Use --measurement-value 1.0",
     ) {
         Ok(value) => value,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let options = LearnObserveOptions {
         workspace: cli.resolve_workspace(),
@@ -25757,7 +25757,7 @@ where
                 write_stdout(stdout, &(output::render_learn_observe_json(&report) + "\n"))
             }
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25782,7 +25782,7 @@ where
                 ),
                 repair: Some("Use --status confirmed".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let confidence_delta = match parse_learn_float(
@@ -25791,7 +25791,7 @@ where
         "Use --confidence-delta 0.25",
     ) {
         Ok(value) => value,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let options = LearnCloseOptions {
         workspace: cli.resolve_workspace(),
@@ -25829,7 +25829,7 @@ where
                 write_stdout(stdout, &(output::render_learn_close_json(&report) + "\n"))
             }
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25888,7 +25888,7 @@ where
                 write_stdout(stdout, &(output::render_learn_summary_json(&report) + "\n"))
             }
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25924,17 +25924,17 @@ where
             }
             output::Renderer::Toon => match output::render_audit_timeline_toon(&report) {
                 Ok(toon) => write_stdout(stdout, &(toon + "\n")),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             },
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => match output::render_audit_timeline_json(&report) {
                 Ok(json) => write_stdout(stdout, &(json + "\n")),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             },
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25961,17 +25961,17 @@ where
             }
             output::Renderer::Toon => match output::render_audit_show_toon(&report) {
                 Ok(toon) => write_stdout(stdout, &(toon + "\n")),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             },
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => match output::render_audit_show_json(&report) {
                 Ok(json) => write_stdout(stdout, &(json + "\n")),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             },
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -25999,17 +25999,17 @@ where
             }
             output::Renderer::Toon => match output::render_audit_diff_toon(&report) {
                 Ok(toon) => write_stdout(stdout, &(toon + "\n")),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             },
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => match output::render_audit_diff_json(&report) {
                 Ok(json) => write_stdout(stdout, &(json + "\n")),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             },
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -26037,17 +26037,17 @@ where
             }
             output::Renderer::Toon => match output::render_audit_verify_toon(&report) {
                 Ok(toon) => write_stdout(stdout, &(toon + "\n")),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             },
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => match output::render_audit_verify_json(&report) {
                 Ok(json) => write_stdout(stdout, &(json + "\n")),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             },
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -26069,7 +26069,7 @@ where
     let tripwire_sources = if args.check_tripwires {
         let registry = match PreflightGuardRegistry::load(&workspace) {
             Ok(registry) => registry,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         guard_tripwire_sources_for_command(&registry, &args.task_input)
     } else {
@@ -26089,7 +26089,7 @@ where
 
     match run_preflight(&options) {
         Ok(report) => write_preflight_run_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -26161,7 +26161,7 @@ where
 
     match show_preflight(&options) {
         Ok(report) => write_preflight_show_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -26177,11 +26177,11 @@ where
 {
     let task_outcome = match parse_task_outcome_arg(args.task_outcome.as_deref()) {
         Ok(outcome) => outcome,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let feedback_kind = match parse_preflight_feedback_arg(args.feedback.as_deref()) {
         Ok(kind) => kind,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let options = PreflightCloseOptions {
@@ -26196,7 +26196,7 @@ where
 
     match close_preflight(&options) {
         Ok(report) => write_preflight_close_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -26564,7 +26564,7 @@ where
     };
     match recommend_recipes(&options) {
         Ok(report) => write_plan_recommend_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -26585,7 +26585,7 @@ fn handle_plan_recipe_save<W: Write, E: Write>(
         dry_run: args.dry_run,
     });
     match result {
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         Ok(data) => {
             let summary = if args.dry_run {
                 format!("Draft recipe preview (not saved): {}\n", data["recipe"])
@@ -26634,7 +26634,7 @@ where
             .into_iter()
             .filter(|entry| category.is_none_or(|c| entry.recipe.category == c))
             .collect::<Vec<_>>(),
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let human_output = || {
@@ -26708,7 +26708,7 @@ where
 
     let (workspace, _) = resolve_local_workspace_for_cli(cli, None);
     match find_recipe(&workspace, args.database.as_deref(), &args.recipe_id) {
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         Ok(Some(entry)) => {
             let recipe = &entry.recipe;
             let human_output = || {
@@ -26800,7 +26800,7 @@ where
                 id: args.recipe_id.clone(),
                 repair: Some("ee plan recipe list --json".to_string()),
             };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -26824,7 +26824,7 @@ where
     };
     match report {
         Ok(report) => write_plan_explain_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -26850,7 +26850,7 @@ where
     };
     match recommend_recipes(&options) {
         Ok(report) => write_plan_recommend_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -26961,7 +26961,7 @@ where
 {
     match compare_artifact_summary_files(&args.baseline, &args.candidate) {
         Ok(report) => write_perf_compare_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -26982,7 +26982,7 @@ where
         args.command_timeout_ms,
     ) {
         Ok(options) => options,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let runner = SystemSwarmBriefCommandRunner;
     let snapshot = collect_perf_live_snapshot(&options, &runner);
@@ -27006,7 +27006,7 @@ where
         args.command_timeout_ms,
     ) {
         Ok(options) => options,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let runner = SystemSwarmBriefCommandRunner;
     let max_snapshots = args.max_snapshots.unwrap_or(u64::MAX);
@@ -27041,7 +27041,7 @@ where
 {
     match prompt_budget_report(&args.trace) {
         Ok(report) => write_perf_prompt_budget_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -27060,7 +27060,7 @@ where
             message: format!("Unknown perf explain-latency surface `{}`.", args.surface),
             repair: Some("Use `--surface search` or `--surface context`.".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     };
 
     if args.report.is_none() && args.log.is_none() {
@@ -27073,12 +27073,12 @@ where
                     .to_owned(),
             ),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     match explain_latency_report(surface, args.report.as_deref(), args.log.as_deref()) {
         Ok(report) => write_perf_explain_latency_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -27094,7 +27094,7 @@ where
 {
     match check_perf_budget_report(&args.profile, &args.report) {
         Ok(report) => write_perf_budget_check_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -27560,7 +27560,7 @@ where
                 Ok(report) => write_config_show_report(cli, &report, stdout),
                 Err(error) => {
                     let domain_error = config_surface_error_to_domain(error);
-                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                    write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
                 }
             }
         }
@@ -27573,7 +27573,7 @@ where
                 Ok(report) => write_config_get_report(cli, &report, stdout),
                 Err(error) => {
                     let domain_error = config_surface_error_to_domain(error);
-                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                    write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
                 }
             }
         }
@@ -27586,7 +27586,7 @@ where
                 Ok(report) => write_config_set_report(cli, &report, stdout),
                 Err(error) => {
                     let domain_error = config_surface_error_to_domain(error);
-                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                    write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
                 }
             }
         }
@@ -27723,7 +27723,7 @@ where
 {
     let (workspace_root, catalog) = match load_task_lens_catalog(cli) {
         Ok(loaded) => loaded,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     match command {
@@ -27738,7 +27738,7 @@ where
                         "Run `ee lens list --json` to inspect available task lens ids.".to_owned(),
                     ),
                 };
-                write_domain_error(&error, cli.wants_json(), stdout, stderr)
+                write_domain_error(&error, cli.renderer(), stdout, stderr)
             }
         },
     }
@@ -28238,7 +28238,7 @@ where
                 Ok(report) => write_profile_config_report(cli, &report, stdout),
                 Err(error) => {
                     let domain_error = profile_config_error_to_domain(error);
-                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                    write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
                 }
             }
         }
@@ -28256,7 +28256,7 @@ where
                 Ok(report) => write_profile_config_report(cli, &report, stdout),
                 Err(error) => {
                     let domain_error = profile_config_error_to_domain(error);
-                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                    write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
                 }
             }
         }
@@ -28433,7 +28433,7 @@ where
     };
     match crate::core::procedure::propose_procedure(&options) {
         Ok(report) => write_procedure_propose_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -28483,7 +28483,7 @@ where
     };
     match crate::core::procedure::show_procedure(&options) {
         Ok(report) => write_procedure_show_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -28531,7 +28531,7 @@ where
     };
     match crate::core::procedure::list_procedures(&options) {
         Ok(report) => write_procedure_list_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -28579,7 +28579,7 @@ where
     };
     match crate::core::procedure::export_procedure(&options) {
         Ok(report) => write_procedure_export_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -28631,7 +28631,7 @@ where
     };
     match crate::core::procedure::promote_procedure(&options) {
         Ok(report) => write_procedure_promote_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -28681,7 +28681,7 @@ where
     };
     match crate::core::procedure::retire_procedure(&options) {
         Ok(report) => write_procedure_retire_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -28737,7 +28737,7 @@ where
     };
     match crate::core::procedure::verify_procedure(&options) {
         Ok(report) => write_procedure_verify_report(cli, &report, args.allow_failure, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -28794,12 +28794,12 @@ where
         resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
     let evidence = match parse_procedure_drift_evidence_inputs(&args.evidence) {
         Ok(evidence) => evidence,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let dependency_contracts =
         match parse_procedure_dependency_contract_inputs(&args.dependency_contracts) {
             Ok(dependency_contracts) => dependency_contracts,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     let options = crate::core::procedure::ProcedureDriftOptions {
         workspace: workspace_path,
@@ -28813,7 +28813,7 @@ where
     };
     match crate::core::procedure::detect_procedure_drift(&options) {
         Ok(report) => write_procedure_drift_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -28967,11 +28967,11 @@ where
     } else {
         let conn = match open_recorder_database_for_write(cli) {
             Ok(conn) => conn,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         match crate::core::recorder::start_and_persist_recording(&conn, &options) {
             Ok(report) => report,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     };
 
@@ -29051,7 +29051,7 @@ where
     } else {
         let conn = match open_recorder_database_for_write(cli) {
             Ok(conn) => conn,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         match crate::core::recorder::record_and_persist_event(&conn, &options) {
             Ok(report) => report,
@@ -29148,7 +29148,7 @@ where
                 message: format!("Invalid recorder finish status '{}'.", args.status),
                 repair: Some("Use one of: completed, abandoned.".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -29163,11 +29163,11 @@ where
     } else {
         let conn = match open_recorder_database_for_write(cli) {
             Ok(conn) => conn,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         match crate::core::recorder::finish_and_persist_recording(&conn, &options) {
             Ok(report) => report,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     };
 
@@ -29300,10 +29300,10 @@ where
 {
     let filter = match parse_recorder_event_filter(args.filter.as_deref()) {
         Ok(filter) => filter,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     if let Err(error) = validate_recorder_since(args.since.as_deref()) {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let options = crate::core::recorder::RecorderTailOptions {
         run_id: args.run_id.clone(),
@@ -29315,7 +29315,7 @@ where
     };
     let conn = match open_recorder_database(cli, args.database.as_deref()) {
         Ok(conn) => conn,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     if args.follow {
@@ -29325,7 +29325,7 @@ where
                     message: format!("Unsupported recorder tail follow format `{format}`"),
                     repair: Some("Use `--tail-format jsonl` or `ee recorder follow`.".to_owned()),
                 };
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
         }
         return run_recorder_follow_loop(cli, &conn, options, 250, None, stdout, stderr);
@@ -29333,7 +29333,7 @@ where
 
     match crate::core::recorder::tail_recording_from_store(&conn, &options) {
         Ok(report) => write_recorder_tail_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -29349,10 +29349,10 @@ where
 {
     let filter = match parse_recorder_event_filter(args.filter.as_deref()) {
         Ok(filter) => filter,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     if let Err(error) = validate_recorder_since(args.since.as_deref()) {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let options = crate::core::recorder::RecorderTailOptions {
         run_id: args.run_id.clone(),
@@ -29364,7 +29364,7 @@ where
     };
     let conn = match open_recorder_database(cli, args.database.as_deref()) {
         Ok(conn) => conn,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     if !args.json_lines
@@ -29409,7 +29409,7 @@ where
             ),
             repair: Some("Use --redaction-level strict or --redaction-level audit.".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     };
     let recorded_at = args
         .recorded_at
@@ -29457,7 +29457,7 @@ where
         Err(error) => {
             return write_domain_error(
                 &flight_recorder_error_to_domain(error),
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -29472,7 +29472,7 @@ where
         Ok(report) => write_flight_recorder_report(cli, "recorder flight append", &report, stdout),
         Err(error) => write_domain_error(
             &flight_recorder_error_to_domain(error),
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -29493,7 +29493,7 @@ where
         Ok(report) => write_flight_recorder_report(cli, "recorder flight replay", &report, stdout),
         Err(error) => write_domain_error(
             &flight_recorder_error_to_domain(error),
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -29661,7 +29661,7 @@ where
                             .to_owned(),
                     ),
                 };
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
         };
     let mut seen_event_ids = BTreeSet::new();
@@ -29684,7 +29684,7 @@ where
                             message: format!("Failed to write recorder follow event: {error}"),
                             repair: Some("Check stdout consumer and retry.".to_owned()),
                         };
-                        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
                     }
                 }
                 if let Err(error) = stdout.flush() {
@@ -29692,7 +29692,7 @@ where
                         message: format!("Failed to flush recorder follow output: {error}"),
                         repair: Some("Check stdout consumer and retry.".to_owned()),
                     };
-                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                    return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
                 }
             }
             Ok(crate::core::recorder::TailFollowResult::RunCompleted { .. }) => {
@@ -29709,7 +29709,7 @@ where
                         "Use `ee recorder tail --json` to inspect available events.".to_owned(),
                     ),
                 };
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
             Ok(crate::core::recorder::TailFollowResult::Waiting { .. })
             | Ok(crate::core::recorder::TailFollowResult::StoreUnavailable { .. }) => {
@@ -29735,7 +29735,7 @@ where
                 #[cfg(not(unix))]
                 std::thread::sleep(poll_interval);
             }
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     }
 }
@@ -30009,7 +30009,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let kind = match args.kind.parse::<RationaleTraceKind>() {
@@ -30019,7 +30019,7 @@ where
                 message: format!("Invalid rationale kind '{}'", args.kind),
                 repair: Some("Use one of: hypothesis, decision, question, rejected_alternative, observation, conclusion".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -30038,7 +30038,7 @@ where
                     .to_string(),
             ),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -30054,7 +30054,7 @@ where
                         .to_string(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -30104,7 +30104,7 @@ where
                 message: format!("Failed to open database: {e}"),
                 repair: Some("ee init --workspace .".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -30114,7 +30114,7 @@ where
         &[workspace_path.as_path()],
     ) {
         Ok(workspace_id) => workspace_id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let audit_details = serde_json::json!({
@@ -30136,7 +30136,7 @@ where
             message: format!("Failed to store rationale trace: {e}"),
             repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let output = serde_json::json!({
@@ -30173,7 +30173,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match crate::db::DbConnection::open_file(&database_path) {
@@ -30183,7 +30183,7 @@ where
                 message: format!("Failed to open database: {e}"),
                 repair: Some("ee init --workspace .".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -30219,14 +30219,14 @@ where
                 id: args.trace_id.clone(),
                 repair: Some("ee rationale list --target-type memory --target-id <id>".to_string()),
             };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
         Err(e) => {
             let domain_error = DomainError::Storage {
                 message: format!("Failed to query rationale trace: {e}"),
                 repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
             };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -30249,7 +30249,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match crate::db::DbConnection::open_file(&database_path) {
@@ -30259,13 +30259,13 @@ where
                 message: format!("Failed to open database: {e}"),
                 repair: Some("ee init --workspace .".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
     let workspace_id = match bound_cli_workspace_id(&conn, &workspace_path) {
         Ok(workspace_id) => workspace_id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     match conn.list_rationale_traces_for_target(&workspace_id, &args.target_type, &args.target_id) {
@@ -30303,7 +30303,7 @@ where
                 message: format!("Failed to list rationale traces: {e}"),
                 repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
             };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -30325,11 +30325,11 @@ where
     let commands =
         match load_rehearsal_commands(args.commands.as_deref(), args.commands_json.as_deref()) {
             Ok(commands) => commands,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     let profile = match parse_rehearsal_profile(&args.profile) {
         Ok(profile) => profile,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let options = RehearsePlanOptions {
         workspace: rehearse_workspace(cli),
@@ -30338,7 +30338,7 @@ where
     };
     match plan_rehearsal(&options) {
         Ok(report) => write_rehearse_report(cli, &report, |report| report.human_summary(), stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -30355,11 +30355,11 @@ where
     let commands =
         match load_rehearsal_commands(args.commands.as_deref(), args.commands_json.as_deref()) {
             Ok(commands) => commands,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     let profile = match parse_rehearsal_profile(&args.profile) {
         Ok(profile) => profile,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let ee_binary = match std::env::current_exe() {
         Ok(path) => path,
@@ -30368,7 +30368,7 @@ where
                 message: format!("Failed to locate current ee binary for rehearsal: {error}"),
                 repair: Some("Run ee rehearse from an installed ee binary".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let options = RehearseRunOptions {
@@ -30380,7 +30380,7 @@ where
     };
     match run_rehearsal(&options) {
         Ok(report) => write_rehearse_report(cli, &report, |report| report.human_summary(), stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -30400,7 +30400,7 @@ where
     };
     match inspect_rehearsal(&options) {
         Ok(report) => write_rehearse_report(cli, &report, |report| report.human_summary(), stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -30420,7 +30420,7 @@ where
     };
     match promote_plan_rehearsal(&options) {
         Ok(report) => write_rehearse_report(cli, &report, |report| report.human_summary(), stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -32230,7 +32230,7 @@ where
         Ok(report) => report,
         Err(error) => {
             let domain_error = read_only_report_storage_error("trust report", error);
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -35547,7 +35547,7 @@ where
         .and_then(|()| validate_graph_memory_pair(&args.memory_a, &args.memory_b))
     {
         Ok(()) => {}
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 
     match proximity_feature_enabled(cli) {
@@ -35558,7 +35558,7 @@ where
         }
         Err(error) => {
             let domain_error = config_surface_error_to_domain(error);
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     }
 
@@ -35580,7 +35580,7 @@ where
                 })
         }) {
             Ok(report) => write_proximity_report(cli, &report, stdout),
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     }
 
@@ -39653,7 +39653,7 @@ where
                 "ee shadow run --policy {RETRIEVAL_TUNING_POLICY_ID} --json"
             )),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     };
     if policy != RETRIEVAL_TUNING_POLICY_ID {
         let known = crate::shadow::find_shadow_policy_inventory_entry(policy).is_some();
@@ -39667,7 +39667,7 @@ where
             },
             repair: Some("ee schema export ee.shadow_policy_inventory.v1 --json".to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let MemoryStoreTarget {
@@ -39690,7 +39690,7 @@ where
                 message: format!("open database: {error}"),
                 repair: Some(crate::core::storeless_workspace_repair(&database_path)),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -39722,7 +39722,7 @@ where
                 message: error.to_string(),
                 repair: Some("ee doctor".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -39836,12 +39836,12 @@ where
                 message: format!("open database: {error}"),
                 repair: Some(crate::core::storeless_workspace_repair(&database_path)),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let workspace_id = match bound_cli_workspace_id(&connection, &canonical_workspace) {
         Ok(workspace_id) => workspace_id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let command_name = if promote {
         "shadow promote"
@@ -39864,14 +39864,14 @@ where
                 ),
                 details_json: serde_json::json!({ "refusal": format!("{refusal:?}") }).to_string(),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         Err(error) => {
             let domain_error = DomainError::Storage {
                 message: error.to_string(),
                 repair: Some("ee doctor".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -39991,7 +39991,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     match close_workflow(&WorkflowCloseOptions {
@@ -40009,7 +40009,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -40991,7 +40991,7 @@ where
         // code 10) instead of a bare init-first storage error
         // (bd-workspace-miss-init-suggestion-sfjvq).
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match crate::db::DbConnection::open_schema_only(&database_path) {
@@ -41001,7 +41001,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: Some("ee doctor".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -41013,20 +41013,20 @@ where
                 id: crate::models::public_pack_id(&args.pack_id),
                 repair: Some("ee context <query>  # create a fresh pack".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         Err(error) => {
             let domain_error = DomainError::Storage {
                 message: format!("Failed to query pack: {error}"),
                 repair: Some("ee doctor".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
     let expected_workspace_id = match resolve_database_workspace_id(&conn, &workspace_path) {
         Ok(workspace_id) => workspace_id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     if record.workspace_id != expected_workspace_id {
         let domain_error = DomainError::NotFound {
@@ -41034,7 +41034,7 @@ where
             id: crate::models::public_pack_id(&args.pack_id),
             repair: Some("Use a pack ID from the current workspace.".to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     let parsed = crate::db::parse_stored_pack_ledger(&record);
     let Some(ledger) = parsed.available_ledger() else {
@@ -41045,7 +41045,7 @@ where
             ),
             repair: Some("ee doctor --json".to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     };
     let public_ledger = public_pack_ledger_projection(ledger);
     let query_record = public_ledger
@@ -41153,7 +41153,7 @@ where
                 message,
                 repair: Some("ee orient --help".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -41168,7 +41168,7 @@ where
         Err(error) if error.kind() == std::io::ErrorKind::NotFound
     ) {
         let domain_error = crate::core::storeless_workspace_error(&addressed_database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     let addressed_index_dir = addressed_database_path.parent().map_or_else(
         || workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR),
@@ -41221,7 +41221,7 @@ where
                 }
                 write_stdout(stdout, &(response.to_string() + "\n"))
             }
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     }
     let orient_start_backend = crate::core::index::active_embed_backend();
@@ -42146,7 +42146,7 @@ where
     {
         return write_domain_error(
             &output_write_failure_error(output_path, &error),
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -42158,7 +42158,7 @@ where
                 message,
                 repair: Some("ee pack --help".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -44479,7 +44479,7 @@ where
         // code 10) instead of a bare init-first storage error
         // (bd-workspace-miss-init-suggestion-sfjvq).
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match crate::db::DbConnection::open_schema_only(&database_path) {
@@ -44489,7 +44489,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: Some("ee doctor".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -45017,7 +45017,7 @@ where
         // code 10) instead of a bare init-first storage error
         // (bd-workspace-miss-init-suggestion-sfjvq).
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let connection = if args.dry_run {
@@ -45032,7 +45032,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: Some("ee doctor".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -45103,7 +45103,7 @@ where
                 message: format!("Migration failed: {error}"),
                 repair: Some("ee doctor".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -45122,7 +45122,7 @@ where
             return write_cancelled_error(&reason, cli.wants_json(), stdout, stderr);
         }
         Err(CancellationAwareCliError::Domain(error)) => {
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
     let post_migration_index_rebuild_status = post_migration_index_rebuild
@@ -45133,7 +45133,7 @@ where
     let bayes_backfill =
         match run_migrate_bayes_backfill(&conn, &workspace_path, args.bayes_backfill_mode()) {
             Ok(report) => report,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     // GH #35: migrations are the other place a large batch of frames lands in
     // the WAL sidecar, and the automatic checkpoint threshold is a flat 64 MB
@@ -45240,7 +45240,7 @@ where
         args.shards_dir.clone(),
     ) {
         Ok(plan) => plan,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let plan_value = serde_json::to_value(&plan).unwrap_or_else(|_| serde_json::json!({}));
@@ -45249,7 +45249,7 @@ where
     } else {
         match apply_shard_fanout_migration(&plan) {
             Ok(report) => Some(report),
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     };
     let degraded_value = apply_report
@@ -48030,7 +48030,7 @@ where
 
     match capture_suggestions(&options) {
         Ok(report) => write_capture_suggest_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -48114,7 +48114,7 @@ where
 
     match review_session_proposals(&options) {
         Ok(report) => write_review_session_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -48209,7 +48209,7 @@ where
 
     let surface = match impact_surface_from_args(args) {
         Ok(surface) => surface,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let options = ImpactOptions {
         workspace_path: cli.resolve_workspace(),
@@ -48240,7 +48240,7 @@ where
         },
         Err(error) => {
             let domain_error = impact_error_to_domain(error);
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -48427,7 +48427,7 @@ where
     E: Write,
 {
     if let Err(error) = validate_family_search_args(args) {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
@@ -48436,7 +48436,7 @@ where
         .map(resolve_cli_workspace_path)
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     if let Err(error) = crate::core::ensure_addressed_database_exists(&database_path) {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let options = FamilyRetrievalOptions {
         workspace_path: &workspace_path,
@@ -48461,7 +48461,7 @@ where
                 write_stdout(stdout, &(format_search_family_json(&report) + "\n"))
             }
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -49159,7 +49159,7 @@ where
                 message: "search --all-workspaces requires a positional query".to_owned(),
                 repair: Some("Use `ee search --all-workspaces --json -- <query>`.".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -49180,7 +49180,7 @@ where
                 message: format!("open database read-only: {error}"),
                 repair: Some("ee doctor".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let registered = match connection.list_workspaces() {
@@ -49190,7 +49190,7 @@ where
                 message: format!("list registered workspaces: {error}"),
                 repair: Some("ee doctor".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let total_registered = registered.len();
@@ -49359,7 +49359,7 @@ where
                 message: "search requires either a positional query or --family <id>".to_owned(),
                 repair: Some("Use `ee search <query>` or `ee search --family <id>`.".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -49671,7 +49671,7 @@ where
         }
         Err(error) => {
             let domain_error = similar_error_to_domain_error(&error);
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -50126,7 +50126,7 @@ where
             );
             write_remember_data_payload(cli, &data, &human, stdout)
         }
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -50148,20 +50148,20 @@ where
     };
     if !args.batch || !args.stdin {
         let error = usage("--batch and --stdin must be used together for an outcome JSONL batch");
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     if args.target_id.is_some() || args.signal.is_some() {
         let error = usage(
             "pass either positional TARGET_ID/--signal or --batch --stdin, not both; put \
              target/signal on each JSONL line instead",
         );
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     if args.event_id.is_some() {
         let error = usage(
             "--event-id applies to single-event mode; put `eventId` on each JSONL line instead",
         );
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         let error = DomainError::Usage {
@@ -50171,7 +50171,7 @@ where
                     .to_owned(),
             ),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let mut input = String::new();
     if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input) {
@@ -50179,7 +50179,7 @@ where
             message: format!("failed to read JSONL batch from stdin: {error}"),
             repair: Some("pipe UTF-8 JSONL, one outcome event object per line".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let workspace_path = cli.resolve_workspace();
@@ -50218,7 +50218,7 @@ where
                 ),
                 details_json: details.to_string(),
             };
-            write_domain_error(&error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&error, cli.renderer(), stdout, stderr)
         }
         Ok(report) => {
             let human = format!(
@@ -50231,7 +50231,7 @@ where
             );
             write_remember_data_payload(cli, &report.data_json(), &human, stdout)
         }
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -50285,13 +50285,13 @@ where
                     Some(target)
                 }
                 Err(error) => {
-                    return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                    return write_domain_error(&error, cli.renderer(), stdout, stderr);
                 }
             }
         }
         (Some(_), None) => {
             let error = usage("--pack requires --item <N> to address one pack item");
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
         (None, _) => None,
     };
@@ -50303,11 +50303,11 @@ where
         let error = usage(
             "TARGET_ID (or --pack <id> --item <n>) is required unless --batch --stdin is given",
         );
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     };
     let Some(signal) = args.signal.clone() else {
         let error = usage("--signal is required unless --batch --stdin is given");
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     };
     let target_type = resolved_pack_target.as_ref().map_or_else(
         || args.target_type.clone(),
@@ -50384,7 +50384,7 @@ where
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -50480,7 +50480,7 @@ where
     let (connection, workspace_id, workspace_path) =
         match open_agentsmd_workspace(cli, args.database.as_deref()) {
             Ok(opened) => opened,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     let options = crate::core::agentsmd::AgentsmdExportOptions {
         file: args.file.clone(),
@@ -50498,7 +50498,7 @@ where
         Ok(report) => {
             write_agentsmd_report(cli, &report.human_summary(), &report.data_json(), stdout)
         }
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -50515,7 +50515,7 @@ where
     let (connection, workspace_id, workspace_path) =
         match open_agentsmd_workspace(cli, args.database.as_deref()) {
             Ok(opened) => opened,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     // Dry-run is the default (ADR 0065 §5): --apply is the only way to
     // write; --dry-run is accepted explicitly and conflicts with --apply
@@ -50533,7 +50533,7 @@ where
         Ok(report) => {
             write_agentsmd_report(cli, &report.human_summary(), &report.data_json(), stdout)
         }
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -50595,7 +50595,7 @@ where
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     if !database_path.exists() {
         let error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let connection = match crate::db::DbConnection::open_file(&database_path) {
         Ok(connection) => connection,
@@ -50604,7 +50604,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: Some("ee status --json".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
     if let Err(error) = connection.migrate() {
@@ -50612,11 +50612,11 @@ where
             message: format!("Failed to migrate database: {error}"),
             repair: Some("ee migrate run --workspace . --json".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let workspace_id = match bound_cli_workspace_id(&connection, &workspace_path) {
         Ok(workspace_id) => workspace_id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let settings =
@@ -50634,7 +50634,7 @@ where
                 message: format!("Failed to assemble primer: {error}"),
                 repair: Some("ee doctor --json".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -50712,7 +50712,7 @@ where
                 message: "failed to read question from stdin".to_owned(),
                 repair: Some("ee ask \"your question\" --json".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
         buf.trim().to_owned()
     } else {
@@ -50724,7 +50724,7 @@ where
             message: "ee ask requires a question: ee ask \"<question>\" [--json]".to_owned(),
             repair: Some("ee ask \"what port does the daemon use\" --json".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let workspace_path = cli.resolve_workspace();
@@ -50735,7 +50735,7 @@ where
 
     if !database_path.exists() {
         let error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let connection = match crate::db::DbConnection::open_file(&database_path) {
@@ -50745,7 +50745,7 @@ where
                 message: format!("Failed to open database: {e}"),
                 repair: Some("ee status --json".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -50754,12 +50754,12 @@ where
             message: format!("Failed to migrate database: {e}"),
             repair: Some("ee migrate run --workspace . --json".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let workspace_id = match bound_cli_workspace_id(&connection, &workspace_path) {
         Ok(workspace_id) => workspace_id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     // Fetch non-tombstoned memories for this workspace
@@ -50770,7 +50770,7 @@ where
                 message: format!("Failed to list memories: {e}"),
                 repair: Some("ee doctor --json".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -50799,7 +50799,7 @@ where
                     message: format!("Failed to read ask contradiction evidence: {error}"),
                     repair: Some("ee doctor --json".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -50863,7 +50863,7 @@ where
                 ),
                 repair: Some(format!("ee remember \"<fact about {question}>\" --json")),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     }
 
@@ -50946,7 +50946,7 @@ where
         args.cursor.as_deref(),
     ) {
         Ok(response) => response,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     if let Some(reason) = fallback {
         let entry = daemon_memory_read_fallback(&reason);
@@ -51011,7 +51011,7 @@ where
         limit: args.limit,
     }) {
         Ok(report) => report,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let envelope = serde_json::json!({
@@ -51168,7 +51168,7 @@ where
                     ),
                     repair: Some("ee journal append --help".to_owned()),
                 };
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
         },
     };
@@ -51180,7 +51180,7 @@ where
                 message: "pass either positional TEXT or --stdin, not both".to_owned(),
                 repair: Some("ee journal append --help".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
         // Reading stdin would block forever if no input is piped; refuse on
         // an interactive TTY (same guard as `ee preflight check --stdin`).
@@ -51193,7 +51193,7 @@ where
                         .to_owned(),
                 ),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
         let mut input = String::new();
         if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input)
@@ -51202,7 +51202,7 @@ where
                 message: format!("failed to read JSONL batch from stdin: {error}"),
                 repair: Some("pipe UTF-8 JSONL, one entry object per line".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
         return match append_journal_entries_stdin(&options, &input) {
             Ok(report) if report.all_failed() => {
@@ -51220,7 +51220,7 @@ where
                     ),
                     details_json: details.to_string(),
                 };
-                write_domain_error(&error, cli.wants_json(), stdout, stderr)
+                write_domain_error(&error, cli.renderer(), stdout, stderr)
             }
             Ok(report) => match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
@@ -51243,7 +51243,7 @@ where
                 | output::Renderer::Compact
                 | output::Renderer::Hook => write_journal_data_json(stdout, &report.data_json()),
             },
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     }
 
@@ -51253,7 +51253,7 @@ where
                 .to_owned(),
             repair: Some("ee journal append \"<text>\" --json".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     };
     let draft = JournalEntryDraft {
         body: text.to_owned(),
@@ -51275,13 +51275,13 @@ where
                     return write_journal_append_report(cli, &report, stdout);
                 }
             }
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     }
 
     match crate::core::journal::append_journal_entry_with_id(&options, &draft, entry_id) {
         Ok(report) => write_journal_append_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -51330,7 +51330,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => write_journal_data_json(stdout, &report.data_json()),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -51373,7 +51373,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => write_journal_data_json(stdout, &report.data_json()),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -51422,7 +51422,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => write_journal_data_json(stdout, &report.data_json()),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -51445,7 +51445,7 @@ where
 
     match list_feedback_quarantine(&options) {
         Ok(report) => write_outcome_quarantine_list_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -51498,7 +51498,7 @@ where
 
     match review_feedback_quarantine(&options) {
         Ok(report) => write_outcome_quarantine_review_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -51551,7 +51551,7 @@ where
                 message: error,
                 repair: Some("pass --file <verification-evidence.json> or --stdin".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let parsed = match parse_verification_evidence_record_input(&input) {
@@ -51564,7 +51564,7 @@ where
                         .to_owned(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let options = VerificationRecordOptions {
@@ -51593,7 +51593,7 @@ where
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -51749,7 +51749,7 @@ where
                 error,
                 "pass --from-json <path> or --from-json -",
             );
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let value = match serde_json::from_str::<serde_json::Value>(&input) {
@@ -51760,13 +51760,13 @@ where
                 format!("RCH verifier proof input is not valid JSON: {error}"),
                 "provide one ee.rch.verify.v1 JSON object",
             );
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let (connection, workspace_id, _) =
         match open_workspace_database_for_write(cli, args.database.as_deref()) {
             Ok(opened) => opened,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     let created_at = chrono::Utc::now().to_rfc3339();
 
@@ -51780,7 +51780,7 @@ where
         ),
         Err(error) => {
             let domain_error = rch_verify_ledger_error_to_domain(error);
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -51798,7 +51798,7 @@ where
     let Some((connection, workspace_id)) =
         (match open_verify_rch_ledger_database_for_read(cli, args.database.as_deref()) {
             Ok(opened) => opened,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         })
     else {
         let report = RchVerifyRunsReport {
@@ -51832,7 +51832,7 @@ where
         ),
         Err(error) => {
             let domain_error = rch_verify_ledger_error_to_domain(error);
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -51850,7 +51850,7 @@ where
     let Some((connection, workspace_id)) =
         (match open_verify_rch_ledger_database_for_read(cli, args.database.as_deref()) {
             Ok(opened) => opened,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         })
     else {
         let report = RchVerifyBlockersReport {
@@ -51878,7 +51878,7 @@ where
         ),
         Err(error) => {
             let domain_error = rch_verify_ledger_error_to_domain(error);
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -51901,7 +51901,7 @@ where
                 error,
                 "pass --from-json <path> or --from-json -",
             );
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let value = match serde_json::from_str::<serde_json::Value>(&input) {
@@ -51912,7 +51912,7 @@ where
                 format!("RCH verifier proof input is not valid JSON: {error}"),
                 "provide one ee.rch.verify.v1 JSON object",
             );
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let workspace = cli.resolve_workspace();
@@ -51932,7 +51932,7 @@ where
                 ),
                 "pass --manifest <Cargo.toml>",
             );
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let manifest_dir = manifest_path.parent().unwrap_or(workspace.as_path());
@@ -51951,7 +51951,7 @@ where
         ),
         Err(error) => {
             let domain_error = rch_topology_audit_error_to_domain(error);
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -52165,7 +52165,7 @@ where
                 ),
                 repair: Some("rerun with --proofs-root <path-to-proofs>".to_owned()),
             };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -52238,7 +52238,7 @@ where
     let (connection, workspace_id, workspace_path) =
         match open_verify_provenance_database(cli, args.database.as_deref()) {
             Ok(opened) => opened,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     let options = VerifyProvenanceOptions {
         workspace_path: &workspace_path,
@@ -52254,7 +52254,7 @@ where
 
     match verify_bounded_provenance(options) {
         Ok(report) => write_verify_provenance_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -52360,7 +52360,7 @@ where
 {
     let command_text = proof_command_text(&args.command);
     if let Some(error) = proof_admit_command_error(args, command_text.as_deref()) {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let command_hash = args
         .command_hash
@@ -52392,7 +52392,7 @@ where
         Ok(records) => records,
         Err(error) => {
             let domain_error = proof_ledger_usage_error(error);
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let now = args.now.unwrap_or_else(chrono::Utc::now);
@@ -52445,7 +52445,7 @@ where
         Ok(records) => records,
         Err(error) => {
             let domain_error = proof_ledger_usage_error(error);
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let matches: Vec<&crate::models::ProofBrokerLedgerRecord> = records
@@ -53040,7 +53040,7 @@ where
                         .to_owned(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let normalized_argv_hash = args
@@ -53158,7 +53158,7 @@ where
                 "use --requested-surface beads_comment, agent_mail, or support_bundle".to_owned(),
             ),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let records = match read_verification_closeout_records(args) {
@@ -53171,7 +53171,7 @@ where
                         .to_owned(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let record = match select_verification_closeout_record(args, &records) {
@@ -53184,7 +53184,7 @@ where
                         .to_owned(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let capsule = crate::models::verification_closeout_capsule(
@@ -53309,7 +53309,7 @@ where
                 .to_owned(),
             repair: Some("rerun with --require-rch-cargo".to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let workspace_path = cli.resolve_workspace();
@@ -53340,7 +53340,7 @@ where
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -53358,13 +53358,13 @@ where
         AttestCommand::Memory(args) => {
             let connection = match open_attest_database(cli, args.database.as_deref()) {
                 Ok(connection) => connection,
-                Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
             };
             let expected_workspace_id =
                 match resolve_database_workspace_id(&connection, &cli.resolve_workspace()) {
                     Ok(workspace_id) => workspace_id,
                     Err(error) => {
-                        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                        return write_domain_error(&error, cli.renderer(), stdout, stderr);
                     }
                 };
             match crate::core::attest::build_memory_attestation_for_workspace(
@@ -53387,13 +53387,13 @@ where
         AttestCommand::Pack(args) => {
             let connection = match open_attest_database(cli, args.database.as_deref()) {
                 Ok(connection) => connection,
-                Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
             };
             let expected_workspace_id =
                 match resolve_database_workspace_id(&connection, &cli.resolve_workspace()) {
                     Ok(workspace_id) => workspace_id,
                     Err(error) => {
-                        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                        return write_domain_error(&error, cli.renderer(), stdout, stderr);
                     }
                 };
             match crate::core::attest::build_pack_attestation_for_workspace(
@@ -53418,7 +53418,7 @@ where
 
     let bundle = match bundle_result {
         Ok(bundle) => bundle,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     write_attestation_bundle(cli, &bundle, stdout)
@@ -53444,7 +53444,7 @@ where
 
     let raw_message = match diagnostic_message_from_args(args) {
         Ok(message) => message,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let redacted_message = crate::policy::redact_secret_like_content(&raw_message).content;
     let inferred_code = if matches!(args.tool.as_str(), "rustc" | "cargo") {
@@ -53474,7 +53474,7 @@ where
                     ),
                     repair: Some("ee diagnose-error --help".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -53498,12 +53498,12 @@ where
     };
     let connection = match opened {
         Ok(connection) => connection,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let workspace_path = cli.resolve_workspace();
     let workspace_id = match bound_cli_workspace_id(&connection, &workspace_path) {
         Ok(workspace_id) => workspace_id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let mut recorded = false;
@@ -53519,7 +53519,7 @@ where
                     message: format!("Failed to record error fingerprint: {error}"),
                     repair: Some("ee doctor --json".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -53540,7 +53540,7 @@ where
                         message: format!("Failed to record error repair links: {error}"),
                         repair: Some("ee doctor --json".to_owned()),
                     },
-                    cli.wants_json(),
+                    cli.renderer(),
                     stdout,
                     stderr,
                 );
@@ -53561,7 +53561,7 @@ where
                     message: format!("Failed to diagnose error: {error}"),
                     repair: Some("ee doctor --json".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -53579,7 +53579,7 @@ where
                     message: format!("Failed to build error recall report: {error}"),
                     repair: Some("ee doctor --json".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -54218,7 +54218,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let profile = match args.profile.as_deref() {
@@ -54231,7 +54231,7 @@ where
                         "ee why-not <memory-id> --task \"<task>\" --profile balanced".to_string(),
                     ),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         },
         None => None,
@@ -54298,7 +54298,7 @@ where
             message: "Memory id is required unless --gaps is supplied.".to_string(),
             repair: Some("Use `ee why-not <memory-id> --task \"<task>\" --json`, or `ee why-not --task \"<task>\" --gaps --json`.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     };
     let memory_id = match memory_id_raw.parse::<crate::models::MemoryId>() {
         Ok(id) => id,
@@ -54307,7 +54307,7 @@ where
                 message: format!("Invalid memory id: {memory_id_raw}"),
                 repair: Some("ee memory list --workspace . --json".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -57099,7 +57099,7 @@ where
     let remember_args = note_to_remember_args(args);
     match handle_remember(cli, &remember_args) {
         Ok((outcome, seal)) => write_remember_outcome(cli, &outcome, seal.as_ref(), stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -57119,7 +57119,7 @@ where
     };
     match result {
         Ok(data) => write_sentinel_data(cli, data, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -57896,7 +57896,7 @@ where
                 repair: Some("Retry with --json and report the serialization failure.".to_owned()),
             };
             let mut sink = std::io::sink();
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, &mut sink);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, &mut sink);
         }
     };
     match cli.renderer() {
@@ -57973,13 +57973,13 @@ where
                 message: "--global is not supported with --batch --stdin".to_owned(),
                 repair: Some("Use single-memory `ee remember --global \"...\" --json`.".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
         return handle_remember_batch(cli, args, stdout, stderr);
     }
     match handle_remember(cli, args) {
         Ok((outcome, seal)) => write_remember_outcome(cli, &outcome, seal.as_ref(), stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -57999,33 +57999,33 @@ where
     };
     if !args.batch || !args.stdin {
         let error = usage("--batch and --stdin must be used together for a remember JSONL batch");
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     if args.content.is_some() {
         let error = usage("pass either positional CONTENT or --batch --stdin, not both");
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     if args.idempotency_key.is_some() {
         let error = usage(
             "--idempotency-key applies to single-memory mode; put `idempotencyKey` on each \
              JSONL line instead",
         );
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     if !args.typed_field_assignments.is_empty() {
         let error = usage(
             "--field applies to single-memory mode; put a `fields` object on each JSONL line instead",
         );
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     if !args.sentinels.is_empty() || !args.revive_when.is_empty() {
         let error = usage("--sentinel/--revive-when are not supported with --batch");
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     if args.seal {
         let error =
             usage("--seal applies to single-memory mode; seal each protocol write individually");
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     if args.attempt_family.is_some()
         || args.attempt_family_of_n.is_some()
@@ -58036,7 +58036,7 @@ where
             "--family/--of-n/--attempt/--attempt-outcome apply to single-memory mode; record \
              each sibling attempt with its own `ee remember --family <id>` write",
         );
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     // Reading stdin would block forever if no input is piped; refuse on an
     // interactive TTY (same guard as `ee journal append --stdin`).
@@ -58048,7 +58048,7 @@ where
                     .to_owned(),
             ),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let mut input = String::new();
     if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input) {
@@ -58056,7 +58056,7 @@ where
             message: format!("failed to read JSONL batch from stdin: {error}"),
             repair: Some("pipe UTF-8 JSONL, one remember input object per line".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
@@ -58067,7 +58067,7 @@ where
     if !args.dry_run
         && let Err(error) = crate::core::ensure_addressed_database_exists(&database_path)
     {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let options = RememberBatchOptions {
         workspace_path: &workspace_path,
@@ -58093,12 +58093,12 @@ where
                 ),
                 details_json: details.to_string(),
             };
-            write_domain_error(&error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&error, cli.renderer(), stdout, stderr)
         }
         Ok(report) => {
             write_remember_data_payload(cli, &report.data_json(), &report.human_summary(), stdout)
         }
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -58126,7 +58126,7 @@ where
                 message: "--all cannot be combined with --status".to_owned(),
                 repair: Some("ee curate candidates --help".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -58150,7 +58150,7 @@ where
 
     match list_curation_candidates(&options) {
         Ok(report) => write_curate_candidates_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -58226,7 +58226,7 @@ where
                     + "\n"),
             ),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -58253,7 +58253,7 @@ where
 
     match show_curation_candidate(&options) {
         Ok(report) => write_curate_show_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -58308,7 +58308,7 @@ where
 
     match validate_curation_candidate(&options) {
         Ok(report) => write_curate_validate_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -58371,7 +58371,7 @@ where
     };
     match result {
         Ok(report) => write_curate_apply_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -58432,7 +58432,7 @@ where
 
     match review_curation_candidate(&options) {
         Ok(report) => write_curate_review_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -58482,7 +58482,7 @@ where
 
     match run_curation_disposition(&options) {
         Ok(report) => write_curate_disposition_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -58544,7 +58544,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -58581,7 +58581,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -58620,7 +58620,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -58656,7 +58656,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -58741,7 +58741,7 @@ where
                     + "\n"),
             ),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -58768,7 +58768,7 @@ where
     };
     let reflection_kind = match reflect_propose_kind(args) {
         Ok(kind) => kind,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let options = ReflectionProposeOptions {
         workspace_path: &workspace,
@@ -58824,7 +58824,7 @@ where
                 &(output::render_reflect_propose_json(&report) + "\n"),
             ),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -58857,7 +58857,7 @@ where
                 message: error,
                 repair: Some("pass --file <reflection-result.json> or --stdin".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let options = ReflectionIngestOptions {
@@ -58905,7 +58905,7 @@ where
                 &(output::render_reflect_ingest_json(&report) + "\n"),
             ),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -59014,7 +59014,7 @@ where
                     + "\n"),
             ),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -59061,7 +59061,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -59096,7 +59096,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -59122,7 +59122,7 @@ where
 
     match extract_playbook_candidates(&options) {
         Ok(report) => write_playbook_extract_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -59173,7 +59173,7 @@ where
 
     match list_playbook_rules(&options) {
         Ok(report) => write_playbook_list_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -59228,7 +59228,7 @@ where
 
     match export_playbook(&options) {
         Ok(report) => write_playbook_export_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -59282,7 +59282,7 @@ where
 
     match import_playbook(&options) {
         Ok(report) => write_playbook_import_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -59346,7 +59346,7 @@ where
 
     match add_rule(&options) {
         Ok(report) => write_rule_add_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -59394,7 +59394,7 @@ where
 
     match list_rules(&options) {
         Ok(report) => write_rule_list_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -59438,7 +59438,7 @@ where
 
     match show_rule(&options) {
         Ok(report) => write_rule_show_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -59474,7 +59474,7 @@ where
 {
     match load_rule_provenance_ego(cli, args) {
         Ok(raw) => write_rule_provenance_report(cli, &raw, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -59574,7 +59574,7 @@ where
 
     match mark_rule(&options) {
         Ok(report) => write_rule_mark_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -59620,7 +59620,7 @@ where
 
     match protect_rule(&options) {
         Ok(report) => write_rule_protect_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -59697,7 +59697,7 @@ where
 
     match update_rule(&options) {
         Ok(report) => write_rule_update_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -59769,7 +59769,7 @@ where
                 message: err.to_string(),
                 repair: Some("ee agent detect --help".to_string()),
             };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -60104,7 +60104,7 @@ where
         },
     ) {
         Ok(report) => report,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     if cli.wants_json() {
         let envelope = serde_json::json!({
@@ -60251,7 +60251,7 @@ where
     let database_path = situation_read_database_path(cli, args.database.as_deref());
     let connection = match open_situation_read_database(&database_path) {
         Ok(connection) => connection,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     match crate::core::situation::show_situation(&connection, &args.situation_id) {
@@ -60272,11 +60272,11 @@ where
         }
         Ok(None) => write_domain_error(
             &situation_not_found_error(&args.situation_id),
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -60293,7 +60293,7 @@ where
     let database_path = situation_read_database_path(cli, args.database.as_deref());
     let connection = match open_situation_read_database(&database_path) {
         Ok(connection) => connection,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     match crate::core::situation::explain_situation(&connection, &args.situation_id) {
@@ -60314,11 +60314,11 @@ where
         }
         Ok(None) => write_domain_error(
             &situation_not_found_error(&args.situation_id),
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -60360,7 +60360,7 @@ where
                     "Use one of: pack, curation, tail_risk, privacy_budget, lifecycle.".to_string(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let status = match args
@@ -60375,7 +60375,7 @@ where
                 message: error.to_string(),
                 repair: Some("Use one of: valid, pending, invalid, expired, revoked.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -60762,7 +60762,7 @@ where
 {
     let inputs = match regression_evidence_inputs_from_args(args) {
         Ok(inputs) => inputs,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let capsule = build_regression_causality_capsule(cli, args, &inputs);
     let json = match serde_json::to_string(&serde_json::json!({
@@ -60780,7 +60780,7 @@ where
                 message: format!("Failed to serialize regression causality capsule: {error}"),
                 repair: Some("Fix the regression causality serializer.".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -61075,7 +61075,7 @@ where
         "causal trace memory ID",
     ) {
         Ok(value) => value,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let options = TraceOptions::new()
         .with_limit(args.limit)
@@ -61117,7 +61117,7 @@ where
 
     match result {
         Ok(report) => write_causal_report(cli, report.data_json(), report.human_summary(), stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -61137,7 +61137,7 @@ where
         "causal estimate chain ID",
     ) {
         Ok(value) => value,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let mut options = EstimateOptions::new()
         .with_method(args.method.clone())
@@ -61169,7 +61169,7 @@ where
 
     match result {
         Ok(report) => write_causal_report(cli, report.data_json(), report.human_summary(), stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -61241,7 +61241,7 @@ where
 
     match result {
         Ok(report) => write_causal_report(cli, report.data_json(), report.human_summary(), stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -61265,7 +61265,7 @@ where
                         "Use one of: promote, hold, demote, archive, quarantine.".to_string(),
                     ),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         },
         None => None,
@@ -61312,7 +61312,7 @@ where
 
     match result {
         Ok(report) => write_causal_report(cli, report.data_json(), report.human_summary(), stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -61528,7 +61528,7 @@ where
         message: error.to_string(),
         repair: Some("Fix .ee/claims.yaml or pass --claims-file <path>.".to_string()),
     };
-    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+    write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
 }
 
 fn write_claim_list_report<W>(
@@ -62343,7 +62343,7 @@ where
 {
     let status_filter = match parse_demo_status_filter(args.status.as_deref()) {
         Ok(filter) => filter,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let (manifest_path, manifest) = match load_demo_manifest(
         cli,
@@ -62351,7 +62351,7 @@ where
         "ee demo list --demo-file <path> --json",
     ) {
         Ok(loaded) => loaded,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let (latest_runs, run_ledger_error) = match latest_demo_audit_by_id(cli) {
@@ -62438,11 +62438,11 @@ where
         "ee demo run <demo-id> --dry-run --json",
     ) {
         Ok(loaded) => loaded,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let demos = match select_demo_refs(&manifest, &args.demo_id) {
         Ok(demos) => demos,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     if args.dry_run {
@@ -62483,15 +62483,15 @@ where
 
     let manifest_hash = match demo_manifest_hash(&manifest_path) {
         Ok(hash) => hash,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let (conn, workspace_id, workspace) = match open_demo_database(cli) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let evidence_root = match demo_evidence_root() {
         Ok(root) => root,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let started_at = chrono::Utc::now().to_rfc3339();
@@ -62540,7 +62540,7 @@ where
                 cwd_override: args.cwd.as_ref(),
             }) {
                 Ok(execution) => execution,
-                Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
             };
             audit_ids.push(execution.audit_id.clone());
             if !execution.passed {
@@ -62649,11 +62649,11 @@ where
             message: format!("invalid demo id `{}`: {error}", args.demo_id),
             repair: Some("ee demo list --json".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let (conn, _workspace_id, _workspace) = match open_demo_database(cli) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let entries = match conn.list_audit_by_target("demo", &args.demo_id, Some(args.limit)) {
         Ok(entries) => entries,
@@ -62662,7 +62662,7 @@ where
                 message: format!("Failed to list demo audit rows: {error}"),
                 repair: Some("ee audit timeline --surface demo --json".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
     let rows = entries
@@ -62732,11 +62732,11 @@ where
         "ee demo verify <demo-id> --json",
     ) {
         Ok(loaded) => loaded,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let demos = match select_demo_refs(&manifest, &args.demo_id) {
         Ok(demos) => demos,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let artifacts_dir = args
         .artifacts_dir
@@ -63113,7 +63113,7 @@ where
                 message,
                 repair: Some("ee daemon status --json".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     }
     let run_plan = match crate::serve::record_daemon_foreground_start(&workspace_path, &options) {
@@ -63123,7 +63123,7 @@ where
                 message,
                 repair: Some("ee daemon status --json".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -63146,7 +63146,7 @@ where
                     message,
                     repair: Some("ee daemon status --json".to_owned()),
                 };
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
             write_daemon_report(cli, &report, stdout)
         }
@@ -63155,7 +63155,7 @@ where
                 message,
                 repair: Some("ee daemon --foreground --once --job decay_sweep --json".to_owned()),
             };
-            write_domain_error(&error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -63328,7 +63328,7 @@ where
                         "set HOME or USERPROFILE and retry ee daemon install --dry-run".to_owned(),
                     ),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -63344,7 +63344,7 @@ where
                 message: "this platform has no user-scoped daemon supervisor".to_owned(),
                 repair: Some("ee mesh hello-responder run --workspace . --json".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -63357,7 +63357,7 @@ where
                         message: format!("Failed to unregister daemon unit: {error}"),
                         repair: Some("ee daemon uninstall --confirm --json".to_owned()),
                     },
-                    cli.wants_json(),
+                    cli.renderer(),
                     stdout,
                     stderr,
                 );
@@ -63373,7 +63373,7 @@ where
                                 message: format!("Failed to quarantine daemon unit: {error}"),
                                 repair: Some("ee daemon uninstall --confirm --json".to_owned()),
                             },
-                            cli.wants_json(),
+                            cli.renderer(),
                             stdout,
                             stderr,
                         );
@@ -63392,7 +63392,7 @@ where
                             message: format!("Failed to write daemon unit: {error}"),
                             repair: Some("ee daemon install --confirm --json".to_owned()),
                         },
-                        cli.wants_json(),
+                        cli.renderer(),
                         stdout,
                         stderr,
                     );
@@ -63412,7 +63412,7 @@ where
                                     "ee daemon install --confirm --load --json".to_owned(),
                                 ),
                             },
-                            cli.wants_json(),
+                            cli.renderer(),
                             stdout,
                             stderr,
                         );
@@ -63505,7 +63505,7 @@ where
         if args.foreground {
             let mut shutdown_signals = match daemon_foreground_shutdown_signals() {
                 Ok(signals) => signals,
-                Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
             };
             if args.detached_session_child
                 && let Err(error) = rustix::process::setsid()
@@ -63518,7 +63518,7 @@ where
                             .to_owned(),
                     ),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
             return match start_server_for_workspace(&socket_path, daemon_workspace_id) {
                 Ok(mut handle) => {
@@ -63554,13 +63554,13 @@ where
                                     "Inspect the daemon socket path before restarting.".to_owned(),
                                 ),
                             };
-                            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
                         }
                     }
                 }
                 Err(DaemonStartError::AlreadyRunning { .. }) => {
                     let domain_error = daemon_already_running_error(&socket_path);
-                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                    write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
                 }
                 Err(error) => {
                     let domain_error = DomainError::Configuration {
@@ -63571,7 +63571,7 @@ where
                                 .to_owned(),
                         ),
                     };
-                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                    write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
                 }
             };
         }
@@ -63598,7 +63598,7 @@ where
 
         if daemon_socket_accepts_connection(&socket_path) {
             let domain_error = daemon_already_running_error(&socket_path);
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
 
         let exe = match std::env::current_exe() {
@@ -63612,7 +63612,7 @@ where
                         "Run `ee daemon start --foreground` to bind in-process instead.".to_owned(),
                     ),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
 
@@ -63639,7 +63639,7 @@ where
                         "Run `ee daemon start --foreground` to bind in-process instead.".to_owned(),
                     ),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
 
@@ -63698,7 +63698,7 @@ where
         let _ = child.wait();
         if child_died_early && daemon_socket_accepts_connection(&socket_path) {
             let domain_error = daemon_already_running_error(&socket_path);
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         let _ = cleanup_failed_daemon_start_socket_file(&socket_path);
         let elapsed_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
@@ -63733,7 +63733,7 @@ where
             message: "ee daemon UDS RPC is only supported on Unix targets; the in-process CLI path remains available on Windows.".to_owned(),
             repair: Some("Use `ee context` / `ee search` directly without --daemon-socket.".to_owned()),
         };
-        write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
     }
 }
 
@@ -64017,15 +64017,15 @@ where
         // that can also unlink a peer's live daemon endpoint.
         let should_remove = match verify_daemon_stop_target(&socket_path) {
             Ok(should_remove) => should_remove,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         let removed = if should_remove {
             if let Err(error) = request_daemon_shutdown(&socket_path) {
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
             match wait_for_daemon_socket_removed(&socket_path, DAEMON_STOP_SHUTDOWN_TIMEOUT) {
                 Ok(removed) => removed,
-                Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         } else {
             false
@@ -64084,7 +64084,7 @@ where
             message: "ee daemon UDS RPC is only supported on Unix targets.".to_owned(),
             repair: None,
         };
-        write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
     }
 }
 
@@ -64103,7 +64103,7 @@ where
             message: "ee serve currently runs only in explicit foreground mode.".to_owned(),
             repair: Some("Run `ee serve --foreground --json` with EE_SERVE_TOKEN configured before accepting localhost HTTP requests.".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     {
@@ -64151,7 +64151,7 @@ where
                 let _ = writeln!(stderr, "error: {}", error.message());
                 error.exit_code()
             }
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     }
 }
@@ -64340,7 +64340,7 @@ where
                 message,
                 repair: Some("ee daemon --foreground --once --json".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
     let socket = match &args.command {
@@ -64609,7 +64609,7 @@ where
         // (bd-workspace-miss-init-suggestion-sfjvq).
         return write_domain_error(
             &crate::core::storeless_workspace_error(&database_path),
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -64933,7 +64933,7 @@ where
         resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
     let database_path = match graph_database_path(cli, args.database.as_deref()) {
         Ok(path) => path,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, &mut io::sink()),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, &mut io::sink()),
     };
     let conn = match crate::db::DbConnection::open_file(&database_path) {
         Ok(conn) => conn,
@@ -64945,12 +64945,12 @@ where
                 ),
                 repair: Some("ee doctor --json".to_string()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, &mut io::sink());
+            return write_domain_error(&error, cli.renderer(), stdout, &mut io::sink());
         }
     };
     let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
         Ok(id) => id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, &mut io::sink()),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, &mut io::sink()),
     };
     let policy = match load_witness_retention_policy(&workspace, args) {
         Ok(policy) => policy,
@@ -66094,7 +66094,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => write_artifact_success(stdout, report.data_json()),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -66129,7 +66129,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => write_artifact_success(stdout, report.data_json()),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -66164,7 +66164,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => write_artifact_success(stdout, report.data_json()),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -66210,7 +66210,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => write_artifact_success(stdout, report.data_json()),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -66299,7 +66299,7 @@ where
                 write_stdout(stdout, &(response.to_string() + "\n"))
             }
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -66691,7 +66691,7 @@ where
                 write_stdout(stdout, &(response.to_string() + "\n"))
             }
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -66715,7 +66715,7 @@ where
                     .to_owned(),
             ),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let options = InspectOptions {
@@ -66753,7 +66753,7 @@ where
                 write_stdout(stdout, &(response.to_string() + "\n"))
             }
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -66769,7 +66769,7 @@ where
 {
     let mut enabled_sources = match parse_swarm_brief_sources(&args.sources, args.include_rch) {
         Ok(sources) => sources,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     if args.sources.trim().eq_ignore_ascii_case("default") {
         enabled_sources.insert(SwarmBriefSourceKind::Rch);
@@ -66799,7 +66799,7 @@ where
                     .to_string(),
             ),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     match cli.renderer() {
@@ -66809,7 +66809,7 @@ where
         output::Renderer::Toon => {
             match render_swarm_brief_json(&report, output::FieldProfile::Summary) {
                 Ok(json) => write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n")),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
         output::Renderer::Json
@@ -66824,7 +66824,7 @@ where
                 };
             match render_swarm_brief_json(&report, profile) {
                 Ok(json) => write_stdout(stdout, &(json + "\n")),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
     }
@@ -66842,7 +66842,7 @@ where
 {
     let enabled_sources = match parse_swarm_next_action_sources(&args.sources, args.include_rch) {
         Ok(sources) => sources,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let mut options = SwarmBriefCollectOptions::for_workspace(cli.resolve_workspace());
     options.max_recent_commits = args.max_recent_commits;
@@ -66857,7 +66857,7 @@ where
 
     let verifier_evidence = match read_swarm_next_action_verifier_evidence(args) {
         Ok(evidence) => evidence,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let runner = SystemSwarmBriefCommandRunner;
     let snapshot = collect_swarm_next_action_snapshot_with_verifier_evidence(
@@ -66877,7 +66877,7 @@ where
                     .to_string(),
             ),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     match cli.renderer() {
@@ -66887,7 +66887,7 @@ where
         output::Renderer::Toon => {
             match render_swarm_next_action_json(&snapshot, cli.fields_level().to_field_profile()) {
                 Ok(json) => write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n")),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
         output::Renderer::Json
@@ -66901,7 +66901,7 @@ where
             };
             match render_swarm_next_action_json(&snapshot, profile) {
                 Ok(json) => write_stdout(stdout, &(json + "\n")),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
     }
@@ -66919,7 +66919,7 @@ where
 {
     let enabled_sources = match parse_swarm_work_packet_sources(&args.sources, args.include_rch) {
         Ok(sources) => sources,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let mut options = SwarmBriefCollectOptions::for_workspace(cli.resolve_workspace());
     options.max_recent_commits = args.max_recent_commits;
@@ -66934,7 +66934,7 @@ where
 
     let verifier_evidence = match read_swarm_work_packet_verifier_evidence(args) {
         Ok(evidence) => evidence,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let runner = SystemSwarmBriefCommandRunner;
     let packet = collect_swarm_work_packet_with_verifier_evidence(
@@ -66955,7 +66955,7 @@ where
                     .to_string(),
             ),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     if args.unsafe_plan {
@@ -66969,7 +66969,7 @@ where
                     Ok(json) => {
                         write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
                     }
-                    Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                    Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
                 }
             }
             output::Renderer::Json
@@ -66978,7 +66978,7 @@ where
             | output::Renderer::Hook => {
                 match render_swarm_work_packet_unsafe_claim_plan_json(&gate, &packet) {
                     Ok(json) => write_stdout(stdout, &(json + "\n")),
-                    Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                    Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
                 }
             }
         };
@@ -66995,7 +66995,7 @@ where
                     Ok(json) => {
                         write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
                     }
-                    Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                    Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
                 }
             }
             output::Renderer::Json
@@ -67004,7 +67004,7 @@ where
             | output::Renderer::Hook => {
                 match render_swarm_work_packet_claim_gate_json(&gate, &packet) {
                     Ok(json) => write_stdout(stdout, &(json + "\n")),
-                    Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                    Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
                 }
             }
         };
@@ -67017,7 +67017,7 @@ where
         output::Renderer::Toon => {
             match render_swarm_work_packet_json(&packet, cli.fields_level().to_field_profile()) {
                 Ok(json) => write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n")),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
         output::Renderer::Json
@@ -67031,7 +67031,7 @@ where
             };
             match render_swarm_work_packet_json(&packet, profile) {
                 Ok(json) => write_stdout(stdout, &(json + "\n")),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
     }
@@ -67049,7 +67049,7 @@ where
 {
     let enabled_sources = match parse_swarm_repair_plan_sources(&args.sources, args.include_rch) {
         Ok(sources) => sources,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let mut options = SwarmBriefCollectOptions::for_workspace(cli.resolve_workspace());
     options.max_recent_commits = args.max_recent_commits;
@@ -67064,7 +67064,7 @@ where
 
     let verifier_evidence = match read_swarm_repair_plan_verifier_evidence(args) {
         Ok(evidence) => evidence,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let runner = SystemSwarmBriefCommandRunner;
     let packet = collect_swarm_work_packet_with_verifier_evidence(
@@ -67085,7 +67085,7 @@ where
                     .to_string(),
             ),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let gate = packet.claim_gate(args.candidate.as_deref());
@@ -67096,14 +67096,14 @@ where
         }
         output::Renderer::Toon => match render_swarm_repair_plan_json(&plan) {
             Ok(json) => write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n")),
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         },
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => match render_swarm_repair_plan_json(&plan) {
             Ok(json) => write_stdout(stdout, &(json + "\n")),
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         },
     }
 }
@@ -67153,7 +67153,7 @@ where
                         ),
                         repair: None,
                     },
-                    cli.wants_json(),
+                    cli.renderer(),
                     stdout,
                     stderr,
                 ),
@@ -67164,7 +67164,7 @@ where
                 message: format!("session-budget plan serialization failed: {error}"),
                 repair: None,
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -68021,7 +68021,7 @@ where
 {
     let (workspace_path, database_path) = match economy_paths(cli, args.database.as_deref()) {
         Ok(paths) => paths,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let options = EconomyReportOptions {
         workspace_path,
@@ -68049,7 +68049,7 @@ where
                 &(economy_response_json("economy report", "report", &report) + "\n"),
             ),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -68065,7 +68065,7 @@ where
 {
     let (workspace_path, database_path) = match economy_paths(cli, args.database.as_deref()) {
         Ok(paths) => paths,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let options = EconomyScoreOptions {
         workspace_path,
@@ -68092,7 +68092,7 @@ where
                 &(economy_response_json("economy score", "score", &report) + "\n"),
             ),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -68111,12 +68111,12 @@ where
             message: "economy simulate budgets must be greater than zero".to_owned(),
             repair: Some("ee economy simulate --budget 2000 --budget 4000 --json".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let (workspace_path, database_path) = match economy_paths(cli, args.database.as_deref()) {
         Ok(paths) => paths,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let options = EconomySimulateOptions {
         workspace_path,
@@ -68144,7 +68144,7 @@ where
                 &(economy_response_json("economy simulate", "simulation", &report) + "\n"),
             ),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -68163,12 +68163,12 @@ where
             message: "economy prune-plan is report-only in this slice; pass --dry-run to confirm no mutation".to_owned(),
             repair: Some("ee economy prune-plan --dry-run --json".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let (workspace_path, database_path) = match economy_paths(cli, args.database.as_deref()) {
         Ok(paths) => paths,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let options = EconomyPrunePlanOptions {
         workspace_path,
@@ -68194,7 +68194,7 @@ where
                 &(economy_response_json("economy prune-plan", "prunePlan", &report) + "\n"),
             ),
         },
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -69821,11 +69821,11 @@ where
 
     let state = match parse_optional_tripwire_state(args.state.as_deref()) {
         Ok(state) => state,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let tripwire_type = match parse_optional_tripwire_type(args.tripwire_type.as_deref()) {
         Ok(tripwire_type) => tripwire_type,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let database_path = database_path.exists().then_some(database_path);
@@ -69839,7 +69839,7 @@ where
         include_disarmed: args.include_disarmed,
     }) {
         Ok(report) => report,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     match cli.renderer() {
@@ -69879,11 +69879,11 @@ where
                 message: "--revivals is a standalone read-only check and cannot be combined with a tripwire ID or tripwire event/mutation options".to_owned(),
                 repair: Some("ee tripwire check --revivals --workspace . --json".to_owned()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
         return match revival_sentinel_data(cli, args, RevivalObservationMode::Explicit) {
             Ok(data) => write_revival_sentinel_data(cli, data, stdout),
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     }
     let Some(tripwire_id) = args.tripwire_id.as_ref() else {
@@ -69893,15 +69893,15 @@ where
                 "ee tripwire check <id> --json, or ee tripwire check --revivals --json".to_owned(),
             ),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     };
     let task_outcome = match parse_task_outcome_arg(args.task_outcome.as_deref()) {
         Ok(outcome) => outcome,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let event_payload = match parse_tripwire_event_payload(args) {
         Ok(payload) => payload,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let workspace = cli.resolve_workspace();
     let database_path = args
@@ -69920,7 +69920,7 @@ where
         dry_run: args.dry_run,
     }) {
         Ok(report) => report,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     match cli.renderer() {
