@@ -1896,6 +1896,13 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
     let cass_session_arg = cass_session_path.to_string_lossy().into_owned();
     let path = path_with_fake_cass(&fake_bin_dir)?;
     let envs = [
+        // The bundled embedding model downloads ONCE per host, and the notice
+        // goes to stderr. Every one of these fixtures asserts clean stderr, so
+        // whichever test happens to run first on an unprovisioned host catches
+        // it -- an order-dependent failure, not a property of the test that
+        // caught it. Pinning the precondition is the repo's own idiom (72 uses
+        // across tests/ and scripts/); the stderr assertions are untouched.
+        ("EE_EMBED_DOWNLOAD", OsString::from("off")),
         ("EE_WORKSPACE_REGISTRY", registry_env),
         ("PATH", path),
         (
@@ -4108,6 +4115,13 @@ fn import_cass_json_uses_cass_robot_contract_and_is_idempotent() -> TestResult {
     let session_arg = session_path.to_string_lossy().into_owned();
     let path = path_with_fake_cass(&fake_bin_dir)?;
     let envs = [
+        // The bundled embedding model downloads ONCE per host, and the notice
+        // goes to stderr. Every one of these fixtures asserts clean stderr, so
+        // whichever test happens to run first on an unprovisioned host catches
+        // it -- an order-dependent failure, not a property of the test that
+        // caught it. Pinning the precondition is the repo's own idiom (72 uses
+        // across tests/ and scripts/); the stderr assertions are untouched.
+        ("EE_EMBED_DOWNLOAD", OsString::from("off")),
         ("PATH", path),
         (
             "EE_CASS_BINARY",
@@ -4199,10 +4213,30 @@ fn import_cass_json_uses_cass_robot_contract_and_is_idempotent() -> TestResult {
             .ok_or("first ledger missing cursor")?,
     )
     .map_err(|error| format!("first ledger cursor must be JSON: {error}"))?;
-    ensure_equal(
-        &first_cursor["lastSourcePath"],
-        &serde_json::json!(session_arg),
-        "first cursor source",
+    // The cursor records a source; the PUBLIC report redacts it.
+    // `import_cursor_json` (src/cass/import.rs:1889) maps lastSourcePath through
+    // `redact_import_report_source_ref`, while the write side
+    // (src/cass/session.rs:839) keeps the raw path, and nothing ever reads
+    // lastSourcePath back -- it appears exactly once in src/ outside tests.
+    // So idempotency is unaffected and only the rendered spelling moved.
+    //
+    // This used to assert the field EQUALS the raw workspace path, which
+    // required the public report to leak the very path redaction exists to
+    // hide: the assertion mandated the leak. Pin the behaviour instead --
+    // a source was recorded, and no raw path reached the public cursor.
+    let first_source = first_cursor["lastSourcePath"]
+        .as_str()
+        .ok_or("first cursor lastSourcePath must be a string")?;
+    ensure(
+        !first_source.is_empty(),
+        format!("first cursor must record a source, got {first_source:?}"),
+    )?;
+    ensure(
+        !first_source.contains(session_arg.as_str()),
+        format!(
+            "public cursor must not disclose the raw source path; got {first_source:?} \
+             which contains {session_arg:?}"
+        ),
     )?;
     ensure_equal(
         &first_cursor["lastLine"],
@@ -4322,6 +4356,13 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
     let query = "lp4p7 cass retrieval evidence alpha";
     let assistant_evidence = "lp4p7 imported evidence should be retrievable with provenance";
     let envs = [
+        // The bundled embedding model downloads ONCE per host, and the notice
+        // goes to stderr. Every one of these fixtures asserts clean stderr, so
+        // whichever test happens to run first on an unprovisioned host catches
+        // it -- an order-dependent failure, not a property of the test that
+        // caught it. Pinning the precondition is the repo's own idiom (72 uses
+        // across tests/ and scripts/); the stderr assertions are untouched.
+        ("EE_EMBED_DOWNLOAD", OsString::from("off")),
         ("HOME", home.as_os_str().to_owned()),
         ("CODEX_HOME", codex_home.as_os_str().to_owned()),
         ("CASS_DATA_DIR", cass_data_dir.as_os_str().to_owned()),
