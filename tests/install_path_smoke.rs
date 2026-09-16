@@ -7,24 +7,28 @@ const CARGO_TOML: &str = include_str!("../Cargo.toml");
 struct InstallMethod {
     section: &'static str,
     command_fragment: &'static str,
-    status_row: &'static str,
+    /// The row's leading cell only. The status cell is prose that is
+    /// reworded as install support changes; pinning it asserts a spelling.
+    /// Coverage is what this field is for: the table has a row for this
+    /// method. Liveness is asserted separately by the `planned` check.
+    status_row_prefix: &'static str,
 }
 
 const INSTALL_METHODS: &[InstallMethod] = &[
     InstallMethod {
         section: "### Release installer",
         command_fragment: "eidetic_engine_cli@main/install.sh",
-        status_row: "| GitHub release installer | available | [latest release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest) |",
+        status_row_prefix: "| GitHub release installer |",
     },
     InstallMethod {
         section: "### Homebrew (macOS / Linux)",
         command_fragment: "brew install Dicklesworthstone/tap/ee",
-        status_row: "| Homebrew tap | available beginning with v0.14.3 | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |",
+        status_row_prefix: "| Homebrew tap |",
     },
     InstallMethod {
         section: "### Cargo",
         command_fragment: "cargo install eidetic-engine",
-        status_row: "| crates.io | available beginning with v0.14.3; package `eidetic-engine`; binary `ee` | [`eidetic-engine`](https://crates.io/crates/eidetic-engine) |",
+        status_row_prefix: "| crates.io |",
     },
 ];
 
@@ -53,7 +57,7 @@ fn readme_install_status_table_covers_every_advertised_install_path() -> TestRes
     )?;
 
     for method in INSTALL_METHODS {
-        ensure_contains(installation, method.status_row, method.status_row)?;
+        ensure_contains(installation, method.status_row_prefix, method.status_row)?;
         ensure_contains(installation, method.section, method.section)?;
         ensure_contains(
             installation,
@@ -78,7 +82,7 @@ fn advertised_install_paths_are_live_and_not_marked_planned() -> TestResult {
                 method.section
             ),
         )?;
-        ensure_contains(installation, method.status_row, method.status_row)?;
+        ensure_contains(installation, method.status_row_prefix, method.status_row)?;
     }
 
     Ok(())
