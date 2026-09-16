@@ -9252,6 +9252,11 @@ pub struct SearchArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain: bool,
 
+    /// Emit each result's full body instead of eliding it at 240 characters.
+    /// Without this, long bodies are cut and marked `content_truncated`.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub full: bool,
+
     /// Include tombstoned memories in search results.
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_tombstoned: bool,
@@ -49401,10 +49406,15 @@ fn format_search_json_with_mesh_and_recalibration_in_process(
     result_path_hint: Option<&'static str>,
     advisory_session: &mut SearchAdvisorySession,
     workspace_id: &str,
+    preview: SearchContentPreview,
 ) -> String {
     format_search_json_data_with_mesh_and_recalibration(
         report,
-        report.data_json_with_advisory_session_for_workspace(advisory_session, workspace_id),
+        report.data_json_with_advisory_session_for_workspace_and_preview(
+            advisory_session,
+            workspace_id,
+            preview,
+        ),
         mesh_mode,
         recalibration,
         result_path_hint,
@@ -49461,6 +49471,7 @@ fn format_search_toon_with_mesh_in_process(
     mesh_mode: MeshCommandMode,
     advisory_session: &mut SearchAdvisorySession,
     workspace_id: &str,
+    preview: SearchContentPreview,
 ) -> String {
     output::render_toon_from_json(&format_search_json_with_mesh_and_recalibration_in_process(
         report,
@@ -49469,6 +49480,7 @@ fn format_search_toon_with_mesh_in_process(
         None,
         advisory_session,
         workspace_id,
+        preview,
     ))
 }
 
