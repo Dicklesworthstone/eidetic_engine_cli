@@ -130,9 +130,22 @@ fn subsection<'a>(section: &'a str, heading: &str) -> Result<&'a str, String> {
     Ok(&tail[..end])
 }
 
+/// Extract the package name from a `cargo install` line, tolerating a
+/// toolchain selector.
+///
+/// README advertises `cargo +nightly install eidetic-engine ...` because this
+/// crate is nightly-only; a bare `cargo install` would fail for a user on
+/// stable. The earlier `strip_prefix("cargo install ")` could not see that
+/// form, so this guard went red when `3889af4bf` (2026-09-12) made the README
+/// command correct. The README is the right side; the parser was too narrow.
 fn cargo_install_package(line: &str) -> Option<&str> {
-    line.trim()
-        .strip_prefix("cargo install ")
+    let rest = line.trim().strip_prefix("cargo ")?;
+    let rest = match rest.strip_prefix('+') {
+        // `+nightly install pkg` -> drop the toolchain token
+        Some(after_plus) => after_plus.split_once(' ').map(|(_, tail)| tail)?,
+        None => rest,
+    };
+    rest.strip_prefix("install ")
         .and_then(|value| value.split_whitespace().next())
 }
 
