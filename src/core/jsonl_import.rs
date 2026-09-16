@@ -1030,6 +1030,20 @@ fn import_jsonl_records_with_policy(
                 },
             )?;
         }
+
+        // bd-tmv70: an archive written before V123 encodes supersession in
+        // `valid_to`, because that column doubled as the marker. Import writes
+        // those values faithfully, so without this every restored revision comes
+        // back with `superseded_at = NULL` and the whole chain reads as live
+        // heads -- silent corruption of the revision graph on restore.
+        //
+        // Re-derived structurally from the chain rather than by widening the
+        // archive format, and scoped to the rows this import wrote.
+        let imported_ids = to_insert
+            .iter()
+            .map(|memory| memory.id.clone())
+            .collect::<Vec<_>>();
+        connection.derive_supersession_for_memory_ids(&imported_ids)?;
         for link in &links {
             if conflicting_memory_ids.contains(&link.input.src_memory_id)
                 || conflicting_memory_ids.contains(&link.input.dst_memory_id)

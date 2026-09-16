@@ -24972,6 +24972,61 @@ impl DbConnection {
     /// Resolve unique current live heads for revision-stable ledger keys in
     /// bounded chunks. Ambiguous chains are omitted so callers fail closed
     /// instead of selecting an arbitrary head.
+    /// Derive supersession for imported rows whose archive encoded it as `valid_to`.
+    ///
+    /// bd-tmv70. An archive written before V123 marks a superseded revision by
+    /// setting `valid_to`, because that column doubled as the supersession
+    /// marker. Import writes those values faithfully, so after V123 every
+    /// restored revision has `superseded_at = NULL` and the whole chain comes
+    /// back as live heads.
+    ///
+    /// Rather than widen the archive format, supersession is re-derived
+    /// STRUCTURALLY from the chain, exactly as V123/V125 do: a row is history
+    /// when a newer row shares its `logical_id`. Comparison is by INSTANT via
+    /// `julianday`, not by string, so it is immune to the timestamp-spelling
+    /// differences an external archive can carry (bd-o22r0).
+    ///
+    /// Scoped to `ids` so an import can never re-chain rows it did not write.
+    /// Idempotent: a row already marked is skipped by `superseded_at IS NULL`.
+    /// Returns the number of rows marked.
+    pub fn derive_supersession_for_memory_ids(&self, ids: &[String]) -> Result<usize> {
+        let ids = ids
+            .iter()
+            .filter(|id| !id.trim().is_empty())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut marked = 0usize;
+        for chunk in ids.chunks(ATTEMPT_FAMILY_MEMBERSHIP_BATCH_SIZE) {
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "UPDATE memories SET superseded_at = valid_to \
+                  WHERE id IN ({placeholders}) \
+                    AND superseded_at IS NULL \
+                    AND valid_to IS NOT NULL \
+                    AND julianday(created_at) IS NOT NULL \
+                    AND EXISTS (SELECT 1 FROM memories newer \
+                                 WHERE newer.workspace_id = memories.workspace_id \
+                                   AND newer.logical_id = memories.logical_id \
+                                   AND newer.id <> memories.id \
+                                   AND julianday(newer.created_at) IS NOT NULL \
+                                   AND (julianday(newer.created_at) > julianday(memories.created_at) \
+                                        OR (julianday(newer.created_at) = julianday(memories.created_at) \
+                                            AND newer.id > memories.id)))"
+            );
+            let params = chunk.iter().cloned().map(Value::Text).collect::<Vec<_>>();
+            marked = marked.saturating_add(
+                usize::try_from(self.execute_for(DbOperation::Execute, &sql, &params)?)
+                    .unwrap_or(usize::MAX),
+            );
+        }
+        Ok(marked)
+    }
+
     /// Narrow a set of memory IDs to those that are still the current revision.
     ///
     /// bd-tmv70. Callers outside this module hold `StoredMemory` values, which
