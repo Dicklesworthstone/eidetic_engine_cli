@@ -247,7 +247,17 @@ fn serve_schemas_stay_aligned_with_adr_0033_terms() -> TestResult {
         ensure_contains(&startup, needle, "startup schema")?;
     }
     for needle in [
-        "Content-Length",
+        // The ADR is prose about HTTP and says "Content-Length"; the SCHEMA is
+        // JSON and spells the same contract `contentLengthRequired`, matching
+        // its own camelCase vocabulary (`sseReadOnly`, `authPosture`,
+        // `chunkedUploadAccepted`). The HTTP-header spelling was applied to the
+        // schema by reusing the ADR's needle, and both landed in 5e63c9031, so
+        // this needle has never matched. The concept was always present.
+        //
+        // Pinning the schema's own property name is also stricter than the old
+        // needle: a bare "Content-Length" substring would match a description
+        // string anywhere in the file, while this names the declared property.
+        "contentLengthRequired",
         "ee.response.v2",
         "ee.error.v2",
         "chunkedUploadAccepted",
