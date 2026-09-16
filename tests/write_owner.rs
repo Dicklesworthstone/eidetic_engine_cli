@@ -10,6 +10,7 @@ use std::time::Duration;
 use asupersync::Outcome;
 use asupersync::channel::oneshot;
 use asupersync::cx::Cx;
+use ee::core::init::{InitOptions, init_workspace};
 use ee::core::journal::{
     JournalAppendOptions, JournalEntryDraft, JournalSource, append_journal_entries_stdin,
     append_journal_entry,
@@ -236,6 +237,7 @@ fn exercise_one_shot_durable_paths(
         .path()
         .canonicalize()
         .map_err(|error| error.to_string())?;
+    init_fixture_workspace(&workspace_path)?;
     write_group_commit_config(&workspace_path, group_commit_enabled)?;
 
     let remember = remember_fixture(
@@ -345,6 +347,31 @@ fn exercise_one_shot_durable_paths(
     );
 
     Ok(status.write_group_commit)
+}
+
+/// Create the store this fixture writes into.
+///
+/// `ee remember` has not created a store since `91cf7bcbd` ("fix(storage):
+/// reject storeless write and search addresses", 2026-08-11): ordinary write
+/// surfaces preflight the addressed path through
+/// `core::ensure_addressed_database_exists` so a mistyped `--workspace` cannot
+/// plant a new store, and `ee init` owns store creation. This fixture predates
+/// that change and relied on the write path creating the database.
+fn init_fixture_workspace(workspace_path: &Path) -> TestResult {
+    let report = init_workspace(&InitOptions {
+        workspace_path: workspace_path.to_path_buf(),
+        dry_run: false,
+        repair_plan: false,
+        force: false,
+        allow_symlink: false,
+        skip_boilerplate: true,
+    });
+    if !report.status.is_success() {
+        return Err(format!(
+            "initialize write-owner fixture workspace failed: {report:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn write_group_commit_config(workspace_path: &Path, enabled: bool) -> TestResult {
