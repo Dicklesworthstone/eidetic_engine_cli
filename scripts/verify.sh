@@ -960,14 +960,17 @@ untracked_work_audit_advisory() {
     ./scripts/untracked-work-audit.sh
 }
 
-# shellcheck disable=SC2329
-ruby_gate_or_skip() {
-    if ! command -v ruby >/dev/null 2>&1; then
-        echo "[!] SKIP: ruby is unavailable; run this no-Cargo proof-lane gate on a Ruby-capable host"
-        return 0
-    fi
-    "$@"
-}
+# NOTE: ruby_gate_or_skip used to live here. It wrapped the command INSIDE
+# run_stage and returned 0 when ruby was absent, so a stage that never executed
+# was recorded as PASS and counted in STAGE_PASSED
+# (bd-ruby-gate-skip-counts-as-passed-jb56c).
+#
+# It could not be repaired in place. run_stage executes its command as
+# `eval "$cmd" 2>&1 | tee "$output_file"` -- a pipeline, therefore a subshell --
+# so a wrapper calling record_gated_off from within the command would have its
+# counter increments discarded by the subshell. The decision has to be made
+# BEFORE run_stage is entered, which is why the three CI Proof-Lane call sites
+# now guard on `command -v ruby` themselves.
 
 # shellcheck disable=SC2329
 e2e_event_contract_radar_advisory() {
@@ -1147,19 +1150,31 @@ run_stage "Swarm SLO Replay Contract" "./scripts/e2e_overhaul/swarm_slo_replay.s
 # harness transforms offline proof-lane fixtures and verifies duplicate-run,
 # missing/stale artifact, checksum, surface-probe, unavailable-gh, and invalid
 # SHA behavior before agents rely on CI artifact source-authority evidence.
-run_stage "CI Proof-Lane Snapshot Contract" "ruby_gate_or_skip ./scripts/ci_proof_lane_snapshot_fixture_test.sh"
+if command -v ruby >/dev/null 2>&1; then
+    run_stage "CI Proof-Lane Snapshot Contract" "./scripts/ci_proof_lane_snapshot_fixture_test.sh"
+else
+    record_gated_off "CI Proof-Lane Snapshot Contract" "ruby unavailable on this host"
+fi
 
 # Gate 3.89: CI proof-lane hygiene contract. This no-Cargo synthetic harness
 # exercises workflow-dispatch, duplicate-dispatch, cancellable CI artifacts,
 # release artifacts, and unclassified artifact-lane policy without reading
 # live workflows or invoking Cargo.
-run_stage "CI Proof-Lane Hygiene Contract" "ruby_gate_or_skip ./scripts/ci_proof_lane_hygiene.sh --self-test"
+if command -v ruby >/dev/null 2>&1; then
+    run_stage "CI Proof-Lane Hygiene Contract" "./scripts/ci_proof_lane_hygiene.sh --self-test"
+else
+    record_gated_off "CI Proof-Lane Hygiene Contract" "ruby unavailable on this host"
+fi
 
 # Gate 3.895: CI proof-lane hygiene advisory (bd-1n3x1.8). This no-Cargo,
 # network-free workflow scanner emits ee.ci_proof_lane_hygiene.v1 so agents see
 # duplicate-dispatch, cancel-in-progress, artifact-retention, release-artifact,
 # and unclassified artifact-lane posture before spending CI/RCH proof slots.
-run_stage "CI Proof-Lane Hygiene Advisory" "ruby_gate_or_skip ./scripts/ci_proof_lane_hygiene.sh --json"
+if command -v ruby >/dev/null 2>&1; then
+    run_stage "CI Proof-Lane Hygiene Advisory" "./scripts/ci_proof_lane_hygiene.sh --json"
+else
+    record_gated_off "CI Proof-Lane Hygiene Advisory" "ruby unavailable on this host"
+fi
 
 # Gate 3.896: Release provenance static contract. This no-Cargo gate verifies
 # the release workflow, installer, README, publish checklist, and audit script
