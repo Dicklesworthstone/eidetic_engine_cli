@@ -224,11 +224,17 @@ fn curate_reject_returns_not_found_for_valid_format_but_missing_candidate() -> T
         format!("response must include an error object; got {parsed}"),
     )?;
     let message = error["message"].as_str().unwrap_or_default();
-    let error_id = error["id"].as_str().unwrap_or_default();
+    // `DomainError::NotFound` renders its resource and id under `error.details`
+    // (src/output/mod.rs:15542-15545), not at the top level, so `error["id"]`
+    // was always empty and the prose needle "curation candidate" never matched
+    // the emitted machine code `curation_candidate`. Assert the structured
+    // fields at the path they actually occupy.
+    let error_resource = error["details"]["resource"].as_str().unwrap_or_default();
+    let error_id = error["details"]["id"].as_str().unwrap_or_default();
     ensure(
-        message.contains("curation candidate") || error_id == valid_id,
+        error_resource == "curation_candidate" && error_id == valid_id,
         format!(
-            "not-found error must reference curation candidate; got message={message}, id={error_id}"
+            "not-found error must name the curation candidate it could not find; got message={message}, resource={error_resource}, id={error_id}"
         ),
     )?;
     let repair = error["repair"].as_str().unwrap_or_default();
@@ -268,11 +274,17 @@ fn curate_retire_dry_run_returns_not_found_for_valid_format_but_missing_candidat
         format!("retire dry-run must return not_found for missing candidate; got {code}"),
     )?;
     let message = error["message"].as_str().unwrap_or_default();
-    let error_id = error["id"].as_str().unwrap_or_default();
+    // `DomainError::NotFound` renders its resource and id under `error.details`
+    // (src/output/mod.rs:15542-15545), not at the top level, so `error["id"]`
+    // was always empty and the prose needle "curation candidate" never matched
+    // the emitted machine code `curation_candidate`. Assert the structured
+    // fields at the path they actually occupy.
+    let error_resource = error["details"]["resource"].as_str().unwrap_or_default();
+    let error_id = error["details"]["id"].as_str().unwrap_or_default();
     ensure(
-        message.contains("curation candidate") || error_id == valid_id,
+        error_resource == "curation_candidate" && error_id == valid_id,
         format!(
-            "not-found error must reference curation candidate; got message={message}, id={error_id}"
+            "not-found error must name the curation candidate it could not find; got message={message}, resource={error_resource}, id={error_id}"
         ),
     )?;
     let repair = error["repair"].as_str().unwrap_or_default();
