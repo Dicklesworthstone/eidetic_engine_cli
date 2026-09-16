@@ -937,6 +937,17 @@ after `swarm brief`:
 ee swarm brief --fields summary --workspace . --json
 ```
 
+To fold a captured Agent Mail snapshot into the brief instead of probing the
+live mailbox, pass its path. This is the form to use when reproducing another
+agent's coordination view, or when the mailbox is unavailable and you still
+need a deterministic brief:
+
+```bash
+ee swarm brief --workspace . --agent-mail-snapshot <snapshot.json> --json
+```
+
+The flag defaults to `<workspace>/.ee/agent-mail-snapshot.json` when omitted.
+
 If either summary form (`ee swarm brief --fields summary ...` or
 `ee --fields summary swarm brief ...`) returns an `ee.error.v2` usage failure
 such as `usage_unknown_field`, and `error.details.presetsAvailable` still lists
