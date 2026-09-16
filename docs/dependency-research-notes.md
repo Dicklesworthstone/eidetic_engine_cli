@@ -44,16 +44,16 @@ workspace root; individual crates may declare their own.
 
 | Crate | Version | Location | Notes |
 | --- | --- | --- | --- |
-| `asupersync` | 0.4.10 | `/dp/asupersync` (root) | Public API: `Cx`, `Scope`, `LabRuntime`, `LabConfig`. |
-| `asupersync-macros` | 0.4.9 | `/dp/asupersync/asupersync-macros` | Proc-macros for `scope!`, `spawn!`, `join!`, `race!`. |
+| `asupersync` | 0.5.0 | `/dp/asupersync` (root) | Public API: `Cx`, `Scope`, `LabRuntime`, `LabConfig`. |
+| `asupersync-macros` | 0.5.0 | `/dp/asupersync/asupersync-macros` | Proc-macros for `scope!`, `spawn!`, `join!`, `race!`. |
 | `asupersync-tokio-compat` | (see crate `Cargo.toml`) | `/dp/asupersync/asupersync-tokio-compat` | Quarantine adapter. **Not for `ee` core** — pulls `tokio`. |
 
 **Upstream default features (root `asupersync` crate):**
-`["proc-macros", "nightly-outcome-try"]` as of `0.4.10`. `test-internals` is an explicit
+`["proc-macros", "nightly-outcome-try"]` as of `0.5.0`. `test-internals` is an explicit
 non-default feature.
 
 **EE accepted profile:**
-`asupersync = { version = "=0.4.10", default-features = false, features = ["tracing-integration"] }`.
+`asupersync = { version = "=0.5.0", default-features = false, features = ["tracing-integration"] }`.
 This matches `Cargo.toml`, the dependency contract matrix, and the doctor
 franken-health golden. Do not enable upstream defaults in `ee` unless a future
 ADR updates the dependency contract.
