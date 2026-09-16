@@ -30,6 +30,7 @@ use ee::core::write_owner::{
     reset_write_group_commit_telemetry_for_test, write_group_commit_telemetry,
 };
 use ee::db::{CreateWorkspaceInput, DbConnection};
+use ee::models::DomainError;
 
 type TestResult = Result<(), String>;
 
@@ -431,13 +432,15 @@ fn run_write_owner_actor_fixture(config: WriteHotPathConfig) -> Result<ActorRun,
         owner
             .run_group_commit(&cx, config, |operations| {
                 callback_count = callback_count.saturating_add(1);
-                Ok(operations
+                operations
                     .iter()
-                    .enumerate()
-                    .map(|(index, operation)| WriteResult::Success {
-                        entity_id: Some(format!("{}-{index}", operation.operation_type())),
+                    .map(|operation| {
+                        let index = group_commit_operation_index(operation)?;
+                        Ok(WriteResult::Success {
+                            entity_id: Some(format!("{}-{index}", operation.operation_type())),
+                        })
                     })
-                    .collect())
+                    .collect()
             })
             .await
     })
@@ -455,6 +458,36 @@ fn run_write_owner_actor_fixture(config: WriteHotPathConfig) -> Result<ActorRun,
         callback_count,
         report,
     })
+}
+
+/// The operation's own identity, independent of where it lands in a batch.
+///
+/// The callback used to derive the entity id from `enumerate()`, i.e. the
+/// position *within the delivered batch*. That is structurally 0 for every
+/// operation when group commit is disabled (one operation per callback) and
+/// 0,1,2 when it is enabled (one callback for all three), so the ids differed
+/// by batch shape alone — the very thing the two runs are supposed to vary.
+/// The equality assertion could therefore never hold, and could not have
+/// detected a genuine per-write/group-commit result mismatch if one existed.
+fn group_commit_operation_index(operation: &WriteOperation) -> Result<u64, DomainError> {
+    let WriteOperation::Custom { payload, .. } = operation else {
+        return Err(DomainError::Usage {
+            message: format!(
+                "group-commit fixture received an unexpected operation: {}",
+                operation.operation_type()
+            ),
+            repair: None,
+        });
+    };
+    payload
+        .get("index")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| DomainError::Usage {
+            message: format!(
+                "group-commit fixture operation payload has no numeric index: {payload}"
+            ),
+            repair: None,
+        })
 }
 
 fn group_commit_test_operation(index: usize) -> WriteOperation {
