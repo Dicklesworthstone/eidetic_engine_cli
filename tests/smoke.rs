@@ -37,6 +37,23 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
+/// Portable sibling of `run_ee_with_env`. Setting environment variables needs
+/// nothing unix-specific; that helper is `cfg(unix)` only because it sits in
+/// this file's block of unix-y fixtures. The status fixtures below are NOT
+/// `cfg(unix)` and still need `EE_EMBED_DOWNLOAD=off`, because they assert clean
+/// stderr and `ee status` reports embedding posture -- on a host with no model
+/// cache the one-time download notice would land on stderr and fail them.
+fn run_ee_env(args: &[&str], envs: &[(&str, &str)]) -> Result<Output, String> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    command.args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command
+        .output()
+        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
 #[cfg(unix)]
 fn run_ee_with_env(args: &[&str], envs: &[(&str, OsString)]) -> Result<Output, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
@@ -1096,7 +1113,34 @@ fn ensure_pack_query_file_machine_error(
 
 #[test]
 fn status_json_stdout_is_stable_machine_data() -> TestResult {
-    let output = run_ee(&["status", "--json"])?;
+    // These fixtures used to run `ee status` with NO --workspace, so they
+    // resolved against the process cwd -- the repo root -- and asserted against
+    // the repository's OWN .ee store. That store is excluded from RCH sync
+    // (.rchignore:51-52) and from git (.gitignore:17), so it exists on a dev Mac
+    // and does not exist on a worker, which is why these failed there and
+    // nowhere else (bd-tvi3a). Nothing here depends on live store CONTENTS --
+    // the assertions are envelope shape, capability and profile gating -- so a
+    // fresh initialised workspace tests the same properties hermetically.
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace_arg = temp.path().to_string_lossy().into_owned();
+    let envs = [("EE_EMBED_DOWNLOAD", "off")];
+    let init = run_ee_env(
+        &["--workspace", workspace_arg.as_str(), "--json", "init"],
+        &envs,
+    )?;
+    ensure(
+        init.status.success(),
+        format!(
+            "init must succeed before the status checks; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&init.stdout),
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )?;
+
+    let output = run_ee_env(
+        &["--workspace", workspace_arg.as_str(), "status", "--json"],
+        &envs,
+    )?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1135,7 +1179,17 @@ fn status_json_stdout_is_stable_machine_data() -> TestResult {
         &serde_json::Value::Null,
         "status JSON omits the runtime object at the default summary profile",
     )?;
-    let standard = run_ee(&["status", "--json", "--fields", "standard"])?;
+    let standard = run_ee_env(
+        &[
+            "--workspace",
+            workspace_arg.as_str(),
+            "status",
+            "--json",
+            "--fields",
+            "standard",
+        ],
+        &envs,
+    )?;
     let standard_stdout = String::from_utf8_lossy(&standard.stdout);
     ensure_command_success(&standard, "status --fields standard")?;
     let standard_json: serde_json::Value = serde_json::from_str(&standard_stdout)
@@ -3869,8 +3923,40 @@ fn curate_review_with_reason_pins_audit_row_shape() -> TestResult {
 
 #[test]
 fn global_json_flag_is_order_independent() -> TestResult {
-    let before = run_ee(&["--json", "status"])?;
-    let after = run_ee(&["status", "--json"])?;
+    // These fixtures used to run `ee status` with NO --workspace, so they
+    // resolved against the process cwd -- the repo root -- and asserted against
+    // the repository's OWN .ee store. That store is excluded from RCH sync
+    // (.rchignore:51-52) and from git (.gitignore:17), so it exists on a dev Mac
+    // and does not exist on a worker, which is why these failed there and
+    // nowhere else (bd-tvi3a). Nothing here depends on live store CONTENTS --
+    // the assertions are envelope shape, capability and profile gating -- so a
+    // fresh initialised workspace tests the same properties hermetically.
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace_arg = temp.path().to_string_lossy().into_owned();
+    let envs = [("EE_EMBED_DOWNLOAD", "off")];
+    let init = run_ee_env(
+        &["--workspace", workspace_arg.as_str(), "--json", "init"],
+        &envs,
+    )?;
+    ensure(
+        init.status.success(),
+        format!(
+            "init must succeed before the status checks; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&init.stdout),
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )?;
+
+    // Only the position of `--json` varies between the two runs, which is the
+    // property under test; `--workspace` is fixed in both.
+    let before = run_ee_env(
+        &["--workspace", workspace_arg.as_str(), "--json", "status"],
+        &envs,
+    )?;
+    let after = run_ee_env(
+        &["--workspace", workspace_arg.as_str(), "status", "--json"],
+        &envs,
+    )?;
 
     ensure(before.status.success(), "--json status should succeed")?;
     ensure(after.status.success(), "status --json should succeed")?;
