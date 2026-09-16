@@ -1041,14 +1041,22 @@ def blank_rust_noise(src):
             index += 1
     return "".join(out)
 
-def emitted_event_field_sets(path):
-    """Field-key sets for each tracing event / span / #[instrument] in `path`."""
+surface_literal_re = re.compile(r'surface\s*=\s*"([A-Za-z0-9_.-]+)"')
+
+def emitted_events(path):
+    """`(field_keys, surface_literal)` for each event / span / #[instrument].
+
+    `surface_literal` is the string literal assigned to `surface`, or None
+    when the surface is passed at runtime (`surface,` shorthand over a
+    function parameter, as src/core/why.rs does). Literals are read from the
+    RAW text because `blank_rust_noise` deliberately erases string bodies.
+    """
     try:
         raw = path.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError):
         return []
     source = blank_rust_noise(raw)
-    field_sets = []
+    events = []
     for pattern in (event_macro_re, instrument_re):
         for match in pattern.finditer(source):
             open_paren = match.end() - 1
@@ -1071,25 +1079,48 @@ def emitted_event_field_sets(path):
                 token = token.strip()
                 if token in required_fields:
                     keys.add(token)
-            field_sets.append(keys)
-    return field_sets
+            literal = surface_literal_re.search(raw[open_paren + 1:cursor])
+            events.append((keys, literal.group(1) if literal else None))
+    return events
 
-def source_has_tracing_evidence(path):
-    """True when SOME emitted event carries the convention fields as KEYS.
+def source_has_tracing_evidence(path, expected_surface):
+    """True when an event in `path` is evidence for `expected_surface`.
 
-    The previous implementation asked whether the FILE contained the literal
-    "tracing::" plus three of the field names anywhere in its bytes. That is
-    satisfied by a doc comment: src/steward/mod.rs passed it while every event
-    the file actually emits carries memory_id / freshness / confidence /
-    reason and not one convention field (bd-ti1zt). A gate answering "this
-    file mentions the vocabulary" cannot be read as "this surface emits
-    conventional tracing", so it is answered per event instead.
+    Two failure modes have to be avoided at once, and neither rule alone does
+    it:
+
+      * Asking only "does this FILE contain the vocabulary" is satisfied by a
+        doc comment -- src/steward/mod.rs passed while every event it emits
+        carries memory_id / freshness / confidence / reason (bd-ti1zt).
+      * Asking only "does SOME event here carry the fields" is satisfied by a
+        neighbour. src/cli/mod.rs hosts dozens of surfaces, so one conformant
+        event would silently vouch for every bead that happens to declare that
+        file -- bd-3usjw.1 (db_inspect) would go green on an event belonging
+        to a different subcommand entirely.
+      * Requiring a literal `surface = "<name>"` match would in turn punish a
+        well-factored helper that takes the surface as a parameter, which is
+        exactly what src/core/why.rs:1162 does -- a false negative against
+        good code.
+
+    So: an event is evidence when it carries at least
+    MIN_EVENT_REQUIRED_FIELDS convention fields AND either names this bead's
+    surface literally, or the file names no surface literally at all (a
+    parameterised helper, which cannot be attributed statically and is not
+    penalised for it).
     """
-    field_sets = emitted_event_field_sets(path)
-    if not field_sets:
+    events = emitted_events(path)
+    if not events:
         return False, required_fields
     required = set(required_fields)
-    best = max(field_sets, key=lambda keys: len(keys & required))
+    named_surfaces = {literal for _, literal in events if literal}
+    attributable = [
+        keys
+        for keys, literal in events
+        if not named_surfaces or literal == expected_surface
+    ]
+    if not attributable:
+        return False, required_fields
+    best = max(attributable, key=lambda keys: len(keys & required))
     hits = best & required
     return (
         len(hits) >= MIN_EVENT_REQUIRED_FIELDS,
@@ -1164,7 +1195,7 @@ for bead in beads:
 
     if runtime_candidates:
         evidence = [
-            (name, source_has_tracing_evidence(path))
+            (name, source_has_tracing_evidence(path, impl_surfaces[0]))
             for name, path in runtime_candidates
         ]
         if not any(ok for _, (ok, _) in evidence):
@@ -1220,6 +1251,8 @@ if [ "$SELF_TEST" = true ]; then
 {"id":"bd-3usjw.harness","title":"[implements-surface:harness_surface] example","labels":["implements-surface:harness_surface"],"description":"FILE SURFACE: tests/harness.rs, benches/harness.rs\nTRACING: surface=harness_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
 {"id":"bd-3usjw.untraced","title":"[implements-surface:untraced_surface] example","labels":["implements-surface:untraced_surface"],"description":"FILE SURFACE: src/untraced.rs\nTRACING: surface=untraced_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
 {"id":"bd-3usjw.mentions","title":"[implements-surface:mentions_surface] example","labels":["implements-surface:mentions_surface"],"description":"FILE SURFACE: src/mentions.rs\nTRACING: surface=mentions_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
+{"id":"bd-3usjw.neighbour","title":"[implements-surface:neighbour_surface] example","labels":["implements-surface:neighbour_surface"],"description":"FILE SURFACE: src/shared_host.rs\nTRACING: surface=neighbour_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
+{"id":"bd-3usjw.parameterised","title":"[implements-surface:parameterised_surface] example","labels":["implements-surface:parameterised_surface"],"description":"FILE SURFACE: src/parameterised.rs\nTRACING: surface=parameterised_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
 JSONL
     mkdir -p "$tmp_dir/src"
     cat > "$tmp_dir/src/good.rs" <<'RS'
@@ -1287,10 +1320,44 @@ pub fn handler() {
     );
 }
 RS
+    # A file hosting MANY surfaces: it emits a fully conformant event, but for
+    # someone else's surface. bd-3usjw.neighbour must NOT be able to claim it.
+    # This is src/cli/mod.rs in miniature.
+    cat > "$tmp_dir/src/shared_host.rs" <<'RS'
+pub fn other_subcommand() {
+    tracing::info!(
+        workspace_id = "wsp",
+        request_id = "req",
+        bead_id = "bd-other",
+        surface = "some_other_surface",
+        phase = "response",
+        elapsed_ms = 1_u64,
+        degraded_codes = ?Vec::<String>::new(),
+        "a neighbouring surface, not neighbour_surface"
+    );
+}
+RS
+    # A well-factored helper that takes the surface as a PARAMETER (what
+    # src/core/why.rs does). Nothing can attribute it statically, so it must
+    # NOT be punished for that: bd-3usjw.parameterised passes.
+    cat > "$tmp_dir/src/parameterised.rs" <<'RS'
+pub fn trace_checkpoint(workspace_id: &str, surface: &'static str, phase: &'static str) {
+    tracing::info!(
+        workspace_id = %workspace_id,
+        request_id = "req",
+        bead_id = "bd-param",
+        surface,
+        phase,
+        elapsed_ms = 1_u64,
+        degraded_codes = ?Vec::<String>::new(),
+        "parameterised surface checkpoint"
+    );
+}
+RS
     report=$(run_checker "$tmp_dir/issues.jsonl" "$tmp_dir" "" "false")
     printf '%s\n' "$report" > "$tmp_dir/self-test-report.json"
-    if ! printf '%s\n' "$report" | jq -e '.status == "fail" and .violationCount == 4' >/dev/null; then
-        echo "error: self-test expected four violations" >&2
+    if ! printf '%s\n' "$report" | jq -e '.status == "fail" and .violationCount == 5' >/dev/null; then
+        echo "error: self-test expected five violations" >&2
         printf '%s\n' "$report" >&2
         exit 1
     fi
@@ -1315,6 +1382,18 @@ RS
     # bd-ti1zt: mentioning the vocabulary must NOT count as emitting it.
     if ! printf '%s\n' "$report" | jq -e '[.violations[] | select(.bead == "bd-3usjw.mentions")] | length == 1' >/dev/null; then
         echo "error: a file that only MENTIONS the convention fields must not pass; the predicate has regressed to a substring check" >&2
+        printf '%s\n' "$report" >&2
+        exit 1
+    fi
+    # A conformant event for a DIFFERENT surface must not vouch for this bead.
+    if ! printf '%s\n' "$report" | jq -e '[.violations[] | select(.bead == "bd-3usjw.neighbour")] | length == 1' >/dev/null; then
+        echo "error: a bead must not claim a conformant event belonging to another surface in the same file" >&2
+        printf '%s\n' "$report" >&2
+        exit 1
+    fi
+    # A helper taking the surface as a parameter must still count as evidence.
+    if ! printf '%s\n' "$report" | jq -e '[.violations[] | select(.bead == "bd-3usjw.parameterised")] | length == 0' >/dev/null; then
+        echo "error: a parameterised tracing helper must not be penalised for not naming its surface literally" >&2
         printf '%s\n' "$report" >&2
         exit 1
     fi

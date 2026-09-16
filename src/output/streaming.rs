@@ -550,6 +550,12 @@ pub fn context_response_stream_frames(
             include_verbose_meta: false,
             include_non_affecting_degradations: false,
             include_legacy_selection_certificate: false,
+            // bd-pack-compact-mode-ibksx: true preserves this adapter's
+            // existing output exactly. The streaming batch is not a Lean
+            // consumer, and changing what it emits is out of scope here.
+            include_selection_audit: true,
+            include_quality_metrics: true,
+            include_budget_detail: true,
         },
     );
     let root: JsonValue = serde_json::from_str(&batch_json)

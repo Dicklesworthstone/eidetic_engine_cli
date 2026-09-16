@@ -16360,6 +16360,105 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    /// GH49 / bd-jikgj: `elapsed_status` must describe the elapsed time the
+    /// caller waited, not the `packAssembly` phase.
+    ///
+    /// Profiling on this bead measured `packAssembly` at 92-250ms while
+    /// candidateConstruction, scopeVisibility and queryAssist together ran to
+    /// several times that, so classifying on the phase alone let a pack blow
+    /// its published budget end to end and still report `within_budget`. The
+    /// trace here carries a deliberately comfortable 3ms `packAssembly` span
+    /// alongside a 24s observed elapsed: the SLO must follow the 24s.
+    #[test]
+    fn pack_slo_elapsed_follows_observed_request_time_not_the_assembly_span() -> Result<(), String>
+    {
+        let draft = assemble_draft_with_profile_and_options(
+            ContextPackProfile::Balanced,
+            "slo elapsed wiring",
+            TokenBudget::new(64).map_err(|error| error.to_string())?,
+            Vec::new(),
+            PackAssemblyOptions::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        let search_report = ppr_search_report(Vec::new());
+        let trace = ContextPerformanceTrace {
+            timings: vec![PerformanceTiming {
+                name: "packAssembly",
+                elapsed: Duration::from_millis(3),
+            }],
+            ..ContextPerformanceTrace::default()
+        };
+
+        let reported = |observed_elapsed_ms| {
+            pack_assembly_slo_for_run(
+                PackResourceProfile::Standard,
+                &draft,
+                &search_report,
+                &trace,
+                observed_elapsed_ms,
+            )
+        };
+
+        // The number actually handed in wins, and reaches `actuals` intact.
+        let slow = reported(24_000);
+        assert_eq!(
+            slow.actuals.elapsed_ms, 24_000,
+            "the observed request elapsed must reach the SLO actuals"
+        );
+        assert_eq!(
+            slow.elapsed_status,
+            crate::pack::PackAssemblySloStatus::Failure,
+            "24s against a 2s Standard failure threshold must report failure"
+        );
+        assert_eq!(
+            slow.status,
+            crate::pack::PackAssemblySloStatus::Failure,
+            "the aggregate status must not absorb an elapsed overrun"
+        );
+        // Resource posture stays clean: this pack was slow, not wasteful. The
+        // two axes must not be conflated in either direction.
+        assert_eq!(
+            slow.resource_status,
+            crate::pack::PackAssemblySloStatus::WithinBudget,
+            "a slow but resource-clean pack must keep a clean resource status"
+        );
+
+        // Same trace, different observed elapsed => different verdict. If the
+        // classification ever reverts to reading the `packAssembly` span, both
+        // calls would agree and this fails.
+        let fast = reported(5);
+        assert_eq!(
+            fast.elapsed_status,
+            crate::pack::PackAssemblySloStatus::WithinBudget
+        );
+        assert_ne!(
+            slow.elapsed_status, fast.elapsed_status,
+            "elapsed classification must depend on the supplied elapsed, not the trace"
+        );
+        Ok(())
+    }
+
+    /// The reason the SLO takes elapsed as a parameter rather than reading it
+    /// back from the trace by span name: an absent span answers 0, which would
+    /// silently reinstate a false `within_budget`.
+    #[test]
+    fn trace_elapsed_ms_answers_zero_for_an_unrecorded_span() {
+        let trace = ContextPerformanceTrace {
+            timings: vec![PerformanceTiming {
+                name: "packAssembly",
+                elapsed: Duration::from_millis(7),
+            }],
+            ..ContextPerformanceTrace::default()
+        };
+        assert_eq!(trace.elapsed_ms("packAssembly"), 7);
+        assert_eq!(
+            trace.elapsed_ms("total"),
+            0,
+            "an unrecorded span must be understood to read as zero; the SLO \
+             therefore must not source its elapsed this way"
+        );
+    }
+
     fn ppr_search_report(hits: Vec<SearchHit>) -> SearchReport {
         SearchReport {
             index_freshness: None,
