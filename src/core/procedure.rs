@@ -884,49 +884,11 @@ fn redact_procedure_public_source_ref(value: &str) -> String {
 }
 
 fn redact_procedure_public_path_like_segments(value: &str) -> String {
-    const REDACTED_PATH: &str = "[REDACTED_PATH]";
-    const PREFIXES: &[&str] = &[
-        "/Users/",
-        "/Volumes/",
-        "/private/",
-        "/var/",
-        "/tmp/",
-        "/home/",
-        "/data/",
-        "/dp/",
-        "/workspace/",
-        "/repo/",
-        "/etc/",
-    ];
-
-    let mut output = String::with_capacity(value.len());
-    let mut cursor = 0;
-    while cursor < value.len() {
-        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, ch)| *ch == '/')
-        else {
-            output.push_str(&value[cursor..]);
-            break;
-        };
-        let start = cursor + relative_index;
-        if !PREFIXES
-            .iter()
-            .any(|prefix| value[start..].starts_with(prefix))
-        {
-            output.push_str(&value[cursor..=start]);
-            cursor = start + 1;
-            continue;
-        }
-
-        output.push_str(&value[cursor..start]);
-        output.push_str(REDACTED_PATH);
-        cursor = value[start..]
-            .char_indices()
-            .find_map(|(index, ch)| {
-                procedure_public_source_path_boundary(ch).then_some(start + index)
-            })
-            .unwrap_or(value.len());
-    }
-    output
+    // bd-redactor-prefix-divergence-lsy52: one of twenty hand-copied
+    // prefix lists, replaced by the shared start predicate, which also
+    // recognises Windows drive paths and UNC shares this walker could not
+    // reach (it scanned only for '/'). The boundary stays local.
+    crate::util::redact_path_like_segments(value, procedure_public_source_path_boundary)
 }
 
 fn procedure_public_source_path_boundary(ch: char) -> bool {

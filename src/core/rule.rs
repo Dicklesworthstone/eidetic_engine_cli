@@ -4573,43 +4573,11 @@ fn redact_rule_public_source_ref(value: &str) -> String {
 }
 
 fn redact_rule_public_path_like_segments(value: &str) -> String {
-    const REDACTED_PATH: &str = "[REDACTED_PATH]";
-    const UNIX_PREFIXES: &[&str] = &[
-        "/Users/",
-        "/Volumes/",
-        "/private/",
-        "/var/",
-        "/tmp/",
-        "/home/",
-        "/data/",
-        "/dp/",
-        "/workspace/",
-        "/repo/",
-        "/etc/",
-    ];
-
-    let mut output = String::with_capacity(value.len());
-    let mut cursor = 0usize;
-    while cursor < value.len() {
-        let remaining = &value[cursor..];
-        if let Some(prefix_len) = rule_public_path_prefix_len(remaining, UNIX_PREFIXES) {
-            output.push_str(REDACTED_PATH);
-            cursor += prefix_len;
-            while cursor < value.len() {
-                let next = value[cursor..].chars().next().unwrap_or('\0');
-                if rule_public_path_boundary(next) {
-                    break;
-                }
-                cursor += next.len_utf8();
-            }
-            continue;
-        }
-
-        let next = remaining.chars().next().unwrap_or('\0');
-        output.push(next);
-        cursor += next.len_utf8();
-    }
-    output
+    // bd-redactor-prefix-divergence-lsy52: one of twenty hand-copied
+    // prefix lists, replaced by the shared start predicate, which also
+    // recognises Windows drive paths and UNC shares this walker could not
+    // reach (it scanned only for '/'). The boundary stays local.
+    crate::util::redact_path_like_segments(value, rule_public_path_boundary)
 }
 
 /// Length of an absolute-path-like prefix at the start of `remaining`, if any.
