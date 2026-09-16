@@ -735,14 +735,10 @@ fn subscribe_filter_domain_error(message: String, repair: &'static str) -> Domai
         code: SUBSCRIBE_FILTER_INVALID,
         message,
         repair: Some(repair.to_owned()),
-        details_json: json!({
-            "recovery": [{
-                "priority": 1,
-                "kind": "command",
-                "command": "ee subscribe poll --cursor 0 --filter LEVEL=procedural,TAG=release --json"
-            }]
-        })
-        .to_string(),
+        // The recovery action is supplied by `DomainError::recovery_actions`
+        // so the renderer derives the risk/privacy metadata `ee.error.v2`
+        // requires. Hand-rolling it here emitted 3 of the 8 required fields.
+        details_json: json!({}).to_string(),
     }
 }
 

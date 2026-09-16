@@ -1232,6 +1232,25 @@ impl RecoveryAction {
         }
     }
 
+    /// Construct a run-this-command recovery.
+    #[must_use]
+    pub fn command(priority: u8, command: impl Into<String>, rationale: impl Into<String>) -> Self {
+        let command = command.into();
+        Self {
+            priority,
+            kind: RecoveryKind::Command,
+            rationale: rationale.into(),
+            env_name: None,
+            value_hint: None,
+            config_path: None,
+            config_key: None,
+            flag_name: None,
+            command: Some(command.clone()),
+            results_in: None,
+            example: Some(command),
+        }
+    }
+
     /// Construct a migration-run recovery.
     #[must_use]
     pub fn migration(
@@ -1977,6 +1996,19 @@ impl DomainError {
             return derivation_reflection_actions;
         }
         match self {
+            // bd: the subscribe filter refusal used to hand-roll its recovery
+            // array into `details_json`, which emitted 3 of the 8 fields
+            // `ee.error.v2` requires of a recoveryAction. Routing it through the
+            // typed path makes `build_recovery_action_fields` derive the safety
+            // metadata, exactly as every other typed recovery gets it.
+            Self::UsageCodeWithDetails {
+                code: "subscribe_filter_invalid",
+                ..
+            } => vec![RecoveryAction::command(
+                1,
+                "ee subscribe poll --cursor 0 --filter LEVEL=procedural,TAG=release --json",
+                "Re-run the poll with a filter whose keys and values parse, using the documented LEVEL/KIND/TAG vocabulary.",
+            )],
             Self::UsageCodeWithDetails {
                 code: "curate_reason_too_large",
                 ..
