@@ -5483,6 +5483,11 @@ struct DefaultSearchEmbedder {
     stack: EmbedderStack,
     lazy_model2vec: Option<Arc<EeLazyModel2VecEmbedder>>,
     model_resolution: EmbedModelResolution,
+    /// A verified local model directory was present and its weights still
+    /// failed to load, so this selection describes the hash tier that ran
+    /// instead. Distinct from never having resolved a model at all: the
+    /// operator HAS the files and the LOAD is what broke (bd-kvltg).
+    verified_load_failed: bool,
 }
 
 impl DefaultSearchEmbedder {
@@ -5491,7 +5496,36 @@ impl DefaultSearchEmbedder {
             stack,
             lazy_model2vec: None,
             model_resolution,
+            verified_load_failed: false,
         }
+    }
+
+    /// Same as [`Self::ready`], but carries whether a verified local model
+    /// directory was found and failed to load on the way to this fallback.
+    fn after_local_load(
+        stack: EmbedderStack,
+        model_resolution: EmbedModelResolution,
+        verified_load_failed: bool,
+    ) -> Self {
+        Self {
+            stack,
+            lazy_model2vec: None,
+            model_resolution,
+            verified_load_failed,
+        }
+    }
+
+    /// True when the local neural tier was attempted and FAILED: either a
+    /// verified directory whose weights would not load, or a lazy
+    /// auto-download tier that has since marked itself failed. Both mean the
+    /// hash tier is running because something broke, not because no model was
+    /// ever available -- which is the distinction bd-kvltg exists to restore.
+    fn local_model_load_failed(&self) -> bool {
+        self.verified_load_failed
+            || self
+                .lazy_model2vec
+                .as_ref()
+                .is_some_and(|lazy| lazy.failed())
     }
 }
 
@@ -5591,6 +5625,13 @@ fn default_search_embedder_for_settings(settings: &EeEmbedderSettings) -> Defaul
     // The supported local stack has one pinned Model2Vec fast tier. Inspection
     // and execution share discovery; only execution constructs the real model.
     // In particular, off prohibits downloads, not use of verified cached files.
+    // A verified directory proves the FILES are present, never that the weights
+    // load. When the load fails we still fall to the hash tier, but the reason
+    // is now carried forward rather than living only in a log line: otherwise
+    // "no model ever resolved" and "the model resolved and would not load"
+    // surface as one undifferentiated frankensearch_hash_fallback, which is
+    // what made bd-kvltg unanswerable from output alone.
+    let mut verified_load_failed = false;
     if let Some(model_dir) = verified_default_model_dir(settings) {
         match Model2VecEmbedder::load_shared_with_name(&model_dir, POTION_MODEL_NAME) {
             Ok(embedder) => {
@@ -5600,6 +5641,7 @@ fn default_search_embedder_for_settings(settings: &EeEmbedderSettings) -> Defaul
                 );
             }
             Err(error) => {
+                verified_load_failed = true;
                 tracing::warn!(
                     target: "ee::index::embedder",
                     %error,
@@ -5609,9 +5651,10 @@ fn default_search_embedder_for_settings(settings: &EeEmbedderSettings) -> Defaul
         }
     }
     match settings.download_mode {
-        EeEmbedDownloadMode::Off => DefaultSearchEmbedder::ready(
+        EeEmbedDownloadMode::Off => DefaultSearchEmbedder::after_local_load(
             hash_fallback_embedder_stack(),
             EmbedModelResolution::deterministic_hash(),
+            verified_load_failed,
         ),
         EeEmbedDownloadMode::Auto => ee_auto_download_embedder(settings.model_root.clone()),
     }
@@ -5646,6 +5689,7 @@ fn ee_auto_download_embedder(model_root: PathBuf) -> DefaultSearchEmbedder {
         stack: EmbedderStack::from_parts(fast_embedder, None),
         lazy_model2vec: Some(lazy_model2vec),
         model_resolution: EmbedModelResolution::ready(EmbedModelSource::Downloaded),
+        verified_load_failed: false,
     }
 }
 
@@ -6972,6 +7016,12 @@ struct EmbedderDescriptor {
     /// Distinct from an ordinary hash fallback: the operator asked for a remote
     /// backend and must be told it is not working.
     remote_unavailable: bool,
+    /// The LOCAL neural tier was attempted and failed, so this descriptor
+    /// describes the hash tier that ran instead. Also distinct from an ordinary
+    /// hash fallback: the model was reachable and the load is what broke, and
+    /// an operator who already has the files needs to be told which step failed
+    /// rather than being handed one undifferentiated fallback label (bd-kvltg).
+    local_load_failed: bool,
 }
 
 impl EmbedderDescriptor {
@@ -6985,6 +7035,7 @@ impl EmbedderDescriptor {
             ready: embedder.is_ready(),
             pending_download: embedder_reports_pending_model2vec_download(embedder),
             remote_unavailable: false,
+            local_load_failed: false,
         }
     }
 
@@ -6998,6 +7049,7 @@ impl EmbedderDescriptor {
             ready: true,
             pending_download: false,
             remote_unavailable: false,
+            local_load_failed: false,
         }
     }
 }
@@ -7049,7 +7101,16 @@ fn workspace_embedder_descriptors(
     // caller what retrieval would have paid anyway and costs later callers
     // nothing.
     let selection = DEFAULT_SEARCH_EMBEDDER.get_or_init(detect_default_search_embedder);
-    Ok(stack_descriptors(&selection.stack))
+    let (mut fast, quality) = stack_descriptors(&selection.stack);
+    // Read from the selection in hand rather than from process-global state.
+    // The failure belongs to THIS selection, and a stack that a caller or a
+    // test built directly must never inherit a failure it did not participate
+    // in. Refines only an already-hash verdict: a semantic embedder is working
+    // regardless of what failed earlier, so it is never relabelled.
+    if !fast.semantic {
+        fast.local_load_failed = selection.local_model_load_failed();
+    }
+    Ok((fast, quality))
 }
 
 fn active_embedder_fingerprint(
@@ -7301,6 +7362,11 @@ fn embedding_posture_from_records(
         "neural_local_unconfirmed"
     } else if pending_local_download {
         "ee_model2vec_download_pending"
+    } else if fast_embedder.local_load_failed {
+        // Already documented as a valid label in
+        // docs/schemas/ee.embedding_posture.v1.json; nothing emitted it until
+        // now, so every load failure arrived as a bare hash fallback.
+        "model_load_failed"
     } else {
         "frankensearch_hash_fallback"
     };
@@ -9414,6 +9480,61 @@ mod tests {
                 "non-semantic embedder must not be reported as unconfirmed-neural; \
                  got mode {:?}, source {:?}",
                 hash.mode, hash.source
+            ),
+        )
+    }
+
+    #[test]
+    fn hash_posture_names_a_failed_local_load_instead_of_a_bare_fallback() -> TestResult {
+        let coverage = EmbeddingVectorCoverage::new(0, 3);
+
+        // A load failure must be NAMED. Before bd-kvltg it arrived as a bare
+        // frankensearch_hash_fallback, so "no model ever resolved" and "the
+        // model resolved and would not load" were indistinguishable in output,
+        // and the only way to tell them apart was to read the source.
+        let mut failed = EmbedderDescriptor::from_embedder(&HashEmbedder::default_256());
+        failed.local_load_failed = true;
+        let failed_posture = embedding_posture_from_records(&failed, None, &[], coverage);
+        ensure(
+            failed_posture.source == "model_load_failed",
+            format!(
+                "a failed local load must name the failing step; got source {:?}",
+                failed_posture.source
+            ),
+        )?;
+        ensure(
+            failed_posture.mode == EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH,
+            format!(
+                "a failed local load still RUNS the hash tier, so the mode must \
+                 stay honest; got mode {:?}",
+                failed_posture.mode
+            ),
+        )?;
+
+        // Paired negative: without the flag the SAME descriptor must still
+        // report the ordinary fallback. Without this arm the assertion above
+        // would pass no matter what the new branch did.
+        let plain = EmbedderDescriptor::from_embedder(&HashEmbedder::default_256());
+        let plain_posture = embedding_posture_from_records(&plain, None, &[], coverage);
+        ensure(
+            plain_posture.source == "frankensearch_hash_fallback",
+            format!(
+                "an ordinary hash fallback must keep its label; got source {:?}",
+                plain_posture.source
+            ),
+        )?;
+
+        // A working semantic embedder is never relabelled, whatever failed
+        // earlier in the process.
+        let mut semantic = EmbedderDescriptor::potion();
+        semantic.local_load_failed = true;
+        let semantic_posture = embedding_posture_from_records(&semantic, None, &[], coverage);
+        ensure(
+            semantic_posture.source != "model_load_failed",
+            format!(
+                "a semantic embedder is working and must never be reported as a \
+                 load failure; got source {:?}",
+                semantic_posture.source
             ),
         )
     }
