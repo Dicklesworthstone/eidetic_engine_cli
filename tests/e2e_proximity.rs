@@ -59,6 +59,25 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
+/// Turn on the proximity graph feature, which ships default-off.
+///
+/// `built_in_config` sets `proximity_enabled: Some(false)`
+/// (src/config/merge.rs:1255), so `ee proximity` abstains with
+/// `interpretation: "graph_feature_disabled"` and a `graph_feature_disabled`
+/// degradation instead of computing anything. That is the product behaving
+/// correctly — it refuses to fake an answer for a disabled feature — but it
+/// means the self / missing_memory / unreachable branches below were never
+/// reachable. Mirrors the repair the product itself prints:
+/// `ee config set graph.feature.proximity.enabled true`, and the same idiom
+/// tests/graph_neighborhood_smoke.rs uses for its happy-path pair.
+fn enable_proximity_feature(workspace: &std::path::Path) -> TestResult {
+    fs::write(
+        workspace.join(".ee").join("config.toml"),
+        "[graph.feature.proximity]\nenabled = true\n",
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn unique_workspace(prefix: &str) -> Result<PathBuf, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -264,6 +283,7 @@ fn proximity_self_pair_returns_self_interpretation_with_zero_min_cut() -> TestRe
         .ok_or_else(|| "workspace path must be UTF-8".to_string())?
         .to_owned();
     init_workspace(&workspace_arg)?;
+    enable_proximity_feature(&workspace)?;
 
     let a = remember(&workspace_arg, "Pin-test proximity self-pair a.")?;
     let b = remember(&workspace_arg, "Pin-test proximity self-pair b.")?;
@@ -322,6 +342,7 @@ fn proximity_missing_memory_returns_missing_interpretation() -> TestResult {
         .ok_or_else(|| "workspace path must be UTF-8".to_string())?
         .to_owned();
     init_workspace(&workspace_arg)?;
+    enable_proximity_feature(&workspace)?;
 
     let a = remember(&workspace_arg, "Pin-test proximity missing src.")?;
     let b = remember(&workspace_arg, "Pin-test proximity missing dst.")?;
@@ -377,6 +398,7 @@ fn proximity_disconnected_pair_returns_unreachable_with_degraded_entry() -> Test
         .ok_or_else(|| "workspace path must be UTF-8".to_string())?
         .to_owned();
     init_workspace(&workspace_arg)?;
+    enable_proximity_feature(&workspace)?;
 
     // Two distinct components: (a <-> b) and (c <-> d). No cross-edge.
     let a = remember(&workspace_arg, "Pin-test proximity component-1 a.")?;
