@@ -27,17 +27,32 @@ fn parse_doc_env_vars() -> TestResult<Vec<DocEnvVar>> {
             .split('|')
             .map(str::trim)
             .collect::<Vec<_>>();
+        // docs/env_vars.md carries TWO tables. The registry table (:44) is
+        // `| Name | Category | Type | Default | Controls | Notes |`; a second,
+        // narrower one (:19) documents the third-party vars `EMBEDDING_MODEL`
+        // and `OPENAI_API_KEY`, whose surrounding prose says their "values are
+        // never displayed, never passed to Frankensearch, and never used for
+        // retrieval". They are not `EE_*` and are not in the registry.
+        //
+        // The six-cell shape is a requirement of the REGISTRY table, so the
+        // `EE_` filter -- which this loop already applied two lines later --
+        // has to run first. Applied after, it made a hard error out of a table
+        // this test was never meant to read.
+        //
+        // This cannot go vacuous: `docs_env_vars_table_matches_registry`
+        // compares the parsed rows against the whole of `EnvVar::all()`, so a
+        // registry row skipped here fails that equality loudly.
+        let raw_name = match cells.first() {
+            Some(name) if name.starts_with("`EE_") => *name,
+            _ => continue,
+        };
+
         if cells.len() != 6 {
             return Err(format!(
                 "docs/env_vars.md:{} expected 6 table cells, got {}",
                 line_index + 1,
                 cells.len()
             ));
-        }
-
-        let raw_name = cells[0];
-        if !raw_name.starts_with("`EE_") {
-            continue;
         }
 
         let name = raw_name.trim_matches('`').to_owned();
