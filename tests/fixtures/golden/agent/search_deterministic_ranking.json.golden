@@ -117,8 +117,8 @@
       },
       {
         "docId": "mem_00000000000000000000010002",
-        "score": 0.40871692,
-        "relevanceScore": 0.408717,
+        "score": 0.6233764,
+        "relevanceScore": 0.623376,
         "scoreKind": "unit_normalized",
         "scoreInterval": [
           0.0,
@@ -127,7 +127,7 @@
         "coverageGuarantee": null,
         "calibrated": false,
         "source": "lexical",
-        "why": "Relevance 0.4087 from score 0.4087 (unit_normalized) via lexical match (1.06).",
+        "why": "Relevance 0.6234 from score 0.6234 (unit_normalized) via lexical match (1.06).",
         "provenance": [
           {
             "kind": "provenance_uri",
@@ -194,7 +194,7 @@
         "validityStatus": "current",
         "validityWindowKind": "starts_at",
         "explanation": {
-          "summary": "Relevance 0.4087 from score 0.4087 (unit_normalized) via lexical match (1.06).",
+          "summary": "Relevance 0.6234 from score 0.6234 (unit_normalized) via lexical match (1.06).",
           "factors": [
             {
               "name": "lexical",
@@ -208,8 +208,8 @@
       },
       {
         "docId": "mem_00000000000000000000010003",
-        "score": 0.0,
-        "relevanceScore": 0.0,
+        "score": 0.36304024,
+        "relevanceScore": 0.36304,
         "scoreKind": "unit_normalized",
         "scoreInterval": [
           0.0,
@@ -218,7 +218,7 @@
         "coverageGuarantee": null,
         "calibrated": false,
         "source": "lexical",
-        "why": "Relevance 0.0000 from score 0.0000 (unit_normalized) via lexical match (0.62).",
+        "why": "Relevance 0.3630 from score 0.3630 (unit_normalized) via lexical match (0.62).",
         "provenance": [
           {
             "kind": "provenance_uri",
@@ -285,7 +285,7 @@
         "validityStatus": "current",
         "validityWindowKind": "starts_at",
         "explanation": {
-          "summary": "Relevance 0.0000 from score 0.0000 (unit_normalized) via lexical match (0.62).",
+          "summary": "Relevance 0.3630 from score 0.3630 (unit_normalized) via lexical match (0.62).",
           "factors": [
             {
               "name": "lexical",
@@ -316,9 +316,9 @@
       },
       "scoreDistribution": {
         "top": 1.0,
-        "min": 0.0,
+        "min": 0.36304,
         "max": 1.0,
-        "mean": 0.469572
+        "mean": 0.662139
       },
       "fieldCoverage": {
         "fastScoreCount": 0,
