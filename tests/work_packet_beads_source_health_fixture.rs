@@ -168,7 +168,9 @@ fn recovery_actions_are_stable_and_inspection_only() -> TestResult {
     if !commands.contains(&"br doctor --json") {
         return Err(format!("missing br doctor probe in {commands:?}"));
     }
-    if !commands.contains(&"br --no-auto-import --allow-stale ready --json") {
+    if !commands
+        .contains(&"br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale")
+    {
         return Err(format!(
             "missing stale-safe read-only fallback in {commands:?}"
         ));
