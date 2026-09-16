@@ -199,6 +199,96 @@ printf '%b' "$STAGE_RESULTS"
         .expect("render record_gated_off")
 }
 
+/// Runs the real `closure_lint_or_tracked_drift` with both of its subprocesses
+/// stubbed, and returns the status it hands back to `run_stage`.
+///
+/// Extracts the function from verify.sh rather than restating its logic, for
+/// the same reason `render_gated_off` does: the thing under test is what the
+/// script WOULD do, not what this test remembers it spelling.
+fn closure_gate_status(lint_code: i32, guard_code: i32) -> Output {
+    Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"
+set -uo pipefail
+BEADS_LOCK_SKIP_CODE=75
+with_beads_read_locks() {
+    case "$1" in
+        *closure-lint.sh)             return "$LINT_CODE" ;;
+        *verification-drift-guard.sh) return "$GUARD_CODE" ;;
+    esac
+}
+eval "$(awk '/^closure_lint_or_tracked_drift\(\) /,/^}/' "$VERIFY_SCRIPT")"
+closure_lint_or_tracked_drift >/dev/null 2>&1
+printf '%s' "$?"
+"#,
+        )
+        .env("VERIFY_SCRIPT", verify_script_path())
+        .env("LINT_CODE", lint_code.to_string())
+        .env("GUARD_CODE", guard_code.to_string())
+        .current_dir(project_root())
+        .output()
+        .expect("run closure_lint_or_tracked_drift")
+}
+
+fn closure_gate_code(lint_code: i32, guard_code: i32) -> String {
+    let output = closure_gate_status(lint_code, guard_code);
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// The closure-lint gate must be ABLE to fail.
+///
+/// Regression test for bd-closure-lint-gate-cannot-fail-6hb5b. The function
+/// used to read `$?` after an `if`, and a false `if` with no `else` exits 0,
+/// so the captured status was always 0 and `return "$closure_exit"` could
+/// never be non-zero. Executed against the pre-fix function, ALL FIVE cases
+/// below returned 0 -- the gate could not fail under any condition, while
+/// run_stage recorded every one of them as PASS.
+///
+/// These assert the routing decision, not the linter's own logic.
+#[test]
+fn closure_lint_gate_can_actually_fail() {
+    // A violation the drift guard does not excuse must fail the gate. This is
+    // the case the branch exists for, and the one that was dead.
+    assert_eq!(
+        closure_gate_code(1, 1),
+        "1",
+        "unexcused closure-lint violation must fail the stage"
+    );
+}
+
+#[test]
+fn closure_lint_gate_still_passes_and_still_excuses() {
+    // Paired positives: the fix must not turn the gate into one that always
+    // fails, which would be the same defect pointing the other way.
+    assert_eq!(closure_gate_code(0, 0), "0", "a clean lint must pass");
+    assert_eq!(
+        closure_gate_code(1, 0),
+        "0",
+        "tracked drift must still excuse a violation"
+    );
+}
+
+/// A contended closure-lint must reach run_stage's contention counter.
+///
+/// Before the fix a held beads lock fell through to the drift guard, and a
+/// passing guard converted a gate that NEVER EXECUTED into a PASS that no
+/// counter saw -- invisible to the INCOMPLETE banner and to the exit status.
+#[test]
+fn contended_closure_lint_is_reported_as_contention_not_as_a_pass() {
+    let skip_code = "75";
+    assert_eq!(
+        closure_gate_code(75, 0),
+        skip_code,
+        "a contended lint must not be excused by a guard that did run"
+    );
+    assert_eq!(
+        closure_gate_code(75, 75),
+        skip_code,
+        "a contended lint must report contention when the guard is contended too"
+    );
+}
+
 #[test]
 fn fake_oidc_idp_selfcheck_wiring() {
     let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");

@@ -912,11 +912,32 @@ closure_lint_or_tracked_drift() {
     # The closure-lint audit covers both bead closure discipline and the
     # failure-mode fixture taxonomy (including *_unimplemented honesty-only
     # markers), so verify routes that full gate through drift tracking.
-    if with_beads_read_locks ./scripts/closure-lint.sh --audit --json; then
+    #
+    # Capture the status with `|| closure_exit=$?` rather than reading `$?`
+    # after an `if`. A false `if` with no `else` exits 0, so the old
+    # `local closure_exit=$?` placed after the `fi` read the COMPOUND's
+    # status and never the linter's. closure_exit was therefore always 0 and
+    # `return "$closure_exit"` could never be non-zero: this gate's only
+    # failure path was dead, and a real violation was recorded as PASS
+    # (bd-closure-lint-gate-cannot-fail-6hb5b).
+    local closure_exit=0
+    with_beads_read_locks ./scripts/closure-lint.sh --audit --json || closure_exit=$?
+    if [ "$closure_exit" -eq 0 ]; then
         return 0
     fi
 
-    local closure_exit=$?
+    # Contention is not a linter verdict. Hand the skip code straight back so
+    # run_stage records it as a skipped stage and counts it toward the
+    # INCOMPLETE banner and exit 75. Previously a contended closure-lint fell
+    # through to the drift guard, and a passing guard converted a gate that
+    # NEVER EXECUTED into a PASS that no counter ever saw.
+    if [ "$closure_exit" -eq "$BEADS_LOCK_SKIP_CODE" ]; then
+        return "$closure_exit"
+    fi
+
+    # Only a real linter verdict may be excused by tracked drift. If the guard
+    # itself cannot run, the excuse is not established, so the linter's own
+    # failure stands.
     if with_beads_read_locks ./scripts/verification-drift-guard.sh --gate=closure-lint --json; then
         echo "[!] Closure linter reported tracked violations; continuing via Verification Drift Guard"
         return 0
@@ -1610,7 +1631,13 @@ run_stage "Eval Regression Contract (bd-bife.18)" "./scripts/eval_regression.sh 
 # Gate 8.76: Ask answer-quality fixture contract. Runs the discoverable ask_v1
 # fixture through the public eval surface so citation/abstention QA remains a
 # committed verification step instead of a manual inspection.
-run_stage "Ask Eval Quality Gate (bd-169v0.4)" "ee eval run ask_v1 --json"
+# The binary is pinned to the current source build for the same reason the
+# E2E stages pin EE_BIN/EE_BINARY (see 48b20809f): an unqualified ee resolves
+# through PATH, so the gate would grade whatever build happens to be installed
+# rather than the tree under verification. This stage invokes the binary
+# directly instead of through a harness script, so the path is the pin;
+# EE_BIN/EE_BINARY are not consulted on this call path.
+run_stage "Ask Eval Quality Gate (bd-169v0.4)" "\"${CURRENT_SOURCE_EE_BINARY}\" eval run ask_v1 --json"
 
 # Gate 8.8: Pack-quality eval regression sweep. Optional because it validates
 # committed report artifacts and intended eval thresholds after feature slices.
