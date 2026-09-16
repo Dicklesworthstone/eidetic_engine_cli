@@ -20818,6 +20818,135 @@ mod tests {
         }
     }
 
+    // ---- bd-cli-surface-consistency-cluster-1jnu1 item 5: `ee search --full` ----
+
+    /// A body comfortably longer than the 240-character elision budget.
+    fn long_search_body() -> String {
+        "release formatting policy sentence. ".repeat(20)
+    }
+
+    fn hit_with_body(doc_id: &str, body: &str) -> SearchHit {
+        let mut hit = synthetic_hit(doc_id, 0.9);
+        hit.metadata = Some(serde_json::json!({ "content": body }));
+        hit
+    }
+
+    #[test]
+    fn truncated_preview_elides_and_flags_while_full_preview_does_neither() {
+        let body = long_search_body();
+        let (elided, was_truncated) =
+            search_content_for_preview(&body, SearchContentPreview::Truncated);
+        assert!(
+            was_truncated,
+            "a body past the budget must report truncation"
+        );
+        assert!(
+            elided.chars().count() <= SEARCH_CONTENT_PREVIEW_MAX_CHARS + 1,
+            "elided body should be the budget plus the ellipsis, got {}",
+            elided.chars().count()
+        );
+
+        let (full, full_truncated) = search_content_for_preview(&body, SearchContentPreview::Full);
+        assert!(!full_truncated, "--full must never report truncation");
+        assert!(
+            !full.ends_with('…'),
+            "--full must not append the elision ellipsis: {full}"
+        );
+        // Whitespace is still collapsed, matching the short-body path, so the
+        // only difference between the modes is the elision itself.
+        assert_eq!(full, body.split_whitespace().collect::<Vec<_>>().join(" "));
+    }
+
+    #[test]
+    fn short_bodies_are_identical_under_both_preview_modes() {
+        let body = "Run cargo fmt --check before release.";
+        let (truncated, truncated_flag) =
+            search_content_for_preview(body, SearchContentPreview::Truncated);
+        let (full, full_flag) = search_content_for_preview(body, SearchContentPreview::Full);
+        assert_eq!(truncated, full);
+        assert!(!truncated_flag && !full_flag);
+    }
+
+    #[test]
+    fn search_json_honors_the_requested_preview_mode() {
+        let body = long_search_body();
+        let report = rerank_test_report(
+            vec![hit_with_body("mem_full_preview", &body)],
+            Vec::new(),
+            true,
+        );
+
+        let render = |preview| {
+            let mut session = SearchAdvisorySession::default();
+            report.data_json_with_advisory_session_for_workspace_and_preview(
+                &mut session,
+                "wsp-full-preview",
+                preview,
+            )
+        };
+
+        let truncated = render(SearchContentPreview::Truncated);
+        let full = render(SearchContentPreview::Full);
+
+        // `unwrap_or_default` + an emptiness assert rather than `expect`:
+        // clippy::expect_used is warn repo-wide and CI runs -D warnings.
+        let truncated_content = truncated["results"][0]["content"]
+            .as_str()
+            .unwrap_or_default();
+        let full_content = full["results"][0]["content"].as_str().unwrap_or_default();
+        assert!(
+            !truncated_content.is_empty(),
+            "truncated render must still emit content: {truncated}"
+        );
+        assert!(
+            !full_content.is_empty(),
+            "full render must emit content: {full}"
+        );
+
+        assert_eq!(
+            truncated["results"][0]["content_truncated"],
+            serde_json::json!(true),
+            "default render must flag the elision"
+        );
+        assert!(
+            full["results"][0].get("content_truncated").is_none(),
+            "--full must not set content_truncated: {}",
+            full["results"][0]
+        );
+        assert!(
+            full_content.chars().count() > truncated_content.chars().count(),
+            "--full must return more of the body than the default render"
+        );
+        assert!(
+            full_content.contains("release formatting policy sentence."),
+            "--full must return the real body"
+        );
+    }
+
+    #[test]
+    fn search_human_summary_honors_the_requested_preview_mode() {
+        let body = long_search_body();
+        let report = rerank_test_report(
+            vec![hit_with_body("mem_full_human", &body)],
+            Vec::new(),
+            true,
+        );
+
+        let truncated = report.human_summary_with_preview(SearchContentPreview::Truncated);
+        let full = report.human_summary_with_preview(SearchContentPreview::Full);
+
+        assert!(
+            full.len() > truncated.len(),
+            "--full human output must be longer than the elided default"
+        );
+        assert!(
+            truncated.contains('…'),
+            "default human output should show the elision marker"
+        );
+        // The default-argument wrapper must keep the historical behavior.
+        assert_eq!(report.human_summary(), truncated);
+    }
+
     fn registered_reranker_entry(
         id: &str,
         model_name: &str,
