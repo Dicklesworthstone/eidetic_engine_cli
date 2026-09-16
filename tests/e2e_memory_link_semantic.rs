@@ -111,9 +111,11 @@ fn remember(workspace_arg: &str, content: &str) -> Result<String, String> {
 /// (`src/core/memory.rs:9525` only READS that column, to refuse re-expiring an
 /// already-tombstoned memory). Both guards these fixtures exercise test
 /// `tombstoned_at` -- revise at `src/core/memory.rs:11512` and link at
-/// `:10215` -- so an expired memory never reaches either one. Revise then
-/// falls through to its `valid_to` guard at `:11516` and answers "superseded";
-/// link has no such fallback and succeeds outright.
+/// `:10215` -- so an expired memory never reaches either one. Revise USED TO
+/// fall through to a `valid_to` guard and answer "superseded" for any expired
+/// memory; since bd-tmv70 / V123 that guard reads `superseded_at`, so an
+/// expired-but-unsuperseded memory is now revisable. Link has no such guard
+/// and succeeds outright either way.
 ///
 /// `ee curate tombstone` is the verb that writes the column
 /// (`src/core/curate.rs:6846` -> `tombstone_memory_audited`).

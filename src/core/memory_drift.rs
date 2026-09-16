@@ -3521,7 +3521,7 @@ mod tests {
         let blocked_live = crate::testing::mem("driftblockedlive");
         insert_recent_pack_test_memory(&connection, &workspace_id, &blocked_old, true)?;
         connection
-            .expire_memory_valid_to(&blocked_old, "2030-01-07T00:00:00Z")
+            .mark_memory_superseded(&blocked_old, "2030-01-07T00:00:00Z")
             .map_err(|error| error.to_string())?;
         connection
             .insert_memory_revision(
@@ -3547,7 +3547,7 @@ mod tests {
         let cleared_live = crate::testing::mem("driftclearedlive");
         insert_recent_pack_test_memory(&connection, &workspace_id, &cleared_old, true)?;
         connection
-            .expire_memory_valid_to(&cleared_old, "2030-01-06T00:00:00Z")
+            .mark_memory_superseded(&cleared_old, "2030-01-06T00:00:00Z")
             .map_err(|error| error.to_string())?;
         connection
             .insert_memory_revision(
@@ -3626,7 +3626,7 @@ mod tests {
             "2030-01-07T00:00:00Z",
         )?;
         connection
-            .expire_memory_valid_to(&missing_head, "2030-01-07T00:00:01Z")
+            .mark_memory_superseded(&missing_head, "2030-01-07T00:00:01Z")
             .map_err(|error| error.to_string())?;
 
         let ambiguous_first = crate::testing::mem("driftambiguousfirst");

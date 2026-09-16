@@ -15089,7 +15089,7 @@ mod tests {
         let revised_id = MemoryId::from_uuid(Uuid::from_u128(0xfeed)).to_string();
         connection
             .with_transaction(|| {
-                connection.expire_memory_valid_to(&original_id, "2026-08-09T00:00:00Z")?;
+                connection.mark_memory_superseded(&original_id, "2026-08-09T00:00:00Z")?;
                 connection.insert_memory_revision(
                     &revised_id,
                     &original_id,

@@ -6,9 +6,13 @@
 //!    keeps the original's `logical_id` so both rows share the chain
 //!    identifier, and reports `revision_number = 2` (the original
 //!    counts as revision 1).
-//! 2. The original row's `valid_to` flips from `NULL` to the
+//! 2. The original row's `superseded_at` flips from `NULL` to the
 //!    revision timestamp so future "current state" queries return
-//!    only the new row.
+//!    only the new row -- and its `valid_to` is left ALONE, because
+//!    that column carries the author's temporal bound and has no
+//!    part in the revision chain (bd-tmv70 / V123). Before V123 both
+//!    facts shared `valid_to`, so a memory with any author expiry was
+//!    indistinguishable from a superseded revision.
 //! 3. A `memory.revise` audit entry lands with `from_id`, `to_id`,
 //!    `logical_id`, `revision_number`, `changed_fields`, and the
 //!    caller's reason in `details`.
@@ -146,6 +150,12 @@ fn fetch_logical_id(db_path: &Path, id: &str) -> Result<String, String> {
         .ok_or_else(|| format!("no logical_id for {id}"))
 }
 
+fn fetch_superseded_at(db_path: &Path, id: &str) -> Result<Option<String>, String> {
+    let conn = DbConnection::open_file(db_path).map_err(|error| format!("open db: {error}"))?;
+    conn.get_memory_superseded_at(id)
+        .map_err(|error| format!("get_memory_superseded_at: {error}"))
+}
+
 fn fetch_valid_to(db_path: &Path, id: &str) -> Result<Option<String>, String> {
     let conn = DbConnection::open_file(db_path).map_err(|error| format!("open db: {error}"))?;
     let mem = conn
@@ -199,7 +209,7 @@ fn revise_creates_new_row_with_same_logical_id() -> TestResult {
 }
 
 #[test]
-fn revise_sets_original_valid_to_and_keeps_new_row_live() -> TestResult {
+fn revise_sets_original_superseded_at_and_keeps_new_row_live() -> TestResult {
     let seed = seed_workspace("Original content for valid_to test.")?;
     let original_valid_to_before = fetch_valid_to(&seed.db_path, &seed.original_id)?;
     if original_valid_to_before.is_some() {
@@ -216,14 +226,22 @@ fn revise_sets_original_valid_to_and_keeps_new_row_live() -> TestResult {
     )?;
     let new_id = report.new_id.as_deref().unwrap();
 
-    let original_valid_to_after = fetch_valid_to(&seed.db_path, &seed.original_id)?;
-    if original_valid_to_after.is_none() {
-        return Err("original's valid_to must be set after revise".to_string());
+    let original_superseded_after = fetch_superseded_at(&seed.db_path, &seed.original_id)?;
+    if original_superseded_after.is_none() {
+        return Err("original's superseded_at must be set after revise".to_string());
     }
-    let new_valid_to = fetch_valid_to(&seed.db_path, new_id)?;
-    if new_valid_to.is_some() {
+    // The other half of the contract, and the reason V123 exists: revise must
+    // NOT touch the author's validity bound.
+    let original_valid_to_after = fetch_valid_to(&seed.db_path, &seed.original_id)?;
+    if original_valid_to_after.is_some() {
         return Err(format!(
-            "new revision row must have valid_to=NULL (live); got {new_valid_to:?}"
+            "revise must not write the author's valid_to; got {original_valid_to_after:?}"
+        ));
+    }
+    let new_superseded = fetch_superseded_at(&seed.db_path, new_id)?;
+    if new_superseded.is_some() {
+        return Err(format!(
+            "new revision row must have superseded_at=NULL (live); got {new_superseded:?}"
         ));
     }
 
@@ -312,19 +330,19 @@ fn two_revises_compose_into_chain_of_three() -> TestResult {
             "chain must share one logical_id; orig={logical_original} first={logical_first} second={logical_second}"
         ));
     }
-    // After two revisions the original and the first should both
-    // carry a valid_to; only the second is live.
-    let orig_vt = fetch_valid_to(&seed.db_path, &seed.original_id)?;
-    let first_vt = fetch_valid_to(&seed.db_path, first_id)?;
-    let second_vt = fetch_valid_to(&seed.db_path, second_id)?;
-    if orig_vt.is_none() || first_vt.is_none() {
+    // After two revisions the original and the first should both be marked
+    // superseded; only the second is live.
+    let orig_sa = fetch_superseded_at(&seed.db_path, &seed.original_id)?;
+    let first_sa = fetch_superseded_at(&seed.db_path, first_id)?;
+    let second_sa = fetch_superseded_at(&seed.db_path, second_id)?;
+    if orig_sa.is_none() || first_sa.is_none() {
         return Err(format!(
-            "earlier revisions must carry valid_to; orig_vt={orig_vt:?} first_vt={first_vt:?}"
+            "earlier revisions must carry superseded_at; orig={orig_sa:?} first={first_sa:?}"
         ));
     }
-    if second_vt.is_some() {
+    if second_sa.is_some() {
         return Err(format!(
-            "latest revision must be live (valid_to=NULL); got {second_vt:?}"
+            "latest revision must be live (superseded_at=NULL); got {second_sa:?}"
         ));
     }
     Ok(())

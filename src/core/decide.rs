@@ -779,7 +779,17 @@ fn memory_to_decide_item(
         chain_depth,
         revisit_status: revisit_status(fields.revisit_by.as_deref(), now, None),
         revisit_by: fields.revisit_by,
-        superseded: memory.valid_to.is_some(),
+        // bd-tmv70: "superseded" is a fact about the revision chain, read from
+        // `superseded_at`. This used to read `valid_to`, so any decision the
+        // author gave an expiry -- even one far in the future -- was reported
+        // to the user as superseded. `valid_to` is still emitted alongside,
+        // because the two are now genuinely different facts.
+        superseded: conn
+            .get_memory_superseded_at(&memory.id)
+            .map_err(|error| {
+                decide_storage_error(format!("Failed to read revision state: {error}"))
+            })?
+            .is_some(),
         valid_to: memory.valid_to.clone(),
         created_at: memory.created_at.clone(),
     })

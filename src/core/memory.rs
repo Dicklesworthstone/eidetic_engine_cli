@@ -11524,8 +11524,22 @@ where
         return MemoryReviseReport::tombstoned(options.original_memory_id.to_owned());
     }
 
-    if original.valid_to.is_some() {
-        return MemoryReviseReport::superseded(options.original_memory_id.to_owned());
+    // bd-tmv70: supersession is its own column now. This check used to read
+    // `original.valid_to`, which meant ANY author-set expiry -- including one
+    // centuries in the future -- was reported to the user as "superseded", and
+    // the memory could never be revised. An expiry is a statement about the
+    // world; supersession is a statement about the revision chain.
+    match conn.get_memory_superseded_at(options.original_memory_id) {
+        Ok(Some(_)) => {
+            return MemoryReviseReport::superseded(options.original_memory_id.to_owned());
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return MemoryReviseReport::error(
+                options.original_memory_id.to_owned(),
+                format!("Failed to read revision state: {e}"),
+            );
+        }
     }
 
     // Determine what fields are changing
@@ -11628,8 +11642,10 @@ where
     //      `logical_id` as the original (the revision chain identifier
     //      that V043 added). The new row carries `valid_from = now()`
     //      and `valid_to = NULL` — it becomes the live row.
-    //   2. Sets the original row's `valid_to = now()`, marking it
-    //      superseded but not tombstoned.
+    //   2. Sets the original row's `superseded_at = now()`, marking it
+    //      history but not tombstoned. It deliberately does NOT touch
+    //      `valid_to`: that column holds the author's own temporal bound,
+    //      and supersession has no business rewriting it (bd-tmv70).
     //   3. Records a `memory.revise` audit entry with `from_id`,
     //      `to_id`, `logical_id`, `revision_number`, `changed_fields`,
     //      and the caller's reason.
@@ -11734,17 +11750,24 @@ where
             // the attempt-family pointer; the slot ledger inherits by
             // logical_id and is never copied.
             conn.carry_memory_attempt_family_pointer(options.original_memory_id, &new_id)?;
+            // bd-tmv70: mark the original as history in `superseded_at`, NOT by
+            // overwriting `valid_to`. `valid_to` is the author's temporal bound
+            // and supersession has no business editing it. The previous write
+            // guarded on `(valid_to IS NULL OR valid_to > ?1)`, so revising a
+            // memory whose author expiry had already PASSED failed this check
+            // and aborted the revision outright -- the comment below used to
+            // claim that could not happen. Keying on `superseded_at` makes
+            // supersession independent of any expiry, past or future.
             let prior_updated =
-                conn.expire_memory_valid_to(options.original_memory_id, &revised_at)?;
+                conn.mark_memory_superseded(options.original_memory_id, &revised_at)?;
             if !prior_updated {
-                // The original row no longer has a NULL valid_to. This
-                // shouldn't happen given the earlier validation, but we
-                // bail out so the transaction rolls back rather than
-                // landing an orphan revision.
+                // The original row is already marked superseded at or before
+                // this timestamp, so another revision beat us to it. Bail out
+                // so the transaction rolls back rather than landing an orphan
+                // revision or moving an existing marker backwards.
                 return Err(crate::db::DbError::MalformedRow {
                     operation: crate::db::DbOperation::Execute,
-                    message: "Original memory's valid_to could not be set; revision aborted."
-                        .to_owned(),
+                    message: "Original memory is already superseded; revision aborted.".to_owned(),
                 });
             }
             conn.insert_audit(
@@ -17419,10 +17442,21 @@ mod tests {
             .get_memory(&memory_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "created memory should still exist".to_string())?;
+        // bd-tmv70: supersession is recorded in `superseded_at`, and `valid_to`
+        // must be left alone -- it belongs to the author. Asserting both halves
+        // is what makes this a test of the split rather than of either column.
         ensure(
-            original.valid_to.is_some(),
+            connection
+                .get_memory_superseded_at(&memory_id)
+                .map_err(|error| error.to_string())?
+                .is_some(),
             true,
-            "original row was superseded",
+            "original row was marked superseded",
+        )?;
+        ensure(
+            original.valid_to.is_none(),
+            true,
+            "supersession must not write the author's valid_to",
         )?;
         let revised = connection
             .get_memory(new_id)
@@ -17434,7 +17468,10 @@ mod tests {
             "revised content",
         )?;
         ensure(
-            revised.valid_to.is_none(),
+            connection
+                .get_memory_superseded_at(new_id)
+                .map_err(|error| error.to_string())?
+                .is_none(),
             true,
             "new revision remains live",
         )?;
@@ -17614,10 +17651,22 @@ mod tests {
             .get_memory(&memory_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "original memory missing after rollback".to_owned())?;
+        // bd-tmv70: this used to assert `valid_to.is_none()`. Supersession no
+        // longer writes that column, so the old assertion would hold even if the
+        // transaction had COMMITTED -- it would prove nothing. `superseded_at` is
+        // what a successful revise sets, so it is what rollback must leave clear.
+        ensure(
+            connection
+                .get_memory_superseded_at(&memory_id)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            true,
+            "failed reveal leaves original live",
+        )?;
         ensure(
             original_after.valid_to.is_none(),
             true,
-            "failed reveal leaves original live",
+            "failed reveal leaves the author's valid_to untouched",
         )?;
         let seal_after = connection
             .get_memory_seal(&memory_id)

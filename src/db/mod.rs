@@ -1809,7 +1809,7 @@ impl DbConnection {
     pub fn count_live_memories_for_workspace(&self, workspace_id: &str) -> Result<u64> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT COUNT(*) FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND valid_to IS NULL",
+            "SELECT COUNT(*) FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND superseded_at IS NULL",
             &[Value::Text(workspace_id.to_owned())],
         )?;
         let first = rows.first().ok_or_else(|| DbError::MalformedRow {
@@ -5268,8 +5268,13 @@ ALTER TABLE memories ADD COLUMN bayes_beta REAL NOT NULL DEFAULT 0.5
 ///
 /// Every memory belongs to a *revision chain*: a sequence of rows that
 /// share a `logical_id` but have distinct `id` values, one per
-/// historical revision. The current live row has `valid_to IS NULL`;
-/// prior revisions carry the timestamp when they were superseded.
+/// historical revision. As shipped, this migration marked the live row with
+/// `valid_to IS NULL` and gave prior revisions the timestamp when they were
+/// superseded -- which is exactly the overload V123 repairs: `valid_to` is
+/// also the AUTHOR's expiry, so the two facts collided in one column. From
+/// V123 on, the live row is `superseded_at IS NULL` and `valid_to` means only
+/// what the author said. This comment documents the historical shape; do not
+/// read it as the current contract.
 ///
 /// This migration ships the foundational column only:
 ///   - Adds `logical_id TEXT` (nullable in SQL because SQLite cannot add a
@@ -10525,6 +10530,94 @@ CREATE INDEX idx_pack_items_trust_class ON pack_items(trust_class);
     "blake3:v122_typed_pack_item_identity_2026_09_16",
 );
 
+/// V123: Give revision supersession its own column so `valid_to` stops
+/// carrying two independent facts.
+///
+/// bd-tmv70. Until now `memories.valid_to` meant BOTH "a newer revision
+/// superseded this row" and "the author said this stops being valid at T".
+/// Every reader spelled `valid_to IS NULL` and had to guess which question it
+/// was asking; half of them guessed wrong, and any author-set expiry hid a
+/// live memory outright.
+pub const V123_MEMORY_SUPERSEDED_AT: Migration = Migration::new(
+    123,
+    "memory_superseded_at",
+    r#"
+-- FOUR STATES. A memory row is one of:
+--   S0  live, in force       superseded_at IS NULL      valid_to unset or future
+--   S1  live, expired        superseded_at IS NULL      valid_to in the past
+--   S2  history, unexpired   superseded_at IS NOT NULL  valid_to unset or future
+--   S3  history, expired     superseded_at IS NOT NULL  valid_to in the past
+-- One nullable timestamp expresses two of those four. That is the whole defect:
+-- no predicate over a single column can recover four states.
+--
+-- Which column a reader wants follows from the question it asks:
+--   APPLICABILITY ("is this in force now?") -> valid_to, against a reference
+--     time. The Rust layer already owns this (validity_status_at,
+--     memory_temporally_invalid_at) and this migration does not touch it.
+--   IDENTITY ("which row is the current revision?") -> superseded_at, and it
+--     must ignore valid_to entirely. An author's expiry is not a statement
+--     about the revision chain and must never change which row is the head.
+
+ALTER TABLE memories
+    ADD COLUMN superseded_at TEXT
+    CHECK (superseded_at IS NULL OR length(trim(superseded_at)) > 0);
+
+-- BACKFILL, and it is part of this migration rather than a follow-up: until it
+-- runs, nothing in the store knows which rows are history, and a reader keying
+-- on superseded_at would resurrect every superseded revision.
+--
+-- Supersession is recovered STRUCTURALLY, not from valid_to's value: a row is
+-- history exactly when a newer row shares its revision chain. `logical_id` is
+-- already populated for every row (backfilled by V044, indexed by
+-- idx_memories_logical_id), so the chain is available here.
+--
+-- Deliberately VISIBILITY-PRESERVING. superseded_at is set only on rows that
+-- already carry a non-NULL valid_to, so afterwards `superseded_at IS NULL`
+-- selects exactly what `valid_to IS NULL` selected, PLUS the rows this bead is
+-- about: live heads carrying an author expiry, which were wrongly hidden.
+-- Nothing visible today becomes hidden. A row with a NULL valid_to that
+-- nonetheless has a newer chain member is left alone: it is visible today, and
+-- marking it history here would be a behaviour change smuggled in on a
+-- migration rather than the defect this one repairs.
+--
+-- A row that is BOTH superseded and author-expired takes superseded_at =
+-- valid_to, because that is the only timestamp that survived: the supersede
+-- write overwrote the author's value whenever the author's was later. For rows
+-- already in the store that pairing is unrecoverable -- precisely the loss this
+-- column prevents from here on. valid_to is left as it stands rather than
+-- cleared, so history views keep the best value that exists.
+UPDATE memories
+   SET superseded_at = valid_to
+ WHERE valid_to IS NOT NULL
+   AND EXISTS (
+        SELECT 1
+          FROM memories newer
+         WHERE newer.workspace_id = memories.workspace_id
+           AND newer.logical_id = memories.logical_id
+           AND newer.id <> memories.id
+           AND (newer.created_at > memories.created_at
+                OR (newer.created_at = memories.created_at
+                    AND newer.id > memories.id))
+       );
+
+CREATE INDEX idx_memories_superseded_at
+    ON memories(superseded_at)
+    WHERE superseded_at IS NOT NULL;
+
+-- The simhash dedup index encodes `valid_to IS NULL` as the DEFINITION of live,
+-- so it stops covering its query once the identity predicates move. Rebuilt
+-- here rather than left stale. V056 created this index and V090 recreated it
+-- after a table rebuild; both spell the same index name, so there is one live
+-- index and one rebuild, not two.
+DROP INDEX IF EXISTS idx_memories_workspace_content_simhash;
+CREATE INDEX idx_memories_workspace_content_simhash
+    ON memories(workspace_id, content_simhash)
+    WHERE content_simhash IS NOT NULL
+      AND tombstoned_at IS NULL
+      AND superseded_at IS NULL;
+"#,
+    "blake3:v123_memory_superseded_at_2026_09_16",
+);
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -10649,6 +10742,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V120_TEAM_JOIN_ATTEMPT_FIRST_SYNC_PHASE,
     V121_EVIDENCE_FEEDBACK_TARGETS,
     V122_TYPED_PACK_ITEM_IDENTITY,
+    V123_MEMORY_SUPERSEDED_AT,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -23322,7 +23416,7 @@ impl DbConnection {
         })?;
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT s.spec_hash, s.memory_id, s.sentinel_kind, s.target, s.expected_predicate, s.safety_class, s.provenance, s.stale_threshold_seconds, s.created_at, s.updated_at, s.polarity, COUNT(*) OVER () AS total_count FROM memory_sentinel_specs s JOIN memories m ON m.id = s.memory_id WHERE s.polarity = 'revive' AND m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND (m.valid_from IS NULL OR julianday(m.valid_from) <= julianday(?2)) AND (m.valid_to IS NULL OR julianday(m.valid_to) > julianday(?2)) ORDER BY s.memory_id ASC, s.sentinel_kind ASC, s.target ASC, s.expected_predicate ASC, s.spec_hash ASC LIMIT ?3",
+            "SELECT s.spec_hash, s.memory_id, s.sentinel_kind, s.target, s.expected_predicate, s.safety_class, s.provenance, s.stale_threshold_seconds, s.created_at, s.updated_at, s.polarity, COUNT(*) OVER () AS total_count FROM memory_sentinel_specs s JOIN memories m ON m.id = s.memory_id WHERE s.polarity = 'revive' AND m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND (m.valid_from IS NULL OR julianday(m.valid_from) <= julianday(?2)) AND (m.superseded_at IS NULL OR julianday(m.superseded_at) > julianday(?2)) AND (m.valid_to IS NULL OR julianday(m.valid_to) > julianday(?2)) ORDER BY s.memory_id ASC, s.sentinel_kind ASC, s.target ASC, s.expected_predicate ASC, s.spec_hash ASC LIMIT ?3",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(reference_time.to_string()),
@@ -23813,6 +23907,24 @@ impl DbConnection {
         }
     }
 
+    /// Read a memory's supersession marker, if it has one (bd-tmv70).
+    ///
+    /// `Ok(None)` means the row is the live head (or does not exist); `Ok(Some)`
+    /// carries the timestamp at which a newer revision took over. Callers that
+    /// want "is this still the current revision?" must ask this rather than
+    /// inspecting `valid_to`, which answers a different question entirely.
+    pub fn get_memory_superseded_at(&self, id: &str) -> Result<Option<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT superseded_at FROM memories WHERE id = ?1 ORDER BY id ASC LIMIT 1",
+            &[Value::Text(id.to_string())],
+        )?;
+        match rows.first() {
+            None => Ok(None),
+            Some(row) => Ok(optional_text(row, 0)?.map(str::to_string)),
+        }
+    }
+
     /// Read revision identities in one query for a workspace export snapshot.
     pub(crate) fn list_memory_logical_ids(
         &self,
@@ -23845,7 +23957,7 @@ impl DbConnection {
     ) -> Result<Vec<StoredMemory>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND logical_id = ?2 AND tombstoned_at IS NULL AND valid_to IS NULL ORDER BY COALESCE(valid_from, created_at) DESC, created_at DESC, id DESC LIMIT 2",
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND logical_id = ?2 AND tombstoned_at IS NULL AND superseded_at IS NULL ORDER BY COALESCE(valid_from, created_at) DESC, created_at DESC, id DESC LIMIT 2",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(logical_id.to_string()),
@@ -23872,7 +23984,7 @@ impl DbConnection {
         }
 
         if !include_tombstoned {
-            sql.push_str(" AND tombstoned_at IS NULL AND valid_to IS NULL");
+            sql.push_str(" AND tombstoned_at IS NULL AND superseded_at IS NULL");
         }
 
         sql.push_str(" ORDER BY id ASC");
@@ -23923,7 +24035,7 @@ impl DbConnection {
         if !include_tombstoned {
             params.push(Value::Text(as_of.to_owned()));
             sql.push_str(&format!(
-                " AND tombstoned_at IS NULL AND (valid_to IS NULL OR valid_to >= ?{})",
+                " AND tombstoned_at IS NULL AND superseded_at IS NULL AND (valid_to IS NULL OR valid_to >= ?{})",
                 params.len()
             ));
         }
@@ -23945,7 +24057,7 @@ impl DbConnection {
     ) -> Result<Vec<StoredMemory>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND valid_to IS NULL ORDER BY id ASC",
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND superseded_at IS NULL ORDER BY id ASC",
             &[Value::Text(workspace_id.to_string())],
         )?;
         rows.iter().map(stored_memory_from_row).collect()
@@ -23998,7 +24110,7 @@ impl DbConnection {
     ) -> Result<Vec<StoredMemory>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND created_at <= ?2 AND updated_at <= ?2 AND (valid_from IS NULL OR valid_from <= ?2) AND (valid_to IS NULL OR valid_to >= ?2) ORDER BY created_at DESC, id ASC LIMIT ?3",
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND created_at <= ?2 AND updated_at <= ?2 AND (valid_from IS NULL OR valid_from <= ?2) AND (superseded_at IS NULL OR superseded_at > ?2) AND (valid_to IS NULL OR valid_to >= ?2) ORDER BY created_at DESC, id ASC LIMIT ?3",
             &[
                 Value::Text(workspace_id.to_owned()),
                 Value::Text(as_of.to_owned()),
@@ -24057,7 +24169,7 @@ impl DbConnection {
 
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, content_simhash FROM memories WHERE workspace_id = ?1 AND content_simhash IS NOT NULL AND tombstoned_at IS NULL AND valid_to IS NULL ORDER BY id ASC",
+            "SELECT id, content_simhash FROM memories WHERE workspace_id = ?1 AND content_simhash IS NOT NULL AND tombstoned_at IS NULL AND superseded_at IS NULL ORDER BY id ASC",
             &[Value::Text(workspace_id.to_string())],
         )?;
         let mut candidates: Vec<MemorySimHashCandidate> = rows
@@ -24094,7 +24206,7 @@ impl DbConnection {
     ) -> Result<Vec<StoredMemory>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND workflow_id = ?2 AND id <> ?3 AND tombstoned_at IS NULL AND valid_to IS NULL ORDER BY created_at DESC, id ASC LIMIT ?4",
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND workflow_id = ?2 AND id <> ?3 AND tombstoned_at IS NULL AND superseded_at IS NULL ORDER BY created_at DESC, id ASC LIMIT ?4",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(workflow_id.to_string()),
@@ -24544,7 +24656,7 @@ impl DbConnection {
                AND EXISTS (SELECT 1 FROM memories AS live \
                    WHERE live.workspace_id = member.workspace_id \
                      AND COALESCE(live.logical_id, live.id) = member.memory_logical_id \
-                     AND live.tombstoned_at IS NULL AND live.valid_to IS NULL) \
+                     AND live.tombstoned_at IS NULL AND live.superseded_at IS NULL) \
              ORDER BY attempt_index ASC",
             &[
                 Value::Text(workspace_id.to_string()),
@@ -24656,7 +24768,7 @@ impl DbConnection {
     }
 
     /// Resolve the CURRENT live revision row id for a ledger key inside one
-    /// workspace: not tombstoned and not superseded (`valid_to IS NULL`),
+    /// workspace: not tombstoned and not superseded (`superseded_at IS NULL`),
     /// newest first for determinism. Family retrieval uses this so ledger
     /// members always surface through their live revision, never a
     /// superseded historical row.
@@ -24669,7 +24781,7 @@ impl DbConnection {
             DbOperation::Query,
             "SELECT id FROM memories \
              WHERE workspace_id = ?1 AND COALESCE(logical_id, id) = ?2 \
-               AND tombstoned_at IS NULL AND valid_to IS NULL \
+               AND tombstoned_at IS NULL AND superseded_at IS NULL \
              ORDER BY created_at DESC, id DESC LIMIT 1",
             &[
                 Value::Text(workspace_id.to_string()),
@@ -24705,7 +24817,7 @@ impl DbConnection {
             let sql = format!(
                 "SELECT COALESCE(logical_id, id), MIN(id) FROM memories \
                  WHERE workspace_id = ?1 AND COALESCE(logical_id, id) IN ({placeholders}) \
-                   AND tombstoned_at IS NULL AND valid_to IS NULL \
+                   AND tombstoned_at IS NULL AND superseded_at IS NULL \
                  GROUP BY COALESCE(logical_id, id) HAVING COUNT(*) = 1 \
                  ORDER BY COALESCE(logical_id, id) ASC"
             );
@@ -24760,7 +24872,7 @@ impl DbConnection {
                 "SELECT DISTINCT COALESCE(memory.logical_id, memory.id) AS logical_id \
                  FROM memories AS memory \
                  WHERE memory.workspace_id = ?1 AND memory.attempt_family_id = ?2 \
-                   AND memory.tombstoned_at IS NULL AND memory.valid_to IS NULL \
+                   AND memory.tombstoned_at IS NULL AND memory.superseded_at IS NULL \
                    AND NOT EXISTS (\
                        SELECT 1 FROM attempt_family_members AS member \
                        WHERE member.workspace_id = ?1 \
@@ -24921,7 +25033,7 @@ impl DbConnection {
                   AND EXISTS (SELECT 1 FROM memories AS live \
                        WHERE live.workspace_id = member.workspace_id \
                          AND COALESCE(live.logical_id, live.id) = member.memory_logical_id \
-                         AND live.tombstoned_at IS NULL AND live.valid_to IS NULL) \
+                         AND live.tombstoned_at IS NULL AND live.superseded_at IS NULL) \
                  UNION ALL \
                  SELECT family_key.workspace_id, family_key.family_id, \
                         family.declared_size, family.origin, \
@@ -24934,7 +25046,7 @@ impl DbConnection {
                  JOIN memories AS memory \
                    ON memory.workspace_id = family_key.workspace_id \
                   AND memory.attempt_family_id = family_key.family_id \
-                  AND memory.tombstoned_at IS NULL AND memory.valid_to IS NULL \
+                  AND memory.tombstoned_at IS NULL AND memory.superseded_at IS NULL \
                  WHERE NOT EXISTS (\
                      SELECT 1 FROM attempt_family_members AS recorded \
                      WHERE recorded.workspace_id = family_key.workspace_id \
@@ -25155,12 +25267,46 @@ impl DbConnection {
         Ok(affected > 0)
     }
 
-    /// Expire a memory by setting its validity end timestamp.
+    /// Expire a memory by setting its author-facing validity end timestamp.
+    ///
+    /// This is the AUTHOR's temporal bound -- "this memory stops being true at
+    /// T" -- and nothing else. It does not mark the row as history. Use
+    /// [`Self::mark_memory_superseded`] for that; before bd-tmv70 this one
+    /// function carried both meanings into the same column.
     pub fn expire_memory_valid_to(&self, id: &str, valid_to: &str) -> Result<bool> {
         let affected = self.execute_for(
             DbOperation::Execute,
             "UPDATE memories SET valid_to = ?1, updated_at = ?1 WHERE id = ?2 AND tombstoned_at IS NULL AND (valid_to IS NULL OR valid_to > ?1)",
             &[Value::Text(valid_to.to_string()), Value::Text(id.to_string())],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Mark a memory as superseded by a newer revision (bd-tmv70).
+    ///
+    /// This is a statement about the REVISION CHAIN, not about the world: it
+    /// records that a newer row has taken over as the live head. It is
+    /// deliberately independent of `valid_to`, which carries the author's
+    /// temporal bound and belongs to the author alone.
+    ///
+    /// Before the split these were the same write, so superseding a memory
+    /// overwrote whatever expiry its author had set, and a memory whose expiry
+    /// had already PASSED could not be revised at all -- the old guard
+    /// `(valid_to IS NULL OR valid_to > ?1)` failed and the revision aborted.
+    /// Keying on `superseded_at` removes both problems: an author's expiry,
+    /// past or future, no longer has any bearing on whether a row can be
+    /// superseded.
+    ///
+    /// The guard still refuses to move an existing marker backwards, so a
+    /// double-supersede is a no-op rather than a silent rewrite of history.
+    pub fn mark_memory_superseded(&self, id: &str, superseded_at: &str) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET superseded_at = ?1, updated_at = ?1 WHERE id = ?2 AND tombstoned_at IS NULL AND (superseded_at IS NULL OR superseded_at > ?1)",
+            &[
+                Value::Text(superseded_at.to_string()),
+                Value::Text(id.to_string()),
+            ],
         )?;
         Ok(affected > 0)
     }
@@ -25556,7 +25702,7 @@ impl DbConnection {
     pub fn list_all_tags(&self, workspace_id: &str) -> Result<Vec<String>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT DISTINCT mt.tag FROM memory_tags mt JOIN memories m ON mt.memory_id = m.id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND m.valid_to IS NULL ORDER BY mt.tag ASC",
+            "SELECT DISTINCT mt.tag FROM memory_tags mt JOIN memories m ON mt.memory_id = m.id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND m.superseded_at IS NULL ORDER BY mt.tag ASC",
             &[Value::Text(workspace_id.to_string())],
         )?;
 
@@ -25569,7 +25715,7 @@ impl DbConnection {
     pub fn get_tag_counts(&self, workspace_id: &str) -> Result<Vec<TagCount>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT mt.tag, COUNT(*) as count FROM memory_tags mt JOIN memories m ON mt.memory_id = m.id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND m.valid_to IS NULL GROUP BY mt.tag ORDER BY count DESC, mt.tag ASC",
+            "SELECT mt.tag, COUNT(*) as count FROM memory_tags mt JOIN memories m ON mt.memory_id = m.id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND m.superseded_at IS NULL GROUP BY mt.tag ORDER BY count DESC, mt.tag ASC",
             &[Value::Text(workspace_id.to_string())],
         )?;
 
@@ -25587,7 +25733,7 @@ impl DbConnection {
         let canonical_tag = canonicalize_tag_filter(tag);
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT m.id FROM memories m JOIN memory_tags mt ON m.id = mt.memory_id WHERE m.workspace_id = ?1 AND mt.tag = ?2 AND m.tombstoned_at IS NULL AND m.valid_to IS NULL ORDER BY m.id ASC",
+            "SELECT m.id FROM memories m JOIN memory_tags mt ON m.id = mt.memory_id WHERE m.workspace_id = ?1 AND mt.tag = ?2 AND m.tombstoned_at IS NULL AND m.superseded_at IS NULL ORDER BY m.id ASC",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(canonical_tag),
@@ -25613,7 +25759,7 @@ impl DbConnection {
         let canonical_tag = canonicalize_tag_filter(tag);
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT m.id FROM memories m JOIN memory_tags mt ON m.id = mt.memory_id WHERE m.workspace_id = ?1 AND mt.tag = ?2 AND m.tombstoned_at IS NULL AND (m.valid_to IS NULL OR m.valid_to >= ?3) ORDER BY m.id ASC",
+            "SELECT m.id FROM memories m JOIN memory_tags mt ON m.id = mt.memory_id WHERE m.workspace_id = ?1 AND mt.tag = ?2 AND m.tombstoned_at IS NULL AND m.superseded_at IS NULL AND (m.valid_to IS NULL OR m.valid_to >= ?3) ORDER BY m.id ASC",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(canonical_tag),
@@ -27290,7 +27436,7 @@ impl DbConnection {
     ) -> Result<Vec<WorkflowMemoryPromotion>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND workflow_id = ?2 AND level = 'working' AND tombstoned_at IS NULL AND valid_to IS NULL AND importance >= 0.5 ORDER BY id ASC",
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND workflow_id = ?2 AND level = 'working' AND tombstoned_at IS NULL AND superseded_at IS NULL AND importance >= 0.5 ORDER BY id ASC",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(workflow_id.to_string()),
@@ -52258,10 +52404,14 @@ mod tests {
             &ids[1],
             &test_memory_input(workspace_a, "Tombstoned memory for workspace A."),
         )?;
-        let mut superseded =
+        // bd-tmv70: supersession lives in `superseded_at`. Fabricating it by
+        // setting the author's `valid_to` would now build a LIVE row that merely
+        // carries an expiry -- a different fixture, and one that would make the
+        // "excludes superseded" assertions below pass for the wrong reason.
+        let superseded =
             test_memory_input(workspace_a, "Superseded historical memory for workspace A.");
-        superseded.valid_to = Some("2026-08-12T00:00:00Z".to_owned());
         connection.insert_memory(&ids[2], &superseded)?;
+        connection.mark_memory_superseded(&ids[2], "2026-08-12T00:00:00Z")?;
         connection.insert_memory(
             &ids[3],
             &test_memory_input(workspace_b, "Current live memory for workspace B."),
