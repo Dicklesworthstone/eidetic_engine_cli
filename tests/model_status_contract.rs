@@ -10,11 +10,12 @@ use std::path::Path;
 use ee::core::index::{INDEX_METADATA_SCHEMA_V2, expected_index_corpus_revision};
 use ee::core::model::{
     BUNDLED_EMBEDDING_MODEL_ID, MODEL_LIST_SCHEMA_V1, MODEL_STATUS_SCHEMA_V2, ModelListOptions,
-    ModelStatusOptions, build_model_list_report, build_model_status_report,
+    ModelStatusOptions, ModelStatusReport, build_model_list_report, build_model_status_report,
 };
 use ee::db::{
     CreateModelRegistryInput, CreateWorkspaceInput, DbConnection, EVIDENCE_SECURITY_POLICY_EPOCH,
 };
+use ee::models::EMBEDDING_POSTURE_MODE_NEURAL_LOCAL;
 use ee::models::model_registry::{
     EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
 };
@@ -62,6 +63,58 @@ fn ensure_no_degradations(codes: &[&str], context: &str) -> TestResult {
     ensure(
         codes.is_empty(),
         format!("{context}: expected no degradations, actual codes {codes:?}"),
+    )
+}
+
+/// bd-7hsgy: with nothing available, the posture may not claim it is.
+///
+/// This replaces `ensure_equal(active.source, "<one literal>")`. That pin could
+/// not express the contract, and the bv11 values show why: the fixture is
+/// genuinely zero-available, the posture honestly reported
+/// `neural_local_unconfirmed`, and the test failed anyway -- while the ACTUAL
+/// bug (`mode: neural_local` with `available_model_count: 0`) would have failed
+/// with the same undifferentiated "string mismatch". A contract that fails
+/// identically for an honest posture and a dishonest one is not checking
+/// honesty. That was the hole, and it sat exactly where the bug was.
+///
+/// Which non-claiming value appears is host state: `neural_local_unconfirmed`
+/// when a model directory verifies but no registry entry confirms it,
+/// `ee_model2vec_download_pending` when a download is outstanding,
+/// `frankensearch_hash_fallback` otherwise. All three are honest. Only
+/// `registry_observed` / mode `neural_local` assert a CONFIRMED capability, and
+/// both require an available registry entry -- so with `available_count == 0`
+/// they are precisely what must not appear.
+fn ensure_posture_does_not_claim_unavailable_capability(
+    report: &ModelStatusReport,
+    context: &str,
+) -> TestResult {
+    ensure_equal(
+        report.available_count,
+        0,
+        &format!("{context}: fixture must actually be the zero-available case"),
+    )?;
+    ensure(
+        report.active.selected_registry_entry.is_none(),
+        format!(
+            "{context}: no entry may be selected when none is available; got {:?}",
+            report.active.selected_registry_entry
+        ),
+    )?;
+    ensure(
+        report.active.source != "registry_observed",
+        format!(
+            "{context}: posture claims a registry-confirmed embedder with available_count 0; \
+             source {:?}",
+            report.active.source
+        ),
+    )?;
+    ensure(
+        report.active.posture.mode != EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
+        format!(
+            "{context}: posture reports mode neural_local with available_count 0 -- this is the \
+             bd-7hsgy contradiction; mode {:?}, source {:?}, semantic {}",
+            report.active.posture.mode, report.active.source, report.active.semantic
+        ),
     )
 }
 
@@ -264,11 +317,7 @@ fn model_status_auto_declares_bundled_embedding_model() -> TestResult {
         report.reranker.registered_count == 0 && report.reranker.available_count == 0,
         "reranker counts should be empty",
     )?;
-    ensure_equal(
-        report.active.source.as_str(),
-        "ee_model2vec_download_pending",
-        "pending bundled model source",
-    )?;
+    ensure_posture_does_not_claim_unavailable_capability(&report, "pending bundled model")?;
     ensure(
         report.degradations.len() == 1
             && report.degradations[0].code == "model_registry_no_available_entry",
@@ -480,13 +529,31 @@ fn model_status_picks_first_available_registry_entry() -> TestResult {
         .canonicalize()
         .map_err(|error| format!("canonicalize: {error}"))?;
     let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
-    insert_registry_entry(
+    // The entry this test is NAMED for must actually be selectable. The shared
+    // `insert_registry_entry` helper writes `metadata_json: None`, and
+    // `list_embedding_metadata_records` derives records FROM registry entries
+    // via `stored_embedding_metadata_record_from_entry`, which yields nothing
+    // for an entry with no metadata. So the fixture was marking an entry
+    // Available while leaving it unusable -- `available_count` counted it (the
+    // registry row exists) but `selected_registry_model` could not select it,
+    // and the honest `model_registry_no_available_entry` degradation fired.
+    //
+    // The product was right; the fixture never established the precondition its
+    // own name claims. Supply metadata, as the sibling fixtures at :392 and
+    // :476 already do.
+    insert_embedding_registry_entry(
         &database_path,
         &workspace_id,
-        "mdl_01HQ3K5Z000000000000000010",
-        ModelProvider::Hash,
-        "fnv1a-256",
-        ModelRegistryStatus::Available,
+        EmbeddingRegistryFixture {
+            id: "mdl_01HQ3K5Z000000000000000010",
+            provider: ModelProvider::Hash,
+            name: "fnv1a-256",
+            status: ModelRegistryStatus::Available,
+            dimension: 384,
+            source_uri: None,
+            content_hash: None,
+            metadata_json: Some(embedding_metadata_json(384)?),
+        },
     )?;
     insert_registry_entry(
         &database_path,
@@ -550,9 +617,8 @@ fn model_status_reports_reranker_registry_separately() -> TestResult {
 
     ensure(report.registered_count == 2, "registered_count")?;
     ensure(report.available_count == 1, "available_count")?;
-    ensure_equal(
-        report.active.source.as_str(),
-        "ee_model2vec_download_pending",
+    ensure_posture_does_not_claim_unavailable_capability(
+        &report,
         "reranker entry should not select active embedder",
     )?;
     ensure(
