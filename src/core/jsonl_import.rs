@@ -2250,7 +2250,15 @@ fn prepare_memory(
                 .or(memory.expires_at.as_deref())
                 .map(|raw| normalize_imported_timestamp(raw, TimestampClass::Validity)),
         },
-        tombstoned_at: memory.tombstoned_at.clone(),
+        // bd-o22r0: `tombstoned_at` is a bookkeeping column (offset canon), and
+        // restore_imported_memory_tombstone writes this same value into
+        // `updated_at` too -- so an archive-spelled value would mix spellings in
+        // BOTH columns. Normalized here rather than synthesizing now() at the
+        // writer, which would make restore non-deterministic.
+        tombstoned_at: memory
+            .tombstoned_at
+            .as_deref()
+            .map(|raw| normalize_imported_timestamp(raw, TimestampClass::Row)),
         tombstoned_reason: memory.tombstoned_reason.clone(),
         bayes_posterior: validated.bayes_posterior,
         attempt_family: memory.attempt_family.clone(),

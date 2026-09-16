@@ -25274,10 +25274,20 @@ impl DbConnection {
     /// [`Self::mark_memory_superseded`] for that; before bd-tmv70 this one
     /// function carried both meanings into the same column.
     pub fn expire_memory_valid_to(&self, id: &str, valid_to: &str) -> Result<bool> {
+        // bd-o22r0: `updated_at` must NOT reuse ?1. `valid_to` arrives in the
+        // validity canon (SecondsFormat::Secs `Z`), while `updated_at` is a
+        // bookkeeping column written in the offset canon. Binding one value to
+        // both put `Z`-spelled values into `updated_at` and mixed the spellings
+        // inside that column, which breaks its lexical ordering.
+        let updated_at = Utc::now().to_rfc3339();
         let affected = self.execute_for(
             DbOperation::Execute,
-            "UPDATE memories SET valid_to = ?1, updated_at = ?1 WHERE id = ?2 AND tombstoned_at IS NULL AND (valid_to IS NULL OR valid_to > ?1)",
-            &[Value::Text(valid_to.to_string()), Value::Text(id.to_string())],
+            "UPDATE memories SET valid_to = ?1, updated_at = ?3 WHERE id = ?2 AND tombstoned_at IS NULL AND (valid_to IS NULL OR valid_to > ?1)",
+            &[
+                Value::Text(valid_to.to_string()),
+                Value::Text(id.to_string()),
+                Value::Text(updated_at),
+            ],
         )?;
         Ok(affected > 0)
     }
@@ -25300,12 +25310,17 @@ impl DbConnection {
     /// The guard still refuses to move an existing marker backwards, so a
     /// double-supersede is a no-op rather than a silent rewrite of history.
     pub fn mark_memory_superseded(&self, id: &str, superseded_at: &str) -> Result<bool> {
+        // bd-o22r0: same spelling hazard as expire_memory_valid_to. `superseded_at`
+        // arrives in the validity canon; `updated_at` is bookkeeping and must be
+        // written in the offset canon, so it gets its own bind.
+        let updated_at = Utc::now().to_rfc3339();
         let affected = self.execute_for(
             DbOperation::Execute,
-            "UPDATE memories SET superseded_at = ?1, updated_at = ?1 WHERE id = ?2 AND tombstoned_at IS NULL AND (superseded_at IS NULL OR superseded_at > ?1)",
+            "UPDATE memories SET superseded_at = ?1, updated_at = ?3 WHERE id = ?2 AND tombstoned_at IS NULL AND (superseded_at IS NULL OR superseded_at > ?1)",
             &[
                 Value::Text(superseded_at.to_string()),
                 Value::Text(id.to_string()),
+                Value::Text(updated_at),
             ],
         )?;
         Ok(affected > 0)
