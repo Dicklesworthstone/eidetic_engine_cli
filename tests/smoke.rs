@@ -4147,6 +4147,24 @@ fn import_cass_json_uses_cass_robot_contract_and_is_idempotent() -> TestResult {
             OsString::from(workspace_arg.clone()),
         ),
     ];
+    // 91cf7bcbd ("reject storeless write and search addresses") made `ee init`
+    // the ONLY thing that creates a store. `create_dir_all` gives a bare
+    // directory, so every command below was addressing a store that does not
+    // exist. Initialise it explicitly, under the same env as the run so the
+    // one-time model-download notice cannot land on a later stderr assertion.
+    let init = run_ee_with_env(
+        &["--workspace", workspace_arg.as_str(), "--json", "init"],
+        &envs,
+    )?;
+    ensure(
+        init.status.success(),
+        format!(
+            "init must succeed before importing cass; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&init.stdout),
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )?;
+
     let args = [
         "--workspace",
         workspace_arg.as_str(),
@@ -4387,6 +4405,24 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
         ("EE_CASS_BINARY", cass_binary.as_os_str().to_owned()),
         ("PATH", cass_path),
     ];
+
+    // 91cf7bcbd ("reject storeless write and search addresses") made `ee init`
+    // the ONLY thing that creates a store. `create_dir_all` gives a bare
+    // directory, so every command below was addressing a store that does not
+    // exist. Initialise it explicitly, under the same env as the run so the
+    // one-time model-download notice cannot land on a later stderr assertion.
+    let init = run_ee_with_env(
+        &["--workspace", workspace_arg.as_str(), "--json", "init"],
+        &envs,
+    )?;
+    ensure(
+        init.status.success(),
+        format!(
+            "init must succeed before the real-cass import; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&init.stdout),
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )?;
 
     let cass_index_args = [
         OsString::from("index"),
@@ -4990,6 +5026,20 @@ fn backup_create_json_writes_redacted_artifacts_and_manifest() -> TestResult {
     let source_arg = source.to_string_lossy().into_owned();
     let backup_root = root.join("backups");
     let backup_root_arg = backup_root.to_string_lossy().into_owned();
+
+    // 91cf7bcbd ("reject storeless write and search addresses") made `ee init`
+    // the ONLY thing that creates a store. `create_dir_all` gives a bare
+    // directory, so every command below was addressing a store that does not
+    // exist. Initialise it explicitly.
+    let init = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "init"])?;
+    ensure(
+        init.status.success(),
+        format!(
+            "init must succeed before the backup import; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&init.stdout),
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )?;
 
     let import = run_ee(&[
         "--workspace",
