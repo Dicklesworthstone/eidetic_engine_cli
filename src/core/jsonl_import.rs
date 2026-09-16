@@ -795,7 +795,11 @@ fn prepare_link(
                 .filter(|value| !value.is_null())
                 .map(|value| value.to_string()),
         },
-        created_at: record.created_at.clone(),
+        // bd-o22r0: same hazard as the memory timestamps normalized in 1f9f57923,
+        // and my sweep there stopped at PreparedMemory. memory_links.created_at
+        // is indexed (idx_memory_links_created) and therefore ordered on, so an
+        // archive-spelled value mixes spellings in an ordered column.
+        created_at: normalize_imported_timestamp(&record.created_at, TimestampClass::Row),
         details: json!({
             "source": "jsonl_import",
             "sourceExportId": header.map(|header| &header.export_id),
