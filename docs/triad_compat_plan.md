@@ -25,20 +25,37 @@ Verbose commands stay available for explicit workflows, debugging, audit, and hu
 | `ee agent` | kept | Agent inventory and connector diagnostics remain explicit support surfaces. |
 | `ee analyze` | kept | Diagnostic analysis remains a specialist surface. |
 | `ee agent-docs` | kept | Long-form docs stay for onboarding and audits. |
+| `ee ask` | kept | Deterministic extractive question answering with citations and honest abstention (ADR 0067). Remains available as an explicit surface. |
+| `ee attest` | kept | Emit redaction-safe local provenance attestation bundles. Remains available as an explicit surface. |
 | `ee audit` | kept | Audit inspection is not part of the triad common path. |
 | `ee artifact` | kept | Artifact registration remains a narrow support surface. |
 | `ee backup` | kept | Backup operations stay explicit and never alias to triad commands. |
+| `ee bootstrap` | kept | Compile docs into reviewable bootstrap candidates. Remains available as an explicit surface. |
+| `ee cache` | kept | Derived cache inspection and explicit prewarm planning. Remains available as an explicit surface. |
 | `ee capabilities` | kept | Capability discovery remains explicit. |
+| `ee capture` | kept | Suggest high-value memories from session evidence without storing them. Remains available as an explicit surface. |
 | `ee check` | kept | Quick posture checks remain explicit. |
 | `ee certificate` | kept | Certificate inspection remains explicit. |
 | `ee causal` | kept | Causal tracing remains an advanced surface. |
 | `ee claim` | kept | Executable claim management remains explicit. |
+| `ee config` | kept | Inspect and update workspace configuration. Remains available as an explicit surface. |
+| `ee conflict` | kept | Surface memory contradictions (read-only): list / explain / cluster. Remains available as an explicit surface. |
 | `ee context "<task>"` | soft-deprecated alias | Runs the identical `run_context_pack` engine as canonical `ee pack "<task>"` and emits an info-severity `deprecated_alias` degraded entry. Prefer `ee pack` in new scripts, harnesses, and docs. |
 | `ee completion` | kept | Shell completion generation remains explicit. |
+| `ee context-show` | kept | Retrieve a previously persisted context pack by ID. Remains available as an explicit surface. |
+| `ee coordination` | kept | Persist redaction-safe coordination fallback evidence. Remains available as an explicit surface. |
 | `ee curate` | kept | Curation review and apply workflows remain explicit. |
+| `ee decide` | kept | Record, list, and revisit durable typed decision memories. Remains available as an explicit surface. |
 | `ee diag` | kept | Diagnostics remain explicit. |
 | `ee demo` | kept | Demo listing and verification remain explicit. |
 | `ee db` | kept | Database inspection remains explicit. |
+| `ee diagnose-error` | kept | Diagnose a tool error against the fingerprint recall store (error-recall). Remains available as an explicit surface. |
+| `ee hook` | kept | Generate agent-harness memory-context and advisory helpers. Remains available as an explicit surface. |
+| `ee impact` | kept | Find memories attached to a path, symbol, command, env var, or schema. Remains available as an explicit surface. |
+| `ee insights` | kept | Bundle read-only operational insight sections for agents. Remains available as an explicit surface. |
+| `ee journal` | kept | Append-only agent observation journal (append, list, show). Remains available as an explicit surface. |
+| `ee lens` | kept | Inspect task lens policy overlays. Remains available as an explicit surface. |
+| `ee mesh` | kept | Foreground local mesh operations for peers, status, export/import, and sync-once. Remains available as an explicit surface. |
 | `ee migrate` | kept | Schema migration remains explicit and never hidden behind triad. |
 | `ee daemon` | kept | Daemon operation remains an advanced maintenance surface. |
 | `ee doctor` | kept | Human/debug health checks remain explicit. |
@@ -61,8 +78,24 @@ Verbose commands stay available for explicit workflows, debugging, audit, and hu
 | `ee lab` | kept | Counterfactual lab workflows remain explicit. |
 | `ee learn` | kept | Learning agenda and uncertainty workflows remain explicit. |
 | `ee memory` | kept | Detailed memory operations remain explicit. |
+| `ee orient` | kept | Read-only orientation bundle for an agent starting a task. Remains available as an explicit surface. |
+| `ee primer` | kept | Deterministic cached workspace charter from highest-value memory (ADR 0065). Remains available as an explicit surface. |
+| `ee proof` | kept | Read-only proof-broker admission and status decisions. Remains available as an explicit surface. |
+| `ee proximity` | kept | Report pairwise min-cut proximity between two memories. Remains available as an explicit surface. |
+| `ee recall` | kept | Code-anchored memory recall: reverse lookup from paths, symbols, or a git diff to anchored memories (ADR 0064). Remains available as an explicit surface. |
+| `ee reflect` | kept | Create and inspect external reflection request handshakes. Remains available as an explicit surface. |
+| `ee regress` | kept | Explain likely regression causes from existing structured artifacts. Remains available as an explicit surface. |
+| `ee resume` | kept | Where was I — recent sessions, open decisions, queued work, staleness flags. Remains available as an explicit surface. |
+| `ee sandbox` | kept | What-If Memory Sandbox (no durable mutation): remember / import / curate / diff. Remains available as an explicit surface. |
+| `ee sentinel` | kept | Attach, explain, and run deterministic memory sentinel checks. Remains available as an explicit surface. |
+| `ee serve` | kept | Report localhost HTTP/SSE adapter availability. Remains available as an explicit surface. |
+| `ee session-budget` | kept | Opt-in session-budget ledger planning and diagnostics. Remains available as an explicit surface. |
+| `ee shadow` | kept | Execute shadowable policy evaluators offline (side-effect-free). Remains available as an explicit surface. |
+| `ee share` | kept | Preview and consent-check outbound mesh sharing. Remains available as an explicit surface. |
 | `ee show <id>` | kept | Top-level detail alias remains a useful support shortcut. |
 | `ee link ...` | kept | Top-level link alias remains a useful support shortcut. |
+| `ee similar` | kept | Find memories semantically similar to a selected memory. Remains available as an explicit surface. |
+| `ee subscribe` | kept | Subscribe to memory change deltas by cursor or foreground stream. Remains available as an explicit surface. |
 | `ee tag ...` | kept | Top-level tag alias remains a useful support shortcut. |
 | `ee history <id>` | kept | Top-level history alias remains a useful support shortcut. |
 | `ee mcp` | kept | Optional MCP adapter inspection remains explicit. |
@@ -92,7 +125,10 @@ Verbose commands stay available for explicit workflows, debugging, audit, and hu
 | `ee support` | kept | Support bundle creation remains explicit. |
 | `ee swarm` | kept | Swarm coordination snapshots remain explicit. |
 | `ee task-frame` | kept | Durable task frames remain explicit. |
+| `ee team` | kept | Team confederation over mesh primitives. Remains available as an explicit surface. |
+| `ee timeline` | kept | Reconstruct what was known about a topic at an RFC3339 as-of time. Remains available as an explicit surface. |
 | `ee tripwire` | kept | Tripwire listing and checks remain explicit. |
+| `ee trust` | kept | Audit memory confidence calibration and outcome-backed reliability. Remains available as an explicit surface. |
 | `ee verify` | kept | Verification evidence recording remains explicit. |
 | `ee verification` | kept | Verification guidance remains explicit. |
 | `ee version` | kept | Version reporting remains explicit. |
