@@ -192,6 +192,14 @@ fn package_version_golden_format(category: &str, name: &str) -> Option<ContractF
         | ("check", "check_json")
         | ("capabilities", "capabilities_json")
         | ("dependencies", "diag_integrity")
+        // The two doctor degradation projections pinned the crate version as a
+        // literal (0.13.1 against a 0.15.2 crate), so they re-broke on every
+        // release. Scrubbing here does NOT drop the check:
+        // `assert_actual_package_version` validates the LIVE version against the
+        // compiled package before this normalization runs, which is stricter
+        // than a frozen literal -- a literal only ever matched one release.
+        | ("doctor", "missing_db_degradation")
+        | ("doctor", "pending_migration_degradation")
         | ("version", "version") => Some(ContractFormat::Json),
         ("check", "check_toon") | ("capabilities", "capabilities_toon") => {
             Some(ContractFormat::Toon)
