@@ -423,6 +423,24 @@ pub fn decide_record(options: &DecideRecordOptions<'_>) -> Result<DecideRecordRe
             include_tombstoned: false,
         })?;
         expire_audit_id = expired.audit_id.clone();
+        // bd-tmv70: expiring a predecessor is NOT marking it superseded. Before
+        // V123 that distinction did not exist, so `valid_to IS NULL` excluded it
+        // from head listings for free. Now that the two are separate columns, a
+        // predecessor marked only by expiry is still a live head to every
+        // identity reader -- and worse, an expiry stamped at real-now is not even
+        // ordered against an injected clock, so no as-of bound can rescue it.
+        //
+        // The expiry is kept because it is this verb's documented behaviour and
+        // its report field; the supersession marker is ADDED so the revision
+        // chain says what actually happened.
+        if let Some(superseded_at) = expired.valid_to.as_deref() {
+            let supersede_conn = open_decide_database(&scope.database_path)?;
+            supersede_conn
+                .mark_memory_superseded(target_id, superseded_at)
+                .map_err(|error| {
+                    decide_storage_error(format!("Failed to mark predecessor superseded: {error}"))
+                })?;
+        }
         superseded = Some(DecideMemoryRef {
             memory_id: target_id.to_owned(),
             valid_to: expired.valid_to,
@@ -744,20 +762,16 @@ fn load_decisions(
         &scope.workspace_id,
         &[scope.workspace_path.as_path()],
     )?;
-    // bd-tmv70: `ee decide` marks a superseded predecessor by EXPIRING it
-    // (expire_memory -> valid_to), so "current heads" here means in-force, not
-    // merely unsuperseded. list_memories answers the IDENTITY question and since
-    // V123 returns expired-but-current rows, which made an expired predecessor
-    // count as a head. The applicability reader is the right one for this branch.
+    // bd-tmv70: head selection is an IDENTITY question and must stay clock-free.
+    // An earlier attempt bounded this on the caller's `now`, which does not work:
+    // decide expires a predecessor at REAL now while callers may inject a fixed
+    // clock, so an as-of bound in the past still sees the predecessor as in
+    // force. The predecessor is now marked `superseded_at` at record time, which
+    // the identity reader excludes regardless of any clock.
     let memories = if include_superseded {
         conn.list_memories_for_retrieval(&scope.workspace_id, None, false)
     } else {
-        conn.list_memories_valid_at(
-            &scope.workspace_id,
-            None,
-            false,
-            &crate::core::memory::normalize_validity_timestamp(now),
-        )
+        conn.list_memories(&scope.workspace_id, None, false)
     }
     .map_err(|error| decide_storage_error(format!("Failed to list decisions: {error}")))?;
 
