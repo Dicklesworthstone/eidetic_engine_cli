@@ -39,10 +39,25 @@ Signals per suggestion row (raw values always carried): `adamicAdar`,
 `ppr` (symmetrized), `affinity` (retrieval co-selection; honestly omitted
 while the [retrieval-affinity snapshot](../architecture/graph-snapshots.md) is
 cold — the report sets `affinityCold` and emits `retrieval_affinity_cold`).
-Blend weights are ADR constants in `src/core/suggest_links.rs` (0.35 AA /
-0.20 PA / 0.25 Jaccard / 0.15 PPR / 0.05 affinity, per-batch min-max
-normalized); there are no `[graph.suggest]` config keys yet — treat the
+Blend weights are ADR constants in `SuggestBlendWeights::default()`
+(`src/core/suggest_links.rs`), applied to per-batch min-max normalized
+signals. There are no `[graph.suggest]` config keys yet — treat these
 constants as the contract until a config surface ships.
+
+| Signal | Struct field | Weight |
+| --- | --- | --- |
+| Adamic–Adar | `adamic_adar` | 0.35 |
+| PPR (symmetrized) | `ppr` | 0.25 |
+| Jaccard over tags | `jaccard_tags` | 0.20 |
+| Retrieval affinity | `affinity` | 0.15 |
+| Preferential attachment | `preferential_attachment` | 0.05 |
+
+Each row names the struct field it comes from, so a value can be checked
+against the code without inferring which signal it belongs to. An earlier
+revision of this paragraph listed the values in struct-declaration order but
+paired them with signal names in a different order, which overstated
+preferential attachment 4× (0.20 vs 0.05) and understated retrieval affinity
+3× (0.05 vs 0.15).
 
 Typing: token-Jaccard ≥ 0.5 with opposed polarity (negation on exactly one
 side) → `contradicts`; same-polarity overlap → `supports`; otherwise

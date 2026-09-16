@@ -118,6 +118,34 @@ serialized.
 The target in-memory budget is 50 MB per snapshot family and 250 MB total for
 the five operational families.
 
+## Retrieval affinity: rebuilding a derived projection
+
+The `retrieval_affinity` family is **derived and rebuildable**. It is not a
+source of truth, and nothing durable is lost by discarding it.
+
+Storage (created by migration `retrieval_affinity_projection`):
+
+- `retrieval_affinity_accumulation` — decayed co-selection counts per
+  canonical memory pair.
+- `retrieval_affinity_cursor` — one row per workspace holding
+  `(pack_ledger_rowid, search_audit_rowid)`, the high-water marks of the rows
+  already folded into the accumulation.
+
+The `retrieval_affinity_refresh` steward job advances that cursor over the pack
+ledger and search audits, so the projection is reconstructible by replaying
+those rows. **To force a full rebuild, reset the workspace's cursor row** and
+let the refresh job run again; it re-accumulates from the beginning of the
+retained ledger. Note the rebuild is bounded by ledger retention — pruned
+ledger rows cannot be replayed, so a rebuilt projection reflects the retained
+window rather than all history.
+
+**Blast radius of dropping it is deliberately small.** A cold or missing
+projection degrades `ee graph suggest-links` only: the report omits the
+`affinity` signal, sets `affinityCold`, and emits `retrieval_affinity_cold`.
+It never affects live ranking — that is an ADR 0066 hard rule, pinned by
+`retrieval_affinity_is_not_a_search_scoring_input`. So resetting the cursor is
+a safe operation whose worst case is temporarily weaker link suggestions.
+
 Required behavior:
 
 - Workspaces below 10k memories may cache graph objects during a foreground
