@@ -31,6 +31,8 @@ state on disk.
 
 ## Wiring status
 
-`ee doctor --fix --only fm-search_indexes-index_corrupt` is currently gated by
-`bd-3boan` (CLI surface for the doctor runtime); set
-`EE_DOCTOR_FIXTURE_RUN_EE=1` only once the CLI wiring lands.
+`ee doctor --fix --only fm-search_indexes-index_corrupt` is WIRED. `bd-3boan` (CLI surface for
+the doctor runtime) is closed and `DoctorArgs` carries both `--fix` and
+`--only`, so `scripts/verify-undo.sh` sets `EE_DOCTOR_FIXTURE_RUN_EE=1` and
+the round-trip above runs under the `ee doctor Safety Harness` stage of
+`scripts/verify.sh`.
