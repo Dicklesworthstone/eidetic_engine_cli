@@ -71,6 +71,9 @@ pub const MESH_LANE_GRANT_TARGET_ADAPTER_SCHEMA_V1: &str = "ee.mesh.lane_grant_t
 /// Standard audit action types for memory operations (EE-070).
 pub mod audit_actions {
     pub const PLAN_RECIPE_SAVE: &str = "plan.recipe.save";
+    /// bd-4vwiz: explicit authenticated rebind of one workspace row's path
+    /// after the store was relocated. Addressing-only; no memory row moves.
+    pub const WORKSPACE_RELOCATE: &str = "workspace.relocate";
     pub const ARTIFACT_REGISTER: &str = "artifact.register";
     pub const CERTIFICATE_UPSERT: &str = "certificate.upsert";
     pub const AGENT_PROFILE_UPDATE: &str = "agent_profile.update";
@@ -10945,6 +10948,71 @@ pub struct StoredWorkspace {
     pub updated_at: String,
 }
 
+/// Schema id for the durable `workspace.relocate` audit details payload.
+///
+/// The payload is the rollback record: it carries the complete previous
+/// addressing so an operator (or a later call to
+/// [`DbConnection::relocate_workspace_binding`]) can invert the rebind without
+/// any other state.
+pub const WORKSPACE_RELOCATION_AUDIT_SCHEMA_V1: &str = "ee.audit.workspace_relocate.v1";
+
+/// Why an explicit workspace relocation was refused.
+///
+/// Every variant is a deliberate control, not a fault: relocation must fail
+/// closed rather than guess which workspace the caller meant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceRelocationRefusal {
+    /// No row in this store carries the named workspace id. The caller is not
+    /// offered a substitute — implicitly adopting some other workspace's rows
+    /// is the exact failure mode this recovery exists to prevent.
+    WorkspaceRowMissing,
+    /// The target path is already bound to a different workspace row. Proceeding
+    /// would merge two stores' addressing (and violate the `path ... UNIQUE`
+    /// constraint). This is the wrong-store control.
+    TargetPathBoundElsewhere { bound_workspace_id: String },
+    /// The row already names the target path. Idempotent no-op: no write and no
+    /// audit row, so retrying a completed relocation is safe.
+    AlreadyBound,
+    /// The target path is empty or whitespace, refused at the boundary rather
+    /// than as a `CHECK (length(trim(path)) > 0)` constraint fault.
+    EmptyTargetPath,
+}
+
+/// Durable receipt for a completed workspace relocation.
+///
+/// `previous_path` and `previous_scope` are the rollback payload: passing them
+/// back to [`DbConnection::relocate_workspace_binding`] inverts the operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceRelocationReceipt {
+    pub workspace_id: String,
+    pub previous_path: String,
+    pub new_path: String,
+    pub previous_scope: WorkspaceScopeFields,
+    pub audit_id: String,
+    pub relocated_at: String,
+}
+
+/// Result of an explicit workspace relocation attempt.
+///
+/// `Err(DbError)` is reserved for genuine storage failure; a refused relocation
+/// is a value so callers must handle it explicitly instead of treating every
+/// non-success as an unexplained error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceRelocationOutcome {
+    Relocated(WorkspaceRelocationReceipt),
+    Refused(WorkspaceRelocationRefusal),
+}
+
+impl WorkspaceRelocationOutcome {
+    #[must_use]
+    pub const fn receipt(&self) -> Option<&WorkspaceRelocationReceipt> {
+        match self {
+            Self::Relocated(receipt) => Some(receipt),
+            Self::Refused(_) => None,
+        }
+    }
+}
+
 impl DbConnection {
     /// Restore one authenticated workspace row without replacing existing state.
     pub(crate) fn restore_workspace_row(&self, row: &StoredWorkspace) -> Result<()> {
@@ -11095,6 +11163,172 @@ impl DbConnection {
             ],
         )?;
         Ok(affected > 0)
+    }
+
+    /// Rebind one named workspace row to a new path (bd-4vwiz, GH46).
+    ///
+    /// This is the durable half of explicit relocation recovery for a store
+    /// that was *copied* rather than backed up. The workspace id is derived
+    /// from the canonical workspace path, so a store moved to a new directory
+    /// derives a different id and every read reports
+    /// `workspace_identity_mismatch` — the memories are present and
+    /// unreachable.
+    ///
+    /// The rebind deliberately keeps the existing `workspace_id` and rewrites
+    /// only the row's *addressing* columns. Nothing in `memories`, its audit
+    /// trail, or any other `workspace_id`-keyed table is touched, so
+    /// provenance, memory ids, seals and history survive byte-for-byte; the
+    /// relocated path simply resolves to the identity that already owns them.
+    /// The alternative — rewriting `workspace_id` across every table — would
+    /// destroy exactly the provenance this recovery exists to preserve.
+    ///
+    /// Refusals are values, not errors, and each one is a control the bead
+    /// requires:
+    ///
+    /// - [`WorkspaceRelocationRefusal::WorkspaceRowMissing`] — the caller named
+    ///   an id this store does not contain. There is no search for a
+    ///   "close enough" row: implicit adoption of a foreign workspace is the
+    ///   specific failure mode this recovery must not have.
+    /// - [`WorkspaceRelocationRefusal::TargetPathBoundElsewhere`] — the new
+    ///   path already belongs to a *different* workspace row. This is the
+    ///   wrong-store control: relocating onto an occupied path would either
+    ///   violate the `path TEXT NOT NULL UNIQUE` constraint or, worse, silently
+    ///   merge two stores' addressing.
+    /// - [`WorkspaceRelocationRefusal::AlreadyBound`] — the row already names
+    ///   the target. Idempotent no-op; no write, no audit row.
+    /// - [`WorkspaceRelocationRefusal::EmptyTargetPath`] — the schema's
+    ///   `CHECK (length(trim(path)) > 0)` refused at the boundary instead of as
+    ///   a constraint fault.
+    ///
+    /// The update and its audit row commit in one transaction, so a crash
+    /// mid-rebind leaves either the old binding or the new one with its
+    /// receipt, never a rebind with no record of what it replaced.
+    ///
+    /// Rollback: the receipt and the durable audit details both carry the full
+    /// previous addressing, so the operation is inverted by calling this method
+    /// again with the previous path and scope. The primitive is its own undo.
+    ///
+    /// # Authentication
+    ///
+    /// This is the storage primitive only. It performs **no** authentication —
+    /// proving the caller owns the source store's key material
+    /// (`<store>/.ee/keys` via `crate::policy::store_auth::StoreAuthRoot`) is
+    /// the calling layer's job, and no relocation surface may be exposed to
+    /// users without it. `actor` is recorded for audit, not trusted as proof.
+    pub fn relocate_workspace_binding(
+        &self,
+        workspace_id: &str,
+        new_path: &str,
+        new_scope: &WorkspaceScopeFields,
+        actor: Option<&str>,
+    ) -> Result<WorkspaceRelocationOutcome> {
+        if new_path.trim().is_empty() {
+            return Ok(WorkspaceRelocationOutcome::Refused(
+                WorkspaceRelocationRefusal::EmptyTargetPath,
+            ));
+        }
+        let Some(existing) = self.get_workspace(workspace_id)? else {
+            return Ok(WorkspaceRelocationOutcome::Refused(
+                WorkspaceRelocationRefusal::WorkspaceRowMissing,
+            ));
+        };
+        if existing.path == new_path {
+            return Ok(WorkspaceRelocationOutcome::Refused(
+                WorkspaceRelocationRefusal::AlreadyBound,
+            ));
+        }
+        if let Some(occupant) = self.get_workspace_by_path(new_path)?
+            && occupant.id != existing.id
+        {
+            return Ok(WorkspaceRelocationOutcome::Refused(
+                WorkspaceRelocationRefusal::TargetPathBoundElsewhere {
+                    bound_workspace_id: occupant.id,
+                },
+            ));
+        }
+
+        let audit_id = generate_audit_id();
+        let now = Utc::now().to_rfc3339();
+        let details = serde_json::json!({
+            "schema": WORKSPACE_RELOCATION_AUDIT_SCHEMA_V1,
+            "previousPath": existing.path,
+            "newPath": new_path,
+            "previousScopeKind": existing.scope_kind,
+            "newScopeKind": new_scope.scope_kind,
+            "previousRepositoryRoot": existing.repository_root,
+            "newRepositoryRoot": new_scope.repository_root,
+            "previousRepositoryFingerprint": existing.repository_fingerprint,
+            "newRepositoryFingerprint": new_scope.repository_fingerprint,
+            "previousSubprojectPath": existing.subproject_path,
+            "newSubprojectPath": new_scope.subproject_path,
+            // Named explicitly so an auditor never has to infer it: relocation
+            // rebinds addressing only. No memory row was adopted, rewritten,
+            // or moved between workspaces.
+            "memoryRowsRebound": 0,
+            "rollbackCommandShape": "relocate_workspace_binding(workspace_id, previousPath, previous scope)",
+        })
+        .to_string();
+
+        self.with_transaction_error::<(), DbError, _>(|| {
+            let affected = self.execute_for(
+                DbOperation::Execute,
+                "UPDATE workspaces SET path = ?1, scope_kind = ?2, repository_root = ?3, repository_fingerprint = ?4, subproject_path = ?5, updated_at = ?6 WHERE id = ?7",
+                &[
+                    Value::Text(new_path.to_owned()),
+                    Value::Text(new_scope.scope_kind.clone()),
+                    new_scope
+                        .repository_root
+                        .clone()
+                        .map_or(Value::Null, Value::Text),
+                    new_scope
+                        .repository_fingerprint
+                        .clone()
+                        .map_or(Value::Null, Value::Text),
+                    new_scope
+                        .subproject_path
+                        .clone()
+                        .map_or(Value::Null, Value::Text),
+                    Value::Text(now.clone()),
+                    Value::Text(existing.id.clone()),
+                ],
+            )?;
+            if affected == 0 {
+                // The row vanished between the lookup and the update. Fail the
+                // transaction rather than writing an audit row for a rebind
+                // that did not happen.
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "workspace row disappeared during relocation".to_owned(),
+                });
+            }
+            self.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(existing.id.clone()),
+                    actor: actor.map(str::to_owned),
+                    action: audit_actions::WORKSPACE_RELOCATE.to_owned(),
+                    target_type: Some("workspace".to_owned()),
+                    target_id: Some(existing.id.clone()),
+                    details: Some(details),
+                },
+            )
+        })?;
+
+        Ok(WorkspaceRelocationOutcome::Relocated(
+            WorkspaceRelocationReceipt {
+                workspace_id: existing.id,
+                previous_path: existing.path,
+                new_path: new_path.to_owned(),
+                previous_scope: WorkspaceScopeFields {
+                    scope_kind: existing.scope_kind,
+                    repository_root: existing.repository_root,
+                    repository_fingerprint: existing.repository_fingerprint,
+                    subproject_path: existing.subproject_path,
+                },
+                audit_id,
+                relocated_at: now,
+            },
+        ))
     }
 
     pub fn get_workspace_generation(&self, workspace_id: &str) -> Result<Option<u64>> {
@@ -52093,6 +52327,311 @@ mod tests {
 
         connection.close()?;
         Ok(())
+    }
+
+    // ── Explicit workspace relocation (bd-4vwiz, GH46) ──────────────────────
+
+    const RELOCATION_WORKSPACE_ID: &str = "wsp_relocate000000000000000000";
+    const RELOCATION_OLD_PATH: &str = "/home/user/projects/original";
+    const RELOCATION_NEW_PATH: &str = "/home/user/relocated/original";
+
+    fn relocation_fixture() -> Result<DbConnection> {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        connection.insert_workspace_with_scope(
+            RELOCATION_WORKSPACE_ID,
+            &super::CreateWorkspaceInput {
+                path: RELOCATION_OLD_PATH.to_string(),
+                name: Some("Original".to_string()),
+            },
+            &super::WorkspaceScopeFields {
+                scope_kind: "repository".to_string(),
+                repository_root: Some(RELOCATION_OLD_PATH.to_string()),
+                repository_fingerprint: Some("fp-original".to_string()),
+                subproject_path: None,
+            },
+        )?;
+        Ok(connection)
+    }
+
+    fn relocation_target_scope() -> super::WorkspaceScopeFields {
+        super::WorkspaceScopeFields {
+            scope_kind: "repository".to_string(),
+            repository_root: Some(RELOCATION_NEW_PATH.to_string()),
+            repository_fingerprint: Some("fp-original".to_string()),
+            subproject_path: None,
+        }
+    }
+
+    #[test]
+    fn workspace_relocation_rebinds_addressing_and_keeps_memories_4vwiz() -> TestResult {
+        // A copied store derives a different workspace id from its new path, so
+        // every read reports workspace_identity_mismatch and the memories are
+        // present but unreachable. Relocation rebinds the ADDRESSING only.
+        let connection = relocation_fixture()?;
+        connection.insert_memory(
+            "mem_relocate00000000000000000",
+            &super::CreateMemoryInput {
+                workspace_id: RELOCATION_WORKSPACE_ID.to_string(),
+                level: "procedural".to_string(),
+                kind: "rule".to_string(),
+                content: "Survives relocation.".to_string(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.7,
+                importance: 0.8,
+                provenance_uri: Some("file://AGENTS.md#L1".to_string()),
+                trust_class: "human_explicit".to_string(),
+                trust_subclass: None,
+                tags: vec!["relocation".to_string()],
+                valid_from: None,
+                valid_to: None,
+            },
+        )?;
+
+        let outcome = connection.relocate_workspace_binding(
+            RELOCATION_WORKSPACE_ID,
+            RELOCATION_NEW_PATH,
+            &relocation_target_scope(),
+            Some("GentleBear"),
+        )?;
+        let receipt = outcome
+            .receipt()
+            .ok_or_else(|| TestFailure::new(format!("expected relocation, got {outcome:?}")))?;
+        ensure_equal(
+            &receipt.workspace_id.as_str(),
+            &RELOCATION_WORKSPACE_ID,
+            "receipt workspace id",
+        )?;
+        ensure_equal(
+            &receipt.previous_path.as_str(),
+            &RELOCATION_OLD_PATH,
+            "receipt previous path",
+        )?;
+        ensure_equal(
+            &receipt.previous_scope.repository_root,
+            &Some(RELOCATION_OLD_PATH.to_string()),
+            "receipt carries the previous repository root for rollback",
+        )?;
+
+        // The new path now resolves to the SAME identity that owns the rows.
+        let rebound = connection
+            .get_workspace_by_path(RELOCATION_NEW_PATH)?
+            .ok_or_else(|| TestFailure::new("relocated path must resolve"))?;
+        ensure_equal(
+            &rebound.id.as_str(),
+            &RELOCATION_WORKSPACE_ID,
+            "relocated path resolves to the original identity",
+        )?;
+        ensure_equal(
+            &rebound.name,
+            &Some("Original".to_string()),
+            "relocation preserves the workspace name",
+        )?;
+        ensure(
+            connection.get_workspace_by_path(RELOCATION_OLD_PATH)?.is_none(),
+            "the old path must no longer resolve",
+        )?;
+
+        // The whole point: memory rows are untouched, so provenance, ids and
+        // content survive byte-for-byte and are reachable under the new path.
+        let memory = connection
+            .get_memory("mem_relocate00000000000000000")?
+            .ok_or_else(|| TestFailure::new("memory must survive relocation"))?;
+        ensure_equal(
+            &memory.workspace_id.as_str(),
+            &RELOCATION_WORKSPACE_ID,
+            "memory keeps its original workspace id",
+        )?;
+        ensure_equal(
+            &memory.content.as_str(),
+            &"Survives relocation.",
+            "memory content is untouched",
+        )?;
+        ensure_equal(
+            &memory.provenance_uri,
+            &Some("file://AGENTS.md#L1".to_string()),
+            "memory provenance is untouched",
+        )?;
+
+        // The audit row is the durable rollback record.
+        let audit = connection
+            .get_audit(&receipt.audit_id)?
+            .ok_or_else(|| TestFailure::new("relocation must be audited"))?;
+        ensure_equal(
+            &audit.action.as_str(),
+            &super::audit_actions::WORKSPACE_RELOCATE,
+            "audit action",
+        )?;
+        ensure_equal(
+            &audit.actor,
+            &Some("GentleBear".to_string()),
+            "audit records the actor",
+        )?;
+        let details = audit
+            .details
+            .ok_or_else(|| TestFailure::new("audit must carry rollback details"))?;
+        ensure(
+            details.contains(super::WORKSPACE_RELOCATION_AUDIT_SCHEMA_V1),
+            format!("audit details must name their schema: {details}"),
+        )?;
+        ensure(
+            details.contains(RELOCATION_OLD_PATH),
+            format!("audit details must carry the previous path: {details}"),
+        )?;
+        ensure(
+            details.contains("\"memoryRowsRebound\":0"),
+            format!("audit must state that no memory row moved: {details}"),
+        )
+    }
+
+    #[test]
+    fn workspace_relocation_refuses_wrong_store_and_unknown_rows_4vwiz() -> TestResult {
+        // Every refusal here is a control, not a fault: relocation must fail
+        // closed rather than guess which workspace the caller meant.
+        let connection = relocation_fixture()?;
+
+        // An id this store does not contain gets no substitute. Implicit
+        // adoption of a foreign workspace is the failure mode to prevent.
+        ensure_equal(
+            &connection.relocate_workspace_binding(
+                "wsp_absent0000000000000000000",
+                RELOCATION_NEW_PATH,
+                &relocation_target_scope(),
+                None,
+            )?,
+            &super::WorkspaceRelocationOutcome::Refused(
+                super::WorkspaceRelocationRefusal::WorkspaceRowMissing,
+            ),
+            "unknown workspace id is refused",
+        )?;
+
+        // Wrong-store control: the target path already belongs to someone else.
+        const OCCUPANT_ID: &str = "wsp_occupant00000000000000000";
+        connection.insert_workspace(
+            OCCUPANT_ID,
+            &super::CreateWorkspaceInput {
+                path: RELOCATION_NEW_PATH.to_string(),
+                name: None,
+            },
+        )?;
+        ensure_equal(
+            &connection.relocate_workspace_binding(
+                RELOCATION_WORKSPACE_ID,
+                RELOCATION_NEW_PATH,
+                &relocation_target_scope(),
+                None,
+            )?,
+            &super::WorkspaceRelocationOutcome::Refused(
+                super::WorkspaceRelocationRefusal::TargetPathBoundElsewhere {
+                    bound_workspace_id: OCCUPANT_ID.to_string(),
+                },
+            ),
+            "relocating onto an occupied path is refused, naming the occupant",
+        )?;
+
+        // An empty target is refused at the boundary, not as a CHECK fault.
+        ensure_equal(
+            &connection.relocate_workspace_binding(
+                RELOCATION_WORKSPACE_ID,
+                "   ",
+                &relocation_target_scope(),
+                None,
+            )?,
+            &super::WorkspaceRelocationOutcome::Refused(
+                super::WorkspaceRelocationRefusal::EmptyTargetPath,
+            ),
+            "an empty target path is refused",
+        )?;
+
+        // Re-running a completed relocation is an idempotent no-op.
+        ensure_equal(
+            &connection.relocate_workspace_binding(
+                RELOCATION_WORKSPACE_ID,
+                RELOCATION_OLD_PATH,
+                &relocation_target_scope(),
+                None,
+            )?,
+            &super::WorkspaceRelocationOutcome::Refused(
+                super::WorkspaceRelocationRefusal::AlreadyBound,
+            ),
+            "rebinding a row to the path it already has is a no-op",
+        )?;
+
+        // No refusal may have moved anything.
+        let unchanged = connection
+            .get_workspace(RELOCATION_WORKSPACE_ID)?
+            .ok_or_else(|| TestFailure::new("original row must survive every refusal"))?;
+        ensure_equal(
+            &unchanged.path.as_str(),
+            &RELOCATION_OLD_PATH,
+            "a refused relocation leaves the binding untouched",
+        )?;
+        ensure_equal(
+            &connection.get_workspace_by_path(RELOCATION_NEW_PATH)?.map(|row| row.id),
+            &Some(OCCUPANT_ID.to_string()),
+            "the occupant keeps its own path",
+        )?;
+        ensure(
+            connection
+                .list_audit_by_action(super::audit_actions::WORKSPACE_RELOCATE, Some(16))?
+                .is_empty(),
+            "a refused relocation writes no audit row",
+        )
+    }
+
+    #[test]
+    fn workspace_relocation_is_its_own_rollback_4vwiz() -> TestResult {
+        // Rollback needs no separate undo path: the receipt carries the full
+        // previous addressing, so replaying it inverts the rebind.
+        let connection = relocation_fixture()?;
+        let forward = connection.relocate_workspace_binding(
+            RELOCATION_WORKSPACE_ID,
+            RELOCATION_NEW_PATH,
+            &relocation_target_scope(),
+            Some("GentleBear"),
+        )?;
+        let receipt = forward
+            .receipt()
+            .ok_or_else(|| TestFailure::new(format!("expected relocation, got {forward:?}")))?;
+
+        let reverted = connection.relocate_workspace_binding(
+            &receipt.workspace_id,
+            &receipt.previous_path,
+            &receipt.previous_scope,
+            Some("GentleBear"),
+        )?;
+        ensure(
+            reverted.receipt().is_some(),
+            format!("rollback must succeed, got {reverted:?}"),
+        )?;
+
+        let restored = connection
+            .get_workspace(RELOCATION_WORKSPACE_ID)?
+            .ok_or_else(|| TestFailure::new("row must survive rollback"))?;
+        ensure_equal(
+            &restored.path.as_str(),
+            &RELOCATION_OLD_PATH,
+            "rollback restores the original path",
+        )?;
+        ensure_equal(
+            &restored.repository_root,
+            &Some(RELOCATION_OLD_PATH.to_string()),
+            "rollback restores the original repository root",
+        )?;
+        ensure(
+            connection.get_workspace_by_path(RELOCATION_NEW_PATH)?.is_none(),
+            "the relocated path no longer resolves after rollback",
+        )?;
+
+        // Both directions stay on the audit trail; a rollback is not an erasure.
+        ensure_equal(
+            &connection
+                .list_audit_by_action(super::audit_actions::WORKSPACE_RELOCATE, Some(16))?
+                .len(),
+            &2,
+            "both the relocation and its rollback are audited",
+        )
     }
 
     #[test]
