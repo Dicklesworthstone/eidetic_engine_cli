@@ -43,7 +43,19 @@
 
 set -euo pipefail
 
-EE_BIN="${EE_BIN:-ee}"
+# Honour the pinned binary. EE_BIN wins if the caller set it, then
+# EE_BINARY (which scripts/verify.sh and e2e_overhaul.sh export), and
+# only then PATH. Defaulting straight to `ee` here is what let this
+# epic run a different binary than its parent hashed.
+EE_BIN="${EE_BIN:-${EE_BINARY:-ee}}"
+
+# bd-overhaul-false-binary-attestation-2rmdw: report the binary this epic
+# actually invoked, so the parent can refuse to publish a provenance hash it
+# cannot back. Written only when the parent asked for it, so standalone runs
+# are unaffected.
+if [ -n "${EE_BINARY_WITNESS:-}" ]; then
+  printf '%s' "$EE_BIN" > "$EE_BINARY_WITNESS"
+fi
 WORKSPACE="${EE_DOCTOR_UNDO_REPLAY_WORKSPACE:-${TMPDIR:-/tmp}/ee-doctor-undo-replay-$$}"
 FAILURE_WORKSPACE="${EE_DOCTOR_FAILURE_WORKSPACE:-${WORKSPACE}-finish-failure}"
 EVENT_DIR="${EE_TEST_EVENT_DIR:-${TMPDIR:-/tmp}/ee-doctor-undo-replay-events}"

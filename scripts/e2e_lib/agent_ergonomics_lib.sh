@@ -18,7 +18,12 @@ export REPO_ROOT
 # shellcheck source=/dev/null
 source "$REPO_ROOT/scripts/lib/e2e_logger.sh"
 
-EE_BIN="${EE_BIN:-ee}"
+# bd-overhaul-false-binary-attestation-2rmdw: honour the pinned binary.
+# EE_BIN wins if the caller set it, then EE_BINARY (exported by
+# scripts/verify.sh:201), and only then PATH. verify.sh invokes this
+# stage with no explicit pin, so defaulting straight to `ee` meant the
+# gate could pass against whatever ee happened to be installed.
+EE_BIN="${EE_BIN:-${EE_BINARY:-ee}}"
 TEST_NAME="${TEST_NAME:-$(basename "${BASH_SOURCE[1]:-${0}}" .sh)}"
 STEP=0
 PASS=0

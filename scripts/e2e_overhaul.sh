@@ -237,6 +237,18 @@ binary_hash() {
     fi
 }
 EE_BINARY_HASH="$(binary_hash)"
+
+# Epics report the binary they actually invoked into this directory. The
+# attestation below is withheld unless every executed epic's report matches
+# the binary hashed above.
+WITNESS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/j4-binary-witness.XXXXXX")"
+EXECUTED_EPICS=""
+cleanup_witness_dir() {
+    [ -n "${WITNESS_DIR:-}" ] || return 0
+    rm -f -- "${WITNESS_DIR}"/*.path 2>/dev/null || true
+    rmdir -- "${WITNESS_DIR}" 2>/dev/null || true
+}
+trap cleanup_witness_dir EXIT
 EE_VERSION="$("$EE_BINARY" --version 2>/dev/null | awk '{print $NF}' | head -1)"
 EE_VERSION="${EE_VERSION:-unknown}"
 
@@ -289,10 +301,24 @@ PY
     echo "[$letter] $epic_name → $(date -u +%H:%M:%S)" >&2
 
     epic_start_ns="$(python3 -c "from time import time_ns; print(time_ns())")"
+    # bd-overhaul-false-binary-attestation-2rmdw.
+    #
+    # EE_BIN is passed as well as EE_BINARY. Several epics read $EE_BIN and
+    # defaulted it to `ee` on PATH, so passing only EE_BINARY meant this
+    # parent hashed one binary while its children could execute another --
+    # and the summary still published ee_binary_hash for the hashed one.
+    #
+    # EE_BINARY_WITNESS is how an epic reports what it ACTUALLY invoked.
+    # Passing the pin removes one route to a wrong binary; requiring the
+    # witness back is what makes the attestation unable to lie.
+    epic_witness="${WITNESS_DIR}/${letter}.path"
     EE_TEST_LOG_PATH="$epic_log" \
         EE_BINARY="$EE_BINARY" \
+        EE_BIN="$EE_BINARY" \
+        EE_BINARY_WITNESS="$epic_witness" \
         "$epic_path"
     rc=$?
+    EXECUTED_EPICS="${EXECUTED_EPICS}${letter} "
     epic_end_ns="$(python3 -c "from time import time_ns; print(time_ns())")"
     elapsed_ms=$(( (epic_end_ns - epic_start_ns) / 1000000 ))
 
@@ -363,13 +389,61 @@ done
 ENDED_AT="$(python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec='microseconds').replace('+00:00','Z'))")"
 
 # ---------------------------------------------------------------------------
+# Binary attestation gate (bd-overhaul-false-binary-attestation-2rmdw).
+#
+# Everything above hashed ONE binary. This proves the epics actually ran THAT
+# binary before the summary is allowed to publish the hash as provenance.
+#
+# The rule is deliberately fail-closed: an epic that ran and left no witness
+# is treated exactly like a mismatch. A missing witness means we cannot say
+# what it executed, and "cannot say" must not render as an attestation. An
+# attestation that is accidentally true is still not evidence.
+# ---------------------------------------------------------------------------
+BINARY_ATTESTATION_STATUS="verified"
+BINARY_WITNESS_DETAIL=""
+
+# An empty epic list must not attest. A loop over nothing succeeds trivially,
+# which would publish the hash for a run that executed no epic at all -- the
+# exact vacuity this gate exists to prevent.
+if [ -z "${EXECUTED_EPICS// /}" ]; then
+    BINARY_ATTESTATION_STATUS="unverified"
+    BINARY_WITNESS_DETAIL="no epic executed"
+fi
+
+for witness_letter in $EXECUTED_EPICS; do
+    witness_file="${WITNESS_DIR}/${witness_letter}.path"
+    if [ ! -s "$witness_file" ]; then
+        BINARY_ATTESTATION_STATUS="unverified"
+        BINARY_WITNESS_DETAIL="${BINARY_WITNESS_DETAIL}${witness_letter}=no-witness "
+        continue
+    fi
+    witness_path="$(cat -- "$witness_file")"
+    if [ "$witness_path" != "$EE_BINARY" ]; then
+        BINARY_ATTESTATION_STATUS="unverified"
+        BINARY_WITNESS_DETAIL="${BINARY_WITNESS_DETAIL}${witness_letter}=${witness_path} "
+    fi
+done
+
+if [ "$BINARY_ATTESTATION_STATUS" != "verified" ]; then
+    echo "j4: BINARY ATTESTATION WITHHELD -- epics did not all run the hashed binary" >&2
+    echo "j4:   hashed: $EE_BINARY" >&2
+    echo "j4:   epics:  $BINARY_WITNESS_DETAIL" >&2
+    echo "j4:   ee_binary_hash is reported as null; this run does not establish" >&2
+    echo "j4:   which binary produced its results." >&2
+    # Withhold the claim rather than publish one nothing supports.
+    EE_BINARY_HASH=""
+    overall_exit=4
+fi
+
+# ---------------------------------------------------------------------------
 # Compose final summary JSON.
 # ---------------------------------------------------------------------------
 python3 - "$epic_records_file" "$SUMMARY_PATH" \
     "$STARTED_AT" "$ENDED_AT" "$EE_VERSION" "$EE_BINARY_HASH" \
-    "$asserts_pass_total" "$asserts_fail_total" "$epics_pass" "$epics_fail" <<'PY'
+    "$asserts_pass_total" "$asserts_fail_total" "$epics_pass" "$epics_fail" \
+    "$BINARY_ATTESTATION_STATUS" <<'PY'
 import json, sys
-records_path, summary_path, started, ended, ver, bhash, ap, af, ep, ef = sys.argv[1:]
+records_path, summary_path, started, ended, ver, bhash, ap, af, ep, ef, attestation = sys.argv[1:]
 epics = []
 with open(records_path) as f:
     for line in f:
@@ -382,7 +456,11 @@ summary = {
     "started_at": started,
     "ended_at": ended,
     "ee_version": ver,
-    "ee_binary_hash": bhash,
+    # Withheld (empty) means the epics could not be proven to have run the
+    # hashed binary. It renders as JSON null so no consumer can mistake it
+    # for provenance -- see the attestation gate above.
+    "ee_binary_hash": bhash or None,
+    "binary_attestation": attestation,
     "epics": epics,
     "totals": {
         "asserts_pass": int(ap),
@@ -409,7 +487,10 @@ import json, sys
 data = json.load(open(sys.argv[1]))
 print()
 print(f"  Overhaul e2e run: {data['started_at']} → {data['ended_at']}")
-print(f"  ee version: {data['ee_version']}  binary: {data['ee_binary_hash']}")
+bhash = data["ee_binary_hash"]
+att = data.get("binary_attestation", "unknown")
+shown = bhash if bhash else f"WITHHELD ({att}) - epics not proven to have run the hashed binary"
+print(f"  ee version: {data['ee_version']}  binary: {shown}")
 print()
 for epic in data["epics"]:
     print(f"  [{epic['letter']}] {epic['name']:<22} "

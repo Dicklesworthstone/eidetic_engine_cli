@@ -97,7 +97,7 @@ for script in "${SCRIPTS[@]}"; do
     WORKSPACE="$workspace" \
         LOG_DIR="$log_dir" \
         EE_TEST_LOG_PATH="$log_dir/events.jsonl" \
-        EE_BIN="${EE_BIN:-ee}" \
+        EE_BIN="${EE_BIN:-${EE_BINARY:-ee}}" \
         "$path" >"$log_dir/stdout.txt" 2>"$log_dir/stderr.txt"
     rc=$?
     set -e
