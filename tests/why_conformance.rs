@@ -303,7 +303,7 @@ fn why_storage_section_is_complete() -> TestResult {
         "--kind",
         "rule",
         "--source",
-        "file://tests/fixtures/storage_test.json#L42",
+        "file:///tests/fixtures/storage_test.json#L42",
         "--json",
     ])?;
     persist_artifact("storage_remember", &remember);
@@ -339,7 +339,7 @@ fn why_storage_section_is_complete() -> TestResult {
     ensure(storage.is_object(), "storage section must exist")?;
     ensure_equal(
         &storage["provenanceUri"],
-        &serde_json::json!("file://tests/fixtures/storage_test.json#L42"),
+        &serde_json::json!("file:///tests/fixtures/storage_test.json#L42"),
         "storage provenanceUri",
     )?;
     // Storage section should contain memory metadata; exact fields may vary
