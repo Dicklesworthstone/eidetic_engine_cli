@@ -1288,6 +1288,43 @@ run_stage "Coverage Gap E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BIN
 run_stage "Timeline E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_timeline.sh"
 run_stage "Trust Freshness E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_trust_freshness.sh"
 
+# Gate 6.12698a-j: bd-udjrq triage — ten e2e suites that were invoked by
+# nothing, now executed. 3,047 lines of assertions across twelve orphans were
+# read before wiring; these ten reference only surfaces that exist at HEAD and
+# create their own fixtures, so none is stale-by-dependency.
+#
+# PRE-REGISTERED, same discipline as 6.12697: a RED here is a FIRST-EXECUTION
+# finding, not a regression from this session. Reading assertions proves a
+# suite is not obsolete; it cannot prove it passes. Stage names say so.
+#
+# EE_BIN/EE_BINARY pinned at each call site. Unpinned, these resolve through
+# _harness_resolve_ee_bin's bare `printf ee` fallback to whatever is installed
+# -- the path that made e2e_field_report_suite.sh emit five false assert_fails
+# against 0.14.2 at 06:17 today. Wiring without the pin would reproduce that
+# ten times over.
+#
+# NOT wired, with reasons:
+#   e2e_backup_roundtrip.sh   RETIRED as superseded by the registered
+#                             [[test]] target tests/e2e_backup_restore_roundtrip.rs
+#                             (6 tests, updated 2026-09-15). File NOT deleted
+#                             per RULE 1; it stays baselined pending an
+#                             operator decision on removal.
+#   e2e_field_report_suite.sh BLOCKED on the unguarded harness PATH fallback
+#                             (scripts/lib/e2e_harness.sh:69). It is PROVEN to
+#                             emit false assert_fails against a stale binary;
+#                             wiring it now would create exactly the
+#                             permanently-red stage this triage exists to avoid.
+run_stage "Anchors E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_anchors.sh"
+run_stage "Bridge Exemption E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_bridge_exemption.sh"
+run_stage "Command Inventory E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_command_inventory.sh"
+run_stage "Delivery E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_delivery.sh"
+run_stage "Provenance Reverify E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_provenance_reverify.sh"
+run_stage "Reach E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_reach.sh"
+run_stage "Rerank Precision Gain E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_rerank_precision_gain.sh"
+run_stage "Reservation Pressure E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_reservation_pressure.sh"
+run_stage "Search Weight Config E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_search_weight_config.sh"
+run_stage "Similar Scope E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_similar_scope.sh"
+
 # Gate 6.127: Ergonomics real-binary E2E (bd-1et0v.22). No-Cargo:
 # proves `ee context` remains an alias for canonical `ee pack` while carrying
 # the deprecated_alias info row, and proves PATH-shadow doctor findings are

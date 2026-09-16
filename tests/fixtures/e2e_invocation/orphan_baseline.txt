@@ -16,13 +16,21 @@
 # and the script — but deletion needs the operator's explicit permission
 # (AGENTS.md RULE 1).
 #
+#
+# 2026-09-16 bd-udjrq triage: 10 of the 12 non-mesh orphans were wired into
+# verify.sh gate 6.12698a-j and removed from this list. The two that remain:
+#   e2e_backup_roundtrip.sh    RETIRED - superseded by the registered
+#                              tests/e2e_backup_restore_roundtrip.rs target.
+#                              File retained per RULE 1; awaiting an operator
+#                              decision on deletion.
+#   e2e_field_report_suite.sh  BLOCKED - proven to emit false assert_fails
+#                              through the unguarded harness PATH fallback
+#                              (scripts/lib/e2e_harness.sh:69). Unblocks when
+#                              that fallback refuses instead of defaulting.
+#
 # Note: 7 of the 19 are e2e_mesh_* from the mesh campaign and may be a single
 # decision rather than seven.
-e2e_anchors.sh
 e2e_backup_roundtrip.sh
-e2e_bridge_exemption.sh
-e2e_command_inventory.sh
-e2e_delivery.sh
 e2e_field_report_suite.sh
 e2e_mesh_admission.sh
 e2e_mesh_anti_entropy_protocol.sh
@@ -31,9 +39,3 @@ e2e_mesh_privacy_redaction_authorization.sh
 e2e_mesh_replay_convergence.sh
 e2e_mesh_selective_sync.sh
 e2e_mesh_share_preview.sh
-e2e_provenance_reverify.sh
-e2e_reach.sh
-e2e_rerank_precision_gain.sh
-e2e_reservation_pressure.sh
-e2e_search_weight_config.sh
-e2e_similar_scope.sh

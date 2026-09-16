@@ -55,7 +55,15 @@ e2e_orphans() {
         # the reference scan. Without this every baselined script appears
         # "referenced" by the baseline itself and the audit reports zero
         # orphans forever -- a gate made vacuous by its own bookkeeping.
-        if ! rg -l --fixed-strings "$base" "$root" \
+        # "Invoked" is NOT the same as "mentioned". Naming a script inside a
+        # COMMENT -- e.g. a verify.sh note explaining why it is deliberately
+        # NOT wired -- would otherwise mark it invoked and silently retire the
+        # baseline entry. Found by running this audit against its own triage
+        # commit, which is the only way that ambiguity shows up.
+        #
+        # So require the name on a line with no preceding '#': comment lines
+        # and trailing-comment mentions do not count as invocation.
+        if ! rg -l "^[^#]*$(printf '%s' "$base" | sed 's/\./\\./g')" "$root" \
             --glob '!target' --glob '!.git' --glob "!scripts/$base" \
             --glob '!tests/fixtures/e2e_invocation/**' \
             >/dev/null 2>&1; then
