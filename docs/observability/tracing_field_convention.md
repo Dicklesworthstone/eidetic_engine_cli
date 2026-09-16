@@ -67,6 +67,30 @@ The checker is build-independent. It reads `.beads/issues.jsonl`, finds Part II
 declared Rust source surfaces for tracing evidence when those files exist. It
 does not write to Beads or edit source files.
 
+The Rust source check is **per bead, not per file**. `FILE SURFACE:` is a change
+manifest — new leaf modules, extended dispatch files, schemas, tests, docs — so
+the checker considers only production (`src/**`) Rust paths and is satisfied when
+at least one of them carries the evidence. Two exclusions are deliberate:
+
+- `tests/**` and `benches/**` are never required to carry tracing. A benchmark
+  has no request and no workspace, so it cannot supply `workspace_id`,
+  `request_id`, or `elapsed_ms`; instrumenting one would measure the harness.
+- A bead that declares no production Rust path is a docs, CI, or test-harness
+  surface with no runtime boundary to instrument, and is satisfied vacuously.
+
+This matches how the crate actually emits tracing: roughly 55 of 338 `src` files
+use `tracing::`/`#[instrument]`, concentrated at dispatch boundaries
+(`src/cli/mod.rs`, `src/core/{context,search,memory,outcome,why,status}.rs`,
+`src/steward/mod.rs`, …) rather than in pure leaf helpers. Modules such as
+`src/util/radix_ulid_sort.rs` and `src/core/influence.rs` document that they are
+storage-independent and hot-path pure; threading a request context into them to
+satisfy a grep would destroy the contract they advertise.
+
+A production surface with no tracing evidence anywhere in its declared files
+still fails. `scripts/check-tracing-fields.sh --self-test` pins all three
+behaviours, including that last anti-regression case, so the rule cannot decay
+into a rubber stamp.
+
 ## Retrofit Strategy
 
 The first audit after this convention landed reported 46 audited Part II beads
@@ -82,9 +106,14 @@ Retire the backlog in this order:
 2. Prioritize open or in-progress runtime surfaces over docs-only or release
    process beads, because runtime surfaces are where source tracing can prevent
    future debugging gaps.
-3. For every Rust `FILE SURFACE` violation, add structured tracing in the
-   implementation or test helper that owns the public response path. Do not add
-   placeholder fields to unrelated code just to satisfy the grep gate.
+3. For a Rust `FILE SURFACE` violation, add structured tracing in the
+   implementation that owns the public response path — the dispatch boundary,
+   not whichever leaf module the bead happened to create. Do not add
+   placeholder fields to unrelated code just to satisfy the grep gate, and do
+   not instrument a pure helper, a test, or a benchmark to turn a number green.
+   If the checker is demanding evidence from a file that structurally cannot
+   carry a request context, the gate is wrong and the gate is what should
+   change.
 4. Re-run the checker with an explicit external report path when working on this
    Mac:
 
