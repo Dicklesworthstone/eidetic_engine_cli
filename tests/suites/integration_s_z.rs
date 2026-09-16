@@ -78,6 +78,8 @@ mod swarm_slo_replay_parser_proptest;
 mod symbol_graph_conformance_e2e;
 #[path = "../symbol_graph_manifest_conformance_e2e.rs"]
 mod symbol_graph_manifest_conformance_e2e;
+#[path = "../tag_backfill_e2e.rs"]
+mod tag_backfill_e2e;
 #[path = "../tailscale_local_probe.rs"]
 mod tailscale_local_probe;
 #[path = "../task_lens_golden.rs"]
