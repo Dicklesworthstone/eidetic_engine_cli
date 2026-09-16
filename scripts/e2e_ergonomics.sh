@@ -400,7 +400,15 @@ case "${1:-}" in
     ;;
 esac
 EOS
-chmod +x "${SHADOW_BIN_DIR}/ee"
+# Defence in depth: `path_shadow_advisory_present` below already fails if this
+# shadow never ran, because it requires doctor to report version 0.5.0, which
+# only this fixture emits. Guarding the chmod turns that into an immediate,
+# self-describing failure instead of a puzzling downstream one.
+if ! chmod +x "${SHADOW_BIN_DIR}/ee"; then
+    fail "shadow_ee_stub_executable" \
+        "chmod failed for ${SHADOW_BIN_DIR}/ee; PATH shadowing would silently resolve the real ee"
+    exit 1
+fi
 
 DOCTOR_PATH="${SHADOW_BIN_DIR}:${REAL_BIN_DIR}:${PATH}"
 step "doctor_clean" "capturing clean doctor top-line before PATH shadowing"
