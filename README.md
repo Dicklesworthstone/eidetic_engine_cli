@@ -1710,6 +1710,14 @@ harmful_burst_window_seconds = 3600
 [privacy]
 redact_secrets   = true
 redaction_classes = ["api_key", "jwt", "password", "private_key", "ssh_key"]
+primer_keyword_gate = "keyword"       # keyword | value_only — which matches withhold a
+                                      # memory from `ee primer` and `ee export agentsmd`.
+                                      # "keyword" (default) withholds any body mentioning a
+                                      # detector keyword (secret, credential, token, …).
+                                      # "value_only" withholds only when the value-shaped
+                                      # detector finds something, so rules *about* handling
+                                      # secrets can reach a committed AGENTS.md; admitted
+                                      # matches are listed in `keywordGateAdmitted`.
 
 [trust]
 default_class = "agent_assertion"     # bumped on validation, demoted on contradiction

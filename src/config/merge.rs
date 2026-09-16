@@ -23,9 +23,10 @@ use super::file::{
     GraphPprConfig, GraphWitnessesConfig, HandoffConfig, HandoffStaleThresholdConfig,
     JournalConfig, LearnConfig, LearnDecayConfig, MemoryConfig, MeshCommandMode, MeshConfig,
     OutputRedactionConfig, PackConfig, PackL2CacheConfig, PolicyConfig, PrimerConfig,
-    PrivacyConfig, ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig, RuntimeConfig,
-    SearchConfig, SearchLexicalRamTierConfig, SearchRerankMode, SearchSpeed, SecretDetectorConfig,
-    StorageConfig, SwarmAdaptiveConfig, SwarmConfig, TaskLensConfig, TrustConfig, WriteConfig,
+    PrimerKeywordGate, PrivacyConfig, ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig,
+    RuntimeConfig, SearchConfig, SearchLexicalRamTierConfig, SearchRerankMode, SearchSpeed,
+    SecretDetectorConfig, StorageConfig, SwarmAdaptiveConfig, SwarmConfig, TaskLensConfig,
+    TrustConfig, WriteConfig,
 };
 use super::parse_env_bool_flag;
 use super::path::{PathExpander, PathExpansionError};
@@ -161,6 +162,7 @@ pub const POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY: &str = "policy.secret_detector
 pub const POLICY_OUTPUT_REDACTION_ENABLED_KEY: &str = "policy.output_redaction.enabled";
 pub const PRIVACY_REDACT_SECRETS_KEY: &str = "privacy.redact_secrets";
 pub const PRIVACY_REDACTION_CLASSES_KEY: &str = "privacy.redaction_classes";
+pub const PRIVACY_PRIMER_KEYWORD_GATE_KEY: &str = "privacy.primer_keyword_gate";
 pub const TRUST_DEFAULT_CLASS_KEY: &str = "trust.default_class";
 pub const TRUST_PROMPT_INJECTION_GUARD_KEY: &str = "trust.prompt_injection_guard";
 
@@ -1027,6 +1029,13 @@ impl MergedConfig {
                 self.source(PRIVACY_REDACTION_CLASSES_KEY),
             ));
         }
+        if let Some(gate) = self.values.privacy.primer_keyword_gate {
+            entries.push(ConfigShowEntry::new(
+                PRIVACY_PRIMER_KEYWORD_GATE_KEY,
+                gate.as_str().to_owned(),
+                self.source(PRIVACY_PRIMER_KEYWORD_GATE_KEY),
+            ));
+        }
 
         // Trust section
         if let Some(ref class) = self.values.trust.default_class {
@@ -1319,6 +1328,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
                 // payload-class label.
                 "tailscale_metadata".to_string(),
             ]),
+            primer_keyword_gate: Some(PrimerKeywordGate::Keyword),
         },
         trust: TrustConfig {
             default_class: Some("agent_assertion".to_string()),
@@ -2676,6 +2686,15 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.privacy.redaction_classes,
                 &layers.user.privacy.redaction_classes,
                 &layers.defaults.privacy.redaction_classes,
+            ),
+            primer_keyword_gate: pick_field(
+                &mut sources,
+                PRIVACY_PRIMER_KEYWORD_GATE_KEY,
+                &layers.cli.privacy.primer_keyword_gate,
+                &layers.environment.privacy.primer_keyword_gate,
+                &layers.project.privacy.primer_keyword_gate,
+                &layers.user.privacy.primer_keyword_gate,
+                &layers.defaults.privacy.primer_keyword_gate,
             ),
         },
         trust: TrustConfig {

@@ -22,6 +22,7 @@
     "rulesTruncatedByBudget",
     "redactionSkipped",
     "redactionSkippedMemories",
+    "keywordGateAdmitted",
     "diff",
     "degraded"
   ],
@@ -91,6 +92,23 @@
       "type": "integer",
       "minimum": 0,
       "description": "Primer redaction skip count carried through for honesty (skipped, never leaked)."
+    },
+    "keywordGateAdmitted": {
+      "type": "array",
+      "description": "Keyword-only matches admitted because [privacy] primer_keyword_gate = \"value_only\" and the value-shaped detector found nothing in the body. Empty under the default keyword gate. Never carries the memory body.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["memoryId", "pattern"],
+        "properties": {
+          "memoryId": { "type": "string", "minLength": 1 },
+          "pattern": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Detector keyword that would have withheld the memory under the default gate."
+          }
+        }
+      }
     },
     "redactionSkippedMemories": {
       "type": "array",

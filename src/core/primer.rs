@@ -91,6 +91,10 @@ pub struct PrimerSettings {
     /// Skip memories whose bodies trip the secret detector (workspace
     /// `[privacy]` posture). Skips are counted, never silent.
     pub redact_secrets: bool,
+    /// `[privacy] primer_keyword_gate = "value_only"` (GH #55): admit a
+    /// keyword-only match when the value-shaped detector finds nothing in the
+    /// body. Default `false` keeps the conservative keyword gate.
+    pub keyword_gate_value_only: bool,
     /// `[memory] include_global && participate` (bd-1bfwa.3 slice C); when
     /// false the primer never consults the user-global store.
     pub global_lane_enabled: bool,
@@ -178,6 +182,11 @@ pub struct PrimerMeta {
     /// Per-memory detail behind `skipped.redaction`, in candidate order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redaction_skips: Vec<PrimerRedactionSkip>,
+    /// Keyword-only matches admitted because `[privacy]
+    /// primer_keyword_gate = "value_only"` is set and the value-shaped
+    /// detector found nothing in the body (GH #55). Empty by default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keyword_gate_admitted: Vec<PrimerRedactionSkip>,
     /// Sections whose ranked candidates did not all fit the token budget.
     /// Computed at assembly for the AGENTS.md export (GH #55); never part of
     /// the cached primer bytes or the `ee.primer.v1` payload.
@@ -217,13 +226,25 @@ pub struct PrimerReport {
 /// primer output. Reuses the derived-asset dependency hashing so the hash
 /// vocabulary stays consistent across caches.
 #[must_use]
-pub fn primer_config_hash(default_tokens: u32, redact_secrets: bool) -> String {
+pub fn primer_config_hash(
+    default_tokens: u32,
+    redact_secrets: bool,
+    keyword_gate_value_only: bool,
+) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(PRIMER_SCHEMA_V1.as_bytes());
     hasher.update(b"\0primer.default_tokens\0");
     hasher.update(default_tokens.to_string().as_bytes());
     hasher.update(b"\0privacy.redact_secrets\0");
     hasher.update(if redact_secrets { b"true" } else { b"false" });
+    // GH #55: the gate decides which memories reach the primer, so a mode
+    // change must not be served from a cache row assembled under the other.
+    hasher.update(b"\0privacy.primer_keyword_gate\0");
+    hasher.update(if keyword_gate_value_only {
+        &b"value_only"[..]
+    } else {
+        &b"keyword"[..]
+    });
     format!(
         "blake3:{}",
         hasher
@@ -254,6 +275,10 @@ pub fn primer_settings_from_workspace(
         .as_ref()
         .and_then(|config| config.privacy.redact_secrets)
         .unwrap_or(true);
+    let keyword_gate_value_only = config
+        .as_ref()
+        .and_then(|config| config.privacy.primer_keyword_gate)
+        .is_some_and(|gate| gate == crate::config::file::PrimerKeywordGate::ValueOnly);
     let global_lane_enabled = config
         .as_ref()
         .map(|config| {
@@ -264,7 +289,8 @@ pub fn primer_settings_from_workspace(
     PrimerSettings {
         budget_tokens: budget_override.unwrap_or(default_tokens),
         format,
-        config_hash: primer_config_hash(default_tokens, redact_secrets),
+        config_hash: primer_config_hash(default_tokens, redact_secrets, keyword_gate_value_only),
+        keyword_gate_value_only,
         redact_secrets,
         global_lane_enabled,
     }
@@ -350,6 +376,7 @@ pub fn assemble_primer(
     let mut degraded = Vec::new();
     let mut skipped = PrimerSkipped::default();
     let mut redaction_skips = Vec::new();
+    let mut keyword_gate_admitted = Vec::new();
     let markdown = settings.format == PrimerFormat::Markdown;
 
     // Redaction gate first: a memory whose body would require redaction
@@ -364,6 +391,20 @@ pub fn assemble_primer(
             let Some(pattern) = secret_pattern_match(&candidate.content) else {
                 return true;
             };
+            // GH #55: `value_only` admits a body that merely mentions a
+            // detector keyword, but only when the value-shaped detector finds
+            // nothing at all in it. Any value-shaped reason still withholds.
+            if settings.keyword_gate_value_only
+                && crate::policy::redact_secret_like_content(&candidate.content)
+                    .redacted_reasons
+                    .is_empty()
+            {
+                keyword_gate_admitted.push(PrimerRedactionSkip {
+                    memory_id: candidate.memory_id.clone(),
+                    pattern: pattern.to_owned(),
+                });
+                return true;
+            }
             skipped.redaction += 1;
             redaction_skips.push(PrimerRedactionSkip {
                 memory_id: candidate.memory_id.clone(),
@@ -591,6 +632,7 @@ pub fn assemble_primer(
             skipped,
             floors_engaged,
             redaction_skips,
+            keyword_gate_admitted,
             budget_truncated_sections,
         },
         rendered_markdown,
@@ -998,7 +1040,8 @@ mod tests {
             global_lane_enabled: true,
             budget_tokens: budget,
             format: PrimerFormat::Markdown,
-            config_hash: primer_config_hash(budget, true),
+            config_hash: primer_config_hash(budget, true, false),
+            keyword_gate_value_only: false,
             redact_secrets: true,
         }
     }
@@ -1172,6 +1215,67 @@ mod tests {
         open_settings.redact_secrets = false;
         let open = assemble_primer(&corpus, None, &open_settings, 7);
         assert_eq!(open.meta.skipped.redaction, 0);
+    }
+
+    #[test]
+    fn value_only_gate_admits_keyword_only_bodies_but_never_value_shaped() {
+        let mut corpus = corpus();
+        corpus.push(candidate(
+            91,
+            "procedural",
+            "rule",
+            "Never paste an API key or password into a prompt; rotate them in the vault instead.",
+        ));
+        corpus.push(candidate(
+            92,
+            "procedural",
+            "rule",
+            "Use key -----BEGIN PRIVATE KEY----- abc123 to deploy.",
+        ));
+
+        let strict = assemble_primer(&corpus, None, &settings(100_000), 7);
+        assert_eq!(
+            strict.meta.skipped.redaction, 2,
+            "the default keyword gate withholds both bodies"
+        );
+        assert!(strict.meta.keyword_gate_admitted.is_empty());
+
+        let mut value_only = settings(100_000);
+        value_only.keyword_gate_value_only = true;
+        let report = assemble_primer(&corpus, None, &value_only, 7);
+        assert_eq!(
+            report
+                .meta
+                .keyword_gate_admitted
+                .iter()
+                .map(|admitted| admitted.memory_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![format!("mem_{:026}", 91).as_str()],
+            "only the keyword-only body is admitted"
+        );
+        assert_eq!(
+            report.meta.skipped.redaction, 1,
+            "the value-shaped body stays withheld"
+        );
+        assert!(
+            report
+                .meta
+                .redaction_skips
+                .iter()
+                .any(|skip| skip.memory_id == format!("mem_{:026}", 92))
+        );
+        let lines: Vec<&str> = report
+            .sections
+            .iter()
+            .flat_map(|section| &section.items)
+            .map(|item| item.line.as_str())
+            .collect();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("rotate them in the vault"))
+        );
+        assert!(!lines.iter().any(|line| line.contains("PRIVATE KEY")));
     }
 
     #[test]

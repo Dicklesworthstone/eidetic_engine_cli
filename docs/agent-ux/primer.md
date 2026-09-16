@@ -113,6 +113,13 @@ the detector keyword that matched (`password`, `secret`, `credential`,
 `token`, …); the gate is keyword-based, so a rule that merely mentions one of
 those words is withheld too.
 
+Set `[privacy] primer_keyword_gate = "value_only"` when that costs you the
+rules you most need — it withholds a memory only when the value-shaped
+detector finds something in the body, and lists every keyword-only match it
+admitted in `keywordGateAdmitted[]`. The default stays `"keyword"`. Choose
+`value_only` deliberately: the managed block usually lands in a committed
+file, and only the value-shaped detector stands between a note and that file.
+
 ### Import: hand-written rules become candidates, never memories
 
 ```bash

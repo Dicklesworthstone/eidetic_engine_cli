@@ -1335,6 +1335,47 @@ impl SecretDetectorConfig {
 pub struct PrivacyConfig {
     pub redact_secrets: Option<bool>,
     pub redaction_classes: Option<Vec<String>>,
+    /// How the primer/AGENTS.md-export secret gate treats a keyword-only
+    /// match (GH #55).
+    pub primer_keyword_gate: Option<PrimerKeywordGate>,
+}
+
+/// `[privacy] primer_keyword_gate`: which matches withhold a memory from the
+/// primer and the AGENTS.md export.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PrimerKeywordGate {
+    /// Default: any secret-detector keyword in the body withholds it.
+    #[default]
+    Keyword,
+    /// Withhold only when the value-shaped detector finds something; a body
+    /// that merely mentions `secret`, `credential`, … is admitted.
+    ValueOnly,
+}
+
+impl PrimerKeywordGate {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Keyword => "keyword",
+            Self::ValueOnly => "value_only",
+        }
+    }
+}
+
+impl FromStr for PrimerKeywordGate {
+    type Err = ConfigParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match normalized_config_enum_token(input).as_str() {
+            "keyword" => Ok(Self::Keyword),
+            "value_only" => Ok(Self::ValueOnly),
+            _ => Err(ConfigParseError::InvalidValue {
+                key: "privacy.primer_keyword_gate".to_string(),
+                value: input.to_string(),
+                message: "expected one of `keyword` or `value_only`".to_string(),
+            }),
+        }
+    }
 }
 
 /// `[memory]` — global-lane posture (ADR 0069 / bd-1bfwa.3).
@@ -1361,6 +1402,9 @@ impl PrivacyConfig {
         Ok(Self {
             redact_secrets: optional_bool(document, "privacy", "redact_secrets")?,
             redaction_classes: optional_string_array(document, "privacy", "redaction_classes")?,
+            primer_keyword_gate: optional_string(document, "privacy", "primer_keyword_gate")?
+                .map(|value| value.parse())
+                .transpose()?,
         })
     }
 }
@@ -1693,7 +1737,9 @@ fn config_key_policy(table_path: &str) -> Option<ConfigKeyPolicy> {
         "policy" => ConfigKeyPolicy::Closed(&["secret_detector", "output_redaction"]),
         "policy.secret_detector" => ConfigKeyPolicy::Closed(&["allow_phrases", "allow_regex"]),
         "policy.output_redaction" => ConfigKeyPolicy::Closed(&["enabled"]),
-        "privacy" => ConfigKeyPolicy::Closed(&["redact_secrets", "redaction_classes"]),
+        "privacy" => {
+            ConfigKeyPolicy::Closed(&["redact_secrets", "redaction_classes", "primer_keyword_gate"])
+        }
         "memory" => ConfigKeyPolicy::Closed(&["include_global", "participate"]),
         "trust" => ConfigKeyPolicy::Closed(&["default_class", "prompt_injection_guard"]),
         "profile" => ConfigKeyPolicy::Closed(&["selected", "budgets"]),
@@ -4647,6 +4693,48 @@ requires_consent = true
                 error,
                 ConfigParseError::InvalidType { ref key, expected }
                     if key == "privacy.redaction_classes" && expected == "an array of strings"
+            ),
+            format!("unexpected error: {error:?}"),
+        )
+    }
+
+    #[test]
+    fn parses_primer_keyword_gate_and_rejects_unknown_value() -> TestResult {
+        let document = "[privacy]\nprimer_keyword_gate = \"value_only\"\n"
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| format!("test TOML should parse: {error}"))?;
+        let privacy =
+            PrivacyConfig::parse(&document).map_err(|error| format!("parse failed: {error:?}"))?;
+        ensure(
+            privacy.primer_keyword_gate == Some(PrimerKeywordGate::ValueOnly),
+            format!("unexpected gate: {:?}", privacy.primer_keyword_gate),
+        )?;
+
+        let absent = "[privacy]\nredact_secrets = true\n"
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| format!("test TOML should parse: {error}"))?;
+        let default_gate =
+            PrivacyConfig::parse(&absent).map_err(|error| format!("parse failed: {error:?}"))?;
+        ensure(
+            default_gate.primer_keyword_gate.is_none(),
+            format!(
+                "an absent gate stays unset, got {:?}",
+                default_gate.primer_keyword_gate
+            ),
+        )?;
+
+        let invalid = "[privacy]\nprimer_keyword_gate = \"loose\"\n"
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| format!("test TOML should parse: {error}"))?;
+        let error = match PrivacyConfig::parse(&invalid) {
+            Ok(value) => return Err(format!("expected invalid value error, got {value:?}")),
+            Err(error) => error,
+        };
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::InvalidValue { ref key, ref value, .. }
+                    if key == "privacy.primer_keyword_gate" && value == "loose"
             ),
             format!("unexpected error: {error:?}"),
         )

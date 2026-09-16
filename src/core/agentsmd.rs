@@ -879,6 +879,9 @@ pub struct AgentsmdExportReport {
     /// The memories behind `redaction_skipped` and the detector keyword that
     /// withheld each one.
     pub redaction_skipped_memories: Vec<PrimerRedactionSkip>,
+    /// Keyword-only matches the `value_only` gate admitted, with the keyword
+    /// that would have withheld each one under the default gate.
+    pub keyword_gate_admitted: Vec<PrimerRedactionSkip>,
     /// Dry-run block replacement preview; `null` otherwise.
     pub diff: Option<String>,
     pub degraded: Vec<AgentsmdDegradation>,
@@ -905,6 +908,10 @@ impl AgentsmdExportReport {
             "rulesTruncatedByBudget": self.rules_truncated_by_budget,
             "redactionSkipped": self.redaction_skipped,
             "redactionSkippedMemories": self.redaction_skipped_memories.iter().map(|skip| serde_json::json!({
+                "memoryId": &skip.memory_id,
+                "pattern": &skip.pattern,
+            })).collect::<Vec<_>>(),
+            "keywordGateAdmitted": self.keyword_gate_admitted.iter().map(|skip| serde_json::json!({
                 "memoryId": &skip.memory_id,
                 "pattern": &skip.pattern,
             })).collect::<Vec<_>>(),
@@ -942,6 +949,12 @@ impl AgentsmdExportReport {
             out.push_str(&format!(
                 "redaction skipped: {} (matched `{}`)\n",
                 skip.memory_id, skip.pattern
+            ));
+        }
+        for admitted in &self.keyword_gate_admitted {
+            out.push_str(&format!(
+                "keyword gate admitted: {} (matched `{}`, no value-shaped secret)\n",
+                admitted.memory_id, admitted.pattern
             ));
         }
         if let Some(backup) = &self.backup_path {
@@ -1305,6 +1318,7 @@ pub fn run_agentsmd_export(
             .any(|name| name == "rules"),
         redaction_skipped: primer.meta.skipped.redaction,
         redaction_skipped_memories: primer.meta.redaction_skips.clone(),
+        keyword_gate_admitted: primer.meta.keyword_gate_admitted.clone(),
         diff: None,
         degraded: Vec::new(),
     };

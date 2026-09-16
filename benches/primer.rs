@@ -82,8 +82,9 @@ fn bench_settings() -> PrimerSettings {
     PrimerSettings {
         budget_tokens: 600,
         format: PrimerFormat::Markdown,
-        config_hash: primer_config_hash(600, true),
+        config_hash: primer_config_hash(600, true, false),
         redact_secrets: true,
+        keyword_gate_value_only: false,
         global_lane_enabled: false,
     }
 }
