@@ -8070,10 +8070,15 @@ async fn run_similar_with_cx_and_posture(
         message: error.message(),
     })?
     .map_or(requested_workspace_id, |workspace| workspace.id);
-    let scope_context = MemoryScopeContext::for_workspace(
+    // GH49 / bd-jikgj: same roster-snapshot reuse as the pack path. The
+    // connection is already open and is used on the next line; without it
+    // `load_team_members` opens a second read-only connection and re-queries
+    // `team_members`. Path identity is validated inside the helper.
+    let scope_context = MemoryScopeContext::for_workspace_with_connection(
         &options.workspace_path,
         options.memory_scope,
         options.strict_scope,
+        Some(&connection),
     );
     let target = resolve_similar_seed_memory(&connection, options, &workspace_id, &scope_context)?;
     let index_dir = options.resolve_index_dir();

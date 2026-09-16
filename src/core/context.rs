@@ -1496,10 +1496,18 @@ pub(crate) fn admit_recent_context_memories(
         candidates.push(candidate);
     }
 
-    let scope_context = MemoryScopeContext::for_workspace(
+    // GH49 / bd-jikgj: reuse the request's already-open read snapshot for the
+    // team roster instead of opening a second read-only connection and
+    // re-querying `team_members` inside `load_team_members`. The helper
+    // compares the supplied connection's file path against
+    // `<workspace>/.ee/ee.db` itself, so an explicit `--database` or campaign
+    // store still falls back to its own roster lookup; passing the connection
+    // is therefore safe unconditionally and cannot widen scope.
+    let scope_context = MemoryScopeContext::for_workspace_with_connection(
         &options.workspace_path,
         options.memory_scope,
         options.strict_scope,
+        Some(&connection),
     );
     filter_candidates_by_memory_scope(
         &connection,
