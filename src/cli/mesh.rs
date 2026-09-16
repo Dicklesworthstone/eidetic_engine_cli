@@ -7953,6 +7953,7 @@ mod tests {
             self_advertised_tags: Vec::new(),
             self_owner: None,
             peers: vec![TailscalePeerReport {
+                stable_node_id: None,
                 node_key: node_key.to_owned(),
                 tailscale_ips: vec!["100.64.0.2".to_owned()],
                 magic_dns_name: Some("allowed.tailnet.test.".to_owned()),
@@ -8367,6 +8368,7 @@ mod tests {
             self_advertised_tags: Vec::new(),
             self_owner: None,
             peers: vec![TailscalePeerReport {
+                stable_node_id: None,
                 node_key: "nodekey:ee".to_owned(),
                 tailscale_ips: vec!["100.64.0.4".to_owned()],
                 magic_dns_name: None,
@@ -8415,6 +8417,7 @@ mod tests {
             self_owner: None,
             peers: vec![
                 TailscalePeerReport {
+                    stable_node_id: None,
                     node_key: "nodekey:plain".to_owned(),
                     tailscale_ips: vec!["100.64.0.2".to_owned()],
                     magic_dns_name: Some("plain.tailnet.test.".to_owned()),
@@ -8425,6 +8428,7 @@ mod tests {
                     owner: None,
                 },
                 TailscalePeerReport {
+                    stable_node_id: None,
                     node_key: "nodekey:malformed".to_owned(),
                     tailscale_ips: vec!["100.64.0.3".to_owned()],
                     magic_dns_name: Some("malformed.tailnet.test.".to_owned()),
@@ -8441,6 +8445,7 @@ mod tests {
                     owner: None,
                 },
                 TailscalePeerReport {
+                    stable_node_id: None,
                     node_key: "nodekey:ee".to_owned(),
                     tailscale_ips: vec!["100.64.0.4".to_owned()],
                     magic_dns_name: Some("ee.tailnet.test.".to_owned()),
@@ -8457,6 +8462,7 @@ mod tests {
                     owner: None,
                 },
                 TailscalePeerReport {
+                    stable_node_id: None,
                     node_key: "nodekey:offline-ee".to_owned(),
                     tailscale_ips: vec!["100.64.0.7".to_owned()],
                     magic_dns_name: Some("offline-ee.tailnet.test.".to_owned()),
@@ -8473,6 +8479,7 @@ mod tests {
                     owner: None,
                 },
                 TailscalePeerReport {
+                    stable_node_id: None,
                     node_key: "nodekey:declined".to_owned(),
                     tailscale_ips: vec!["100.64.0.5".to_owned()],
                     magic_dns_name: Some("declined.tailnet.test.".to_owned()),
@@ -8489,6 +8496,7 @@ mod tests {
                     owner: None,
                 },
                 TailscalePeerReport {
+                    stable_node_id: None,
                     node_key: "nodekey:other-workspace".to_owned(),
                     tailscale_ips: vec!["100.64.0.6".to_owned()],
                     magic_dns_name: Some("other-workspace.tailnet.test.".to_owned()),

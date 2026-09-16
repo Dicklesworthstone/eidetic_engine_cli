@@ -690,6 +690,7 @@ mod tests {
 
     fn peer(node_key: &str, tags: &[&str]) -> TailscalePeerReport {
         TailscalePeerReport {
+            stable_node_id: None,
             node_key: node_key.to_owned(),
             tailscale_ips: vec!["100.64.0.2".to_owned()],
             magic_dns_name: Some(format!("{node_key}.tailnet.test.")),

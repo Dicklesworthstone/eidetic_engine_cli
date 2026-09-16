@@ -186,6 +186,12 @@ pub fn login_belongs_to_domain(login: &str, domain: &str) -> bool {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TailscalePeerReport {
     pub node_key: String,
+    /// Tailscale's stable per-device identifier (`ipnstate.PeerStatus.ID`, a
+    /// `tailcfg.StableNodeID`). Unlike `node_key`, which is regenerated at each
+    /// authentication, this survives re-enrollment, so it is the only value in
+    /// the probe payload that can anchor a peer's identity across it
+    /// (bd-mesh-no-stable-node-identity-pt7k5).
+    pub stable_node_id: Option<String>,
     pub tailscale_ips: Vec<String>,
     pub magic_dns_name: Option<String>,
     pub hostname: Option<String>,
@@ -1284,6 +1290,18 @@ fn string_value(value: &Value, key: &str) -> Option<String> {
     value.get(key)?.as_str().map(str::to_owned)
 }
 
+/// Read the stable device id verbatim.
+///
+/// Deliberately NOT routed through `normalize_node_key`: that filter keeps only
+/// values prefixed `nodekey:`, and a `StableNodeID` is a different identifier
+/// space from a node key. Applying it here is exactly what silently discarded
+/// this value at `node_key_value`'s third branch.
+fn stable_node_id_value(value: &Value) -> Option<String> {
+    let id = string_value(value, "ID")?;
+    let trimmed = id.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
 fn bool_value(value: &Value, key: &str) -> Option<bool> {
     value.get(key)?.as_bool()
 }
@@ -1327,6 +1345,7 @@ fn peer_reports(
             }
             Some(TailscalePeerReport {
                 node_key,
+                stable_node_id: stable_node_id_value(peer),
                 tailscale_ips: string_array_value(peer, "TailscaleIPs"),
                 magic_dns_name: string_value(peer, "DNSName"),
                 hostname: string_value(peer, "HostName"),

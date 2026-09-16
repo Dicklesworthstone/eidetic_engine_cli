@@ -13558,6 +13558,7 @@ mod tests {
             peers: peer_login
                 .map(|(login, user_id)| {
                     vec![crate::core::tailscale_probe::TailscalePeerReport {
+                        stable_node_id: None,
                         node_key: "nodekey:peer".to_owned(),
                         tailscale_ips: vec!["100.64.0.2".to_owned()],
                         magic_dns_name: Some("peer.tailnet.test.".to_owned()),
