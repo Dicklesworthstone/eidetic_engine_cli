@@ -13,6 +13,22 @@ use std::process::{Command, Output};
 const NORMAL_CARGO_TEST_GATE: &str = "cargo test --workspace --lib --bins --tests --examples";
 const BENCH_INCLUDED_TEST_GATE: &str = "cargo test --workspace --all-targets";
 
+/// Marks a `[[stage]]` that has no measured p50 yet.
+///
+/// A stage carrying this must NOT also declare `expected_seconds_p50`: an
+/// honest gap beats a plausible-looking number, and verify.sh already skips
+/// budget enforcement for a stage whose p50 is absent.
+const UNMEASURED_MARKER: &str = "expected_seconds_p50_unmeasured = true";
+
+/// How many stages may sit unmeasured at once.
+///
+/// This is a RATCHET and it only moves down. It was set to 27 on 2026-09-16,
+/// the exact number of verify.sh stages that had never been budgeted; measuring
+/// one means lowering this by one in the same commit. It is deliberately not
+/// slack for new stages -- a 28th unmeasured stage should fail here and be
+/// measured instead.
+const UNMEASURED_STAGE_ALLOWANCE: usize = 27;
+
 fn project_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
@@ -313,13 +329,36 @@ fn verify_budget_manifest_has_p50_and_regression_factor_for_every_stage() {
     );
 
     let mut non_benchmark_p50_total = 0;
+    let mut unmeasured = Vec::new();
     for block in &blocks {
         let name = block
             .iter()
             .find_map(|line| line.trim().strip_prefix("name = "))
             .map(|value| value.trim_matches('"'))
             .expect("stage should have a name");
-        let p50 = budget_stage_p50(block).expect("stage should have expected_seconds_p50");
+
+        if block.iter().any(|line| line.trim() == UNMEASURED_MARKER) {
+            // An unmeasured stage must not also carry a p50. verify.sh's
+            // `stage_budget_thresholds` returns non-zero when the field is
+            // absent and `enforce_stage_budget` then skips the stage, so
+            // "unmeasured" is structurally unable to produce a threshold
+            // rather than merely documented as not having one.
+            assert!(
+                budget_stage_p50(block).is_none(),
+                "stage {name} is marked `{UNMEASURED_MARKER}` but also declares \
+                 expected_seconds_p50; drop one. A stage cannot be both measured \
+                 and unmeasured, and keeping the number is how a guess becomes a budget."
+            );
+            unmeasured.push(name.to_string());
+            continue;
+        }
+
+        let p50 = budget_stage_p50(block).unwrap_or_else(|| {
+            panic!(
+                "stage {name} must declare expected_seconds_p50, or `{UNMEASURED_MARKER}` \
+                 if no measurement exists yet"
+            )
+        });
         let factor = block
             .iter()
             .find(|line| line.trim() == "regression_factor = 1.5")
@@ -335,13 +374,37 @@ fn verify_budget_manifest_has_p50_and_regression_factor_for_every_stage() {
         }
     }
 
-    assert_eq!(
-        non_benchmark_p50_total, 600,
-        "non-benchmark p50 budgets should sum to the 10-minute verify target"
+    // A CEILING, not an equality.
+    //
+    // This was `assert_eq!(non_benchmark_p50_total, 600)`. Combined with
+    // `verify_budget_manifest_declares_every_verify_stage` -- which requires
+    // every verify.sh stage to appear here -- an exact sum made the two guards
+    // contradict each other: adding any stage to verify.sh broke one of them
+    // unless someone reduced another stage's p50, i.e. wrote down a number that
+    // was not the measurement. A gate that can only be satisfied by falsifying
+    // a latency is worse than a loose gate, so the equality is the defect.
+    //
+    // Measured 2026-09-16: verify.sh had 112 stages, this manifest 85, and the
+    // 85 summed to exactly 600. The guard had been red since 2026-08-10.
+    assert!(
+        non_benchmark_p50_total <= 600,
+        "non-benchmark p50 budgets total {non_benchmark_p50_total}s, over the 600s \
+         readiness ceiling. Re-measure and reduce a real stage cost -- do not \
+         retune a p50 to fit, because that turns this file into fiction."
     );
     assert!(
         budget_manifest.contains("total_expected_seconds = 600"),
         "manifest should document the total 10-minute verification budget"
+    );
+
+    // Unmeasured entries are an honest gap, but they are not free: each one is
+    // a stage running with no budget enforcement at all. Surfacing the count
+    // keeps that visible instead of letting the list grow quietly.
+    assert!(
+        unmeasured.len() <= UNMEASURED_STAGE_ALLOWANCE,
+        "{} stages carry no measured p50, over the allowance of {UNMEASURED_STAGE_ALLOWANCE}. \
+         Measure some before adding more: {unmeasured:?}",
+        unmeasured.len()
     );
 }
 

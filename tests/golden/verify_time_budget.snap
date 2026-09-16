@@ -8,8 +8,12 @@ primary_tests:
   - tests/verification_drift_guard.rs
 checks:
   - Every verify.sh run_stage entry has a matching budget manifest stage.
-  - Every stage declares expected_seconds_p50 and regression_factor = 1.5.
-  - Non-benchmark p50 budgets sum to the 10-minute readiness target.
+  - Every stage declares either expected_seconds_p50 + regression_factor = 1.5,
+    or expected_seconds_p50_unmeasured = true and no p50 at all.
+  - Non-benchmark p50 budgets stay at or under the 10-minute readiness target
+    (a ceiling; it was an exact sum until 2026-09-16, which forced anyone
+    adding a stage to retune another stage's p50 to a number nobody measured).
+  - Unmeasured stages stay within a ratchet allowance that only moves down.
   - Budget status reports ok, advisory, or fail for each stage.
 verified_by:
   - cargo test --test verification_drift_guard verify_budget

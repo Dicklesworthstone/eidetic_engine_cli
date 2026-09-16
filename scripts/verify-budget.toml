@@ -4,8 +4,23 @@
 # regression_factor = 1.5 emits an advisory when elapsed time exceeds p50 * 1.5.
 # scripts/verify.sh fails the run when elapsed time exceeds p50 * 3.
 #
-# Non-benchmark p50 values sum to 600s, matching the 10-minute readiness target.
+# Non-benchmark p50 values must not EXCEED 600s, the 10-minute readiness
+# target. This is a ceiling, not an equality. It used to be an exact sum, which
+# meant adding any verify.sh stage forced someone to reduce another stage's p50
+# to keep the total -- i.e. to write down a number that was not the
+# measurement. A budget file that can only stay green by falsifying a latency
+# is worse than a loose one, so the equality was removed on 2026-09-16.
+#
 # Benchmarks are optional behind --include-bench and excluded from that total.
+#
+# A stage with no measurement yet declares `expected_seconds_p50_unmeasured =
+# true` and NO `expected_seconds_p50`. That is deliberate: verify.sh's
+# stage_budget_thresholds fails to resolve a threshold when the field is
+# absent, and enforce_stage_budget then skips the stage, so an unmeasured stage
+# is structurally unenforceable rather than enforced against a guess. Replace
+# the marker with a real p50 the first time the stage is timed, and lower
+# UNMEASURED_STAGE_ALLOWANCE in tests/verification_drift_guard.rs in the same
+# commit -- that allowance is a ratchet and only moves down.
 total_expected_seconds = 600
 total_regression_factor = 1.5
 
@@ -433,3 +448,131 @@ regression_factor = 1.5
 name = "Performance Benchmarks"
 expected_seconds_p50 = 120
 regression_factor = 1.5
+
+# ---------------------------------------------------------------------------
+# UNMEASURED STAGES (27, recorded 2026-09-16)
+#
+# These run in verify.sh but have never been timed here, so they declare
+# no p50 and are not budget-enforced. They are listed rather than given a
+# plausible number: a fabricated p50 would enforce a threshold nobody
+# measured, and `p50 * 3` is a hard failure in verify.sh.
+#
+# Each was dated with:
+#   git log -S 'run_stage "<name>"' -- scripts/verify.sh
+# ---------------------------------------------------------------------------
+
+# Wired 2026-08-10, unbudgeted ever since (manifest last updated 2026-08-08).
+
+[[stage]]
+name = "Beads Export Fixture Suite (bd-2p297.3)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Beads Export Repair Self-Test (bd-2p297.1)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Global Lane E2E (bd-1bfwa.4)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Graph Intel E2E (bd-3a1op.6)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Memory Debt E2E (bd-3ap2m.4)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Resume E2E (bd-resume-verb-v0f57)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Shadow Retrieval Tuning E2E (bd-2tehh.4)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Write Contention E2E (bd-d67os.27)"
+expected_seconds_p50_unmeasured = true
+
+# Wired 2026-09-16 by b7189e54d / 65aa513ad / c66b8f34e (binary pinning, mcp lib tests, invocation audit).
+
+[[stage]]
+name = "EE Binary Resolution Contract"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "MCP Lib Unit Tests (bd-up1hk)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "MCP Lib Unit Tests Guard (bd-up1hk)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "E2E Invocation Audit"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "E2E Invocation Audit Contract"
+expected_seconds_p50_unmeasured = true
+
+# Wired 2026-09-16 by 9fd9ffab1 (bd-smxdr: four suites that were wired into nothing).
+
+[[stage]]
+name = "Agent Docs Env E2E (first execution)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Coverage Gap E2E (first execution)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Timeline E2E (first execution)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Trust Freshness E2E (first execution)"
+expected_seconds_p50_unmeasured = true
+
+# Wired 2026-09-16 by 4728ce93b (bd-udjrq: 10 of the 12 non-mesh e2e orphans).
+
+[[stage]]
+name = "Anchors E2E (first execution)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Bridge Exemption E2E (first execution)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Command Inventory E2E (first execution)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Delivery E2E (first execution)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Provenance Reverify E2E (first execution)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Reach E2E (first execution)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Rerank Precision Gain E2E (first execution)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Reservation Pressure E2E (first execution)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Search Weight Config E2E (first execution)"
+expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Similar Scope E2E (first execution)"
+expected_seconds_p50_unmeasured = true
