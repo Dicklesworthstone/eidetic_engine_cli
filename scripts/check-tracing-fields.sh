@@ -928,16 +928,161 @@ def tracing_decl(text):
 def missing_decl_fields(decl):
     return [field for field in required_fields if field not in decl]
 
-def source_has_tracing_evidence(path):
+# Minimum convention fields ONE emitted event must carry. Deliberately the
+# same number the previous substring check used, so this change alters the
+# PREDICATE (file mentions -> event carries) without silently re-calibrating
+# strictness at the same time. Measured 2026-09-16: raising it to 4 flags the
+# identical bead set, so that tightening is free whenever someone wants it.
+MIN_EVENT_REQUIRED_FIELDS = 3
+
+EVENT_MACRO_NAMES = (
+    "event", "info", "warn", "error", "debug", "trace",
+    "info_span", "warn_span", "error_span", "debug_span", "trace_span", "span",
+)
+event_macro_re = re.compile(
+    r"(?:tracing::)?(?:" + "|".join(EVENT_MACRO_NAMES) + r")!\s*\("
+)
+instrument_re = re.compile(r"#\[(?:tracing::)?instrument\s*\(")
+# `key = value`, including the `%key =` / `?key =` sigil forms and dotted keys.
+event_key_re = re.compile(
+    r"(?:^|[,(\s])\??%?([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*=(?!=)"
+)
+
+def blank_rust_noise(src):
+    """Blank comments and string/char literals so paren matching is safe.
+
+    Length is preserved (every removed byte becomes a space) so offsets stay
+    valid. Without this a `//` comment or a `")"` inside a message string
+    would terminate an event body early and hide its fields.
+    """
+    out = list(src)
+    index = 0
+    length = len(src)
+    while index < length:
+        char = src[index]
+        if char == "/" and index + 1 < length and src[index + 1] == "/":
+            while index < length and src[index] != "\n":
+                out[index] = " "
+                index += 1
+        elif char == "/" and index + 1 < length and src[index + 1] == "*":
+            depth = 1
+            out[index] = out[index + 1] = " "
+            index += 2
+            while index < length and depth:
+                if src[index] == "/" and index + 1 < length and src[index + 1] == "*":
+                    depth += 1
+                    out[index] = out[index + 1] = " "
+                    index += 2
+                    continue
+                if src[index] == "*" and index + 1 < length and src[index + 1] == "/":
+                    depth -= 1
+                    out[index] = out[index + 1] = " "
+                    index += 2
+                    continue
+                if src[index] != "\n":
+                    out[index] = " "
+                index += 1
+        elif char == "r" and index + 1 < length and src[index + 1] in "#\"":
+            cursor = index + 1
+            hashes = 0
+            while cursor < length and src[cursor] == "#":
+                hashes += 1
+                cursor += 1
+            if cursor < length and src[cursor] == '"':
+                terminator = '"' + "#" * hashes
+                end = src.find(terminator, cursor + 1)
+                if end == -1:
+                    end = length
+                for pos in range(index, min(end + len(terminator), length)):
+                    if src[pos] != "\n":
+                        out[pos] = " "
+                index = end + len(terminator)
+                continue
+            index += 1
+        elif char == '"':
+            out[index] = " "
+            index += 1
+            while index < length:
+                if src[index] == "\\":
+                    for pos in (index, index + 1):
+                        if pos < length and src[pos] != "\n":
+                            out[pos] = " "
+                    index += 2
+                    continue
+                if src[index] == '"':
+                    out[index] = " "
+                    index += 1
+                    break
+                if src[index] != "\n":
+                    out[index] = " "
+                index += 1
+        elif char == "'":
+            # Char literal, or a lifetime like `'a` which must be left alone.
+            match = re.match(r"'(?:\\.|[^\\'])'", src[index:])
+            if match:
+                for pos in range(index, index + match.end()):
+                    out[pos] = " "
+                index += match.end()
+            else:
+                index += 1
+        else:
+            index += 1
+    return "".join(out)
+
+def emitted_event_field_sets(path):
+    """Field-key sets for each tracing event / span / #[instrument] in `path`."""
     try:
-        content = path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
+        raw = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return []
+    source = blank_rust_noise(raw)
+    field_sets = []
+    for pattern in (event_macro_re, instrument_re):
+        for match in pattern.finditer(source):
+            open_paren = match.end() - 1
+            depth = 0
+            cursor = open_paren
+            while cursor < len(source):
+                if source[cursor] == "(":
+                    depth += 1
+                elif source[cursor] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                cursor += 1
+            body = source[open_paren + 1:cursor]
+            keys = set(event_key_re.findall(body))
+            # `tracing::info!(workspace_id, ...)` shorthand means
+            # `workspace_id = workspace_id`. Only honoured for the convention
+            # names so an unrelated positional expression cannot be miscounted.
+            for token in re.split(r"[,()]", body):
+                token = token.strip()
+                if token in required_fields:
+                    keys.add(token)
+            field_sets.append(keys)
+    return field_sets
+
+def source_has_tracing_evidence(path):
+    """True when SOME emitted event carries the convention fields as KEYS.
+
+    The previous implementation asked whether the FILE contained the literal
+    "tracing::" plus three of the field names anywhere in its bytes. That is
+    satisfied by a doc comment: src/steward/mod.rs passed it while every event
+    the file actually emits carries memory_id / freshness / confidence /
+    reason and not one convention field (bd-ti1zt). A gate answering "this
+    file mentions the vocabulary" cannot be read as "this surface emits
+    conventional tracing", so it is answered per event instead.
+    """
+    field_sets = emitted_event_field_sets(path)
+    if not field_sets:
         return False, required_fields
-    has_tracing_call = "tracing::" in content or "#[instrument" in content or "#[tracing::instrument" in content
-    field_hits = [field for field in required_fields if field in content]
-    if not has_tracing_call:
-        return False, required_fields
-    return len(field_hits) >= 3, [field for field in required_fields if field not in field_hits]
+    required = set(required_fields)
+    best = max(field_sets, key=lambda keys: len(keys & required))
+    hits = best & required
+    return (
+        len(hits) >= MIN_EVENT_REQUIRED_FIELDS,
+        [field for field in required_fields if field not in hits],
+    )
 
 beads = load_beads(beads_path)
 violations = []
@@ -1006,19 +1151,26 @@ for bead in beads:
         runtime_candidates.append((declared, path))
 
     if runtime_candidates:
-        evidence = [source_has_tracing_evidence(path) for _, path in runtime_candidates]
-        if not any(ok for ok, _ in evidence):
-            missing = sorted(
-                {field for _, fields in evidence for field in fields},
-                key=required_fields.index,
+        evidence = [
+            (name, source_has_tracing_evidence(path))
+            for name, path in runtime_candidates
+        ]
+        if not any(ok for _, (ok, _) in evidence):
+            # Report the file that came CLOSEST, not the union of every miss.
+            # A bead declaring both src/cli/mod.rs (0 convention keys) and
+            # src/db/mod.rs (carries `phase`) should point at db/mod.rs and
+            # name the six fields actually outstanding there, otherwise the
+            # report sends the reader to the wrong file with a wrong list.
+            closest_name, (_, closest_missing) = min(
+                evidence, key=lambda item: len(item[1][1])
             )
             violations.append({
                 "bead": bead_id,
                 "surface": impl_surfaces[0],
-                "path": runtime_candidates[0][0],
+                "path": closest_name,
                 "declaredRuntimeFiles": [name for name, _ in runtime_candidates],
                 "reason": "no declared production FILE SURFACE carries structured tracing evidence",
-                "missingFields": missing,
+                "missingFields": closest_missing,
             })
 
 observability_report = validate_observability_manifest(root, manifest_required)
@@ -1055,6 +1207,7 @@ if [ "$SELF_TEST" = true ]; then
 {"id":"bd-3usjw.dispatch","title":"[implements-surface:dispatch_surface] example","labels":["implements-surface:dispatch_surface"],"description":"FILE SURFACE: src/leaf.rs, src/dispatch.rs\nTRACING: surface=dispatch_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
 {"id":"bd-3usjw.harness","title":"[implements-surface:harness_surface] example","labels":["implements-surface:harness_surface"],"description":"FILE SURFACE: tests/harness.rs, benches/harness.rs\nTRACING: surface=harness_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
 {"id":"bd-3usjw.untraced","title":"[implements-surface:untraced_surface] example","labels":["implements-surface:untraced_surface"],"description":"FILE SURFACE: src/untraced.rs\nTRACING: surface=untraced_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
+{"id":"bd-3usjw.mentions","title":"[implements-surface:mentions_surface] example","labels":["implements-surface:mentions_surface"],"description":"FILE SURFACE: src/mentions.rs\nTRACING: surface=mentions_surface, phases=input|dispatch|response, fields=workspace_id,request_id,bead_id,surface,phase,elapsed_ms,degraded_codes."}
 JSONL
     mkdir -p "$tmp_dir/src"
     cat > "$tmp_dir/src/good.rs" <<'RS'
@@ -1106,10 +1259,26 @@ RS
     cat > "$tmp_dir/src/untraced.rs" <<'RS'
 pub fn handler() {}
 RS
+    # bd-ti1zt regression guard, in miniature: this file MENTIONS every
+    # convention field in prose and calls tracing::, so the old substring
+    # predicate passed it -- but the event it actually emits carries none of
+    # them. This is src/steward/mod.rs reduced to eight lines. It must FAIL.
+    cat > "$tmp_dir/src/mentions.rs" <<'RS'
+//! Emits workspace_id, request_id, bead_id, surface, phase, elapsed_ms and
+//! degraded_codes. (It does not. That is the point of this fixture.)
+pub fn handler() {
+    tracing::info!(
+        memory_id = "mem",
+        freshness = 1.0,
+        confidence = 0.5,
+        "memory demoted by decay"
+    );
+}
+RS
     report=$(run_checker "$tmp_dir/issues.jsonl" "$tmp_dir" "" "false")
     printf '%s\n' "$report" > "$tmp_dir/self-test-report.json"
-    if ! printf '%s\n' "$report" | jq -e '.status == "fail" and .violationCount == 3' >/dev/null; then
-        echo "error: self-test expected three violations" >&2
+    if ! printf '%s\n' "$report" | jq -e '.status == "fail" and .violationCount == 4' >/dev/null; then
+        echo "error: self-test expected four violations" >&2
         printf '%s\n' "$report" >&2
         exit 1
     fi
@@ -1128,6 +1297,12 @@ RS
     # bd-3usjw.untraced: the rule must still catch a real gap.
     if ! printf '%s\n' "$report" | jq -e '[.violations[] | select(.bead == "bd-3usjw.untraced")] | length == 1' >/dev/null; then
         echo "error: a production surface with no tracing evidence must still fail" >&2
+        printf '%s\n' "$report" >&2
+        exit 1
+    fi
+    # bd-ti1zt: mentioning the vocabulary must NOT count as emitting it.
+    if ! printf '%s\n' "$report" | jq -e '[.violations[] | select(.bead == "bd-3usjw.mentions")] | length == 1' >/dev/null; then
+        echo "error: a file that only MENTIONS the convention fields must not pass; the predicate has regressed to a substring check" >&2
         printf '%s\n' "$report" >&2
         exit 1
     fi

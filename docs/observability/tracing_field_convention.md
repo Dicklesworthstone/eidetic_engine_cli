@@ -91,6 +91,34 @@ still fails. `scripts/check-tracing-fields.sh --self-test` pins all three
 behaviours, including that last anti-regression case, so the rule cannot decay
 into a rubber stamp.
 
+## What counts as evidence
+
+"Tracing evidence" means **an emitted event carries the convention fields as
+keys** — not that the file mentions them. The checker blanks comments and
+string literals, finds each `tracing::{info,warn,error,debug,trace}!`, span
+macro, and `#[instrument(...)]`, matches its parentheses, and reads the field
+keys out of that body (including the `%field` / `?field` sigil forms and the
+`field` shorthand). A file passes when **one** event carries at least
+`MIN_EVENT_REQUIRED_FIELDS` (3) of the 7.
+
+This replaced a substring test that asked whether the file contained the
+literal `tracing::` plus three of the field names anywhere in its bytes — which
+a doc comment satisfies. The counterexample that motivated the change
+(bd-ti1zt): `src/steward/mod.rs` passed, while every event it actually emits
+carries `memory_id` / `freshness` / `confidence` / `reason` and not one
+convention field. `src/cli/mod.rs` (9 events) and `src/core/context.rs` (24
+events) passed the same way and carry zero convention keys between them.
+
+So a green result now means "some event on this surface is shaped like the
+convention", which is a real if partial claim. It still does **not** mean every
+event is conformant, nor that the emitted values are correct. Weight it
+accordingly in a release or batch verdict.
+
+`--self-test` carries `src/mentions.rs`, an eight-line reduction of the
+`steward/mod.rs` counterexample: prose naming all seven fields, a `tracing::`
+call emitting none of them. It must fail. If that fixture ever passes, the
+predicate has regressed to a substring check.
+
 ## Retrofit Strategy
 
 The first audit after this convention landed reported 46 audited Part II beads
