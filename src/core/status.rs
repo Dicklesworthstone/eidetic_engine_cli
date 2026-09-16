@@ -121,6 +121,13 @@ const RCH_WORKER_PRESSURE_TIMEOUT_MS: u64 = 500;
 const RCH_WORKER_PRESSURE_COMMAND: &str = "rch status --workers --jobs --json";
 pub const WAL_GROWTH_EXCEEDS_THRESHOLD_CODE: &str = "wal_growth_exceeds_threshold";
 pub const WAL_GROWTH_NO_WRITER_CODE: &str = "wal_growth_no_writer";
+/// A healthy index that can only serve lexical evidence
+/// (bd-status-search-lexical-honesty-ejdpo).
+pub const SEARCH_LEXICAL_ONLY_CODE: &str = "search_lexical_only";
+/// Posture reason emitted alongside [`SEARCH_LEXICAL_ONLY_CODE`].
+pub const SEARCH_LEXICAL_ONLY_REASON: &str = "lexical_only";
+/// Repair command for [`SEARCH_LEXICAL_ONLY_CODE`].
+pub const SEARCH_LEXICAL_ONLY_REPAIR: &str = "ee index rebuild --workspace .";
 
 /// Memory subsystem health status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1225,6 +1232,68 @@ fn probe_storage_capability_with_connection(
     }) {
         Ok(false) => CapabilityStatus::Ready,
         Ok(true) | Err(_) => CapabilityStatus::Degraded,
+    }
+}
+
+/// Whether workspace retrieval can actually contribute semantic evidence.
+///
+/// [`CapabilityStatus::Ready`] for search only proves the *index* is healthy:
+/// [`probe_search_capability_with_connection`] derives it from
+/// [`IndexHealth::Ready`] alone. A workspace whose embedder fell back to the
+/// deterministic hash backend — or whose indexed documents carry no vectors at
+/// all — still has a perfectly healthy index while every single result is
+/// served by the lexical fallback. Reporting that state as `search: ok` is the
+/// silent under-recall this enum exists to close
+/// (bd-status-search-lexical-honesty-ejdpo).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchSemanticPosture {
+    /// A semantic embedder is active and semantic evidence can be retrieved.
+    Available,
+    /// The index is healthy, but retrieval is lexical-only.
+    LexicalOnly,
+    /// Embedding posture was not probed for this call, so semantic
+    /// availability is unknown. Unknown is never reported as lexical-only:
+    /// an unprobed workspace has no evidence of under-recall, and inventing
+    /// a degradation from missing evidence is its own dishonesty.
+    NotProbed,
+}
+
+/// Derive [`SearchSemanticPosture`] from the index-status probe.
+///
+/// Deliberately conservative, so `search: degraded` always means something an
+/// agent can act on:
+///
+/// - `semantic == false` is the deterministic-hash fallback. No amount of
+///   corpus growth produces semantic evidence, so this is lexical-only.
+/// - A semantic embedder with a non-empty corpus and *zero* embedded vectors
+///   also retrieves lexical-only, because there is nothing for the vector arm
+///   to match against.
+/// - An empty corpus under a semantic embedder is [`Available`]: there is no
+///   recall to lose yet. Partial coverage is also [`Available`] — the vector
+///   arm does contribute, and index lag is already reported by
+///   `search_index_stale` / `search_index_large_gap` rather than being
+///   double-counted here.
+///
+/// [`Available`]: SearchSemanticPosture::Available
+fn search_semantic_posture_from_index_status(
+    index_status: Option<&Result<IndexStatusReport, ()>>,
+) -> SearchSemanticPosture {
+    match index_status {
+        Some(Ok(report)) => report.embedding.as_ref().map_or(
+            SearchSemanticPosture::NotProbed,
+            |embedding| {
+                if !embedding.semantic {
+                    SearchSemanticPosture::LexicalOnly
+                } else if embedding.vector_coverage.total > 0
+                    && embedding.vector_coverage.embedded == 0
+                {
+                    SearchSemanticPosture::LexicalOnly
+                } else {
+                    SearchSemanticPosture::Available
+                }
+            },
+        ),
+        Some(Err(())) | None => SearchSemanticPosture::NotProbed,
     }
 }
 
@@ -2410,6 +2479,10 @@ impl StatusReport {
             capabilities.storage = CapabilityStatus::Degraded;
             capabilities.search = CapabilityStatus::Degraded;
         }
+        // Reuses the index-status probe already gathered above, so the
+        // semantic-availability half of the search posture costs nothing
+        // extra (bd-status-search-lexical-honesty-ejdpo).
+        let search_semantic = search_semantic_posture_from_index_status(index_status.as_ref());
         let runtime = timed_gather("runtime", RuntimeReport::gather);
         let read_pool = timed_gather("read_pool", || {
             ReadPoolStatusReport::gather_for_workspace(options.workspace_path.as_deref())
@@ -2580,6 +2653,7 @@ impl StatusReport {
                 &mut degradations,
                 capabilities.search,
                 options.workspace_path.as_deref(),
+                search_semantic,
             );
         }
         push_graph_capability_degradation(&mut degradations, graph_compute.status);
@@ -2615,6 +2689,7 @@ impl StatusReport {
             &shard_fanout,
             &derived_assets,
             &degradations,
+            search_semantic,
         );
 
         Self {
@@ -3631,6 +3706,7 @@ fn status_posture_report(
     shard_fanout: &ShardFanoutStatusReport,
     derived_assets: &[DerivedAssetReport],
     degradations: &[DegradationReport],
+    search_semantic: SearchSemanticPosture,
 ) -> WorkspacePostureReport {
     let workspace_path = options.workspace_path.as_deref();
     let write_replay_required =
@@ -3646,7 +3722,7 @@ fn status_posture_report(
     let search_status = if identity_mismatch {
         SubsystemPostureStatus::DegradedRecoverable
     } else {
-        search_posture_status(capabilities.search, storage_status)
+        search_posture_status(capabilities.search, storage_status, search_semantic)
     };
     let graph_status = graph_compute_posture_status(graph_compute.status);
     let rch_worker_pressure_status = rch_worker_pressure_posture_status(rch_worker_pressure);
@@ -3684,12 +3760,12 @@ fn status_posture_report(
             if identity_mismatch {
                 Some(super::workspace::WORKSPACE_IDENTITY_MISMATCH_CODE)
             } else {
-                search_posture_reason(capabilities.search, storage_status)
+                search_posture_reason(capabilities.search, storage_status, search_semantic)
             },
             if identity_mismatch {
                 Some(super::workspace::WORKSPACE_IDENTITY_MISMATCH_INSPECT)
             } else {
-                search_posture_fallback(capabilities.search, storage_status)
+                search_posture_fallback(capabilities.search, storage_status, search_semantic)
             },
         ),
         posture_row(
@@ -3951,9 +4027,18 @@ const fn shard_fanout_posture_fallback(posture: ShardFanoutPosture) -> Option<&'
 const fn search_posture_status(
     status: CapabilityStatus,
     storage_status: SubsystemPostureStatus,
+    semantic: SearchSemanticPosture,
 ) -> SubsystemPostureStatus {
     match status {
-        CapabilityStatus::Ready => SubsystemPostureStatus::Ok,
+        // A healthy index is not a ready search subsystem when the only arm
+        // that can run is lexical. "Ready" has to mean ready
+        // (bd-status-search-lexical-honesty-ejdpo).
+        CapabilityStatus::Ready => match semantic {
+            SearchSemanticPosture::LexicalOnly => SubsystemPostureStatus::DegradedRecoverable,
+            SearchSemanticPosture::Available | SearchSemanticPosture::NotProbed => {
+                SubsystemPostureStatus::Ok
+            }
+        },
         CapabilityStatus::Pending => SubsystemPostureStatus::Initializing,
         CapabilityStatus::Degraded
             if matches!(
@@ -3971,9 +4056,13 @@ const fn search_posture_status(
 const fn search_posture_reason(
     status: CapabilityStatus,
     storage_status: SubsystemPostureStatus,
+    semantic: SearchSemanticPosture,
 ) -> Option<&'static str> {
     match status {
-        CapabilityStatus::Ready => None,
+        CapabilityStatus::Ready => match semantic {
+            SearchSemanticPosture::LexicalOnly => Some(SEARCH_LEXICAL_ONLY_REASON),
+            SearchSemanticPosture::Available | SearchSemanticPosture::NotProbed => None,
+        },
         CapabilityStatus::Pending
             if matches!(
                 storage_status,
@@ -3993,9 +4082,13 @@ const fn search_posture_reason(
 const fn search_posture_fallback(
     status: CapabilityStatus,
     storage_status: SubsystemPostureStatus,
+    semantic: SearchSemanticPosture,
 ) -> Option<&'static str> {
     match status {
-        CapabilityStatus::Ready => None,
+        CapabilityStatus::Ready => match semantic {
+            SearchSemanticPosture::LexicalOnly => Some(SEARCH_LEXICAL_ONLY_REPAIR),
+            SearchSemanticPosture::Available | SearchSemanticPosture::NotProbed => None,
+        },
         CapabilityStatus::Pending
             if matches!(
                 storage_status,
@@ -4436,9 +4529,22 @@ fn push_search_capability_degradation(
     degradations: &mut Vec<DegradationReport>,
     status: CapabilityStatus,
     workspace_path: Option<&Path>,
+    semantic: SearchSemanticPosture,
 ) {
     match status {
-        CapabilityStatus::Ready => {}
+        // A healthy index still under-recalls when the semantic arm cannot
+        // run. This is the only place `ee status` can say so
+        // (bd-status-search-lexical-honesty-ejdpo).
+        CapabilityStatus::Ready => {
+            if matches!(semantic, SearchSemanticPosture::LexicalOnly) {
+                degradations.push(DegradationReport {
+                    code: SEARCH_LEXICAL_ONLY_CODE,
+                    severity: "medium",
+                    message: "Search index is healthy but semantic retrieval is unavailable; every result is served by the lexical fallback, which under-recalls paraphrases and synonyms of indexed content.",
+                    repair: "Run `ee index rebuild --workspace .`.",
+                });
+            }
+        }
         CapabilityStatus::Pending if workspace_path.is_none() => {
             degradations.push(DegradationReport {
                 code: "search_not_inspected",
@@ -7317,6 +7423,7 @@ mod tests {
             &mut degradations,
             CapabilityStatus::Degraded,
             Some(Path::new(".")),
+            SearchSemanticPosture::NotProbed,
         );
 
         ensure(
@@ -7975,6 +8082,285 @@ mod tests {
             vec![SEARCH_INDEX_ASSET_NAME],
             "freshness invalidates",
         )
+    }
+
+    // bd-status-search-lexical-honesty-ejdpo: `ee status` reported
+    // `search: ok` whenever the index was healthy, even when every retrieval
+    // was served lexical-only because the embedder had fallen back to the
+    // deterministic hash backend. These pin the honest posture instead.
+
+    fn index_report_with_embedding(
+        embedding: Option<super::super::index::EmbeddingPosture>,
+    ) -> super::super::index::IndexStatusReport {
+        super::super::index::IndexStatusReport {
+            health: IndexHealth::Ready,
+            index_dir: PathBuf::from("/tmp/index"),
+            database_path: PathBuf::from("/tmp/ee.db"),
+            index_exists: true,
+            index_file_count: 1,
+            index_size_bytes: 1024,
+            db_memory_count: 3,
+            db_session_count: 0,
+            db_artifact_count: 0,
+            db_rule_count: 0,
+            db_evidence_count: 0,
+            db_evidence_admitted_count: 0,
+            db_evidence_quarantined_count: 0,
+            db_evidence_denied_count: 0,
+            db_generation: Some(3),
+            index_generation: Some(3),
+            expected_corpus_revision: "blake3:test".to_owned(),
+            actual_corpus_revision: Some("blake3:test".to_owned()),
+            index_document_count: Some(3),
+            index_document_counts: None,
+            last_rebuild_at: None,
+            last_check_error: None,
+            repair_hint: None,
+            elapsed_ms: 1.0,
+            embedding,
+        }
+    }
+
+    fn embedding_posture(
+        semantic: bool,
+        embedded: usize,
+        total: usize,
+    ) -> super::super::index::EmbeddingPosture {
+        super::super::index::EmbeddingPosture {
+            schema: crate::models::schema::EMBEDDING_POSTURE_SCHEMA_V1,
+            mode: if semantic {
+                crate::models::schema::EMBEDDING_POSTURE_MODE_NEURAL_LOCAL
+            } else {
+                crate::models::schema::EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH
+            },
+            semantic,
+            source: if semantic {
+                "neural_local".to_owned()
+            } else {
+                "frankensearch_hash_fallback".to_owned()
+            },
+            fast_model_id: "test-fast".to_owned(),
+            fast_dimension: 128,
+            quality_model_id: None,
+            quality_dimension: None,
+            deterministic: true,
+            registered_model_count: 0,
+            available_model_count: 0,
+            selected_registry_model: None,
+            vector_coverage: super::super::index::EmbeddingVectorCoverage { embedded, total },
+        }
+    }
+
+    #[test]
+    fn hash_fallback_embedder_reports_lexical_only_semantic_posture() -> TestResult {
+        let report = index_report_with_embedding(Some(embedding_posture(false, 0, 3)));
+
+        ensure(
+            search_semantic_posture_from_index_status(Some(&Ok(report))),
+            SearchSemanticPosture::LexicalOnly,
+            "deterministic-hash embedder cannot serve semantic evidence",
+        )
+    }
+
+    #[test]
+    fn semantic_embedder_with_no_indexed_vectors_reports_lexical_only() -> TestResult {
+        let report = index_report_with_embedding(Some(embedding_posture(true, 0, 3)));
+
+        ensure(
+            search_semantic_posture_from_index_status(Some(&Ok(report))),
+            SearchSemanticPosture::LexicalOnly,
+            "a semantic embedder with zero embedded vectors still retrieves lexical-only",
+        )
+    }
+
+    #[test]
+    fn semantic_embedder_with_vectors_reports_available_semantic_posture() -> TestResult {
+        let report = index_report_with_embedding(Some(embedding_posture(true, 3, 3)));
+
+        ensure(
+            search_semantic_posture_from_index_status(Some(&Ok(report))),
+            SearchSemanticPosture::Available,
+            "a covered semantic corpus is available",
+        )
+    }
+
+    #[test]
+    fn empty_corpus_under_semantic_embedder_is_available_not_lexical_only() -> TestResult {
+        // Nothing indexed yet means no recall to lose. Reporting a degraded
+        // search subsystem here would be a false alarm on every fresh
+        // workspace.
+        let report = index_report_with_embedding(Some(embedding_posture(true, 0, 0)));
+
+        ensure(
+            search_semantic_posture_from_index_status(Some(&Ok(report))),
+            SearchSemanticPosture::Available,
+            "empty corpus is not a lexical-only degradation",
+        )
+    }
+
+    #[test]
+    fn unprobed_or_failed_index_status_reports_not_probed_semantic_posture() -> TestResult {
+        ensure(
+            search_semantic_posture_from_index_status(None),
+            SearchSemanticPosture::NotProbed,
+            "absent index status",
+        )?;
+        ensure(
+            search_semantic_posture_from_index_status(Some(&Err(()))),
+            SearchSemanticPosture::NotProbed,
+            "failed index status probe",
+        )?;
+        ensure(
+            search_semantic_posture_from_index_status(Some(&Ok(index_report_with_embedding(None)))),
+            SearchSemanticPosture::NotProbed,
+            "index status without an embedding posture",
+        )
+    }
+
+    #[test]
+    fn ready_search_with_lexical_only_retrieval_is_degraded_with_rebuild_repair() -> TestResult {
+        ensure(
+            search_posture_status(
+                CapabilityStatus::Ready,
+                SubsystemPostureStatus::Ok,
+                SearchSemanticPosture::LexicalOnly,
+            ),
+            SubsystemPostureStatus::DegradedRecoverable,
+            "lexical-only search is not ok",
+        )?;
+        ensure(
+            search_posture_reason(
+                CapabilityStatus::Ready,
+                SubsystemPostureStatus::Ok,
+                SearchSemanticPosture::LexicalOnly,
+            ),
+            Some("lexical_only"),
+            "lexical-only posture reason",
+        )?;
+        ensure(
+            search_posture_fallback(
+                CapabilityStatus::Ready,
+                SubsystemPostureStatus::Ok,
+                SearchSemanticPosture::LexicalOnly,
+            ),
+            Some("ee index rebuild --workspace ."),
+            "lexical-only posture names the rebuild command",
+        )
+    }
+
+    #[test]
+    fn ready_search_with_semantic_retrieval_stays_ok_and_silent() -> TestResult {
+        for semantic in [
+            SearchSemanticPosture::Available,
+            SearchSemanticPosture::NotProbed,
+        ] {
+            ensure(
+                search_posture_status(
+                    CapabilityStatus::Ready,
+                    SubsystemPostureStatus::Ok,
+                    semantic,
+                ),
+                SubsystemPostureStatus::Ok,
+                "ready search posture",
+            )?;
+            ensure(
+                search_posture_reason(
+                    CapabilityStatus::Ready,
+                    SubsystemPostureStatus::Ok,
+                    semantic,
+                ),
+                None,
+                "ready search emits no reason",
+            )?;
+            ensure(
+                search_posture_fallback(
+                    CapabilityStatus::Ready,
+                    SubsystemPostureStatus::Ok,
+                    semantic,
+                ),
+                None,
+                "ready search emits no fallback",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lexical_only_search_degrades_the_pack_subsystem_too() -> TestResult {
+        // Pack quality is a direct consumer of retrieval quality, so a
+        // lexical-only search subsystem must not leave `pack` reporting ok.
+        let search_status = search_posture_status(
+            CapabilityStatus::Ready,
+            SubsystemPostureStatus::Ok,
+            SearchSemanticPosture::LexicalOnly,
+        );
+
+        ensure(
+            pack_posture_status(SubsystemPostureStatus::Ok, search_status),
+            SubsystemPostureStatus::DegradedRecoverable,
+            "pack posture follows lexical-only search",
+        )
+    }
+
+    #[test]
+    fn lexical_only_search_emits_the_degraded_code_with_a_rebuild_repair() -> TestResult {
+        let mut degradations = Vec::new();
+        push_search_capability_degradation(
+            &mut degradations,
+            CapabilityStatus::Ready,
+            Some(Path::new(".")),
+            SearchSemanticPosture::LexicalOnly,
+        );
+
+        ensure(
+            degradations
+                .iter()
+                .map(|degradation| degradation.code)
+                .collect::<Vec<_>>(),
+            vec![SEARCH_LEXICAL_ONLY_CODE],
+            "lexical-only degraded code",
+        )?;
+        ensure(
+            degradations.first().map(|degradation| degradation.severity),
+            Some("medium"),
+            "lexical-only severity",
+        )?;
+        ensure(
+            degradations
+                .first()
+                .is_some_and(|degradation| degradation.repair.contains("ee index rebuild")),
+            true,
+            "lexical-only degradation names the rebuild command",
+        )?;
+        ensure(
+            degradations
+                .first()
+                .is_some_and(|degradation| degradation.message.contains("lexical fallback")),
+            true,
+            "lexical-only degradation explains the retrieval mode",
+        )
+    }
+
+    #[test]
+    fn healthy_semantic_search_emits_no_capability_degradation() -> TestResult {
+        for semantic in [
+            SearchSemanticPosture::Available,
+            SearchSemanticPosture::NotProbed,
+        ] {
+            let mut degradations = Vec::new();
+            push_search_capability_degradation(
+                &mut degradations,
+                CapabilityStatus::Ready,
+                Some(Path::new(".")),
+                semantic,
+            );
+            ensure(
+                degradations.len(),
+                0,
+                "ready search with usable semantic retrieval stays silent",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

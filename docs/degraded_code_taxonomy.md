@@ -441,6 +441,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `search_index_large_gap` | medium | bd-index-auto-freshness-m5kwf (I) |
 | `cass_import_index_publish_failed` | medium | bd-index-auto-freshness-m5kwf (I) |
 | `search_index_degraded` | medium | bd-17c65.10.6 (J6) |
+| `search_lexical_only` | medium | bd-status-search-lexical-honesty-ejdpo — a healthy index whose active embedder can only serve lexical evidence. Classified `response_time`, not `mixed`: the emission is decided entirely by workspace embedding state (hash fallback, or a semantic embedder with zero embedded vectors over a non-empty corpus) against an unchanged binary. The build-time half — search or the embedder not being compiled in at all — is already reported by `search_unimplemented` and `lexical_unavailable`, so it is not double-counted here. |
 | `model_lifecycle_unknown` | warning | gh-32 (F4) |
 | `conformal_calibration_insufficient` | warning | bd-17c65.14.2 (N2) |
 | `search_score_calibration_file_too_large` | warning | bd-1nsk4 |
