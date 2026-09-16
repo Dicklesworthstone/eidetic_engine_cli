@@ -5192,6 +5192,19 @@ pub const fn category_for_code(code: &str) -> DegradedCategory {
         | b"rerank_model_missing"
         | b"rerank_model_corrupt" => DegradedCategory::WorkspaceStateNotPerResponse,
 
+        // Retrieval genuinely ran in a different mode for THIS response, so
+        // this is per-response, not workspace state
+        // (bd-lexical-fallback-hint-suppression-s2c10).
+        //
+        // Classified explicitly rather than left to the default below. It
+        // reached the same value by fallthrough before, which meant every
+        // reader had to re-derive whether that was a deliberate choice or an
+        // oversight — three separate agents did exactly that. Demoting it to
+        // `WorkspaceStateNotPerResponse` would make `included_by_default()`
+        // drop the entry, silently hiding that a pack was assembled from the
+        // lexical fallback. That is the one outcome this code must not have.
+        b"context_lexical_fallback" => DegradedCategory::AffectsThisResponse,
+
         // Everything else affects the current response (the safe
         // default for unknown codes too).
         _ => DegradedCategory::AffectsThisResponse,
@@ -9547,6 +9560,24 @@ mod tests {
                 "intentional serialization failure",
             ))
         }
+    }
+
+    #[test]
+    // bd-lexical-fallback-hint-suppression-s2c10: this classification was
+    // reached by fallthrough, so nothing failed if someone reclassified the
+    // code. The bead exists because the repetition is annoying; the failure
+    // mode to guard against is somebody "fixing" that by demoting the
+    // category, which would drop the entry entirely instead of only its
+    // repair hint.
+    #[test]
+    fn lexical_fallback_stays_a_per_response_degradation() {
+        let category = super::category_for_code("context_lexical_fallback");
+        assert_eq!(category, super::DegradedCategory::AffectsThisResponse);
+        assert!(
+            category.included_by_default(),
+            "demoting context_lexical_fallback would silently hide that a pack \
+             was assembled from the lexical fallback"
+        );
     }
 
     #[test]
