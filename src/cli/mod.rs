@@ -15708,11 +15708,70 @@ fn render_hook_git_readiness_human(report: &crate::hooks::GitHookReadinessReport
     out
 }
 
+/// Structured tracing for the `ee mcp validate` surface (bd-3usjw.70).
+///
+/// Field set and phase vocabulary are the shared convention in
+/// `docs/observability/tracing_field_convention.md`.
+///
+/// `degraded_codes` is empty, and that is the accurate value rather than a
+/// placeholder. Two things that might look like degradations are not:
+///
+///   * `mcp_feature_disabled` is a BUILD-TIME capability gap. It belongs in
+///     `ee capabilities`, not in a per-response `degraded[]` (the E5 rule in
+///     AGENTS.md; see also the note at `src/pack/mod.rs`). The response this
+///     surface emits carries `"degraded": []` unconditionally, so an empty
+///     list is what actually happened.
+///   * An invalid manifest is this command's RESULT, not a degradation of it.
+///     `ee mcp validate` succeeded at validating; the answer was "no". That
+///     is reported through `valid` and `validation_error_count` rather than
+///     laundered into a degraded code.
+fn trace_mcp_validate(cli: &Cli, report: &serde_json::Value, elapsed: Duration) {
+    let workspace_id = cli
+        .workspace
+        .as_ref()
+        .map_or_else(|| "unbound".to_owned(), |path| path.display().to_string());
+    // `ee mcp validate` reads the embedded manifest and an optional schema
+    // path; it opens no workspace store, so an absent --workspace is reported
+    // as "unbound" rather than resolved to a default that was never used.
+    let degraded_codes: [&str; 0] = [];
+    tracing::info!(
+        target: "ee::mcp::validate",
+        workspace_id = %workspace_id,
+        request_id = "ee_mcp_validate",
+        bead_id = "bd-3usjw.70",
+        surface = "mcp_validate_subcommand",
+        phase = "response",
+        elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+        degraded_codes = ?degraded_codes,
+        valid = report
+            .get("valid")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        adapter_feature_enabled = report
+            .get("adapterFeatureEnabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        validation_error_count = report
+            .get("validationErrors")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len),
+        schema_source = report
+            .get("schemaSource")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown"),
+        "mcp manifest validation completed"
+    );
+}
+
 fn handle_mcp_validate<W>(cli: &Cli, args: &McpValidateArgs, stdout: &mut W) -> ProcessExitCode
 where
     W: Write,
 {
+    let started = Instant::now();
     let report = mcp_validate_report(args);
+    // Traced before rendering so `elapsed_ms` measures validation, not the
+    // caller's terminal.
+    trace_mcp_validate(cli, &report, started.elapsed());
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &mcp_validate_human(&report))
