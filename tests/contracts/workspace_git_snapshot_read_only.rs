@@ -717,19 +717,28 @@ fn workspace_git_snapshot_provider_uses_repo_root_from_nested_workspace() -> Tes
         "provider must not change files when invoked from a subdirectory"
     );
 
+    // These three pin redaction as a property of `WorkspaceGitSnapshot`
+    // itself, not of any emitter. That is deliberate and is the stronger
+    // guarantee: "this field is never raw once collected" cannot be defeated
+    // by a new consumer, a refactor, or an author who forgets. Moving the
+    // redaction to the emitting surfaces would read as better layering and
+    // would weaken exactly this property. See
+    // bd-redaction-conceals-disclosed-path-820a3, closed wontfix on that
+    // reasoning.
     let raw_repository_root = workspace.display().to_string();
     assert_ne!(
         snapshot.repository_root, raw_repository_root,
-        "public workspace snapshot output must not expose raw absolute repository roots"
+        "collected WorkspaceGitSnapshot.repository_root must never hold a raw absolute path, \
+         whatever any consumer later does with it"
     );
     assert!(
         snapshot.repository_root.starts_with("[REDACTED_PATH:"),
-        "repository root should use the redacted path marker, got {}",
+        "WorkspaceGitSnapshot.repository_root should carry the redacted path marker, got {}",
         snapshot.repository_root
     );
     assert!(
         !snapshot.repository_root.contains(&raw_repository_root),
-        "redacted repository root must not contain the raw temp path"
+        "redacted WorkspaceGitSnapshot.repository_root must not contain the raw temp path"
     );
     let entry_paths = snapshot
         .entries
