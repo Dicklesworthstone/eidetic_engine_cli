@@ -778,12 +778,6 @@ fn effect_manifest_covers_all_normalized_cli_command_paths() -> TestResult {
     use ee::core::effect::EffectManifest;
 
     let commands = command_paths_from_cli_extract_function()?;
-    ensure(
-        commands.len(),
-        NORMALIZED_CLI_COMMAND_COUNT,
-        "normalized CLI command count",
-    )?;
-
     let manifest = EffectManifest::build();
     let missing = commands
         .iter()
@@ -791,12 +785,32 @@ fn effect_manifest_covers_all_normalized_cli_command_paths() -> TestResult {
         .cloned()
         .collect::<Vec<_>>();
 
-    if missing.is_empty() {
+    // Both conditions are evaluated before either is reported. The count check
+    // used to run first and return early, so whenever the command inventory
+    // drifted -- which is exactly when new commands are most likely to lack a
+    // declaration -- this test aborted BEFORE the coverage check it is named
+    // for. The guard was silent about coverage for as long as the count was
+    // wrong. Neither check is removed and neither is relaxed; they simply can
+    // no longer mask each other, and the coverage number is now always stated.
+    let mut failures: Vec<String> = Vec::new();
+    if !missing.is_empty() {
+        failures.push(format!(
+            "effect manifest is missing {} of {} normalized command paths: {missing:?}",
+            missing.len(),
+            commands.len()
+        ));
+    }
+    if commands.len() != NORMALIZED_CLI_COMMAND_COUNT {
+        failures.push(format!(
+            "normalized CLI command count: expected {NORMALIZED_CLI_COMMAND_COUNT}, got {}",
+            commands.len()
+        ));
+    }
+
+    if failures.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "effect manifest missing command paths: {missing:?}"
-        ))
+        Err(failures.join("; "))
     }
 }
 
