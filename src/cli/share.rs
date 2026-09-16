@@ -84,7 +84,7 @@ where
 {
     let validated_args = match validate_share_preview_args(args) {
         Ok(validated_args) => validated_args,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let workspace_path = cli.resolve_workspace();
@@ -96,18 +96,18 @@ where
         Ok(connection) => connection,
         Err(error) => {
             let domain_error = storage_error("Failed to open share-preview database", error);
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let workspace_id = match resolve_share_workspace_id(&connection, &workspace_path) {
         Ok(workspace_id) => workspace_id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let memories = match connection.list_memories(&workspace_id, args.level.as_deref(), false) {
         Ok(memories) => memories,
         Err(error) => {
             let domain_error = storage_error("Failed to list share-preview memories", error);
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let (registry, _, _) = match super::mesh::load_mesh_peer_policy_registry(
@@ -117,7 +117,7 @@ where
         &workspace_id,
     ) {
         Ok(loaded) => loaded,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let candidate_set = share_preview_candidates(
         &memories,
