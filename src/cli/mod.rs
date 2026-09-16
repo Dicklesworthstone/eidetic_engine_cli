@@ -39728,7 +39728,51 @@ fn parse_memory_link_score(label: &str, raw: &str) -> Result<f32, DomainError> {
     }
 }
 
+/// Subcommand-shaped words that `ee memory link` has no subcommand for.
+///
+/// `MemoryLinkArgs` takes two bare positionals, so `ee memory link list <id>`
+/// parses `list` as MEMORY_ID and `<id>` as TARGET_MEMORY_ID. Without this
+/// guard the user gets "Creating a memory link requires --relation.", which
+/// describes a link creation they never asked for. Listing is spelled
+/// `ee memory link <id>` with the target omitted.
+const MEMORY_LINK_NON_SUBCOMMAND_WORDS: &[&str] = &[
+    "add", "create", "delete", "list", "ls", "new", "remove", "rm", "show",
+];
+
+/// Detects `ee memory link <verb> ...` where `<verb>` is a subcommand-shaped
+/// word rather than a memory ID.
+///
+/// Fires only when the token is a known verb AND is not `mem_`-prefixed, so a
+/// genuine memory ID can never be misread as a verb.
+fn memory_link_subcommand_confusion(args: &MemoryLinkArgs) -> Option<DomainError> {
+    let first = args.memory_id.as_str();
+    if first.starts_with("mem_") {
+        return None;
+    }
+    let lowered = first.to_ascii_lowercase();
+    if !MEMORY_LINK_NON_SUBCOMMAND_WORDS.contains(&lowered.as_str()) {
+        return None;
+    }
+    let repair = match args.target_memory_id.as_deref() {
+        Some(target) => format!(
+            "`ee memory link` has no `{lowered}` subcommand. To list links incident to a memory, run ee memory link {target}."
+        ),
+        None => format!(
+            "`ee memory link` has no `{lowered}` subcommand. To list links incident to a memory, run ee memory link <MEMORY_ID>."
+        ),
+    };
+    Some(DomainError::Usage {
+        message: format!(
+            "Expected a memory ID for MEMORY_ID, but got the subcommand-shaped word {first:?}."
+        ),
+        repair: Some(repair),
+    })
+}
+
 fn memory_link_mode_from_args(args: &MemoryLinkArgs) -> Result<MemoryLinkMode, DomainError> {
+    if let Some(error) = memory_link_subcommand_confusion(args) {
+        return Err(error);
+    }
     match &args.target_memory_id {
         Some(target_memory_id) => {
             let relation = args.relation.as_deref().ok_or_else(|| DomainError::Usage {
@@ -39755,6 +39799,147 @@ fn memory_link_mode_from_args(args: &MemoryLinkArgs) -> Result<MemoryLinkMode, D
                 .map(parse_memory_link_relation)
                 .transpose()?,
         }),
+    }
+}
+
+#[cfg(test)]
+// Fixed parser fixtures with explicit failure messages, matching the
+// convention in the main `cli::tests` module.
+#[allow(clippy::expect_used)]
+mod memory_link_arg_shape_tests {
+    use clap::Parser;
+
+    use super::{
+        DomainError, MEMORY_SUBCOMMANDS, MemoryLinkArgs, MemoryLinkMode,
+        memory_link_mode_from_args,
+    };
+
+    fn args_from(argv: &[&str]) -> MemoryLinkArgs {
+        // `copied()` yields `&str`; iterating `&[&str]` directly yields `&&str`,
+        // which does not satisfy clap's `Into<OsString>` bound.
+        MemoryLinkArgs::try_parse_from(argv.iter().copied())
+            .expect("memory link args should parse")
+    }
+
+    fn usage_parts(error: &DomainError) -> (String, String) {
+        match error {
+            DomainError::Usage { message, repair } => (
+                message.clone(),
+                repair.clone().unwrap_or_default(),
+            ),
+            other => panic!("expected a usage error, got {other:?}"),
+        }
+    }
+
+    /// `ee memory link list <id>` used to report "Creating a memory link
+    /// requires --relation." — a link creation the user never asked for.
+    #[test]
+    fn link_list_subcommand_word_reports_arg_shape_not_missing_relation() {
+        let args = args_from(&["link", "list", "mem_abc"]);
+        let error = memory_link_mode_from_args(&args)
+            .expect_err("`list` as MEMORY_ID must be rejected");
+        let (message, repair) = usage_parts(&error);
+        assert!(
+            message.contains("subcommand-shaped word") && message.contains("list"),
+            "message should name the offending token: {message}"
+        );
+        assert!(
+            !message.contains("--relation"),
+            "message must not blame a missing relation: {message}"
+        );
+        assert!(
+            repair.contains("ee memory link mem_abc"),
+            "repair should point at the working list spelling: {repair}"
+        );
+    }
+
+    /// The bare `ee memory link list` form (no target) must be caught too,
+    /// rather than listing links for a memory literally named "list".
+    #[test]
+    fn link_list_without_target_is_rejected_with_generic_repair() {
+        let args = args_from(&["link", "list"]);
+        let error = memory_link_mode_from_args(&args)
+            .expect_err("bare `list` must be rejected");
+        let (_, repair) = usage_parts(&error);
+        assert!(
+            repair.contains("ee memory link <MEMORY_ID>"),
+            "repair should show the list spelling: {repair}"
+        );
+    }
+
+    /// Zero false positives: a real `mem_`-prefixed ID is never read as a verb,
+    /// even when its payload spells one.
+    #[test]
+    fn memory_id_shaped_token_is_never_treated_as_a_subcommand() {
+        let args = args_from(&["link", "mem_list"]);
+        let mode = memory_link_mode_from_args(&args)
+            .expect("a mem_-prefixed ID must still resolve");
+        assert!(
+            matches!(mode, MemoryLinkMode::List { relation: None }),
+            "omitting the target should list links"
+        );
+    }
+
+    /// The documented list spelling keeps working unchanged.
+    #[test]
+    fn omitting_target_still_lists_links() {
+        let args = args_from(&["link", "mem_abc"]);
+        assert!(matches!(
+            memory_link_mode_from_args(&args).expect("list mode"),
+            MemoryLinkMode::List { relation: None }
+        ));
+    }
+
+    /// Creation is untouched by the guard.
+    #[test]
+    fn creation_with_relation_still_succeeds() {
+        let args = args_from(&["link", "mem_a", "mem_b", "--relation", "supports"]);
+        let mode = memory_link_mode_from_args(&args).expect("create mode");
+        match mode {
+            MemoryLinkMode::Create {
+                target_memory_id, ..
+            } => assert_eq!(target_memory_id, "mem_b"),
+            other => panic!("expected create mode, got {other:?}"),
+        }
+    }
+
+    /// A genuine missing-relation creation must still say so.
+    #[test]
+    fn creation_without_relation_still_reports_missing_relation() {
+        let args = args_from(&["link", "mem_a", "mem_b"]);
+        let error = memory_link_mode_from_args(&args)
+            .expect_err("creation without --relation must fail");
+        let (message, _) = usage_parts(&error);
+        assert!(
+            message.contains("--relation"),
+            "genuine creation should still name --relation: {message}"
+        );
+    }
+
+    /// did-you-mean can only guide `ee memory <typo>` if every real
+    /// subcommand is listed; `link` was missing.
+    #[test]
+    fn memory_subcommands_list_covers_link_and_siblings() {
+        for expected in [
+            "link",
+            "list",
+            "show",
+            "expire",
+            "drift",
+            "level",
+            "history",
+            "revise",
+            "reveal",
+            "tags",
+            "promote-global",
+            "demote-global",
+            "outcome-global",
+        ] {
+            assert!(
+                MEMORY_SUBCOMMANDS.contains(&expected),
+                "MEMORY_SUBCOMMANDS is missing {expected}"
+            );
+        }
     }
 }
 
@@ -67742,7 +67927,25 @@ const MAINTENANCE_SUBCOMMANDS: &[&str] = &[
     "graph-witnesses-prune",
     "status",
 ];
-const MEMORY_SUBCOMMANDS: &[&str] = &["expire", "list", "show", "history", "revise", "tags"];
+// Mirrors every `MemoryCommand` variant so did-you-mean can guide a typo to
+// any real subcommand. `link` in particular was missing, which made
+// `ee memory link list <id>` doubly opaque: the word `list` was swallowed as
+// a positional MEMORY_ID and did-you-mean had nothing to suggest.
+const MEMORY_SUBCOMMANDS: &[&str] = &[
+    "expire",
+    "drift",
+    "level",
+    "link",
+    "list",
+    "show",
+    "history",
+    "revise",
+    "reveal",
+    "tags",
+    "promote-global",
+    "demote-global",
+    "outcome-global",
+];
 const MIGRATE_SUBCOMMANDS: &[&str] = &["status", "run"];
 const MESH_SUBCOMMANDS: &[&str] = &[
     "init", "peers", "peer", "status", "export", "import", "sync",
