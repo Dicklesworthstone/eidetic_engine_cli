@@ -156,14 +156,27 @@ mesh_peer_policy_anchors = {
     "rawPayloadExportAllowed",
     "redactedPayloadRequired",
 }
+# Keep in lockstep with REQUIRED_SHARE_PREVIEW_SOURCE_ANCHORS in
+# tests/contracts/dueling_wizards_mesh_redaction.rs. The share-preview schema
+# moved V1 -> V2 in 601006ae9.
 mesh_share_preview_anchors = {
-    "SHARE_PREVIEW_SCHEMA_V1",
+    "SHARE_PREVIEW_SCHEMA_V2",
     "SharePreviewCandidate",
     "redaction_class",
     "build_share_preview",
-    "share_preview_hash",
     "scan_mesh_export_subjects",
     "MESH_EXPORT_POLICY_ATTESTATION_SCHEMA_V1",
+}
+
+# Keep in lockstep with FORBIDDEN_SHARE_PREVIEW_ORACLES in
+# tests/contracts/dueling_wizards_mesh_redaction.rs. cb3738a0c removed these
+# content-derived oracles from the share-preview surface: an aggregate or
+# per-example hash over redacted content lets a peer confirm guessed content
+# without ever receiving it. They must stay absent.
+mesh_share_preview_forbidden_oracles = {
+    "share_preview_hash",
+    "share_preview_content_hash",
+    "serialization_error:",
 }
 
 def as_set(values):
@@ -849,6 +862,16 @@ def validate_mesh_redaction_manifest(root_path, required):
                     path=str(rel_path),
                     anchor=anchor,
                 )
+
+        if label == "share preview source":
+            for forbidden in sorted(mesh_share_preview_forbidden_oracles):
+                if forbidden in text:
+                    add_manifest_violation(
+                        violations,
+                        f"mesh redaction {label} must not expose a public share-preview oracle",
+                        path=str(rel_path),
+                        forbiddenOracle=forbidden,
+                    )
 
     return {
         "schema": "ee.dueling_wizards.mesh_redaction_shell_check.v1",
