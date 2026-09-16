@@ -45510,7 +45510,7 @@ where
             message: "`ee pack --error-log` is only supported with `ee pack <task>` or `ee pack build --query-file ... --error-log ...`, not legacy top-level --query-file.".to_string(),
             repair: Some("Use `ee pack \"fix this\" --error-log \"error[E0277]...\" --json`.".to_string()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     if let Some(query) = args.query.as_ref() {
         if args.query_file.is_some() {
@@ -45518,29 +45518,29 @@ where
                 message: "`ee pack <task>` cannot be combined with --query-file.".to_string(),
                 repair: Some("Use either `ee pack \"prepare release\"` or `ee pack --query-file task.eeq.json`.".to_string()),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
         let workspace_path = cli.resolve_workspace();
         let resolved_lens =
             match resolve_pack_task_lens(&workspace_path, args.lens.as_deref(), args.no_lens) {
                 Ok(resolved_lens) => resolved_lens,
-                Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
             };
         let lens_source_mode = match task_lens_source_mode(resolved_lens.as_ref()) {
             Ok(source_mode) => source_mode,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         let lens_pack_profile = match task_lens_pack_profile(resolved_lens.as_ref()) {
             Ok(pack_profile) => pack_profile,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         let lens_resource_profile = match task_lens_resource_profile(resolved_lens.as_ref()) {
             Ok(resource_profile) => resource_profile,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         let lens_memory_scope = match task_lens_memory_scope(resolved_lens.as_ref()) {
             Ok(memory_scope) => memory_scope,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         let lens_overlay = resolved_lens.as_ref().map(|resolved| &resolved.overlay);
         let query = match error_recall_query_seed(
@@ -45550,7 +45550,7 @@ where
         ) {
             Ok(Some(seed)) => format!("{query}\n\n{seed}"),
             Ok(None) => query.clone(),
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         let context_args = ContextArgs {
             use_daemon: args.use_daemon,
@@ -45658,7 +45658,7 @@ where
         Some(PackCommand::Diff(diff_args)) => handle_pack_diff(cli, diff_args, stdout, stderr),
         None => match args.legacy_build_args() {
             Ok(build_args) => handle_pack(process, cli, &build_args, stdout, stderr),
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         },
     }
 }
@@ -45711,33 +45711,33 @@ where
             request.query = format!("{}\n\n{seed}", request.query);
         }
         Ok(None) => {}
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 
     let resolved_lens =
         match resolve_pack_task_lens(&workspace_root, args.lens.as_deref(), args.no_lens) {
             Ok(resolved_lens) => resolved_lens,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     let lens_profile = match task_lens_context_profile(resolved_lens.as_ref()) {
         Ok(profile) => profile,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let lens_source_mode = match task_lens_source_mode(resolved_lens.as_ref()) {
         Ok(source_mode) => source_mode,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let lens_pack_profile = match task_lens_pack_profile(resolved_lens.as_ref()) {
         Ok(pack_profile) => pack_profile,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let lens_resource_profile = match task_lens_resource_profile(resolved_lens.as_ref()) {
         Ok(resource_profile) => resource_profile,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let lens_memory_scope = match task_lens_memory_scope(resolved_lens.as_ref()) {
         Ok(memory_scope) => memory_scope,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let lens_overlay = resolved_lens.as_ref().map(|resolved| &resolved.overlay);
     let output_options = resolve_context_output_options(
@@ -46651,16 +46651,16 @@ where
 {
     let connection = match open_pack_read_database(cli, args.database.as_deref()) {
         Ok(connection) => connection,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let record = match load_pack_record(&connection, &args.pack_id) {
         Ok(record) => record,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let expected_workspace_id =
         match resolve_database_workspace_id(&connection, &cli.resolve_workspace()) {
             Ok(workspace_id) => workspace_id,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     if record.workspace_id != expected_workspace_id {
         let error = DomainError::NotFound {
@@ -46668,7 +46668,7 @@ where
             id: crate::models::public_pack_id(&record.id),
             repair: Some("Use a pack ID from the current workspace.".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let ledger = parse_pack_ledger(&record);
     let ledger_value = available_pack_ledger(&ledger).map(public_pack_ledger_projection);
@@ -46773,20 +46773,20 @@ where
 {
     let connection = match open_pack_read_database(cli, args.database.as_deref()) {
         Ok(connection) => connection,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let record_a = match load_pack_record(&connection, &args.pack_a) {
         Ok(record) => record,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let record_b = match load_pack_record(&connection, &args.pack_b) {
         Ok(record) => record,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let expected_workspace_id =
         match resolve_database_workspace_id(&connection, &cli.resolve_workspace()) {
             Ok(workspace_id) => workspace_id,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     if record_a.workspace_id != expected_workspace_id
         || record_b.workspace_id != expected_workspace_id
@@ -46796,7 +46796,7 @@ where
             id: "requested pack pair".to_owned(),
             repair: Some("Use pack IDs from the current workspace.".to_owned()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let ledger_a = parse_pack_ledger(&record_a);
     let ledger_b = parse_pack_ledger(&record_b);
