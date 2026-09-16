@@ -14,8 +14,9 @@ use crate::core::degraded_aggregation::{
 };
 use crate::models::{
     COVERAGE_GAP_SCHEMA_V1, ContextProfile, ContextProfileName, ContextProfileSection,
-    ContextProfileSectionMix, ERROR_SCHEMA_V2, EmbedBackend, MemoryId, MemoryScopeStats,
-    ProvenanceUri, RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V2, RedactionLevel, TrustClass, UnitScore,
+    ContextProfileSectionMix, ERROR_SCHEMA_V2, EmbedBackend, EvidenceId, MemoryId,
+    MemoryScopeStats, ProvenanceUri, RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V2, RedactionLevel,
+    RuleId, TrustClass, UnitScore,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
@@ -1139,6 +1140,142 @@ pub const fn subsystem_name() -> &'static str {
 }
 
 pub type ContextPackProfile = ContextProfileName;
+
+/// Domain separator for the typed pack-entity hash encoding (ADR 0085).
+///
+/// Prefixing every encoded identity with a version-bearing domain string means
+/// an encoding produced for one contract can never be mistaken for another
+/// contract's bytes, even if both happen to describe the same entity.
+pub const PACK_ENTITY_HASH_DOMAIN: &str = "ee.pack.entity.v3";
+
+/// Native typed identity for a pack-capable entity (ADR 0085, bd-vp087).
+///
+/// `ee pack` is memory-centric today: candidates, selected items, omissions,
+/// persistence and replay all key on a `MemoryId`. That is correct for durable
+/// memories and wrong for the two other first-class retrieval results — an
+/// applied procedural rule (`RuleId`) and an imported evidence span
+/// (`EvidenceId`) — whose native identities are not memories. Requiring a
+/// linked memory is why a sourceless rule is searchable but cannot enter a
+/// pack, and inventing a `MemoryId` for one would launder policy and
+/// observation into learned interpretation.
+///
+/// This type is the identity half of that migration. **It is deliberately not
+/// wired into the live pack path yet**: ADR 0085 also requires the
+/// `ee.pack.v3` contract, a typed-foreign-key schema migration, and a
+/// coordinated sweep of every consumer, and those must land together. A
+/// migration that changed selection without replay would leave `ee pack
+/// replay` unable to reproduce the pack it claims to replay, which is strictly
+/// worse than today's memory aliasing. Landing the identity and its encoding
+/// first lets those slices be written against a fixed, tested representation.
+///
+/// Both the kind and the ID participate in every equality, ordering, map key
+/// and hash input. A raw ID string without its kind is not a pack identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum PackEntityRef {
+    /// A durable memory. The only kind the live pack path constructs today.
+    Memory(MemoryId),
+    /// An applied procedural rule.
+    Rule(RuleId),
+    /// An imported CASS evidence span.
+    EvidenceSpan(EvidenceId),
+}
+
+impl PackEntityRef {
+    /// Stable wire kind: `memory`, `rule`, or `evidence_span`.
+    #[must_use]
+    pub const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Memory(_) => "memory",
+            Self::Rule(_) => "rule",
+            Self::EvidenceSpan(_) => "evidence_span",
+        }
+    }
+
+    /// Canonical kind order: `memory < rule < evidence_span` (ADR 0085).
+    ///
+    /// Derived [`Ord`] already follows variant declaration order, which
+    /// matches. This method exists so the contract is stated explicitly rather
+    /// than resting on declaration order, and so a reordering of the variants
+    /// fails a test instead of silently changing every mixed-kind pack's
+    /// ordering and hash.
+    #[must_use]
+    pub const fn kind_order(&self) -> u8 {
+        match self {
+            Self::Memory(_) => 0,
+            Self::Rule(_) => 1,
+            Self::EvidenceSpan(_) => 2,
+        }
+    }
+
+    /// The prefixed native identifier (`mem_…`, `rule_…`, `ev_…`).
+    #[must_use]
+    pub fn id_string(&self) -> String {
+        match self {
+            Self::Memory(id) => id.to_string(),
+            Self::Rule(id) => id.to_string(),
+            Self::EvidenceSpan(id) => id.to_string(),
+        }
+    }
+
+    /// Direct provenance URI for this entity (ADR 0085).
+    ///
+    /// Evidence carries additional redacted CASS session and line provenance
+    /// elsewhere; this is only the direct entity form.
+    #[must_use]
+    pub fn provenance_uri(&self) -> String {
+        let scheme_kind = match self {
+            Self::Memory(_) => "memory",
+            Self::Rule(_) => "rule",
+            // ADR 0085 spells the evidence provenance authority `evidence`
+            // while its wire kind is `evidence_span`. Keeping the two distinct
+            // here rather than reusing `kind_str` prevents a later "tidy-up"
+            // from silently rewriting published provenance URIs.
+            Self::EvidenceSpan(_) => "evidence",
+        };
+        format!("ee://{scheme_kind}/{}", self.id_string())
+    }
+
+    /// Append this identity's canonical hash contribution to `out`.
+    ///
+    /// Domain-separated, labeled and length-delimited, per ADR 0085. Length
+    /// delimiting is the load-bearing part: without it, a value containing the
+    /// field separator could be split so that two different identities encode
+    /// identically, which would let one entity's pack hash collide with
+    /// another's. Rust enum discriminants, memory addresses, map iteration
+    /// order and `Debug` output never enter the encoding.
+    ///
+    /// Only the identity is encoded here. The caller appends its own
+    /// section/rank or omission position, so this stays reusable for both
+    /// selected and omitted items.
+    pub fn push_hash_encoding(&self, entity_revision: &str, out: &mut String) {
+        out.push_str(PACK_ENTITY_HASH_DOMAIN);
+        out.push(';');
+        push_labeled_field(out, "kind", self.kind_str());
+        push_labeled_field(out, "id", &self.id_string());
+        push_labeled_field(out, "revision", entity_revision);
+    }
+
+    /// Convenience wrapper over [`Self::push_hash_encoding`].
+    #[must_use]
+    pub fn hash_encoding(&self, entity_revision: &str) -> String {
+        let mut out = String::new();
+        self.push_hash_encoding(entity_revision, &mut out);
+        out
+    }
+}
+
+/// Encode one `label=<byte-len>:<value>;` field for the pack-entity hash.
+///
+/// The length is in bytes rather than characters so multi-byte content cannot
+/// disagree with what a byte-oriented hasher consumes.
+fn push_labeled_field(out: &mut String, label: &str, value: &str) {
+    out.push_str(label);
+    out.push('=');
+    out.push_str(&value.len().to_string());
+    out.push(':');
+    out.push_str(value);
+    out.push(';');
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PackSection {
@@ -9560,6 +9697,121 @@ mod tests {
                 "intentional serialization failure",
             ))
         }
+    }
+
+    // bd-vp087 slice (a): PackEntityRef and its hash encoding, per ADR 0085.
+    // Nothing constructs Rule or EvidenceSpan on the live path yet; these pin
+    // the representation the later slices will be written against.
+
+    fn entity_ids() -> (super::MemoryId, super::RuleId, super::EvidenceId) {
+        let uuid = uuid::Uuid::from_u128(0x0085);
+        (
+            super::MemoryId::from_uuid(uuid),
+            super::RuleId::from_uuid(uuid),
+            super::EvidenceId::from_uuid(uuid),
+        )
+    }
+
+    #[test]
+    fn pack_entity_wire_kinds_are_the_adr_spelling() {
+        let (memory, rule, evidence) = entity_ids();
+        assert_eq!(super::PackEntityRef::Memory(memory).kind_str(), "memory");
+        assert_eq!(super::PackEntityRef::Rule(rule).kind_str(), "rule");
+        assert_eq!(
+            super::PackEntityRef::EvidenceSpan(evidence).kind_str(),
+            "evidence_span"
+        );
+    }
+
+    #[test]
+    fn pack_entity_canonical_kind_order_is_memory_rule_evidence() {
+        // Guards the ordering contract against a variant reorder. Derived Ord
+        // follows declaration order, so without this a reshuffle would
+        // silently change every mixed-kind pack's ordering and hash.
+        let (memory, rule, evidence) = entity_ids();
+        let memory = super::PackEntityRef::Memory(memory);
+        let rule = super::PackEntityRef::Rule(rule);
+        let evidence = super::PackEntityRef::EvidenceSpan(evidence);
+
+        assert!(memory < rule, "memory must sort before rule");
+        assert!(rule < evidence, "rule must sort before evidence_span");
+        assert_eq!(
+            (memory.kind_order(), rule.kind_order(), evidence.kind_order()),
+            (0, 1, 2)
+        );
+
+        let mut sorted = vec![evidence, memory, rule];
+        sorted.sort();
+        assert_eq!(vec![memory, rule, evidence], sorted);
+    }
+
+    #[test]
+    fn changing_only_the_entity_kind_changes_the_hash_encoding() {
+        // ADR 0085 states this requirement explicitly. The three IDs below
+        // share one UUID, so the encodings differ ONLY by kind and by the
+        // prefix the typed ID renders.
+        let (memory, rule, evidence) = entity_ids();
+        let revision = "blake3:0000";
+        let memory = super::PackEntityRef::Memory(memory).hash_encoding(revision);
+        let rule = super::PackEntityRef::Rule(rule).hash_encoding(revision);
+        let evidence = super::PackEntityRef::EvidenceSpan(evidence).hash_encoding(revision);
+
+        assert_ne!(memory, rule);
+        assert_ne!(rule, evidence);
+        assert_ne!(memory, evidence);
+    }
+
+    #[test]
+    fn hash_encoding_is_domain_separated_and_length_delimited() {
+        let (memory, _, _) = entity_ids();
+        let encoded = super::PackEntityRef::Memory(memory).hash_encoding("blake3:abc");
+
+        assert!(
+            encoded.starts_with(super::PACK_ENTITY_HASH_DOMAIN),
+            "encoding must be domain-separated: {encoded}"
+        );
+        assert!(
+            encoded.contains("kind=6:memory;"),
+            "kind must be length-delimited: {encoded}"
+        );
+        assert!(
+            encoded.contains("revision=10:blake3:abc;"),
+            "revision must be length-delimited: {encoded}"
+        );
+    }
+
+    #[test]
+    fn length_delimiting_prevents_a_forged_field_boundary() {
+        // The reason lengths are encoded at all. A revision that contains the
+        // field separators must not be able to imitate a different identity's
+        // encoding. Without the byte counts these two would be ambiguous.
+        let (memory, _, _) = entity_ids();
+        let entity = super::PackEntityRef::Memory(memory);
+        let forged_revision = "blake3:abc;revision=10:blake3:xyz;";
+        let honest = entity.hash_encoding("blake3:abc");
+        let forged = entity.hash_encoding(forged_revision);
+
+        assert_ne!(honest, forged);
+        // Derived, not hand-counted: the invariant is that the byte count
+        // covers the WHOLE value including its embedded separators.
+        assert!(
+            forged.contains(&format!("revision={}:", forged_revision.len())),
+            "the forged value must be counted whole, not split: {forged}"
+        );
+    }
+
+    #[test]
+    fn pack_entity_provenance_uris_use_the_adr_authorities() {
+        let (memory, rule, evidence) = entity_ids();
+        let memory_uri = super::PackEntityRef::Memory(memory).provenance_uri();
+        let rule_uri = super::PackEntityRef::Rule(rule).provenance_uri();
+        let evidence_uri = super::PackEntityRef::EvidenceSpan(evidence).provenance_uri();
+
+        assert!(memory_uri.starts_with("ee://memory/"), "{memory_uri}");
+        assert!(rule_uri.starts_with("ee://rule/"), "{rule_uri}");
+        // `evidence`, NOT the `evidence_span` wire kind -- ADR 0085 spells the
+        // provenance authority differently from the kind.
+        assert!(evidence_uri.starts_with("ee://evidence/"), "{evidence_uri}");
     }
 
     // bd-lexical-fallback-hint-suppression-s2c10: this classification was
