@@ -10,11 +10,11 @@
 //! explained `authoritative`, while a stored-but-unretrieved memory is
 //! explained `reconstructed`.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use ee::core::context::{ContextPackOptions, ContextPackOutputOptions, explain_why_not_default};
+use ee::core::init::{InitOptions, init_workspace};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::models::{MemoryId, MemoryScope};
 use ee::search::SpeedMode;
@@ -25,6 +25,37 @@ type TestResult<T = ()> = Result<T, String>;
 
 fn db_path(workspace_path: &Path) -> PathBuf {
     workspace_path.join(".ee").join("ee.db")
+}
+
+/// Create the store these fixtures write into.
+///
+/// `ee remember` has not created a store since `91cf7bcbd` ("fix(storage):
+/// reject storeless write and search addresses", 2026-08-11), which made
+/// ordinary write surfaces preflight the addressed path via
+/// `core::ensure_addressed_database_exists` so a mistyped `--workspace` cannot
+/// plant a new store. `ee init` owns store creation.
+///
+/// This file predates that change (2026-06-07) and relied on the write path
+/// migrating a database into existence — the seed comment in
+/// `why_not_missing_memory_id_errors` said so in as many words. The sibling
+/// fixtures sharing this helper's shape were repaired the same way:
+/// `tests/ppr_context_pack.rs` in `be14b998a` and
+/// `tests/contradiction_detect_properties.rs` in `429a44576`.
+fn init_fixture_workspace(workspace_path: &Path) -> TestResult {
+    let report = init_workspace(&InitOptions {
+        workspace_path: workspace_path.to_path_buf(),
+        dry_run: false,
+        repair_plan: false,
+        force: false,
+        allow_symlink: false,
+        skip_boilerplate: true,
+    });
+    if !report.status.is_success() {
+        return Err(format!(
+            "initialize why-not fixture workspace failed: {report:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn remember_fixture(workspace_path: &Path, db_path: &Path, content: &str) -> TestResult<String> {
@@ -92,8 +123,7 @@ fn setup(content: &str, task: &str) -> TestResult<(TempDir, Value, String)> {
     let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
     let workspace_path = temp_dir.path().to_path_buf();
     let database_path = db_path(&workspace_path);
-    fs::create_dir_all(database_path.parent().ok_or("missing db parent")?)
-        .map_err(|error| error.to_string())?;
+    init_fixture_workspace(&workspace_path)?;
 
     let memory_id_raw = remember_fixture(&workspace_path, &database_path, content)?;
     let memory_id = MemoryId::from_str(&memory_id_raw).map_err(|error| format!("{error:?}"))?;
@@ -182,9 +212,8 @@ fn why_not_missing_memory_id_errors() -> TestResult {
     let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
     let workspace_path = temp_dir.path().to_path_buf();
     let database_path = db_path(&workspace_path);
-    fs::create_dir_all(database_path.parent().ok_or("missing db parent")?)
-        .map_err(|error| error.to_string())?;
-    // Seed one unrelated memory so the DB exists and migrates.
+    init_fixture_workspace(&workspace_path)?;
+    // Seed one unrelated memory so the lookup below has a populated store.
     let _ = remember_fixture(&workspace_path, &database_path, "unrelated seed memory")?;
 
     let absent = MemoryId::from_uuid(uuid::Uuid::from_u128(0x5151_5151));
@@ -205,8 +234,7 @@ fn why_not_is_deterministic_across_runs() -> TestResult {
     let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
     let workspace_path = temp_dir.path().to_path_buf();
     let database_path = db_path(&workspace_path);
-    fs::create_dir_all(database_path.parent().ok_or("missing db parent")?)
-        .map_err(|error| error.to_string())?;
+    init_fixture_workspace(&workspace_path)?;
 
     let memory_id_raw = remember_fixture(
         &workspace_path,
