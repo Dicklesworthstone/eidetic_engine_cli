@@ -1101,6 +1101,15 @@ fi
 # deliberately excluded here and run only through the explicit benchmark gate.
 run_stage "Unit, Contract, and Golden Tests" "cargo test --workspace --lib --bins --tests --examples -- --test-threads=1"
 
+# Gate 5.1: mcp lib unit tests (bd-up1hk). The stage above builds with default
+# features, and `mcp` is not among them, so src/mcp.rs is not compiled and its
+# 59 #[test] functions execute nowhere. The wrapper carries a vacuity guard:
+# without --features mcp the `mcp::` filter matches nothing and cargo exits 0
+# having run no tests, which would be a second false green in the exact shape
+# this gate exists to remove.
+run_stage "MCP Lib Unit Tests Guard (bd-up1hk)" "./scripts/mcp_lib_tests.sh --self-test"
+run_stage "MCP Lib Unit Tests (bd-up1hk)" "./scripts/mcp_lib_tests.sh"
+
 # Gate 6: Basic End-to-End
 run_stage "Basic E2E Scripts" "./scripts/e2e_test.sh"
 

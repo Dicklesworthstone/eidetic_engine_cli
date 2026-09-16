@@ -251,6 +251,20 @@ jobs:
           RUSTFLAGS: "-C debuginfo=0 -C linker-features=-lld"
         run: cargo test --workspace --features mcp --test mcp_parity
 
+      # bd-up1hk: mcp_parity above is an INTEGRATION target. The verify-tests
+      # shards filter --lib tests by top-level module prefix and build with
+      # default features, which exclude `mcp`, so src/mcp.rs never compiles
+      # there and its 59 unit tests ran in no job at all. The wrapper refuses a
+      # vacuous pass: without --features mcp the `mcp::` filter matches nothing
+      # and cargo exits 0 having executed zero tests.
+      - name: MCP lib unit-test guard
+        run: ./scripts/mcp_lib_tests.sh --self-test
+
+      - name: MCP lib unit tests
+        env:
+          RUSTFLAGS: "-C debuginfo=0 -C linker-features=-lld"
+        run: ./scripts/mcp_lib_tests.sh
+
   verify-tests:
     if: github.event_name != 'schedule'
     name: verify-tests (${{ matrix.shard }})
