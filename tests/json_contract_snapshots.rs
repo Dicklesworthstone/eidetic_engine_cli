@@ -1211,7 +1211,7 @@ fn timing_degradations_read_the_same_on_a_fast_and_a_slow_host() -> TestResult {
         "message": "Embedding model unavailable; semantic similarity is disabled.",
     });
     let freshness = json!({
-        "code": "evidence_freshness_missing_source",
+        "code": "context_evidence_freshness_missing_source",
         "severity": "low",
         "message": "Memory evidence freshness is missing_source.",
     });
@@ -1303,7 +1303,7 @@ fn timing_degradations_read_the_same_on_a_fast_and_a_slow_host() -> TestResult {
     if codes
         != [
             "embed_model_unavailable",
-            "evidence_freshness_missing_source",
+            "context_evidence_freshness_missing_source",
         ]
     {
         return Err(format!(
