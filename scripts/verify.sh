@@ -189,6 +189,20 @@ fi
 ARTIFACT_DIRS=""
 TRACE_LOG_DIRS=""
 STAGE_RESULTS=""
+# Green has to carry its denominator. STAGE_RESULTS is a display string whose
+# "\n" stay literal until printf "%b", so it is not something to parse -- the
+# counts are recorded here as stages run instead.
+#
+# The two kinds of not-run are kept apart on purpose:
+#   GATED_OFF  - deliberate (profile flag or --ci-smoke). Fine in a green run.
+#   CONTENTION - a beads lock was held, so a stage that was SUPPOSED to run did
+#                not. Non-fatal by design, but a run containing one has not
+#                established what that stage checks, and must not read as clean.
+STAGE_PASSED=0
+STAGE_SKIPPED_CONTENTION=0
+STAGE_SKIPPED_CONTENTION_NAMES=""
+STAGE_GATED_OFF=0
+STAGE_GATED_OFF_NAMES=""
 TOTAL_START=$(date +%s)
 
 CURRENT_SOURCE_TARGET_DIR="$(ee_cargo_target_directory || true)"
@@ -632,6 +646,48 @@ enforce_stage_budget() {
     fi
 }
 
+# Record a stage that was deliberately not attempted. Emits the same
+# STAGE_RESULTS line the call sites used to write by hand, and additionally
+# counts and names it so the banner can state its own scope.
+record_gated_off() {
+    local name="$1"
+    local reason="$2"
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP ${name} (${reason})\n"
+    STAGE_GATED_OFF=$((STAGE_GATED_OFF + 1))
+    STAGE_GATED_OFF_NAMES="${STAGE_GATED_OFF_NAMES}    - ${name} (${reason})\n"
+}
+
+# The closing verdict, stating what it covers.
+#
+# The line this replaces was `echo "=== All verification stages passed ==="`,
+# printed unconditionally. It was true only in the sense that run_stage exits
+# the script on a real failure, so reaching it meant nothing FAILED -- it said
+# nothing about how much was attempted, and it read as a full sweep whether 112
+# stages ran or 30.
+verification_summary_banner() {
+    local attempted=$((STAGE_PASSED + STAGE_SKIPPED_CONTENTION))
+    local declared=$((attempted + STAGE_GATED_OFF))
+
+    if [ "$STAGE_SKIPPED_CONTENTION" -gt 0 ]; then
+        echo "=== INCOMPLETE: ${STAGE_PASSED}/${attempted} attempted stages passed; ${STAGE_SKIPPED_CONTENTION} did NOT run (lock contention) ==="
+        echo ""
+        echo "    This run does not establish what these stages check:"
+        printf "%b" "$STAGE_SKIPPED_CONTENTION_NAMES"
+    else
+        echo "=== ${STAGE_PASSED}/${attempted} attempted verification stages passed ==="
+    fi
+
+    echo ""
+    echo "Stage accounting:"
+    echo "  declared                  : ${declared}"
+    echo "  passed                    : ${STAGE_PASSED}"
+    echo "  did not run (contention)  : ${STAGE_SKIPPED_CONTENTION}"
+    echo "  gated off (not attempted) : ${STAGE_GATED_OFF}"
+    if [ "$STAGE_GATED_OFF" -gt 0 ]; then
+        printf "%b" "$STAGE_GATED_OFF_NAMES"
+    fi
+}
+
 run_stage() {
     local name="$1"
     local cmd="$2"
@@ -651,6 +707,7 @@ run_stage() {
         budget_summary="$(stage_budget_summary "$name" "$duration")"
         echo "[+] PASS: $name (${duration}s; ${budget_summary})"
         STAGE_RESULTS="${STAGE_RESULTS}PASS ${name} (${duration}s; ${budget_summary})\n"
+        STAGE_PASSED=$((STAGE_PASSED + 1))
         capture_test_trace_artifacts "$name"
 
         # Capture artifact paths from E2E output
@@ -672,6 +729,11 @@ run_stage() {
             budget_summary="$(stage_budget_summary "$name" "$duration")"
             echo "[!] SKIP: $name (${duration}s; ${budget_summary})"
             STAGE_RESULTS="${STAGE_RESULTS}SKIP ${name} (${duration}s; ${budget_summary})\n"
+            # Non-fatal on purpose: routine lock contention must not break a
+            # five-agent swarm. But it is NOT a pass, so it is counted
+            # separately and named in the banner.
+            STAGE_SKIPPED_CONTENTION=$((STAGE_SKIPPED_CONTENTION + 1))
+            STAGE_SKIPPED_CONTENTION_NAMES="${STAGE_SKIPPED_CONTENTION_NAMES}    - ${name} (beads lock held)\n"
             rm -f "$output_file"
             enforce_stage_budget "$name" "$duration"
             echo ""
@@ -909,9 +971,14 @@ fi
 
 if [ "$PLAN_DOC_SMOKE" = "true" ]; then
     run_stage "Plan Doc Smoke (bd-3usjw.23)" "plan_doc_smoke"
-    echo "=== Verification Summary ==="
+    # Early-exit mode: this runs ONE stage and stops. It gets the same
+    # self-describing banner so a plan-doc-smoke run cannot be mistaken,
+    # in a log, for a full sweep.
+    verification_summary_banner
     printf "%b" "$STAGE_RESULTS"
     exit 0
+else
+    record_gated_off "Plan Doc Smoke (bd-3usjw.23)" "--plan-doc-smoke not set"
 fi
 
 # Gate 0.84: e2e invocation audit (bd-smxdr follow-on). No-Cargo. Asserts no
@@ -1091,6 +1158,8 @@ run_stage "Fuzz Target Audit (bd-bife.10)" "fuzz_target_audit"
 
 if [ "$INCLUDE_FUZZ_SMOKE" = "true" ]; then
     run_stage "Fuzz Smoke: search query parser (bd-2j2h0)" "fuzz_smoke"
+else
+    record_gated_off "Fuzz Smoke: search query parser (bd-2j2h0)" "--include-fuzz-smoke not set"
 fi
 
 # Gate 4: Strategic Vision Coverage
@@ -1103,7 +1172,7 @@ run_stage "Vision Coverage" "with_beads_read_locks sh ./scripts/vision-coverage.
 if [ "$CI_SMOKE" != "true" ]; then
     run_stage "Proof Verification (bd-nnfq4)" "./scripts/e2e_overhaul/proof_verify.sh"
 else
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP Proof Verification (bd-nnfq4) (ci-smoke)\n"
+    record_gated_off "Proof Verification (bd-nnfq4)" "ci-smoke"
 fi
 
 # Gate 5: Core Cargo Tests (Contracts, Logic, Golden). Benchmarks are
@@ -1488,21 +1557,21 @@ if [ "$CI_SMOKE" != "true" ]; then
     # EE_SAFETY_HARNESS_STRICT=1 to fail closed.
     run_stage "ee doctor Safety Harness (bd-21joy)" "./scripts/run-safety-harness.sh"
 else
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP Agent Ergonomics E2E (F1-F5) (ci-smoke)\n"
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP Overhaul Integration E2E (J4) (ci-smoke)\n"
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP Swarm Next-Action Recommendation Cards E2E (bd-3vwx0.6) (ci-smoke)\n"
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP Graph Determinism E2E (F4.a) (ci-smoke)\n"
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP Fake Tailscale Harness E2E (SRR6.46.10) (ci-smoke)\n"
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP Fake OIDC IdP Harness E2E (T7.7) (ci-smoke)\n"
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP Fake OIDC IdP Defects E2E (T7.7) (ci-smoke)\n"
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP Fake OIDC IdP Matrix Self-Check E2E (T7.7) (ci-smoke)\n"
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP Tailscale Local Probe E2E (SRR6.46.1) (ci-smoke)\n"
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP Tailscale Peer Autodiscovery E2E (SRR6.46.2) (ci-smoke)\n"
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP Mesh Hello Handshake E2E (SRR6.46.6) (ci-smoke)\n"
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP Mesh Hello Responder Lifecycle E2E (SRR6.46.12) (ci-smoke)\n"
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP Advanced E2E Scripts (ci-smoke)\n"
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP Boundary Migration Scripts (ci-smoke)\n"
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP ee doctor Safety Harness (bd-21joy) (ci-smoke)\n"
+    record_gated_off "Agent Ergonomics E2E (F1-F5)" "ci-smoke"
+    record_gated_off "Overhaul Integration E2E (J4)" "ci-smoke"
+    record_gated_off "Swarm Next-Action Recommendation Cards E2E (bd-3vwx0.6)" "ci-smoke"
+    record_gated_off "Graph Determinism E2E (F4.a)" "ci-smoke"
+    record_gated_off "Fake Tailscale Harness E2E (SRR6.46.10)" "ci-smoke"
+    record_gated_off "Fake OIDC IdP Harness E2E (T7.7)" "ci-smoke"
+    record_gated_off "Fake OIDC IdP Defects E2E (T7.7)" "ci-smoke"
+    record_gated_off "Fake OIDC IdP Matrix Self-Check E2E (T7.7)" "ci-smoke"
+    record_gated_off "Tailscale Local Probe E2E (SRR6.46.1)" "ci-smoke"
+    record_gated_off "Tailscale Peer Autodiscovery E2E (SRR6.46.2)" "ci-smoke"
+    record_gated_off "Mesh Hello Handshake E2E (SRR6.46.6)" "ci-smoke"
+    record_gated_off "Mesh Hello Responder Lifecycle E2E (SRR6.46.12)" "ci-smoke"
+    record_gated_off "Advanced E2E Scripts" "ci-smoke"
+    record_gated_off "Boundary Migration Scripts" "ci-smoke"
+    record_gated_off "ee doctor Safety Harness (bd-21joy)" "ci-smoke"
 fi
 
 # Gate 8.75: Pack-quality eval threshold contract. This no-Cargo self-test
@@ -1519,17 +1588,21 @@ run_stage "Ask Eval Quality Gate (bd-169v0.4)" "ee eval run ask_v1 --json"
 # committed report artifacts and intended eval thresholds after feature slices.
 if [ "$INCLUDE_EVAL" = "true" ]; then
     run_stage "Eval Regression (bd-bife.18)" "./scripts/eval_regression.sh"
+else
+    record_gated_off "Eval Regression (bd-bife.18)" "--include-eval not set"
 fi
 
 # Gate 9: Performance Benchmarks (optional, gated behind --include-bench)
 if [ "$INCLUDE_BENCH" = "true" ]; then
     run_stage "Performance Benchmarks" "./scripts/bench_perf_regression.sh --check-regression"
+else
+    record_gated_off "Performance Benchmarks" "--include-bench not set"
 fi
 
 TOTAL_END=$(date +%s)
 TOTAL_DURATION=$((TOTAL_END - TOTAL_START))
 
-echo "=== All verification stages passed ==="
+verification_summary_banner
 echo ""
 echo "Summary:"
 printf "%b" "$STAGE_RESULTS"
