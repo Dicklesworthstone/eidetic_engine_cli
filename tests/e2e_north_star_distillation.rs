@@ -787,6 +787,52 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
         )?;
     }
 
+    // bd-3h6bz acceptance bullet 5 asks for ONE public no-mock chain:
+    // `curate apply -> index -> search -> pack`, asserting the created rule's
+    // ID/content appears. Before this, the chain was covered by two tests with
+    // different entry points and neither spanned it: this test entered via
+    // `curate apply` but stopped at search, while
+    // north_star_context_e2e::north_star_3b asserted the pack body but entered
+    // via `ee rule add`. So "a rule created by CURATE APPLY reaches a pack" was
+    // unproven, and a divergence between the two creation paths in the metadata
+    // pack hydration reads would have gone uncaught.
+    let pack = run_ee_json(&[
+        "--workspace",
+        &ws_arg,
+        "--json",
+        "pack",
+        &rule_content,
+        "--max-tokens",
+        "2000",
+    ])?;
+    let pack_items = pack
+        .pointer("/data/pack/items")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| format!("pack response missing data.pack.items: {pack}"))?;
+    let rule_item = pack_items
+        .iter()
+        .find(|item| {
+            item.get("content")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|content| content == rule_content)
+        })
+        .ok_or_else(|| {
+            format!(
+                "pack must carry the curate-applied rule {rule_id} body verbatim; items: {pack_items:?}"
+            )
+        })?;
+    ensure_equal(
+        &rule_item.get("section").and_then(JsonValue::as_str),
+        &Some("procedural_rules"),
+        "curate-applied rule packs into the procedural_rules section",
+    )?;
+    // The rule id must be reachable from the item, not merely implied by prose.
+    let item_json = rule_item.to_string();
+    ensure(
+        item_json.contains(rule_id.as_str()),
+        format!("packed rule item must reference rule id {rule_id}: {rule_item:?}"),
+    )?;
+
     let ready_before_protect = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "status"])?;
     ensure_equal(
         &ready_before_protect
