@@ -52347,7 +52347,7 @@ mod tests {
             &super::WorkspaceScopeFields {
                 scope_kind: "repository".to_string(),
                 repository_root: Some(RELOCATION_OLD_PATH.to_string()),
-                repository_fingerprint: Some("fp-original".to_string()),
+                repository_fingerprint: Some("repo:original".to_string()),
                 subproject_path: None,
             },
         )?;
@@ -52358,7 +52358,7 @@ mod tests {
         super::WorkspaceScopeFields {
             scope_kind: "repository".to_string(),
             repository_root: Some(RELOCATION_NEW_PATH.to_string()),
-            repository_fingerprint: Some("fp-original".to_string()),
+            repository_fingerprint: Some("repo:original".to_string()),
             subproject_path: None,
         }
     }
@@ -52370,7 +52370,7 @@ mod tests {
         // present but unreachable. Relocation rebinds the ADDRESSING only.
         let connection = relocation_fixture()?;
         connection.insert_memory(
-            "mem_relocate00000000000000000",
+            "mem_relocate000000000000000000",
             &super::CreateMemoryInput {
                 workspace_id: RELOCATION_WORKSPACE_ID.to_string(),
                 level: "procedural".to_string(),
@@ -52438,7 +52438,7 @@ mod tests {
         // The whole point: memory rows are untouched, so provenance, ids and
         // content survive byte-for-byte and are reachable under the new path.
         let memory = connection
-            .get_memory("mem_relocate00000000000000000")?
+            .get_memory("mem_relocate000000000000000000")?
             .ok_or_else(|| TestFailure::new("memory must survive relocation"))?;
         ensure_equal(
             &memory.workspace_id.as_str(),
@@ -52497,7 +52497,7 @@ mod tests {
         // adoption of a foreign workspace is the failure mode to prevent.
         ensure_equal(
             &connection.relocate_workspace_binding(
-                "wsp_absent0000000000000000000",
+                "wsp_absent00000000000000000000",
                 RELOCATION_NEW_PATH,
                 &relocation_target_scope(),
                 None,
@@ -52509,7 +52509,7 @@ mod tests {
         )?;
 
         // Wrong-store control: the target path already belongs to someone else.
-        const OCCUPANT_ID: &str = "wsp_occupant00000000000000000";
+        const OCCUPANT_ID: &str = "wsp_occupant000000000000000000";
         connection.insert_workspace(
             OCCUPANT_ID,
             &super::CreateWorkspaceInput {
