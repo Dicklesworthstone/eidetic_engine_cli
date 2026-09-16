@@ -11658,8 +11658,23 @@ pub(crate) fn map_frankensearch_error(
             // The backend's value/reason may contain arbitrary index-header
             // text. The allowlisted field identifies the repair without
             // copying that text into context-pack diagnostics.
+            //
+            // bd-f0q00: name WHICH side we can see. The old message said only
+            // that verification failed, so a reader could not tell whether the
+            // stored vectors or this process was the odd one out, nor what
+            // decides it. The stored producer still stays unquoted (see
+            // above); the active embedder is ours to describe, and its
+            // `source` is the decisive field - a deterministic hash tier and a
+            // real Model2Vec bind different producer identities, and which one
+            // a process resolves depends on EE_EMBED_MODEL_DIR,
+            // EE_EMBED_DOWNLOAD and on-disk registry state when the
+            // process-global embedder was first initialised.
+            let active = crate::core::index::active_embedder_identity_hint();
             SearchError::IndexIncompatible(format!(
-                "{phase}: {field} cannot verify the stored producer against the active embedder"
+                "{phase}: {field} cannot verify the stored producer against the active embedder \
+                 ({active}); the stored vectors were built by a different producer. Rebuild the \
+                 index with this embedder, or make EE_EMBED_MODEL_DIR and EE_EMBED_DOWNLOAD match \
+                 the environment that built it."
             ))
         }
         error => SearchError::Index(format!("{phase}: {error}")),
@@ -23690,6 +23705,81 @@ mod tests {
             ));
         }
         Ok(())
+    }
+
+    /// bd-f0q00 acceptance 2: the producer-identity refusal must say WHICH
+    /// side the reader can see and what decides it.
+    #[test]
+    fn producer_revision_refusal_names_the_active_embedder_and_its_repair() {
+        let cx = asupersync::Cx::for_testing();
+        let mapped = map_frankensearch_error(
+            &cx,
+            "test phase",
+            frankensearch::SearchError::InvalidConfig {
+                field: "search_activation.fast.producer_revision".to_owned(),
+                value: "63a8c123deadbeefeffc0c".to_owned(),
+                reason: "stored header names an unverifiable producer".to_owned(),
+            },
+        );
+        // `match` rather than `let-else`: a let-else moves the scrutinee, so
+        // the diagnostic in its else branch cannot name the value it rejected.
+        let reason = match mapped {
+            SearchError::IndexIncompatible(reason) => reason,
+            other => {
+                panic!("allowlisted producer_revision must map to IndexIncompatible, got {other:?}")
+            }
+        };
+
+        assert!(
+            reason.contains("active embedder:"),
+            "refusal must name the identity this process resolved: {reason}"
+        );
+        assert!(
+            reason.contains("EE_EMBED_MODEL_DIR") && reason.contains("EE_EMBED_DOWNLOAD"),
+            "refusal must name what decides the identity: {reason}"
+        );
+        assert!(
+            reason.contains("Rebuild the index"),
+            "refusal must carry the repair: {reason}"
+        );
+
+        // Redaction property preserved: the backend's arbitrary header text
+        // must NOT reach context-pack diagnostics. This is the constraint the
+        // pre-existing comment protects, and widening the message must not
+        // quietly drop it.
+        assert!(
+            !reason.contains("63a8c123deadbeefeffc0c"),
+            "backend value must never be copied into the diagnostic: {reason}"
+        );
+        assert!(
+            !reason.contains("stored header names an unverifiable producer"),
+            "backend reason must never be copied into the diagnostic: {reason}"
+        );
+    }
+
+    /// bd-f0q00 acceptance 3, the load-bearing half: improving the message must
+    /// not widen WHICH failures are treated as a producer-identity refusal.
+    ///
+    /// Without this, the test above would pass just as well for a mapping that
+    /// classified every InvalidConfig as IndexIncompatible - which would hand a
+    /// "rebuild the index" repair to unrelated config faults and weaken exactly
+    /// the check this bead forbids weakening.
+    #[test]
+    fn non_allowlisted_invalid_config_is_not_a_producer_identity_refusal() {
+        let cx = asupersync::Cx::for_testing();
+        let mapped = map_frankensearch_error(
+            &cx,
+            "test phase",
+            frankensearch::SearchError::InvalidConfig {
+                field: "search_activation.fast.some_other_field".to_owned(),
+                value: "whatever".to_owned(),
+                reason: "unrelated config fault".to_owned(),
+            },
+        );
+        assert!(
+            matches!(mapped, SearchError::Index(_)),
+            "a non-allowlisted InvalidConfig must stay on the generic index-error path, got {mapped:?}"
+        );
     }
 }
 

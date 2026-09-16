@@ -4285,6 +4285,45 @@ fn active_semantic_identity() -> Option<(String, u32)> {
     Some((fast_embedder.id().to_owned(), dimension))
 }
 
+/// Redaction-safe descriptor of the embedder identity this process resolved,
+/// for diagnostics only (`bd-f0q00`).
+///
+/// The producer-identity refusal in
+/// [`crate::core::search::map_frankensearch_error`] names the field that
+/// failed but not *which side* differs, so a reader cannot tell whether the
+/// stored vectors or the active process are the odd one out, nor what decides
+/// it. This reports the half we can describe safely: our own resolved
+/// embedder. The stored producer stays unquoted, because the backend's index
+/// header may contain arbitrary text that must not reach context-pack
+/// diagnostics.
+///
+/// Reads [`DEFAULT_SEARCH_EMBEDDER`] WITHOUT forcing it, for the same reason
+/// as [`active_semantic_identity`] and one more: a diagnostic that initialised
+/// the global would fix the very identity it claims to be reporting, turning
+/// an observation into a mutation.
+///
+/// `source` is the decisive field for this failure class - a deterministic
+/// hash tier and a downloaded Model2Vec bind different producer identities
+/// into stored vectors, and which one a process gets depends on
+/// `EE_EMBED_MODEL_DIR`, `EE_EMBED_DOWNLOAD` and on-disk registry state at the
+/// moment the first caller initialised the lock.
+pub(crate) fn active_embedder_identity_hint() -> String {
+    let Some(selection) = DEFAULT_SEARCH_EMBEDDER.get() else {
+        return "active embedder: not resolved in this process".to_owned();
+    };
+    let source = selection.model_resolution.source.as_str();
+    let fast = selection.stack.fast();
+    if fast.is_semantic() && fast.is_ready() {
+        format!(
+            "active embedder: source={source} id={} dim={}",
+            fast.id(),
+            fast.dimension()
+        )
+    } else {
+        format!("active embedder: source={source} (non-semantic tier)")
+    }
+}
+
 /// GH #34: vectors from two different embedding spaces must never share one
 /// index.
 ///
