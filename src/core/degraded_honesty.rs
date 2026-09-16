@@ -408,6 +408,11 @@ pub fn validate_degraded_response(
 /// ordinary successful command output must not look like it came from a sample,
 /// mock, or stub path. The list is intentionally small and literal so it is
 /// explainable when a contract fails.
+///
+/// Markers beginning with a word character are identifier *prefixes* and match
+/// only at a token start -- see [`marker_occurs_at_token_start`]. Markers that
+/// begin with punctuation (`[sample]`, `tests/fixtures/`) are self-delimiting
+/// and match verbatim.
 pub const FORBIDDEN_SUCCESS_MARKERS: &[&str] = &[
     "[sample]",
     "example_",
@@ -419,6 +424,47 @@ pub const FORBIDDEN_SUCCESS_MARKERS: &[&str] = &[
     "fixture_",
     "tests/fixtures/",
 ];
+
+/// True when `marker` occurs in `haystack` at the start of a token.
+///
+/// The identifier-prefix markers (`fixture_`, `mock_`, `stub_`, ...) exist to
+/// catch fixture DATA identifiers such as `fixture_memory_1`. An unbounded
+/// substring scan also matches those characters in the *middle* of an unrelated
+/// identifier, which made the check impossible to satisfy on at least two
+/// surfaces: `ee capabilities --json` emits every registry variable name
+/// unconditionally, and `EE_RERANK_MODEL_FIXTURE_DIR` lower-cases to a string
+/// containing `fixture_` (bd-zmdmk). Requiring a token start keeps the real
+/// signal and drops that collision.
+///
+/// A marker that begins with a non-word character is already delimited by its
+/// own first character, so it matches verbatim.
+fn marker_occurs_at_token_start(haystack: &str, marker: &str) -> bool {
+    let Some(first) = marker.chars().next() else {
+        return false;
+    };
+    if !is_marker_word_char(first) {
+        return haystack.contains(marker);
+    }
+
+    let mut searched = 0usize;
+    while let Some(offset) = haystack[searched..].find(marker) {
+        let start = searched + offset;
+        let preceded_by_word_char = haystack[..start]
+            .chars()
+            .next_back()
+            .is_some_and(is_marker_word_char);
+        if !preceded_by_word_char {
+            return true;
+        }
+        searched = start + 1;
+    }
+    false
+}
+
+/// Word characters for marker boundary purposes: ASCII identifier characters.
+const fn is_marker_word_char(value: char) -> bool {
+    value.is_ascii_alphanumeric() || value == '_'
+}
 
 /// Successful outputs must not claim evidence-backed validity without evidence.
 ///
@@ -774,7 +820,7 @@ pub fn validate_no_fake_success_output(
     let checks = FORBIDDEN_SUCCESS_MARKERS
         .iter()
         .map(|marker| {
-            if lower_output.contains(marker) {
+            if marker_occurs_at_token_start(&lower_output, marker) {
                 HonestyCheckResult::fail_for(
                     "no_fake_success_output",
                     command_path,
@@ -1152,6 +1198,59 @@ mod tests {
         );
 
         assert!(report.passed);
+    }
+
+    #[test]
+    fn fake_success_output_allows_registry_variable_names() {
+        // bd-zmdmk: `ee capabilities --json` emits every registry variable
+        // name unconditionally, and EE_RERANK_MODEL_FIXTURE_DIR lower-cases to
+        // a string containing `fixture_`. An unbounded scan made the honesty
+        // check impossible to satisfy on that surface.
+        let report = validate_no_fake_success_output(
+            "capabilities",
+            true,
+            false,
+            r#"{"schema":"ee.response.v2","success":true,"data":{"envOverrides":[{"name":"EE_RERANK_MODEL_FIXTURE_DIR","isSet":false},{"name":"EE_EMBED_MODEL_FIXTURE_DIR","isSet":false}]}}"#,
+        );
+
+        assert!(report.passed, "registry names must not read as fake data");
+    }
+
+    #[test]
+    fn fake_success_output_still_rejects_fixture_identifiers() {
+        // The paired positive: loosening the scan must not cost real signal.
+        // `fixture_memory_1` is the shape the `fixture_` marker exists for.
+        let report = validate_no_fake_success_output(
+            "memory show",
+            true,
+            false,
+            r#"{"schema":"ee.response.v2","success":true,"data":{"id":"fixture_memory_1"}}"#,
+        );
+
+        assert!(!report.passed);
+        assert_eq!(report.issue_count, 1);
+    }
+
+    #[test]
+    fn marker_boundary_holds_at_token_start_only() {
+        // Identifier-prefix markers bind at a token start ...
+        assert!(marker_occurs_at_token_start(
+            "id=fixture_memory_1",
+            "fixture_"
+        ));
+        assert!(marker_occurs_at_token_start("fixture_memory_1", "fixture_"));
+        // ... and not mid-token, which is the whole defect.
+        assert!(!marker_occurs_at_token_start(
+            "ee_rerank_model_fixture_dir",
+            "fixture_"
+        ));
+        assert!(!marker_occurs_at_token_start("unstubbed", "stubbed"));
+        // Self-delimiting markers keep matching verbatim.
+        assert!(marker_occurs_at_token_start(
+            "path=tests/fixtures/a.json",
+            "tests/fixtures/"
+        ));
+        assert!(marker_occurs_at_token_start("label=[sample]", "[sample]"));
     }
 
     #[test]
