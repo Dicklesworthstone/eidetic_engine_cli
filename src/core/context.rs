@@ -5126,49 +5126,12 @@ fn redact_context_public_source_ref(value: &str) -> String {
 }
 
 fn redact_context_public_path_like_segments(value: &str) -> String {
-    const REDACTED_PATH: &str = "[REDACTED_PATH]";
-    const PREFIXES: &[&str] = &[
-        "/Users/",
-        "/Volumes/",
-        "/private/",
-        "/var/",
-        "/tmp/",
-        "/home/",
-        "/data/",
-        "/dp/",
-        "/workspace/",
-        "/repo/",
-        "/etc/",
-    ];
-
-    let mut output = String::with_capacity(value.len());
-    let mut cursor = 0;
-    while cursor < value.len() {
-        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, ch)| *ch == '/')
-        else {
-            output.push_str(&value[cursor..]);
-            break;
-        };
-        let start = cursor + relative_index;
-        if !PREFIXES
-            .iter()
-            .any(|prefix| value[start..].starts_with(prefix))
-        {
-            output.push_str(&value[cursor..=start]);
-            cursor = start + 1;
-            continue;
-        }
-
-        output.push_str(&value[cursor..start]);
-        output.push_str(REDACTED_PATH);
-        cursor = value[start..]
-            .char_indices()
-            .find_map(|(index, ch)| {
-                context_public_source_path_boundary(ch).then_some(start + index)
-            })
-            .unwrap_or(value.len());
-    }
-    output
+    // bd-redactor-prefix-divergence-lsy52: the eleven-prefix list that used to
+    // sit here was one of twenty hand-copied copies. The shared predicate also
+    // recognises Windows drive paths and UNC shares, which this walker could
+    // never reach because it only scanned for '/'. The boundary stays local:
+    // context renders prose, so a path ends at whitespace.
+    crate::util::redact_path_like_segments(value, context_public_source_path_boundary)
 }
 
 fn context_public_source_path_boundary(ch: char) -> bool {

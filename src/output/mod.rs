@@ -8840,47 +8840,17 @@ fn redact_local_memory_provenance_uri(value: &str) -> String {
 }
 
 fn redact_memory_output_path_like_segments(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    let mut cursor = 0;
-    while cursor < value.len() {
-        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
-        else {
-            output.push_str(&value[cursor..]);
-            break;
-        };
-        let start = cursor + relative_index;
-        if !memory_output_path_starts_sensitive_segment(&value[start..]) {
-            output.push_str(&value[cursor..=start]);
-            cursor = start + 1;
-            continue;
-        }
-
-        output.push_str(&value[cursor..start]);
-        output.push_str("[REDACTED_PATH]");
-        cursor = value[start..]
-            .char_indices()
-            .find_map(|(index, c)| memory_output_path_boundary(c).then_some(start + index))
-            .unwrap_or(value.len());
-    }
-    output
-}
-
-fn memory_output_path_starts_sensitive_segment(value: &str) -> bool {
-    const PREFIXES: &[&str] = &[
-        "/Users/",
-        "/Volumes/",
-        "/private/",
-        "/var/",
-        "/tmp/",
-        "/home/",
-        "/data/",
-        "/dp/",
-        "/workspace/",
-        "/repo/",
-        "/etc/",
-    ];
-
-    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+    // bd-redactor-prefix-divergence-lsy52: one of twenty hand-copied prefix
+    // lists, replaced by the shared start predicate, which additionally
+    // recognises Windows drive paths and UNC shares this walker could not reach
+    // (it only scanned for '/'). The boundary stays local -- this surface
+    // renders prose, so a path ends at whitespace.
+    //
+    // NOTE the routing above is load-bearing and unchanged:
+    // `redact_local_memory_provenance_uri` deliberately calls the SECRET-only
+    // redactor, not this one, so local reads keep showing their own paths
+    // (bd-provenance-redaction-local-reads-xisfl).
+    crate::util::redact_path_like_segments(value, memory_output_path_boundary)
 }
 
 fn memory_output_path_boundary(c: char) -> bool {
