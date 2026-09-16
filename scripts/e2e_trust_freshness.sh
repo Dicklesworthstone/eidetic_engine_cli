@@ -17,7 +17,16 @@ set -uo pipefail
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Avoid the shared harness's cargo-metadata fallback in code-first swarm lanes.
-EE_BIN="${EE_BIN:-ee}"
+# Pin the binary under test; never fall through to `ee` on PATH (bd-smxdr).
+# Checking only EE_BIN shadowed the EE_BINARY that scripts/verify.sh
+# exports, so a hand-run silently tested whatever ee was installed --
+# measured at 0.14.2 against source 0.15.2.
+EE_BIN="${EE_BIN:-${EE_BINARY:-}}"
+if [ -z "$EE_BIN" ]; then
+    printf 'e2e_trust_freshness: refusing to run without an explicit binary.\n' >&2
+    printf 'e2e_trust_freshness: set EE_BIN (or EE_BINARY) to the ee binary under test.\n' >&2
+    exit 2
+fi
 export EE_BIN
 if [ -d /private/tmp ]; then
     EE_E2E_TMPDIR="${EE_E2E_TMPDIR:-/private/tmp}"
@@ -29,6 +38,15 @@ fi
 source "$E2E_DIR/e2e_lib.sh"
 
 harness_init "trust_freshness"
+
+# Refuse a stale or missing binary before any assertion, and record which
+# binary produced this run's verdict (bd-smxdr).
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+if ! ee_require_current_binary "$EE_BIN" "e2e_trust_freshness"; then
+    exit 2
+fi
 
 ee_json() {
     e2e_log_command "$EE_BIN" "$@" || true
