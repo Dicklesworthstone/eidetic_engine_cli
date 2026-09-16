@@ -344,10 +344,175 @@ arm_ns_gate_first_open_race() {
         duration_ms "$(( $(now_ms) - started ))"
 }
 
+# ---------------------------------------------------------------------------
+# Arm: bd-tag-case-roundtrip-tkq8v
+#
+# `ee remember` canonicalises tags through Tag::parse (ASCII-lowercasing), but
+# `memory list --tag` matched case-SENSITIVELY, so recall for a tag written as
+# "Ticker:RDVT" silently returned zero forever. Read-side canonicalisation is
+# models/query.rs:1376 via canonicalize_tag_filter.
+#
+# Two-sided: a tag that was never written must still match nothing, otherwise
+# "found it" would also pass for a filter that matches everything.
+# ---------------------------------------------------------------------------
+arm_tag_case_roundtrip() {
+    local bead="bd-tag-case-roundtrip-tkq8v"
+    local ws started tagged_id
+    ws="$(arm_workspace "$bead" tag_case_roundtrip)"
+    started="$(now_ms)"
+
+    step "[$bead] a tag written in mixed case is recallable in any case"
+    ee_in "$ws" init --json >/dev/null
+    tagged_id="$(ee_in "$ws" remember "Underwrite verdict recorded for the screen." \
+        --level semantic --kind decision --tags "Ticker:RDVT" --json \
+        | jq -r '.data.memoryId // .data.memory_id // empty')"
+    assert_eq "$( [ -n "$tagged_id" ] && echo created || echo missing )" "created" \
+        "$bead: tagged memory created"
+
+    local lower_hits upper_hits absent_hits
+    lower_hits="$(ee_in "$ws" memory list --tag "ticker:rdvt" --json \
+        | jq -r --arg id "$tagged_id" '[.data.memories[]? | select(.id == $id)] | length')"
+    upper_hits="$(ee_in "$ws" memory list --tag "Ticker:RDVT" --json \
+        | jq -r --arg id "$tagged_id" '[.data.memories[]? | select(.id == $id)] | length')"
+    absent_hits="$(ee_in "$ws" memory list --tag "ticker:neverwritten" --json \
+        | jq -r '[.data.memories[]?] | length')"
+
+    log_event arm_act bead_id "$bead" phase act check tag_case_probe \
+        workspace "$ws" host "$SUITE_HOST" memory "$tagged_id" \
+        lower_hits "$lower_hits" upper_hits "$upper_hits" absent_hits "$absent_hits"
+
+    assert_eq "$lower_hits" "1" "$bead: canonical lowercase tag recalls the memory"
+    assert_eq "$upper_hits" "1" "$bead: the original mixed-case spelling also recalls it"
+    # PAIRING: proves the filter is actually filtering, not matching everything.
+    assert_eq "$absent_hits" "0" "$bead: a tag that was never written matches nothing"
+
+    log_event arm_done bead_id "$bead" phase assert check tag_case_roundtrip \
+        verdict recorded workspace "$ws" host "$SUITE_HOST" \
+        duration_ms "$(( $(now_ms) - started ))"
+}
+
+# ---------------------------------------------------------------------------
+# Arm: bd-cik-phone-number-false-positive-pmsri  (P0, store-corruption evidence)
+#
+# Zero-padded 10-digit CIKs and SEC accession numbers were refused as phone
+# numbers, so filing memories could not be written without
+# --allow-secret-mention. The two-sided framing the bead demands: the MUST-PASS
+# corpus admits, and the MUST-REDACT corpus still refuses. Without the second
+# half, "CIK admits" would also pass for a build that disabled the detector.
+# ---------------------------------------------------------------------------
+arm_cik_accession_false_positive() {
+    local bead="bd-cik-phone-number-false-positive-pmsri"
+    local ws started
+    ws="$(arm_workspace "$bead" cik_accession_false_positive)"
+    started="$(now_ms)"
+
+    step "[$bead] CIK and accession numbers admit; real secrets still refuse"
+    ee_in "$ws" init --json >/dev/null
+
+    # MUST-PASS corpus — no --allow-secret-mention anywhere below.
+    local pass_ok=0 pass_total=0 label
+    while IFS='|' read -r label body; do
+        [ -z "$label" ] && continue
+        pass_total=$(( pass_total + 1 ))
+        if ee_in "$ws" remember "$body" --level semantic --kind fact --json >/dev/null; then
+            pass_ok=$(( pass_ok + 1 ))
+        else
+            log_event arm_evidence bead_id "$bead" phase act check must_pass_refused \
+                workspace "$ws" host "$SUITE_HOST" case "$label"
+        fi
+    done <<'CORPUS'
+zero_padded_cik|Registrant CIK 0001720116 filed the annual report on time.
+bare_cik|The filer is identified as CIK 1720116 in the submission header.
+accession_number|Accession 0001957132-26-000015 covers the amended filing.
+CORPUS
+
+    assert_eq "$pass_ok" "$pass_total" \
+        "$bead: all $pass_total CIK/accession cases admit without --allow-secret-mention"
+
+    # MUST-REDACT corpus — the detector must still be doing its job.
+    local redact_refused=0 redact_total=0
+    while IFS='|' read -r label body; do
+        [ -z "$label" ] && continue
+        redact_total=$(( redact_total + 1 ))
+        if ee_in "$ws" remember "$body" --level semantic --kind fact --json >/dev/null 2>&1; then
+            log_event arm_evidence bead_id "$bead" phase act check must_redact_admitted \
+                workspace "$ws" host "$SUITE_HOST" case "$label"
+        else
+            redact_refused=$(( redact_refused + 1 ))
+        fi
+    done <<'CORPUS'
+nanp_phone_separators|Call the desk at 415-555-0142 to confirm the trade.
+ssn_shape|The beneficial owner SSN is 123-45-6789 per the filing.
+CORPUS
+
+    log_event arm_act bead_id "$bead" phase act check secret_corpus_probe \
+        workspace "$ws" host "$SUITE_HOST" \
+        must_pass_admitted "$pass_ok" must_pass_total "$pass_total" \
+        must_redact_refused "$redact_refused" must_redact_total "$redact_total"
+
+    # PAIRING: without this, the arm above would pass on a disabled detector.
+    assert_eq "$redact_refused" "$redact_total" \
+        "$bead: all $redact_total real-secret cases are still refused"
+
+    log_event arm_done bead_id "$bead" phase assert check cik_accession_false_positive \
+        verdict recorded workspace "$ws" host "$SUITE_HOST" \
+        duration_ms "$(( $(now_ms) - started ))"
+}
+
+# ---------------------------------------------------------------------------
+# Arm: bd-pack-doctor-posture-disagreement-nts29
+#
+# `ee pack` and `ee doctor` legitimately measure different things — pack counts
+# one invocation's retrieval degradations, doctor reports static workspace
+# health and deliberately excludes advisory-tier findings. The fix was not to
+# force one number but to make the pack banner NAME its scope, so an agent
+# stops being told to repair a workspace doctor calls healthy.
+# ---------------------------------------------------------------------------
+arm_pack_banner_names_its_scope() {
+    local bead="bd-pack-doctor-posture-disagreement-nts29"
+    local ws started empty_index pack_json summary
+    ws="$(arm_workspace "$bead" pack_banner_scope)"
+    started="$(now_ms)"
+
+    step "[$bead] a degraded pack banner names its per-invocation scope"
+    ee_in "$ws" init --json >/dev/null
+    ee_in "$ws" remember "Run cargo fmt --check before cutting a release." \
+        --level procedural --kind rule --json >/dev/null
+    empty_index="$ws/empty-index"
+    mkdir -p "$empty_index"
+    pack_json="$( export EE_INDEX_DIR="$empty_index"; ee_in "$ws" pack "release checklist" --max-tokens 2000 --json )"
+    summary="$(printf '%s' "$pack_json" | jq -r '.data.pack.advisoryBanner.summary // ""')"
+
+    log_event arm_act bead_id "$bead" phase act check banner_scope_probe \
+        workspace "$ws" host "$SUITE_HOST" \
+        banner_status "$(printf '%s' "$pack_json" | jq -r '.data.pack.advisoryBanner.status // "none"')"
+
+    assert_jq "$pack_json" \
+        '(.data.pack.advisoryBanner.status // "") == "degraded"' \
+        "$bead: precondition — the pack banner is in its degraded state"
+    assert_contains "$summary" "this pack" \
+        "$bead: banner names the pack invocation as its scope"
+    assert_contains "$summary" "not workspace health" \
+        "$bead: banner disclaims workspace-health scope"
+    assert_contains "$summary" "ee doctor" \
+        "$bead: banner points at the workspace-health surface"
+    # The exact prose the field report blamed for sending agents to repair a
+    # healthy workspace must be gone.
+    assert_eq "$(printf '%s' "$summary" | grep -c 'repair degraded sources')" "0" \
+        "$bead: banner no longer directs repair of workspace sources"
+
+    log_event arm_done bead_id "$bead" phase assert check pack_banner_names_its_scope \
+        verdict recorded workspace "$ws" host "$SUITE_HOST" \
+        duration_ms "$(( $(now_ms) - started ))"
+}
+
 arm_status_lexical_honesty
 arm_auto_index_rebuild_request
 arm_fallback_relevance_floor
 arm_ns_gate_first_open_race
+arm_tag_case_roundtrip
+arm_cik_accession_false_positive
+arm_pack_banner_names_its_scope
 
 printf '[suite] artifacts retained under %s\n' "$SUITE_ROOT" >&2
 harness_summary
