@@ -53811,7 +53811,10 @@ where
                     message: "Memory-only explanation options do not apply to recipes.".to_owned(),
                     repair: Some("ee why plan <RECIPE_ID> --task <TASK> --json".to_owned()),
                 },
-                cli.wants_json(),
+                // bd-oqrjn: renderer, not a bool. `From<bool>` maps false to
+                // Human, so `--format toon` failures used to render prose to
+                // stderr while toon successes went to stdout.
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -53831,14 +53834,14 @@ where
         return write_domain_error(&DomainError::Usage {
             message: "Use `ee why plan <RECIPE_ID> --task <TASK>` for recipes, or `ee why <ENTITY_ID>` for memories.".to_owned(),
             repair: Some("ee why --help".to_owned()),
-        }, cli.wants_json(), stdout, stderr);
+        }, cli.renderer(), stdout, stderr);
     }
     if !args.confidence_threshold.is_finite() || !(0.0..=1.0).contains(&args.confidence_threshold) {
         let domain_error = DomainError::Usage {
             message: "confidence threshold must be a finite number between 0.0 and 1.0".to_string(),
             repair: Some("ee why <memory-id> --confidence-threshold 0.5".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let workspace_path = cli.resolve_workspace();
@@ -53849,7 +53852,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let options = WhyOptions {
@@ -53865,7 +53868,7 @@ where
                 message: format!("Failed to open database before why migration: {error}"),
                 repair: Some("ee status --workspace . --json".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     if let Err(error) = migration_connection.migrate() {
@@ -53873,14 +53876,14 @@ where
             message: format!("Failed to migrate database before why: {error}"),
             repair: Some("ee migrate run --workspace . --json".to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if let Err(error) = migration_connection.close() {
         let domain_error = DomainError::Storage {
             message: format!("Failed to close migration connection before why: {error}"),
             repair: Some("ee status --workspace . --json".to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let read_pool = crate::db::read_pool::registered_process_read_pool(
@@ -53894,7 +53897,7 @@ where
                 message: format!("Failed to acquire why read snapshot: {error}"),
                 repair: Some("ee status --workspace . --json".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let connection = match read_snapshot.checked_connection() {
@@ -53904,7 +53907,7 @@ where
                 message: format!("Why read snapshot became unavailable: {error}"),
                 repair: Some("ee status --workspace . --json".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     match connection.needs_migration() {
@@ -53914,14 +53917,14 @@ where
                 message: "Database migration is required before read-only why.".to_owned(),
                 repair: Some("ee migrate run --workspace . --json".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         Err(error) => {
             let domain_error = DomainError::Storage {
                 message: format!("Failed to inspect database migration state before why: {error}"),
                 repair: Some("ee migrate status --workspace . --json".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     }
 
@@ -53932,7 +53935,7 @@ where
             message: error.clone(),
             repair: Some("ee init --workspace . --repair-plan".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     if !report.found {
@@ -53941,7 +53944,7 @@ where
             id: args.memory_id.clone(),
             repair: Some("ee memory list".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     if args.causal_explain {
@@ -53950,7 +53953,7 @@ where
             Ok(false) => why_causal_explanation_feature_disabled_json(&args.memory_id),
             Err(error) => {
                 let domain_error = config_surface_error_to_domain(error);
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
         report = report.with_causal_explanation(causal_explanation);
@@ -53958,7 +53961,7 @@ where
     let sentinel_data = if args.include_sentinel {
         match why_sentinel_data(connection, &args.memory_id) {
             Ok(data) => Some(data),
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     } else {
         None
@@ -53968,7 +53971,7 @@ where
             message: format!("Failed to release why read snapshot: {error}"),
             repair: Some("ee status --workspace . --json".to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
@@ -55871,6 +55874,98 @@ where
         }
     }
     error.exit_code()
+}
+
+#[cfg(test)]
+mod error_render_routing_tests {
+    use super::{DomainError, ErrorRenderMode, output, write_domain_error};
+
+    fn error_fixture() -> DomainError {
+        DomainError::NotFound {
+            resource: "memory".to_owned(),
+            id: "mem_missing".to_owned(),
+            repair: Some("ee memory list".to_owned()),
+        }
+    }
+
+    fn render(mode: impl Into<ErrorRenderMode>) -> (String, String) {
+        let error = error_fixture();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        write_domain_error(&error, mode, &mut stdout, &mut stderr);
+        (
+            String::from_utf8_lossy(&stdout).into_owned(),
+            String::from_utf8_lossy(&stderr).into_owned(),
+        )
+    }
+
+    /// bd-oqrjn countermetric: the routing decision, not the renderer.
+    ///
+    /// `tests/output_negative.rs` already covers `error_response_toon` itself.
+    /// What was untested — and what the bug actually was — is whether a failure
+    /// under `--format toon` is *routed* to the toon envelope on stdout at all.
+    /// A surface still passing a legacy bool answers "no", because
+    /// `From<bool>` maps false to `Human`.
+    #[test]
+    fn a_toon_renderer_routes_failures_to_a_toon_envelope_on_stdout() {
+        let (stdout, stderr) = render(output::Renderer::Toon);
+        assert!(
+            stderr.is_empty(),
+            "toon failures must not go to stderr as prose: {stderr:?}"
+        );
+        assert!(
+            !stdout.is_empty(),
+            "toon failures must be written to stdout"
+        );
+        assert!(
+            !stdout.trim_start().starts_with('{'),
+            "toon output must not be JSON: {stdout}"
+        );
+        // The envelope must actually be present, not just some bytes.
+        assert!(
+            stdout.contains("ee.error.v2"),
+            "toon failure must carry the ee.error.v2 envelope: {stdout}"
+        );
+        assert_eq!(stdout, output::error_response_toon(&error_fixture()) + "\n");
+    }
+
+    /// The JSON renderer keeps its existing routing, so the toon arm is an
+    /// addition rather than a redirection.
+    #[test]
+    fn a_json_renderer_still_routes_failures_to_json_on_stdout() {
+        let (stdout, stderr) = render(output::Renderer::Json);
+        assert!(stderr.is_empty(), "json failures must not go to stderr");
+        assert!(
+            stdout.trim_start().starts_with('{'),
+            "json failures must be a JSON object: {stdout}"
+        );
+    }
+
+    /// Human output stays on stderr. This is also the behaviour every
+    /// not-yet-migrated call site still gets, since `From<bool>` maps both
+    /// `false` and a human renderer to `Human`.
+    #[test]
+    fn human_and_legacy_bool_false_both_route_to_stderr() {
+        let (human_stdout, human_stderr) = render(output::Renderer::Human);
+        assert!(human_stdout.is_empty());
+        assert!(human_stderr.contains("error:"));
+
+        let (bool_stdout, bool_stderr) = render(false);
+        assert_eq!(bool_stdout, human_stdout);
+        assert_eq!(bool_stderr, human_stderr);
+    }
+
+    /// The defect in one assertion: a legacy bool and a toon renderer describe
+    /// the same invocation (`--format toon`) but route oppositely. Any call
+    /// site still passing the bool is therefore still wrong, which is what
+    /// keeps bd-oqrjn open until the count reaches zero.
+    #[test]
+    fn a_legacy_bool_and_a_toon_renderer_disagree_for_the_same_invocation() {
+        let (bool_stdout, bool_stderr) = render(false);
+        let (toon_stdout, toon_stderr) = render(output::Renderer::Toon);
+        assert!(bool_stdout.is_empty() && !bool_stderr.is_empty());
+        assert!(!toon_stdout.is_empty() && toon_stderr.is_empty());
+    }
 }
 
 impl MemoryReviseReport {
@@ -88574,10 +88669,8 @@ mod tests {
         }
     }
 
-    #[test]
     // bd-pack-compact-mode-ibksx: `--compact` is shorthand for
     // `--pack-profile lean`, not a fourth profile.
-
     #[test]
     fn pack_command_accepts_compact_shorthand() -> TestResult {
         let parsed = Cli::try_parse_from(["ee", "pack", "test", "--compact"])
