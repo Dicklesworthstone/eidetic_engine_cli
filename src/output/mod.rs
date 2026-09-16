@@ -20631,6 +20631,156 @@ mod tests {
         context_response_fixture_with_query("prepare release")
     }
 
+    // bd-pack-compact-mode-ibksx: the Lean profile parsed and changed nothing.
+    // It dropped only coverage_fill / rendered_text / skipped[] while still
+    // emitting every heavy diagnostic block, which is why field reports
+    // measured pack metadata outweighing the returned memories ~10:1.
+
+    fn lean_render_options() -> ContextJsonRenderOptions {
+        ContextJsonRenderOptions::from(crate::core::context::ContextPackOutputOptions::for_profile(
+            crate::core::context::ContextPackOutputProfile::Lean,
+        ))
+    }
+
+    fn adaptive_budget_fixture() -> crate::pack::budget_classifier::AdaptiveBudgetDecision {
+        crate::pack::budget_classifier::classify_adaptive_budget(
+            crate::pack::budget_classifier::AdaptiveBudgetInput::new(
+                "prepare release",
+                &[0.8_f32, 0.4_f32],
+                2.0,
+            )
+            .with_max_tokens(100),
+        )
+    }
+
+    #[test]
+    fn lean_profile_drops_the_heavy_diagnostic_blocks() -> TestResult {
+        let mut response = context_response_fixture()?;
+        response.data.adaptive_budget = Some(adaptive_budget_fixture());
+
+        let rendered = render_context_response_json_with_options(&response, lean_render_options());
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &parsed.pointer("/data/pack/selectionAudit").is_none(),
+            &true,
+            "lean drops selectionAudit, the single largest block",
+        )?;
+        ensure_equal(
+            &parsed.pointer("/data/pack/quality").is_none(),
+            &true,
+            "lean drops quality metrics",
+        )?;
+        ensure_equal(
+            &parsed
+                .pointer("/data/pack/budget/classifierContributions")
+                .is_none(),
+            &true,
+            "lean drops the adaptive-budget explanation",
+        )
+    }
+
+    #[test]
+    fn lean_profile_keeps_the_scalars_and_signals_an_agent_acts_on() -> TestResult {
+        // Compaction must not be paid for with honesty or with utility. The
+        // budget scalars are what an agent reads to decide whether to re-pack,
+        // and advisoryBanner can carry safety-relevant notices.
+        let mut response = context_response_fixture()?;
+        response.data.adaptive_budget = Some(adaptive_budget_fixture());
+
+        let rendered = render_context_response_json_with_options(&response, lean_render_options());
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &parsed.pointer("/data/pack/budget/maxTokens").is_some(),
+            &true,
+            "lean keeps budget.maxTokens",
+        )?;
+        ensure_equal(
+            &parsed.pointer("/data/pack/budget/usedTokens").is_some(),
+            &true,
+            "lean keeps budget.usedTokens",
+        )?;
+        ensure_equal(
+            &parsed.pointer("/data/pack/budget/utilization").is_some(),
+            &true,
+            "lean keeps budget.utilization",
+        )?;
+        ensure_equal(
+            &parsed.pointer("/data/pack/advisoryBanner").is_some(),
+            &true,
+            "lean keeps the advisory banner",
+        )?;
+        ensure_equal(
+            &parsed.pointer("/degraded").is_some(),
+            &true,
+            "lean never suppresses degraded[]",
+        )
+    }
+
+    #[test]
+    fn standard_profile_output_is_unchanged_by_the_lean_gates() -> TestResult {
+        // Standard is the default profile: nobody who did not ask for Lean may
+        // see a field disappear.
+        let mut response = context_response_fixture()?;
+        response.data.adaptive_budget = Some(adaptive_budget_fixture());
+
+        let rendered = render_context_response_json_with_options(
+            &response,
+            ContextJsonRenderOptions::from(
+                crate::core::context::ContextPackOutputOptions::for_profile(
+                    crate::core::context::ContextPackOutputProfile::Standard,
+                ),
+            ),
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &parsed.pointer("/data/pack/selectionAudit").is_some(),
+            &true,
+            "standard keeps selectionAudit",
+        )?;
+        ensure_equal(
+            &parsed.pointer("/data/pack/quality").is_some(),
+            &true,
+            "standard keeps quality metrics",
+        )?;
+        ensure_equal(
+            &parsed
+                .pointer("/data/pack/budget/classifierContributions")
+                .is_some(),
+            &true,
+            "standard keeps the adaptive-budget explanation",
+        )
+    }
+
+    #[test]
+    fn lean_render_is_strictly_smaller_than_standard() -> TestResult {
+        // The bead's acceptance is that --compact genuinely REDUCES output
+        // rather than reordering it.
+        let mut response = context_response_fixture()?;
+        response.data.adaptive_budget = Some(adaptive_budget_fixture());
+
+        let lean = render_context_response_json_with_options(&response, lean_render_options());
+        let standard = render_context_response_json_with_options(
+            &response,
+            ContextJsonRenderOptions::from(
+                crate::core::context::ContextPackOutputOptions::for_profile(
+                    crate::core::context::ContextPackOutputProfile::Standard,
+                ),
+            ),
+        );
+
+        ensure_equal(
+            &(lean.len() < standard.len()),
+            &true,
+            "lean render must be smaller than standard, not merely different",
+        )
+    }
+
     fn context_response_fixture_with_query(query: &str) -> Result<ContextResponse, String> {
         let request = ContextRequest::from_query(query)
             .map_err(|error| format!("request rejected: {error:?}"))?;
