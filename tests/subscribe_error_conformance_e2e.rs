@@ -99,6 +99,7 @@ fn assert_recovery_action_conforms(action: &Value, context: &str) -> TestResult 
         "rebuild",
         "permission",
         "migration",
+        "command",
         "broaden",
         "narrow",
         "seed",
