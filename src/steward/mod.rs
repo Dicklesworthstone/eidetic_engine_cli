@@ -8236,7 +8236,10 @@ mod tests {
 
         // A corrupt marker must never conscript the daemon into rebuild loops.
         std::fs::write(
-            workspace.path().join(".ee").join("index-rebuild-request.json"),
+            workspace
+                .path()
+                .join(".ee")
+                .join("index-rebuild-request.json"),
             b"{not json",
         )
         .map_err(|error| error.to_string())?;
