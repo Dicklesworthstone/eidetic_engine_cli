@@ -9077,9 +9077,16 @@ pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
         Err(error) => return MemoryListReport::domain_error(error),
     };
 
+    // bd-tmv70 stopgap: `valid_to` doubles as the revision-supersession marker,
+    // so the plain readers hide any memory the author gave an expiry -- even one
+    // centuries away. Bound the read at now instead, spelled the way the writer
+    // normalizes validity timestamps so the lexical comparison lines up. This
+    // still cannot separate "superseded" from "expired"; bd-tmv70 tracks that.
+    let validity_bound = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+
     // If filtering by tag, get memory IDs first
     let memory_ids: Option<Vec<String>> = if let Some(tag) = options.tag {
-        match conn.list_memories_by_tag(&workspace_id, tag) {
+        match conn.list_memories_by_tag_valid_at(&workspace_id, tag, &validity_bound) {
             Ok(ids) => Some(ids),
             Err(e) => return MemoryListReport::error(format!("Failed to query by tag: {e}")),
         }
@@ -9088,8 +9095,12 @@ pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
     };
 
     // Get memories
-    let stored = match conn.list_memories(&workspace_id, options.level, options.include_tombstoned)
-    {
+    let stored = match conn.list_memories_valid_at(
+        &workspace_id,
+        options.level,
+        options.include_tombstoned,
+        &validity_bound,
+    ) {
         Ok(m) => m,
         Err(e) => return MemoryListReport::error(format!("Failed to list memories: {e}")),
     };

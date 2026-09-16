@@ -23881,6 +23881,59 @@ impl DbConnection {
         rows.iter().map(stored_memory_from_row).collect()
     }
 
+    /// List memories that are still temporally valid at `as_of`.
+    ///
+    /// STOPGAP for bd-tmv70; this is NOT the fix. `memories.valid_to` carries
+    /// two independent facts -- "a newer revision superseded this row" and
+    /// "the author said this stops being valid at T" -- and one nullable
+    /// column cannot represent both. `list_memories` reads the column as the
+    /// former, so ANY author-set expiry, even a date centuries out, hides the
+    /// memory from `ee memory list` entirely. This reader errs the other way:
+    /// a row whose expiry has not yet arrived is returned.
+    ///
+    /// What it CANNOT do: distinguish a superseded revision from a live row
+    /// that merely carries a future expiry -- a superseded row with a future
+    /// `valid_to` is still returned here. Only splitting the column into
+    /// separate supersession and validity fields fixes that. bd-tmv70 stays
+    /// open for that work and must not be closed by this stopgap.
+    ///
+    /// `as_of` is a parameter, never SQL `now`: a wall-clock predicate cannot
+    /// express `--as-of` and would make query results non-deterministic.
+    /// Callers pass the same `SecondsFormat::Secs` UTC spelling the writer
+    /// normalizes to, so the lexical comparison lines up. The boundary matches
+    /// `validity_status_at`, which treats a memory as expired only once
+    /// `valid_to` is strictly before the reference time.
+    pub fn list_memories_valid_at(
+        &self,
+        workspace_id: &str,
+        level: Option<&str>,
+        include_tombstoned: bool,
+        as_of: &str,
+    ) -> Result<Vec<StoredMemory>> {
+        let mut sql = String::from(
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1",
+        );
+        let mut params: Vec<Value> = vec![Value::Text(workspace_id.to_string())];
+
+        if let Some(lvl) = level {
+            sql.push_str(" AND level = ?2");
+            params.push(Value::Text(lvl.to_string()));
+        }
+
+        if !include_tombstoned {
+            params.push(Value::Text(as_of.to_owned()));
+            sql.push_str(&format!(
+                " AND tombstoned_at IS NULL AND (valid_to IS NULL OR valid_to >= ?{})",
+                params.len()
+            ));
+        }
+
+        sql.push_str(" ORDER BY id ASC");
+
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter().map(stored_memory_from_row).collect()
+    }
+
     /// List current revision heads, including rows that have been tombstoned.
     ///
     /// This is intentionally narrower than `list_memories(..., true)`: callers
@@ -25538,6 +25591,33 @@ impl DbConnection {
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(canonical_tag),
+            ],
+        )?;
+
+        rows.iter()
+            .map(|row| required_text(row, 0, DbOperation::Query, "id").map(|s| s.to_string()))
+            .collect()
+    }
+
+    /// List memory IDs carrying `tag` that are still temporally valid at `as_of`.
+    ///
+    /// STOPGAP for bd-tmv70, with exactly the limits described on
+    /// `list_memories_valid_at`: it cannot tell a superseded revision from a
+    /// live row that merely carries a future expiry.
+    pub fn list_memories_by_tag_valid_at(
+        &self,
+        workspace_id: &str,
+        tag: &str,
+        as_of: &str,
+    ) -> Result<Vec<String>> {
+        let canonical_tag = canonicalize_tag_filter(tag);
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT m.id FROM memories m JOIN memory_tags mt ON m.id = mt.memory_id WHERE m.workspace_id = ?1 AND mt.tag = ?2 AND m.tombstoned_at IS NULL AND (m.valid_to IS NULL OR m.valid_to >= ?3) ORDER BY m.id ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(canonical_tag),
+                Value::Text(as_of.to_owned()),
             ],
         )?;
 
