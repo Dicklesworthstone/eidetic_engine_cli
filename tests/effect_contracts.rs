@@ -1481,7 +1481,6 @@ fn effect_manifest_tracks_handoff_and_eval_as_real_surfaces() -> TestResult {
         "handoff completion-audit",
         "handoff inspect",
         "handoff preview",
-        "handoff resume",
     ] {
         let effect = manifest
             .get(command)
@@ -1502,6 +1501,28 @@ fn effect_manifest_tracks_handoff_and_eval_as_real_surfaces() -> TestResult {
             &format!("{command} no longer has an unavailable sentinel"),
         )?;
     }
+
+    // handoff resume is NOT read-only: verifying a tampered capsule appends an
+    // audit row, so it is declared append-only rather than having the security
+    // record suppressed to preserve a read-only claim (bd-czj3e).
+    let resume = manifest
+        .get("handoff resume")
+        .ok_or_else(|| "handoff resume not in manifest".to_string())?;
+    ensure(
+        resume.default_effect,
+        EffectClass::DurableMemoryWrite,
+        "handoff resume appends an audit row on HMAC failure",
+    )?;
+    ensure(
+        resume.mutation_contract.side_effect_class,
+        SideEffectClass::AppendOnly,
+        "handoff resume is append-only, never an overwrite",
+    )?;
+    ensure(
+        resume.write_surfaces.db_tables.contains(&"audit_log"),
+        true,
+        "handoff resume declares the audit_log table it writes",
+    )?;
 
     // handoff create writes a capsule file to a user-specified --out path,
     // so it is a workspace-file-write surface (parallel to backup create).

@@ -1468,7 +1468,20 @@ impl EffectManifest {
                 "handoff preview",
                 "Plan handoff capsule contents without writing",
             ),
-            CommandEffect::read_only("handoff resume", "Render handoff resume payload"),
+            // Resume is read-only on a well-formed capsule, but a capsule that
+            // fails HMAC verification -- or is loaded with verification bypassed
+            // -- durably appends an audit row before the command returns
+            // (`record_handoff_hmac_verify_failure_audit`,
+            // `record_handoff_insecure_load_audit`). A security record of a
+            // bypass is exactly what must survive, so the declaration follows
+            // the write rather than the write being suppressed to fit a
+            // read-only declaration. Parallel to `db check-integrity` (bd-czj3e).
+            CommandEffect::append_only_write(
+                "handoff resume",
+                vec!["audit_log"],
+                "audit row id",
+                "Render handoff resume payload, appending an audit row when capsule HMAC verification fails or is bypassed",
+            ),
             CommandEffect::read_only_db("artifact inspect", "Inspect artifact metadata"),
             CommandEffect::read_only_db("artifact list", "List registered artifacts"),
             CommandEffect::read_only_db(
