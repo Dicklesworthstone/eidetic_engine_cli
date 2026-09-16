@@ -99,7 +99,7 @@ fn remember(workspace: &str, content: &str) -> Result<String, String> {
         .ok_or_else(|| {
             format!(
                 "remember response missing memory id: {}",
-                serde_json::to_string(&parsed).unwrap_or_default()
+                parsed.to_string()
             )
         })
 }

@@ -340,8 +340,10 @@ fn dry_run_produces_byte_identical_proposals_across_two_runs() -> TestResult {
     if first != second {
         return Err(format!(
             "dry-run proposals drifted across two runs.\n--- first ---\n{}\n--- second ---\n{}",
-            serde_json::to_string_pretty(&first).unwrap_or_default(),
-            serde_json::to_string_pretty(&second).unwrap_or_default()
+            serde_json::to_string_pretty(&first)
+                .unwrap_or_else(|error| format!("<first proposal unserializable: {error}>")),
+            serde_json::to_string_pretty(&second)
+                .unwrap_or_else(|error| format!("<second proposal unserializable: {error}>"))
         ));
     }
     Ok(())

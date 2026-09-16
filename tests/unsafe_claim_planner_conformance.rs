@@ -379,7 +379,7 @@ fn assert_report_invariants(report: &Value) -> TestResult {
 }
 
 fn contains_forbidden_marker(value: &Value) -> bool {
-    let rendered = serde_json::to_string(value).unwrap_or_default();
+    let rendered = value.to_string();
     [
         "/Users/",
         "/home/",
