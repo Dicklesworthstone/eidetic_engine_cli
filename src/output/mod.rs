@@ -2798,6 +2798,9 @@ pub struct ContextJsonRenderOptions {
     /// `degraded[]` independently (bd-jikgj), so suppressing this block does
     /// not hide a blown latency budget.
     pub include_slo: bool,
+    /// bd-r1gbq: emit the `repair` hint on each `degraded[]` entry. The entry
+    /// itself is never suppressed; only the repair text is elided under `Lean`.
+    pub include_degraded_repair_hints: bool,
 }
 
 impl Default for ContextJsonRenderOptions {
@@ -2815,6 +2818,7 @@ impl Default for ContextJsonRenderOptions {
             include_quality_metrics: true,
             include_budget_detail: true,
             include_slo: true,
+            include_degraded_repair_hints: true,
         }
     }
 }
@@ -2832,6 +2836,7 @@ impl From<ContextPackOutputOptions> for ContextJsonRenderOptions {
             include_quality_metrics: options.include_quality_metrics,
             include_budget_detail: options.include_budget_detail,
             include_slo: options.include_slo,
+            include_degraded_repair_hints: options.include_degraded_repair_hints,
         }
     }
 }
@@ -2865,7 +2870,13 @@ pub fn render_context_response_json_with_options(
             options.include_non_affecting_degradations || d.category().included_by_default()
         })
     };
-    let aggregated_degraded = aggregate_context_degraded(filtered_degraded());
+    // bd-r1gbq: the entry set is unchanged by profile — only the repair text is
+    // elided under Lean. `filtered_degraded()` still decides WHICH signals
+    // appear, keeping the bd-2v6r0 pack.text/degraded[] lockstep intact.
+    let aggregated_degraded = aggregate_context_degraded_with_repair_hints(
+        filtered_degraded(),
+        options.include_degraded_repair_hints,
+    );
     let mut b = JsonBuilder::with_capacity(2048 + rendered_text.as_ref().map_or(0, String::len));
     b.field_str("schema", response.schema);
     b.field_bool("success", response.success);
@@ -3647,13 +3658,43 @@ fn aggregate_context_degraded<'a, I>(degraded: I) -> Vec<AggregatedDegradation>
 where
     I: IntoIterator<Item = &'a ContextResponseDegradation>,
 {
+    aggregate_context_degraded_with_repair_hints(degraded, true)
+}
+
+/// Aggregate context degradations, optionally eliding the repair hint
+/// (bd-r1gbq).
+///
+/// Only the repair text is affected. Code, severity and message are always
+/// emitted, so an agent can still see exactly which signals fired and look the
+/// remedy up in `docs/degraded_codes.md` or `ee doctor --json`. An empty repair
+/// is an established shape here rather than a new one:
+/// `build_aggregated_degradation` has always emitted the `repair`/`repairKind`
+/// pair only `if !degraded.repair.is_empty()`, so consumers already handle a
+/// degraded entry without one.
+///
+/// Deliberately a separate entry point rather than a signature change on
+/// `aggregate_context_degraded`: that function has four other callers whose
+/// behaviour must not move, and `build_aggregated_degradation` has ~28 call
+/// sites across unrelated surfaces (status, doctor, qos, agent, provenance)
+/// that this bead has no business touching.
+fn aggregate_context_degraded_with_repair_hints<'a, I>(
+    degraded: I,
+    include_repair_hints: bool,
+) -> Vec<AggregatedDegradation>
+where
+    I: IntoIterator<Item = &'a ContextResponseDegradation>,
+{
     aggregate_degraded_entries(degraded.into_iter().map(|entry| {
         DegradationAggregationInput::new(
             context_degradation_source(&entry.code),
             entry.code.clone(),
             entry.severity.as_str(),
             entry.message.clone(),
-            entry.repair.clone().unwrap_or_default(),
+            if include_repair_hints {
+                entry.repair.clone().unwrap_or_default()
+            } else {
+                String::new()
+            },
         )
     }))
 }
@@ -20693,6 +20734,116 @@ mod tests {
             &true,
             "lean drops the adaptive-budget explanation",
         )
+    }
+
+    // bd-r1gbq: suppress the repeated lexical-fallback repair hint by output
+    // PROFILE rather than by session. s2c10 asked for per-session suppression,
+    // which cannot work -- ee is a one-shot CLI, so there is no session to
+    // suppress across, and a persisted marker would break determinism.
+
+    fn response_with_lexical_fallback_degradation() -> Result<ContextResponse, String> {
+        let mut response = context_response_fixture()?;
+        let entry = crate::pack::ContextResponseDegradation::new(
+            "context_lexical_fallback",
+            crate::pack::ContextResponseSeverity::Medium,
+            "Search index could not satisfy the context request; assembled context from 2 deterministic lexical memory matches.".to_string(),
+            Some("ee index rebuild --workspace .".to_string()),
+        )
+        .map_err(|error| format!("degradation rejected: {error:?}"))?;
+        response.data.degraded.push(entry);
+        Ok(response)
+    }
+
+    fn degraded_entry_for<'a>(
+        parsed: &'a serde_json::Value,
+        code: &str,
+    ) -> Option<&'a serde_json::Value> {
+        parsed
+            .pointer("/degraded")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|entries| {
+                entries.iter().find(|entry| {
+                    entry.get("code").and_then(serde_json::Value::as_str) == Some(code)
+                })
+            })
+    }
+
+    #[test]
+    fn lean_elides_the_repair_hint_but_keeps_the_degraded_entry() -> TestResult {
+        // The countermetric: suppressing the hint must NOT be achieved by
+        // dropping the entry. An agent must still be able to see that this pack
+        // came from the lexical fallback.
+        let response = response_with_lexical_fallback_degradation()?;
+        let rendered = render_context_response_json_with_options(&response, lean_render_options());
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+
+        let entry = degraded_entry_for(&parsed, "context_lexical_fallback").ok_or_else(|| {
+            format!("lean must keep the context_lexical_fallback entry: {rendered}")
+        })?;
+        ensure_equal(
+            &entry.get("severity").and_then(serde_json::Value::as_str),
+            &Some("medium"),
+            "lean keeps the severity",
+        )?;
+        ensure_equal(
+            &entry
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|message| message.contains("lexical")),
+            &true,
+            "lean keeps the message explaining the retrieval mode",
+        )?;
+        ensure_equal(
+            &entry.get("repair").is_none(),
+            &true,
+            "lean elides the repeated repair hint",
+        )?;
+        ensure_equal(
+            &entry.get("repairKind").is_none(),
+            &true,
+            "repairKind is derived from repair and must go with it",
+        )
+    }
+
+    #[test]
+    fn standard_and_verbose_keep_the_repair_hint() -> TestResult {
+        for profile in [
+            crate::core::context::ContextPackOutputProfile::Standard,
+            crate::core::context::ContextPackOutputProfile::Verbose,
+        ] {
+            let response = response_with_lexical_fallback_degradation()?;
+            let rendered = render_context_response_json_with_options(
+                &response,
+                ContextJsonRenderOptions::from(
+                    crate::core::context::ContextPackOutputOptions::for_profile(profile),
+                ),
+            );
+            let parsed: serde_json::Value =
+                serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+            let entry = degraded_entry_for(&parsed, "context_lexical_fallback")
+                .ok_or_else(|| format!("{profile:?} must keep the entry: {rendered}"))?;
+            ensure_equal(
+                &entry.get("repair").and_then(serde_json::Value::as_str),
+                &Some("ee index rebuild --workspace ."),
+                "non-lean profiles keep the repair hint verbatim",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn repair_hint_elision_is_deterministic_across_identical_renders() -> TestResult {
+        // The property that per-session suppression could not have: the same
+        // inputs and the same profile produce byte-identical output every time,
+        // no matter how often it is called.
+        let response = response_with_lexical_fallback_degradation()?;
+        let first = render_context_response_json_with_options(&response, lean_render_options());
+        let second = render_context_response_json_with_options(&response, lean_render_options());
+        let third = render_context_response_json_with_options(&response, lean_render_options());
+
+        ensure_equal(&first, &second, "repeated lean renders are byte-identical")?;
+        ensure_equal(&second, &third, "a third lean render does not drift")
     }
 
     #[test]

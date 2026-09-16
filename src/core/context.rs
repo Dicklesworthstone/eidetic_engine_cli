@@ -784,6 +784,27 @@ pub struct ContextPackOutputOptions {
     /// latency budget was reported, and dropping this block would have made
     /// `--compact` hide it. `false` under `Lean`.
     pub include_slo: bool,
+    /// bd-r1gbq: emit the `repair` hint on each `degraded[]` entry.
+    ///
+    /// The field report behind bd-lexical-fallback-hint-suppression-s2c10 was
+    /// that a degraded workspace repeats the same `ee index rebuild` hint on
+    /// every single pack. That bead asked for per-session suppression, which
+    /// cannot work: `ee` is a one-shot CLI, so there is no session to suppress
+    /// across, and a persisted marker would break the AGENTS.md determinism
+    /// contract (two identical invocations must be byte-identical).
+    ///
+    /// Suppressing by PROFILE is deterministic instead: the output is a pure
+    /// function of (inputs, profile), and `refresh_context_pack_hash` already
+    /// takes `ContextPackOutputOptions` as a hash input, so the hash is already
+    /// profile-aware.
+    ///
+    /// The degraded ENTRY is never suppressed — code, severity and message are
+    /// always emitted. Only the repair text is elided, and only when the caller
+    /// asked for less. Demoting the entry's `DegradedCategory` to achieve this
+    /// would drop the whole entry and hide that a pack came from the lexical
+    /// fallback at all; see the explicit arm in `crate::pack::category_for_code`.
+    /// `false` under `Lean`.
+    pub include_degraded_repair_hints: bool,
 }
 
 impl Default for ContextPackOutputOptions {
@@ -814,6 +835,7 @@ impl ContextPackOutputOptions {
                 include_quality_metrics: false,
                 include_budget_detail: false,
                 include_slo: false,
+                include_degraded_repair_hints: false,
             },
             ContextPackOutputProfile::Standard => Self {
                 profile,
@@ -831,6 +853,7 @@ impl ContextPackOutputOptions {
                 include_quality_metrics: true,
                 include_budget_detail: true,
                 include_slo: true,
+                include_degraded_repair_hints: true,
             },
             ContextPackOutputProfile::Verbose => Self {
                 profile,
@@ -846,6 +869,7 @@ impl ContextPackOutputOptions {
                 include_quality_metrics: true,
                 include_budget_detail: true,
                 include_slo: true,
+                include_degraded_repair_hints: true,
             },
         }
     }
@@ -877,6 +901,7 @@ impl ContextPackOutputOptions {
             include_quality_metrics: self.include_quality_metrics,
             include_budget_detail: self.include_budget_detail,
             include_slo: self.include_slo,
+            include_degraded_repair_hints: self.include_degraded_repair_hints,
         }
     }
 

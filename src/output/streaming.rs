@@ -557,6 +557,7 @@ pub fn context_response_stream_frames(
             include_quality_metrics: true,
             include_budget_detail: true,
             include_slo: true,
+            include_degraded_repair_hints: true,
         },
     );
     let root: JsonValue = serde_json::from_str(&batch_json)
