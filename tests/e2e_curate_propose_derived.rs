@@ -305,9 +305,17 @@ fn curate_propose_derived_dry_run_does_not_mutate_database() -> TestResult {
         "--json",
         "curate",
         "candidates",
+        // `--all` means "all statuses" and is rejected alongside `--status`
+        // (src/cli/mod.rs:58061, exclusive since a809035f0 on 2026-05-01 --
+        // three weeks BEFORE this test was written). Passing both made the
+        // listing exit 1 with a usage error, so the dry-run mutation check
+        // below never ran: this row was an untested control, not a failure.
+        //
+        // `--status pending` is what the assertion actually wants, and it is
+        // also the documented default. Keeping it explicit so the intent
+        // survives a future change to that default.
         "--status",
         "pending",
-        "--all",
     ])?;
     ensure(
         listing.status.success(),
