@@ -13844,6 +13844,119 @@ mod tests {
         )
     }
 
+    /// bd-reality-core-convergence-1azkt.13, plan section C negative matrix:
+    /// the "interrupted restore" class, and its clause *"every failure must
+    /// leave the destination recoverable"*.
+    ///
+    /// I first scoped this as needing a fault-injection harness. Reading the
+    /// code showed that was wrong, and the correction is worth recording:
+    ///
+    /// - `restore_backup_to_side_path` takes no `Cx`, so there is no
+    ///   cooperative cancellation to drive. "Interrupted" here means the
+    ///   process died, not that it was asked to stop.
+    /// - The atomic-publish half is **already proven** by
+    ///   `restore_publication_never_replaces_an_existing_store`, which covers
+    ///   the `renameat_with(NOREPLACE)` in all three destination states.
+    /// - What an interruption actually leaves is an ordinary directory:
+    ///   `side_path/.ee-restore-<uuid7>`, assembled at 0700 *outside* the
+    ///   active `.ee` marker precisely so a half-restored store is never
+    ///   discoverable. That is reproducible with a fixture, so no harness is
+    ///   needed and none is filed.
+    ///
+    /// The untested consequence is what a *retry* then does, which is the
+    /// operator-facing half of "recoverable".
+    #[test]
+    fn interrupted_restore_leaves_no_discoverable_store_and_fails_a_retry_closed() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(workspace.join("backups")),
+            label: Some("interrupted".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        // Canonicalized for the same host-independence reason as the
+        // side-path isolation tests: the scan does not resolve symlinks.
+        let side_root = tempdir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+
+        // Simulate the aftermath of a restore killed mid-assembly: its staging
+        // directory survives, carrying a partially written store.
+        let interrupted = side_root.join("interrupted-target");
+        let orphan_staging = interrupted.join(format!(".ee-restore-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(orphan_staging.join(WORKSPACE_MARKER))
+            .map_err(|error| error.to_string())?;
+        let orphan_db = orphan_staging.join(WORKSPACE_MARKER).join(DEFAULT_DB_FILE);
+        fs::write(&orphan_db, b"half-written store").map_err(|error| error.to_string())?;
+
+        // 1. The partial store is NOT discoverable as a workspace. This is the
+        //    invariant the staging-outside-the-marker design exists to give.
+        ensure(
+            !interrupted.join(WORKSPACE_MARKER).exists(),
+            "an interrupted restore must not leave a discoverable .ee marker",
+        )?;
+
+        // 2. A retry against the same side path fails CLOSED rather than
+        //    assembling alongside the debris.
+        let retry = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace.clone(),
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path: interrupted.clone(),
+            restore_graph_cache: false,
+            dry_run: false,
+        })
+        .err()
+        .ok_or_else(|| "a retry onto interrupted debris must be refused".to_owned())?;
+        ensure(
+            retry
+                .message()
+                .contains("is not empty; restore refuses to overwrite existing data"),
+            format!("unexpected retry refusal: {}", retry.message()),
+        )?;
+
+        // 3. The refusal touched nothing, so the debris stays inspectable.
+        ensure_equal(
+            fs::read(&orphan_db)
+                .map_err(|error| error.to_string())?
+                .as_slice(),
+            b"half-written store".as_slice(),
+            "a refused retry must leave the interrupted staging bytes intact",
+        )?;
+        ensure(
+            !interrupted.join(WORKSPACE_MARKER).exists(),
+            "a refused retry must not create a marker either",
+        )?;
+
+        // 4. Control, and the actual meaning of "recoverable": the SAME backup
+        //    restores cleanly to a fresh side path. Without this arm the
+        //    refusal above could equally mean the backup was unusable, and the
+        //    test would assert nothing about recoverability at all.
+        let fresh = side_root.join("fresh-target");
+        restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path: fresh.clone(),
+            restore_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| {
+            format!(
+                "the same backup must still restore to a fresh side path: {}",
+                error.message()
+            )
+        })?;
+        ensure(
+            fresh.join(WORKSPACE_MARKER).join(DEFAULT_DB_FILE).is_file(),
+            "a successful restore must publish a real store at the fresh side path",
+        )
+    }
+
     fn remap_workspace_fixture(id: &str) -> crate::db::StoredWorkspace {
         crate::db::StoredWorkspace {
             id: id.to_owned(),
