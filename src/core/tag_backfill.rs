@@ -427,9 +427,201 @@ fn slugify_attribution(raw: &str) -> Option<String> {
     Some(slug)
 }
 
+/// One memory considered by the backfill, as read from the store.
+///
+/// `content` MUST be the untruncated body. List views may truncate (see
+/// `MemorySummary::content_truncated`), and deriving from a truncated body
+/// would silently miss evidence near the end — producing a *different*,
+/// quietly worse answer rather than an obviously broken one. Callers that
+/// only hold a truncated body must set `content_truncated` so the planner
+/// refuses the row instead of guessing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackfillCandidate {
+    /// Memory id.
+    pub memory_id: String,
+    /// Structured memory kind.
+    pub kind: String,
+    /// Full memory body.
+    pub content: String,
+    /// True when `content` was truncated by the read path.
+    pub content_truncated: bool,
+    /// Tags the memory already carries.
+    pub existing_tags: Vec<String>,
+}
+
+/// Why a candidate was not given tags.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SkipReason {
+    /// The memory already carries tags; this backfill only targets rows that
+    /// are completely dark to `--tag`.
+    AlreadyTagged,
+    /// Nothing in the memory justified a tag. A normal, honest outcome.
+    NoEvidence,
+    /// The body was truncated, so absence of evidence is not evidence of
+    /// absence. Refused rather than guessed.
+    ContentTruncated,
+}
+
+impl SkipReason {
+    /// Stable lowercase wire form.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AlreadyTagged => "already_tagged",
+            Self::NoEvidence => "no_evidence",
+            Self::ContentTruncated => "content_truncated",
+        }
+    }
+}
+
+/// A single planned mutation: the tags to add to one memory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackfillProposal {
+    /// Memory that would be patched.
+    pub memory_id: String,
+    /// Tags to add, sorted and free of tags the memory already has.
+    pub add_tags: Vec<String>,
+    /// The derivations backing `add_tags`, in the same order.
+    pub derivations: Vec<TagDerivation>,
+}
+
+/// A candidate the plan intentionally left alone.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackfillSkip {
+    /// Memory that was skipped.
+    pub memory_id: String,
+    /// Why.
+    pub reason: SkipReason,
+}
+
+/// The full dry-run plan: what would change, and what deliberately would not.
+///
+/// Skips are first-class rather than silently dropped, because "we looked at
+/// 900 memories and could justify tags for 240" is the honest report an
+/// operator needs in order to trust the 240.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BackfillPlan {
+    /// Memories that would be patched, ordered by memory id.
+    pub proposals: Vec<BackfillProposal>,
+    /// Memories deliberately untouched, ordered by memory id.
+    pub skipped: Vec<BackfillSkip>,
+}
+
+impl BackfillPlan {
+    /// Number of memories that would be mutated.
+    #[must_use]
+    pub fn proposed_memory_count(&self) -> usize {
+        self.proposals.len()
+    }
+
+    /// Total number of tags that would be added across all memories.
+    #[must_use]
+    pub fn proposed_tag_count(&self) -> usize {
+        self.proposals
+            .iter()
+            .map(|proposal| proposal.add_tags.len())
+            .sum()
+    }
+
+    /// True when applying this plan would write nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.proposals.is_empty()
+    }
+}
+
+/// Build a deterministic backfill plan over `candidates`.
+///
+/// Idempotency comes from the plan, not from the writer: this backfill
+/// targets only rows that are completely tag-less, so once a row has been
+/// given tags it is skipped as [`SkipReason::AlreadyTagged`] on every later
+/// run. A second pass over an already-applied workspace therefore produces
+/// an empty plan and the apply path performs no write at all, without
+/// relying on the store to deduplicate.
+#[must_use]
+pub fn plan_backfill(candidates: &[BackfillCandidate]) -> BackfillPlan {
+    let mut proposals = Vec::new();
+    let mut skipped = Vec::new();
+
+    for candidate in candidates {
+        if !candidate.existing_tags.is_empty() {
+            skipped.push(BackfillSkip {
+                memory_id: candidate.memory_id.clone(),
+                reason: SkipReason::AlreadyTagged,
+            });
+            continue;
+        }
+        if candidate.content_truncated {
+            skipped.push(BackfillSkip {
+                memory_id: candidate.memory_id.clone(),
+                reason: SkipReason::ContentTruncated,
+            });
+            continue;
+        }
+
+        let derivations = derive_tags(&candidate.kind, &candidate.content);
+        if derivations.is_empty() {
+            skipped.push(BackfillSkip {
+                memory_id: candidate.memory_id.clone(),
+                reason: SkipReason::NoEvidence,
+            });
+            continue;
+        }
+
+        let add_tags = derivations
+            .iter()
+            .map(|derivation| derivation.tag.clone())
+            .collect();
+        proposals.push(BackfillProposal {
+            memory_id: candidate.memory_id.clone(),
+            add_tags,
+            derivations,
+        });
+    }
+
+    proposals.sort_by(|left, right| left.memory_id.cmp(&right.memory_id));
+    skipped.sort_by(|left, right| left.memory_id.cmp(&right.memory_id));
+    BackfillPlan { proposals, skipped }
+}
+
+/// Render one proposal as a single JSONL audit line.
+///
+/// Emitted for every mutation so the operator has a durable, greppable record
+/// of exactly which tag was added to which memory and what text justified it.
+/// `applied` distinguishes a dry-run preview from a real write, so the two
+/// logs can never be mistaken for each other.
+#[must_use]
+pub fn proposal_log_line(proposal: &BackfillProposal, applied: bool) -> String {
+    let derivations: Vec<serde_json::Value> = proposal
+        .derivations
+        .iter()
+        .map(|derivation| {
+            serde_json::json!({
+                "tag": derivation.tag,
+                "rule": derivation.rule.as_str(),
+                "evidence": derivation.evidence,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "schema": TAG_BACKFILL_LOG_SCHEMA_V1,
+        "memoryId": proposal.memory_id,
+        "addTags": proposal.add_tags,
+        "derivations": derivations,
+        "applied": applied,
+    })
+    .to_string()
+}
+
+/// Schema id for one JSONL mutation-log line.
+pub const TAG_BACKFILL_LOG_SCHEMA_V1: &str = "ee.tag_backfill.log.v1";
+
 #[cfg(test)]
 mod tests {
-    use super::{TagRule, derive_tags, slugify_attribution};
+    use super::{
+        BackfillCandidate, SkipReason, TagRule, derive_tags, plan_backfill, proposal_log_line,
+        slugify_attribution,
+    };
 
     fn tags(kind: &str, content: &str) -> Vec<String> {
         derive_tags(kind, content)
@@ -627,6 +819,165 @@ mod tests {
         assert_eq!(slugify_attribution("  "), None);
         assert_eq!(slugify_attribution("12345"), None, "digits are not a name");
         assert_eq!(slugify_attribution("x"), None, "too short to be a name");
+    }
+
+    fn candidate(id: &str, kind: &str, content: &str) -> BackfillCandidate {
+        BackfillCandidate {
+            memory_id: id.to_owned(),
+            kind: kind.to_owned(),
+            content: content.to_owned(),
+            content_truncated: false,
+            existing_tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn plan_skips_memories_that_already_carry_tags() {
+        let mut already = candidate("mem_b", "decision", "anything");
+        already.existing_tags = vec!["genre:decision".to_owned()];
+        let plan = plan_backfill(&[already]);
+
+        assert!(
+            plan.is_empty(),
+            "tagged rows are not this backfill's target"
+        );
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(plan.skipped[0].reason, SkipReason::AlreadyTagged);
+    }
+
+    #[test]
+    fn plan_refuses_truncated_content_instead_of_guessing() {
+        // Absence of evidence in a truncated body is not evidence of absence:
+        // the marker may simply have been cut off. Refuse the row.
+        let mut truncated = candidate("mem_a", "decision", "Position in $RDVT...");
+        truncated.content_truncated = true;
+        let plan = plan_backfill(&[truncated]);
+
+        assert!(plan.is_empty(), "a truncated body must not be derived from");
+        assert_eq!(plan.skipped[0].reason, SkipReason::ContentTruncated);
+    }
+
+    #[test]
+    fn plan_records_no_evidence_rather_than_dropping_the_row() {
+        let plan = plan_backfill(&[candidate("mem_a", "some-custom-kind", "nothing here")]);
+
+        assert!(plan.is_empty());
+        assert_eq!(
+            plan.skipped[0].reason,
+            SkipReason::NoEvidence,
+            "an unjustifiable row must be reported, not silently omitted"
+        );
+    }
+
+    #[test]
+    fn plan_proposes_only_justified_tags() {
+        let plan = plan_backfill(&[candidate(
+            "mem_a",
+            "decision",
+            "Underwrite $RDVT. Analyst: Jane Roe",
+        )]);
+
+        assert_eq!(plan.proposed_memory_count(), 1);
+        assert_eq!(
+            plan.proposals[0].add_tags,
+            vec!["analyst:jane-roe", "genre:decision", "ticker:rdvt"]
+        );
+        assert_eq!(
+            plan.proposals[0].derivations.len(),
+            plan.proposals[0].add_tags.len(),
+            "every proposed tag must carry its derivation"
+        );
+        assert_eq!(plan.proposed_tag_count(), 3);
+    }
+
+    #[test]
+    fn applying_the_plan_makes_a_second_run_a_no_op() {
+        let first = plan_backfill(&[candidate("mem_a", "decision", "Underwrite $RDVT.")]);
+        assert!(!first.is_empty(), "first run must have work to do");
+
+        // Simulate the apply: the row now carries the tags it was given.
+        let mut applied = candidate("mem_a", "decision", "Underwrite $RDVT.");
+        applied.existing_tags = first.proposals[0].add_tags.clone();
+        let second = plan_backfill(&[applied]);
+
+        assert!(
+            second.is_empty(),
+            "re-running over an applied workspace must write nothing"
+        );
+        assert_eq!(second.proposed_tag_count(), 0);
+    }
+
+    #[test]
+    fn plan_is_deterministic_and_ordered_by_memory_id() {
+        let candidates = vec![
+            candidate("mem_c", "decision", "Underwrite $RDVT."),
+            candidate("mem_a", "fact", "Nothing notable."),
+            candidate("mem_b", "rule", "Run fmt before release."),
+        ];
+        let first = plan_backfill(&candidates);
+        let second = plan_backfill(&candidates);
+        assert_eq!(first, second, "planning must be a pure function");
+
+        let proposed: Vec<&str> = first
+            .proposals
+            .iter()
+            .map(|proposal| proposal.memory_id.as_str())
+            .collect();
+        let mut sorted = proposed.clone();
+        sorted.sort_unstable();
+        assert_eq!(proposed, sorted, "proposals must be memory-id ordered");
+
+        let skipped: Vec<&str> = first
+            .skipped
+            .iter()
+            .map(|skip| skip.memory_id.as_str())
+            .collect();
+        let mut sorted_skips = skipped.clone();
+        sorted_skips.sort_unstable();
+        assert_eq!(skipped, sorted_skips, "skips must be memory-id ordered");
+    }
+
+    #[test]
+    fn log_line_records_the_tag_its_rule_and_its_evidence() {
+        let plan = plan_backfill(&[candidate("mem_a", "fact", "Bought $RDVT today.")]);
+        let line = proposal_log_line(&plan.proposals[0], true);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&line).expect("log line must be valid JSON");
+
+        assert_eq!(parsed["schema"], super::TAG_BACKFILL_LOG_SCHEMA_V1);
+        assert_eq!(parsed["memoryId"], "mem_a");
+        assert_eq!(parsed["applied"], true);
+
+        let derivations = parsed["derivations"]
+            .as_array()
+            .expect("derivations must be an array");
+        let ticker = derivations
+            .iter()
+            .find(|entry| entry["tag"] == "ticker:rdvt")
+            .expect("ticker derivation must be logged");
+        assert_eq!(ticker["rule"], "ticker_cashtag");
+        assert_eq!(
+            ticker["evidence"], "$RDVT",
+            "the log must record the span that justified the tag"
+        );
+    }
+
+    #[test]
+    fn dry_run_and_applied_log_lines_are_distinguishable() {
+        let plan = plan_backfill(&[candidate("mem_a", "fact", "Bought $RDVT today.")]);
+        let preview = proposal_log_line(&plan.proposals[0], false);
+        let applied = proposal_log_line(&plan.proposals[0], true);
+        assert_ne!(
+            preview, applied,
+            "a preview log must never be mistakable for a write log"
+        );
+    }
+
+    #[test]
+    fn skip_reason_wire_names_are_stable() {
+        assert_eq!(SkipReason::AlreadyTagged.as_str(), "already_tagged");
+        assert_eq!(SkipReason::NoEvidence.as_str(), "no_evidence");
+        assert_eq!(SkipReason::ContentTruncated.as_str(), "content_truncated");
     }
 
     #[test]
