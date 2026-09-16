@@ -47,7 +47,21 @@ SUITE_HOST="$(uname -n)"
 SUITE_OS="$(uname -s)"
 SUITE_ROOT="${EE_E2E_TMPDIR:-${TMPDIR:-/tmp}}/ee-field-report-suite-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 mkdir -p "$SUITE_ROOT"
+# Record WHICH binary produced every verdict below. Without this a reader cannot
+# tell a pre-fix run from a post-fix one, and "executed" becomes an unfalsifiable
+# claim. EE_BIN is resolved by the harness ahead of EE_BINARY and ahead of the
+# cargo target-dir fallbacks, so a stale target-dir build cannot be used silently.
+SUITE_EE_BIN="$EE_BIN"
+SUITE_EE_VERSION="$("$EE_BIN" --version 2>/dev/null | head -1)"
+SUITE_EE_MTIME="$(date -u -r "$(command -v "$EE_BIN" || printf '%s' "$EE_BIN")" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf 'unknown')"
 printf '[suite] root=%s host=%s os=%s\n' "$SUITE_ROOT" "$SUITE_HOST" "$SUITE_OS" >&2
+printf '[suite] ee_bin=%s version=%s mtime=%s cargo_toml_version=%s\n' \
+    "$SUITE_EE_BIN" "$SUITE_EE_VERSION" "$SUITE_EE_MTIME" \
+    "$(awk -F'"' '/^version = /{print $2; exit}' "$SUITE_DIR/../Cargo.toml" 2>/dev/null)" >&2
+log_event suite_binary phase setup ee_bin "$SUITE_EE_BIN" \
+    ee_version "$SUITE_EE_VERSION" ee_mtime "$SUITE_EE_MTIME" \
+    cargo_toml_version "$(awk -F'"' '/^version = /{print $2; exit}' "$SUITE_DIR/../Cargo.toml" 2>/dev/null)" \
+    host "$SUITE_HOST" os "$SUITE_OS"
 
 # arm_workspace <bead_id> <arm_name> -> prints a fresh workspace path
 arm_workspace() {
