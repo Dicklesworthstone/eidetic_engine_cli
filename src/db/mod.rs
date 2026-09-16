@@ -25963,6 +25963,52 @@ impl DbConnection {
             .collect()
     }
 
+    /// Distinct tags carried by memories that are live AND in force at `as_of`.
+    ///
+    /// Applicability twin of [`Self::list_all_tags`] (bd-tmv70). `list_all_tags`
+    /// answers the IDENTITY question -- which tags are on current revisions --
+    /// and deliberately ignores author expiry. A tag list shown to a user wants
+    /// the APPLICABILITY answer, so it must also bound on `valid_to`.
+    pub fn list_all_tags_valid_at(&self, workspace_id: &str, as_of: &str) -> Result<Vec<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT DISTINCT mt.tag FROM memory_tags mt JOIN memories m ON mt.memory_id = m.id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND m.superseded_at IS NULL AND (m.valid_to IS NULL OR m.valid_to >= ?2) ORDER BY mt.tag ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(as_of.to_owned()),
+            ],
+        )?;
+        rows.iter()
+            .map(|row| required_text(row, 0, DbOperation::Query, "tag").map(|s| s.to_string()))
+            .collect()
+    }
+
+    /// Tag usage counts over memories that are live AND in force at `as_of`.
+    ///
+    /// Applicability twin of [`Self::get_tag_counts`]; see
+    /// [`Self::list_all_tags_valid_at`] for why both exist.
+    pub fn get_tag_counts_valid_at(
+        &self,
+        workspace_id: &str,
+        as_of: &str,
+    ) -> Result<Vec<TagCount>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT mt.tag, COUNT(*) as count FROM memory_tags mt JOIN memories m ON mt.memory_id = m.id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND m.superseded_at IS NULL AND (m.valid_to IS NULL OR m.valid_to >= ?2) GROUP BY mt.tag ORDER BY count DESC, mt.tag ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(as_of.to_owned()),
+            ],
+        )?;
+        rows.iter()
+            .map(|row| {
+                let tag = required_text(row, 0, DbOperation::Query, "tag")?.to_string();
+                let count = required_u32(row, 1, DbOperation::Query, "count")?;
+                Ok(TagCount { tag, count })
+            })
+            .collect()
+    }
+
     /// Replace all tags on a memory atomically.
     pub fn set_memory_tags(&self, memory_id: &str, tags: &[String]) -> Result<()> {
         let mut changed = self.execute_for(
@@ -52125,11 +52171,36 @@ mod tests {
         };
         connection.insert_memory("mem_00000000000000000000000030", &expired_rule)?;
 
+        // bd-tmv70: list_memories answers the IDENTITY question -- which rows are
+        // current revisions -- and deliberately ignores author expiry, so the
+        // expired-but-unsuperseded row IS returned. Before V123 `valid_to IS NULL`
+        // did double duty and hid it, which is what this used to assert.
         let all = connection.list_memories("wsp_01234567890123456789012345", None, false)?;
-        ensure_equal(&all.len(), &2, "list all returns 2")?;
+        ensure_equal(
+            &all.len(),
+            &3,
+            "identity list returns all current revisions",
+        )?;
         ensure(
-            all.iter().all(|memory| memory.valid_to.is_none()),
-            "default list excludes superseded memories",
+            all.iter().any(|memory| memory.valid_to.is_some()),
+            "identity list includes an expired-but-current revision",
+        )?;
+        // ...and the APPLICABILITY reader is the one that bounds on valid_to.
+        // Asserting both is what makes this a test of the split.
+        let in_force = connection.list_memories_valid_at(
+            "wsp_01234567890123456789012345",
+            None,
+            false,
+            "2026-09-16T00:00:00Z",
+        )?;
+        ensure_equal(
+            &in_force.len(),
+            &2,
+            "applicability list excludes the expired row",
+        )?;
+        ensure(
+            in_force.iter().all(|memory| memory.valid_to.is_none()),
+            "applicability list returns only in-force memories",
         )?;
         ensure(
             all.iter().all(|memory| memory.valid_from.is_some()),
@@ -55787,13 +55858,22 @@ mod tests {
         };
         connection.insert_memory("mem_tagcount000000000000000004", &expired)?;
 
+        // bd-tmv70: the identity readers ignore author expiry, so the expired
+        // row's tag IS present; the applicability twins are what exclude it.
         let all_tags = connection.list_all_tags("wsp_01234567890123456789012345")?;
         ensure(
-            !all_tags.contains(&"expired-only".to_string()),
-            "live tag list excludes expired-only tag",
+            all_tags.contains(&"expired-only".to_string()),
+            "identity tag list includes an expired-but-current memory's tag",
+        )?;
+        let in_force_tags = connection
+            .list_all_tags_valid_at("wsp_01234567890123456789012345", "2026-09-16T00:00:00Z")?;
+        ensure(
+            !in_force_tags.contains(&"expired-only".to_string()),
+            "applicability tag list excludes expired-only tag",
         )?;
 
-        let counts = connection.get_tag_counts("wsp_01234567890123456789012345")?;
+        let counts = connection
+            .get_tag_counts_valid_at("wsp_01234567890123456789012345", "2026-09-16T00:00:00Z")?;
         ensure_equal(&counts.len(), &2, "two unique tags")?;
         ensure_equal(
             &counts[0].tag.as_str(),
@@ -55871,9 +55951,14 @@ mod tests {
         connection.insert_memory("mem_bytag000000000000000000002", &mem2)?;
         connection.insert_memory("mem_bytag000000000000000000003", &mem3)?;
 
-        let memories =
-            connection.list_memories_by_tag("wsp_01234567890123456789012345", "target")?;
-        ensure_equal(&memories.len(), &1, "one live memory with target tag")?;
+        let memories = connection.list_memories_by_tag_valid_at(
+            "wsp_01234567890123456789012345",
+            "target",
+            "2026-09-16T00:00:00Z",
+        )?;
+        // bd-tmv70: the applicability reader is the one that excludes the
+        // expired row. list_memories_by_tag answers identity and would return it.
+        ensure_equal(&memories.len(), &1, "one in-force memory with target tag")?;
         ensure(
             memories.contains(&"mem_bytag000000000000000000001".to_string()),
             "first memory included",

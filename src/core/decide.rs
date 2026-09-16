@@ -1137,13 +1137,24 @@ mod tests {
         let second = decide_record(&second_options).map_err(|error| error.to_string())?;
 
         ensure_equal(&second.decision.chain_depth, &1, "chain depth")?;
+        // bd-tmv70: supersession is recorded in `superseded_at`, and `valid_to`
+        // must be left alone -- it is the author's temporal bound and a
+        // supersede has no business writing it. This used to assert
+        // `valid_to.is_some()`, which pinned the pre-V123 conflation. Both
+        // halves are asserted so this tests the SPLIT rather than either column.
         ensure(
             second
                 .superseded
                 .as_ref()
-                .and_then(|item| item.valid_to.as_ref())
-                .is_some(),
-            "predecessor valid_to is set",
+                .is_some_and(|item| item.superseded),
+            "predecessor is marked superseded",
+        )?;
+        ensure(
+            second
+                .superseded
+                .as_ref()
+                .is_some_and(|item| item.valid_to.is_none()),
+            "supersede must not write the author's valid_to",
         )?;
 
         let heads = decide_list(&DecideListOptions {
