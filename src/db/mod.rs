@@ -10399,6 +10399,132 @@ DROP TABLE feedback_events_v120;
     "blake3:v121_evidence_feedback_targets_2026_09_01",
 );
 
+/// Typed native pack-item identity (ADR 0085, bd-vp087 slice b).
+///
+/// `pack_items` keyed every row on a `MemoryId`, so an applied procedural rule
+/// or an imported evidence span could only enter a pack by riding in on a
+/// linked memory. This rebuilds the table around exactly one native foreign key
+/// per row — `memory_id | rule_id | evidence_span_id` — with the typed identity
+/// derived from whichever column is populated. There is deliberately no
+/// `(kind, raw_id)` authority column: two sources of truth for one identity can
+/// disagree.
+///
+/// **This migration is permissive, not behavioural.** Nothing writes a rule or
+/// evidence row until the `ee.pack.v3` contract lands (slice c); existing rows
+/// keep their `memory_id` and every current writer continues to satisfy the new
+/// constraints unchanged.
+///
+/// Two things here are deliberate and would be wrong to "tidy":
+///
+/// 1. **The rank guard runs first.** ADR 0085 requires a unique selected rank
+///    per pack, but the old schema only had a NON-unique
+///    `idx_pack_items_rank`, so existing stores may already contain duplicate
+///    ranks. Without the guard the `INSERT … SELECT` below would fail
+///    mid-rebuild with a bare `UNIQUE constraint failed`, which tells an
+///    operator that something is wrong and nothing about what. The guard
+///    aborts before any table is touched and names the exact query that lists
+///    the offending rows.
+/// 2. **Entity foreign keys are restricted, not `ON DELETE CASCADE`.** The old
+///    `memory_id` cascaded, so physically deleting a memory silently erased it
+///    from every historical pack — a pack record that quietly loses items is
+///    not a record. ADR 0085 requires soft lifecycle transitions instead, and a
+///    future hard purge must explicitly purge or anonymize pack rows. The
+///    `pack_id` foreign key still cascades: deleting a whole pack legitimately
+///    owns its item rows.
+pub const V122_TYPED_PACK_ITEM_IDENTITY: Migration = Migration::new(
+    122,
+    "typed_pack_item_identity",
+    r#"
+CREATE TABLE pack_items_rank_guard_v122 (
+    duplicate_rank_groups INTEGER NOT NULL
+);
+
+CREATE TRIGGER pack_items_rank_guard_v122_refuse
+BEFORE INSERT ON pack_items_rank_guard_v122
+FOR EACH ROW WHEN NEW.duplicate_rank_groups > 0
+BEGIN
+    SELECT RAISE(ABORT, 'bd-vp087/V122: pack_items contains duplicate (pack_id, rank) rows, which the typed-entity schema forbids. No table was modified. List them with: SELECT pack_id, rank, COUNT(*) FROM pack_items GROUP BY pack_id, rank HAVING COUNT(*) > 1;');
+END;
+
+INSERT INTO pack_items_rank_guard_v122 (duplicate_rank_groups)
+SELECT COUNT(*) FROM (
+    SELECT pack_id, rank
+    FROM pack_items
+    GROUP BY pack_id, rank
+    HAVING COUNT(*) > 1
+);
+
+DROP TRIGGER pack_items_rank_guard_v122_refuse;
+DROP TABLE pack_items_rank_guard_v122;
+
+DROP INDEX IF EXISTS idx_pack_items_memory;
+DROP INDEX IF EXISTS idx_pack_items_section;
+DROP INDEX IF EXISTS idx_pack_items_rank;
+DROP INDEX IF EXISTS idx_pack_items_trust_class;
+
+ALTER TABLE pack_items RENAME TO pack_items_v121;
+
+CREATE TABLE pack_items (
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    memory_id TEXT REFERENCES memories(id),
+    rule_id TEXT REFERENCES procedural_rules(id),
+    evidence_span_id TEXT REFERENCES evidence_spans(id),
+    rank INTEGER NOT NULL CHECK (rank > 0),
+    section TEXT NOT NULL CHECK (section IN (
+        'procedural_rules', 'decisions', 'failures', 'evidence', 'artifacts'
+    )),
+    estimated_tokens INTEGER NOT NULL CHECK (estimated_tokens > 0),
+    relevance REAL NOT NULL CHECK (relevance >= 0.0 AND relevance <= 1.0),
+    utility REAL NOT NULL CHECK (utility >= 0.0 AND utility <= 1.0),
+    why TEXT NOT NULL CHECK (length(trim(why)) > 0),
+    diversity_key TEXT CHECK (diversity_key IS NULL OR length(trim(diversity_key)) > 0),
+    provenance_json TEXT NOT NULL DEFAULT '{"schema":"ee.pack_item.provenance.v1","entries":[]}'
+        CHECK (json_valid(provenance_json)),
+    trust_class TEXT NOT NULL DEFAULT 'agent_assertion' CHECK (trust_class IN (
+        'human_explicit', 'peer_human_attested', 'agent_validated',
+        'agent_assertion', 'cass_evidence', 'legacy_import'
+    )),
+    trust_subclass TEXT CHECK (trust_subclass IS NULL OR length(trim(trust_subclass)) > 0),
+    CHECK (
+        (CASE WHEN memory_id IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN rule_id IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN evidence_span_id IS NULL THEN 0 ELSE 1 END) = 1
+    ),
+    CHECK (memory_id IS NULL OR (memory_id GLOB 'mem_*' AND length(memory_id) = 30)),
+    CHECK (rule_id IS NULL OR (rule_id GLOB 'rule_*' AND length(rule_id) = 31)),
+    CHECK (evidence_span_id IS NULL OR (evidence_span_id GLOB 'ev_*' AND length(evidence_span_id) = 29)),
+    CHECK (rule_id IS NULL OR section = 'procedural_rules'),
+    CHECK (evidence_span_id IS NULL OR section = 'evidence'),
+    UNIQUE (pack_id, rank),
+    UNIQUE (pack_id, memory_id),
+    UNIQUE (pack_id, rule_id),
+    UNIQUE (pack_id, evidence_span_id)
+);
+
+INSERT INTO pack_items (
+    pack_id, memory_id, rule_id, evidence_span_id, rank, section,
+    estimated_tokens, relevance, utility, why, diversity_key,
+    provenance_json, trust_class, trust_subclass
+)
+SELECT
+    pack_id, memory_id, NULL, NULL, rank, section,
+    estimated_tokens, relevance, utility, why, diversity_key,
+    provenance_json, trust_class, trust_subclass
+FROM pack_items_v121
+ORDER BY rowid;
+
+DROP TABLE pack_items_v121;
+
+CREATE INDEX idx_pack_items_memory ON pack_items(memory_id);
+CREATE INDEX idx_pack_items_rule ON pack_items(rule_id);
+CREATE INDEX idx_pack_items_evidence_span ON pack_items(evidence_span_id);
+CREATE INDEX idx_pack_items_section ON pack_items(section);
+CREATE INDEX idx_pack_items_rank ON pack_items(pack_id, rank);
+CREATE INDEX idx_pack_items_trust_class ON pack_items(trust_class);
+"#,
+    "blake3:v122_typed_pack_item_identity_2026_09_16",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -10522,6 +10648,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V119_CURATION_GENERATION_TRIGGER_REPAIR,
     V120_TEAM_JOIN_ATTEMPT_FIRST_SYNC_PHASE,
     V121_EVIDENCE_FEEDBACK_TARGETS,
+    V122_TYPED_PACK_ITEM_IDENTITY,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
