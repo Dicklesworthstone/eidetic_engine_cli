@@ -9736,7 +9736,11 @@ mod tests {
         assert!(memory < rule, "memory must sort before rule");
         assert!(rule < evidence, "rule must sort before evidence_span");
         assert_eq!(
-            (memory.kind_order(), rule.kind_order(), evidence.kind_order()),
+            (
+                memory.kind_order(),
+                rule.kind_order(),
+                evidence.kind_order()
+            ),
             (0, 1, 2)
         );
 
