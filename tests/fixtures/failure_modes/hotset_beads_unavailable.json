@@ -22,6 +22,7 @@
     "severity": "low",
     "message_contains": [
       "Beads JSONL export"
-    ]
+    ],
+    "repair_contains": "Run `br sync --flush-only` to export tracker state, then re-collect."
   }
 }

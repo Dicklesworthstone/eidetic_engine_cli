@@ -22,6 +22,7 @@
     "severity": "medium",
     "message_contains": [
       "explicitly fails closed"
-    ]
+    ],
+    "repair_contains": "Repair the degraded source-authority inputs"
   }
 }

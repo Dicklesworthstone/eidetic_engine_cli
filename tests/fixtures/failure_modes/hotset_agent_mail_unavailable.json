@@ -22,6 +22,7 @@
     "severity": "low",
     "message_contains": [
       "Agent Mail snapshot"
-    ]
+    ],
+    "repair_contains": "Produce a read-only snapshot with scripts/agent_mail_snapshot.sh"
   }
 }

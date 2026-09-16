@@ -22,6 +22,7 @@
     "severity": "medium",
     "message_contains": [
       "git status probe exceeded the"
-    ]
+    ],
+    "repair_contains": "Raise --probe-timeout-ms"
   }
 }

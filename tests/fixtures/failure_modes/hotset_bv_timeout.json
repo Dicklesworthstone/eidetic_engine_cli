@@ -22,6 +22,7 @@
     "severity": "medium",
     "message_contains": [
       "bv --robot-next exceeded the"
-    ]
+    ],
+    "repair_contains": "Raise --bv-timeout-ms"
   }
 }

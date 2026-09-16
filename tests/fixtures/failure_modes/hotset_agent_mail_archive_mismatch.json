@@ -22,6 +22,7 @@
     "severity": "medium",
     "message_contains": [
       "archive/database parity drift"
-    ]
+    ],
+    "repair_contains": "Run `am doctor check`"
   }
 }
