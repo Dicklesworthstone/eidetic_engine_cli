@@ -28,14 +28,12 @@
 #                              (scripts/lib/e2e_harness.sh:69). Unblocks when
 #                              that fallback refuses instead of defaulting.
 #
-# Note: 7 of the 19 are e2e_mesh_* from the mesh campaign and may be a single
-# decision rather than seven.
+# 2026-09-16 mesh decision: the 7 e2e_mesh_* entries were RETIRED, not wired,
+# and moved to tests/fixtures/e2e_invocation/retired.txt. They contain no
+# assertions -- each is an RCH dispatch wrapper around a cargo test target CI
+# already runs -- so retiring them loses zero assertion coverage. That ledger
+# requires a named covering command which the audit verifies actually exists in
+# ci.yml or verify.sh, so "retired" cannot be used to park an inconvenient
+# orphan. This list still only shrinks.
 e2e_backup_roundtrip.sh
 e2e_field_report_suite.sh
-e2e_mesh_admission.sh
-e2e_mesh_anti_entropy_protocol.sh
-e2e_mesh_peer_enrollment.sh
-e2e_mesh_privacy_redaction_authorization.sh
-e2e_mesh_replay_convergence.sh
-e2e_mesh_selective_sync.sh
-e2e_mesh_share_preview.sh

@@ -1,0 +1,47 @@
+# RETIRED e2e scripts — bd-udjrq / bd-smxdr follow-on.
+#
+# A third category beside "invoked" and "orphaned". An entry here is a script
+# that is deliberately not wired because something else already runs the same
+# assertions. It is NOT a place to put an inconvenient orphan.
+#
+# FORMAT — three pipe-delimited fields, all required:
+#   <script> | <covering command> | <assertion coverage lost>
+#
+# The audit enforces all four of these, so the justification is machine-checked
+# rather than prose a reviewer has to take on faith:
+#   1. the script must still be un-invoked — if something now calls it, it is
+#      not retired, and the line must be deleted
+#   2. it must NOT also appear in orphan_baseline.txt — no double-booking
+#   3. the covering command must be a literal that actually appears in
+#      .github/workflows/ci.yml or scripts/verify.sh — naming a command that
+#      runs nowhere is exactly the failure this whole audit exists to catch
+#   4. assertion coverage lost must be exactly `none`
+#
+# If you cannot name a real covering command, the script stays ORPHANED and the
+# gate stays red. That is the intended outcome, not a gap.
+#
+# This does not loosen the orphan ratchet: orphan_baseline.txt still only
+# shrinks, and moving a line here costs you a named, verified covering command.
+#
+# ---------------------------------------------------------------------------
+# The mesh campaign wrappers (7).
+#
+# These contain NO assertions. Each is a 29-63 line RCH dispatch wrapper that
+# emits scenario events and then shells out to a cargo test target, refusing to
+# run at all when `rch` is absent (exit 2). The assertions live in src/mesh
+# unit tests and in tests/integration_g_m.rs, both of which CI already runs.
+#
+# Retiring them loses zero assertion coverage. What it does lose is the
+# RCH-remote execution posture and the per-scenario outcome events — real, but
+# not coverage, and not worth importing RCH's flakiness into the readiness gate.
+#
+# Files remain on disk. Deletion needs the operator's explicit permission
+# (AGENTS.md RULE 1) and has not been given.
+# ---------------------------------------------------------------------------
+e2e_mesh_admission.sh | cargo test --workspace --lib --jobs 1 mesh:: | none
+e2e_mesh_anti_entropy_protocol.sh | cargo test --workspace --bins --tests --examples | none
+e2e_mesh_peer_enrollment.sh | cargo test --workspace --bins --tests --examples | none
+e2e_mesh_privacy_redaction_authorization.sh | cargo test --workspace --bins --tests --examples | none
+e2e_mesh_replay_convergence.sh | cargo test --workspace --bins --tests --examples | none
+e2e_mesh_selective_sync.sh | cargo test --workspace --bins --tests --examples | none
+e2e_mesh_share_preview.sh | cargo test --workspace --bins --tests --examples | none

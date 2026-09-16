@@ -29,15 +29,31 @@
 # The second arm is what stops the baseline decaying into a permanent
 # ignore-list. It can only shrink.
 #
+# RETIRED — the third category (2026-09-16). Some scripts should be neither
+# wired nor counted as debt: wrappers whose assertions are already run by
+# something else. tests/fixtures/e2e_invocation/retired.txt holds those, one
+# per line, as
+#     <script> | <covering command> | <assertion coverage lost>
+#
+# This is deliberately NOT a softer baseline. An entry re-earns the category on
+# every run: the script must still be un-invoked, must not also sit in the
+# orphan baseline, must declare `none` coverage lost, and its covering command
+# must be a literal that ACTUALLY APPEARS in ci.yml or verify.sh. That last
+# check is the point — a retired entry naming a command that runs nowhere is
+# precisely the failure this audit exists to catch, so it is verified rather
+# than believed. If you cannot name a real covering command, the script stays
+# orphaned and the gate stays red.
+#
 # Usage:
 #   scripts/e2e_invocation_audit.sh              audit the repo
-#   scripts/e2e_invocation_audit.sh --self-test  prove both failure directions
+#   scripts/e2e_invocation_audit.sh --self-test  prove every failure direction
 #   scripts/e2e_invocation_audit.sh --list       print the current orphan set
 
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASELINE="${REPO_ROOT}/tests/fixtures/e2e_invocation/orphan_baseline.txt"
+RETIRED="${REPO_ROOT}/tests/fixtures/e2e_invocation/retired.txt"
 
 # Print the basenames of e2e scripts in <dir> that nothing else references.
 # Pure function of the tree so the self-test can drive it over a fixture.
@@ -76,6 +92,58 @@ read_baseline() {
     local file="$1"
     [ -f "$file" ] || return 0
     sed -e 's/#.*//' -e 's/[[:space:]]//g' "$file" | grep -v '^$' | sort -u
+}
+
+# Basenames listed in the retired ledger. Field 1 of each non-comment line.
+read_retired_names() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    grep -v '^[[:space:]]*#' "$file" | grep -v '^[[:space:]]*$' \
+        | awk -F'|' '{gsub(/[[:space:]]/,"",$1); if ($1 != "") print $1}' | sort -u
+}
+
+# Validate every retired entry. Prints one diagnostic per violation and returns
+# 1 if any fired. A retired entry has to EARN the category on every run:
+# a named covering command that genuinely exists, and zero coverage lost.
+validate_retired() {
+    local root="$1" file="$2" orphans="$3"
+    [ -f "$file" ] || return 0
+    local bad=0 line script covering lost
+    while IFS= read -r line; do
+        case "$line" in ''|\#*) continue ;; esac
+        script="$(printf '%s' "$line" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$1); print $1}')"
+        covering="$(printf '%s' "$line" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2}')"
+        lost="$(printf '%s' "$line" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$3); print $3}')"
+
+        if [ -z "$script" ] || [ -z "$covering" ] || [ -z "$lost" ]; then
+            echo "  ${script:-<no script>}: needs all three fields — <script> | <covering command> | <coverage lost>" >&2
+            bad=1
+            continue
+        fi
+
+        # Rule 4: retiring something with real coverage loss is deleting
+        # coverage, not retiring a wrapper.
+        if [ "$lost" != "none" ]; then
+            echo "  $script: assertion coverage lost is '$lost', must be 'none'" >&2
+            bad=1
+        fi
+
+        # Rule 1: if something invokes it again, it is not retired.
+        if ! printf '%s\n' "$orphans" | grep -qx "$script"; then
+            echo "  $script: is invoked again, so it is not retired — delete this line" >&2
+            bad=1
+        fi
+
+        # Rule 3: the covering command must actually exist somewhere that runs.
+        # Naming a command that runs nowhere is the exact failure this audit
+        # exists to catch, so it is checked rather than believed.
+        if ! grep -Fq -- "$covering" "$root/.github/workflows/ci.yml" 2>/dev/null \
+            && ! grep -Fq -- "$covering" "$root/scripts/verify.sh" 2>/dev/null; then
+            echo "  $script: covering command is in neither ci.yml nor verify.sh: '$covering'" >&2
+            bad=1
+        fi
+    done <"$file"
+    return "$bad"
 }
 
 if [[ "${1:-}" == "--list" ]]; then
@@ -130,7 +198,62 @@ if [[ "${1:-}" == "--self-test" ]]; then
         failures=$((failures + 1))
     fi
 
-    echo "self-test: $((4 - failures))/4 passed"
+    # ---- retired-ledger arms. Every rule gets a negative control, because a
+    # validator that has only ever been shown a passing input is untested.
+    mkdir -p "$tmp/fixture/.github/workflows"
+    printf 'jobs:\n  run: cargo test --workspace --lib real::\n' \
+        >"$tmp/fixture/.github/workflows/ci.yml"
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$tmp/fixture/scripts/verify.sh"
+    orphan_set="$(printf 'e2e_lonely.sh\n')"
+
+    # 5. A well-formed entry naming a command CI really runs must pass.
+    printf 'e2e_lonely.sh | cargo test --workspace --lib real:: | none\n' >"$tmp/retired_ok.txt"
+    if validate_retired "$tmp/fixture" "$tmp/retired_ok.txt" "$orphan_set" 2>/dev/null; then
+        echo "ok   - a valid retired entry is accepted"
+    else
+        echo "FAIL - valid retired entry was rejected"
+        failures=$((failures + 1))
+    fi
+
+    # 6. A covering command that exists nowhere must FAIL. This is the arm that
+    #    stops "retired" becoming prose: the named command is checked, not read.
+    printf 'e2e_lonely.sh | cargo test --workspace --lib imaginary:: | none\n' >"$tmp/retired_fake.txt"
+    if validate_retired "$tmp/fixture" "$tmp/retired_fake.txt" "$orphan_set" 2>/dev/null; then
+        echo "FAIL - accepted a covering command that runs nowhere"
+        failures=$((failures + 1))
+    else
+        echo "ok   - rejects a covering command that runs nowhere"
+    fi
+
+    # 7. Retiring something that loses real coverage is deleting coverage.
+    printf 'e2e_lonely.sh | cargo test --workspace --lib real:: | the redaction cases\n' \
+        >"$tmp/retired_lossy.txt"
+    if validate_retired "$tmp/fixture" "$tmp/retired_lossy.txt" "$orphan_set" 2>/dev/null; then
+        echo "FAIL - accepted a retired entry that admits losing coverage"
+        failures=$((failures + 1))
+    else
+        echo "ok   - rejects a retired entry whose coverage loss is not none"
+    fi
+
+    # 8. A script that something invokes again is not retired.
+    printf 'e2e_wired.sh | cargo test --workspace --lib real:: | none\n' >"$tmp/retired_stale.txt"
+    if validate_retired "$tmp/fixture" "$tmp/retired_stale.txt" "$orphan_set" 2>/dev/null; then
+        echo "FAIL - accepted a retired entry for a script that is invoked again"
+        failures=$((failures + 1))
+    else
+        echo "ok   - rejects a retired entry whose script is invoked again"
+    fi
+
+    # 9. Missing fields must fail rather than silently retiring on a blank.
+    printf 'e2e_lonely.sh | | none\n' >"$tmp/retired_blank.txt"
+    if validate_retired "$tmp/fixture" "$tmp/retired_blank.txt" "$orphan_set" 2>/dev/null; then
+        echo "FAIL - accepted a retired entry with an empty covering command"
+        failures=$((failures + 1))
+    else
+        echo "ok   - rejects a retired entry with an empty field"
+    fi
+
+    echo "self-test: $((9 - failures))/9 passed"
     [[ "$failures" -eq 0 ]] || exit 2
     exit 0
 fi
@@ -142,11 +265,37 @@ fi
 
 CURRENT="$(e2e_orphans "$REPO_ROOT" | sort -u)"
 BASE="$(read_baseline "$BASELINE")"
-
-NEW_ORPHANS="$(comm -23 <(printf '%s\n' "$CURRENT" | grep -v '^$') <(printf '%s\n' "$BASE" | grep -v '^$'))"
-STALE_ENTRIES="$(comm -13 <(printf '%s\n' "$CURRENT" | grep -v '^$') <(printf '%s\n' "$BASE" | grep -v '^$'))"
+RETIRED_NAMES="$(read_retired_names "$RETIRED")"
 
 rc=0
+
+# Retired entries are validated BEFORE they are allowed to suppress anything.
+# An invalid entry does not quietly fall back to "orphaned" — it fails the
+# audit, so a malformed justification cannot be used to park a script.
+if [[ -n "$RETIRED_NAMES" ]]; then
+    RETIRED_DIAGNOSTICS="$(validate_retired "$REPO_ROOT" "$RETIRED" "$CURRENT" 2>&1)" || true
+    if [[ -n "$RETIRED_DIAGNOSTICS" ]]; then
+        echo "e2e_invocation_audit: RETIRED entr(ies) failed validation:" >&2
+        printf '%s\n' "$RETIRED_DIAGNOSTICS" >&2
+        echo "  File: tests/fixtures/e2e_invocation/retired.txt" >&2
+        rc=1
+    fi
+fi
+
+# A validated retired script is neither a new orphan nor a baseline entry.
+CURRENT_UNRETIRED="$(comm -23 <(printf '%s\n' "$CURRENT" | grep -v '^$') <(printf '%s\n' "$RETIRED_NAMES" | grep -v '^$'))"
+
+# Rule 2: no double-booking. An entry in both ledgers lets a shrinking baseline
+# look like progress while the script simply moved sideways.
+DOUBLE_BOOKED="$(comm -12 <(printf '%s\n' "$BASE" | grep -v '^$') <(printf '%s\n' "$RETIRED_NAMES" | grep -v '^$'))"
+if [[ -n "$DOUBLE_BOOKED" ]]; then
+    echo "e2e_invocation_audit: script(s) in BOTH orphan_baseline.txt and retired.txt — pick one:" >&2
+    printf '  %s\n' $DOUBLE_BOOKED >&2
+    rc=1
+fi
+
+NEW_ORPHANS="$(comm -23 <(printf '%s\n' "$CURRENT_UNRETIRED" | grep -v '^$') <(printf '%s\n' "$BASE" | grep -v '^$'))"
+STALE_ENTRIES="$(comm -13 <(printf '%s\n' "$CURRENT_UNRETIRED" | grep -v '^$') <(printf '%s\n' "$BASE" | grep -v '^$'))"
 
 if [[ -n "$NEW_ORPHANS" ]]; then
     echo "e2e_invocation_audit: NEW orphaned e2e script(s) — written but invoked by nothing:" >&2
@@ -165,6 +314,6 @@ fi
 # Denominator excludes this audit script, which matches the glob but is a
 # tool rather than a suite -- the same exclusion the scan loop makes.
 TOTAL=$(( $(ls "$REPO_ROOT"/scripts/e2e_*.sh 2>/dev/null | wc -l | tr -d ' ') - 1 ))
-echo "e2e_invocation_audit: $(printf '%s\n' "$CURRENT" | grep -vc '^$') orphaned of ${TOTAL} e2e scripts; baseline holds $(printf '%s\n' "$BASE" | grep -vc '^$')" >&2
+echo "e2e_invocation_audit: $(printf '%s\n' "$CURRENT_UNRETIRED" | grep -vc '^$') orphaned of ${TOTAL} e2e scripts; baseline holds $(printf '%s\n' "$BASE" | grep -vc '^$'); retired $(printf '%s\n' "$RETIRED_NAMES" | grep -vc '^$')" >&2
 
 exit "$rc"
