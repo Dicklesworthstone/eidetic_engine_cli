@@ -398,7 +398,7 @@ changes index width on 32-bit platforms with 64-bit atomics and extends the
 upstream MSRV support policy. EE's `ArrayQueue` usage needs no API change.
 The dependency list is unchanged; the lock checksum was verified against the
 official sparse index. Pinned RCH tests at af09aa6bc passed all 58
-`core::write_owner::tests` (no failures or ignored tests) on hz2.
+`core::write_owner::tests` (no failures or ignored tests) on worker-01.
 
 ## base64 0.23.1
 
@@ -410,7 +410,7 @@ the scalar implementation is sufficient for EE's cursors and credentials.
 Version 0.23.1 was already present in the lockfile for Asupersync. The older
 0.22.1 entry remains required by other transitive consumers. Pinned RCH tests
 at 4eae0038e passed all 151 selected cursor, query, preflight-token,
-deterministic-ID and JSONL regression tests on hz4, with no failures or ignores.
+deterministic-ID and JSONL regression tests on worker-02, with no failures or ignores.
 
 ## fs4 1.1.0
 
@@ -422,7 +422,7 @@ errors in doctor locking. Key rotation still takes an exclusive lock while
 approval transactions hold shared locks. Existing contention and release
 assertions use the new API without weakening their guarantees. Tantivy retains
 its separate fs4 0.13.1 requirement. Pinned RCH tests at c1e15d265 passed
-all 78 selected doctor-lock and secret-store tests on vmi1152480, with no
+all 78 selected doctor-lock and secret-store tests on worker-03, with no
 failures or ignored tests. The same compiled test artifact also passed three
 CLI checks for contention, audited mutation failure and undoable finish failure.
 Final Windows qualification also passed real byte-lock contention followed by
