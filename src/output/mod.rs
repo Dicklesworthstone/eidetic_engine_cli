@@ -2787,6 +2787,13 @@ pub struct ContextJsonRenderOptions {
     /// Transitional N5.1 compatibility path for consumers explicitly asking for
     /// the old field name during the one-release rename window.
     pub include_legacy_selection_certificate: bool,
+    /// bd-pack-compact-mode-ibksx: emit `pack.selectionAudit`.
+    pub include_selection_audit: bool,
+    /// bd-pack-compact-mode-ibksx: emit `pack.quality`.
+    pub include_quality_metrics: bool,
+    /// bd-pack-compact-mode-ibksx: emit `pack.budget.adaptiveBudget`. The
+    /// `maxTokens` / `usedTokens` / `utilization` scalars are always emitted.
+    pub include_budget_detail: bool,
 }
 
 impl Default for ContextJsonRenderOptions {
@@ -2798,6 +2805,11 @@ impl Default for ContextJsonRenderOptions {
             include_verbose_meta: false,
             include_non_affecting_degradations: false,
             include_legacy_selection_certificate: is_set(EnvVar::LegacySelectionCertificate),
+            // Default mirrors the Standard profile: only an explicit Lean
+            // request drops these (bd-pack-compact-mode-ibksx).
+            include_selection_audit: true,
+            include_quality_metrics: true,
+            include_budget_detail: true,
         }
     }
 }
@@ -2811,6 +2823,9 @@ impl From<ContextPackOutputOptions> for ContextJsonRenderOptions {
             include_verbose_meta: options.include_verbose_meta,
             include_non_affecting_degradations: options.include_non_affecting_degradations,
             include_legacy_selection_certificate: is_set(EnvVar::LegacySelectionCertificate),
+            include_selection_audit: options.include_selection_audit,
+            include_quality_metrics: options.include_quality_metrics,
+            include_budget_detail: options.include_budget_detail,
         }
     }
 }
@@ -2931,7 +2946,13 @@ pub fn render_context_response_json_with_options(
                             / response.data.pack.budget.max_tokens() as f32,
                     ),
                 );
-                if let Some(adaptive_budget) = &response.data.adaptive_budget {
+                // bd-pack-compact-mode-ibksx: the three scalars above stay at
+                // every profile — an agent needs them to decide whether to
+                // re-pack. The adaptive-budget explanation is the heavy,
+                // diagnostic half and is what Lean drops.
+                if options.include_budget_detail
+                    && let Some(adaptive_budget) = &response.data.adaptive_budget
+                {
                     budget.field_str("schema", adaptive_budget.schema);
                     budget.field_bool("adaptive", adaptive_budget.adaptive);
                     budget.field_u32("baseTokens", adaptive_budget.base_tokens);
@@ -2960,13 +2981,22 @@ pub fn render_context_response_json_with_options(
             pack.field_object("advisoryBanner", |banner| {
                 build_pack_advisory_banner(banner, &advisory_banner);
             });
-            let quality_metrics = response.data.pack.quality_metrics();
-            pack.field_object("quality", |quality| {
-                build_pack_quality_metrics(quality, &quality_metrics);
-            });
-            pack.field_object("selectionAudit", |audit| {
-                build_pack_selection_audit(audit, &response.data.pack.selection_audit);
-            });
+            // bd-pack-compact-mode-ibksx: `quality` walks every section plus
+            // the omission set, and `selectionAudit` (selectedItems[] +
+            // steps[]) is the single largest block in the response. Both are
+            // diagnostic, so Lean drops them. `advisoryBanner` above is
+            // deliberately NOT gated: it can carry safety-relevant notices.
+            if options.include_quality_metrics {
+                let quality_metrics = response.data.pack.quality_metrics();
+                pack.field_object("quality", |quality| {
+                    build_pack_quality_metrics(quality, &quality_metrics);
+                });
+            }
+            if options.include_selection_audit {
+                pack.field_object("selectionAudit", |audit| {
+                    build_pack_selection_audit(audit, &response.data.pack.selection_audit);
+                });
+            }
             if let Some(coordination) = &response.data.coordination {
                 if let Ok(coordination_json) = serde_json::to_string(coordination) {
                     pack.field_raw("coordination", &coordination_json);

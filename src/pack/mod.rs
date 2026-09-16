@@ -3605,6 +3605,11 @@ pub struct PackAssemblySloActuals {
     pub index_generation: Option<u64>,
     pub graph_generation: Option<u64>,
     pub graph_edges_traversed: usize,
+    /// Elapsed time the caller waited for the whole request, in milliseconds —
+    /// not the duration of any single internal phase. `elapsed_status` is
+    /// classified against this, so narrowing it to one phase would let a pack
+    /// blow its published budget end to end while still reporting
+    /// `within_budget` (GH49 / bd-jikgj).
     pub elapsed_ms: u64,
     pub memory_bytes_peak: u64,
 }
