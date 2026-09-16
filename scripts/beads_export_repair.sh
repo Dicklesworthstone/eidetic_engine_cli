@@ -271,6 +271,13 @@ if [[ "$MODE" == "self_test" ]]; then
     mkdir -p "$stub_dir"
     cat >"$stub_dir/br" <<'STUB'
 #!/usr/bin/env bash
+# Record that this stub actually RAN. A stub that exists but is not executable
+# is indistinguishable, to every assertion below, from one that worked -- except
+# the test would then be exercising the real `br`. The caller asserts this log
+# is non-empty, so that fallthrough fails instead of passing quietly.
+if [[ -n "${STUB_INVOCATION_LOG:-}" ]]; then
+    printf '%s\n' "$*" >>"${STUB_INVOCATION_LOG}"
+fi
 # Hermetic br stub. Reports a healthy DB with a count supplied by the caller.
 for arg in "$@"; do
     case "$arg" in
@@ -284,13 +291,27 @@ for arg in "$@"; do
 done
 exit 0
 STUB
-    chmod +x "$stub_dir/br"
+    if ! chmod +x "$stub_dir/br"; then
+        echo "FAIL - could not make the br stub executable at "$stub_dir/br"; the" >&2
+        echo "       self-test would silently exercise the real br instead." >&2
+        exit 3
+    fi
 
     repair_check() {
         local label="$1" mode="$2" beads_dir="$3" db_count="$4" jq_filter="$5" expected="$6"
-        local out actual
+        local out actual stub_log
+        stub_log="$tmp/stub-invocations-${label//[^a-zA-Z0-9]/_}.log"
+        : >"$stub_log"
         out=$(cd "$tmp" && STUB_DB_COUNT="$db_count" BEADS_DIR="$beads_dir" \
+            STUB_INVOCATION_LOG="$stub_log" \
             PATH="$stub_dir:$PATH" bash "$self_script" "$mode" 2>/dev/null)
+        # gather_evidence always runs `br doctor` and `br stats`, so an empty log
+        # means the stub was never executed and this case measured the real br.
+        if [[ ! -s "$stub_log" ]]; then
+            echo "FAIL - $label: the br stub never ran; this case exercised the real br"
+            failures=$((failures + 1))
+            return
+        fi
         actual=$(printf '%s' "$out" | jq -r "$jq_filter" 2>/dev/null)
         if [[ "$actual" == "$expected" ]]; then
             echo "ok   - $label"
@@ -365,6 +386,13 @@ STUB
     mkdir -p "$repair_stub"
     cat >"$repair_stub/br" <<'STUB'
 #!/usr/bin/env bash
+# Record that this stub actually RAN. A stub that exists but is not executable
+# is indistinguishable, to every assertion below, from one that worked -- except
+# the test would then be exercising the real `br`. The caller asserts this log
+# is non-empty, so that fallthrough fails instead of passing quietly.
+if [[ -n "${STUB_INVOCATION_LOG:-}" ]]; then
+    printf '%s\n' "$*" >>"${STUB_INVOCATION_LOG}"
+fi
 # Stub whose `sync` actually repairs the export, so the success path runs.
 for arg in "$@"; do
     case "$arg" in
@@ -378,10 +406,23 @@ for arg in "$@"; do
 done
 exit 0
 STUB
-    chmod +x "$repair_stub/br"
+    if ! chmod +x "$repair_stub/br"; then
+        echo "FAIL - could not make the br stub executable at "$repair_stub/br"; the" >&2
+        echo "       self-test would silently exercise the real br instead." >&2
+        exit 3
+    fi
 
+    ok_stub_log="$tmp/stub-invocations-apply.log"
+    : >"$ok_stub_log"
     ok_out=$(cd "$tmp" && STUB_DB_COUNT=3 BEADS_DIR="ok/.beads" \
+        STUB_INVOCATION_LOG="$ok_stub_log" \
         PATH="$repair_stub:$PATH" bash "$self_script" --apply 2>/dev/null)
+    if [[ -s "$ok_stub_log" ]]; then
+        echo "ok   - successful apply ran against the br stub"
+    else
+        echo "FAIL - successful apply never invoked the br stub; it used the real br"
+        failures=$((failures + 1))
+    fi
     if [[ "$(printf '%s' "$ok_out" | jq -r '.schema' 2>/dev/null)" == "beads.export_repair_report.v1" ]]; then
         echo "ok   - successful apply emits its report"
     else
@@ -403,7 +444,7 @@ STUB
         failures=$((failures + 1))
     fi
 
-    echo "self-test: $((21 - failures))/21 passed"
+    echo "self-test: $((22 - failures))/22 passed"
     [[ "$failures" -eq 0 ]] || exit 2
     exit 0
 fi
