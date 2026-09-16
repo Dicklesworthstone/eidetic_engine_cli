@@ -403,6 +403,7 @@ fn memory_list_surface_has_no_field_name_drift() -> TestResult {
             valid_to: None,
             validity_status: "active".to_owned(),
             validity_window_kind: "open_ended".to_owned(),
+            tags: vec!["release".to_owned()],
             created_at: "2026-05-10T00:00:00Z".to_owned(),
         }],
         1,

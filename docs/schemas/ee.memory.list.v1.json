@@ -44,6 +44,7 @@
               "is_tombstoned",
               "validity_status",
               "validity_window_kind",
+              "tags",
               "created_at"
             ],
             "additionalProperties": false,
@@ -60,6 +61,7 @@
               "valid_to": {"type": ["string", "null"]},
               "validity_status": {"type": "string"},
               "validity_window_kind": {"type": "string"},
+              "tags": {"type": "array", "items": {"type": "string"}},
               "created_at": {"type": "string"}
             }
           }

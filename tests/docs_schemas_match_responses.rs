@@ -3104,6 +3104,7 @@ fn memory_list_sample() -> Result<Value, String> {
             valid_to: None,
             validity_status: "active".to_string(),
             validity_window_kind: "always".to_string(),
+            tags: vec!["release".to_string()],
             created_at: "2026-05-13T00:00:00Z".to_string(),
         }],
         1,

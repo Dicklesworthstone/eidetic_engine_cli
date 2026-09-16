@@ -8668,6 +8668,11 @@ pub fn render_memory_list_json(report: &MemoryListReport) -> String {
             field_optional_str(obj, "valid_to", m.valid_to.as_deref());
             obj.field_str("validity_status", &m.validity_status);
             obj.field_str("validity_window_kind", &m.validity_window_kind);
+            // bd-cli-surface-consistency-cluster-1jnu1 item 3: a string array,
+            // matching `ee remember` and `ee memory tags`. Always emitted (as
+            // `[]` when empty) so consumers never have to distinguish "no tags"
+            // from "this command does not report tags".
+            obj.field_array_of_strings("tags", &m.tags);
             obj.field_str("created_at", &m.created_at);
         });
     });
@@ -8860,6 +8865,9 @@ pub fn render_memory_list_human(report: &MemoryListReport) -> String {
             "    confidence={:.2}, created={}, validity={} ({})\n",
             m.confidence, m.created_at, m.validity_status, m.validity_window_kind
         ));
+        if !m.tags.is_empty() {
+            output.push_str(&format!("    tags: {}\n", m.tags.join(", ")));
+        }
         if m.is_tombstoned {
             output.push_str("    [TOMBSTONED]\n");
         }
@@ -20392,6 +20400,7 @@ mod tests {
                 valid_to: None,
                 validity_status: "current".to_owned(),
                 validity_window_kind: "unbounded".to_owned(),
+                tags: Vec::new(),
                 created_at: "2026-05-17T00:00:00Z".to_owned(),
             }],
             1,
@@ -20421,6 +20430,70 @@ mod tests {
 
         let toon = render_memory_list_toon(&report);
         ensure_toon_matches_json(&json, &toon, "memory list TOON local provenance")
+    }
+
+    /// bd-cli-surface-consistency-cluster-1jnu1 item 3: `ee memory list`
+    /// omitted tags entirely, forcing an N+1 `ee memory show` sweep to build a
+    /// tag inventory. Tags must be a string array (matching `ee remember` and
+    /// `ee memory tags`), and must be present even when empty so consumers
+    /// never confuse "no tags" with "this command does not report tags".
+    #[test]
+    fn memory_list_emits_tags_as_a_string_array() -> TestResult {
+        let tagged = MemorySummary {
+            id: "mem_tagged".to_owned(),
+            level: "semantic".to_owned(),
+            kind: "fact".to_owned(),
+            content: "Tagged row.".to_owned(),
+            content_truncated: false,
+            confidence: 0.5,
+            provenance_uri: None,
+            is_tombstoned: false,
+            valid_from: None,
+            valid_to: None,
+            validity_status: "current".to_owned(),
+            validity_window_kind: "unbounded".to_owned(),
+            tags: vec!["contract".to_owned(), "governor".to_owned()],
+            created_at: "2026-05-17T00:00:00Z".to_owned(),
+        };
+        let untagged = MemorySummary {
+            id: "mem_untagged".to_owned(),
+            tags: Vec::new(),
+            ..tagged.clone()
+        };
+        let report = MemoryListReport::success(
+            vec![tagged, untagged],
+            2,
+            false,
+            MemoryListFilter::default(),
+        );
+
+        let json = render_memory_list_json(&report);
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &value.pointer("/data/memories/0/tags"),
+            &Some(&serde_json::json!(["contract", "governor"])),
+            "memory list tags are emitted as a string array",
+        )?;
+        // Present-but-empty, not absent: absence would be indistinguishable
+        // from the old omit-tags behavior.
+        ensure_equal(
+            &value.pointer("/data/memories/1/tags"),
+            &Some(&serde_json::json!([])),
+            "memory list emits an empty tag array rather than omitting the key",
+        )?;
+
+        // Human output lists tags for tagged rows and stays quiet otherwise.
+        let human = super::render_memory_list_human(&report);
+        ensure_contains(&human, "tags: contract, governor", "memory list human tags")?;
+        ensure(
+            human.matches("tags:").count() == 1,
+            format!("untagged row must not print an empty tag line: {human}"),
+        )?;
+
+        let toon = render_memory_list_toon(&report);
+        ensure_toon_matches_json(&json, &toon, "memory list TOON tags")
     }
 
     fn ensure_starts_with(haystack: &str, prefix: &str, context: &str) -> TestResult {
@@ -20902,6 +20975,7 @@ mod tests {
                 valid_to: memory.valid_to.clone(),
                 validity_status: "current".to_owned(),
                 validity_window_kind: "unbounded".to_owned(),
+                tags: Vec::new(),
                 created_at: memory.created_at.clone(),
             }],
             1,

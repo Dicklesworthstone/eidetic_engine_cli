@@ -8936,6 +8936,9 @@ pub struct MemorySummary {
     pub validity_status: String,
     /// Stable shape of the validity window.
     pub validity_window_kind: String,
+    /// Tags assigned to this memory, sorted ascending. Emitted as a string
+    /// array, matching `ee remember` and `ee memory tags`.
+    pub tags: Vec<String>,
     /// Creation timestamp.
     pub created_at: String,
 }
@@ -9101,12 +9104,26 @@ pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
     let total_count = filtered.len() as u32;
     let truncated = total_count > options.limit;
 
-    let memories: Vec<MemorySummary> = filtered
+    // Page first so the tag batch load covers exactly the rows we emit.
+    let page: Vec<_> = filtered.into_iter().take(options.limit as usize).collect();
+
+    // bd-cli-surface-consistency-cluster-1jnu1 item 3: `ee memory list` used to
+    // omit tags entirely, so building a tag inventory cost one `ee memory show`
+    // per row (N+1). That is how the `ticker:sn` vs `ticker-sn` namespace split
+    // went unnoticed in a live store. One batched query covers the whole page.
+    let page_ids: Vec<&str> = page.iter().map(|m| m.id.as_str()).collect();
+    let tags_by_memory = match conn.get_memory_tags_batch(&page_ids) {
+        Ok(tags) => tags,
+        Err(e) => return MemoryListReport::error(format!("Failed to load memory tags: {e}")),
+    };
+
+    let memories: Vec<MemorySummary> = page
         .into_iter()
-        .take(options.limit as usize)
         .map(|m| {
             let validity = memory_validity(&m.valid_from, &m.valid_to);
             let (content, content_truncated) = truncate_content(&m.content);
+            // Read tags before the struct literal moves `m.id`.
+            let tags = tags_by_memory.get(&m.id).cloned().unwrap_or_default();
             MemorySummary {
                 id: m.id,
                 level: m.level,
@@ -9120,6 +9137,7 @@ pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
                 valid_to: validity.valid_to,
                 validity_status: validity.status,
                 validity_window_kind: validity.window_kind,
+                tags,
                 created_at: m.created_at,
             }
         })

@@ -22,6 +22,10 @@
         "valid_to": "<scrubbed>",
         "validity_status": "current",
         "validity_window_kind": "starts_at",
+        "tags": [
+          "contract",
+          "governor"
+        ],
         "created_at": "<scrubbed>"
       },
       "<remaining elements scrubbed>"
