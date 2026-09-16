@@ -1,9 +1,17 @@
 //! G8 audit event coverage contract test (eidetic_engine_cli bd-17c65.7.7).
 //!
-//! Asserts that canonical no-write reads (`ee search` and `ee why`) do not
-//! append audit rows, while enclosing mutating surfaces (`ee context` with
-//! pack persistence and `ee memory show`) retain their declared audit
-//! coverage. The test runs the real surfaces against a real DbConnection.
+//! Asserts each surface's declared audit coverage against a real
+//! `DbConnection`: `ee why` appends no row, `ee search` appends hash-only
+//! retrieval rows, and the mutating surfaces (`ee context` with pack
+//! persistence, `ee memory show`) append theirs.
+//!
+//! The `ee search` half was rewritten for bd-g3yh5. It previously asserted
+//! that search wrote *nothing*, contradicting the privacy contract stated
+//! below in this very comment — which describes what a read surface's audit
+//! row must contain, and so presumes the row exists. ADR 0070 (outcome-tuned
+//! retrieval weights) and ADR 0071 (memory debt, which defines
+//! `never_retrieved` by the absence of these rows) are the deciding
+//! authorities; `src/core/shadow_tuning.rs` is the live consumer.
 //!
 //! Privacy contract: every audit row written for a read surface stores a
 //! BLAKE3 query_hash (or `surface` tag for whys/shows), NEVER the raw query
@@ -24,6 +32,7 @@ use ee::core::search::{SearchOptions, run_search};
 use ee::core::why::{WhyOptions, explain_memory};
 use ee::db::{DbConnection, audit_actions};
 use ee::models::MemoryScope;
+use ee::obs::audit_events::query_hash;
 use ee::search::scoring::SpeedMode;
 use tempfile::TempDir;
 
@@ -90,10 +99,30 @@ fn count_action(audit: &[(String, Option<String>)], action: &str) -> usize {
     audit.iter().filter(|(a, _)| a == action).count()
 }
 
+/// `ee search` records retrieval in the audit log, one `search.executed` row
+/// plus one `search.returned_mem` row per returned hit
+/// (bd-g3yh5).
+///
+/// This test previously asserted both counts were **zero**, under a
+/// pre-ADR-0070 reading in which a read surface wrote nothing at all. That
+/// contract was deliberately superseded: ADR 0070 (outcome-tuned retrieval
+/// weights) consumes the per-memory `search.returned_mem` row, and ADR 0071
+/// (memory debt) *defines* `never_retrieved` as the absence of a
+/// `search.returned_mem` / `pack.included_mem` row inside the retrieval
+/// window. `src/core/shadow_tuning.rs` reads those rows today. Asserting they
+/// are absent contradicted the module's own documented privacy contract
+/// above, which describes what a read surface's audit row must *contain*.
+///
+/// Counts are measured as a delta around the search so fixture setup —
+/// `remember_memory` runs with `auto_link`, which may itself retrieve —
+/// cannot inflate or mask the result.
 #[test]
-fn ee_search_does_not_write_search_audit_rows() -> TestResult {
+fn ee_search_writes_hash_only_retrieval_audit_rows() -> TestResult {
     let (_dir, workspace, database, _memory_id) =
         build_workspace().map_err(|error| format!("setup: {error}"))?;
+    let before = audit_actions_for(&database);
+    let executed_before = count_action(&before, audit_actions::SEARCH_EXECUTED);
+    let returned_before = count_action(&before, audit_actions::SEARCH_RETURNED_MEM);
     let report = run_search(&SearchOptions {
         workspace_path: workspace.clone(),
         database_path: Some(database.clone()),
@@ -123,26 +152,47 @@ fn ee_search_does_not_write_search_audit_rows() -> TestResult {
     }
 
     let audit = audit_actions_for(&database);
-    let executed_count = count_action(&audit, audit_actions::SEARCH_EXECUTED);
-    let returned_count = count_action(&audit, audit_actions::SEARCH_RETURNED_MEM);
-    if executed_count != 0 {
+    let executed_delta =
+        count_action(&audit, audit_actions::SEARCH_EXECUTED).saturating_sub(executed_before);
+    let returned_delta =
+        count_action(&audit, audit_actions::SEARCH_RETURNED_MEM).saturating_sub(returned_before);
+    if executed_delta != 1 {
         return Err(format!(
-            "read-only search wrote {executed_count} search.executed rows"
+            "one search must append exactly one search.executed row, got {executed_delta}"
         ));
     }
-    if returned_count != 0 {
+    if returned_delta != report.results.len() {
         return Err(format!(
-            "read-only search wrote {returned_count} search.returned_mem rows"
+            "search must append one search.returned_mem row per returned hit: {} hits, {returned_delta} rows",
+            report.results.len()
         ));
     }
     Ok(())
 }
 
+/// A search audit payload carries the BLAKE3 query hash and never the query
+/// text (bd-g3yh5).
+///
+/// Renamed from `ee_search_does_not_persist_raw_or_hashed_query_audit_payloads`,
+/// which had become half-false: the "raw" half is the live privacy contract and
+/// still holds, but the "or hashed" half asserted that no search audit payload
+/// persists at all, which ADR 0070/0071 superseded (see the sibling test
+/// above). Keeping a name that forbids hashed payloads would have documented a
+/// guarantee the product deliberately does not make.
+///
+/// The raw-leak guard is kept and strengthened: the old version only rejected
+/// the query as one exact substring, so any partial or re-tokenized leak passed.
+/// It now also rejects every distinctive token of the query, and pins the hash
+/// to the exact value of the canonical `query_hash` helper — which proves the
+/// stored digest really is derived from this query while remaining one-way.
 #[test]
-fn ee_search_does_not_persist_raw_or_hashed_query_audit_payloads() -> TestResult {
+fn ee_search_audit_payloads_carry_hashed_never_raw_query_text() -> TestResult {
     let (_dir, workspace, database, _memory_id) =
         build_workspace().map_err(|error| format!("setup: {error}"))?;
-    let raw_query = "secret-flag-marker-text-for-coverage";
+    // Deliberately nonce-like: every token below is distinctive enough that its
+    // appearance in an audit payload is a real leak, not a collision with a
+    // field name such as `status`, `reason`, `sampling` or `redaction`.
+    let raw_query = "zzqx-sentinel-secret-marker-coverage";
     let _ = run_search(&SearchOptions {
         workspace_path: workspace.clone(),
         database_path: Some(database.clone()),
@@ -175,18 +225,53 @@ fn ee_search_does_not_persist_raw_or_hashed_query_audit_payloads() -> TestResult
         })
         .filter_map(|(_, details)| details.as_deref())
         .collect::<Vec<_>>();
+    // (1) The live privacy contract, unchanged in intent and widened in reach:
+    // neither the whole query nor any distinctive token of it may appear.
     if search_details
         .iter()
         .any(|details| details.contains(raw_query))
     {
         return Err(format!(
-            "read-only search audit details leak raw query text: {search_details:?}"
+            "search audit details leak raw query text: {search_details:?}"
         ));
     }
-    if !search_details.is_empty() {
+    for token in raw_query.split('-').filter(|token| token.len() >= 5) {
+        if let Some(details) = search_details
+            .iter()
+            .find(|details| details.contains(token))
+        {
+            return Err(format!(
+                "search audit details leak query token {token:?}: {details}"
+            ));
+        }
+    }
+
+    // (2) The payload must actually carry the canonical hash. Without this the
+    // test would pass on an audit row that recorded nothing at all, which is
+    // how the superseded assertion hid the real contract.
+    let expected_hash = query_hash(raw_query);
+    if !expected_hash.starts_with("blake3:") {
         return Err(format!(
-            "read-only search persisted unexpected audit payloads: {search_details:?}"
+            "query_hash must stay a prefixed digest, got {expected_hash}"
         ));
+    }
+    if search_details.is_empty() {
+        return Err(
+            "search must record retrieval audit payloads for ADR 0070/0071 consumers".to_owned(),
+        );
+    }
+    for details in &search_details {
+        let parsed: serde_json::Value = serde_json::from_str(details)
+            .map_err(|error| format!("search audit details must be JSON: {error}: {details}"))?;
+        let recorded = parsed
+            .get("queryHash")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("search audit payload is missing queryHash: {details}"))?;
+        if recorded != expected_hash {
+            return Err(format!(
+                "search audit payload must store the canonical query hash {expected_hash}, got {recorded}"
+            ));
+        }
     }
     Ok(())
 }
