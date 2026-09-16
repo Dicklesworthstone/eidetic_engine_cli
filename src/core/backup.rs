@@ -13531,6 +13531,80 @@ mod tests {
         )
     }
 
+    /// bd-reality-core-convergence-1azkt.13, plan section C negative matrix:
+    /// the "wrong workspace" class.
+    ///
+    /// The mechanism exists and is cryptographic — `verify_backup_manifest_
+    /// authentication` selects keys from the ADDRESSED workspace
+    /// (`workspace_keys_dir(normalize_path(workspace_path))`, with an explicit
+    /// comment that the untrusted `workspace.path` inside the manifest must
+    /// never select keys) while the MAC context binds the manifest's own
+    /// `workspace.id`. Presenting a backup to a different workspace therefore
+    /// cannot authenticate. That had no test.
+    ///
+    /// The control arm matters more than the negative one here: without
+    /// proving the SAME backup verifies cleanly against its own workspace, a
+    /// rejection could equally mean the backup was malformed all along.
+    #[test]
+    fn verify_rejects_a_backup_presented_to_a_different_workspace() -> TestResult {
+        let (_source_tempdir, source_workspace, source_database) =
+            fixture().map_err(|error| error.message())?;
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: source_workspace.clone(),
+            database_path: Some(source_database),
+            output_dir: Some(source_workspace.join("backups")),
+            label: Some("wrong-workspace".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        // Control: the backup is sound when addressed to the workspace that
+        // produced it.
+        let accepted = verify_backup(&BackupVerifyOptions {
+            workspace_path: source_workspace,
+            backup_path: PathBuf::from(&created.backup_path),
+        })
+        .map_err(|error| error.message())?;
+        ensure(
+            !accepted
+                .issues
+                .iter()
+                .any(|issue| issue.code.starts_with("manifest_authentication")),
+            format!(
+                "control verification must authenticate against its own workspace: {:?}",
+                accepted.issues
+            ),
+        )?;
+
+        // Negative: an independent workspace with its own key material cannot
+        // authenticate another store's manifest.
+        let (_other_tempdir, other_workspace, _other_database) =
+            fixture().map_err(|error| error.message())?;
+        let rejected = verify_backup(&BackupVerifyOptions {
+            workspace_path: other_workspace,
+            backup_path: PathBuf::from(&created.backup_path),
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            rejected.status.as_str(),
+            "failed",
+            "a backup presented to a different workspace must not verify",
+        )?;
+        ensure(
+            rejected
+                .issues
+                .iter()
+                .any(|issue| issue.code.starts_with("manifest_authentication")),
+            format!(
+                "wrong-workspace rejection must be an authentication issue, not an incidental one: {:?}",
+                rejected.issues
+            ),
+        )
+    }
+
     fn remap_workspace_fixture(id: &str) -> crate::db::StoredWorkspace {
         crate::db::StoredWorkspace {
             id: id.to_owned(),
