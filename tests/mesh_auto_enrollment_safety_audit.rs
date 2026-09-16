@@ -20,7 +20,10 @@ use ee::mesh::auto_enrollment_safety::{
 };
 use serde_json::Value as Json;
 
-const WORKSPACE_ID: &str = "wsp_meshsafety000000000000aa";
+// `workspaces.id` is pinned by DDL to `id GLOB 'wsp_*' AND length(id) = 30`
+// (src/db/mod.rs). The previous literal was 28 characters, so every test in
+// this file aborted in `fresh_db` before reaching a single safety assertion.
+const WORKSPACE_ID: &str = "wsp_meshsafety0000000000000001";
 const WORKSPACE_PATH: &str = "/tmp/ee-mesh-safety-test";
 const TAILNET_ID: &str = "tn_meshsafety0000000000";
 
