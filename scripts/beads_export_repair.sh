@@ -248,7 +248,162 @@ if [[ "$MODE" == "self_test" ]]; then
     gather_evidence "$tmp/interior.jsonl"; DB_DOCTOR_OK=true; DB_COUNT=3
     check "interior corruption fails closed" invalid_interior_lines none
 
-    echo "self-test: $((7 - failures))/7 passed"
+    # ---------------------------------------------------------------------
+    # bd-2p297.2: the REPAIR paths, not just the classifier.
+    #
+    # Everything above calls `classify` directly and asserts STATE. That
+    # covers bd-2p297.1 and nothing else: --dry-run and --apply were shipped
+    # with no automated coverage at all, while this bead's acceptance asks
+    # for "shell/static tests cover safe repair and unsafe refusal cases".
+    #
+    # These arms drive THIS script as a subprocess against fixture BEADS_DIRs
+    # so the real shipped code path runs, with `br` stubbed for hermeticity.
+    #
+    # The stub is a TRIPWIRE: its `sync` arm always fails loudly. Both --apply
+    # arms below are refusal cases that must exit before $REPAIR_COMMAND runs,
+    # so if a guard ever regresses the stub fires and the test fails instead
+    # of silently mutating a tracker export.
+    # ---------------------------------------------------------------------
+    # Absolute: repair_check cd's into the fixture root, so a relative
+    # BASH_SOURCE would not resolve from there.
+    self_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+    stub_dir="$tmp/stub"
+    mkdir -p "$stub_dir"
+    cat >"$stub_dir/br" <<'STUB'
+#!/usr/bin/env bash
+# Hermetic br stub. Reports a healthy DB with a count supplied by the caller.
+for arg in "$@"; do
+    case "$arg" in
+        doctor) printf '{"workspace_health":"healthy"}\n'; exit 0 ;;
+        stats)  printf '{"total":%s}\n' "${STUB_DB_COUNT:-0}"; exit 0 ;;
+        sync)
+            echo "TRIPWIRE: br sync was invoked during a refusal test" >&2
+            exit 99
+            ;;
+    esac
+done
+exit 0
+STUB
+    chmod +x "$stub_dir/br"
+
+    repair_check() {
+        local label="$1" mode="$2" beads_dir="$3" db_count="$4" jq_filter="$5" expected="$6"
+        local out actual
+        out=$(cd "$tmp" && STUB_DB_COUNT="$db_count" BEADS_DIR="$beads_dir" \
+            PATH="$stub_dir:$PATH" bash "$self_script" "$mode" 2>/dev/null)
+        actual=$(printf '%s' "$out" | jq -r "$jq_filter" 2>/dev/null)
+        if [[ "$actual" == "$expected" ]]; then
+            echo "ok   - $label"
+        else
+            echo "FAIL - $label: $jq_filter got '$actual', wanted '$expected'"
+            echo "       raw: $out"
+            failures=$((failures + 1))
+        fi
+    }
+
+    # Fixture A: aged invalid trailing line, DB count corroborating -> the
+    # dry run must print the EXACT command and must not mark itself refused.
+    mkdir -p "$tmp/safe/.beads"
+    printf '{"id":"a"}\n{"id":"b"}\n{"id":"c"\n' >"$tmp/safe/.beads/issues.jsonl"
+    touch -t 202601010000 "$tmp/safe/.beads/issues.jsonl" 2>/dev/null || true
+    repair_check "dry-run emits the plan schema" --dry-run "safe/.beads" 3 \
+        '.schema' 'beads.export_repair_plan.v1'
+    repair_check "dry-run prints the exact repair command" --dry-run "safe/.beads" 3 \
+        '.wouldRun' 'br sync --flush-only --force --json'
+    repair_check "dry-run on a safe candidate is not refused" --dry-run "safe/.beads" 3 \
+        '.refused // false' 'false'
+
+    # Fixture B: merge markers -> dry run must refuse and name no command.
+    mkdir -p "$tmp/unsafe/.beads"
+    printf '{"id":"a"}\n<<<<<<< HEAD\n{"id":"b"}\n' >"$tmp/unsafe/.beads/issues.jsonl"
+    repair_check "dry-run refuses merge markers" --dry-run "unsafe/.beads" 2 \
+        '.refused' 'true'
+    repair_check "refused dry-run offers no command" --dry-run "unsafe/.beads" 2 \
+        '.wouldRun' 'null'
+
+    # Fixture C: --apply on a NON-candidate must fail closed before mutating.
+    repair_check "apply refuses a non-candidate" --apply "unsafe/.beads" 2 \
+        '.applied' 'false'
+    unsafe_before=$(shasum -a 256 "$tmp/unsafe/.beads/issues.jsonl" | awk '{print $1}')
+    (cd "$tmp" && STUB_DB_COUNT=2 BEADS_DIR="unsafe/.beads" PATH="$stub_dir:$PATH" \
+        bash "$self_script" --apply >/dev/null 2>&1)
+    unsafe_after=$(shasum -a 256 "$tmp/unsafe/.beads/issues.jsonl" | awk '{print $1}')
+    if [[ "$unsafe_before" == "$unsafe_after" ]]; then
+        echo "ok   - refused apply left the export byte-identical"
+    else
+        echo "FAIL - refused apply MUTATED the export"
+        failures=$((failures + 1))
+    fi
+
+    # Fixture D: the acceptance clause with no coverage until now -- a safe
+    # candidate plus an in-flight .beads lock must still refuse.
+    mkdir -p "$tmp/locked/.beads"
+    printf '{"id":"a"}\n{"id":"b"}\n{"id":"c"\n' >"$tmp/locked/.beads/issues.jsonl"
+    touch -t 202601010000 "$tmp/locked/.beads/issues.jsonl" 2>/dev/null || true
+    touch "$tmp/locked/.beads/beads.lock"
+    repair_check "apply fails closed while a .beads lock exists" --apply "locked/.beads" 3 \
+        '.applied' 'false'
+    locked_out=$(cd "$tmp" && STUB_DB_COUNT=3 BEADS_DIR="locked/.beads" \
+        PATH="$stub_dir:$PATH" bash "$self_script" --apply 2>/dev/null)
+    if printf '%s' "$locked_out" | jq -e '.why | test("lock")' >/dev/null 2>&1; then
+        echo "ok   - lock refusal explains itself"
+    else
+        echo "FAIL - lock refusal did not cite the lock: $locked_out"
+        failures=$((failures + 1))
+    fi
+
+    # Fixture E: the SUCCESS path. This is the arm whose absence hid a real
+    # defect -- `set -e` after the repair killed the script inside
+    # gather_evidence (grep -c exits 1 when it finds no merge markers), so the
+    # report was never printed and the evidence ledger this bead is named for
+    # was never written. Every prior arm is a refusal, and refusals return
+    # before that line, which is exactly why nothing caught it.
+    mkdir -p "$tmp/ok/.beads"
+    printf '{"id":"a"}\n{"id":"b"}\n{"id":"c"\n' >"$tmp/ok/.beads/issues.jsonl"
+    touch -t 202601010000 "$tmp/ok/.beads/issues.jsonl" 2>/dev/null || true
+    repair_stub="$tmp/stub_ok"
+    mkdir -p "$repair_stub"
+    cat >"$repair_stub/br" <<'STUB'
+#!/usr/bin/env bash
+# Stub whose `sync` actually repairs the export, so the success path runs.
+for arg in "$@"; do
+    case "$arg" in
+        doctor) printf '{"workspace_health":"healthy"}\n'; exit 0 ;;
+        stats)  printf '{"total":%s}\n' "${STUB_DB_COUNT:-0}"; exit 0 ;;
+        sync)
+            printf '{"id":"a"}\n{"id":"b"}\n{"id":"c"}\n' >"${BEADS_DIR}/issues.jsonl"
+            exit 0
+            ;;
+    esac
+done
+exit 0
+STUB
+    chmod +x "$repair_stub/br"
+
+    ok_out=$(cd "$tmp" && STUB_DB_COUNT=3 BEADS_DIR="ok/.beads" \
+        PATH="$repair_stub:$PATH" bash "$self_script" --apply 2>/dev/null)
+    if [[ "$(printf '%s' "$ok_out" | jq -r '.schema' 2>/dev/null)" == "beads.export_repair_report.v1" ]]; then
+        echo "ok   - successful apply emits its report"
+    else
+        echo "FAIL - successful apply emitted no report: '$ok_out'"
+        failures=$((failures + 1))
+    fi
+    if [[ "$(printf '%s' "$ok_out" | jq -r '.applied' 2>/dev/null)" == "true" ]]; then
+        echo "ok   - successful apply reports applied=true"
+    else
+        echo "FAIL - successful apply did not report applied=true: '$ok_out'"
+        failures=$((failures + 1))
+    fi
+    if [[ -s "$tmp/ok/.beads/export-repair-evidence.jsonl" ]] \
+        && jq -e '.preExportSha256 and .postExportSha256 and (.pre.state and .post.state)' \
+            "$tmp/ok/.beads/export-repair-evidence.jsonl" >/dev/null 2>&1; then
+        echo "ok   - evidence ledger records pre/post hashes and both classifications"
+    else
+        echo "FAIL - evidence ledger missing or incomplete after a successful apply"
+        failures=$((failures + 1))
+    fi
+
+    echo "self-test: $((21 - failures))/21 passed"
     [[ "$failures" -eq 0 ]] || exit 2
     exit 0
 fi
@@ -357,7 +512,17 @@ pre_hash=$(shasum -a 256 "$JSONL" 2>/dev/null | awk '{print $1}')
 set +e
 REPAIR_OUTPUT=$($REPAIR_COMMAND 2>&1)
 repair_rc=$?
-set -e 2>/dev/null || true
+# Do NOT re-enable errexit here. This script runs under `set -uo pipefail`
+# (line 23) and never had `-e`, so the previous `set -e` did not restore a
+# prior state -- it INTRODUCED errexit for the rest of the run. The very next
+# call, gather_evidence, runs `grep -cE` for merge markers, and grep exits 1
+# when it finds none. On a cleanly repaired export that is the normal case, so
+# the script died silently right here: no beads.export_repair_report.v1 on
+# stdout and no row appended to the evidence ledger.
+#
+# That made this bead's own deliverable -- the evidence ledger -- unwritable in
+# the success path. Failure semantics are already carried explicitly by
+# repair_rc and the final `[[ ... ]] || exit 1`, so errexit was never needed.
 post_hash=$(shasum -a 256 "$JSONL" 2>/dev/null | awk '{print $1}')
 gather_evidence "$JSONL"
 classify
