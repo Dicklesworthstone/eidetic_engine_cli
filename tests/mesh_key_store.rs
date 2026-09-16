@@ -125,7 +125,13 @@ fn symlinked_keys_directory_fails_closed() {
     std::fs::create_dir_all(keys_dir.parent().expect("parent")).expect("mkdir parents");
     std::os::unix::fs::symlink(&elsewhere, &keys_dir).expect("symlink");
     let error = MeshKeyStore::open_or_create(workspace.path()).expect_err("must refuse");
-    assert!(matches!(error, KeyStoreError::SymlinkComponent { .. }));
+    // Print the variant on failure. The control demonstrably fails closed here
+    // (`expect_err` succeeds), so the only open question is which variant it
+    // chose — and a bare `matches!` leaves that unanswerable from a CI log.
+    assert!(
+        matches!(error, KeyStoreError::SymlinkComponent { .. }),
+        "symlinked keys directory must fail closed as SymlinkComponent, got {error:?}"
+    );
     assert_eq!(error.degraded_code(), MESH_KEY_STORE_UNAVAILABLE_CODE);
     assert_eq!(error.guidance().class, KeyStoreFailureClass::PathSafety);
     assert!(error.guidance().credential_operation_blocked);
