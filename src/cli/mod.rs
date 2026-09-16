@@ -5832,6 +5832,47 @@ pub enum IndexCommand {
     Status(IndexStatusArgs),
     /// Preview reclaimable derived search-index artifacts without deleting anything.
     Vacuum(IndexVacuumArgs),
+    /// Derive tags for historical tag-less memories so `--tag` recall can reach them.
+    BackfillTags(IndexBackfillTagsArgs),
+}
+
+/// Arguments for `ee index backfill-tags`.
+///
+/// A one-time data migration, never automatic: historical memories written
+/// before tagging was routine carry no tags and are invisible to `--tag`
+/// recall. Defaults to a dry run so the operator reviews the proposals
+/// before anything is written.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct IndexBackfillTagsArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Operate on the user-global store instead of this workspace.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub global: bool,
+
+    /// Write the derived tags. Without this the run only reports its plan.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub apply: bool,
+
+    /// Report the plan without writing. Default behavior; accepted explicitly
+    /// so an operator can state the intent, and rejected together with --apply.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "apply")]
+    pub dry_run: bool,
+
+    /// Cap how many memories are patched in one run. The plan is still
+    /// computed over the whole workspace, so reported totals stay truthful.
+    #[arg(long, value_name = "N")]
+    pub limit: Option<usize>,
+
+    /// Append a JSONL line per proposed or applied mutation to this path.
+    #[arg(long, value_name = "PATH")]
+    pub log: Option<PathBuf>,
+
+    /// Actor recorded on each audit row.
+    #[arg(long, value_name = "NAME")]
+    pub actor: Option<String>,
 }
 
 /// Arguments for `ee index rebuild`.
@@ -14554,6 +14595,9 @@ where
         }
         Some(Command::Index(IndexCommand::Vacuum(ref args))) => {
             handle_index_vacuum(&cli, args, stdout, stderr)
+        }
+        Some(Command::Index(IndexCommand::BackfillTags(ref args))) => {
+            handle_index_backfill_tags(&cli, args, stdout, stderr)
         }
         Some(Command::Journal(JournalCommand::Append(ref args))) => {
             handle_journal_append(&cli, args, stdout, stderr)
@@ -24511,6 +24555,165 @@ where
                 repair: error.repair_hint().map(str::to_string),
             };
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_index_backfill_tags<W, E>(
+    cli: &Cli,
+    args: &IndexBackfillTagsArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::tag_backfill::{TagBackfillOptions, run_backfill};
+
+    let MemoryStoreTarget {
+        workspace,
+        database_path,
+    } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let options = TagBackfillOptions {
+        workspace_path: &workspace,
+        database_path: &database_path,
+        apply: args.apply,
+        limit: args.limit,
+        log_path: args.log.as_deref(),
+        actor: args.actor.as_deref(),
+    };
+
+    let report = match run_backfill(&options) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut text = String::new();
+            text.push_str(&format!(
+                "tag backfill: {} ({} memories scanned)\n",
+                if report.dry_run { "dry run" } else { "applied" },
+                report.scanned_memory_count
+            ));
+            text.push_str(&format!(
+                "proposed: {} memories, {} tags\n",
+                report.plan.proposed_memory_count(),
+                report.plan.proposed_tag_count()
+            ));
+            if !report.dry_run {
+                text.push_str(&format!(
+                    "applied: {} memories, {} tags\n",
+                    report.applied_memory_count(),
+                    report.applied_tag_count()
+                ));
+            }
+            text.push_str(&format!("skipped: {}\n", report.plan.skipped.len()));
+            if report.deferred_memory_count > 0 {
+                text.push_str(&format!(
+                    "deferred by --limit: {}\n",
+                    report.deferred_memory_count
+                ));
+            }
+            for proposal in &report.plan.proposals {
+                text.push_str(&format!(
+                    "  {} -> {}\n",
+                    proposal.memory_id,
+                    proposal.add_tags.join(", ")
+                ));
+            }
+            if let Some(ref path) = report.log_path {
+                text.push_str(&format!("log: {path}\n"));
+            }
+            write_stdout(stdout, &text)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &format!(
+                "INDEX_BACKFILL_TAGS|{}|{}|{}|{}\n",
+                report.dry_run,
+                report.plan.proposed_memory_count(),
+                report.plan.proposed_tag_count(),
+                report.plan.skipped.len()
+            ),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let proposals: Vec<serde_json::Value> = report
+                .plan
+                .proposals
+                .iter()
+                .map(|proposal| {
+                    serde_json::json!({
+                        "memoryId": proposal.memory_id,
+                        "addTags": proposal.add_tags,
+                        "derivations": proposal
+                            .derivations
+                            .iter()
+                            .map(|derivation| serde_json::json!({
+                                "tag": derivation.tag,
+                                "rule": derivation.rule.as_str(),
+                                "evidence": derivation.evidence,
+                            }))
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            let skipped: Vec<serde_json::Value> = report
+                .plan
+                .skipped
+                .iter()
+                .map(|skip| {
+                    serde_json::json!({
+                        "memoryId": skip.memory_id,
+                        "reason": skip.reason.as_str(),
+                    })
+                })
+                .collect();
+            let outcomes: Vec<serde_json::Value> = report
+                .outcomes
+                .iter()
+                .map(|outcome| {
+                    serde_json::json!({
+                        "memoryId": outcome.memory_id,
+                        "addTags": outcome.add_tags,
+                        "auditIds": outcome.audit_ids,
+                        "persisted": outcome.persisted,
+                        "changed": outcome.changed,
+                    })
+                })
+                .collect();
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "degraded": [],
+                "data": {
+                    "schema": crate::models::TAG_BACKFILL_SCHEMA_V1,
+                    "command": "index backfill-tags",
+                    "version": report.version,
+                    "dryRun": report.dry_run,
+                    "scannedMemoryCount": report.scanned_memory_count,
+                    "proposedMemoryCount": report.plan.proposed_memory_count(),
+                    "proposedTagCount": report.plan.proposed_tag_count(),
+                    "appliedMemoryCount": report.applied_memory_count(),
+                    "appliedTagCount": report.applied_tag_count(),
+                    "deferredMemoryCount": report.deferred_memory_count,
+                    "proposals": proposals,
+                    "skipped": skipped,
+                    "outcomes": outcomes,
+                    "logPath": report.log_path,
+                },
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
         }
     }
 }
@@ -68343,6 +68546,7 @@ impl NormalizedInvocation {
                     IndexCommand::Reembed(_) => "index reembed".to_string(),
                     IndexCommand::Status(_) => "index status".to_string(),
                     IndexCommand::Vacuum(_) => "index vacuum".to_string(),
+                    IndexCommand::BackfillTags(_) => "index backfill-tags".to_string(),
                 },
                 Command::Introspect => "introspect".to_string(),
                 Command::Primer(_) => "primer".to_string(),
