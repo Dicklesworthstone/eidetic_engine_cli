@@ -780,7 +780,7 @@ where
 {
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     let workspace_path = cli.resolve_workspace();
@@ -813,7 +813,7 @@ where
                 message: format!("Failed to create team: {error}"),
                 repair: Some("ee init --workspace . && ee migrate run --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -832,7 +832,7 @@ where
 {
     let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     match local_team_status(&connection) {
         Ok(report) => {
@@ -846,7 +846,7 @@ where
                         message: format!("Failed to serialize team status: {error}"),
                         repair: Some("ee team status --workspace . --json".to_owned()),
                     },
-                    cli.wants_json(),
+                    cli.renderer(),
                     stdout,
                     stderr,
                 ),
@@ -857,7 +857,7 @@ where
                 message: format!("Failed to read team status: {error}"),
                 repair: Some("ee migrate run --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -886,7 +886,7 @@ where
                 message: "Invite wait needs a live TCP endpoint".to_owned(),
                 repair: Some("ee team invite --endpoint <ip-or-ip:port> --wait".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -899,7 +899,7 @@ where
                     message: format!("Failed to bind invite waiter: {error}"),
                     repair: Some("ee mesh hello-responder run --workspace .".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -921,7 +921,7 @@ where
                         "ee team invite --wait --resume <invite-id> --workspace .".to_owned(),
                     ),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -974,7 +974,7 @@ where
 {
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     let expires_at = (chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339();
@@ -993,7 +993,7 @@ where
                         "ee team invite --wait --resume <invite-id> --workspace .".to_owned(),
                     ),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -1013,7 +1013,7 @@ where
                     message: format!("Failed to resume invite: {error}"),
                     repair: Some("ee team status --workspace . --json".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             ),
@@ -1037,7 +1037,7 @@ where
                             "ee team invite --endpoint <tailscale-ip> --workspace .".to_owned(),
                         ),
                     },
-                    cli.wants_json(),
+                    cli.renderer(),
                     stdout,
                     stderr,
                 );
@@ -1084,7 +1084,7 @@ where
                 message: format!("Failed to mint team invite: {error}"),
                 repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1103,7 +1103,7 @@ where
 {
     let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let revoked_at = chrono::Utc::now().to_rfc3339();
     if args.all_before_floor {
@@ -1129,7 +1129,7 @@ where
                     message: format!("Failed to revoke invites before the floor: {error}"),
                     repair: Some("ee team doctor --workspace . --json".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             ),
@@ -1141,7 +1141,7 @@ where
                 message: "invite revoke requires --invite-id or --all-before-floor".to_owned(),
                 repair: Some("ee team revoke --invite-id <id> --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -1168,7 +1168,7 @@ where
                 message: format!("Invite {invite_id} is not pending"),
                 repair: Some("ee team invite --endpoint <ip> --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1177,7 +1177,7 @@ where
                 message: format!("Failed to revoke invite: {error}"),
                 repair: Some("ee team status --workspace . --json".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1196,7 +1196,7 @@ where
 {
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     let workspace_path = cli.resolve_workspace();
@@ -1233,7 +1233,7 @@ where
                 message: format!("Failed to share team history: {error}"),
                 repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1252,7 +1252,7 @@ where
 {
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     let workspace_path = cli.resolve_workspace();
@@ -1267,7 +1267,7 @@ where
                             "ee team share bodies --confirm --token-stdin --workspace .".to_owned(),
                         ),
                     },
-                    cli.wants_json(),
+                    cli.renderer(),
                     stdout,
                     stderr,
                 );
@@ -1316,7 +1316,7 @@ where
                 message: format!("Failed to share team bodies: {error}"),
                 repair: Some("ee team share history --workspace . --json".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1339,14 +1339,14 @@ where
                 message: "Unshare bodies requires --confirm".to_owned(),
                 repair: Some("ee team unshare bodies --confirm --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
     }
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     match unshare_team_bodies(&connection, &workspace_id, &produced_at) {
@@ -1364,7 +1364,7 @@ where
                 message: format!("Failed to unshare team bodies: {error}"),
                 repair: Some("ee team share bodies --workspace . --json".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1403,7 +1403,7 @@ where
 {
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     let workspace_path = cli.resolve_workspace();
@@ -1428,7 +1428,7 @@ where
                 message: format!("Failed to remove member: {error}"),
                 repair: Some("ee team members list --workspace . --json".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1447,7 +1447,7 @@ where
 {
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     let workspace_path = cli.resolve_workspace();
@@ -1471,7 +1471,7 @@ where
                 message: format!("Failed to add node: {error}"),
                 repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1490,7 +1490,7 @@ where
 {
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     let workspace_path = cli.resolve_workspace();
@@ -1509,7 +1509,7 @@ where
                 message: format!("Failed to rotate signing key: {error}"),
                 repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1528,7 +1528,7 @@ where
 {
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     match reconcile_local_team_membership(&connection, &workspace_id) {
         Ok(report) => write_team_report(
@@ -1548,7 +1548,7 @@ where
                 message: format!("Failed to reconcile membership: {error}"),
                 repair: Some("ee team status --workspace . --json".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1571,14 +1571,14 @@ where
                 message: "Leave requires --confirm".to_owned(),
                 repair: Some("ee team leave --confirm --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
     }
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     let workspace_path = cli.resolve_workspace();
@@ -1599,7 +1599,7 @@ where
                 message: format!("Failed to leave team: {error}"),
                 repair: Some("ee team status --workspace . --json".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1618,7 +1618,7 @@ where
 {
     let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     match any_local_team_paused(&connection) {
         Ok(true) => {
@@ -1627,7 +1627,7 @@ where
                     message: "Team is paused".to_owned(),
                     repair: Some("ee team resume --confirm --workspace .".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -1639,7 +1639,7 @@ where
                     message: format!("Failed to read team posture: {error}"),
                     repair: Some("ee team status --workspace . --json".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -1690,7 +1690,7 @@ where
                 message: "Resume requires --confirm".to_owned(),
                 repair: Some("ee team resume --confirm --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -1758,11 +1758,11 @@ where
 {
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let since = match resolve_team_activity_since(args.since.as_deref(), cli.wants_json()) {
         Ok(since) => since,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     match list_team_activity(
         &connection,
@@ -1795,7 +1795,7 @@ where
                 message: format!("Failed to list team activity: {error}"),
                 repair: Some("ee team status --workspace . --json".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1814,7 +1814,7 @@ where
 {
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     let workspace_path = cli.resolve_workspace();
@@ -1846,7 +1846,7 @@ where
                 message: format!("Failed to share project: {error}"),
                 repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1865,7 +1865,7 @@ where
 {
     let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     match adopt_team_project(
@@ -1886,7 +1886,7 @@ where
                 message: format!("Failed to adopt project: {error}"),
                 repair: Some("ee team projects list --workspace . --json".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1905,7 +1905,7 @@ where
 {
     let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     match list_team_projects(&connection) {
         Ok(report) => write_team_report(
@@ -1922,7 +1922,7 @@ where
                 message: format!("Failed to list projects: {error}"),
                 repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1941,7 +1941,7 @@ where
 {
     let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     match reconcile_local_team_projects(&connection) {
         Ok(report) => write_team_report(
@@ -1958,7 +1958,7 @@ where
                 message: format!("Failed to reconcile projects: {error}"),
                 repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -1977,7 +1977,7 @@ where
 {
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let workspace_path = cli.resolve_workspace();
     let mut local =
@@ -1989,7 +1989,7 @@ where
                         message: format!("Failed to fetch team body: {error}"),
                         repair: Some("ee team share bodies --workspace . --json".to_owned()),
                     },
-                    cli.wants_json(),
+                    cli.renderer(),
                     stdout,
                     stderr,
                 );
@@ -2033,7 +2033,7 @@ where
 {
     let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let workspace_path = cli.resolve_workspace();
     let plan = match execute_team_steward_once(&connection, Some(&workspace_path)) {
@@ -2044,7 +2044,7 @@ where
                     message: format!("Failed to run team steward: {error}"),
                     repair: Some("ee team status --workspace . --json".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -2104,14 +2104,14 @@ where
                         .to_owned(),
                 ),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
     }
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     let workspace_path = cli.resolve_workspace();
@@ -2139,7 +2139,7 @@ where
                 message: format!("Failed to require tailnet-attested identity: {error}"),
                 repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -2158,7 +2158,7 @@ where
 {
     let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     match team_idp_status(&connection) {
         Ok(report) => write_team_report(
@@ -2178,7 +2178,7 @@ where
                 message: format!("Failed to read team IdP policy: {error}"),
                 repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -2197,7 +2197,7 @@ where
 {
     let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let bytes = match std::fs::read(&args.discovery_json) {
         Ok(bytes) => bytes,
@@ -2210,7 +2210,7 @@ where
                             .to_owned(),
                     ),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -2227,7 +2227,7 @@ where
                             .to_owned(),
                     ),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -2258,7 +2258,7 @@ where
                         .to_owned(),
                 ),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -2277,18 +2277,18 @@ where
 {
     let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let discovery = match read_json_file(&args.discovery_json) {
         Ok(value) => value,
         Err(error) => {
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
     let authorization = match read_json_file(&args.authorization_json) {
         Ok(value) => value,
         Err(error) => {
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
     if args.execute {
@@ -2320,7 +2320,7 @@ where
                             .to_owned(),
                     ),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             ),
@@ -2354,7 +2354,7 @@ where
                         .to_owned(),
                 ),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -2373,7 +2373,7 @@ where
 {
     let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let token = if args.id_token == "-" {
         match read_bounded_id_token_from_stdin() {
@@ -2387,7 +2387,7 @@ where
                                 .to_owned(),
                         ),
                     },
-                    cli.wants_json(),
+                    cli.renderer(),
                     stdout,
                     stderr,
                 );
@@ -2400,7 +2400,7 @@ where
     let checked_at = chrono::Utc::now().to_rfc3339();
     let discovery = match read_json_file(&args.discovery_json) {
         Ok(value) => value,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let jwks_url = match pinned_team_jwks_uri(&connection, &discovery) {
         Ok(url) => url,
@@ -2413,7 +2413,7 @@ where
                             .to_owned(),
                     ),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -2435,7 +2435,7 @@ where
                                 .to_owned(),
                         ),
                     },
-                    cli.wants_json(),
+                    cli.renderer(),
                     stdout,
                     stderr,
                 );
@@ -2466,7 +2466,7 @@ where
                         .to_owned(),
                 ),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -2496,7 +2496,7 @@ where
 {
     let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let report = probe_local_tailscale_for_team();
     let checked_at = chrono::Utc::now().to_rfc3339();
@@ -2515,7 +2515,7 @@ where
                 message: format!("Failed to revalidate team identities: {error}"),
                 repair: Some("ee team idp require --tailnet-attested --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -2561,7 +2561,7 @@ where
                         .to_owned(),
                 ),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -2577,7 +2577,7 @@ where
                             .to_owned(),
                     ),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -2587,7 +2587,7 @@ where
     let (output_dir, file_name) =
         match resolve_credential_backup_output(&workspace_path, args.output.as_deref()) {
             Ok(resolved) => resolved,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     let created_at = chrono::Utc::now().to_rfc3339();
     match crate::mesh::credential_backup::backup_workspace_credentials(
@@ -2607,7 +2607,7 @@ where
         }
         Err(error) => write_domain_error(
             &credential_backup_domain_error(error),
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -2633,7 +2633,7 @@ where
                         .to_owned(),
                 ),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -2649,7 +2649,7 @@ where
                             .to_owned(),
                     ),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -2673,7 +2673,7 @@ where
         }
         Err(error) => write_domain_error(
             &credential_backup_domain_error(error),
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -2786,7 +2786,7 @@ where
 {
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let workspace_path = cli.resolve_workspace();
     match inspect_team_health(&connection, &workspace_id, Some(&workspace_path)) {
@@ -2805,7 +2805,7 @@ where
                 message: format!("Failed to inspect team health: {error}"),
                 repair: Some("ee team status --workspace . --json".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -2824,7 +2824,7 @@ where
 {
     let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     match inspect_team_port(&connection) {
         Ok(report) => {
@@ -2851,7 +2851,7 @@ where
                 message: format!("Failed to inspect team hello port: {error}"),
                 repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -2877,14 +2877,14 @@ where
                     args.to
                 )),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
     }
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     let workspace_path = cli.resolve_workspace();
@@ -2923,7 +2923,7 @@ where
                     args.to
                 )),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -2943,7 +2943,7 @@ where
 {
     let (connection, _) = match open_team_store(cli, database) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let updated_at = chrono::Utc::now().to_rfc3339();
     match set_local_team_paused(&connection, paused, &updated_at) {
@@ -2963,7 +2963,7 @@ where
                 message: format!("Failed to update team posture: {error}"),
                 repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
@@ -2982,7 +2982,7 @@ where
 {
     let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
         Ok(opened) => opened,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     let invite_code = if args.invite_stdin {
@@ -2994,7 +2994,7 @@ where
                         message: format!("Failed to read invite from stdin: {error}"),
                         repair: Some("ee team join --invite-stdin --workspace .".to_owned()),
                     },
-                    cli.wants_json(),
+                    cli.renderer(),
                     stdout,
                     stderr,
                 );
@@ -3009,7 +3009,7 @@ where
                 message: "Join needs --invite or --invite-stdin".to_owned(),
                 repair: Some("ee team join --invite-stdin --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -3044,7 +3044,7 @@ where
                 message: format!("Failed to join team: {error}"),
                 repair: Some("ee mesh hello-responder run --workspace .".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         ),
