@@ -307,6 +307,19 @@ assert_jq_file "host_profile_response_envelope" "${HOST_PROFILE_JSON}" '.schema 
 assert_jq_file "host_profile_raw_probe_shape" "${HOST_PROFILE_JSON}" '.data.schema == "ee.host_profile.v1" and .data.sideEffectFree == true and (.data.redaction | test("paths_presence_only_env")) and (.data.paths | type) == "array" and (.data.topology.rch.status | type) == "string"'
 
 emit_note "cass_limited_advisory_probe" "forcing invalid EE_CASS_BINARY to simulate limited optional CASS capability"
+# What actually produces `cass_limited` here is the FILE NAME, not the file's
+# contents or mode. `validate_import_binary` (src/cass/client.rs:241-259)
+# rejects any EE_CASS_BINARY whose `file_name()` is not `cass`
+# (DEFAULT_BINARY, :38) -- and it is a pure path + metadata check, so doctor
+# NEVER spawns this binary (probe_cass_capability -> discover_import_binary ->
+# validate_import_binary; no Command::new on that path).
+#
+# Two consequences worth stating, because the heredoc and chmod below imply
+# otherwise: this fixture is not exercising "a cass that runs but is useless",
+# and its executability cannot change the outcome. There is also no
+# real-binary fallthrough to worry about here -- an absolute EE_CASS_BINARY
+# override is honoured and then rejected by name, so a non-executable stub
+# yields the same advisory for the same reason, not a wrong one.
 BAD_CASS="${TOOL_DIR}/not-cass"
 printf '#!/usr/bin/env bash\nexit 0\n' >"${BAD_CASS}"
 if ! chmod +x "${BAD_CASS}"; then
