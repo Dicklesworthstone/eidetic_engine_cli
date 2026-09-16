@@ -3566,6 +3566,26 @@ impl ManualRunner {
             report.status,
             crate::core::index::IndexRebuildStatus::Success
         );
+        // Close the auto-rebuild loop: a pending request recorded by the
+        // context lexical-fallback path is satisfied only by a rebuild that
+        // actually published (bd-auto-index-rebuild-on-fallback-x35vi). A
+        // failed or empty rebuild deliberately leaves the request pending so
+        // the next tick retries and `requestCount` keeps accumulating as
+        // evidence. Marking never fails the job — the rebuild itself is the
+        // durable outcome, and a state-dir problem must not turn a successful
+        // rebuild into a reported failure.
+        if durable_mutation {
+            if let Err(reason) = crate::core::index::mark_index_rebuild_request_satisfied(
+                &workspace_path,
+                &chrono::Utc::now().to_rfc3339(),
+            ) {
+                tracing::debug!(
+                    target: "ee::steward::index_rebuild",
+                    reason = %reason,
+                    "index rebuild could not mark its pending request satisfied"
+                );
+            }
+        }
         let outcome = if matches!(
             report.status,
             crate::core::index::IndexRebuildStatus::Success
@@ -7663,6 +7683,30 @@ const BACKGROUND_SCHEDULER_JOB_TYPES: &[JobType] = &[
     JobType::TeamSteward,
 ];
 
+/// Job types for one background tick, given the workspace's current state.
+///
+/// [`BACKGROUND_SCHEDULER_JOB_TYPES`] is the unconditional low-overhead set.
+/// `IndexRebuild` is deliberately NOT in it — a full rebuild is the most
+/// expensive steward job and running it on every tick would make the daemon
+/// unfit to leave running.
+///
+/// It is added only when the workspace carries a pending index-rebuild request
+/// (`bd-auto-index-rebuild-on-fallback-x35vi`). Context assembly records that
+/// request when it degrades to lexical fallback because the index is missing or
+/// broken, so this is the consumer that closes the loop: pack degrades → marker
+/// → next tick rebuilds → [`crate::core::index::mark_index_rebuild_request_satisfied`]
+/// clears it → subsequent packs are served semantically.
+///
+/// An unreadable or already-satisfied marker yields the base set, so a corrupt
+/// `.ee/` can never conscript the daemon into rebuild loops.
+fn background_scheduler_job_types(workspace: &str) -> Vec<JobType> {
+    let mut job_types = BACKGROUND_SCHEDULER_JOB_TYPES.to_vec();
+    if crate::core::index::pending_index_rebuild_request(Path::new(workspace)).is_some() {
+        job_types.push(JobType::IndexRebuild);
+    }
+    job_types
+}
+
 /// Run the steward scheduler indefinitely on a background cadence.
 ///
 /// Called by the daemon server when it starts for a bound workspace.
@@ -7691,7 +7735,7 @@ pub fn run_daemon_background_scheduler(workspace: &str, shutdown: Arc<AtomicBool
             tick_limit: 1,
             interval_ms: 0,
             dry_run: false,
-            job_types: BACKGROUND_SCHEDULER_JOB_TYPES.to_vec(),
+            job_types: background_scheduler_job_types(workspace),
             runner_options: RunnerOptions::new().with_cancellation_flag(Arc::clone(&shutdown)),
         };
         let _ = run_daemon_foreground(&options);
@@ -8140,6 +8184,67 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    #[test]
+    fn background_scheduler_runs_index_rebuild_only_on_request_x35vi() -> TestResult {
+        // The daemon must stay cheap to leave running: a full index rebuild is
+        // the most expensive steward job, so it is scheduled only when the
+        // context lexical-fallback path has recorded a pending request
+        // (bd-auto-index-rebuild-on-fallback-x35vi).
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = workspace.path().to_string_lossy().into_owned();
+
+        let idle = background_scheduler_job_types(&workspace_path);
+        ensure(
+            idle,
+            BACKGROUND_SCHEDULER_JOB_TYPES.to_vec(),
+            "an idle workspace keeps the base low-overhead job set",
+        )?;
+
+        crate::core::index::record_index_rebuild_request(
+            workspace.path(),
+            crate::core::index::IndexRebuildTrigger::IndexMissing,
+            "context_lexical_fallback",
+            "2026-09-16T04:00:00Z",
+            crate::core::index::DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+        );
+        let requested = background_scheduler_job_types(&workspace_path);
+        ensure(
+            requested.contains(&JobType::IndexRebuild),
+            true,
+            "a pending request schedules the rebuild job",
+        )?;
+        ensure(
+            requested.len(),
+            BACKGROUND_SCHEDULER_JOB_TYPES.len() + 1,
+            "the rebuild job is added, not substituted",
+        )?;
+
+        // Once a rebuild has published, the request stops scheduling work —
+        // otherwise the daemon would rebuild on every tick forever.
+        crate::core::index::mark_index_rebuild_request_satisfied(
+            workspace.path(),
+            "2026-09-16T04:30:00Z",
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            background_scheduler_job_types(&workspace_path),
+            BACKGROUND_SCHEDULER_JOB_TYPES.to_vec(),
+            "a satisfied request stops scheduling rebuilds",
+        )?;
+
+        // A corrupt marker must never conscript the daemon into rebuild loops.
+        std::fs::write(
+            workspace.path().join(".ee").join("index-rebuild-request.json"),
+            b"{not json",
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            background_scheduler_job_types(&workspace_path),
+            BACKGROUND_SCHEDULER_JOB_TYPES.to_vec(),
+            "a corrupt marker keeps the base job set",
+        )
     }
 
     fn stored_memory_for_consolidation(

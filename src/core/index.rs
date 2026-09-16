@@ -8704,6 +8704,477 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+// ── Index rebuild requests (bd-auto-index-rebuild-on-fallback-x35vi) ────────
+//
+// When context assembly falls back to deterministic lexical matching because
+// the search index is missing or broken, the pack is served degraded and the
+// operator has historically had to run `ee index rebuild` by hand — every pack
+// in between paying the same degradation (field report 2026-08-24/25).
+//
+// A pack cannot fix that inline. It has a token/latency budget, it may hold a
+// read-only connection, and a synchronous rebuild would block the very request
+// the user is waiting on. So the pack records a durable *request* instead, and
+// the steward's `IndexRebuild` job consumes it out of band.
+//
+// What this is NOT: a promise. The request is a bounded, rate-limited,
+// auditable marker. It is consumed by the steward background scheduler (when a
+// daemon is running) or by `ee maintenance run --job index_rebuild`. With
+// neither running it records the need and nothing acts on it — the degradation
+// stays honest and the repair hint still points at the manual command. This
+// makes the rebuild reachable, not guaranteed, and the degradation is never
+// suppressed on that account.
+
+/// Schema id for the durable index-rebuild request marker.
+pub const INDEX_REBUILD_REQUEST_SCHEMA_V1: &str = "ee.index.rebuild_request.v1";
+
+/// File name of the request marker inside the workspace `.ee/` state dir.
+const INDEX_REBUILD_REQUEST_FILE: &str = "index-rebuild-request.json";
+
+/// Byte cap for reading the request marker.
+///
+/// The real document is a handful of short fields (well under 1 KiB). The cap
+/// bounds peak allocation against a corrupt write or a peer-planted oversize
+/// file on a shared multi-agent checkout, exactly as
+/// [`INDEX_METADATA_INSPECT_LIMIT`] does for `meta.json` — the marker is read
+/// on the steward tick path, so an unbounded read here would be a cheap way to
+/// pin memory in the daemon.
+const INDEX_REBUILD_REQUEST_INSPECT_LIMIT: u64 = 64 * 1024;
+
+/// Minimum spacing between two recorded rebuild requests for one workspace.
+///
+/// Without a floor, a shell loop or an agent swarm packing in parallel would
+/// rewrite the marker on every pack. Fifteen minutes is longer than any
+/// plausible rebuild and short enough that a genuinely stuck index re-requests
+/// within one working session.
+pub const DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS: i64 = 900;
+
+/// Why a rebuild was requested.
+///
+/// Deliberately a closed set of *rebuildable* causes. A missing embedding model
+/// is **not** one of them: rebuilding cannot conjure a model, so requesting a
+/// rebuild there would burn steward budget and imply a repair that cannot
+/// happen. `bd-1iupc.2` closed on reporting that condition honestly, and this
+/// type keeps that distinction rather than collapsing every lexical fallback
+/// into "rebuild it".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexRebuildTrigger {
+    /// No index exists at the configured path (`SearchStatus::IndexNotFound`).
+    IndexMissing,
+    /// An index exists but could not serve the query
+    /// (`SearchStatus::IndexError`) — corrupt, truncated, or incompatible.
+    IndexError,
+}
+
+impl IndexRebuildTrigger {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::IndexMissing => "index_missing",
+            Self::IndexError => "index_error",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "index_missing" => Some(Self::IndexMissing),
+            "index_error" => Some(Self::IndexError),
+            _ => None,
+        }
+    }
+}
+
+/// A durable index-rebuild request read back from the workspace state dir.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexRebuildRequest {
+    pub trigger: IndexRebuildTrigger,
+    /// RFC 3339 timestamp of the most recent request.
+    pub requested_at: String,
+    /// How many times this marker has been (re)recorded since it was last
+    /// satisfied. Useful evidence that a rebuild is failing to stick.
+    pub request_count: u64,
+    /// The degraded code that prompted the request, carried for audit.
+    pub degraded_code: String,
+    /// RFC 3339 timestamp set when a rebuild satisfied this request. `None`
+    /// means still pending.
+    pub satisfied_at: Option<String>,
+}
+
+impl IndexRebuildRequest {
+    #[must_use]
+    pub const fn is_pending(&self) -> bool {
+        self.satisfied_at.is_none()
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": INDEX_REBUILD_REQUEST_SCHEMA_V1,
+            "trigger": self.trigger.as_str(),
+            "requestedAt": self.requested_at,
+            "requestCount": self.request_count,
+            "degradedCode": self.degraded_code,
+            "satisfiedAt": self.satisfied_at,
+        })
+    }
+
+    fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        let schema = value
+            .get("schema")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "index rebuild request is missing `schema`".to_owned())?;
+        if schema != INDEX_REBUILD_REQUEST_SCHEMA_V1 {
+            return Err(format!(
+                "index rebuild request has unknown schema '{schema}' (expected {INDEX_REBUILD_REQUEST_SCHEMA_V1})"
+            ));
+        }
+        let trigger = value
+            .get("trigger")
+            .and_then(serde_json::Value::as_str)
+            .and_then(IndexRebuildTrigger::parse)
+            .ok_or_else(|| "index rebuild request has no recognized `trigger`".to_owned())?;
+        let requested_at = value
+            .get("requestedAt")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "index rebuild request is missing `requestedAt`".to_owned())?
+            .to_owned();
+        let request_count = value
+            .get("requestCount")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(1);
+        let degraded_code = value
+            .get("degradedCode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let satisfied_at = match value.get("satisfiedAt") {
+            Some(serde_json::Value::String(text)) => Some(text.clone()),
+            _ => None,
+        };
+        Ok(Self {
+            trigger,
+            requested_at,
+            request_count,
+            degraded_code,
+            satisfied_at,
+        })
+    }
+}
+
+/// Why a request was not recorded. Every variant is a normal outcome, not a
+/// failure of the command that observed the degradation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexRebuildRequestSkip {
+    /// A pending request is younger than the cooldown.
+    Cooldown { seconds_remaining: i64 },
+    /// The marker could not be read or written. Carries the reason so callers
+    /// can surface it as evidence; it never fails the caller's command.
+    Unavailable { reason: String },
+}
+
+/// Result of recording an index-rebuild request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexRebuildRequestOutcome {
+    /// The marker was written (or refreshed after the cooldown elapsed).
+    Recorded {
+        trigger: IndexRebuildTrigger,
+        request_count: u64,
+    },
+    /// Nothing was written; see the reason.
+    Skipped(IndexRebuildRequestSkip),
+}
+
+impl IndexRebuildRequestOutcome {
+    #[must_use]
+    pub const fn was_recorded(&self) -> bool {
+        matches!(self, Self::Recorded { .. })
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        match self {
+            Self::Recorded {
+                trigger,
+                request_count,
+            } => serde_json::json!({
+                "status": "recorded",
+                "trigger": trigger.as_str(),
+                "requestCount": request_count,
+            }),
+            Self::Skipped(IndexRebuildRequestSkip::Cooldown { seconds_remaining }) => {
+                serde_json::json!({
+                    "status": "skipped",
+                    "reason": "cooldown",
+                    "secondsRemaining": seconds_remaining,
+                })
+            }
+            Self::Skipped(IndexRebuildRequestSkip::Unavailable { reason }) => serde_json::json!({
+                "status": "skipped",
+                "reason": "unavailable",
+                "detail": reason,
+            }),
+        }
+    }
+}
+
+fn index_rebuild_request_path(workspace_path: &Path) -> PathBuf {
+    workspace_path.join(".ee").join(INDEX_REBUILD_REQUEST_FILE)
+}
+
+/// Read the request marker, if one exists and parses.
+///
+/// `Ok(None)` means "no marker"; `Err` means "a marker exists but is unusable"
+/// (oversize, symlinked, malformed, wrong schema). Callers on a serving path
+/// should prefer [`pending_index_rebuild_request`], which folds both into
+/// "nothing actionable".
+pub fn read_index_rebuild_request(
+    workspace_path: &Path,
+) -> Result<Option<IndexRebuildRequest>, String> {
+    let path = index_rebuild_request_path(workspace_path);
+
+    // Refuse to follow a symlink into the marker, matching the posture the
+    // index metadata reader uses: on a shared checkout the `.ee/` directory is
+    // writable by every agent on the host.
+    if let Some(component) =
+        first_existing_index_symlink_component(&path).map_err(|error| error.to_string())?
+    {
+        return Err(format!(
+            "index rebuild request '{}' traverses symlinked path component '{}'",
+            path.display(),
+            component.display()
+        ));
+    }
+
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => {
+            return Err(format!(
+                "index rebuild request '{}' is not a regular file",
+                path.display()
+            ));
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect index rebuild request '{}': {error}",
+                path.display()
+            ));
+        }
+    };
+    if metadata.len() > INDEX_REBUILD_REQUEST_INSPECT_LIMIT {
+        return Err(format!(
+            "index rebuild request '{}' exceeds the {INDEX_REBUILD_REQUEST_INSPECT_LIMIT} byte cap (size={size})",
+            path.display(),
+            size = metadata.len(),
+        ));
+    }
+
+    // Bound the read itself against a TOCTOU growth between the stat above and
+    // the open here.
+    use std::io::Read as _;
+    let file = std::fs::File::open(&path).map_err(|error| {
+        format!(
+            "failed to read index rebuild request '{}': {error}",
+            path.display()
+        )
+    })?;
+    let mut bytes = Vec::new();
+    file.take(INDEX_REBUILD_REQUEST_INSPECT_LIMIT.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            format!(
+                "failed to read index rebuild request '{}': {error}",
+                path.display()
+            )
+        })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > INDEX_REBUILD_REQUEST_INSPECT_LIMIT {
+        return Err(format!(
+            "index rebuild request '{}' exceeds the {INDEX_REBUILD_REQUEST_INSPECT_LIMIT} byte cap during read",
+            path.display(),
+        ));
+    }
+
+    let document: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "index rebuild request '{}' is not valid JSON: {error}",
+            path.display()
+        )
+    })?;
+    IndexRebuildRequest::from_json(&document).map(Some)
+}
+
+/// The pending request for this workspace, if any.
+///
+/// Folds "no marker", "unreadable marker", and "already satisfied" into `None`:
+/// a serving path must never change behavior because of a corrupt marker.
+#[must_use]
+pub fn pending_index_rebuild_request(workspace_path: &Path) -> Option<IndexRebuildRequest> {
+    read_index_rebuild_request(workspace_path)
+        .ok()
+        .flatten()
+        .filter(IndexRebuildRequest::is_pending)
+}
+
+/// Record a rebuild request for `workspace_path`.
+///
+/// Infallible by construction — every failure is reported as
+/// [`IndexRebuildRequestSkip::Unavailable`] rather than an `Err`, because the
+/// caller is a degraded-but-succeeding context pack and must not be turned into
+/// a failed command by a state-dir problem.
+///
+/// Rate limiting: a pending request younger than `cooldown_secs` suppresses the
+/// write. A pending request *older* than the cooldown is refreshed in place
+/// with an incremented `requestCount`, so a rebuild that never runs keeps a
+/// live, countable signal instead of going stale forever.
+///
+/// `now` is an RFC 3339 timestamp supplied by the caller so the behavior is
+/// deterministic under test.
+pub fn record_index_rebuild_request(
+    workspace_path: &Path,
+    trigger: IndexRebuildTrigger,
+    degraded_code: &str,
+    now: &str,
+    cooldown_secs: i64,
+) -> IndexRebuildRequestOutcome {
+    let previous = match read_index_rebuild_request(workspace_path) {
+        Ok(previous) => previous,
+        Err(reason) => {
+            // A malformed or hostile marker is not a reason to stop requesting
+            // rebuilds; it is overwritten below and the reason is surfaced only
+            // if the overwrite itself fails.
+            tracing::debug!(
+                target: "ee::index::rebuild_request",
+                reason = %reason,
+                "replacing unreadable index rebuild request marker"
+            );
+            None
+        }
+    };
+
+    let mut request_count = 1;
+    if let Some(previous) = previous {
+        if previous.is_pending() {
+            match seconds_between_rfc3339(&previous.requested_at, now) {
+                Some(elapsed) if elapsed < cooldown_secs => {
+                    return IndexRebuildRequestOutcome::Skipped(
+                        IndexRebuildRequestSkip::Cooldown {
+                            seconds_remaining: cooldown_secs.saturating_sub(elapsed),
+                        },
+                    );
+                }
+                // An unparsable or future-dated previous timestamp cannot bound
+                // the cooldown, so treat the marker as expired and refresh it
+                // rather than letting a bad clock wedge requests off forever.
+                _ => {}
+            }
+            request_count = previous.request_count.saturating_add(1);
+        }
+    }
+
+    let request = IndexRebuildRequest {
+        trigger,
+        requested_at: now.to_owned(),
+        request_count,
+        degraded_code: degraded_code.to_owned(),
+        satisfied_at: None,
+    };
+    match write_index_rebuild_request(workspace_path, &request) {
+        Ok(()) => IndexRebuildRequestOutcome::Recorded {
+            trigger,
+            request_count,
+        },
+        Err(reason) => {
+            IndexRebuildRequestOutcome::Skipped(IndexRebuildRequestSkip::Unavailable { reason })
+        }
+    }
+}
+
+/// Mark the pending request satisfied after a rebuild published successfully.
+///
+/// Returns `Ok(true)` when a pending request was marked, `Ok(false)` when there
+/// was nothing pending to mark.
+///
+/// Per RULE NUMBER 1 this never unlinks the marker: the satisfied record stays
+/// on disk as evidence of the request/repair pair, and `requestCount` shows how
+/// many packs paid the degradation before the rebuild landed.
+pub fn mark_index_rebuild_request_satisfied(
+    workspace_path: &Path,
+    satisfied_at: &str,
+) -> Result<bool, String> {
+    let Some(mut request) = read_index_rebuild_request(workspace_path)? else {
+        return Ok(false);
+    };
+    if !request.is_pending() {
+        return Ok(false);
+    }
+    request.satisfied_at = Some(satisfied_at.to_owned());
+    write_index_rebuild_request(workspace_path, &request)?;
+    Ok(true)
+}
+
+/// Publish the marker atomically: write a unique temp file beside the target,
+/// then rename over it. A reader therefore sees either the old document or the
+/// new one, never a partial write.
+fn write_index_rebuild_request(
+    workspace_path: &Path,
+    request: &IndexRebuildRequest,
+) -> Result<(), String> {
+    let path = index_rebuild_request_path(workspace_path);
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("index rebuild request '{}' has no parent", path.display()))?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "failed to create workspace state directory '{}': {error}",
+            parent.display()
+        )
+    })?;
+    ensure_index_path_has_no_symlinks(&path, "publish index rebuild request")
+        .map_err(|error| error.to_string())?;
+
+    let mut temp_name = OsString::from(".");
+    temp_name.push(INDEX_REBUILD_REQUEST_FILE);
+    temp_name.push(OsString::from(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        monotonicish_stamp()
+    )));
+    let temp_path = parent.join(&temp_name);
+
+    let mut body = serde_json::to_string_pretty(&request.data_json())
+        .map_err(|error| format!("failed to encode index rebuild request: {error}"))?;
+    body.push('\n');
+    std::fs::write(&temp_path, body.as_bytes()).map_err(|error| {
+        format!(
+            "failed to write index rebuild request '{}': {error}",
+            temp_path.display()
+        )
+    })?;
+    std::fs::rename(&temp_path, &path).map_err(|error| {
+        format!(
+            "failed to publish index rebuild request from {} to {}: {error}",
+            temp_path.display(),
+            path.display()
+        )
+    })
+}
+
+/// Whole seconds from `earlier` to `later`, or `None` when either timestamp is
+/// not RFC 3339 or `later` precedes `earlier`.
+fn seconds_between_rfc3339(earlier: &str, later: &str) -> Option<i64> {
+    let earlier = chrono::DateTime::parse_from_rfc3339(earlier).ok()?;
+    let later = chrono::DateTime::parse_from_rfc3339(later).ok()?;
+    let elapsed = later.signed_duration_since(earlier).num_seconds();
+    if elapsed < 0 { None } else { Some(elapsed) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9344,6 +9815,279 @@ mod tests {
             file.size = bytes.len() as u64;
         }
         Ok((native, download))
+    }
+
+    // ── Index rebuild requests (bd-auto-index-rebuild-on-fallback-x35vi) ────
+
+    fn rebuild_request_marker_path(workspace: &Path) -> PathBuf {
+        workspace.join(".ee").join("index-rebuild-request.json")
+    }
+
+    #[test]
+    fn index_rebuild_request_records_and_reads_back_x35vi() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+
+        // A fresh workspace has nothing pending: the steward must not rebuild
+        // just because it was asked to tick.
+        assert!(read_index_rebuild_request(workspace.path())?.is_none());
+        assert!(pending_index_rebuild_request(workspace.path()).is_none());
+
+        let outcome = record_index_rebuild_request(
+            workspace.path(),
+            IndexRebuildTrigger::IndexMissing,
+            "context_lexical_fallback",
+            "2026-09-16T04:00:00Z",
+            DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+        );
+        assert_eq!(
+            outcome,
+            IndexRebuildRequestOutcome::Recorded {
+                trigger: IndexRebuildTrigger::IndexMissing,
+                request_count: 1,
+            }
+        );
+        assert!(outcome.was_recorded());
+
+        let recorded = read_index_rebuild_request(workspace.path())?
+            .ok_or_else(|| "recorded request should read back".to_owned())?;
+        assert_eq!(recorded.trigger, IndexRebuildTrigger::IndexMissing);
+        assert_eq!(recorded.requested_at, "2026-09-16T04:00:00Z");
+        assert_eq!(recorded.request_count, 1);
+        assert_eq!(recorded.degraded_code, "context_lexical_fallback");
+        assert_eq!(recorded.satisfied_at, None);
+        assert!(recorded.is_pending());
+        assert_eq!(pending_index_rebuild_request(workspace.path()), Some(recorded));
+
+        // The marker is a plain JSON document under the workspace state dir,
+        // readable by an operator without ee.
+        let body = std::fs::read_to_string(rebuild_request_marker_path(workspace.path()))
+            .map_err(|error| error.to_string())?;
+        assert!(body.contains(INDEX_REBUILD_REQUEST_SCHEMA_V1));
+        assert!(body.contains("index_missing"));
+        Ok(())
+    }
+
+    #[test]
+    fn index_rebuild_request_cooldown_suppresses_repeat_packs_x35vi() -> TestResult {
+        // A swarm packing in parallel, or a shell loop, must not rewrite the
+        // marker on every pack.
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        record_index_rebuild_request(
+            workspace.path(),
+            IndexRebuildTrigger::IndexMissing,
+            "context_lexical_fallback",
+            "2026-09-16T04:00:00Z",
+            DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+        );
+
+        let repeat = record_index_rebuild_request(
+            workspace.path(),
+            IndexRebuildTrigger::IndexMissing,
+            "context_lexical_fallback",
+            "2026-09-16T04:05:00Z",
+            DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+        );
+        assert_eq!(
+            repeat,
+            IndexRebuildRequestOutcome::Skipped(IndexRebuildRequestSkip::Cooldown {
+                seconds_remaining: DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS - 300,
+            })
+        );
+        assert!(!repeat.was_recorded());
+
+        // Suppression leaves the original request untouched — the count must
+        // not inflate just because packs kept arriving inside the window.
+        let stored = read_index_rebuild_request(workspace.path())?
+            .ok_or_else(|| "request should survive a suppressed repeat".to_owned())?;
+        assert_eq!(stored.requested_at, "2026-09-16T04:00:00Z");
+        assert_eq!(stored.request_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn index_rebuild_request_refreshes_after_cooldown_x35vi() -> TestResult {
+        // A rebuild that never runs must keep a live, countable signal rather
+        // than going stale forever.
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        record_index_rebuild_request(
+            workspace.path(),
+            IndexRebuildTrigger::IndexMissing,
+            "context_lexical_fallback",
+            "2026-09-16T04:00:00Z",
+            DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+        );
+
+        let refreshed = record_index_rebuild_request(
+            workspace.path(),
+            IndexRebuildTrigger::IndexError,
+            "context_lexical_fallback",
+            "2026-09-16T04:20:00Z",
+            DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+        );
+        assert_eq!(
+            refreshed,
+            IndexRebuildRequestOutcome::Recorded {
+                trigger: IndexRebuildTrigger::IndexError,
+                request_count: 2,
+            }
+        );
+
+        let stored = read_index_rebuild_request(workspace.path())?
+            .ok_or_else(|| "refreshed request should read back".to_owned())?;
+        assert_eq!(stored.trigger, IndexRebuildTrigger::IndexError);
+        assert_eq!(stored.requested_at, "2026-09-16T04:20:00Z");
+        assert_eq!(stored.request_count, 2);
+
+        // A previous timestamp the cooldown cannot bound (unparsable, or a
+        // clock that went backwards) must refresh rather than wedge requests
+        // off forever.
+        let backwards = record_index_rebuild_request(
+            workspace.path(),
+            IndexRebuildTrigger::IndexError,
+            "context_lexical_fallback",
+            "2026-09-16T03:00:00Z",
+            DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+        );
+        assert_eq!(
+            backwards,
+            IndexRebuildRequestOutcome::Recorded {
+                trigger: IndexRebuildTrigger::IndexError,
+                request_count: 3,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn index_rebuild_request_satisfied_stops_being_pending_x35vi() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+
+        // Nothing pending: marking is a no-op, not an error.
+        assert!(!mark_index_rebuild_request_satisfied(
+            workspace.path(),
+            "2026-09-16T04:30:00Z"
+        )?);
+
+        record_index_rebuild_request(
+            workspace.path(),
+            IndexRebuildTrigger::IndexMissing,
+            "context_lexical_fallback",
+            "2026-09-16T04:00:00Z",
+            DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+        );
+        assert!(mark_index_rebuild_request_satisfied(
+            workspace.path(),
+            "2026-09-16T04:30:00Z"
+        )?);
+
+        // Per RULE NUMBER 1 the marker is never unlinked: the satisfied record
+        // stays on disk as evidence of the request/repair pair.
+        let marker = rebuild_request_marker_path(workspace.path());
+        assert!(marker.exists());
+        let stored = read_index_rebuild_request(workspace.path())?
+            .ok_or_else(|| "satisfied request should still be readable".to_owned())?;
+        assert_eq!(stored.satisfied_at.as_deref(), Some("2026-09-16T04:30:00Z"));
+        assert_eq!(stored.request_count, 1);
+        assert!(!stored.is_pending());
+        assert!(pending_index_rebuild_request(workspace.path()).is_none());
+
+        // Marking twice is idempotent.
+        assert!(!mark_index_rebuild_request_satisfied(
+            workspace.path(),
+            "2026-09-16T05:00:00Z"
+        )?);
+
+        // A later degradation starts a fresh request at count 1 rather than
+        // resuming the satisfied one.
+        let next = record_index_rebuild_request(
+            workspace.path(),
+            IndexRebuildTrigger::IndexError,
+            "context_lexical_fallback",
+            "2026-09-16T06:00:00Z",
+            DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+        );
+        assert_eq!(
+            next,
+            IndexRebuildRequestOutcome::Recorded {
+                trigger: IndexRebuildTrigger::IndexError,
+                request_count: 1,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn index_rebuild_request_tolerates_a_corrupt_marker_x35vi() -> TestResult {
+        // `.ee/` is writable by every agent on a shared checkout. A corrupt or
+        // peer-planted marker must never fail a serving path and must never
+        // conscript the steward into a rebuild.
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(workspace.path().join(".ee"))
+            .map_err(|error| error.to_string())?;
+        let marker = rebuild_request_marker_path(workspace.path());
+        std::fs::write(&marker, b"{not json").map_err(|error| error.to_string())?;
+
+        assert!(read_index_rebuild_request(workspace.path()).is_err());
+        assert!(pending_index_rebuild_request(workspace.path()).is_none());
+
+        // Recording overwrites the unusable document instead of giving up.
+        let outcome = record_index_rebuild_request(
+            workspace.path(),
+            IndexRebuildTrigger::IndexError,
+            "context_lexical_fallback",
+            "2026-09-16T04:00:00Z",
+            DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+        );
+        assert_eq!(
+            outcome,
+            IndexRebuildRequestOutcome::Recorded {
+                trigger: IndexRebuildTrigger::IndexError,
+                request_count: 1,
+            }
+        );
+        assert!(pending_index_rebuild_request(workspace.path()).is_some());
+
+        // Valid JSON carrying an unknown schema is refused rather than guessed.
+        std::fs::write(&marker, br#"{"schema":"ee.index.rebuild_request.v99"}"#)
+            .map_err(|error| error.to_string())?;
+        assert!(read_index_rebuild_request(workspace.path()).is_err());
+        assert!(pending_index_rebuild_request(workspace.path()).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn index_rebuild_request_rejects_an_oversize_marker_x35vi() -> TestResult {
+        // The marker is read on the steward tick path; an unbounded read would
+        // be a cheap way to pin memory in a long-running daemon.
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(workspace.path().join(".ee"))
+            .map_err(|error| error.to_string())?;
+        let oversize = vec![b'x'; (INDEX_REBUILD_REQUEST_INSPECT_LIMIT as usize) + 1];
+        std::fs::write(rebuild_request_marker_path(workspace.path()), &oversize)
+            .map_err(|error| error.to_string())?;
+
+        let error = read_index_rebuild_request(workspace.path())
+            .err()
+            .ok_or_else(|| "oversize marker should be refused".to_owned())?;
+        assert!(error.contains("byte cap"), "unexpected error: {error}");
+        assert!(pending_index_rebuild_request(workspace.path()).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn index_rebuild_trigger_round_trips_its_wire_names_x35vi() -> TestResult {
+        for trigger in [
+            IndexRebuildTrigger::IndexMissing,
+            IndexRebuildTrigger::IndexError,
+        ] {
+            assert_eq!(IndexRebuildTrigger::parse(trigger.as_str()), Some(trigger));
+        }
+        // A missing embedding model is deliberately NOT a rebuild trigger
+        // (bd-1iupc.2): rebuilding cannot conjure a model, and requesting one
+        // there would imply a repair that cannot happen.
+        assert_eq!(IndexRebuildTrigger::parse("embedding_model_unavailable"), None);
+        assert_eq!(IndexRebuildTrigger::parse(""), None);
+        Ok(())
     }
 
     #[cfg(unix)]
