@@ -1251,6 +1251,34 @@ run_stage "Resume E2E (bd-resume-verb-v0f57)" "EE_E2E_TMPDIR=/private/tmp ./scri
 # and repeated missed searches form a learn-gaps cluster.
 run_stage "Memory Debt E2E (bd-3ap2m.4)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_memory_debt.sh"
 
+# Gate 6.12697a-d: four e2e suites that were referenced by NOTHING (bd-smxdr).
+# (Numbered after 6.12696 memory-debt; 6.1269 is graph-intel.)
+#
+# These were committed and then wired into no runner at all -- not verify.sh,
+# not any script, not any workflow. They are 662 lines of assertions that had
+# never executed once.
+#
+# PRE-REGISTERED EXPECTATION, recorded before the first run so neither a green
+# nor a red can be spun afterwards:
+#   - All 12 ee subcommands they invoke (agent-docs, why-not, timeline, trust,
+#     verify, outcome, diag, pack, remember, init, memory, why) DO exist at
+#     HEAD, so they are not obsolete and a first run has a real chance of
+#     passing.
+#   - They have nonetheless never run, so their assertions may have drifted
+#     against surfaces that moved underneath them.
+#   - A RED here is therefore most likely a first-execution finding, NOT a
+#     regression from this session's commits. Read it as "this suite has
+#     finally run" before reading it as "someone broke something".
+#
+# Wired as BLOCKING rather than advisory on purpose. An advisory stage that
+# stays permanently red is the appearance-of-coverage pattern this session has
+# been removing; blocking forces the real decision, which is fix or retire.
+# Each pins EE_BIN/EE_BINARY: they carried a PATH default until 48b20809f.
+run_stage "Agent Docs Env E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_agent_docs_env.sh"
+run_stage "Coverage Gap E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_coverage_gap.sh"
+run_stage "Timeline E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_timeline.sh"
+run_stage "Trust Freshness E2E (first execution)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_trust_freshness.sh"
+
 # Gate 6.127: Ergonomics real-binary E2E (bd-1et0v.22). No-Cargo:
 # proves `ee context` remains an alias for canonical `ee pack` while carrying
 # the deprecated_alias info row, and proves PATH-shadow doctor findings are
