@@ -1,0 +1,27 @@
+# bd-c79fk — Part II surfaces that fail the tracing convention TODAY.
+#
+# Recorded 2026-09-16, the first time scripts/check-tracing-fields.sh was run
+# against the tree by anything automated. Until this commit verify.sh ran only
+# the checker's --self-test, so the real contract had never been evaluated by a
+# gate and this debt accumulated unseen.
+#
+# Each line is an accepted, pre-existing violation. They are baselined rather
+# than fixed here because instrumenting seven production surfaces at once is a
+# decision for the orchestrator, not a side effect of finally running the check.
+# Six carry no structured tracing evidence on any declared production surface;
+# bd-3usjw.69 is missing its TRACING paragraph entirely.
+#
+# THIS LIST MAY ONLY SHRINK. The audit fails in BOTH directions: a NEW violation
+# is an error, and an entry here that now PASSES is also an error telling you to
+# delete the line. The second arm is what stops a baseline decaying into a
+# permanent ignore-list -- the failure mode this whole bead is about.
+#
+# Format: one bead id per line. Blank lines and # comments are ignored.
+
+bd-3usjw.1
+bd-3usjw.2
+bd-3usjw.38
+bd-3usjw.45
+bd-3usjw.51
+bd-3usjw.68
+bd-3usjw.69

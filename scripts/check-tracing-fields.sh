@@ -13,6 +13,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BEADS_FILE="${ROOT}/.beads/issues.jsonl"
 REPORT_FILE="${EE_TRACING_FIELD_REPORT:-${ROOT}/.tracing-field-report.json}"
 DOC_PATH="${ROOT}/docs/observability/tracing_field_convention.md"
+BASELINE_FILE="${ROOT}/tests/fixtures/tracing_field/violation_baseline.txt"
 
 JSON_OUTPUT=false
 SELF_TEST=false
@@ -26,12 +27,19 @@ Usage: scripts/check-tracing-fields.sh [--json] [--bead ID] [--self-test]
   --bead ID    Audit one bead instead of every Part II implements-surface bead.
   --self-test  Run synthetic checker tests without reading the workspace.
 
+A real run is judged against tests/fixtures/tracing_field/violation_baseline.txt,
+which records the violations that already existed when this gate was first wired.
+It fails in BOTH directions: a NEW violation is an error, and a baselined bead
+that now PASSES is also an error telling you to delete its line. The baseline may
+only shrink. With --bead the baseline is skipped, because a single-bead audit
+cannot distinguish "fixed" from "not audited".
+
 Writes:
   .tracing-field-report.json
 
 Exit codes:
   0  pass
-  1  tracing convention violations found
+  1  tracing convention violations found (new, or a stale baseline entry)
   2  usage error
   3  required tool or input missing
 USAGE
@@ -1242,6 +1250,35 @@ PY
 require_tool python3
 require_tool jq
 
+# Read the accepted-violation baseline: one bead id per line, `#` comments and
+# blank lines ignored. A MISSING file yields an empty baseline, which is strictly
+# STRICTER (every violation counts as new) rather than silently permissive -- a
+# baseline that vanishes must not turn the gate green.
+read_violation_baseline() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    sed -e 's/#.*//' "$file" | tr -d '[:blank:]' | sed '/^$/d' | sort -u
+}
+
+# The bead ids carrying at least one tracing violation in a report.
+report_violation_beads() {
+    printf '%s\n' "$1" | jq -r '.violations[]?.bead' | sort -u
+}
+
+# Pure classifier: baseline vs current, both newline-separated. Emits `new <id>`
+# for a violation nobody accepted and `stale <id>` for an accepted entry that now
+# passes. Kept string-in/string-out so the self-test can prove it without a
+# workspace.
+classify_violation_baseline() {
+    local baseline current
+    baseline="$(printf '%s\n' "$1" | sed '/^$/d' | sort -u)"
+    current="$(printf '%s\n' "$2" | sed '/^$/d' | sort -u)"
+    comm -13 <(printf '%s\n' "$baseline") <(printf '%s\n' "$current") \
+        | sed '/^$/d' | sed 's/^/new /'
+    comm -23 <(printf '%s\n' "$baseline") <(printf '%s\n' "$current") \
+        | sed '/^$/d' | sed 's/^/stale /'
+}
+
 if [ "$SELF_TEST" = true ]; then
     tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/ee-tracing-fields.XXXXXX")
     cat > "$tmp_dir/issues.jsonl" <<'JSONL'
@@ -1397,6 +1434,33 @@ RS
         printf '%s\n' "$report" >&2
         exit 1
     fi
+    # bd-c79fk: the baseline ratchet is itself gated. A baseline that only
+    # suppressed findings would reproduce this bead in a new place, so the
+    # stale direction is pinned as hard as the new direction.
+    baseline_case() {
+        local label="$1" baseline="$2" current="$3" expected="$4"
+        local actual
+        actual="$(classify_violation_baseline "$baseline" "$current" | tr '\n' ' ' | sed 's/ $//')"
+        if [ "$actual" = "$expected" ]; then
+            echo "ok   - $label"
+        else
+            echo "FAIL - $label: got '$actual', wanted '$expected'" >&2
+            exit 2
+        fi
+    }
+    baseline_case "an accepted violation stays accepted" \
+        "bd-a"$'\n'"bd-b" "bd-a"$'\n'"bd-b" ""
+    baseline_case "a NEW violation is reported" \
+        "bd-a" "bd-a"$'\n'"bd-c" "new bd-c"
+    baseline_case "a baselined bead that now passes is reported as stale" \
+        "bd-a"$'\n'"bd-b" "bd-a" "stale bd-b"
+    baseline_case "both directions report together" \
+        "bd-a"$'\n'"bd-b" "bd-a"$'\n'"bd-c" "new bd-c stale bd-b"
+    baseline_case "an empty baseline makes every violation new" \
+        "" "bd-a" "new bd-a"
+    baseline_case "a clean tree against an empty baseline is silent" \
+        "" "" ""
+
     echo "ok: tracing field checker self-test passed"
     exit 0
 fi
@@ -1421,12 +1485,59 @@ else
     audited=$(printf '%s\n' "$report" | jq -r '.auditedBeads')
     violations=$(printf '%s\n' "$report" | jq -r '.violationCount')
     echo "Tracing field report -> .tracing-field-report.json"
-    echo "  status: $status"
+    echo "  raw_status: $status"
     echo "  audited_beads: $audited"
     echo "  violations: $violations"
+    # `raw_status` is the checker's own verdict over the tree and stays `fail`
+    # while ANY debt exists. The gate's verdict is the baseline comparison
+    # below, printed after it is computed, so a reader never sees a bare
+    # "status: fail" next to an exit code of 0.
+    echo "  baseline: tests/fixtures/tracing_field/violation_baseline.txt"
 fi
 
-if printf '%s\n' "$report" | jq -e '.status == "pass"' >/dev/null; then
-    exit 0
+# Violations outside the tracing block (the dueling-wizards manifest checks)
+# are never baselined here and still fail outright.
+total_violations=$(printf '%s\n' "$report" | jq -r '.violationCount // 0')
+tracing_violations=$(printf '%s\n' "$report" | jq -r '.violations | length')
+other_violations=$((total_violations - tracing_violations))
+if [ "$other_violations" -gt 0 ]; then
+    echo "check-tracing-fields: $other_violations non-tracing violation(s); see $REPORT_FILE" >&2
+    exit 1
 fi
-exit 1
+
+# A single-bead audit cannot tell "fixed" from "not audited", so it keeps the
+# original all-or-nothing verdict rather than consulting the baseline.
+if [ -n "$BEAD_FILTER" ]; then
+    if printf '%s\n' "$report" | jq -e '.status == "pass"' >/dev/null; then
+        exit 0
+    fi
+    exit 1
+fi
+
+classification="$(classify_violation_baseline \
+    "$(read_violation_baseline "$BASELINE_FILE")" \
+    "$(report_violation_beads "$report")")"
+new_violations="$(printf '%s\n' "$classification" | sed -n 's/^new //p' | sed '/^$/d')"
+stale_baseline="$(printf '%s\n' "$classification" | sed -n 's/^stale //p' | sed '/^$/d')"
+
+status=0
+if [ -n "$new_violations" ]; then
+    echo "check-tracing-fields: NEW tracing violation(s) not in the baseline:" >&2
+    printf '  %s\n' $new_violations >&2
+    echo "  Instrument the surface, or justify it and add the id to" >&2
+    echo "  tests/fixtures/tracing_field/violation_baseline.txt with a reason." >&2
+    status=1
+fi
+if [ -n "$stale_baseline" ]; then
+    echo "check-tracing-fields: baseline entr(ies) that now PASS — delete the line(s):" >&2
+    printf '  %s\n' $stale_baseline >&2
+    echo "  The baseline may only shrink; a stale entry is how it decays into a" >&2
+    echo "  permanent ignore-list." >&2
+    status=1
+fi
+if [ "$status" -eq 0 ] && [ "$JSON_OUTPUT" != true ]; then
+    accepted=$(read_violation_baseline "$BASELINE_FILE" | wc -l | tr -d ' ')
+    echo "  gate: PASS — all $accepted violation(s) are accepted baseline debt," \
+        "none new, none stale"
+fi
+exit "$status"

@@ -1095,10 +1095,25 @@ run_stage "Plan Drift Contract" "./scripts/plan-drift.sh --self-test"
 # implements-surface beads whose plan_doc_section labels point at evolved text.
 run_stage "Plan Drift Advisory" "with_beads_read_locks ./scripts/plan-drift.sh --quiet"
 
-# Gate 3.79: Tracing field contract. This no-Cargo self-test validates the
-# synthetic checker path for Part II tracing declarations and dueling-wizards
-# observability manifests before later real-binary cross-cutting E2E coverage.
-run_stage "Tracing Field Contract" "./scripts/check-tracing-fields.sh --self-test"
+# Gate 3.79: Tracing field contract. TWO ARMS, deliberately, in one stage.
+#
+# The self-test proves the checker's own predicate still works. The second
+# invocation runs the check against the TREE. Until bd-c79fk this stage ran only
+# the self-test, so a stage named "Tracing Field Contract" evaluated the contract
+# against zero production surfaces while reporting PASS -- and the only other
+# automated invocation passed `--bead __no_such_bead__`, auditing no beads at
+# all. Seven real violations had accumulated unseen.
+#
+# Both arms share ONE stage rather than adding a second, because the verify
+# budget currently admits no new stage: the non-benchmark p50s total exactly 600
+# against a `<= 600` ceiling, and UNMEASURED_STAGE_ALLOWANCE sits exactly at its
+# 27 down-only ratchet. Widening an existing stage needs no budget entry.
+#
+# The real arm is baselined (tests/fixtures/tracing_field/violation_baseline.txt)
+# so it fails on NEW violations and on STALE baseline entries, not on the
+# pre-existing debt. That keeps the gate honest without wedging every pane on
+# seven surfaces nobody has been asked to instrument yet.
+run_stage "Tracing Field Contract" "./scripts/check-tracing-fields.sh --self-test && ./scripts/check-tracing-fields.sh"
 
 # Gate 3.8: Advisory contract-drift radar (bd-31nul.5). Cargo-free static
 # scan of current-facing agent docs for stale envelope versions, unknown
