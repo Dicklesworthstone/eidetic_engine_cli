@@ -320,6 +320,31 @@ fn canonicalize_json(value: Value) -> Value {
     }
 }
 
+/// Fold ee's own absolute-path redaction token back to the workspace marker.
+///
+/// `gitSummary.repositoryRoot` is not emitted raw: workspace hygiene inherits
+/// it from `collect_workspace_git_snapshot`, which redacts absolute paths for
+/// the swarm-brief surface (`src/core/swarm_brief.rs:1214`). So the raw path
+/// `scrub_workspace_path` searches for never reaches the output — only
+/// `[REDACTED_PATH:<blake3-prefix>]`, and that prefix is a digest of a per-run
+/// temp path, so it differs on every execution. Folding the token keeps the
+/// field pinned without pinning a value no run could reproduce. The sibling
+/// `workspace` field still arrives raw and is still scrubbed by marker.
+fn scrub_redacted_paths(text: &str) -> String {
+    const OPEN: &str = "[REDACTED_PATH:";
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        let after = &rest[start + OPEN.len()..];
+        let Some(end) = after.find(']') else { break };
+        output.push_str(&rest[..start]);
+        output.push_str("<workspace>");
+        rest = &after[end + 1..];
+    }
+    output.push_str(rest);
+    output
+}
+
 fn scrub_workspace_path(value: Value, workspace: &Path) -> Value {
     let marker = workspace.display().to_string();
     scrub_workspace_path_string(value, &marker)
@@ -327,7 +352,9 @@ fn scrub_workspace_path(value: Value, workspace: &Path) -> Value {
 
 fn scrub_workspace_path_string(value: Value, marker: &str) -> Value {
     match value {
-        Value::String(text) => Value::String(text.replace(marker, "<workspace>")),
+        Value::String(text) => {
+            Value::String(scrub_redacted_paths(&text.replace(marker, "<workspace>")))
+        }
         Value::Array(items) => Value::Array(
             items
                 .into_iter()
@@ -354,7 +381,7 @@ fn normalized_json_snapshot(value: &Value, workspace: &Path) -> Result<String, S
 }
 
 fn normalized_human_snapshot(stdout: &str, workspace: &Path) -> String {
-    stdout.replace(&workspace.display().to_string(), "<workspace>")
+    scrub_redacted_paths(&stdout.replace(&workspace.display().to_string(), "<workspace>"))
 }
 
 fn assert_golden(actual: &str, expected: &str, context: &str) -> TestResult {
