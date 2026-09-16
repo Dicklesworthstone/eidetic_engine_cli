@@ -4039,6 +4039,7 @@ where
         workspace_id: snapshot.workspace_id.clone(),
         alias: args.alias.clone(),
         endpoint: MeshPeerEndpoint {
+            stable_node_id: None,
             tailscale_node_key: args.tailscale_node_key.clone(),
             tailnet_id: args.tailnet_id.clone(),
             tailnet_display_name: args.tailnet_display_name.clone(),
@@ -5458,6 +5459,7 @@ fn auto_enrollment_peer_upserts(
             alias: candidate.hostname.clone(),
             endpoint: MeshPeerEndpoint {
                 tailscale_node_key: candidate.node_key.clone(),
+                stable_node_id: candidate.stable_node_id.clone(),
                 tailnet_id: tailnet_id.to_owned(),
                 tailnet_display_name: tailnet_display_name.map(str::to_owned),
                 endpoint: candidate.tailscale_ip.clone(),
@@ -8268,6 +8270,7 @@ mod tests {
             alias: "alpha".to_owned(),
             endpoint: MeshPeerEndpoint {
                 tailscale_node_key: candidate.node_key.clone(),
+                stable_node_id: candidate.stable_node_id.clone(),
                 tailnet_id: "tailnet-alpha".to_owned(),
                 tailnet_display_name: None,
                 endpoint: candidate.tailscale_ip.clone(),
@@ -8542,6 +8545,7 @@ mod tests {
             workspace_id: "wsp_test_workspace".to_owned(),
             alias: "alpha".to_owned(),
             endpoint: MeshPeerEndpoint {
+                stable_node_id: None,
                 tailscale_node_key: "nodekey:alpha".to_owned(),
                 tailnet_id: "tailnet-alpha".to_owned(),
                 tailnet_display_name: Some("alpha.example".to_owned()),

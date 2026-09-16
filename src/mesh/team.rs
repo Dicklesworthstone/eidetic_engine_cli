@@ -2854,6 +2854,7 @@ pub fn enroll_team_pair_peer(
         workspace_id: workspace_id.to_owned(),
         origin_workspace_id: origin_workspace_id.to_owned(),
         endpoint: crate::mesh::peer::MeshPeerEndpoint {
+            stable_node_id: None,
             tailscale_node_key: remote_node_id.to_owned(),
             tailnet_id: TEAM_JOIN_TAILNET_ID.to_owned(),
             tailnet_display_name: None,

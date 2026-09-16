@@ -16,6 +16,7 @@ const NOW: &str = "2026-05-19T23:40:00Z";
 
 fn endpoint(node_key: &str) -> MeshPeerEndpoint {
     MeshPeerEndpoint {
+        stable_node_id: None,
         tailscale_node_key: node_key.to_owned(),
         tailnet_id: "tn_peer_enroll_001".to_owned(),
         tailnet_display_name: Some("team-tailnet".to_owned()),

@@ -392,6 +392,7 @@ fn real_tailscale_localapi_binds_status_and_whois_to_kernel_source() -> TestResu
             workspace_id: workspace_id.to_owned(),
             alias: "real-tailscale-self".to_owned(),
             endpoint: MeshPeerEndpoint {
+                stable_node_id: None,
                 tailscale_node_key: status.identity.current_node_pubkey.clone(),
                 tailnet_id: status.identity.tailnet_id.clone(),
                 tailnet_display_name: None,

@@ -6069,6 +6069,7 @@ metadata = "deny"
             workspace_id: "wsp_peer".to_owned(),
             origin_workspace_id: String::new(),
             endpoint: MeshPeerEndpoint {
+                stable_node_id: None,
                 tailscale_node_key: format!("{peer_id}-node"),
                 tailnet_id: "tailnet-test".to_owned(),
                 tailnet_display_name: Some("test tailnet".to_owned()),

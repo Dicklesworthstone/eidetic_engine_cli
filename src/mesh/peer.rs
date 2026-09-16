@@ -214,6 +214,16 @@ impl MeshPeerEnrollmentScenario {
 #[serde(rename_all = "camelCase")]
 pub struct MeshPeerEndpoint {
     pub tailscale_node_key: String,
+    /// Tailscale's stable per-device id. The node key above is regenerated at
+    /// each authentication; this is not, so it is the only value here that can
+    /// anchor a peer's identity across re-enrollment
+    /// (bd-mesh-no-stable-node-identity-pt7k5, hop 4 of 4).
+    ///
+    /// `default` is explicit because this struct is persisted into
+    /// `mesh_peers.policy_summary_json`, and every row written before this
+    /// field existed must still deserialize.
+    #[serde(default)]
+    pub stable_node_id: Option<String>,
     pub tailnet_id: String,
     pub tailnet_display_name: Option<String>,
     pub endpoint: String,
@@ -720,6 +730,7 @@ mod tests {
 
     fn endpoint() -> MeshPeerEndpoint {
         MeshPeerEndpoint {
+            stable_node_id: None,
             tailscale_node_key: NODE_KEY.to_owned(),
             tailnet_id: "tn_peer_capability".to_owned(),
             tailnet_display_name: Some("capability-tailnet".to_owned()),
