@@ -1219,6 +1219,23 @@ impl EffectManifest {
             CommandEffect::read_only_db("audit timeline", "List audit log rows"),
             CommandEffect::read_only_db("audit verify", "Verify audit hash-chain integrity"),
             CommandEffect::read_only_db("backup inspect", "Inspect backup manifest"),
+            // Both key-recovery paths implement their own `--dry-run` and honour
+            // it (`src/core/backup.rs`, the `if !options.dry_run` guards), so
+            // both constructors below supply `dry_run_effect: Some(ReadOnly)`.
+            // Declaring either WITHOUT a dry-run effect would make the guard at
+            // src/cli/mod.rs:13510 refuse a `--dry-run` that works today.
+            CommandEffect::external_io_write(
+                "backup keys export",
+                Vec::new(),
+                vec!["<--output-dir>/store-auth.recovery.json"],
+                "output dir plus exported key ids",
+                "Write an encrypted store-auth recovery envelope outside the workspace",
+            ),
+            CommandEffect::workspace_file_write(
+                "backup keys import",
+                vec![".ee/keys/store_auth_root.json"],
+                "Write the store-auth root key file from an encrypted recovery envelope",
+            ),
             CommandEffect::read_only_db("backup list", "List backup manifests"),
             CommandEffect::read_only_db("backup verify", "Verify backup manifest and contents"),
             CommandEffect::read_only_db(
