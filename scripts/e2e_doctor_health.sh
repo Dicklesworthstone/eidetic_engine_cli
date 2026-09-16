@@ -246,7 +246,12 @@ fi
 printf 'unexpected fake rch invocation: %s\n' "$*" >&2
 exit 2
 FAKE_RCH
-    chmod +x "${fake}"
+    if ! chmod +x "${fake}"; then
+        emit_assert_result "fake_rch_stub_executable" "fail" \
+            "chmod failed for ${fake}; doctor would resolve the real rch and this probe would measure the wrong binary" \
+            "" "" "not_applicable"
+        exit 1
+    fi
 }
 
 emit_note "harness_start" "run_id=${RUN_ID} ee_bin=${EE_BIN} artifacts=${ARTIFACT_ROOT} repo=${ROOT}"
@@ -304,7 +309,12 @@ assert_jq_file "host_profile_raw_probe_shape" "${HOST_PROFILE_JSON}" '.data.sche
 emit_note "cass_limited_advisory_probe" "forcing invalid EE_CASS_BINARY to simulate limited optional CASS capability"
 BAD_CASS="${TOOL_DIR}/not-cass"
 printf '#!/usr/bin/env bash\nexit 0\n' >"${BAD_CASS}"
-chmod +x "${BAD_CASS}"
+if ! chmod +x "${BAD_CASS}"; then
+    emit_assert_result "bad_cass_stub_executable" "fail" \
+        "chmod failed for ${BAD_CASS}; a non-executable file can yield the same cass_limited advisory for the wrong reason" \
+        "" "" "not_applicable"
+    exit 1
+fi
 run_ee_json_with_env "04_doctor_full_cass_limited" -- "EE_CASS_BINARY=${BAD_CASS}" --workspace "${WORKSPACE}" --json doctor --full
 CASS_LIMITED_JSON="${LAST_STDOUT}"
 assert_jq_file "cass_limited_topline_green" "${CASS_LIMITED_JSON}" '.data.healthy == true and (.data.posture == "ok" or .data.posture == "ready")'
