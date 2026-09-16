@@ -37060,6 +37060,7 @@ where
     W: Write,
     E: Write,
 {
+    let started = Instant::now();
     if args.limit == 0 {
         let domain_error = DomainError::Usage {
             message: "--limit must be greater than zero".to_string(),
@@ -37114,6 +37115,12 @@ where
     } else {
         ProcessExitCode::Success
     };
+
+    // One call here covers all three renderer arms below, which is why it sits
+    // before the match rather than inside it. The five early `write_domain_error`
+    // returns above are deliberately NOT traced: they reject input before any
+    // report exists, so they have no elapsed work and belong to phase "input".
+    trace_graph_centrality_read(&report, started.elapsed());
 
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
@@ -37178,6 +37185,33 @@ impl GraphCentralityReadAlgorithm {
 }
 
 const GRAPH_CENTRALITY_READ_ALGORITHM_VERSION: &str = "fnx-algorithms@0.1.0";
+
+/// The `graph_centrality_read` surface's conformant tracing event (bd-3usjw.2).
+///
+/// Shaped after `trace_mcp_validate`, which was until now the ONLY event in this
+/// file carrying `surface` plus the convention fields, so the two stay
+/// consistent. One deliberate difference: that surface has no degraded data and
+/// uses a constant empty array, while this one has a live `report.degraded`
+/// whose `graph_snapshot_stale` code drives the exit code. So `degraded_codes`
+/// carries the real codes. A convention field that is always empty decays into
+/// ceremony, which is the failure mode this gate exists to catch.
+fn trace_graph_centrality_read(report: &GraphCentralityReadReport, elapsed: Duration) {
+    let degraded_codes: Vec<&str> = report.degraded.iter().map(|entry| entry.code).collect();
+    tracing::info!(
+        target: "ee::graph::centrality_read",
+        workspace_id = %report.workspace_id,
+        request_id = "ee_graph_centrality_read",
+        bead_id = "bd-3usjw.2",
+        surface = "graph_centrality_read",
+        phase = "response",
+        elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+        degraded_codes = ?degraded_codes,
+        status = report.status,
+        limit = report.limit,
+        row_count = report.rows.len(),
+        "graph centrality read completed"
+    );
+}
 
 struct GraphCentralityReadDegradation {
     code: &'static str,
