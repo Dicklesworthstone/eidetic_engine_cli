@@ -49,7 +49,7 @@ export EE_MESH_ENABLED=1
 export EE_MESH_MODE=cache
 
 STATUS_BEFORE="$(ee_workspace mesh status --json)"
-MESH_ENABLED_BEFORE="$(printf '%s' "$STATUS_BEFORE" | jq -r '.data.meshEnabled // .meshEnabled // empty')"
+MESH_ENABLED_BEFORE="$(printf '%s' "$STATUS_BEFORE" | jq -r '.data.meshEnabled // empty')"
 if [ "$MESH_ENABLED_BEFORE" = "true" ]; then
     log_event "mesh_enabled_before" "true" "$MESH_ENABLED_BEFORE"
 else
@@ -58,9 +58,9 @@ else
 fi
 
 DRY_RUN="$(ee_workspace mesh disable --dry-run --reason "e2e incident preview" --json)"
-assert_json_bool "$DRY_RUN" '.data.disableRequested // .disableRequested' "true" "disable_requested"
-assert_json_bool "$DRY_RUN" '.data.listenerStopped // .listenerStopped' "true" "listener_stopped"
-QUEUED_CANCELLED="$(printf '%s' "$DRY_RUN" | jq -r '.data.queuedExportsCancelled // .queuedExportsCancelled')"
+assert_json_bool "$DRY_RUN" '.data.disableRequested' "true" "disable_requested"
+assert_json_bool "$DRY_RUN" '.data.listenerStopped' "true" "listener_stopped"
+QUEUED_CANCELLED="$(printf '%s' "$DRY_RUN" | jq -r '.data.queuedExportsCancelled')"
 if [ "$QUEUED_CANCELLED" = "0" ]; then
     log_event "queued_exports_cancelled" "true" "$QUEUED_CANCELLED"
 else
@@ -69,7 +69,7 @@ else
 fi
 
 DISABLE_JSON="$(ee_workspace mesh disable --reason "e2e incident containment" --json)"
-assert_json_bool "$DISABLE_JSON" '.data.meshEnabledAfter // .meshEnabledAfter' "false" "mesh_enabled_after_disable"
+assert_json_bool "$DISABLE_JSON" '.data.meshEnabledAfter' "false" "mesh_enabled_after_disable"
 
 MEMORY_JSON="$(ee_workspace remember --level procedural --kind rule "Mesh containment keeps local search readable." --json)"
 MEMORY_ID="$(printf '%s' "$MEMORY_JSON" | jq -r '.data.memory_id // empty')"
@@ -89,6 +89,6 @@ else
 fi
 
 REENABLE_JSON="$(ee_workspace mesh reenable --confirm-reenable --json)"
-assert_json_bool "$REENABLE_JSON" '.data.meshEnabledAfter // .meshEnabledAfter' "true" "reenable_explicit_command"
+assert_json_bool "$REENABLE_JSON" '.data.meshEnabledAfter' "true" "reenable_explicit_command"
 
 mesh_phase_log "cleanup" "node01" "mesh_emergency_disable complete"

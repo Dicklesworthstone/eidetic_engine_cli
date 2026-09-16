@@ -49,7 +49,7 @@ step "remember a memory whose body carries a secret"
 mem="$(ee_json remember "The deploy token is $SECRET and lives at infra/secrets.env." \
     --workspace "$WS" --level procedural --kind fact --json)"
 assert_jq "$mem" '.success == true' "remember succeeds"
-mem_id="$(printf '%s' "$mem" | jq -r '.id // .data.memory_id // .data.id // empty')"
+mem_id="$(printf '%s' "$mem" | jq -r '.data.memoryId // .data.memory_id // empty')"
 assert_eq "$([ -n "$mem_id" ] && echo present || echo missing)" "present" "memory id present"
 
 step "ee attest query emits a hash-only ee.attest.v1 bundle"
