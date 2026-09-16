@@ -70194,9 +70194,9 @@ mod tests {
     use crate::core::index::IndexRebuildError;
     use crate::core::lab::{InterventionType, SwapRevisionMode};
     use crate::core::search::{
-        ScoreExplanation, ScoreFactor, ScoreSource, SearchDedupMode, SearchDegradation,
-        SearchError, SearchHit, SearchIndexFreshness, SearchOptions, SearchReport,
-        SearchSourceMode, SearchStatus,
+        ScoreExplanation, ScoreFactor, ScoreSource, SearchContentPreview, SearchDedupMode,
+        SearchDegradation, SearchError, SearchHit, SearchIndexFreshness, SearchOptions,
+        SearchReport, SearchSourceMode, SearchStatus,
     };
     use crate::core::why::{
         AgentProfileSelectionExplanation, CoordinationFallbackEvidenceSummary,

@@ -22902,7 +22902,11 @@ mod tests {
             &[candidate],
         )
         .expect("below-floor candidate should produce query assist");
-        let json = assist.data_json(true);
+        // Truncated is the production default and is what this test intends:
+        // it asserts on didYouMean identity and reformulations, never on body
+        // length, so it must exercise the same preview mode `ee search` uses
+        // without `--full`.
+        let json = assist.data_json(true, SearchContentPreview::Truncated);
 
         assert_eq!(json["schema"], QUERY_ASSIST_SCHEMA_V1);
         assert_eq!(json["weakResultReason"], "no_relevant_results");
@@ -23121,8 +23125,13 @@ mod tests {
             &[],
         )
         .expect("empty result should offer capture template");
-        let first_json = first.data_json(true);
-        let second_json = second.data_json(true);
+        // Both reports are built from an empty candidate slice, so `didYouMean`
+        // is empty and no body is previewed at all. The mode is therefore not
+        // what this test measures — but both sides must use the SAME mode or
+        // the equality assertion would compare two different renderings, so
+        // they are pinned to the production default rather than left implicit.
+        let first_json = first.data_json(true, SearchContentPreview::Truncated);
+        let second_json = second.data_json(true, SearchContentPreview::Truncated);
 
         assert_eq!(first_json, second_json);
         assert_eq!(first_json["weakResultReason"], "empty_results");
