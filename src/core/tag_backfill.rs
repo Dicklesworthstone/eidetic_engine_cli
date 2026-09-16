@@ -33,7 +33,7 @@ use std::path::Path;
 
 use crate::core::memory::{MemoryTagsMode, MemoryTagsOptions};
 use crate::db::DbConnection;
-use crate::models::{DomainError, Tag};
+use crate::models::{DomainError, TAG_BACKFILL_LOG_SCHEMA_V1, TAG_BACKFILL_SCHEMA_V1, Tag};
 
 /// Longest ticker symbol this module will accept.
 ///
@@ -617,9 +617,6 @@ pub fn proposal_log_line(proposal: &BackfillProposal, applied: bool) -> String {
     .to_string()
 }
 
-/// Schema id for one JSONL mutation-log line.
-pub const TAG_BACKFILL_LOG_SCHEMA_V1: &str = "ee.tag_backfill.log.v1";
-
 /// Options for one `ee index backfill-tags` run.
 #[derive(Clone, Copy, Debug)]
 pub struct TagBackfillOptions<'a> {
@@ -674,9 +671,6 @@ pub struct TagBackfillReport {
     /// Where the JSONL log was written, when one was requested.
     pub log_path: Option<String>,
 }
-
-/// Report schema id.
-pub const TAG_BACKFILL_SCHEMA_V1: &str = "ee.tag_backfill.v1";
 
 impl TagBackfillReport {
     /// Memories actually mutated by this run.

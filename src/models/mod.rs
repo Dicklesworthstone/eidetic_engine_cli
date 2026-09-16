@@ -444,6 +444,12 @@ pub const DOCTOR_UNDO_SUMMARY_SCHEMA_V1: &str = "ee.doctor.undo_summary.v1";
 /// Schema for failure mode fixtures used in tests and evaluations.
 pub const FAILURE_MODE_FIXTURE_SCHEMA_V1: &str = "ee.failure_mode_fixture.v1";
 
+/// Schema for the `ee index backfill-tags` run report.
+pub const TAG_BACKFILL_SCHEMA_V1: &str = "ee.tag_backfill.v1";
+
+/// Schema for one JSONL line in the tag-backfill mutation log.
+pub const TAG_BACKFILL_LOG_SCHEMA_V1: &str = "ee.tag_backfill.log.v1";
+
 /// External derivation source package is missing, malformed, or not canonical.
 pub const DERIVED_SOURCES_INVALID_CODE: &str = "derived_sources_invalid";
 /// External derivation source content changed after proposal.
