@@ -931,8 +931,20 @@ def missing_decl_fields(decl):
 # Minimum convention fields ONE emitted event must carry. Deliberately the
 # same number the previous substring check used, so this change alters the
 # PREDICATE (file mentions -> event carries) without silently re-calibrating
-# strictness at the same time. Measured 2026-09-16: raising it to 4 flags the
-# identical bead set, so that tightening is free whenever someone wants it.
+# strictness at the same time.
+#
+# Measured across every src file that emits events (2026-09-16), the
+# population is strongly bimodal -- best-event convention-key counts are
+# 0:20 files, 1:14, 2:1, 3:3, 4:0, 5:0, 6:3, 7:13. A surface either follows
+# the convention (6-7) or does not (0-1); almost nothing sits between.
+#
+# Consequence: any threshold in 3..5 flags the SAME bd-3usjw bead set, so the
+# audited result is insensitive to the exact number. It is NOT free at file
+# granularity, though -- raising to 4 would newly fail src/core/search.rs,
+# src/db/read_pool.rs and src/search/lexical_ram_tier.rs, which sit at exactly
+# 3 (workspace_id + elapsed_ms + degraded_codes: partial but real
+# conformance). They pass today only because no audited bead declares them.
+# Raise this deliberately, not incidentally.
 MIN_EVENT_REQUIRED_FIELDS = 3
 
 EVENT_MACRO_NAMES = (
