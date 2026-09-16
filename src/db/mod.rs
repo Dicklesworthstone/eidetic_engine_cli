@@ -24972,6 +24972,44 @@ impl DbConnection {
     /// Resolve unique current live heads for revision-stable ledger keys in
     /// bounded chunks. Ambiguous chains are omitted so callers fail closed
     /// instead of selecting an arbitrary head.
+    /// Narrow a set of memory IDs to those that are still the current revision.
+    ///
+    /// bd-tmv70. Callers outside this module hold `StoredMemory` values, which
+    /// carry no `superseded_at` field, so they cannot answer "is this the head?"
+    /// in Rust. Before V123 they filtered on `valid_to.is_none()`, which worked
+    /// only because that column doubled as the supersession marker; since the
+    /// split a superseded row has `valid_to == None` and passes such a filter.
+    /// Ask the database instead.
+    ///
+    /// Tombstoned rows are excluded, matching every other head-selection query.
+    pub fn filter_current_memory_ids(&self, ids: &[String]) -> Result<BTreeSet<String>> {
+        let ids = ids
+            .iter()
+            .filter(|id| !id.trim().is_empty())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut current = BTreeSet::new();
+        for chunk in ids.chunks(ATTEMPT_FAMILY_MEMBERSHIP_BATCH_SIZE) {
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT id FROM memories \
+                 WHERE id IN ({placeholders}) \
+                   AND tombstoned_at IS NULL AND superseded_at IS NULL \
+                 ORDER BY id ASC"
+            );
+            let params = chunk.iter().cloned().map(Value::Text).collect::<Vec<_>>();
+            for row in self.query_for(DbOperation::Query, &sql, &params)? {
+                current.insert(required_text(&row, 0, DbOperation::Query, "id")?.to_string());
+            }
+        }
+        Ok(current)
+    }
+
     pub fn get_current_memory_ids_for_ledger_keys(
         &self,
         workspace_id: &str,

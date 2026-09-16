@@ -5492,9 +5492,25 @@ fn load_export_data_in_current_snapshot(
     // slot exactly once, on the current head; attaching the same slot to every
     // historical revision makes restore attempt duplicate primary keys and
     // misrepresents revisions as sibling attempts.
+    // bd-tmv70: "current head" is a revision-chain fact and since V123 it lives
+    // in `superseded_at`, which StoredMemory does not carry. Filtering on
+    // `valid_to.is_none()` here passed superseded revisions through as heads, so
+    // the ledger slot was exported for every revision in a chain -- the
+    // duplicate-primary-key case this comment already warns about. Ask the
+    // database, which can see the column.
+    let candidate_ids = memories
+        .iter()
+        .map(|memory| memory.id.clone())
+        .collect::<Vec<_>>();
+    let current_set = connection
+        .filter_current_memory_ids(&candidate_ids)
+        .map_err(|error| DomainError::Storage {
+            message: error.to_string(),
+            repair: Some("ee db check --workspace .".to_owned()),
+        })?;
     let current_memory_ids = memories
         .iter()
-        .filter(|memory| memory.valid_to.is_none())
+        .filter(|memory| current_set.contains(&memory.id))
         .map(|memory| memory.id.clone())
         .collect::<Vec<_>>();
     let attempt_family_batch = connection
