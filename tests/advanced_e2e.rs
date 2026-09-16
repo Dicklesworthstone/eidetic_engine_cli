@@ -638,7 +638,11 @@ fn procedure_promote_without_dry_run_reports_not_found_for_missing_record() -> T
 
 #[test]
 fn economy_report_degrades_until_db_backed_metrics_exist() -> TestResult {
-    let (_tempdir, workspace) = empty_workspace()?;
+    // Asserts exit 6 (unsatisfied_degraded_mode), which requires a STORE
+    // that has no db-backed metrics yet. Since 91cf7bcbd an uninitialised
+    // directory answers 10 (WorkspaceStoreMissing) instead, so the degraded
+    // machinery this test exists to check was never reached.
+    let (_tempdir, workspace) = initialized_workspace()?;
     let output = run_ee(&["--workspace", &workspace, "economy", "report", "--json"])?;
     ensure_equal(
         &output.status.code(),
@@ -662,7 +666,11 @@ fn economy_report_degrades_until_db_backed_metrics_exist() -> TestResult {
 
 #[test]
 fn economy_score_degrades_instead_of_scoring_seed_artifacts() -> TestResult {
-    let (_tempdir, workspace) = empty_workspace()?;
+    // Asserts exit 6 (unsatisfied_degraded_mode), which requires a STORE
+    // that has no db-backed metrics yet. Since 91cf7bcbd an uninitialised
+    // directory answers 10 (WorkspaceStoreMissing) instead, so the degraded
+    // machinery this test exists to check was never reached.
+    let (_tempdir, workspace) = initialized_workspace()?;
     let output = run_ee(&[
         "--workspace",
         &workspace,
@@ -687,7 +695,11 @@ fn economy_score_degrades_instead_of_scoring_seed_artifacts() -> TestResult {
 
 #[test]
 fn economy_simulate_degrades_instead_of_ranking_seed_artifacts() -> TestResult {
-    let (_tempdir, workspace) = empty_workspace()?;
+    // Asserts exit 6 (unsatisfied_degraded_mode), which requires a STORE
+    // that has no db-backed metrics yet. Since 91cf7bcbd an uninitialised
+    // directory answers 10 (WorkspaceStoreMissing) instead, so the degraded
+    // machinery this test exists to check was never reached.
+    let (_tempdir, workspace) = initialized_workspace()?;
     let output = run_ee(&[
         "--workspace",
         &workspace,
@@ -751,7 +763,11 @@ fn economy_simulate_rejects_zero_budget() -> TestResult {
 
 #[test]
 fn economy_prune_plan_dry_run_degrades_until_db_backed_metrics_exist() -> TestResult {
-    let (_tempdir, workspace) = empty_workspace()?;
+    // Asserts exit 6 (unsatisfied_degraded_mode), which requires a STORE
+    // that has no db-backed metrics yet. Since 91cf7bcbd an uninitialised
+    // directory answers 10 (WorkspaceStoreMissing) instead, so the degraded
+    // machinery this test exists to check was never reached.
+    let (_tempdir, workspace) = initialized_workspace()?;
     let output = run_ee(&[
         "--workspace",
         &workspace,
