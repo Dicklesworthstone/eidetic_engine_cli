@@ -289,6 +289,137 @@ fn contended_closure_lint_is_reported_as_contention_not_as_a_pass() {
     );
 }
 
+/// Runs verify.sh's own closing verdict against an injected stage tally.
+///
+/// Extracts `verification_exit_status` and `verification_summary_banner` from
+/// the script rather than restating them, for the same reason
+/// `render_gated_off` does: the thing under test is what a real run WOULD
+/// report, not what this test remembers the source spelling.
+///
+/// Returns (stdout, exit status) so one call can assert the banner text and the
+/// exit code together -- they are two halves of one contract and asserting only
+/// the banner is how the exit half went ungraded in the first place.
+fn verification_verdict(passed: u32, contended: u32, gated_off: u32) -> (String, i32) {
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"
+set -uo pipefail
+BEADS_LOCK_SKIP_CODE=75
+VERIFY_EXIT_INCOMPLETE="$BEADS_LOCK_SKIP_CODE"
+STAGE_PASSED="$PASSED"
+STAGE_SKIPPED_CONTENTION="$CONTENDED"
+STAGE_GATED_OFF="$GATED_OFF"
+STAGE_RESULTS=""
+STAGE_SKIPPED_CONTENTION_NAMES="    - Verification Drift Guard (beads lock held)\n"
+STAGE_GATED_OFF_NAMES="    - Performance Benchmarks (--include-bench not set)\n"
+eval "$(awk '/^verification_exit_status\(\) /,/^}/' "$VERIFY_SCRIPT")"
+eval "$(awk '/^verification_summary_banner\(\) /,/^}/' "$VERIFY_SCRIPT")"
+verification_summary_banner
+exit "$(verification_exit_status)"
+"#,
+        )
+        .env("VERIFY_SCRIPT", verify_script_path())
+        .env("PASSED", passed.to_string())
+        .env("CONTENDED", contended.to_string())
+        .env("GATED_OFF", gated_off.to_string())
+        .current_dir(project_root())
+        .output()
+        .expect("run verification verdict");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    (stdout, output.status.code().unwrap_or(-1))
+}
+
+/// A run where every attempted stage passed exits 0.
+#[test]
+fn a_complete_run_exits_zero() {
+    let (stdout, code) = verification_verdict(112, 0, 0);
+    assert_eq!(code, 0, "clean run must exit 0; banner was:\n{stdout}");
+    assert!(
+        stdout.contains("112/112 attempted verification stages passed"),
+        "banner must state the attempted denominator:\n{stdout}"
+    );
+}
+
+/// A contended run exits 75 and NAMES what did not run.
+///
+/// This is the half that had no assertion anywhere. `cc9edd17b` changed the
+/// exit contract of the only gate every agent is told to run before pushing,
+/// and until this test existed nothing graded it: `verify.sh` has no lib tests,
+/// and this file asserted the banner but never the status.
+///
+/// 75 is EX_TEMPFAIL and is deliberately the same value as
+/// `BEADS_LOCK_SKIP_CODE` -- the code a contended stage already returns is the
+/// code the whole run returns. A wrapper retries on 75 and escalates on 1, so
+/// contention can never be mistaken for a stage that ran and failed.
+#[test]
+fn a_contended_run_exits_seventy_five_and_names_the_skipped_stages() {
+    let (stdout, code) = verification_verdict(108, 4, 0);
+    assert_eq!(
+        code, 75,
+        "contended run must exit 75; banner was:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("INCOMPLETE"),
+        "a contended run must lead with INCOMPLETE:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("did NOT run (lock contention)"),
+        "the banner must say the stages did not run:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Verification Drift Guard"),
+        "skipped stages must be named, not just counted:\n{stdout}"
+    );
+}
+
+/// Deliberately gating a stage off is NOT incompleteness: it still exits 0.
+///
+/// The paired negative. Without it, an implementation that returned 75 whenever
+/// any stage was absent would satisfy the contention test above and still be
+/// wrong -- choosing not to run benches is not the same as being unable to run
+/// the drift guard.
+#[test]
+fn a_gated_off_run_still_exits_zero() {
+    let (stdout, code) = verification_verdict(108, 0, 4);
+    assert_eq!(
+        code, 0,
+        "gated-off is not incomplete; banner was:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("108/108 attempted verification stages passed"),
+        "gated-off stages must be outside the attempted denominator:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("gated off (not attempted) : 4"),
+        "gated-off stages must be counted separately:\n{stdout}"
+    );
+}
+
+/// The verdict harness must be executing verify.sh's real functions.
+///
+/// `eval "$(awk ...)"` that matched nothing would define no functions, and the
+/// three tests above would then be asserting against an empty banner and a
+/// default exit code. That is the same vacuity this file already guards against
+/// for `record_gated_off`, and it is the shape that let the exit contract go
+/// ungraded while looking covered.
+#[test]
+fn the_verdict_harness_extracts_real_functions() {
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    for name in ["verification_exit_status", "verification_summary_banner"] {
+        assert!(
+            script.contains(&format!("{name}() {{")),
+            "verify.sh must define {name} at column 0 for the awk extraction to find it"
+        );
+    }
+    let (stdout, _) = verification_verdict(1, 0, 0);
+    assert!(
+        stdout.contains("Stage accounting:"),
+        "the extracted banner produced no accounting block, so the extraction \
+         found nothing:\n{stdout}"
+    );
+}
+
 #[test]
 fn fake_oidc_idp_selfcheck_wiring() {
     let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
