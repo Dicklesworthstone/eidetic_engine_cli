@@ -1904,8 +1904,31 @@ fn verify_ee_memory_provenance_referent(
             Some("Run provenance verification from an initialized workspace database.".to_owned()),
         );
     };
+    // bd-tmv70: "is the referent still live" is an IDENTITY question, and since
+    // V123 `valid_to` no longer answers it. Supersession writes `superseded_at`
+    // and leaves `valid_to` to the author, so a superseded memory now has
+    // `valid_to == None` and this guard verified it as PRESENT -- evidence
+    // pointing at a historical revision passed provenance verification. No test
+    // names this path, so it stayed latent.
+    //
+    // The EvidenceDrift arm below already expects to receive such a row: its
+    // repair text reads "Review the superseded or tombstoned memory". This makes
+    // that true again.
+    let superseded_at = match database.get_memory_superseded_at(memory_id) {
+        Ok(value) => value,
+        Err(error) => {
+            return provenance_referent_report(
+                &uri.to_string(),
+                uri.scheme(),
+                VerifyProvenanceReferentStatus::Unverifiable,
+                format!("ee_memory_lookup_error: {error}"),
+                None,
+                Some("Run ee doctor before retrying provenance verification.".to_owned()),
+            );
+        }
+    };
     match database.get_memory(memory_id) {
-        Ok(Some(memory)) if memory.tombstoned_at.is_none() && memory.valid_to.is_none() => {
+        Ok(Some(memory)) if memory.tombstoned_at.is_none() && superseded_at.is_none() => {
             provenance_referent_report(
                 &uri.to_string(),
                 uri.scheme(),
