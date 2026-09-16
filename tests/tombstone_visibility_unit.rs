@@ -29,11 +29,30 @@ fn unique_dir(name: &str) -> Result<PathBuf, String> {
 }
 
 fn run_ee(workspace: &Path, args: &[&str]) -> Result<JsonValue, String> {
-    let output = Command::new(ee_bin())
+    run_ee_with_env(workspace, args, &[])
+}
+
+/// `ee` with extra environment, needed because `remember` derives its trust
+/// class from actor signals rather than from a flag: `agent_assertion` iff
+/// `attempt_family.is_some() && current_agent_name().is_some()`
+/// (src/core/memory.rs), where `current_agent_name()` reads `EE_AGENT_NAME`
+/// (src/config/env_registry.rs). `--family` ALONE still yields
+/// `human_explicit` -- both signals are required.
+fn run_ee_with_env(
+    workspace: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<JsonValue, String> {
+    let mut command = Command::new(ee_bin());
+    command
         .arg("--workspace")
         .arg(workspace)
         .arg("--json")
-        .args(args)
+        .args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command
         .output()
         .map_err(|error| format!("spawn ee {}: {error}", args.join(" ")))?;
 
@@ -112,7 +131,24 @@ fn tombstone_visibility_surfaces_are_explicit_and_roundtrip_safe() -> TestResult
     let query = "b8 tombstone visibility alpha marker";
     let reason = "superseded by B8 lifecycle fixture";
     let tombstoned_content = format!("{query} tombstoned rule");
-    let tombstoned = run_ee(
+    // This fixture exports from `source` and imports into a SEPARATE
+    // `imported` workspace, i.e. a cross-store import. A plain `ee remember`
+    // writes `human_explicit`, and d6f805f50 made a native import of
+    // human_explicit rows that do not authenticate under the destination store
+    // fail closed with `unauthenticated_native_import_trust`. That control is
+    // correct and is not this test's subject, so the fixture writes below it.
+    //
+    // There is no `--trust-class` on `ee remember` -- that flag exists only on
+    // `rule add` / `rule update` (RuleAddArgs, RuleUpdateArgs). Remember
+    // derives the class from actor signals, so the fixture supplies both:
+    // `--family` plus EE_AGENT_NAME yields `agent_assertion` (650), which is
+    // below `agent_validated` (800) and so satisfies the refusal's own
+    // instruction to "import the rows at agent_validated or lower".
+    // Verified by execution, all three cases: plain -> human_explicit,
+    // --family alone -> human_explicit, --family + EE_AGENT_NAME ->
+    // agent_assertion.
+    let agent_env = [("EE_AGENT_NAME", "tombstone-visibility-fixture")];
+    let tombstoned = run_ee_with_env(
         &source_workspace,
         &[
             "remember",
@@ -122,23 +158,15 @@ fn tombstone_visibility_surfaces_are_explicit_and_roundtrip_safe() -> TestResult
             "rule",
             "--tags",
             "b8,tombstone",
-            // This fixture exports from `source` and imports into a SEPARATE
-            // `imported` workspace, i.e. a cross-store import. `ee remember`
-            // defaults --trust-class to human_explicit (src/cli/mod.rs), and
-            // d6f805f50 made a native import of human_explicit rows that do
-            // not authenticate under the destination store fail closed with
-            // `unauthenticated_native_import_trust`. That control is correct
-            // and is not this test's subject, so the fixture writes at the
-            // class the refusal itself names ("import the rows at
-            // agent_validated or lower"). Every tombstone assertion below is
-            // unchanged; only the trust class of the fixture rows moves.
-            "--trust-class",
-            "agent_validated",
+            "--family",
+            "fam-b8-tombstone",
             "--no-propose-candidates",
             &tombstoned_content,
         ],
+        &agent_env,
     )?;
-    let active = run_ee(
+    // Same cross-store reason as the tombstoned row above.
+    let active = run_ee_with_env(
         &source_workspace,
         &[
             "remember",
@@ -148,12 +176,12 @@ fn tombstone_visibility_surfaces_are_explicit_and_roundtrip_safe() -> TestResult
             "rule",
             "--tags",
             "b8,tombstone",
-            // Same cross-store reason as the tombstoned row above.
-            "--trust-class",
-            "agent_validated",
+            "--family",
+            "fam-b8-active",
             "--no-propose-candidates",
             "b8 tombstone visibility beta active companion",
         ],
+        &agent_env,
     )?;
     let tombstoned_id = json_str(&tombstoned, "/data/memory_id", "tombstoned remember")?;
     let active_id = json_str(&active, "/data/memory_id", "active remember")?;
