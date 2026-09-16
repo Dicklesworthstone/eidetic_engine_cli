@@ -11,7 +11,7 @@
       "docs"
     ],
     "reasons": [
-      "documentation"
+      "docs_dir"
     ],
     "recommendation": "review_and_stage_as_one_logical_commit",
     "readOnly": true
@@ -28,7 +28,7 @@
       "test"
     ],
     "reasons": [
-      "test_or_fixture"
+      "tests_dir"
     ],
     "recommendation": "review_and_stage_as_one_logical_commit",
     "readOnly": true
@@ -62,7 +62,7 @@
       "test"
     ],
     "reasons": [
-      "test_or_fixture"
+      "tests_dir"
     ],
     "recommendation": "review_and_stage_as_one_logical_commit",
     "readOnly": true
