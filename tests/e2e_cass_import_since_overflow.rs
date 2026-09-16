@@ -138,10 +138,15 @@ fn cass_import_since_overflow_surfaces_invalid_since_envelope() -> TestResult {
                 case.branch,
             ),
         )?;
+        // `success` is a field of `ee.response.v2`, not `ee.error.v2` — the
+        // error envelope signals failure by carrying an `error` object at all
+        // (the schema assertion above). Asserting `success == false` here could
+        // never hold. Pin the error code instead, which the previous form did
+        // not check: this failed, AND it failed for the right reason.
         ensure(
-            parsed["success"].as_bool() == Some(false),
+            parsed["error"]["code"].as_str() == Some("import"),
             format!(
-                "branch {}: envelope success must be false; got {parsed}",
+                "branch {}: error.code must be `import`; got {parsed}",
                 case.branch,
             ),
         )?;
