@@ -204,7 +204,16 @@ fn root_help_emits_walking_skeleton_prelude() -> Result<(), String> {
         most_used, core_commands,
         "human Most-used commands must equal agent-docs coreCommands"
     );
-    assert_eq!(most_used.first(), Some(&"orient"), "orient must be first");
+    // cf20191dc ("fix(resume): publish session restart command", 2026-08-11)
+    // deliberately made `resume` the first core command, ahead of `orient`:
+    // AGENT_CORE_COMMANDS (src/core/agent_docs.rs:24-32) lists it first so a
+    // returning agent is pointed at its own prior session end-state before it
+    // is told to build a fresh one. The pin stays -- which command LEADS is a
+    // product claim worth asserting -- only the expected value moves.
+    //
+    // The assertion above (help == agent-docs coreCommands) already proves the
+    // two surfaces agree; this one fixes which command they agree on.
+    assert_eq!(most_used.first(), Some(&"resume"), "resume must be first");
 
     Ok(())
 }
