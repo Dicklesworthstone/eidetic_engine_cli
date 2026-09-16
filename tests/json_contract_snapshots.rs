@@ -444,10 +444,19 @@ fn run_json_command(fixture: &JsonContractFixture, args: Vec<String>) -> Result<
 }
 
 fn scrub_json_contract(value: &mut Value, fixture: &JsonContractFixture) {
+    // Document-level first: the timing normalization has to see the whole
+    // response at once, because one degraded list is serialized at both
+    // `.degraded` and `.data.degraded` and its length is echoed into counts
+    // and prose elsewhere in the tree.
+    normalize_timing_degradations(value);
+    scrub_json_contract_recursive(value, fixture);
+}
+
+fn scrub_json_contract_recursive(value: &mut Value, fixture: &JsonContractFixture) {
     match value {
         Value::Object(object) => {
             for (key, child) in object.iter_mut() {
-                scrub_json_contract(child, fixture);
+                scrub_json_contract_recursive(child, fixture);
                 if key == "hostCalibration" {
                     scrub_host_calibration(child);
                 }
@@ -459,7 +468,7 @@ fn scrub_json_contract(value: &mut Value, fixture: &JsonContractFixture) {
         }
         Value::Array(items) => {
             for item in items {
-                scrub_json_contract(item, fixture);
+                scrub_json_contract_recursive(item, fixture);
             }
         }
         Value::String(text) => {
@@ -566,6 +575,192 @@ fn is_elapsed_key(key: &str) -> bool {
         || key.contains("latency")
         || key == "ms"
         || key.ends_with("ms")
+}
+
+// bd-jikgj (found by TurquoiseBirch): a timing observation reaches this
+// snapshot through channels the key-based scrubber cannot see.
+//
+// `is_elapsed_key` above zeroes a NUMBER whose KEY looks like a duration.
+// That is the entire existing defense against wall-clock volatility, and it is
+// structurally blind to bd-jikgj, which routes elapsed time into:
+//   * a `degraded[]` ENTRY whose mere PRESENCE depends on elapsed time --
+//     `pack_assembly_elapsed_degradation` (src/pack/mod.rs) emits one iff the
+//     observed elapsed is `>=` the profile's warning threshold,
+//   * that entry's `message`, which embeds the raw millisecond reading,
+//   * `advisoryBanner.degradationCount`, a bare number,
+//   * `advisoryBanner.summary` and the rendered `pack.text`, where the count
+//     sits INSIDE an English sentence ("Context includes 2 degraded signals",
+//     built from `degraded.len()` in `advisory_summary`).
+// Not one of those is a key ending in "ms". The signal goes around the
+// defense rather than through it.
+//
+// Production already draws exactly this boundary for the OTHER determinism
+// mechanism: `timing_degradations()` is held out of the pack hash and out of
+// persistence (src/pack/mod.rs:3927-3939, src/core/context.rs:3895-3899) so a
+// loaded machine cannot change the hash. The hash was defended; the snapshot
+// was not. This puts the same boundary on the snapshot side.
+//
+// Pinning the fixture's resource profile is NOT an alternative. The entry
+// fires on a wall-clock `>=` against a FINITE threshold (at most 2000ms, the
+// swarm_heavy warning), so a sufficiently loaded host crosses any profile's
+// threshold. Pinning would only make the flake rarer, and a rare flake whose
+// first green reading looks like proof is worse than a red test.
+const TIMING_DEGRADED_CODES: &[&str] = &[ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE];
+
+/// Opening words of the timing degradation as rendered into markdown.
+///
+/// The markdown body carries only severity + message + repair -- the `code` is
+/// not rendered -- so the bullet can only be matched on message shape. Mirrors
+/// the `format!` in `pack_assembly_elapsed_degradation`. If that wording
+/// changes this stops matching and the test goes RED on a slow host, which is
+/// the safe direction: it can never turn into a silent pass.
+const TIMING_DEGRADED_MESSAGE_PREFIX: &str = "Pack assembly took ";
+
+/// Normalize a response so it reads identically on a fast and a slow host.
+///
+/// Erases the timing degradation and every count derived from it. Deterministic
+/// degradations are untouched, so the snapshot keeps asserting them.
+fn normalize_timing_degradations(value: &mut Value) {
+    let dropped = strip_timing_degraded_entries(value);
+    if dropped == 0 {
+        return;
+    }
+    adjust_timing_derived_counts(value, dropped);
+}
+
+/// Filter timing entries out of every `degraded` array, returning the LARGEST
+/// number taken from any single array.
+///
+/// Largest, not total: one logical list is serialized at both `.degraded` and
+/// `.data.degraded`, so summing would double-count and over-correct the
+/// derived counts.
+fn strip_timing_degraded_entries(value: &mut Value) -> usize {
+    let mut dropped = 0usize;
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object.iter_mut() {
+                if key == "degraded" {
+                    if let Value::Array(items) = child {
+                        let before = items.len();
+                        items.retain(|item| !is_timing_degradation(item));
+                        dropped = dropped.max(before.saturating_sub(items.len()));
+                    }
+                }
+                dropped = dropped.max(strip_timing_degraded_entries(child));
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                dropped = dropped.max(strip_timing_degraded_entries(item));
+            }
+        }
+        Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null => {}
+    }
+    dropped
+}
+
+fn is_timing_degradation(item: &Value) -> bool {
+    item.get("code")
+        .and_then(Value::as_str)
+        .is_some_and(|code| TIMING_DEGRADED_CODES.contains(&code))
+}
+
+/// Bring every value DERIVED from the degraded list back to its fast-host
+/// reading: the numeric count, the count inside prose, and the rendered
+/// markdown bullet.
+fn adjust_timing_derived_counts(value: &mut Value, dropped: usize) {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object.iter_mut() {
+                if key == "degradationCount" {
+                    if let Some(count) = child.as_u64() {
+                        *child = json!(count.saturating_sub(dropped as u64));
+                        continue;
+                    }
+                }
+                adjust_timing_derived_counts(child, dropped);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                adjust_timing_derived_counts(item, dropped);
+            }
+        }
+        Value::String(text) => {
+            let without_bullet = strip_timing_degradation_markdown(text);
+            *text = renumber_degraded_signal_prose(&without_bullet, dropped);
+        }
+        Value::Number(_) | Value::Bool(_) | Value::Null => {}
+    }
+}
+
+/// Rewrite "Context includes N degraded signal(s)" down by `dropped`.
+///
+/// The sentence is built from `degraded.len()`, so it counted the timing entry.
+/// The noun is re-pluralized because the renderer pluralizes from the same
+/// count, and 2 -> 1 must read "signal", not "signals".
+fn renumber_degraded_signal_prose(text: &str, dropped: usize) -> String {
+    const PREFIX: &str = "Context includes ";
+    const SUFFIX: &str = " degraded signal";
+    if !text.contains(SUFFIX) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(PREFIX) {
+        let split = at + PREFIX.len();
+        out.push_str(&rest[..split]);
+        rest = &rest[split..];
+
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() {
+            continue;
+        }
+        let Ok(count) = digits.parse::<usize>() else {
+            continue;
+        };
+        let after_digits = &rest[digits.len()..];
+        if !after_digits.starts_with(SUFFIX) {
+            continue;
+        }
+        let after_noun = &after_digits[SUFFIX.len()..];
+        let tail = after_noun.strip_prefix('s').unwrap_or(after_noun);
+
+        let adjusted = count.saturating_sub(dropped);
+        out.push_str(&adjusted.to_string());
+        out.push_str(SUFFIX);
+        if adjusted != 1 {
+            out.push('s');
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Take the rendered timing bullet, and its indented repair line, out of a
+/// markdown body.
+fn strip_timing_degradation_markdown(text: &str) -> String {
+    if !text.contains(TIMING_DEGRADED_MESSAGE_PREFIX) {
+        return text.to_string();
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    let mut skipping = false;
+    for line in text.split('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("- **[") && line.contains(TIMING_DEGRADED_MESSAGE_PREFIX) {
+            skipping = true;
+            continue;
+        }
+        if skipping {
+            if trimmed.starts_with("- *Repair:*") {
+                continue;
+            }
+            skipping = false;
+        }
+        kept.push(line);
+    }
+    kept.join("\n")
 }
 
 fn scrub_string(text: &str, fixture: &JsonContractFixture) -> String {
@@ -987,4 +1182,175 @@ fn is_profile_budget_key(key: &str) -> bool {
             | "maintenanceWindowMs"
             | "graphRefreshBudget"
     )
+}
+
+/// bd-jikgj (found by TurquoiseBirch): the acceptance property, stated as a
+/// test rather than as a comment.
+///
+/// Two captures of the SAME pack -- one from a host that stayed inside its
+/// elapsed budget, one from a host that did not -- must normalize to the same
+/// document. If they do, the snapshot cannot depend on how loaded the machine
+/// was when it ran.
+///
+/// The slow-host fixture is the shape `pack_assembly_elapsed_degradation`
+/// actually emits: a `pack_assembly_elapsed_over_budget` entry carrying a raw
+/// millisecond reading in its message, appended to the response `degraded[]`
+/// after the pack hash is computed, with every derived count one higher and
+/// the bullet rendered into the markdown body.
+///
+/// Two deterministic degradations, not one: the renderer pluralizes "signal"
+/// from the same count it prints, so a one-entry fixture would compare
+/// "1 degraded signals" -- prose the renderer never emits -- against a
+/// correctly singular normalization, and fail for a reason that has nothing to
+/// do with host dependence. The real recorded snapshot carries two.
+#[test]
+fn timing_degradations_read_the_same_on_a_fast_and_a_slow_host() -> TestResult {
+    let embed = json!({
+        "code": "embed_model_unavailable",
+        "severity": "warning",
+        "message": "Embedding model unavailable; semantic similarity is disabled.",
+    });
+    let freshness = json!({
+        "code": "evidence_freshness_missing_source",
+        "severity": "low",
+        "message": "Memory evidence freshness is missing_source.",
+    });
+    let timing = json!({
+        "code": ee::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE,
+        "severity": "low",
+        "message": "Pack assembly took 812ms, at or over the standard \
+                    resource-profile elapsed warning threshold of 500ms. \
+                    The pack contents are unaffected.",
+        "repair": "Re-run to see whether the overrun is repeatable.",
+    });
+
+    let deterministic_markdown = "## Degradations\n\n\
+        - **[warning]** Embedding model unavailable; semantic similarity is disabled.\n  \
+        - *Repair:* `ee index reembed`\n\
+        - **[low]** Memory evidence freshness is missing_source.\n  \
+        - *Repair:* `Reinstate the file.`\n";
+    let slow_markdown = format!(
+        "{deterministic_markdown}\
+         - **[low]** Pack assembly took 812ms, at or over the standard \
+         resource-profile elapsed warning threshold of 500ms. The pack contents \
+         are unaffected.\n  \
+         - *Repair:* `Re-run to see whether the overrun is repeatable.`\n"
+    );
+
+    let document = |entries: Value, count: u64, markdown: &str| {
+        let sentence = format!(
+            "Context includes {count} degraded signals; semantic embedding is unavailable."
+        );
+        json!({
+            "degraded": entries,
+            "data": {
+                "degraded": entries,
+                "pack": {
+                    "advisoryBanner": {
+                        "degradationCount": count,
+                        "summary": sentence,
+                    },
+                    "text": format!("{sentence}\n\n{markdown}"),
+                }
+            }
+        })
+    };
+
+    let fast = document(json!([embed, freshness]), 2, deterministic_markdown);
+    let slow = document(json!([embed, freshness, timing]), 3, &slow_markdown);
+
+    // The fixtures must actually differ, or this test would pass against a
+    // normalization that does nothing at all.
+    if fast == slow {
+        return Err("fixtures are identical before normalization; the test proves nothing".into());
+    }
+
+    let mut fast_normalized = fast.clone();
+    let mut slow_normalized = slow.clone();
+    normalize_timing_degradations(&mut fast_normalized);
+    normalize_timing_degradations(&mut slow_normalized);
+
+    // The normalization must BITE on the slow document, not silently no-op.
+    if slow_normalized == slow {
+        return Err(format!(
+            "slow-host document was unchanged by normalization; the timing entry survived:\n{slow_normalized:#}"
+        ));
+    }
+    // ...and must leave a document that never had a timing entry alone.
+    if fast_normalized != fast {
+        return Err(format!(
+            "fast-host document must be untouched, but normalization changed it:\n{fast_normalized:#}"
+        ));
+    }
+
+    if fast_normalized != slow_normalized {
+        return Err(format!(
+            "host-dependent snapshot: fast and slow captures normalized differently\n\
+             fast:\n{fast_normalized:#}\n\nslow:\n{slow_normalized:#}"
+        ));
+    }
+
+    // The deterministic degradations must SURVIVE. A normalization that simply
+    // emptied `degraded[]` would satisfy every assertion above.
+    let surviving = slow_normalized
+        .pointer("/data/degraded")
+        .and_then(Value::as_array)
+        .ok_or("normalized document lost /data/degraded")?;
+    let codes: Vec<&str> = surviving
+        .iter()
+        .filter_map(|entry| entry.get("code").and_then(Value::as_str))
+        .collect();
+    if codes
+        != [
+            "embed_model_unavailable",
+            "evidence_freshness_missing_source",
+        ]
+    {
+        return Err(format!(
+            "deterministic degradations must survive normalization, got: {codes:?}"
+        ));
+    }
+
+    // The raw millisecond reading must be gone from the rendered body too --
+    // it rides in the message, not in a key the scrubber can see.
+    let text = slow_normalized
+        .pointer("/data/pack/text")
+        .and_then(Value::as_str)
+        .ok_or("normalized document lost /data/pack/text")?;
+    if text.contains(TIMING_DEGRADED_MESSAGE_PREFIX) {
+        return Err(format!(
+            "timing bullet survived in the markdown body:\n{text}"
+        ));
+    }
+
+    // Print what was found rather than only comparing.
+    println!("normalized slow-host degraded codes: {codes:?}");
+    println!("normalized slow-host body:\n{text}");
+
+    Ok(())
+}
+
+/// The count is re-pluralized, because the renderer pluralizes from the same
+/// number it prints. Dropping the timing entry from a two-signal response must
+/// yield "1 degraded signal", never "1 degraded signals".
+#[test]
+fn renumbering_degraded_prose_repluralizes_at_the_singular_boundary() -> TestResult {
+    let renumbered = renumber_degraded_signal_prose(
+        "Context includes 2 degraded signals; semantic embedding is unavailable.",
+        1,
+    );
+    if renumbered != "Context includes 1 degraded signal; semantic embedding is unavailable." {
+        return Err(format!(
+            "singular boundary not handled, got: {renumbered:?}"
+        ));
+    }
+
+    // A sentence with no count must pass through untouched.
+    let untouched = renumber_degraded_signal_prose("Context is clear.", 1);
+    if untouched != "Context is clear." {
+        return Err(format!("unrelated prose was rewritten, got: {untouched:?}"));
+    }
+
+    println!("renumbered: {renumbered}");
+    Ok(())
 }
