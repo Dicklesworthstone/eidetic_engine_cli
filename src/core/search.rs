@@ -239,6 +239,50 @@ const QUERY_ASSIST_TERM_LIMIT: usize = 4;
 /// a short preview at the top level removes that round-trip. (agent-UX item 1)
 const SEARCH_CONTENT_PREVIEW_MAX_CHARS: usize = 240;
 
+/// How much of a hit's body a search rendering emits.
+///
+/// bd-cli-surface-consistency-cluster-1jnu1 item 5: `ee search` always elided
+/// bodies at `SEARCH_CONTENT_PREVIEW_MAX_CHARS` and set `content_truncated`,
+/// with no way to ask for the whole thing — so reading one full memory cost an
+/// `ee memory show` round-trip per hit, which is the round-trip the preview
+/// field was added to remove.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SearchContentPreview {
+    /// Default: elide at `SEARCH_CONTENT_PREVIEW_MAX_CHARS`, marking elided
+    /// values with `content_truncated`.
+    #[default]
+    Truncated,
+    /// `--full`: emit the whole body. `content_truncated` is never set,
+    /// because nothing was truncated.
+    Full,
+}
+
+impl SearchContentPreview {
+    /// Character budget for this mode. `Full` uses `usize::MAX` so the shared
+    /// preview helper's "is it longer than the budget" test is simply never
+    /// true, rather than needing a second code path.
+    const fn max_chars(self) -> usize {
+        match self {
+            Self::Truncated => SEARCH_CONTENT_PREVIEW_MAX_CHARS,
+            Self::Full => usize::MAX,
+        }
+    }
+}
+
+/// Render a hit body for the requested preview mode, returning the text and
+/// whether it was elided.
+///
+/// Both callers previously inlined this pair. Note that the truncation test is
+/// only correct because `search_content_preview` appends an ellipsis, pushing a
+/// truncated value to `max_chars + 1`; keeping the pair in one place means that
+/// coupling is stated once instead of being rediscovered at each call site.
+fn search_content_for_preview(text: &str, preview: SearchContentPreview) -> (String, bool) {
+    let max_chars = preview.max_chars();
+    let rendered = search_content_preview(text, max_chars);
+    let truncated = rendered.chars().count() > max_chars;
+    (rendered, truncated)
+}
+
 /// Extract the memory body text from a search hit's metadata, checking the
 /// public `content` field first and falling back to the analysis-side keys.
 fn search_hit_content_text(meta: &serde_json::Value) -> Option<String> {
@@ -3200,6 +3244,13 @@ impl SearchReport {
 
     #[must_use]
     pub fn human_summary(&self) -> String {
+        self.human_summary_with_preview(SearchContentPreview::Truncated)
+    }
+
+    /// `human_summary` with an explicit body-preview mode
+    /// (bd-cli-surface-consistency-cluster-1jnu1 item 5, `ee search --full`).
+    #[must_use]
+    pub fn human_summary_with_preview(&self, preview: SearchContentPreview) -> String {
         let mut output = String::new();
         let visible_results = search_display_visible_hits(&self.results);
 
@@ -3235,10 +3286,8 @@ impl SearchReport {
             // Show a one-line body preview so a human/agent can tell what each
             // hit says without a follow-up `ee memory show`/`ee why`. (item 1)
             if let Some(text) = hit.metadata.as_ref().and_then(search_hit_content_text) {
-                output.push_str(&format!(
-                    "     {}\n",
-                    search_content_preview(&text, SEARCH_CONTENT_PREVIEW_MAX_CHARS)
-                ));
+                let (rendered, _) = search_content_for_preview(&text, preview);
+                output.push_str(&format!("     {rendered}\n"));
             }
             if let Some(ref explanation) = hit.explanation {
                 output.push_str(&format!("     {}\n", explanation.summary));
@@ -3287,6 +3336,7 @@ impl SearchReport {
             DEFAULT_SEARCH_ADVISORY_WORKSPACE,
             SEARCH_ADVISORY_SCOPE_INVOCATION,
             None,
+            SearchContentPreview::Truncated,
         )
     }
 
@@ -3316,11 +3366,31 @@ impl SearchReport {
         session: &mut SearchAdvisorySession,
         workspace_id: &str,
     ) -> serde_json::Value {
+        self.data_json_with_advisory_session_for_workspace_and_preview(
+            session,
+            workspace_id,
+            SearchContentPreview::Truncated,
+        )
+    }
+
+    /// As `data_json_with_advisory_session_for_workspace`, but with an explicit
+    /// body-preview mode (bd-cli-surface-consistency-cluster-1jnu1 item 5,
+    /// `ee search --full`). Added rather than folded into the existing
+    /// signature so the daemon, serve, and context callers keep working
+    /// unchanged and keep the truncating default.
+    #[must_use]
+    pub fn data_json_with_advisory_session_for_workspace_and_preview(
+        &self,
+        session: &mut SearchAdvisorySession,
+        workspace_id: &str,
+        preview: SearchContentPreview,
+    ) -> serde_json::Value {
         self.data_json_with_advisory_session_inner(
             session,
             workspace_id,
             SEARCH_ADVISORY_SCOPE_PROCESS,
             None,
+            preview,
         )
     }
 
@@ -3336,6 +3406,7 @@ impl SearchReport {
             workspace_id,
             SEARCH_ADVISORY_SCOPE_PROCESS,
             Some(reservation),
+            SearchContentPreview::Truncated,
         )
     }
 
@@ -3345,6 +3416,7 @@ impl SearchReport {
         workspace_id: &str,
         advisory_scope: &'static str,
         mut reservation: Option<&mut SearchAdvisoryDeliveryReservation>,
+        preview: SearchContentPreview,
     ) -> serde_json::Value {
         let output_redaction_enabled = self.output_redaction_enabled();
         let visible_results = search_display_visible_hits(&self.results);
@@ -3428,11 +3500,11 @@ impl SearchReport {
                         // `content` — `contentPreview` is a forbidden synonym —
                         // with `content_truncated` marking elided values.
                         if let Some(text) = search_hit_content_text(&metadata) {
-                            let preview =
-                                search_content_preview(&text, SEARCH_CONTENT_PREVIEW_MAX_CHARS);
-                            let truncated =
-                                preview.chars().count() > SEARCH_CONTENT_PREVIEW_MAX_CHARS;
-                            obj_map.insert("content".to_string(), serde_json::json!(preview));
+                            // `rendered`, not `preview`: `preview` is the mode
+                            // parameter in scope here.
+                            let (rendered, truncated) =
+                                search_content_for_preview(&text, preview);
+                            obj_map.insert("content".to_string(), serde_json::json!(rendered));
                             if truncated {
                                 obj_map.insert(
                                     "content_truncated".to_string(),
