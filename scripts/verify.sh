@@ -1229,7 +1229,7 @@ run_stage "Beads Export Fixture Suite (bd-2p297.3)" "./scripts/beads_export_repa
 # empty-graph honesty, hub-pattern suggestion with opposed-polarity
 # contradiction typing, --propose emission + re-propose dedup, and the
 # curate validate/apply lifecycle creating the typed link.
-run_stage "Graph Intel E2E (bd-3a1op.6)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_graph_intel.sh"
+run_stage "Graph Intel E2E (bd-3a1op.6)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_graph_intel.sh"
 
 # Gate 6.12695: Session-resume E2E (bd-resume-verb-v0f57). Real binary:
 # empty-store no-session-evidence honesty, tagged-session grouping, revisit
@@ -1240,7 +1240,7 @@ run_stage "Resume E2E (bd-resume-verb-v0f57)" "EE_E2E_TMPDIR=/private/tmp ./scri
 # orphan detected with an Actionable suggested command (healthy linked
 # control stays clean), resolving the debt strictly shrinks the class count,
 # and repeated missed searches form a learn-gaps cluster.
-run_stage "Memory Debt E2E (bd-3ap2m.4)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_memory_debt.sh"
+run_stage "Memory Debt E2E (bd-3ap2m.4)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_memory_debt.sh"
 
 # Gate 6.127: Ergonomics real-binary E2E (bd-1et0v.22). No-Cargo:
 # proves `ee context` remains an alias for canonical `ee pack` while carrying

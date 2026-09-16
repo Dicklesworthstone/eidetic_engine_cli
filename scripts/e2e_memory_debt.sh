@@ -36,6 +36,22 @@ if [[ -z "${REAL_EE}" || ! -x "${REAL_EE}" ]]; then
     exit 3
 fi
 
+# Staleness guard (bd-smxdr). Existing/executable is not the same as current:
+# the PATH fallback above resolves whatever ee happens to be installed. This
+# e2e depends on `curate doctor --now` (the frozen-clock flag added for the
+# age-gated debt classes), so an older installed binary would fail confusingly
+# or, worse, exercise a different clock contract. Under verify.sh this stage
+# inherits the exported EE_BINARY and runs after the build at verify.sh:1195;
+# this protects the STANDALONE path.
+E2E_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "${E2E_SCRIPT_DIR}/.." && pwd)}"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
+if ! ee_require_current_binary "${REAL_EE}" "e2e_memory_debt"; then
+    exit 3
+fi
+
 ROOT_BASE="${EE_E2E_TMPDIR:-/private/tmp}"
 ROOT="$(mktemp -d "${ROOT_BASE%/}/ee-memory-debt-e2e.XXXXXX")"
 WS="${ROOT}/ws"
