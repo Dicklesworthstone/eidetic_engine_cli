@@ -1819,7 +1819,7 @@ fn doctor_franken_health_json_matches_golden() -> TestResult {
     )?;
     ensure_contains(
         &stdout,
-        "\"features\":[\"hash\",\"storage\",\"model2vec\",\"download\",\"lexical\",\"fts5\",\"rerank\"]",
+        "\"features\":[\"hash\",\"storage\",\"model2vec\",\"download\",\"lexical-tantivy\",\"fts5\",\"rerank\",\"native\"]",
         "frankensearch franken-health default features include download and rerank",
     )?;
     ensure(
@@ -1866,7 +1866,7 @@ fn diag_dependencies_json_matches_golden() -> TestResult {
     )?;
     ensure_contains(
         &stdout,
-        "\"features\":[\"hash\",\"storage\",\"model2vec\",\"download\",\"lexical\",\"fts5\",\"rerank\"]",
+        "\"features\":[\"hash\",\"storage\",\"model2vec\",\"download\",\"lexical-tantivy\",\"fts5\",\"rerank\",\"native\"]",
         "frankensearch dependency diagnostics default features include download and rerank",
     )?;
     ensure(
