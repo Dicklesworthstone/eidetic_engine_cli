@@ -171,6 +171,34 @@ fn verify_stage_names(script: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// Render one `record_gated_off` call by executing verify.sh's own helper.
+///
+/// Extracts the function from the script and runs it, so the test observes
+/// what a ci-smoke run WOULD emit rather than what the source happens to
+/// spell. Same technique `run_snapshot_proposal_guard` already uses in this
+/// file.
+fn render_gated_off(label: &str, reason: &str) -> Output {
+    Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"
+set -euo pipefail
+eval "$(awk '/^record_gated_off\(\) /,/^}/' "$VERIFY_SCRIPT")"
+STAGE_RESULTS=""
+STAGE_GATED_OFF=0
+STAGE_GATED_OFF_NAMES=""
+record_gated_off "$LABEL" "$REASON"
+printf '%b' "$STAGE_RESULTS"
+"#,
+        )
+        .env("VERIFY_SCRIPT", verify_script_path())
+        .env("LABEL", label)
+        .env("REASON", reason)
+        .current_dir(project_root())
+        .output()
+        .expect("render record_gated_off")
+}
+
 #[test]
 fn fake_oidc_idp_selfcheck_wiring() {
     let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
@@ -223,16 +251,44 @@ fn fake_oidc_idp_selfcheck_wiring() {
         assert_ne!(mode & 0o111, 0, "matrix self-check should be executable");
     }
 
+    // These previously grepped verify.sh's SOURCE for the literal
+    // `SKIP {label} (ci-smoke)`. 0f2256be4 replaced the hand-written lines
+    // with `record_gated_off "<label>" "ci-smoke"`, which emits byte-identical
+    // text AT RUNTIME -- so behaviour was unchanged and the source literal was
+    // gone, and this assertion went red for a refactor that improved the
+    // script. That is the same defect 6a6d30978 fixed one commit earlier in
+    // this file: a guard pinned to a spelling rather than a behaviour.
+    //
+    // Now asserts BOTH halves, which is strictly more than the literal did:
+    //   1. the label is registered exactly once through the sanctioned helper
+    //      -- a label silently dropped from verify.sh still fails here;
+    //   2. that helper actually renders `SKIP {label} (ci-smoke)` -- checked
+    //      by executing it, so a change to the helper's output format fails
+    //      too, which the old source grep could not see.
     for label in [
         "Fake OIDC IdP Harness E2E (T7.7)",
         "Fake OIDC IdP Defects E2E (T7.7)",
         "Fake OIDC IdP Matrix Self-Check E2E (T7.7)",
     ] {
-        let skip = format!("SKIP {label} (ci-smoke)");
+        let registration = format!("record_gated_off \"{label}\" \"ci-smoke\"");
         assert_eq!(
-            script.matches(&skip).count(),
+            script.matches(&registration).count(),
             1,
-            "{label} should have one explicit ci-smoke skip entry"
+            "{label} should be registered as gated-off exactly once under ci-smoke"
+        );
+
+        let rendered = render_gated_off(label, "ci-smoke");
+        assert!(
+            rendered.status.success(),
+            "rendering record_gated_off for {label} failed\n{}",
+            output_excerpt(&rendered)
+        );
+        let stdout = String::from_utf8_lossy(&rendered.stdout);
+        let expected = format!("SKIP {label} (ci-smoke)");
+        assert_eq!(
+            stdout.matches(&expected).count(),
+            1,
+            "record_gated_off must emit `{expected}`; got {stdout:?}"
         );
     }
 }
