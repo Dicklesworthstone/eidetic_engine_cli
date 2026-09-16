@@ -565,6 +565,9 @@ mod query_assist_schema;
 #[path = "contracts/context_delta_prior_unknown_repair_pinned.rs"]
 mod context_delta_prior_unknown_repair_pinned;
 
+#[path = "contracts/error_routing_call_sites.rs"]
+mod error_routing_call_sites;
+
 #[path = "contracts/mesh_serve_mcp_degraded_code_catalog.rs"]
 mod mesh_serve_mcp_degraded_code_catalog;
 
