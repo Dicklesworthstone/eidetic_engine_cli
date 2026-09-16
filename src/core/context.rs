@@ -4615,7 +4615,17 @@ fn lexical_memory_fallback_hits(
             source: ScoreSource::Lexical,
             fast_score: None,
             quality_score: None,
-            lexical_score: Some(score),
+            // `lexicalScore` is contractually the raw engine BM25 value that
+            // the normalized `relevanceScore` was projected from (README,
+            // "Explainable Retrieval"). This path never reaches Frankensearch
+            // — it is a direct database scan used when the index cannot serve
+            // the request — so there is no BM25 value to report. Echoing the
+            // coverage ratio here, as this did before
+            // bd-fallback-relevance-floor-labeling-dlr6a, dressed a
+            // term-overlap fraction up as an engine score and invited agents
+            // to compare it against genuinely min-max-normalized BM25 pools.
+            // Reporting no raw score is the truthful answer.
+            lexical_score: None,
             rerank_score: None,
             metadata: Some(public_memory_fallback_metadata(&memory, reference_time)),
             explanation: None,
@@ -4910,12 +4920,32 @@ fn lexical_terms(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// Term-coverage score for the degraded, index-free memory fallback
+/// (bd-fallback-relevance-floor-labeling-dlr6a).
+///
+/// Two earlier behaviours made this number mean far more than it measured,
+/// which is how an unrelated ticker's episodic note reached a UCU pack at
+/// `0.60` and was rendered under `evidence`:
+///
+/// 1. The haystack was `"{level} {kind} {content}"`. `level` and `kind` are
+///    structural facets, not evidence that a memory is about the query, so any
+///    query containing a taxonomy word — `decision`, `rule`, `fact`, `risk`,
+///    `episodic` — scored full term credit against *every* memory carrying
+///    that facet. Only `content` is scored now.
+/// 2. Matching was `haystack.contains(term)`, an unanchored substring test, so
+///    a short query term like `ucu` matched `document` and `succumb`. Both
+///    sides are now tokenized with [`lexical_terms`] and compared as whole
+///    words, which is the same boundary the query itself is split on.
+///
+/// The result stays a plain matched/total ratio in `0.0..=1.0`. It is a
+/// coverage fraction, not BM25 and not a calibrated probability — see
+/// [`lexical_memory_fallback_hits`] for why no BM25 value is reported
+/// alongside it.
 fn lexical_memory_score(memory: &StoredMemory, query_terms: &BTreeSet<String>) -> Option<f32> {
-    let haystack =
-        format!("{} {} {}", memory.level, memory.kind, memory.content).to_ascii_lowercase();
+    let content_terms = lexical_terms(&memory.content);
     let matched = query_terms
         .iter()
-        .filter(|term| haystack.contains(term.as_str()))
+        .filter(|term| content_terms.contains(term.as_str()))
         .count();
     if matched == 0 {
         return None;
@@ -15079,6 +15109,179 @@ mod tests {
             .into_iter()
             .map(|memory| (memory.id.clone(), memory))
             .collect()
+    }
+
+    // bd-fallback-relevance-floor-labeling-dlr6a: the index-free fallback
+    // scorer inflated unrelated memories, which is how an ADBE underwrite note
+    // reached a UCU pack at relevance 0.60 under the `evidence` heading.
+
+    fn scored_memory(level: &str, kind: &str, content: &str) -> StoredMemory {
+        let mut memory = tier_memory(
+            MemoryId::from_uuid(uuid::Uuid::from_u128(4_705)),
+            0.9,
+            0.8,
+            0.7,
+            kind,
+        );
+        memory.level = level.to_owned();
+        memory.content = content.to_owned();
+        memory
+    }
+
+    #[test]
+    fn fallback_score_ignores_level_and_kind_facets() -> TestResult {
+        // "decision" is a taxonomy word. Before the fix the haystack was
+        // "{level} {kind} {content}", so every `kind: decision` memory earned
+        // full term credit for it no matter what the memory was about.
+        let query_terms = super::lexical_terms("decision about hedging exposure");
+        let unrelated = scored_memory(
+            "episodic",
+            "decision",
+            "Bumped the release tag and cut a patch build.",
+        );
+
+        ensure_equal(
+            &super::lexical_memory_score(&unrelated, &query_terms),
+            &None,
+            "a kind:decision memory with no query word in its content must not score",
+        )
+    }
+
+    #[test]
+    fn fallback_score_requires_whole_word_matches() -> TestResult {
+        // The old `haystack.contains(term)` substring test matched "ucu"
+        // inside "document" and "succumbed" — the precise mechanism behind
+        // the wrong-ticker false positive.
+        let query_terms = super::lexical_terms("ucu");
+        let unrelated = scored_memory(
+            "episodic",
+            "note",
+            "The document succumbed to an unrelated review cycle.",
+        );
+
+        ensure_equal(
+            &super::lexical_memory_score(&unrelated, &query_terms),
+            &None,
+            "substring hits inside longer words are not term matches",
+        )
+    }
+
+    #[test]
+    fn fallback_score_still_credits_genuine_content_matches() -> TestResult {
+        // The floor must not be bought by destroying real recall.
+        let query_terms = super::lexical_terms("hedging exposure review");
+        let relevant = scored_memory(
+            "episodic",
+            "note",
+            "Hedging exposure was cut after the review.",
+        );
+
+        ensure_equal(
+            &super::lexical_memory_score(&relevant, &query_terms),
+            &Some(1.0),
+            "every query term present as a whole word scores full coverage",
+        )?;
+
+        let partial = scored_memory("episodic", "note", "Exposure was left unchanged.");
+        ensure_equal(
+            &super::lexical_memory_score(&partial, &query_terms),
+            &Some(1.0 / 3.0),
+            "partial coverage stays a plain matched/total fraction",
+        )
+    }
+
+    #[test]
+    fn fallback_score_is_case_insensitive_and_punctuation_tolerant() -> TestResult {
+        let query_terms = super::lexical_terms("Hedging, exposure!");
+        let relevant = scored_memory("episodic", "note", "HEDGING (exposure) reviewed.");
+
+        ensure_equal(
+            &super::lexical_memory_score(&relevant, &query_terms),
+            &Some(1.0),
+            "both sides tokenize through lexical_terms, so case and punctuation drop out",
+        )
+    }
+
+    #[test]
+    fn fallback_hits_report_no_raw_lexical_score() -> TestResult {
+        // `lexicalScore` is contractually the raw engine BM25 value behind the
+        // normalized `relevanceScore`. This path never runs Frankensearch, so
+        // it has no BM25 value to report and must not echo the coverage ratio
+        // into that field.
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let db_path = ee_dir.join("ee.db");
+
+        let connection = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = super::stable_context_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("workspace".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(4_706)).to_string();
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id,
+                    level: "episodic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "Hedging exposure was reviewed this quarter.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: None,
+                    trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut degraded = Vec::new();
+        let hits = super::lexical_memory_fallback_hits(
+            &connection,
+            &workspace,
+            "hedging exposure",
+            10,
+            false,
+            None,
+            false,
+            false,
+            false,
+            &mut degraded,
+        );
+
+        let hit = hits
+            .iter()
+            .find(|hit| hit.doc_id == memory_id)
+            .ok_or_else(|| format!("expected fallback hit for {memory_id}, got {hits:?}"))?;
+
+        ensure_equal(
+            &hit.lexical_score,
+            &None,
+            "index-free fallback hits report no raw BM25 score",
+        )?;
+        ensure_equal(
+            &hit.source,
+            &ScoreSource::Lexical,
+            "fallback hits stay lexical-sourced",
+        )
     }
 
     #[test]
