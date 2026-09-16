@@ -29,6 +29,47 @@ fn overhaul_script_path() -> PathBuf {
     project_root().join("scripts/e2e_overhaul.sh")
 }
 
+/// Modules allowed to have no `--lib <module>::` shard in CI, each paired with
+/// the step that covers them instead.
+///
+/// An entry is not an excuse: `ci_workflow_uses_normal_non_benchmark_test_gate`
+/// re-derives the justification every run, asserting the module is still
+/// feature-gated (so a default `--lib` run could not reach it anyway) AND that
+/// the named covering step is still present in ci.yml.
+const LIB_SHARD_EXEMPT: &[(&str, &str)] = &[("mcp", "scripts/mcp_lib_tests.sh")];
+
+/// Top-level modules declared in `src/lib.rs`, each paired with whether its
+/// declaration carries a `#[cfg(...)]` gate.
+fn lib_modules() -> Vec<(String, bool)> {
+    let source = fs::read_to_string(project_root().join("src/lib.rs")).expect("read src/lib.rs");
+    let mut modules = Vec::new();
+    let mut cfg_gated = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.starts_with("#[cfg(") {
+            cfg_gated = true;
+            continue;
+        }
+        let declaration = trimmed
+            .strip_prefix("pub mod ")
+            .or_else(|| trimmed.strip_prefix("mod "))
+            .and_then(|rest| rest.strip_suffix(';'));
+        if let Some(name) = declaration {
+            if !name.contains(' ') && !name.contains('{') {
+                modules.push((name.to_string(), cfg_gated));
+            }
+        }
+        // Any line that is not a `#[cfg(...)]` attribute ends the attribute run.
+        cfg_gated = false;
+    }
+
+    modules
+}
+
 fn output_excerpt(output: &Output) -> String {
     format!(
         "status={:?}\nstdout:\n{}\nstderr:\n{}",
@@ -619,18 +660,74 @@ fn normal_verify_test_gate_excludes_criterion_benches() {
     );
 }
 
+/// CI must give the same coverage as verify.sh's normal gate, without benches.
+///
+/// This asserts the PROPERTY, not the command spelling. The earlier version
+/// substring-matched `NORMAL_CARGO_TEST_GATE` against ci.yml, so when
+/// `8cec224e6` ("fix(ci): shard tests and repair exposed blockers") split the
+/// single combined invocation into 26 per-module `--lib` shards plus one
+/// `--bins --tests --examples` run, this guard went red for three months while
+/// CI was correct the entire time. A guard that fails when the thing it guards
+/// improves teaches people to edit the guard, which is worse than no guard.
+///
+/// verify.sh is still checked against the literal spelling by
+/// `normal_verify_test_gate_excludes_criterion_benches`: verify.sh is where
+/// that spelling is defined, so pinning it there is a definition, not a shape.
 #[test]
 fn ci_workflow_uses_normal_non_benchmark_test_gate() {
     let ci_workflow =
         fs::read_to_string(project_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
 
-    assert!(
-        ci_workflow.contains(NORMAL_CARGO_TEST_GATE),
-        "CI should run the same non-benchmark test gate as verify.sh"
-    );
+    // 1. Benches stay out of the normal gate. This is the original purpose of
+    //    the guard (598cd6401, "fix(ci): keep benches out of normal test gate").
     assert!(
         !ci_workflow.contains(BENCH_INCLUDED_TEST_GATE),
-        "CI's normal Tests step must not run `{BENCH_INCLUDED_TEST_GATE}`"
+        "CI's normal Tests step must not run `{BENCH_INCLUDED_TEST_GATE}`; \
+         benches belong behind an explicit benchmark job"
+    );
+
+    // 2. The non-lib targets run together, as verify.sh runs them.
+    assert!(
+        ci_workflow.contains("--workspace --bins --tests --examples"),
+        "CI should run the non-lib targets as one gate (--bins --tests --examples), \
+         matching the tail of verify.sh's `{NORMAL_CARGO_TEST_GATE}`"
+    );
+
+    // 3. Every module in src/lib.rs is reachable by CI: either it has its own
+    //    `--lib <module>::` shard, or it is a named exemption that still earns
+    //    the exemption. This is the coverage `--workspace --lib` gave for free
+    //    before the split, re-derived per module so a new module cannot be
+    //    added to lib.rs and silently miss CI.
+    let mut unsharded = Vec::new();
+    for (module, cfg_gated) in lib_modules() {
+        if ci_workflow.contains(&format!("--lib --jobs 1 {module}::")) {
+            continue;
+        }
+        match LIB_SHARD_EXEMPT
+            .iter()
+            .find(|(exempt, _)| *exempt == module.as_str())
+        {
+            Some((_, covering_step)) => {
+                assert!(
+                    cfg_gated,
+                    "module `{module}` is exempt from `--lib` sharding only because it is \
+                     feature-gated and a default `--lib` run cannot reach it. It is no longer \
+                     gated, so it needs a real shard in ci.yml."
+                );
+                assert!(
+                    ci_workflow.contains(covering_step),
+                    "exempt module `{module}` is only exempt while ci.yml still runs \
+                     `{covering_step}`; that step is gone, so `{module}` now runs in no job"
+                );
+            }
+            None => unsharded.push(module),
+        }
+    }
+
+    assert!(
+        unsharded.is_empty(),
+        "these src/lib.rs modules have no CI `--lib` shard and no named exemption, \
+         so their unit tests run in no job: {unsharded:?}"
     );
 }
 
