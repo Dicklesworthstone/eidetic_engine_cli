@@ -332,7 +332,7 @@ pub fn parse_subscribe_filter(raw: Option<&str>) -> Result<SubscribeFilter, Doma
                 };
             }
             "workspaceid" | "workspace_id" => {
-                for item in split_filter_values(value) {
+                for item in split_filter_values_preserving_case(value) {
                     filter.workspace_ids.insert(item);
                 }
             }
@@ -691,11 +691,25 @@ fn normalize_key(value: &str) -> String {
         .collect()
 }
 
-fn split_filter_values(value: &str) -> Vec<String> {
+/// Split a filter value list without touching case.
+///
+/// Workspace IDs are `wsp_` plus a Crockford base32 ULID and are therefore
+/// uppercase (`wsp_42GD1C8SZXBCYKBC6NP9PNZJT8`), so a value list that is
+/// lowercased can never equal the `workspace_id` carried on a delta.
+fn split_filter_values_preserving_case(value: &str) -> Vec<String> {
     value
         .split(['|', '+', ';'])
         .map(str::trim)
         .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Split a filter value list and fold it to lowercase, for the filters whose
+/// vocabularies are lowercase identifiers (levels, kinds, tags, changed fields).
+fn split_filter_values(value: &str) -> Vec<String> {
+    split_filter_values_preserving_case(value)
+        .into_iter()
         .map(|item| item.to_ascii_lowercase())
         .collect()
 }
