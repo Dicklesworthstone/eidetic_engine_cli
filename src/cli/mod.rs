@@ -38681,8 +38681,12 @@ where
             expected_prefixes[0]
         )),
     };
-    let wants_json = matches!(cli.renderer(), output::Renderer::Json);
-    write_domain_error(&domain_error, wants_json, stdout, stderr)
+    // Pass the renderer straight through. This previously narrowed
+    // cli.renderer() to `matches!(.., Renderer::Json)`, which discarded the
+    // information it had just fetched: the bool was false for Toon, Jsonl,
+    // Compact and Hook alike, so every one of them rendered prose to stderr
+    // (bd-sibling-error-writers-bool-mode-y46lf).
+    write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
 }
 
 fn handle_show_alias<W, E>(
