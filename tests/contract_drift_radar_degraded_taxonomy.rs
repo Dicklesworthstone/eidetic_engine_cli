@@ -240,7 +240,20 @@ fn validate_failure_mode_fixture(path: &Path, value: &Value) -> FixtureValidatio
         {
             findings.push(Finding {
                 kind: "repair_shape_missing_structured_field",
-                detail: "`.repair_present` = true but neither `.expected_emission.repair_contains` nor `.expected_emission.repair_strings` is present; prose-only recovery breaks agent automation".to_owned(),
+                // Says what the predicate ENFORCES, not what we wish it did.
+                //
+                // This previously read "prose-only recovery breaks agent
+                // automation" -- a claim about the PRODUCT's repair text that
+                // this check cannot make. It reads fixtures, never the emitted
+                // repair, so it can see whether a fixture asserts anything
+                // about its repair and nothing about whether that repair names
+                // a runnable command. The overclaim also made the honest fix
+                // (declare the repair you expect) look like gaming the gate.
+                //
+                // Whether `degraded[].repair` must name a command is a real
+                // question and a separate one: it spans 273+ codes and may
+                // need a type change. It is tracked on its own bead, not here.
+                detail: "`.repair_present` = true but neither `.expected_emission.repair_contains` nor `.expected_emission.repair_strings` is present; a fixture that claims a repair exists must assert something about it".to_owned(),
             });
         }
         if !repair_present && (has_repair_contains || has_repair_strings) {
