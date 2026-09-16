@@ -1658,7 +1658,7 @@ pub async fn rebuild_index_with_cx(
     }
 
     let _recovery_action = recover_interrupted_publish(&index_dir)?;
-    let registry_stack = workspace_embedder_stack(&db, &workspace_id)?;
+    let (registry_stack, _) = workspace_embedder_stack(&db, &workspace_id)?;
     ensure_active_embedding_registry_record(&db, &workspace_id, &registry_stack)?;
     let build_result = publish_full_index_generation_with_stack(
         cx,
@@ -1730,14 +1730,15 @@ pub async fn reembed_index_with_cx(
 ) -> Result<IndexReembedReport, IndexRebuildError> {
     let db = DbConnection::open_file(&options.resolve_database_path())?;
     let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
-    let stack = workspace_embedder_stack(&db, &workspace_id)?;
-    reembed_index_with_cx_and_stack(cx, options, stack).await
+    let (stack, stack_provenance) = workspace_embedder_stack(&db, &workspace_id)?;
+    reembed_index_with_cx_and_stack(cx, options, stack, stack_provenance).await
 }
 
 async fn reembed_index_with_cx_and_stack(
     cx: &asupersync::Cx,
     options: &IndexReembedOptions,
     stack: EmbedderStack,
+    stack_provenance: EmbedderStackProvenance,
 ) -> Result<IndexReembedReport, IndexRebuildError> {
     index_checkpoint(cx)?;
     let start = Instant::now();
@@ -1768,7 +1769,13 @@ async fn reembed_index_with_cx_and_stack(
     index_checkpoint(cx)?;
     let current_vector_coverage =
         embedding_vector_coverage(&index_dir, documents_total, read_fast_vector_record_count);
-    let embedding = reembed_embedding_summary(&db, &workspace_id, &stack, current_vector_coverage)?;
+    let embedding = reembed_embedding_summary(
+        &db,
+        &workspace_id,
+        &stack,
+        stack_provenance,
+        current_vector_coverage,
+    )?;
     let idempotency_key = reembed_idempotency_key(
         &workspace_id,
         &embedding.fast_model_id,
@@ -1861,7 +1868,13 @@ async fn reembed_index_with_cx_and_stack(
 
     let _recovery_action = recover_interrupted_publish(&index_dir)?;
     ensure_active_embedding_registry_record(&db, &workspace_id, &stack)?;
-    let embedding = reembed_embedding_summary(&db, &workspace_id, &stack, current_vector_coverage)?;
+    let embedding = reembed_embedding_summary(
+        &db,
+        &workspace_id,
+        &stack,
+        stack_provenance,
+        current_vector_coverage,
+    )?;
     let build_result = publish_full_index_generation_with_stack(
         cx,
         &index_dir,
@@ -2535,7 +2548,7 @@ where
         }
     };
     let stack = match workspace_embedder_stack(db, workspace_id) {
-        Ok(stack) => stack,
+        Ok((stack, _)) => stack,
         Err(error) => {
             // `?` would convert here; do it explicitly so the batch records the
             // same error the caller receives.
@@ -2776,7 +2789,7 @@ where
     let result = async {
         let _recovery_action = recover_interrupted_publish(index_dir)?;
         let fallback_to_full = None;
-        let stack = workspace_embedder_stack(db, &job.workspace_id)?;
+        let (stack, _) = workspace_embedder_stack(db, &job.workspace_id)?;
         let build_result = publish_full_index_generation_with_stack(
             cx,
             index_dir,
@@ -5579,11 +5592,49 @@ enum EeEmbedDownloadMode {
     Off,
 }
 
+/// What the caller that RESOLVED a stack knows about the attempt that produced
+/// it.
+///
+/// Threaded from the resolver to the posture rather than re-derived at the
+/// posture site from process-global state. A posture callee is handed an
+/// arbitrary stack and cannot know whether a recorded failure belongs to THAT
+/// stack; reading the process selection there would make the reported label
+/// depend on whether some other caller had already resolved and failed, i.e.
+/// on test order (bd-kvltg).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct EmbedderStackProvenance {
+    /// The local neural tier was attempted and failed while producing THIS
+    /// stack, so the hash tier is running because something broke.
+    local_load_failed: bool,
+}
+
+impl EmbedderStackProvenance {
+    /// A stack whose origin carries no local-load attempt: a workspace
+    /// registry row, a configured override, or a directly-built test stack.
+    /// Nothing is claimed about it, which is the honest default.
+    pub(crate) const fn unattributed() -> Self {
+        Self {
+            local_load_failed: false,
+        }
+    }
+}
+
 pub(crate) fn default_search_embedder_stack() -> EmbedderStack {
-    DEFAULT_SEARCH_EMBEDDER
-        .get_or_init(detect_default_search_embedder)
-        .stack
-        .clone()
+    default_search_embedder_stack_with_provenance().0
+}
+
+/// The process default stack together with what resolving it established.
+///
+/// Provenance is captured HERE, where the selection that produced the stack is
+/// in hand, and then travels with the stack.
+fn default_search_embedder_stack_with_provenance() -> (EmbedderStack, EmbedderStackProvenance) {
+    let selection = DEFAULT_SEARCH_EMBEDDER.get_or_init(detect_default_search_embedder);
+    (
+        selection.stack.clone(),
+        EmbedderStackProvenance {
+            local_load_failed: selection.local_model_load_failed(),
+        },
+    )
 }
 
 fn detect_default_search_embedder() -> DefaultSearchEmbedder {
@@ -6078,7 +6129,7 @@ fn load_registered_model2vec(
 fn workspace_embedder_stack(
     db: &DbConnection,
     workspace_id: &str,
-) -> Result<EmbedderStack, DbError> {
+) -> Result<(EmbedderStack, EmbedderStackProvenance), DbError> {
     #[cfg(test)]
     if let Some(stack) = TEST_WORKSPACE_EMBEDDER_STACK_OVERRIDES
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -6086,12 +6137,22 @@ fn workspace_embedder_stack(
         .ok()
         .and_then(|overrides| overrides.get(workspace_id).cloned())
     {
-        return Ok(stack);
+        return Ok((stack, EmbedderStackProvenance::unattributed()));
     }
     if configured_embedder_model_root().is_some() {
-        return Ok(default_embedder_stack());
+        return Ok(default_search_embedder_stack_with_provenance());
     }
-    workspace_embedder_stack_with_default(db, workspace_id, default_embedder_stack)
+    // The closure runs ONLY when the default supplies the stack, so provenance
+    // is attributed exactly when the default selection is the origin -- and the
+    // registry-selection branch keeps its single implementation rather than
+    // being duplicated here to carry a second return value.
+    let mut provenance = EmbedderStackProvenance::unattributed();
+    let stack = workspace_embedder_stack_with_default(db, workspace_id, || {
+        let (stack, default_provenance) = default_search_embedder_stack_with_provenance();
+        provenance = default_provenance;
+        stack
+    })?;
+    Ok((stack, provenance))
 }
 
 fn workspace_embedder_stack_with_default(
@@ -7255,10 +7316,11 @@ fn reembed_embedding_summary(
     db: &DbConnection,
     workspace_id: &str,
     stack: &EmbedderStack,
+    stack_provenance: EmbedderStackProvenance,
     vector_coverage: EmbeddingVectorCoverage,
 ) -> Result<ReembedEmbeddingSummary, IndexRebuildError> {
     Ok(ReembedEmbeddingSummary::from_posture(
-        embedding_posture_from_stack(db, workspace_id, stack, vector_coverage)?,
+        embedding_posture_from_stack(db, workspace_id, stack, stack_provenance, vector_coverage)?,
     ))
 }
 
@@ -7312,9 +7374,15 @@ pub(crate) fn embedding_posture_from_stack(
     db: &DbConnection,
     workspace_id: &str,
     stack: &EmbedderStack,
+    stack_provenance: EmbedderStackProvenance,
     vector_coverage: EmbeddingVectorCoverage,
 ) -> Result<EmbeddingPosture, DbError> {
-    let (fast_embedder, quality_embedder) = stack_descriptors(stack);
+    let (mut fast_embedder, quality_embedder) = stack_descriptors(stack);
+    // Refines only an already-hash verdict, and only from provenance the
+    // resolver established for THIS stack.
+    if !fast_embedder.semantic {
+        fast_embedder.local_load_failed = stack_provenance.local_load_failed;
+    }
     let records = db.list_embedding_metadata_records(workspace_id)?;
     Ok(embedding_posture_from_records(
         &fast_embedder,
@@ -10924,6 +10992,73 @@ mod tests {
     }
 
     #[test]
+    fn reembed_posture_follows_threaded_provenance_not_global_state() -> TestResult {
+        // The STACK is identical in both arms; only the provenance differs.
+        // That is the whole point of threading it: the label must follow what
+        // the resolver established about this particular stack. Deriving it
+        // from process-global state instead would make this assertion depend
+        // on whether some other test had already resolved and failed the
+        // process selection, i.e. on test order (bd-kvltg).
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::testing::wsp("provenance");
+        let workspace_id = workspace_id.as_str();
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-provenance-posture-test".to_owned(),
+                    name: Some("provenance posture test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let stack = EmbedderStack::from_parts(
+            Arc::new(HashEmbedder::default_256()) as Arc<dyn crate::search::Embedder>,
+            None,
+        );
+        let coverage = EmbeddingVectorCoverage::new(0, 3);
+
+        let attributed = embedding_posture_from_stack(
+            &connection,
+            workspace_id,
+            &stack,
+            EmbedderStackProvenance {
+                local_load_failed: true,
+            },
+            coverage,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            attributed.source == "model_load_failed",
+            format!(
+                "a reembed posture must name a threaded load failure; got source {:?}",
+                attributed.source
+            ),
+        )?;
+
+        // Paired negative on the SAME stack: without the provenance the label
+        // must stay the ordinary fallback, otherwise the arm above would pass
+        // regardless of whether threading works.
+        let unattributed = embedding_posture_from_stack(
+            &connection,
+            workspace_id,
+            &stack,
+            EmbedderStackProvenance::unattributed(),
+            coverage,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            unattributed.source == "frankensearch_hash_fallback",
+            format!(
+                "an unattributed stack must keep the ordinary fallback label; \
+                 got source {:?}",
+                unattributed.source
+            ),
+        )
+    }
+
+    #[test]
     fn pending_lazy_model2vec_posture_is_not_hash_fallback() -> TestResult {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
@@ -10948,6 +11083,7 @@ mod tests {
             &connection,
             workspace_id,
             &stack,
+            EmbedderStackProvenance::unattributed(),
             EmbeddingVectorCoverage::new(0, 3),
         )
         .map_err(|error| error.to_string())?;
@@ -10975,6 +11111,7 @@ mod tests {
             &connection,
             workspace_id,
             &stack,
+            EmbedderStackProvenance::unattributed(),
             EmbeddingVectorCoverage::new(0, 3),
         )
         .map_err(|error| error.to_string())?;
@@ -11108,6 +11245,7 @@ mod tests {
             &connection,
             workspace_id,
             &stack,
+            EmbedderStackProvenance::unattributed(),
             EmbeddingVectorCoverage::new(1, 1),
         )
         .map_err(|error| error.to_string())?;
@@ -11182,6 +11320,7 @@ mod tests {
             &connection,
             workspace_id,
             &stack,
+            EmbedderStackProvenance::unattributed(),
             EmbeddingVectorCoverage::new(2, 3),
         )
         .map_err(|error| error.to_string())?;
@@ -11244,6 +11383,7 @@ mod tests {
             &connection,
             workspace_id,
             &stack,
+            EmbedderStackProvenance::unattributed(),
             EmbeddingVectorCoverage::new(7, 11),
         )
         .map_err(|error| error.to_string())?;
@@ -13965,7 +14105,13 @@ mod tests {
             None,
         );
         let report = crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
-            reembed_index_with_cx_and_stack(&cx, &options, stack).await
+            reembed_index_with_cx_and_stack(
+                &cx,
+                &options,
+                stack,
+                EmbedderStackProvenance::unattributed(),
+            )
+            .await
         })
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
@@ -14025,7 +14171,13 @@ mod tests {
         options: &IndexReembedOptions,
     ) -> Result<IndexReembedReport, IndexRebuildError> {
         crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
-            reembed_index_with_cx_and_stack(&cx, options, cancellation_test_embedder_stack()).await
+            reembed_index_with_cx_and_stack(
+                &cx,
+                options,
+                cancellation_test_embedder_stack(),
+                EmbedderStackProvenance::unattributed(),
+            )
+            .await
         })
         .map_err(|error| {
             IndexRebuildError::Index(format!("Failed to start index runtime: {error}"))
@@ -14099,6 +14251,7 @@ mod tests {
                         &cx,
                         &options,
                         cancellation_test_embedder_stack(),
+                        EmbedderStackProvenance::unattributed(),
                     )
                     .await
                     {
@@ -15168,7 +15321,13 @@ mod tests {
         };
         let (result, caller_reason) = crate::core::run_cli_future(async move {
             let cx = asupersync::Cx::for_testing();
-            let result = reembed_index_with_cx_and_stack(&cx, &options, stack).await;
+            let result = reembed_index_with_cx_and_stack(
+                &cx,
+                &options,
+                stack,
+                EmbedderStackProvenance::unattributed(),
+            )
+            .await;
             (result, cx.cancel_reason())
         })
         .map_err(|error| error.to_string())?;
