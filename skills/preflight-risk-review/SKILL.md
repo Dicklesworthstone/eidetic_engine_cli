@@ -37,7 +37,7 @@ ee context "<task>" --workspace <workspace> --json
 ee search "<query>" --workspace <workspace> --explain --json
 ```
 
-All evidence commands must return parseable `ee.response.v1` or `ee.error.v1`
+All evidence commands must return parseable `ee.response.v2` or `ee.error.v2`
 JSON on stdout; progress and diagnostics belong on stderr.
 
 Dependency audit inputs are allowed only as explicit command artifacts, such as

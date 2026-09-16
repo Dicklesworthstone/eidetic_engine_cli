@@ -32,7 +32,7 @@ ee rehearse inspect --workspace <workspace> --json
 ee rehearse promote <plan-id> --workspace <workspace> --dry-run --json
 ```
 
-The skill may consume `ee.response.v1`, `ee.error.v1`, `ee.rehearse.*`, or
+The skill may consume `ee.response.v2`, `ee.error.v2`, `ee.rehearse.*`, or
 `ee.skill_evidence_bundle.v1` artifacts only when command provenance, redaction,
 trust class, degraded state, and prompt-injection quarantine metadata are
 present.
@@ -61,7 +61,7 @@ Acceptable input schemas:
 - `ee.rehearse.run.v1`
 - `ee.rehearse.inspect.v1`
 - `ee.rehearse.promote_plan.v1`
-- `ee.response.v1` with degraded codes
+- `ee.response.v2` with degraded codes
 
 Do not proceed if:
 

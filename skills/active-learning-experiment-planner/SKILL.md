@@ -45,7 +45,7 @@ ee economy score --workspace <workspace> --json
 ```
 
 JSON from stdout is evidence. stderr is diagnostics only. The skill may also
-consume `ee.response.v1`, `ee.error.v1`, `ee.learn.*`,
+consume `ee.response.v2`, `ee.error.v2`, `ee.learn.*`,
 `ee.skill_evidence_bundle.v1`, causal, economy, and context pack artifacts when
 their paths, hashes, provenance, redaction status, trust class, degraded state,
 and prompt-injection quarantine status are present.

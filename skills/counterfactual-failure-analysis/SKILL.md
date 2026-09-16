@@ -39,7 +39,7 @@ also consume an `ee.skill_evidence_bundle.v1` artifact that wraps those command
 outputs with provenance, redaction, trust class, degraded states, and mutation
 rules.
 
-Command wrappers may use `ee.response.v1` or `ee.error.v1`; evidence must remain
+Command wrappers may use `ee.response.v2` or `ee.error.v2`; evidence must remain
 machine JSON on stdout with provenance and degraded codes preserved.
 
 Durable memory mutation is forbidden except through an explicit audited `ee`

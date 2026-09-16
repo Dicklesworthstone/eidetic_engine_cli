@@ -13,7 +13,7 @@ The skill accepts JSON output from these `ee rehearse` subcommands:
 | `ee.rehearse.run.v1` | `ee rehearse run --workspace <ws> --json` |
 | `ee.rehearse.inspect.v1` | `ee rehearse inspect --plan-id <id> --workspace <ws> --json` |
 | `ee.rehearse.promote_plan.v1` | `ee rehearse promote-plan --plan-id <id> --workspace <ws> --dry-run --json` |
-| `ee.response.v1` | Any command with degradation codes |
+| `ee.response.v2` | Any command with degradation codes |
 
 ## Required Fields for Review
 
@@ -67,11 +67,11 @@ The skill accepts JSON output from these `ee rehearse` subcommands:
 }
 ```
 
-### From `ee.response.v1` (degraded)
+### From `ee.response.v2` (degraded)
 
 ```json
 {
-  "schema": "ee.response.v1",
+  "schema": "ee.response.v2",
   "command": "rehearse",
   "status": "degraded",
   "degraded": [

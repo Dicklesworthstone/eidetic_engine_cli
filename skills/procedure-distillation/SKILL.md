@@ -42,7 +42,7 @@ ee curate candidates --workspace <workspace> --json
 ```
 
 JSON from stdout is evidence. stderr is diagnostic context only. The skill may
-consume `ee.response.v1`, `ee.error.v1`, `ee.procedure.*`, `ee.skill_capsule.v1`,
+consume `ee.response.v2`, `ee.error.v2`, `ee.procedure.*`, `ee.skill_capsule.v1`,
 and `ee.skill_evidence_bundle.v1` artifacts when their paths, hashes,
 provenance, redaction status, trust class, degraded state, and
 prompt-injection quarantine status are present.

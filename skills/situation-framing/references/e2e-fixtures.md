@@ -12,7 +12,7 @@ Use this matrix when building the shared project-local skill harness for `situat
 | `sf_deploy_release` | Prepare deploy or release | `ee status`, `ee context`, `ee why` | `deploy` | Risk checks cite provenance IDs |
 | `sf_ambiguous_request` | Make it better | `ee status` | `ambiguous` | Output asks for evidence or decision point |
 | `sf_missing_evidence` | Explain prior incident with no context | `ee status`, failed `ee search --explain` | `investigation` | `evidenceGaps` names missing evidence |
-| `sf_degraded_cli` | Continue when CASS/search is unavailable | degraded `ee.response.v1` | `investigation` | Names degraded code, effect, and repair |
+| `sf_degraded_cli` | Continue when CASS/search is unavailable | degraded `ee.response.v2` | `investigation` | Names degraded code, effect, and repair |
 
 Each fixture log records:
 

@@ -39,7 +39,7 @@ ee --workspace <workspace> --json schema export ee.certificate.verify.v1
 ```
 
 JSON from stdout is evidence. stderr is diagnostics only. The skill may consume
-`ee.response.v1`, `ee.error.v1`, `ee.claim_verify.v1`,
+`ee.response.v2`, `ee.error.v2`, `ee.claim_verify.v1`,
 `ee.claim_show.v1`, `ee.certificate.verify.v1`,
 `ee.certificate.show.v1`, `ee.certificate.list.v1`, and
 `ee.skill_evidence_bundle.v1` artifacts when their path, hash, schema,

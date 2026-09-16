@@ -28,7 +28,7 @@ ee --workspace <workspace> --json why <memory-id>
 ee --workspace <workspace> --json doctor --fix-plan
 ```
 
-All command evidence must be parseable `ee.response.v1` or `ee.error.v1` JSON
+All command evidence must be parseable `ee.response.v2` or `ee.error.v2` JSON
 on stdout; stderr remains diagnostic context only.
 
 If a durable mutation is needed, recommend an explicit audited command such as `ee --workspace <workspace> --json remember ...`; never write durable memory mutation records directly.

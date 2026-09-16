@@ -46,7 +46,7 @@ JSON data comes from stdout. Diagnostics come from stderr. Never parse progress,
 human text, or tracing as evidence.
 
 The preferred handoff artifact is `ee.skill_evidence_bundle.v1`. A skill may
-also consume `ee.response.v1` and `ee.error.v1` JSON emitted by explicit
+also consume `ee.response.v2` and `ee.error.v2` JSON emitted by explicit
 commands, or a redacted Markdown summary that names the bundle path and hash.
 Raw DB files, derived indexes, and unredacted transcript dumps are not supported
 inputs.

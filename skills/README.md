@@ -87,7 +87,7 @@ The canonical handoff from `ee` to a project-local skill is
 `ee.skill_evidence_bundle.v1`. A bundle may be JSON for machine checks or
 Markdown only when paired with the JSON bundle hash. Allowed inputs are:
 
-- `ee.response.v1` or `ee.error.v1` JSON emitted by explicit `ee ... --json`
+- `ee.response.v2` or `ee.error.v2` JSON emitted by explicit `ee ... --json`
   commands.
 - `ee.skill_evidence_bundle.v1` JSON side-path artifacts.
 - Redacted Markdown summaries that include the source bundle path and hash.
