@@ -36,6 +36,18 @@ set -euo pipefail
 #   ./scripts/verify.sh --eval          # Include pack-quality eval regression sweep
 #   ./scripts/verify.sh --help         # Show this help
 #
+# Exit status:
+#   0   Complete. Every stage that was attempted passed. Stages deliberately
+#       gated off (opt-in flags not set) do not affect this.
+#   75  INCOMPLETE. One or more stages did not run because the beads lock was
+#       held, so this run does not establish what those stages check. This is
+#       EX_TEMPFAIL and matches BEADS_LOCK_SKIP_CODE: the code a contended
+#       stage already returns is the code the whole run returns. Retry.
+#   *   A stage failed; the code is that stage's own exit code.
+#
+#   A contended run is NOT a pass. Before bd-5krnm it exited 0 and was
+#   indistinguishable from a clean run to anything reading $?.
+#
 # Gates (in order):
 #   0. Plan Doc Smoke        - optional bd-3usjw.23 verify_cmd manifest checks
 #   0.9. Forbidden Dependency Contract - no-Cargo metadata scanner self-test
@@ -198,6 +210,11 @@ STAGE_RESULTS=""
 #   CONTENTION - a beads lock was held, so a stage that was SUPPOSED to run did
 #                not. Non-fatal by design, but a run containing one has not
 #                established what that stage checks, and must not read as clean.
+# Exit code for a run that could not attempt every stage. Deliberately the
+# same value as BEADS_LOCK_SKIP_CODE (EX_TEMPFAIL): contention is a retryable
+# incompleteness, never a verification failure, so it must not collide with a
+# real stage failure's exit code.
+VERIFY_EXIT_INCOMPLETE="$BEADS_LOCK_SKIP_CODE"
 STAGE_PASSED=0
 STAGE_SKIPPED_CONTENTION=0
 STAGE_SKIPPED_CONTENTION_NAMES=""
@@ -664,6 +681,16 @@ record_gated_off() {
 # the script on a real failure, so reaching it meant nothing FAILED -- it said
 # nothing about how much was attempted, and it read as a full sweep whether 112
 # stages ran or 30.
+# Exit status for a completed verification run. Echoes rather than returns so
+# callers can use it under `set -e` without the status tripping the shell.
+verification_exit_status() {
+    if [ "$STAGE_SKIPPED_CONTENTION" -gt 0 ]; then
+        printf '%s\n' "$VERIFY_EXIT_INCOMPLETE"
+    else
+        printf '%s\n' "0"
+    fi
+}
+
 verification_summary_banner() {
     local attempted=$((STAGE_PASSED + STAGE_SKIPPED_CONTENTION))
     local declared=$((attempted + STAGE_GATED_OFF))
@@ -686,6 +713,7 @@ verification_summary_banner() {
     if [ "$STAGE_GATED_OFF" -gt 0 ]; then
         printf "%b" "$STAGE_GATED_OFF_NAMES"
     fi
+    echo "  exit status               : $(verification_exit_status)"
 }
 
 run_stage() {
@@ -976,7 +1004,7 @@ if [ "$PLAN_DOC_SMOKE" = "true" ]; then
     # in a log, for a full sweep.
     verification_summary_banner
     printf "%b" "$STAGE_RESULTS"
-    exit 0
+    exit "$(verification_exit_status)"
 else
     record_gated_off "Plan Doc Smoke (bd-3usjw.23)" "--plan-doc-smoke not set"
 fi
@@ -1625,4 +1653,4 @@ fi
 
 artifact_retention_summary
 
-exit 0
+exit "$(verification_exit_status)"
