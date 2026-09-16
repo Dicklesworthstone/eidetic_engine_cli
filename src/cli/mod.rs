@@ -53464,7 +53464,22 @@ where
         }
     };
 
-    let connection = match open_attest_database(cli, args.database.as_deref()) {
+    // Both recording branches below take THIS connection, so the mode has to be
+    // decided before the open. `ee diagnose-error` is declared durable_write
+    // over `error_fingerprints` (src/core/effect.rs:2191-2195); opening
+    // read-only made both branches fail at the write with
+    // "database open mode ReadOnly is invalid for File(...)".
+    //
+    // Only ask for write capability when the invocation will actually record.
+    // A plain `ee diagnose-error` stays read-only, which is what it is.
+    let link_recording = error_repair_link_recording_from_args(args);
+    let will_record = args.record || !link_recording.is_empty();
+    let opened = if will_record {
+        open_attest_database_writable(cli, args.database.as_deref())
+    } else {
+        open_attest_database(cli, args.database.as_deref())
+    };
+    let connection = match opened {
         Ok(connection) => connection,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
@@ -53474,7 +53489,6 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
-    let link_recording = error_repair_link_recording_from_args(args);
     let mut recorded = false;
     let mut recorded_link_count = 0_usize;
     if args.record && link_recording.is_empty() {
@@ -53654,21 +53668,52 @@ fn open_attest_database_for_workspace(
     workspace_path: &Path,
     database: Option<&Path>,
 ) -> Result<crate::db::DbConnection, DomainError> {
+    open_attest_database_for_workspace_with_mode(workspace_path, database, false)
+}
+
+/// Shared attestation/diagnosis opener.
+///
+/// `writable` selects the open mode and nothing else. It is deliberately a
+/// parameter rather than a flip of the default: of the four consumers of this
+/// opener only `handle_diagnose_error` writes, and widening the other three
+/// would hand write capability to paths that are genuinely read-only.
+///
+/// The typo guarantee does NOT come from the open mode -- it comes from the
+/// existence preflight below, which refuses a missing store before any open
+/// happens. So a write-capable open placed after that preflight still cannot
+/// create or "plant" a store from a mistyped `--workspace`.
+fn open_attest_database_for_workspace_with_mode(
+    workspace_path: &Path,
+    database: Option<&Path>,
+    writable: bool,
+) -> Result<crate::db::DbConnection, DomainError> {
     let database_path = database
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     if !database_path.exists() {
         return Err(crate::core::storeless_workspace_error(&database_path));
     }
-    let connection =
-        crate::db::DbConnection::open_file_read_only(&database_path).map_err(|error| {
-            DomainError::Storage {
-                message: format!("Failed to open database: {error}"),
-                repair: Some("ee status --json".to_owned()),
-            }
-        })?;
+    let opened = if writable {
+        crate::db::DbConnection::open_file(&database_path)
+    } else {
+        crate::db::DbConnection::open_file_read_only(&database_path)
+    };
+    let connection = opened.map_err(|error| DomainError::Storage {
+        message: format!("Failed to open database: {error}"),
+        repair: Some("ee status --json".to_owned()),
+    })?;
     ensure_inspection_database_current(&connection, &database_path, "attestation")?;
     Ok(connection)
+}
+
+/// Write-capable sibling of `open_attest_database`, for the one consumer whose
+/// effect declaration is `durable_write` (src/core/effect.rs:2191-2195).
+fn open_attest_database_writable(
+    cli: &Cli,
+    database: Option<&Path>,
+) -> Result<crate::db::DbConnection, DomainError> {
+    let workspace_path = cli.resolve_workspace();
+    open_attest_database_for_workspace_with_mode(&workspace_path, database, true)
 }
 
 fn write_attestation_bundle<W>(
