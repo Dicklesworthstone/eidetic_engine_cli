@@ -241,8 +241,9 @@ use crate::core::rule::{
     protect_rule, show_rule, update_rule,
 };
 use crate::core::search::{
-    FamilyRetrievalOptions, SearchAdvisorySession, SearchAdvisorySettlement, SearchDedupMode,
-    SearchDegradation, SearchError, SearchFamilyReport, SearchOptions, SearchReport,
+    FamilyRetrievalOptions, SearchAdvisorySession, SearchAdvisorySettlement, SearchContentPreview,
+    SearchDedupMode, SearchDegradation, SearchError, SearchFamilyReport, SearchOptions,
+    SearchReport,
     SearchScoreRecalibrationReport, SearchSourceMode, SimilarError, SimilarOptions, SimilarReport,
     TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
     recalibrate_search_score_calibration, run_diag_search, run_family_retrieval,
@@ -49247,9 +49248,13 @@ where
             if let Some(degradation) = daemon_fallback {
                 report.degraded.push(degradation);
             }
+            // bd-cli-surface-consistency-cluster-1jnu1 item 5: `--full` opts out
+            // of the 240-character body elision on every renderer, so the flag
+            // cannot silently apply to JSON but not to human or TOON output.
+            let preview = search_content_preview_mode(args.full);
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
-                    write_stdout(stdout, &report.human_summary())
+                    write_stdout(stdout, &report.human_summary_with_preview(preview))
                 }
                 output::Renderer::Toon => write_stdout(
                     stdout,
@@ -49258,6 +49263,7 @@ where
                         args.mesh_mode,
                         &mut process.search_advisory_session,
                         &advisory_workspace_id,
+                        preview,
                     ) + "\n"),
                 ),
                 output::Renderer::Json
@@ -49272,6 +49278,7 @@ where
                         args.explain.then_some("data.results"),
                         &mut process.search_advisory_session,
                         &advisory_workspace_id,
+                        preview,
                     ) + "\n"),
                 ),
             }
@@ -49397,6 +49404,16 @@ fn format_search_json_with_mesh_and_recalibration(
         recalibration,
         result_path_hint,
     )
+}
+
+/// Map the `--full` flag to a body-preview mode
+/// (bd-cli-surface-consistency-cluster-1jnu1 item 5).
+const fn search_content_preview_mode(full: bool) -> SearchContentPreview {
+    if full {
+        SearchContentPreview::Full
+    } else {
+        SearchContentPreview::Truncated
+    }
 }
 
 fn format_search_json_with_mesh_and_recalibration_in_process(
