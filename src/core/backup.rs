@@ -14047,16 +14047,46 @@ mod tests {
         .map_err(|error| error.message())?;
         ensure_equal(restored.status.as_str(), "completed", "restore status")?;
 
-        // migrate: the recovered store is at the source's schema and wants
-        // nothing further.
+        // migrate: the recovered store carries the COMPLETE migration ledger.
+        //
+        // This assertion was originally `recovered.schema_version() ==
+        // source_schema_version`, which was vacuous and was caught in review:
+        // the fixture creates its source at the current schema, and
+        // `restore_backup_to_side_path` builds the recovered database fresh
+        // (`DbConnection::open_file` + `migrate()` at :3713-3714) and imports
+        // records into it. Both sides are therefore current by construction,
+        // so the comparison held even for a store that never migrated at all —
+        // in a test whose whole purpose is to prove that it did.
+        //
+        // The ledger is what a non-migrated store cannot fake. It is also
+        // self-calibrating: it tracks `MIGRATIONS` as new ones land, rather
+        // than pinning a literal anyone would have to remember to bump.
         let recovered = DbConnection::open_file(&restored.restored_database_path)
             .map_err(|error| error.to_string())?;
+        // Guard the comparison itself, the way the query link below is
+        // guarded: without this, an empty MIGRATIONS table would make
+        // `0 == 0` pass and the whole assertion would mean nothing. This is
+        // the guard the original version of this test was missing.
+        let expected_versions = crate::db::MIGRATIONS
+            .iter()
+            .map(crate::db::Migration::version)
+            .collect::<BTreeSet<_>>();
+        ensure(
+            !expected_versions.is_empty(),
+            "MIGRATIONS is empty, so the ledger comparison below would be vacuous",
+        )?;
+        // Compared as version SETS rather than counts: a count comparison
+        // would be hostage to any off-by-one between declared migrations and
+        // recorded rows, and would report equal for two ledgers that differ.
         ensure_equal(
             recovered
-                .schema_version()
-                .map_err(|error| error.to_string())?,
-            source_schema_version,
-            "recovered store must sit at the same schema version as its source",
+                .applied_migrations()
+                .map_err(|error| error.to_string())?
+                .iter()
+                .map(crate::db::MigrationRecord::version)
+                .collect::<BTreeSet<_>>(),
+            expected_versions,
+            "recovered store must have applied every declared migration, not merely opened a file",
         )?;
         ensure_equal(
             recovered
@@ -14064,6 +14094,16 @@ mod tests {
                 .map_err(|error| error.to_string())?,
             false,
             "recovered store must need no further migration",
+        )?;
+        // Retained as a secondary check only. On its own it proves nothing —
+        // see the note above — but a mismatch here would still be a real
+        // signal, so it is kept beneath an assertion that can actually fail.
+        ensure_equal(
+            recovered
+                .schema_version()
+                .map_err(|error| error.to_string())?,
+            source_schema_version,
+            "recovered store must not sit behind its source's schema version",
         )?;
 
         // query: the recovered store answers for the records it was given.
