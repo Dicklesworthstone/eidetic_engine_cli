@@ -6734,7 +6734,18 @@ fn remember_returns_staged_tag_cooccurrence_suggestions_without_mutating_links()
         "--kind",
         "rule",
         "--tags",
-        "checks,release",
+        // ADR 0051 (bd-pp1fk) auto-persists co-tag neighbours scoring >= 0.75,
+        // which `co_tag_score` reaches at >= 50% tag overlap. This fixture used
+        // to reuse the first memory's exact tag set (100% overlap, score 0.95),
+        // so the neighbour was persisted and removed from `suggested_links` and
+        // the test asserted the dormant-graph behaviour the ADR exists to kill.
+        //
+        // The advisory tier survives for below-threshold candidates: only
+        // PERSISTED targets are retained out of `suggested_links`. 1-of-4
+        // overlap scores 0.65, so it stays staged and unapplied -- which is
+        // what this test is named for. Measured: status "ready", one
+        // suggestion, zero auto_links, `why` links [].
+        "checks,deploy,docs,audit",
         "Before release, collect command evidence for checks.",
     ])?;
     let second_stdout = String::from_utf8_lossy(&second.stdout);
@@ -6784,13 +6795,24 @@ fn remember_returns_staged_tag_cooccurrence_suggestions_without_mutating_links()
     )?;
     ensure_equal(
         &suggestion["matched_tags"],
-        &serde_json::json!(["checks", "release"]),
+        &serde_json::json!(["checks"]),
         "suggestion matched tags",
     )?;
     ensure_equal(
         &suggestion["evidence_count"],
-        &serde_json::json!(2),
+        &serde_json::json!(1),
         "suggestion evidence count",
+    )?;
+    // Pin the tier boundary itself: this candidate must sit BELOW the
+    // auto-persist threshold, or the assertions above stop meaning anything.
+    ensure(
+        suggestion["score"]
+            .as_f64()
+            .is_some_and(|score| score < 0.75),
+        format!(
+            "staged suggestion must score below the 0.75 auto-persist threshold, got {}",
+            suggestion["score"]
+        ),
     )?;
     ensure(
         suggestion["next_action"]
