@@ -5245,63 +5245,35 @@ fn redact_search_provenance_uri(
     redact_search_absolute_path_like_segments(&secret_report.content, redacted_patterns)
 }
 
+/// Where a redacted path ends in search output.
+///
+/// Local on purpose: this surface renders prose, so a path terminates at
+/// whitespace, and like the pack renderer it also treats `<`, `>` and `|` as
+/// terminators. Only where a path STARTS is shared
+/// (bd-redactor-prefix-divergence-lsy52).
+fn search_absolute_path_boundary(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}' | ',' | ';' | '|' | '?' | '#'
+        )
+}
+
 fn redact_search_absolute_path_like_segments(
     input: &str,
     redacted_patterns: &mut BTreeSet<String>,
 ) -> String {
-    const REDACTED_PATH: &str = "[REDACTED_PATH]";
-    const PATH_PREFIXES: &[&str] = &[
-        "/home/",
-        "/Users/",
-        "/data/",
-        "/workspace/",
-        "/Volumes/",
-        "C:\\",
-        "D:\\",
-    ];
-
-    let mut output = String::with_capacity(input.len());
-    let mut cursor = 0usize;
-    while cursor < input.len() {
-        let remaining = &input[cursor..];
-        if let Some(prefix) = PATH_PREFIXES
-            .iter()
-            .find(|prefix| remaining.starts_with(**prefix))
-        {
-            redacted_patterns.insert("path".to_string());
-            output.push_str(REDACTED_PATH);
-            cursor += prefix.len();
-            while cursor < input.len() {
-                let next = input[cursor..].chars().next().unwrap_or('\0');
-                if next.is_whitespace()
-                    || matches!(
-                        next,
-                        '"' | '\''
-                            | '`'
-                            | '<'
-                            | '>'
-                            | ')'
-                            | ']'
-                            | '}'
-                            | ','
-                            | ';'
-                            | '|'
-                            | '?'
-                            | '#'
-                    )
-                {
-                    break;
-                }
-                cursor += next.len_utf8();
-            }
-            continue;
-        }
-
-        let next = remaining.chars().next().unwrap_or('\0');
-        output.push(next);
-        cursor += next.len_utf8();
+    // bd-redactor-prefix-divergence-lsy52. This carried the same seven-prefix
+    // list as the pack renderer -- /home/, /Users/, /data/, /workspace/,
+    // /Volumes/ and the two Windows drives -- and search results are the other
+    // surface an agent copies straight into context. /root/, /etc/, /var/,
+    // /tmp/ and /private/ all passed through unredacted here.
+    let output = crate::util::redact_path_like_segments(input, search_absolute_path_boundary);
+    if output != input {
+        // Preserves the original signal: the marker was recorded exactly when a
+        // path prefix matched, which is exactly when the text changes.
+        redacted_patterns.insert("path".to_string());
     }
-
     output
 }
 
