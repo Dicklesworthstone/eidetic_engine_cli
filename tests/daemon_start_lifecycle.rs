@@ -30,7 +30,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -302,9 +302,22 @@ fn daemon_start_foreground_sigterm_shuts_down_and_unlinks_socket() -> TestResult
         reader
             .read_line(&mut line)
             .map_err(|error| format!("read startup envelope: {error}"))?;
-        let envelope: Value = serde_json::from_str(line.trim()).map_err(|error| {
-            format!("startup envelope is not valid JSON: {error}; line={line:?}")
-        })?;
+        // An empty line means the child died before printing its envelope, and
+        // the reason is on ITS stderr -- which this path used to discard,
+        // leaving `line=""` as the entire diagnostic. stderr is already piped
+        // at spawn, so drain it on the error path and report it.
+        let envelope: Value = match serde_json::from_str::<Value>(line.trim()) {
+            Ok(value) => value,
+            Err(error) => {
+                let mut child_stderr = String::new();
+                if let Some(handle) = child.stderr.as_mut() {
+                    let _ = handle.read_to_string(&mut child_stderr);
+                }
+                return Err(format!(
+                    "startup envelope is not valid JSON: {error}; line={line:?}; daemon stderr={child_stderr:?}"
+                ));
+            }
+        };
         ensure(
             envelope.pointer("/success").and_then(Value::as_bool) == Some(true),
             format!("foreground start must report success:true; got {envelope}"),
