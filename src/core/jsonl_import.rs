@@ -394,39 +394,32 @@ fn jsonl_import_source_path_redaction_start(value: &str, separator_start: usize)
 }
 
 fn jsonl_import_source_path_starts_sensitive_unix_segment(value: &str) -> bool {
-    const PREFIXES: &[&str] = &[
-        "/Users/",
-        "/Volumes/",
-        "/private/",
-        "/var/",
-        "/tmp/",
-        "/home/",
-        "/data/",
-        "/dp/",
-        "/workspace/",
-        "/repo/",
-        "/etc/",
-    ];
-
-    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+    // bd-redactor-prefix-divergence-lsy52: shares the one prefix set instead of
+    // an eleven-entry local copy. This file keeps its own WALKER -- it scans on
+    // both separators and backs up to include a drive letter, which the shared
+    // walker does not do -- so only the data is shared.
+    crate::util::SENSITIVE_PATH_PREFIXES
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
 }
 
 fn jsonl_import_source_path_starts_sensitive_windows_segment(value: &str) -> bool {
-    const PREFIXES: &[&str] = &[
-        "\\Users\\",
-        "\\Volumes\\",
-        "\\private\\",
-        "\\var\\",
-        "\\tmp\\",
-        "\\home\\",
-        "\\data\\",
-        "\\dp\\",
-        "\\workspace\\",
-        "\\repo\\",
-        "\\etc\\",
-    ];
+    /// Longest entry in the shared set is `/github/workspace/` at 18 bytes, so a
+    /// 24-char window is enough to decide any prefix without scanning the rest.
+    const WINDOW: usize = 24;
 
-    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+    // The same prefix set with Windows separators. Normalising a bounded head
+    // of the candidate lets both separator forms share ONE list, rather than a
+    // hand-mirrored backslash copy that silently drifts from its Unix twin --
+    // which is what this bead is about (bd-redactor-prefix-divergence-lsy52).
+    let head: String = value
+        .chars()
+        .take(WINDOW)
+        .map(|c| if c == '\\' { '/' } else { c })
+        .collect();
+    crate::util::SENSITIVE_PATH_PREFIXES
+        .iter()
+        .any(|prefix| head.starts_with(prefix))
 }
 
 fn jsonl_import_source_path_starts_unc_path(value: &str) -> bool {

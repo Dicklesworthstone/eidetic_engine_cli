@@ -68,22 +68,6 @@ const MIN_HIGH_ENTROPY_TOKEN_BYTES: usize = 32;
 const STANDARD_HIGH_ENTROPY_BITS_PER_BYTE: f64 = 4.0;
 const STRICT_HIGH_ENTROPY_BITS_PER_BYTE: f64 = 3.5;
 
-const SENSITIVE_PATH_PREFIXES: &[&str] = &[
-    "/home/",
-    "/Users/",
-    "/Volumes/",
-    "/data/",
-    "/private/",
-    "/var/",
-    "/tmp/",
-    "/dp/",
-    "/workspace/",
-    "/repo/",
-    "/etc/",
-    "C:\\",
-    "D:\\",
-];
-
 /// Check if content contains patterns that suggest secrets.
 #[must_use]
 pub fn contains_secret_pattern(content: &str) -> bool {
@@ -270,12 +254,51 @@ pub fn redact_content(content: &str, level: RedactionLevel) -> String {
     }
 }
 
+/// Does a Windows drive root (`C:\`, `c:/`, any letter) begin at `value`?
+///
+/// The shared prefix set is POSIX-only, because the shared walker recognises
+/// drive roots structurally rather than as strings. This file scans BY PREFIX,
+/// so it needs the form spelled out -- and spelling it out as a form rather than
+/// as the two literals `C:\` and `D:\` it used to carry means every drive
+/// letter is covered, not just those two (bd-redactor-prefix-divergence-lsy52).
+fn starts_with_windows_drive_root(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
+}
+
+/// Length of the sensitive-path prefix at `value`, if one starts there.
+///
+/// Returns the LONGEST match so a nested path is not half-redacted.
+fn sensitive_path_prefix_len(value: &str) -> Option<usize> {
+    let longest = crate::util::SENSITIVE_PATH_PREFIXES
+        .iter()
+        .filter(|prefix| value.starts_with(*prefix))
+        .map(|prefix| prefix.len())
+        .max();
+    longest.or_else(|| starts_with_windows_drive_root(value).then_some(3))
+}
+
+/// Cheap pre-filter: might `text` contain a sensitive path anywhere?
+///
+/// Must not be narrower than `sensitive_path_prefix_len`, or a line skips the
+/// redaction pass entirely and ships unredacted.
+fn may_contain_sensitive_path(text: &str) -> bool {
+    if crate::util::SENSITIVE_PATH_PREFIXES
+        .iter()
+        .any(|prefix| text.contains(prefix))
+    {
+        return true;
+    }
+    text.char_indices()
+        .any(|(index, _)| starts_with_windows_drive_root(&text[index..]))
+}
+
 /// Redact file paths in content.
 fn redact_paths_in_content(content: &str) -> String {
-    if !SENSITIVE_PATH_PREFIXES
-        .iter()
-        .any(|prefix| content.contains(prefix))
-    {
+    if !may_contain_sensitive_path(content) {
         return content.to_owned();
     }
     // One pass per line matching ALL prefixes positionally: sequential
@@ -287,10 +310,7 @@ fn redact_paths_in_content(content: &str) -> String {
         let (line, terminator) = segment
             .strip_suffix('\n')
             .map_or((segment, ""), |line| (line, "\n"));
-        if SENSITIVE_PATH_PREFIXES
-            .iter()
-            .any(|prefix| line.contains(prefix))
-        {
+        if may_contain_sensitive_path(line) {
             redacted.push_str(&redact_paths_in_line(line));
             redacted.push_str(terminator);
         } else {
@@ -305,13 +325,10 @@ fn redact_paths_in_line(line: &str) -> String {
     let mut cursor = 0;
     while cursor < line.len() {
         let remaining = &line[cursor..];
-        let matched_prefix = SENSITIVE_PATH_PREFIXES
-            .iter()
-            .filter(|prefix| remaining.starts_with(*prefix))
-            .max_by_key(|prefix| prefix.len());
-        if let Some(prefix) = matched_prefix {
+        let matched_prefix_len = sensitive_path_prefix_len(remaining);
+        if let Some(prefix_len) = matched_prefix_len {
             output.push_str(REDACTED_PATH_PLACEHOLDER);
-            cursor += prefix.len();
+            cursor += prefix_len;
             let mut saw_separator_after_prefix = false;
             while cursor < line.len() {
                 let next = line[cursor..].chars().next().unwrap_or('\0');
@@ -403,9 +420,23 @@ fn is_high_entropy_token(token: &str, threshold_bits_per_byte: f64) -> bool {
 }
 
 fn starts_with_sensitive_path_prefix(value: &str) -> bool {
-    SENSITIVE_PATH_PREFIXES
+    if crate::util::SENSITIVE_PATH_PREFIXES
         .iter()
         .any(|prefix| value.starts_with(prefix))
+    {
+        return true;
+    }
+
+    // A Windows drive root is a FORM, not a prefix. The shared set is POSIX-only
+    // because the shared walker recognises drives structurally, so this
+    // predicate -- a plain prefix test -- keeps its own check rather than losing
+    // the `C:\` and `D:\` entries it used to carry. Any drive letter now
+    // matches, not just those two (bd-redactor-prefix-divergence-lsy52).
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
 }
 
 fn is_horizontal_path_space(character: char) -> bool {
