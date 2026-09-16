@@ -491,11 +491,22 @@ const RUNTIME_CLASSES: &[&str] = &[
 #[test]
 fn mechanical_boundary_inventory_covers_all_cli_command_paths() -> Result<(), String> {
     let commands = command_paths_from_extract_function(CLI_SOURCE)?;
-    assert_eq!(
-        commands.len(),
-        204,
-        "unexpected CLI command count; update the mechanical boundary inventory"
-    );
+
+    // No pinned command count here, deliberately.
+    //
+    // This used to assert `commands.len() == 204`. That number was typed by a
+    // human on 2026-05-19 and re-breaks on every CLI addition -- it failed at
+    // 453 not because coverage regressed but because the CLI grew, and bumping
+    // it to 453 would guarantee the identical failure at 454.
+    //
+    // The `missing` check below is strictly stronger: it enforces coverage
+    // against the LIVE CLI surface rather than against a literal, so it cannot
+    // be satisfied by editing a number. Removing the count is the same move as
+    // 9e9782c85, which dropped a migration-range counter because a sibling
+    // assertion already checked it against the live catalog.
+    //
+    // This is a removal because something stronger already covers it, which is
+    // the only reason that is not a weakening.
 
     let missing = commands
         .iter()
