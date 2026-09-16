@@ -105,21 +105,49 @@ fn remember(workspace_arg: &str, content: &str) -> Result<String, String> {
         })
 }
 
-fn expire_memory(workspace_arg: &str, memory_id: &str) -> TestResult {
+/// Actually tombstone the memory.
+///
+/// `ee memory expire` sets `valid_to`; it never writes `tombstoned_at`
+/// (`src/core/memory.rs:9525` only READS that column, to refuse re-expiring an
+/// already-tombstoned memory). Both guards these fixtures exercise test
+/// `tombstoned_at` -- revise at `src/core/memory.rs:11512` and link at
+/// `:10215` -- so an expired memory never reaches either one. Revise then
+/// falls through to its `valid_to` guard at `:11516` and answers "superseded";
+/// link has no such fallback and succeeds outright.
+///
+/// `ee curate tombstone` is the verb that writes the column
+/// (`src/core/curate.rs:6846` -> `tombstone_memory_audited`).
+fn tombstone_memory(workspace_arg: &str, memory_id: &str) -> TestResult {
     let output = run_ee(&[
         "--workspace",
         workspace_arg,
         "--json",
-        "memory",
-        "expire",
+        "curate",
+        "tombstone",
         memory_id,
     ])?;
     ensure(
         output.status.success(),
         format!(
-            "ee memory expire {memory_id} must succeed; stderr: {}",
+            "ee curate tombstone {memory_id} must succeed; stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         ),
+    )?;
+    // Exit 0 alone is not proof the state changed: the `--dry-run` arm
+    // (src/core/curate.rs:6825) also returns success while persisting nothing.
+    // Assert the report says it wrote the tombstone, so this helper cannot
+    // hand the test a memory that is not in the state the test names.
+    //
+    // The tombstone handler emits the BARE report -- no schema/success/data
+    // envelope wrapper -- so `persisted` is top level, not under `data`.
+    // Verified against the passing
+    // `e2e_curate_tombstone::curate_tombstone_happy_path_returns_persisted_envelope_with_audit`,
+    // which reads `parsed["schema"]` and `parsed["memoryId"]` flat.
+    let parsed: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("curate tombstone stdout must be JSON: {error}"))?;
+    ensure(
+        parsed["persisted"] == Value::Bool(true),
+        format!("curate tombstone must persist the tombstone; got {parsed}"),
     )
 }
 
@@ -305,7 +333,7 @@ fn memory_revise_rejects_tombstoned_memory_with_policy_repair() -> TestResult {
         .to_owned();
     init_workspace(&workspace_arg)?;
     let memory_id = remember(&workspace_arg, "Pin-test revise tombstoned target.")?;
-    expire_memory(&workspace_arg, &memory_id)?;
+    tombstone_memory(&workspace_arg, &memory_id)?;
 
     let (output, parsed) = run_revise(
         &workspace_arg,
@@ -321,7 +349,10 @@ fn memory_revise_rejects_tombstoned_memory_with_policy_repair() -> TestResult {
     )?;
     assert_error_with_repair(
         &parsed,
-        &["Cannot revise tombstoned memory."],
+        // src/core/memory.rs:11331 emits this WITHOUT a trailing period; the
+        // period made the assertion unsatisfiable even once the branch was
+        // reachable.
+        &["Cannot revise tombstoned memory"],
         &["ee memory show"],
     )
 }

@@ -186,7 +186,16 @@ fn cass_import_redaction_round_trip_is_search_safe_and_idempotent() -> TestResul
     )
     .map_err(|error| format!("span metadata should be JSON: {error}"))?;
     ensure_equal(
-        json_field(&metadata, &["redactionStatus"], "span redaction metadata")?,
+        json_field(
+            &metadata,
+            // The `ee.evidence.security_metadata.v1` envelope spells this
+            // `secretRedactionStatus` (src/db/mod.rs:13810). `redactionStatus`
+            // is a real field name on OTHER schemas, which is what made this
+            // look like a wrong-envelope problem; the value was present and
+            // correct here all along, under the name this schema uses.
+            &["secretRedactionStatus"],
+            "span redaction metadata",
+        )?,
         &serde_json::json!("redacted"),
         "span redaction metadata",
     )?;
