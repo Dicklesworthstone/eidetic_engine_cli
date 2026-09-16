@@ -1,0 +1,39 @@
+# bd-smxdr follow-on — e2e scripts that exist but are invoked by nothing.
+#
+# Recorded 2026-09-16. Each line is an accepted, pre-existing orphan: a suite
+# that was committed and wired into no runner. They are baselined rather than
+# fixed here because wiring 19 never-executed suites at once would wedge the
+# gate on unknown state, which is a decision for the orchestrator, not a
+# side effect of adding an audit.
+#
+# THIS LIST MAY ONLY SHRINK. scripts/e2e_invocation_audit.sh fails in both
+# directions: a NEW orphan is an error, and an entry here that has since been
+# wired is ALSO an error telling you to delete the line. That is what stops a
+# baseline decaying into a permanent ignore-list.
+#
+# To retire an entry: wire the script into scripts/verify.sh or a tests/*.rs
+# harness, then remove its line. To retire the script itself, delete the line
+# and the script — but deletion needs the operator's explicit permission
+# (AGENTS.md RULE 1).
+#
+# Note: 7 of the 19 are e2e_mesh_* from the mesh campaign and may be a single
+# decision rather than seven.
+e2e_anchors.sh
+e2e_backup_roundtrip.sh
+e2e_bridge_exemption.sh
+e2e_command_inventory.sh
+e2e_delivery.sh
+e2e_field_report_suite.sh
+e2e_mesh_admission.sh
+e2e_mesh_anti_entropy_protocol.sh
+e2e_mesh_peer_enrollment.sh
+e2e_mesh_privacy_redaction_authorization.sh
+e2e_mesh_replay_convergence.sh
+e2e_mesh_selective_sync.sh
+e2e_mesh_share_preview.sh
+e2e_provenance_reverify.sh
+e2e_reach.sh
+e2e_rerank_precision_gain.sh
+e2e_reservation_pressure.sh
+e2e_search_weight_config.sh
+e2e_similar_scope.sh

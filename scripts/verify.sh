@@ -914,6 +914,15 @@ if [ "$PLAN_DOC_SMOKE" = "true" ]; then
     exit 0
 fi
 
+# Gate 0.84: e2e invocation audit (bd-smxdr follow-on). No-Cargo. Asserts no
+# scripts/e2e_*.sh is invoked by nothing. Six pieces of test machinery were
+# found this session that existed and ran nowhere; the Rust side already had
+# tests/suites/inventory.rs for exactly this, the shell side had nothing.
+# 19 pre-existing orphans are baselined; the audit fails on CHANGE in BOTH
+# directions, so the baseline can only shrink.
+run_stage "E2E Invocation Audit Contract" "./scripts/e2e_invocation_audit.sh --self-test"
+run_stage "E2E Invocation Audit" "./scripts/e2e_invocation_audit.sh"
+
 # Gate 0.85: ee binary resolution + staleness contract (bd-smxdr). This
 # no-Cargo test proves the shared resolver refuses a stale or missing binary
 # BEFORE any e2e stage runs against one. It had existed unwired since May, so
