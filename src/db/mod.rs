@@ -10618,6 +10618,121 @@ CREATE INDEX idx_memories_workspace_content_simhash
 "#,
     "blake3:v123_memory_superseded_at_2026_09_16",
 );
+/// V124: Repair timestamp spellings that do not match their own column's canon.
+///
+/// bd-o22r0. `created_at`, `valid_from`, `valid_to` and `superseded_at` are all
+/// compared LEXICALLY in SQL. Both `...Z` and `...+00:00` are valid RFC3339 and
+/// both parse, but `Z` is 0x5A and `+` is 0x2B, so at the SAME INSTANT a
+/// `Z`-spelled value sorts ABOVE a `+00:00`-spelled one. Mixing spellings inside
+/// one column therefore breaks that column's ordering -- including the
+/// `created_at` ordering V123's supersession backfill depends on, which can
+/// leave two live heads in one revision chain.
+///
+/// TWO canons, deliberately different, and this migration does NOT unify them:
+///   validity columns   `valid_from`, `valid_to`, `superseded_at`
+///                      -> SecondsFormat::Secs `Z` (normalize_validity_timestamp)
+///   bookkeeping columns `created_at`, `updated_at`, `tombstoned_at`
+///                      -> offset form (normalize_row_timestamp)
+/// Rewriting `created_at` to the `Z` spelling would touch every existing row for
+/// cosmetic consistency. Only rows whose spelling disagrees with THEIR OWN
+/// column are repaired.
+///
+/// Sources, all closed by 1f9f57923 and 632893360 so this repairs history only:
+///   - JSONL import re-emitted every archived timestamp verbatim.
+///   - `expire_memory_valid_to` and `mark_memory_superseded` bound ONE value to
+///     both a validity column and `updated_at`, so any store where a memory was
+///     expired or revised has `Z`-spelled values in `updated_at` with no import
+///     involved.
+///   - `restore_imported_memory_tombstone` wrote an archived `tombstoned_at`
+///     into `tombstoned_at` AND `updated_at`.
+///
+/// SAFETY, established by executing this SQL against constructed rows before it
+/// was written here:
+///   - `strftime` is offset-AWARE. The naive `substr(x,1,19) || 'Z'` would turn
+///     `2026-05-01T05:30:00+05:30` into `...T05:30:00Z`, wrong by 5.5 hours.
+///   - `strftime` returns NULL for unparseable input, so an unguarded UPDATE
+///     would silently NULL out garbage values and destroy them. Every statement
+///     is guarded on `strftime(...) IS NOT NULL` plus a shape GLOB, so garbage,
+///     empty strings and date-only values are left exactly as they are rather
+///     than reinterpreted.
+///   - Idempotent: after repair a row no longer matches its own WHERE clause.
+///
+/// COUNT-REPORTING because the affected-row count is a property of live stores
+/// and cannot be known from the source tree. `memory_timestamp_spelling_repair_v124`
+/// records per-column counts taken BEFORE the updates, so an operator can see
+/// what this did instead of taking it on faith. Expect all zeros on a store that
+/// has never expired, revised, or imported a memory.
+///
+/// VERSION NOTE: the dueling-wizards manifest reserves version 124 for
+/// `V124_SOURCE_WRITE_STATS` (bd-1n0np.8.5). Compiled migrations must stay
+/// contiguous, so this repair could not take 125 and leave 124 free. That makes
+/// three reserved slots consumed by unrelated work (122, 123, 124); see
+/// bd-zs76e, which owns renumbering the planned allocations.
+pub const V124_TIMESTAMP_SPELLING_REPAIR: Migration = Migration::new(
+    124,
+    "timestamp_spelling_repair",
+    r#"
+CREATE TABLE IF NOT EXISTS memory_timestamp_spelling_repair_v124 (
+    column_name   TEXT NOT NULL PRIMARY KEY,
+    rows_repaired INTEGER NOT NULL,
+    repaired_at   TEXT NOT NULL
+);
+
+INSERT OR REPLACE INTO memory_timestamp_spelling_repair_v124 (column_name, rows_repaired, repaired_at)
+SELECT 'valid_from', COUNT(*), strftime('%Y-%m-%dT%H:%M:%SZ', 'now') FROM memories
+ WHERE valid_from IS NOT NULL AND valid_from GLOB '????-??-??T??:??:??*'
+   AND NOT (valid_from GLOB '????-??-??T??:??:??Z')
+   AND strftime('%Y-%m-%dT%H:%M:%SZ', valid_from) IS NOT NULL;
+INSERT OR REPLACE INTO memory_timestamp_spelling_repair_v124 (column_name, rows_repaired, repaired_at)
+SELECT 'valid_to', COUNT(*), strftime('%Y-%m-%dT%H:%M:%SZ', 'now') FROM memories
+ WHERE valid_to IS NOT NULL AND valid_to GLOB '????-??-??T??:??:??*'
+   AND NOT (valid_to GLOB '????-??-??T??:??:??Z')
+   AND strftime('%Y-%m-%dT%H:%M:%SZ', valid_to) IS NOT NULL;
+INSERT OR REPLACE INTO memory_timestamp_spelling_repair_v124 (column_name, rows_repaired, repaired_at)
+SELECT 'superseded_at', COUNT(*), strftime('%Y-%m-%dT%H:%M:%SZ', 'now') FROM memories
+ WHERE superseded_at IS NOT NULL AND superseded_at GLOB '????-??-??T??:??:??*'
+   AND NOT (superseded_at GLOB '????-??-??T??:??:??Z')
+   AND strftime('%Y-%m-%dT%H:%M:%SZ', superseded_at) IS NOT NULL;
+INSERT OR REPLACE INTO memory_timestamp_spelling_repair_v124 (column_name, rows_repaired, repaired_at)
+SELECT 'created_at', COUNT(*), strftime('%Y-%m-%dT%H:%M:%SZ', 'now') FROM memories
+ WHERE created_at GLOB '????-??-??T??:??:??*' AND created_at NOT LIKE '%+00:00'
+   AND strftime('%Y-%m-%dT%H:%M:%f', created_at) IS NOT NULL;
+INSERT OR REPLACE INTO memory_timestamp_spelling_repair_v124 (column_name, rows_repaired, repaired_at)
+SELECT 'updated_at', COUNT(*), strftime('%Y-%m-%dT%H:%M:%SZ', 'now') FROM memories
+ WHERE updated_at GLOB '????-??-??T??:??:??*' AND updated_at NOT LIKE '%+00:00'
+   AND strftime('%Y-%m-%dT%H:%M:%f', updated_at) IS NOT NULL;
+INSERT OR REPLACE INTO memory_timestamp_spelling_repair_v124 (column_name, rows_repaired, repaired_at)
+SELECT 'tombstoned_at', COUNT(*), strftime('%Y-%m-%dT%H:%M:%SZ', 'now') FROM memories
+ WHERE tombstoned_at IS NOT NULL AND tombstoned_at GLOB '????-??-??T??:??:??*'
+   AND tombstoned_at NOT LIKE '%+00:00'
+   AND strftime('%Y-%m-%dT%H:%M:%f', tombstoned_at) IS NOT NULL;
+
+UPDATE memories SET valid_from = strftime('%Y-%m-%dT%H:%M:%SZ', valid_from)
+ WHERE valid_from IS NOT NULL AND valid_from GLOB '????-??-??T??:??:??*'
+   AND NOT (valid_from GLOB '????-??-??T??:??:??Z')
+   AND strftime('%Y-%m-%dT%H:%M:%SZ', valid_from) IS NOT NULL;
+UPDATE memories SET valid_to = strftime('%Y-%m-%dT%H:%M:%SZ', valid_to)
+ WHERE valid_to IS NOT NULL AND valid_to GLOB '????-??-??T??:??:??*'
+   AND NOT (valid_to GLOB '????-??-??T??:??:??Z')
+   AND strftime('%Y-%m-%dT%H:%M:%SZ', valid_to) IS NOT NULL;
+UPDATE memories SET superseded_at = strftime('%Y-%m-%dT%H:%M:%SZ', superseded_at)
+ WHERE superseded_at IS NOT NULL AND superseded_at GLOB '????-??-??T??:??:??*'
+   AND NOT (superseded_at GLOB '????-??-??T??:??:??Z')
+   AND strftime('%Y-%m-%dT%H:%M:%SZ', superseded_at) IS NOT NULL;
+UPDATE memories SET created_at = strftime('%Y-%m-%dT%H:%M:%f', created_at) || '+00:00'
+ WHERE created_at GLOB '????-??-??T??:??:??*' AND created_at NOT LIKE '%+00:00'
+   AND strftime('%Y-%m-%dT%H:%M:%f', created_at) IS NOT NULL;
+UPDATE memories SET updated_at = strftime('%Y-%m-%dT%H:%M:%f', updated_at) || '+00:00'
+ WHERE updated_at GLOB '????-??-??T??:??:??*' AND updated_at NOT LIKE '%+00:00'
+   AND strftime('%Y-%m-%dT%H:%M:%f', updated_at) IS NOT NULL;
+UPDATE memories SET tombstoned_at = strftime('%Y-%m-%dT%H:%M:%f', tombstoned_at) || '+00:00'
+ WHERE tombstoned_at IS NOT NULL AND tombstoned_at GLOB '????-??-??T??:??:??*'
+   AND tombstoned_at NOT LIKE '%+00:00'
+   AND strftime('%Y-%m-%dT%H:%M:%f', tombstoned_at) IS NOT NULL;
+"#,
+    "blake3:v124_timestamp_spelling_repair_2026_09_16",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -10743,6 +10858,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V121_EVIDENCE_FEEDBACK_TARGETS,
     V122_TYPED_PACK_ITEM_IDENTITY,
     V123_MEMORY_SUPERSEDED_AT,
+    V124_TIMESTAMP_SPELLING_REPAIR,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
