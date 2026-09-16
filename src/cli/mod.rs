@@ -71284,6 +71284,166 @@ mod tests {
         )
     }
 
+    /// bd-wttt2 countermetric: every emitted key must carry ITS OWN field's
+    /// value, not merely a value of the right type.
+    ///
+    /// `json_output` is a hand-rolled `format!` with 40 positional arguments.
+    /// Transposing two same-typed arguments produces JSON that still parses,
+    /// still validates against the schema, and still passes any key-presence
+    /// assertion — the compiler cannot see it either. The only thing that
+    /// catches it is giving every field a **distinct** sentinel and asserting
+    /// the round trip field by field. Shared defaults (`""`, `0.0`, `null`,
+    /// empty vec) across several fields would hide exactly the swap this
+    /// exists to detect, so every scalar below is unique.
+    ///
+    /// Deliberately anchored to the STRUCT FIELDS rather than to the format
+    /// string: if it were derived from reading the literal, a misreading would
+    /// produce a test and an emitter that agree with each other and are both
+    /// wrong. This must stay an independent oracle so the planned
+    /// `JsonBuilder` migration can be checked against it.
+    #[test]
+    fn remember_json_round_trips_every_field_to_its_own_key() -> TestResult {
+        let report = crate::core::memory::RememberMemoryReport {
+            version: "sentinel-version",
+            memory_id: MemoryId::from_uuid(uuid::Uuid::from_u128(0x5_001)),
+            workspace_id: "sentinel-workspace-id".to_owned(),
+            workspace_path: PathBuf::from("/tmp/sentinel-workspace-path"),
+            database_path: PathBuf::from("/tmp/sentinel-database-path.db"),
+            content: "sentinel-content".to_owned(),
+            workflow_id: Some("sentinel-workflow-id".to_owned()),
+            level: crate::models::MemoryLevel::Procedural,
+            kind: crate::models::MemoryKind::Rule,
+            typed_fields: None,
+            attempt_family: None,
+            confidence: 0.6125,
+            tags: vec!["sentinel-tag-a".to_owned(), "sentinel-tag-b".to_owned()],
+            source: Some("sentinel-source".to_owned()),
+            producer: crate::models::ProducerMetadata::manual_remember(
+                None,
+                Some("2026-06-18T00:00:00Z"),
+            ),
+            valid_from: Some("2031-01-02T03:04:05Z".to_owned()),
+            valid_to: Some("2032-02-03T04:05:06Z".to_owned()),
+            validity_status: "sentinel-validity-status".to_owned(),
+            validity_window_kind: "sentinel-validity-window-kind".to_owned(),
+            dry_run: true,
+            persisted: false,
+            revision_number: 4_242,
+            revision_group_id: Some("sentinel-revision-group-id".to_owned()),
+            audit_id: Some("sentinel-audit-id".to_owned()),
+            index_job_id: Some("sentinel-index-job-id".to_owned()),
+            index_status: "sentinel-index-status".to_owned(),
+            effect_ids: Vec::new(),
+            suggested_links: Vec::new(),
+            suggested_link_status: "sentinel-suggested-link-status".to_owned(),
+            suggested_link_degradations: Vec::new(),
+            redaction_status: "sentinel-redaction-status".to_owned(),
+            policy_bypass: None,
+            auto_links: Vec::new(),
+            auto_link_status: "sentinel-auto-link-status".to_owned(),
+            auto_link_degradations: Vec::new(),
+            curation_candidate: None,
+            curation_candidate_status: "sentinel-curation-candidate-status".to_owned(),
+            curation_candidate_degradations: Vec::new(),
+            near_duplicates: Vec::new(),
+        };
+
+        let rendered = report.json_output();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| format!("{error}: {rendered}"))?;
+        let data = &parsed["data"];
+
+        // Every distinct string sentinel must land under its own key. A
+        // transposition of any two of these fails here and nowhere else.
+        for (key, expected) in [
+            ("version", "sentinel-version"),
+            ("workspace_id", "sentinel-workspace-id"),
+            ("database_path", "/tmp/sentinel-database-path.db"),
+            ("content", "sentinel-content"),
+            ("workflow_id", "sentinel-workflow-id"),
+            ("source", "sentinel-source"),
+            ("valid_from", "2031-01-02T03:04:05Z"),
+            ("valid_to", "2032-02-03T04:05:06Z"),
+            ("validity_status", "sentinel-validity-status"),
+            ("validity_window_kind", "sentinel-validity-window-kind"),
+            ("revision_group_id", "sentinel-revision-group-id"),
+            ("audit_id", "sentinel-audit-id"),
+            ("index_job_id", "sentinel-index-job-id"),
+            ("index_status", "sentinel-index-status"),
+            ("suggested_link_status", "sentinel-suggested-link-status"),
+            ("auto_link_status", "sentinel-auto-link-status"),
+            (
+                "curation_candidate_status",
+                "sentinel-curation-candidate-status",
+            ),
+            ("redaction_status", "sentinel-redaction-status"),
+        ] {
+            ensure_equal(
+                &data[key].as_str(),
+                &Some(expected),
+                &format!("remember data.{key} must carry its own field"),
+            )?;
+        }
+
+        // Non-string scalars, each a value no other field holds.
+        ensure_equal(
+            &data["confidence"].as_f64(),
+            &Some(0.6125),
+            "remember data.confidence",
+        )?;
+        ensure_equal(
+            &data["revision_number"].as_u64(),
+            &Some(4_242),
+            "remember data.revision_number",
+        )?;
+        // dry_run and persisted are deliberately OPPOSITE so a swap is visible.
+        ensure_equal(&data["dry_run"].as_bool(), &Some(true), "remember dry_run")?;
+        ensure_equal(
+            &data["persisted"].as_bool(),
+            &Some(false),
+            "remember persisted",
+        )?;
+        ensure_equal(
+            &data["policy_bypass_used"].as_bool(),
+            &Some(false),
+            "remember policy_bypass_used tracks policy_bypass.is_some()",
+        )?;
+
+        // Ordered array, so a reversal is caught too.
+        ensure_equal(
+            &data["tags"],
+            &serde_json::json!(["sentinel-tag-a", "sentinel-tag-b"]),
+            "remember data.tags preserves order",
+        )?;
+
+        // memory_id is emitted twice, under both conventions, and both must be
+        // the same value. bd-wttt2 tracks converging these; until then the
+        // duplication is pinned so it cannot drift apart unnoticed.
+        ensure_equal(
+            &data["memory_id"].as_str(),
+            &data["memoryId"].as_str(),
+            "remember memory_id and memoryId must not diverge",
+        )?;
+        ensure_equal(
+            &data["memory_id"].as_str(),
+            &Some(report_memory_id_sentinel().as_str()),
+            "remember memory_id carries the memory id",
+        )?;
+
+        // `provenance_uri` is emitted only when `source` is set, as a suffix
+        // appended after the `source` field.
+        ensure_equal(
+            &data["provenance_uri"].as_str(),
+            &Some("sentinel-source"),
+            "remember provenance_uri mirrors source when present",
+        )?;
+        Ok(())
+    }
+
+    fn report_memory_id_sentinel() -> String {
+        MemoryId::from_uuid(uuid::Uuid::from_u128(0x5_001)).to_string()
+    }
+
     #[test]
     fn remember_output_surfaces_near_duplicates() -> TestResult {
         let duplicate_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x2_005)).to_string();
