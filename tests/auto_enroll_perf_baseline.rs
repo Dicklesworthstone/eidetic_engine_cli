@@ -145,7 +145,6 @@ fn scripts_expose_read_only_auto_enroll_perf_gates() -> TestResult {
     let perf_gate = fs::read_to_string("scripts/e2e_overhaul/auto_enroll_perf_gate.sh")
         .map_err(|error| format!("failed to read auto_enroll_perf_gate.sh: {error}"))?;
     for expected in [
-        "Cargo/Rust execution must happen through RCH",
         "EE_AUTO_ENROLL_PERF_REPORT",
         "active_workload_rows | length == 15",
         "idle_workload_rows | length == 4",
@@ -156,6 +155,27 @@ fn scripts_expose_read_only_auto_enroll_perf_gates() -> TestResult {
             format!("auto_enroll_perf_gate.sh missing {expected}"),
         )?;
     }
+
+    // The tokens above are single-line and load-bearing -- jq filters and an
+    // env var name -- so they are matched exactly and deliberately stay that
+    // way. The RCH claim is different: it lives in a WRAPPED header comment
+    // (auto_enroll_perf_gate.sh:7-8, "...Cargo/Rust execution must" /
+    // "# happen through RCH; ..."), so a contiguous-substring match asserts
+    // where the line breaks fall rather than what the script says. Re-wrapping
+    // the paragraph broke it, which is what bv12 observed.
+    //
+    // Match the claim against a whitespace-normalized copy instead: the same
+    // sentence is still required, it simply no longer depends on the wrap.
+    let perf_gate_prose = perf_gate
+        .split_whitespace()
+        .filter(|token| *token != "#")
+        .collect::<Vec<_>>()
+        .join(" ");
+    require(
+        perf_gate_prose.contains("Cargo/Rust execution must happen through RCH"),
+        "auto_enroll_perf_gate.sh must still state that Cargo/Rust execution happens through RCH"
+            .to_owned(),
+    )?;
 
     let idle_gate = fs::read_to_string("scripts/e2e_overhaul/auto_enroll_idle_24h.sh")
         .map_err(|error| format!("failed to read auto_enroll_idle_24h.sh: {error}"))?;
