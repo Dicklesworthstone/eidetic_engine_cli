@@ -13,8 +13,27 @@ set -uo pipefail
 
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Avoid the shared harness's cargo-metadata fallback in code-first swarm lanes.
-EE_BIN="${EE_BIN:-ee}"
+# Pin the binary under test; never fall through to `ee` on PATH (bd-smxdr).
+#
+# This previously read `EE_BIN="${EE_BIN:-ee}"`. Because that ran BEFORE
+# harness_init, it shadowed the EE_BINARY that scripts/verify.sh exports
+# (verify.sh:200-202) -- _harness_resolve_ee_bin checks EE_BIN first, so it
+# returned PATH's `ee` and never consulted EE_BINARY. Measured on the Mac dev
+# host 2026-09-16: PATH `ee` was 0.14.2 while Cargo.toml was 0.15.2, so this
+# stage was asserting current behaviour against a binary two minor versions
+# behind, and reporting PASS.
+#
+# Order is explicit override, then verify.sh's export, then refuse. The
+# original intent of this block -- avoid the shared harness's cargo-metadata
+# fallback in code-first swarm lanes -- is preserved: nothing is probed here,
+# we simply decline to guess.
+EE_BIN="${EE_BIN:-${EE_BINARY:-}}"
+if [ -z "$EE_BIN" ]; then
+    printf 'e2e_capture: refusing to run without an explicit binary.\n' >&2
+    printf 'e2e_capture: set EE_BIN (or EE_BINARY) to the ee binary under test.\n' >&2
+    printf 'e2e_capture: scripts/verify.sh exports EE_BINARY; standalone callers must pass one.\n' >&2
+    exit 2
+fi
 export EE_BIN
 
 # Capture proofs are forensic artifacts for review/convergence. Retain the
@@ -24,6 +43,20 @@ export EE_E2E_KEEP="${EE_E2E_KEEP:-1}"
 # shellcheck source=scripts/e2e_lib.sh
 # shellcheck disable=SC1091
 source "$E2E_DIR/e2e_lib.sh"
+
+# REPO_ROOT is exported by the harness (scripts/lib/e2e_harness.sh:32-33), so
+# the resolution helpers can read Cargo.toml for the authoritative version.
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+
+# Refuse a stale or missing binary BEFORE any assertion runs, and record which
+# binary produced this run's verdict (bd-smxdr). A pinned-but-stale binary is
+# the same defect as an inherited one: the stage would green against behaviour
+# the source no longer has.
+if ! ee_require_current_binary "$EE_BIN" "e2e_capture"; then
+    exit 2
+fi
 
 harness_init "capture"
 

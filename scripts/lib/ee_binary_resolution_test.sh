@@ -81,3 +81,71 @@ fallback_binary="$(
 assert_eq "$fallback_binary" "$REPO_ROOT/target/debug/ee" "repo target fallback"
 
 printf 'scratch retained for audit: %s\n' "$SCRATCH_ROOT"
+
+# ---------------------------------------------------------------------------
+# bd-smxdr: staleness guard. Resolution alone never caught the real defect --
+# a stage can resolve a real, executable binary that is two minor versions
+# behind and still report PASS. These arms pin the refusal AND the acceptance:
+# an over-broad guard that refuses everything would also "fix" the symptom
+# while breaking every stage, so the current-binary arm is load-bearing.
+# ---------------------------------------------------------------------------
+
+GUARD_BIN_DIR="$SCRATCH_ROOT/guard"
+mkdir -p "$GUARD_BIN_DIR"
+
+guard_source_version="$(ee_source_version)"
+if [ -z "$guard_source_version" ]; then
+    printf 'FAIL ee_source_version returned empty; Cargo.toml parse broke\n' >&2
+    exit 1
+fi
+printf 'ok ee_source_version reads Cargo.toml (%s)\n' "$guard_source_version"
+
+# A binary reporting exactly the source version is accepted.
+cat >"$GUARD_BIN_DIR/ee-current" <<SH
+#!/bin/sh
+echo "ee $guard_source_version"
+SH
+
+# A binary two minor versions behind is the measured real-world case.
+cat >"$GUARD_BIN_DIR/ee-stale" <<'SH'
+#!/bin/sh
+echo "ee 0.14.2"
+SH
+
+# A binary that prints nothing usable must not be treated as current.
+cat >"$GUARD_BIN_DIR/ee-mute" <<'SH'
+#!/bin/sh
+exit 0
+SH
+
+chmod +x "$GUARD_BIN_DIR/ee-current" "$GUARD_BIN_DIR/ee-stale" "$GUARD_BIN_DIR/ee-mute"
+
+guard_verdict() {
+    if ee_require_current_binary "$1" "guard-test" 2>/dev/null; then
+        printf 'accepted\n'
+    else
+        printf 'refused\n'
+    fi
+}
+
+assert_eq "$(guard_verdict "$GUARD_BIN_DIR/ee-current")" "accepted" \
+    "current-version binary is accepted (guard is not over-broad)"
+assert_eq "$(guard_verdict "$GUARD_BIN_DIR/ee-stale")" "refused" \
+    "stale binary is refused (bd-smxdr countermetric)"
+assert_eq "$(guard_verdict "$GUARD_BIN_DIR/ee-mute")" "refused" \
+    "binary with unreadable version is refused, not assumed current"
+assert_eq "$(guard_verdict "$GUARD_BIN_DIR/does-not-exist")" "refused" \
+    "missing binary is refused"
+
+# Provenance must be printed even on the PASSING path, so a log reader can see
+# which binary produced a verdict. Asserting emptiness would prove nothing.
+guard_pass_log="$(ee_require_current_binary "$GUARD_BIN_DIR/ee-current" "guard-test" 2>&1 >/dev/null || true)"
+case "$guard_pass_log" in
+    *"ee_binary=$GUARD_BIN_DIR/ee-current"*"binary_version=$guard_source_version"*"source_version=$guard_source_version"*)
+        printf 'ok passing path still records binary path and both versions\n'
+        ;;
+    *)
+        printf 'FAIL passing path did not record provenance\nactual: %s\n' "$guard_pass_log" >&2
+        exit 1
+        ;;
+esac

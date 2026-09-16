@@ -914,6 +914,14 @@ if [ "$PLAN_DOC_SMOKE" = "true" ]; then
     exit 0
 fi
 
+# Gate 0.85: ee binary resolution + staleness contract (bd-smxdr). This
+# no-Cargo test proves the shared resolver refuses a stale or missing binary
+# BEFORE any e2e stage runs against one. It had existed unwired since May, so
+# the guard it now carries would never have executed. Load-bearing arm: it also
+# asserts a CURRENT binary is still accepted, because a guard that refuses
+# everything would mask the defect rather than fix it.
+run_stage "EE Binary Resolution Contract" "./scripts/lib/ee_binary_resolution_test.sh"
+
 # Gate 0.9: Forbidden dependency scanner contract. This no-Cargo self-test
 # proves the JSON metadata classifier catches forbidden crates before the live
 # cargo-tree audit runs.
@@ -1190,7 +1198,12 @@ run_stage "Write Contention E2E (bd-d67os.27)" "cargo build --locked --bin ee &&
 # proves ambient capture suggestions are read-only and workspace-stable,
 # from-commit/from-diff remember capture is dry-run-first with anchors,
 # redaction and audit checks, and session-arc proposals stay curation-gated.
-run_stage "Capture Track E2E (bd-2vq2z.20)" "EE_E2E_TMPDIR=/private/tmp EE_E2E_KEEP=1 ./scripts/e2e_capture.sh"
+# EE_BIN/EE_BINARY are pinned explicitly here, matching the Write Contention
+# stage above. The global export at :200-202 was being shadowed by the script's
+# own PATH default, so this stage validated whatever `ee` was installed
+# (bd-smxdr). Passing both names keeps the pin visible at the call site rather
+# than depending on an export several hundred lines away.
+run_stage "Capture Track E2E (bd-2vq2z.20)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp EE_E2E_KEEP=1 ./scripts/e2e_capture.sh"
 
 # Gate 6.1266: Shadow retrieval-tuning E2E (bd-2tehh.4 / ADR 0070). Real
 # binary: sparse corpus abstains with the fixture-backed degraded code and
