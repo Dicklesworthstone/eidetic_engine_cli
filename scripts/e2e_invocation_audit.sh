@@ -79,9 +79,22 @@ e2e_orphans() {
         #
         # So require the name on a line with no preceding '#': comment lines
         # and trailing-comment mentions do not count as invocation.
+        #
+        # DOCUMENTATION IS EXCLUDED FOR THE SAME REASON (bd-q2nq9). Markdown
+        # cannot invoke anything, and a Markdown line almost never begins with
+        # '#' unless it is a heading -- so an ordinary English sentence or a
+        # table cell naming a script satisfied the old predicate. Twelve
+        # scripts passed this gate on prose alone:
+        #     "`scripts/e2e_read_coalescing.sh` asserts this"   docs/read_coalescing.md:73
+        #     "| e2e | `scripts/e2e_sandbox.sh` | 21.5 |"       docs/agent-ux/.../sandbox.md:31
+        # Each was verified by hand to have NO reference in scripts/, tests/ or
+        # .github/. The comment exclusion above and this one are the same rule
+        # applied to two spellings of the same mistake: a mention standing in
+        # for an invocation.
         if ! rg -l "^[^#]*$(printf '%s' "$base" | sed 's/\./\\./g')" "$root" \
             --glob '!target' --glob '!.git' --glob "!scripts/$base" \
             --glob '!tests/fixtures/e2e_invocation/**' \
+            --glob '!**/*.md' --glob '!docs/**' \
             >/dev/null 2>&1; then
             printf '%s\n' "$base"
         fi
@@ -177,6 +190,28 @@ if [[ "${1:-}" == "--self-test" ]]; then
         failures=$((failures + 1))
     fi
 
+    # A script named ONLY in documentation is still an orphan (bd-q2nq9).
+    # Paired with the e2e_wired.sh arm above, which proves a real reference in
+    # tests/*.rs still counts -- a predicate that rejected everything would
+    # pass this arm and fail that one.
+    mkdir -p "$tmp/fixture/docs"
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/fixture/scripts/e2e_documented.sh"
+    printf 'The suite `scripts/e2e_documented.sh` asserts the invariant.\n' \
+        >"$tmp/fixture/docs/note.md"
+    got_docs="$(e2e_orphans "$tmp/fixture" | sort -u | tr '\n' ' ')"
+    if [[ "$got_docs" == *"e2e_documented.sh"* ]]; then
+        echo "ok   - a script mentioned only in docs is still an orphan"
+    else
+        echo "FAIL - a docs-only mention counted as invocation, got '$got_docs'"
+        failures=$((failures + 1))
+    fi
+    if [[ "$got_docs" != *"e2e_wired.sh"* ]]; then
+        echo "ok   - excluding docs did not break the Rust-driven case"
+    else
+        echo "FAIL - excluding docs broke detection of a real reference"
+        failures=$((failures + 1))
+    fi
+
     # Direction 1: a new orphan against an empty baseline must fail.
     printf '# empty\n' >"$tmp/baseline_empty.txt"
     new_orphans="$(comm -23 <(printf 'e2e_lonely.sh\n') <(read_baseline "$tmp/baseline_empty.txt"))"
@@ -253,7 +288,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
         echo "ok   - rejects a retired entry with an empty field"
     fi
 
-    echo "self-test: $((9 - failures))/9 passed"
+    echo "self-test: $((11 - failures))/11 passed"
     [[ "$failures" -eq 0 ]] || exit 2
     exit 0
 fi

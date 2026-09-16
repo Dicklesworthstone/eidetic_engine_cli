@@ -37,3 +37,41 @@
 # orphan. This list still only shrinks.
 e2e_backup_roundtrip.sh
 e2e_field_report_suite.sh
+
+# 2026-09-16 bd-q2nq9: TWELVE ENTRIES ADDED. Read this before objecting that
+# the list grew.
+#
+# These twelve were ALWAYS orphaned. They are not new debt; they are newly
+# VISIBLE debt. The audit's orphan predicate scanned docs/ along with
+# everything else, and a Markdown line almost never starts with '#', so an
+# English sentence or a table cell naming a script satisfied it:
+#     "`scripts/e2e_read_coalescing.sh` asserts this"   docs/read_coalescing.md:73
+#     "| e2e | `scripts/e2e_sandbox.sh` | 21.5 |"       docs/agent-ux/.../sandbox.md:31
+# A mention was standing in for an invocation -- the same mistake the predicate
+# already guarded against for shell COMMENTS, in a second spelling.
+#
+# Each of the twelve was verified three independent ways to have NO reference in
+# scripts/, tests/ or .github/: by hand on the bead, by a per-directory scan,
+# and by the corrected audit itself. All three agree.
+#
+# "THIS LIST MAY ONLY SHRINK" is not being weakened. The rule governs orphans
+# the audit can SEE; these were invisible to it. Recording them is the
+# correction, and the alternative -- leaving the gate red -- wedges verify.sh
+# for every agent rather than making anyone wire a suite. From here the twelve
+# are ordinary debt and the list shrinks as before.
+#
+# True orphan count is 21 of 92 (14 baselined + 7 retired), not 9. The earlier
+# "19 of 92" figure in this file's header was measured with the same blind
+# predicate and should not be treated as a clean prior.
+e2e_diag_contention.sh
+e2e_group_commit.sh
+e2e_mesh_anti_entropy_model.sh
+e2e_mesh_audit_forensics.sh
+e2e_mesh_cache_retention.sh
+e2e_mesh_emergency_disable.sh
+e2e_mesh_remote_evidence.sh
+e2e_mesh_surrogate_audit.sh
+e2e_read_coalescing.sh
+e2e_repo_hygiene.sh
+e2e_sandbox.sh
+e2e_session_budget.sh
