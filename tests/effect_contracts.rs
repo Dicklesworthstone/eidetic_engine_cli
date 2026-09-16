@@ -3,6 +3,7 @@
 //! Verifies that read-only commands do not mutate workspace state,
 //! and that the effect manifest accurately reflects command behavior.
 
+use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -56,6 +57,85 @@ fn hash_directory(path: &Path) -> u64 {
         }
     }
     hasher.finish()
+}
+
+/// Every path under `root`, mapped to its content hash (`None` for a
+/// directory) so a drift report can explain ANY `hash_directory` difference --
+/// including an added or removed empty directory, which a files-only map
+/// would miss and then report "no changed paths" on a real mismatch.
+fn snapshot_directory(root: &Path) -> BTreeMap<String, Option<u64>> {
+    let mut snapshot = BTreeMap::new();
+    collect_snapshot(root, root, &mut snapshot);
+    snapshot
+}
+
+fn collect_snapshot(root: &Path, dir: &Path, out: &mut BTreeMap<String, Option<u64>>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let key = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        if path.is_dir() {
+            out.insert(key, None);
+            collect_snapshot(root, &path, out);
+        } else {
+            out.insert(key, hash_file(&path));
+        }
+    }
+}
+
+/// Name what moved between two snapshots. Empty when they agree.
+fn describe_directory_drift(
+    before: &BTreeMap<String, Option<u64>>,
+    after: &BTreeMap<String, Option<u64>>,
+) -> Vec<String> {
+    let mut drift = Vec::new();
+    for (path, before_hash) in before {
+        match after.get(path) {
+            None => drift.push(format!("removed: {path}")),
+            Some(after_hash) if after_hash != before_hash => {
+                drift.push(format!("content changed: {path}"));
+            }
+            Some(_) => {}
+        }
+    }
+    for path in after.keys() {
+        if !before.contains_key(path) {
+            drift.push(format!("created: {path}"));
+        }
+    }
+    drift
+}
+
+/// Assert a surface left the workspace byte-identical, NAMING what moved.
+///
+/// The CONDITION is unchanged -- full-tree `hash_directory` equality, exactly
+/// as before. Only the failure message is richer. Two `u64` hashes tell you
+/// that something was written and withhold the one fact needed to act on it,
+/// and unlike a suppressed-output case this is not recoverable by re-running
+/// with --nocapture: the values are already printed, they are simply the wrong
+/// values. The snapshot diff runs ONLY on mismatch, so a passing run pays
+/// nothing beyond the extra pre-walk.
+fn ensure_workspace_unchanged(
+    workspace: &Path,
+    before_hash: u64,
+    before_snapshot: &BTreeMap<String, Option<u64>>,
+    surface: &str,
+) -> TestResult {
+    let after_hash = hash_directory(workspace);
+    if after_hash == before_hash {
+        return Ok(());
+    }
+    let drift = describe_directory_drift(before_snapshot, &snapshot_directory(workspace));
+    Err(format!(
+        "{surface} must not mutate database, WAL, audit, cache, or pack state: \
+         hash {before_hash} -> {after_hash}; drift: {drift:?}"
+    ))
 }
 
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
@@ -365,6 +445,7 @@ fn canonical_database_reads_leave_initialized_workspace_byte_identical() -> Test
 
     for (surface, args) in cases {
         let before = hash_directory(workspace);
+        let before_snapshot = snapshot_directory(workspace);
         let output = run_ee(&args)?;
         ensure(
             output.status.success() || output.status.code() == Some(3),
@@ -375,12 +456,7 @@ fn canonical_database_reads_leave_initialized_workspace_byte_identical() -> Test
                 String::from_utf8_lossy(&output.stderr)
             ),
         )?;
-        let after = hash_directory(workspace);
-        ensure(
-            after,
-            before,
-            &format!("{surface} must not mutate database, WAL, audit, cache, or pack state"),
-        )?;
+        ensure_workspace_unchanged(workspace, before, &before_snapshot, surface)?;
     }
     Ok(())
 }
