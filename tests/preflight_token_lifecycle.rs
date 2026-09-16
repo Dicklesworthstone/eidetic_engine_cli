@@ -4,6 +4,10 @@
 //! old databases, but no compiled core module or advertised schema may expose
 //! token issuance, verification, revocation, or command authorization.
 
+// This file is a `mod` include of the integration_n_r shard, which carries no
+// crate-level allow (unlike tests/contracts.rs), so the allow must live here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use ee::core::supported_schemas;
 
 const CORE_MODULE_SOURCE: &str = include_str!("../src/core/mod.rs");
