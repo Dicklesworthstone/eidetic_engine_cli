@@ -52335,7 +52335,7 @@ mod tests {
     const RELOCATION_OLD_PATH: &str = "/home/user/projects/original";
     const RELOCATION_NEW_PATH: &str = "/home/user/relocated/original";
 
-    fn relocation_fixture() -> Result<DbConnection> {
+    fn relocation_fixture() -> super::Result<DbConnection> {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
         connection.insert_workspace_with_scope(
@@ -52429,7 +52429,9 @@ mod tests {
             "relocation preserves the workspace name",
         )?;
         ensure(
-            connection.get_workspace_by_path(RELOCATION_OLD_PATH)?.is_none(),
+            connection
+                .get_workspace_by_path(RELOCATION_OLD_PATH)?
+                .is_none(),
             "the old path must no longer resolve",
         )?;
 
@@ -52568,7 +52570,9 @@ mod tests {
             "a refused relocation leaves the binding untouched",
         )?;
         ensure_equal(
-            &connection.get_workspace_by_path(RELOCATION_NEW_PATH)?.map(|row| row.id),
+            &connection
+                .get_workspace_by_path(RELOCATION_NEW_PATH)?
+                .map(|row| row.id),
             &Some(OCCUPANT_ID.to_string()),
             "the occupant keeps its own path",
         )?;
@@ -52620,7 +52624,9 @@ mod tests {
             "rollback restores the original repository root",
         )?;
         ensure(
-            connection.get_workspace_by_path(RELOCATION_NEW_PATH)?.is_none(),
+            connection
+                .get_workspace_by_path(RELOCATION_NEW_PATH)?
+                .is_none(),
             "the relocated path no longer resolves after rollback",
         )?;
 
