@@ -2794,6 +2794,10 @@ pub struct ContextJsonRenderOptions {
     /// bd-pack-compact-mode-ibksx: emit `pack.budget.adaptiveBudget`. The
     /// `maxTokens` / `usedTokens` / `utilization` scalars are always emitted.
     pub include_budget_detail: bool,
+    /// bd-pack-compact-mode-ibksx: emit `pack.slo`. Elapsed overruns ride
+    /// `degraded[]` independently (bd-jikgj), so suppressing this block does
+    /// not hide a blown latency budget.
+    pub include_slo: bool,
 }
 
 impl Default for ContextJsonRenderOptions {
@@ -2810,6 +2814,7 @@ impl Default for ContextJsonRenderOptions {
             include_selection_audit: true,
             include_quality_metrics: true,
             include_budget_detail: true,
+            include_slo: true,
         }
     }
 }
@@ -2826,6 +2831,7 @@ impl From<ContextPackOutputOptions> for ContextJsonRenderOptions {
             include_selection_audit: options.include_selection_audit,
             include_quality_metrics: options.include_quality_metrics,
             include_budget_detail: options.include_budget_detail,
+            include_slo: options.include_slo,
         }
     }
 }
@@ -2969,7 +2975,15 @@ pub fn render_context_response_json_with_options(
                     );
                 }
             });
-            if let Some(slo) = &response.data.slo {
+            // bd-pack-compact-mode-ibksx: safe to drop only because bd-jikgj
+            // (11f77d25a) routed elapsed overruns into `degraded[]` via
+            // `timing_degradations()`. While `slo.elapsedStatus` was the only
+            // place a blown latency budget appeared, gating this block would
+            // have made `--compact` hide it — compaction paid for with
+            // honesty. `degraded[]` is never gated, so the signal survives.
+            if options.include_slo
+                && let Some(slo) = &response.data.slo
+            {
                 pack.field_object("slo", |slo_obj| {
                     build_pack_assembly_slo(slo_obj, slo);
                 });
@@ -20678,6 +20692,60 @@ mod tests {
                 .is_none(),
             &true,
             "lean drops the adaptive-budget explanation",
+        )
+    }
+
+    #[test]
+    fn lean_drops_the_slo_block_but_never_the_latency_signal() -> TestResult {
+        // The whole reason `include_slo` was held back until bd-jikgj landed
+        // (11f77d25a): while `slo.elapsedStatus` was the ONLY place a blown
+        // latency budget appeared, gating this block would have made
+        // `--compact` hide it. Now the overrun rides `degraded[]`, which is
+        // never gated, so the block is safe to drop and the signal is not.
+        let mut response = context_response_fixture()?;
+        response.data.slo = Some(crate::pack::PackAssemblySlo::evaluate(
+            crate::pack::PackResourceProfile::Standard,
+            crate::pack::PackAssemblySloActuals {
+                candidate_count: 1,
+                scanned_count: 1,
+                index_generation: None,
+                graph_generation: None,
+                graph_edges_traversed: 0,
+                elapsed_ms: u64::MAX,
+                memory_bytes_peak: 0,
+            },
+        ));
+        let timing = crate::pack::ContextResponseDegradation::new(
+            crate::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE,
+            crate::pack::ContextResponseSeverity::Warning,
+            "Pack assembly exceeded its elapsed budget.".to_string(),
+            None,
+        )
+        .map_err(|error| format!("timing degradation rejected: {error:?}"))?;
+        response.data.degraded.push(timing);
+
+        let rendered = render_context_response_json_with_options(&response, lean_render_options());
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &parsed.pointer("/data/pack/slo").is_none(),
+            &true,
+            "lean drops the slo block",
+        )?;
+        let carries_timing = parsed
+            .pointer("/degraded")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.get("code").and_then(serde_json::Value::as_str)
+                        == Some(crate::pack::PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE)
+                })
+            });
+        ensure_equal(
+            &carries_timing,
+            &true,
+            "compaction must not be paid for with the latency-overrun signal",
         )
     }
 

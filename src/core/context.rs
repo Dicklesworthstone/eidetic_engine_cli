@@ -776,6 +776,14 @@ pub struct ContextPackOutputOptions {
     /// real utility for almost no bytes. The adaptive-budget explanation is
     /// the part that is large and diagnostic. `false` under `Lean`.
     pub include_budget_detail: bool,
+    /// bd-pack-compact-mode-ibksx: emit `pack.slo`.
+    ///
+    /// Safe to suppress only because bd-jikgj (`11f77d25a`) routed elapsed
+    /// overruns into `degraded[]` via `PackAssemblySlo::timing_degradations`.
+    /// Before that, `pack.slo.elapsedStatus` was the ONLY place a blown
+    /// latency budget was reported, and dropping this block would have made
+    /// `--compact` hide it. `false` under `Lean`.
+    pub include_slo: bool,
 }
 
 impl Default for ContextPackOutputOptions {
@@ -805,6 +813,7 @@ impl ContextPackOutputOptions {
                 include_selection_audit: false,
                 include_quality_metrics: false,
                 include_budget_detail: false,
+                include_slo: false,
             },
             ContextPackOutputProfile::Standard => Self {
                 profile,
@@ -821,6 +830,7 @@ impl ContextPackOutputOptions {
                 include_selection_audit: true,
                 include_quality_metrics: true,
                 include_budget_detail: true,
+                include_slo: true,
             },
             ContextPackOutputProfile::Verbose => Self {
                 profile,
@@ -835,6 +845,7 @@ impl ContextPackOutputOptions {
                 include_selection_audit: true,
                 include_quality_metrics: true,
                 include_budget_detail: true,
+                include_slo: true,
             },
         }
     }
@@ -865,6 +876,7 @@ impl ContextPackOutputOptions {
             include_selection_audit: self.include_selection_audit,
             include_quality_metrics: self.include_quality_metrics,
             include_budget_detail: self.include_budget_detail,
+            include_slo: self.include_slo,
         }
     }
 
