@@ -5357,6 +5357,7 @@ fn auto_enrollment_candidates_from_discovery(
         .iter()
         .map(|peer| AutoEnrollmentCandidate {
             node_key: peer.node_key.clone(),
+            stable_node_id: peer.stable_node_id.clone(),
             tailscale_ip: peer.tailscale_ip.clone(),
             magic_dns_name: peer.magic_dns_name.clone(),
             hostname: auto_enrollment_candidate_hostname(
@@ -5430,6 +5431,7 @@ fn auto_enrollment_candidates_from_local(
             );
             Some(AutoEnrollmentCandidate {
                 node_key: peer.node_key.clone(),
+                stable_node_id: peer.stable_node_id.clone(),
                 tailscale_ip,
                 magic_dns_name: peer.magic_dns_name.clone(),
                 hostname,
@@ -8215,6 +8217,7 @@ mod tests {
     fn auto_enrollment_peer_upserts_persist_materialized_node_key_binding() {
         let candidates = vec![AutoEnrollmentCandidate {
             node_key: "nodekey:alpha".to_owned(),
+            stable_node_id: None,
             tailscale_ip: "100.64.0.2".to_owned(),
             magic_dns_name: Some("alpha.tailnet.test.".to_owned()),
             hostname: "alpha".to_owned(),
@@ -8252,6 +8255,7 @@ mod tests {
     fn auto_enrollment_reuses_one_random_principal_and_rejects_ambiguity() {
         let candidate = AutoEnrollmentCandidate {
             node_key: "nodekey:alpha".to_owned(),
+            stable_node_id: None,
             tailscale_ip: "100.64.0.2".to_owned(),
             magic_dns_name: None,
             hostname: "alpha".to_owned(),

@@ -95,6 +95,10 @@ pub struct AutoEnrollmentInput {
 #[serde(rename_all = "camelCase")]
 pub struct AutoEnrollmentCandidate {
     pub node_key: String,
+    /// Tailscale's stable per-device id, carried from the probe so enrollment
+    /// can anchor identity on a value that survives re-authentication
+    /// (bd-mesh-no-stable-node-identity-pt7k5, hop 3 of 4).
+    pub stable_node_id: Option<String>,
     pub tailscale_ip: String,
     pub magic_dns_name: Option<String>,
     pub hostname: String,
@@ -138,6 +142,15 @@ impl ExistingAutoEnrollmentPeer {
     pub fn candidate(&self) -> AutoEnrollmentCandidate {
         AutoEnrollmentCandidate {
             node_key: self.node_key.clone(),
+            // `ExistingAutoEnrollmentPeer` is rehydrated from an already
+            // persisted row, and nothing persists the anchor yet, so there is
+            // none to carry. It must stay `None` rather than be invented here.
+            //
+            // HAZARD for hop 4 and the migration that follows: this candidate
+            // feeds an upsert, so once the anchor IS stored, a `None` here
+            // must never overwrite a stored value. Reuse the stored anchor on
+            // upsert instead of writing the candidate's `None` over it.
+            stable_node_id: None,
             tailscale_ip: self.tailscale_ip.clone(),
             magic_dns_name: self.magic_dns_name.clone(),
             hostname: self.hostname.clone(),
@@ -903,6 +916,7 @@ mod tests {
 
     fn candidate(node_key: &str) -> AutoEnrollmentCandidate {
         AutoEnrollmentCandidate {
+            stable_node_id: None,
             node_key: node_key.to_owned(),
             tailscale_ip: "100.64.0.2".to_owned(),
             magic_dns_name: Some(format!("{node_key}.tailnet.test.")),
