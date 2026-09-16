@@ -110,6 +110,26 @@ fn init_workspace(workspace_arg: &str) -> TestResult {
 /// (src/config/merge.rs:1255) and `ee proximity` refuses unless
 /// `graph.feature.proximity.enabled` is true. This mirrors the repair the
 /// product itself prints: `ee config set graph.feature.proximity.enabled true`.
+/// Turn on revision dominance, which is off in `built_in_config` exactly as
+/// proximity is.
+///
+/// Without it `why`/`memory revise --dry-run` short-circuit to a disabled
+/// impact block: `validationStatus: "disabled"`, `immediateDominator: null`,
+/// and a `graph_feature_disabled` degradation naming
+/// `graph.feature.revision_dominance.enabled` (src/core/why.rs:1760-1778).
+/// That value is neither `valid` nor `unavailable`, which is why the
+/// positive and the negative fixture in this module both failed against it.
+///
+/// This mirrors the repair the product itself prints:
+/// `ee config set graph.feature.revision_dominance.enabled true`.
+fn enable_revision_dominance_feature(workspace: &Path) -> TestResult {
+    fs::write(
+        workspace.join(".ee").join("config.toml"),
+        "[graph.feature.revision_dominance]\nenabled = true\n",
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn enable_proximity_feature(workspace: &Path) -> TestResult {
     fs::write(
         workspace.join(".ee").join("config.toml"),
@@ -1040,6 +1060,7 @@ fn memory_revise_and_why_emit_revision_impact_blocks() -> TestResult {
         .ok_or_else(|| "workspace path should be utf8".to_string())?
         .to_string();
     init_workspace(&workspace_arg)?;
+    enable_revision_dominance_feature(&workspace)?;
     let root = remember(&workspace_arg, "Revision impact root memory.")?;
     let revised_id = revise_memory(&workspace_arg, &root, "Revision impact child memory.")?;
 
@@ -1120,6 +1141,7 @@ fn memory_revise_dry_run_impact_analysis_reports_branch_frontier() -> TestResult
         .ok_or_else(|| "workspace path should be utf8".to_string())?
         .to_string();
     init_workspace(&workspace_arg)?;
+    enable_revision_dominance_feature(&workspace)?;
     let root = remember(&workspace_arg, "Revision frontier root memory.")?;
     let left = revise_memory(&workspace_arg, &root, "Revision frontier left revision.")?;
     let right = remember(&workspace_arg, "Revision frontier right branch memory.")?;
@@ -1301,6 +1323,7 @@ fn memory_revise_dry_run_impact_analysis_reports_singleton_revision_gap() -> Tes
         .ok_or_else(|| "workspace path should be utf8".to_string())?
         .to_string();
     init_workspace(&workspace_arg)?;
+    enable_revision_dominance_feature(&workspace)?;
     let root = remember(&workspace_arg, "Revision singleton root memory.")?;
 
     let preview = run_ee(&[
@@ -1351,6 +1374,7 @@ fn why_revision_lineage_reports_ancestor_depths_for_revision_chain() -> TestResu
         .ok_or_else(|| "workspace path should be utf8".to_string())?
         .to_string();
     init_workspace(&workspace_arg)?;
+    enable_revision_dominance_feature(&workspace)?;
     let root = remember(&workspace_arg, "Revision lineage root memory.")?;
     let child = revise_memory(&workspace_arg, &root, "Revision lineage child memory.")?;
     let grandchild = revise_memory(
