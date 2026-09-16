@@ -13531,6 +13531,213 @@ mod tests {
         )
     }
 
+    /// Build a session chunk whose envelope fields the caller can corrupt.
+    ///
+    /// Used by the fail-closed cases below so each one differs from a valid
+    /// restore by exactly one field, which is what makes a refusal
+    /// attributable to that field rather than to fixture drift.
+    fn cass_session_chunk_with(
+        schema: &str,
+        source_locator_policy: &str,
+        chunk_index: u32,
+        sessions: Vec<BackupCassSessionRecord>,
+    ) -> BackupCassSessionChunk {
+        BackupCassSessionChunk {
+            schema: schema.to_owned(),
+            captured_at: "2026-09-02T00:00:00Z".to_owned(),
+            chunk_index,
+            source_locator_policy: source_locator_policy.to_owned(),
+            sessions,
+        }
+    }
+
+    /// Write one session chunk and attempt recovery from it alone.
+    fn attempt_cass_session_recovery(
+        tempdir: &Path,
+        database: &Path,
+        chunk: &BackupCassSessionChunk,
+    ) -> Result<(u32, u32), DomainError> {
+        let session_path = tempdir.join("sessions-0000.json");
+        fs::write(
+            &session_path,
+            serialized_payload_bytes(chunk).unwrap_or_default(),
+        )
+        .unwrap_or_default();
+        restore_cass_assets(
+            database,
+            &[restored_cass_asset(&session_path, "cass_sessions")],
+        )
+    }
+
+    /// bd-reality-core-convergence-1azkt.13, plan section C sub-box 4: CASS
+    /// recovery must "fail closed on malformed schema, ambiguous workspace
+    /// mapping, missing session/memory references, or duplicate identities".
+    ///
+    /// Only the missing-reference class had a test
+    /// (`cass_recovery_rolls_back_sessions_when_evidence_reference_is_missing`).
+    /// These cover the envelope classes: an unknown schema, a source-locator
+    /// policy that is not the portable one, and a chunk presented out of order.
+    /// Each differs from a valid restore by a single field.
+    #[test]
+    fn cass_recovery_refuses_unsupported_envelopes_without_inserting_rows() -> TestResult {
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(3)).to_string();
+        let session_id = SessionId::from_uuid(Uuid::from_u128(4)).to_string();
+
+        for (label, chunk) in [
+            (
+                "unknown schema",
+                cass_session_chunk_with(
+                    "ee.backup.derived.cass_sessions.v99",
+                    "omitted_host_local",
+                    0,
+                    vec![backup_cass_session_fixture(&session_id, &workspace_id)],
+                ),
+            ),
+            (
+                // The portable-artifact contract: a chunk claiming it retained
+                // host-local source locators must never be restored, because
+                // that is how a host-private path would re-enter a store.
+                "host-local source-locator policy",
+                cass_session_chunk_with(
+                    "ee.backup.derived.cass_sessions.v1",
+                    "host_local_paths",
+                    0,
+                    vec![backup_cass_session_fixture(&session_id, &workspace_id)],
+                ),
+            ),
+            (
+                // Chunk order is part of the same guard: an out-of-order chunk
+                // means the aggregate is not the one that was captured.
+                "out-of-order chunk index",
+                cass_session_chunk_with(
+                    "ee.backup.derived.cass_sessions.v1",
+                    "omitted_host_local",
+                    7,
+                    vec![backup_cass_session_fixture(&session_id, &workspace_id)],
+                ),
+            ),
+        ] {
+            let (inner, _workspace, database) = fixture().map_err(|error| error.message())?;
+            let error = attempt_cass_session_recovery(inner.path(), &database, &chunk)
+                .err()
+                .ok_or_else(|| format!("{label} must fail CASS recovery"))?;
+            ensure(
+                error
+                    .to_string()
+                    .contains("unsupported schema, chunk order, or source-locator policy"),
+                format!("unexpected {label} error: {error}"),
+            )?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            ensure_equal(
+                connection
+                    .get_session(&session_id)
+                    .map_err(|error| error.to_string())?,
+                None,
+                "a refused CASS envelope must leave no session row",
+            )?;
+            drop(inner);
+        }
+
+        // Control: the same fixture with an untouched envelope DOES restore.
+        // Without this arm every assertion above would also pass for a
+        // function that refused unconditionally.
+        let (inner, _workspace, database) = fixture().map_err(|error| error.message())?;
+        let restored_workspace_id = DbConnection::open_file(&database)
+            .map_err(|error| error.to_string())?
+            .list_workspaces()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "fixture database carries no workspace".to_owned())?
+            .id;
+        let valid = cass_session_chunk_with(
+            "ee.backup.derived.cass_sessions.v1",
+            "omitted_host_local",
+            0,
+            vec![backup_cass_session_fixture(
+                &session_id,
+                &restored_workspace_id,
+            )],
+        );
+        let (sessions, evidence) =
+            attempt_cass_session_recovery(inner.path(), &database, &valid)
+                .map_err(|error| format!("valid envelope must restore: {error}"))?;
+        ensure_equal(sessions, 1, "control envelope restores its session")?;
+        ensure_equal(evidence, 0, "control envelope carries no evidence")?;
+        let restored = DbConnection::open_file(&database)
+            .map_err(|error| error.to_string())?
+            .get_session(&session_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "control envelope should have restored a session".to_owned())?;
+        // Sub-box 3's restore half: the portable record has no source_path
+        // field at all and the recovery INSERT hard-codes NULL, so a
+        // host-private path cannot survive a round trip even in principle,
+        // while the safe upstream identity is retained.
+        ensure_equal(
+            restored.source_path,
+            None,
+            "restored portable session must carry no host-local source path",
+        )?;
+        drop(inner);
+        Ok(())
+    }
+
+    /// Same sub-box, duplicate-identity class: two records sharing one id must
+    /// fail the recovery transaction and leave no partial rows behind.
+    #[test]
+    fn cass_recovery_rolls_back_on_duplicate_session_identity() -> TestResult {
+        let (inner, _workspace, database) = fixture().map_err(|error| error.message())?;
+        let workspace_id = DbConnection::open_file(&database)
+            .map_err(|error| error.to_string())?
+            .list_workspaces()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "fixture database carries no workspace".to_owned())?
+            .id;
+        let duplicated_id = SessionId::from_uuid(Uuid::from_u128(4)).to_string();
+        let distinct_id = SessionId::from_uuid(Uuid::from_u128(5)).to_string();
+        // The distinct row is listed FIRST so it is inserted before the
+        // conflict. If the transaction did not roll back, it would survive —
+        // which is exactly the partial-restore state this asserts against.
+        let chunk = cass_session_chunk_with(
+            "ee.backup.derived.cass_sessions.v1",
+            "omitted_host_local",
+            0,
+            vec![
+                backup_cass_session_fixture(&distinct_id, &workspace_id),
+                backup_cass_session_fixture(&duplicated_id, &workspace_id),
+                backup_cass_session_fixture(&duplicated_id, &workspace_id),
+            ],
+        );
+
+        let error = attempt_cass_session_recovery(inner.path(), &database, &chunk)
+            .err()
+            .ok_or_else(|| "duplicate session identity must fail CASS recovery".to_owned())?;
+        ensure(
+            error
+                .to_string()
+                .contains("failed restoring portable CASS rows"),
+            format!("unexpected duplicate-identity error: {error}"),
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        for (id, label) in [
+            (&duplicated_id, "duplicated session"),
+            (&distinct_id, "earlier session inserted before the conflict"),
+        ] {
+            ensure_equal(
+                connection
+                    .get_session(id)
+                    .map_err(|error| error.to_string())?,
+                None,
+                label,
+            )?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn cass_recovery_rolls_back_sessions_when_evidence_reference_is_missing() -> TestResult {
         let (tempdir, _workspace, database) = fixture().map_err(|error| error.message())?;
