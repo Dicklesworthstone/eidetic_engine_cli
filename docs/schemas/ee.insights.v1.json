@@ -120,7 +120,7 @@
         {
           "code": "graph.workspace_empty",
           "severity": "info",
-          "message": "No graph memories are available for insights yet.",
+          "message": "This workspace holds 0 memories and 0 links, so all 16 insights sections below are empty. They describe what each section would report once the corpus is populated; they are not results.",
           "repair": "run: ee remember --workspace . \"<memory>\" --json",
           "sources": ["insights"]
         }

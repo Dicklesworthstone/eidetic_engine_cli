@@ -583,6 +583,7 @@ pub fn build_insights_report_with_options(
             .any(|(source, _)| *source == section.name)
     });
     let mut raw_degraded_signals = gated_degraded_signals;
+    let mut empty_bundle_graph_data = None;
     if has_executed_section && sections.iter().all(|section| section.items.is_empty()) {
         // A disabled section does not explain why the executed sections are empty.
         // Preserve both signals for a mixed bundle, but avoid loading unrelated
@@ -593,8 +594,14 @@ pub fn build_insights_report_with_options(
             &sections,
             insights_graph_data.as_ref(),
         ));
+        empty_bundle_graph_data = insights_graph_data;
     }
-    let degraded_signals = aggregate_insights_degraded(raw_degraded_signals);
+    let mut degraded_signals = aggregate_insights_degraded(raw_degraded_signals);
+    annotate_empty_bundle_corpus_counts(
+        &mut degraded_signals,
+        empty_bundle_graph_data.as_ref(),
+        sections.len(),
+    );
 
     Ok(InsightsReport {
         schema: INSIGHTS_SCHEMA_V1,
@@ -921,6 +928,53 @@ fn degraded_signals_for_sections(
 
     degraded
 }
+/// Give an all-empty insights bundle an honest, counted top line.
+///
+/// bd-cli-surface-consistency-cluster-1jnu1 item 6: `ee insights` with no
+/// `--section` returned N section *descriptions* and zero data, which reads
+/// like a menu of N further round trips rather than "this workspace has
+/// nothing to report yet". The static `DegradationReport` literals cannot
+/// carry counts (`message` is `&'static str`, and the type lives in
+/// `core::status`), but the aggregated `InsightsDegradedSignal` owns its
+/// strings — so the corpus counts are attached here.
+///
+/// This also repairs an honesty bug in the fallback arm: `graph.workspace_empty`
+/// claimed "No graph memories are available for insights yet" even when the
+/// workspace *did* have memories (it is the else-branch of
+/// "memories present AND links absent", so a corpus with both memories and
+/// links but no qualifying section items landed here too).
+fn annotate_empty_bundle_corpus_counts(
+    signals: &mut [InsightsDegradedSignal],
+    graph_data: Option<&WorkspaceInsightsGraphData>,
+    section_count: usize,
+) {
+    // Without graph data the counts are unknown; keep the static message
+    // rather than inventing a number.
+    let Some(data) = graph_data else {
+        return;
+    };
+    let memories = data.memories.len();
+    let links = data.links.len();
+    for signal in signals {
+        match signal.code.as_str() {
+            "graph.workspace_empty" => {
+                signal.message = format!(
+                    "This workspace holds {memories} memories and {links} links, so all {section_count} insights sections below are empty. \
+                     They describe what each section would report once the corpus is populated; they are not results."
+                );
+            }
+            "graph.no_links" => {
+                signal.message = format!(
+                    "This workspace holds {memories} memories but {links} links between them, so all {section_count} insights sections below are empty. \
+                     PageRank, HITS, bridges, and proximity need edges. Remember-time auto-linking only connects memories in the same explicit workflow. \
+                     The sections describe what they would report once links exist; they are not results."
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
 fn aggregate_insights_degraded(entries: Vec<InsightsDegradedInput>) -> Vec<InsightsDegradedSignal> {
     aggregate_degraded(entries)
         .into_iter()
@@ -3958,6 +4012,86 @@ mod tests {
 
     fn section_names(report: &InsightsReport) -> Vec<&'static str> {
         report.sections.iter().map(|section| section.name).collect()
+    }
+
+    fn empty_bundle_signal(code: &str) -> InsightsDegradedSignal {
+        InsightsDegradedSignal {
+            code: code.to_owned(),
+            severity: "info".to_owned(),
+            message: "placeholder".to_owned(),
+            repair: None,
+            sources: vec!["insights".to_owned()],
+        }
+    }
+
+    /// bd-cli-surface-consistency-cluster-1jnu1 item 6: an all-empty bundle
+    /// must say how big the corpus actually is and that the sections are
+    /// descriptions, not results — otherwise it reads like a menu of N
+    /// further round trips.
+    #[test]
+    fn empty_bundle_signal_reports_corpus_counts_and_section_count() {
+        let mut signals = vec![empty_bundle_signal("graph.workspace_empty")];
+        let graph_data = WorkspaceInsightsGraphData {
+            memories: Vec::new(),
+            links: Vec::new(),
+        };
+        annotate_empty_bundle_corpus_counts(&mut signals, Some(&graph_data), 16);
+
+        let message = &signals[0].message;
+        assert!(
+            message.contains("0 memories") && message.contains("0 links"),
+            "counted top line must state the corpus size: {message}"
+        );
+        assert!(
+            message.contains("16 insights sections"),
+            "top line must state how many sections are empty: {message}"
+        );
+        assert!(
+            message.contains("not results"),
+            "top line must say the sections are descriptions, not results: {message}"
+        );
+    }
+
+    /// The `graph.no_links` arm keeps its distinct diagnosis and gains counts.
+    #[test]
+    fn no_links_signal_distinguishes_populated_corpus_from_empty_one() {
+        let mut signals = vec![empty_bundle_signal("graph.no_links")];
+        let graph_data = WorkspaceInsightsGraphData {
+            memories: vec![stored_memory("mem_a", "semantic", "fact", "A fact.", 0.9)],
+            links: Vec::new(),
+        };
+        annotate_empty_bundle_corpus_counts(&mut signals, Some(&graph_data), 16);
+
+        let message = &signals[0].message;
+        assert!(
+            message.contains("1 memories") && message.contains("0 links"),
+            "no_links top line must state both counts: {message}"
+        );
+        assert!(
+            message.contains("auto-linking"),
+            "no_links must keep its distinct diagnosis: {message}"
+        );
+    }
+
+    /// Without graph data the counts are unknown, so the static message must
+    /// survive rather than a fabricated "0 memories".
+    #[test]
+    fn missing_graph_data_leaves_the_static_message_untouched() {
+        let mut signals = vec![empty_bundle_signal("graph.workspace_empty")];
+        annotate_empty_bundle_corpus_counts(&mut signals, None, 16);
+        assert_eq!(signals[0].message, "placeholder");
+    }
+
+    /// Unrelated codes are never rewritten.
+    #[test]
+    fn unrelated_degraded_codes_are_left_alone() {
+        let mut signals = vec![empty_bundle_signal("graph_feature_disabled")];
+        let graph_data = WorkspaceInsightsGraphData {
+            memories: Vec::new(),
+            links: Vec::new(),
+        };
+        annotate_empty_bundle_corpus_counts(&mut signals, Some(&graph_data), 16);
+        assert_eq!(signals[0].message, "placeholder");
     }
 
     fn unique_insights_workspace(prefix: &str) -> Result<std::path::PathBuf, String> {
