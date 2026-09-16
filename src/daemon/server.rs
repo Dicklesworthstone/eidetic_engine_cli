@@ -38,6 +38,9 @@ use std::time::{Duration, Instant};
 use rustix::fs::{FlockOperation, flock};
 
 use crate::config::env_registry::{self, EnvVar};
+use crate::core::cass_prefetch::{
+    AgentScope, CassPrefetchCoordinator, PrefetchGeneration, RecencyWeightedFrequencyPredictor,
+};
 use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
     ContextPackOutputOptions, ContextSearchAdvisorySnapshot,
@@ -229,6 +232,13 @@ pub struct DaemonDispatchPolicy {
     search_warm_state: Arc<AtomicU8>,
     /// Search advisories are emitted once per active workspace condition.
     search_advisory_session: Arc<Mutex<SearchAdvisorySession>>,
+    /// Scoped CASS prefetch coordinator (bd-16pwc.4). Shared by every
+    /// accepted connection so the rolling per-(agent, workspace) history
+    /// survives across connections — a prefetch history that reset on each
+    /// socket would never reach the two observations the predictor needs.
+    /// The coordinator itself reads no clock and does no I/O, so holding it
+    /// behind a `Mutex` keeps `ee.daemon.context` deterministic.
+    cass_prefetch: Arc<Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>>,
     /// Set once at daemon start when the workspace is bound and the long-lived
     /// write-owner actor is hosted (Inc 2, bd-wx6ou.3). Carries the shared
     /// runtime + a clone of the actor's submit handle to `dispatch_write`
@@ -258,6 +268,10 @@ impl DaemonDispatchPolicy {
 
     fn search_advisory_session(&self) -> &Mutex<SearchAdvisorySession> {
         &self.search_advisory_session
+    }
+
+    fn cass_prefetch(&self) -> &Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>> {
+        &self.cass_prefetch
     }
 }
 
@@ -2304,6 +2318,7 @@ fn dispatch_with_echo_policy_and_workspace_inner(
             request,
             shutdown,
             search_advisory_session,
+            policy.cass_prefetch(),
             defer_advisory_until_socket_write,
         ),
         METHOD_PACK_SEARCH => dispatch_pack_search(request, shutdown),
@@ -5390,6 +5405,7 @@ fn dispatch_context(
     request: &DaemonRequest,
     shutdown: &AtomicBool,
     search_advisory_session: &Mutex<SearchAdvisorySession>,
+    cass_prefetch: &Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>,
     defer_advisory_until_socket_write: bool,
 ) -> DaemonResponse {
     if shutdown.load(Ordering::SeqCst) {
@@ -5499,6 +5515,22 @@ fn dispatch_context(
             "ee.daemon.context deadline expired after pack execution.",
         );
     }
+    // bd-16pwc.4 increment 2: record this context request against the scoped
+    // prefetch history and ask the coordinator for gated warm-fetch
+    // candidates. Deliberately placed after the pack is assembled so it can
+    // only ever add an envelope degraded code, never change the pack.
+    let prefetch_degraded = observe_and_schedule_cass_prefetch(
+        cass_prefetch,
+        shutdown,
+        &request.agent_id,
+        &advisory_workspace_id,
+        &params.query,
+        context_response
+            .data
+            .slo
+            .as_ref()
+            .and_then(|slo| slo.actuals.index_generation),
+    );
     if params.explain && !params.no_pack_dna {
         let database_path = options
             .database_path
@@ -5572,6 +5604,11 @@ fn dispatch_context(
     for code in degraded_codes {
         response = response.with_degraded(code);
     }
+    // Prefetch gate outcomes ride on the envelope, never on `/data/degraded`,
+    // so the rendered pack stays byte-identical to the non-daemon path.
+    if let Some(code) = prefetch_degraded {
+        response = response.with_degraded(code);
+    }
     if !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
         return DaemonResponse::err(
             request.request_id.clone(),
@@ -5585,6 +5622,86 @@ fn dispatch_context(
         );
     }
     pending_delivery.finish(response, defer_advisory_until_socket_write)
+}
+
+/// Post-success CASS prefetch observation + scheduling for one
+/// `ee.daemon.context` call (bd-16pwc.4, increment 2).
+///
+/// Runs only after the pack has already been assembled, and returns at most
+/// one degraded code for the daemon envelope. It never touches
+/// `context_response`, so retrieval results are byte-identical whether or not
+/// prefetch is engaged — the bead's "without mutating retrieval results"
+/// invariant holds structurally, not by convention.
+///
+/// The generation gate is deliberately fail-closed: a run whose SLO block
+/// carries no `index_generation` is skipped entirely rather than admitted
+/// against a fabricated generation, because a history stamped with a
+/// placeholder would be indistinguishable from a real generation-zero index
+/// and would survive a reindex it should not have survived.
+///
+/// `workspace_generation` is pinned to zero on purpose. A daemon is bound to
+/// exactly one workspace at start (`DaemonDispatchPolicy::bound_workspace_id`)
+/// and the history store is already keyed per `(AgentScope, workspace)`, so
+/// the workspace axis cannot vary within one coordinator. Index regeneration
+/// is the only live invalidation event here, which is the axis the predictor
+/// documents as dominant.
+///
+/// Determinism: `expected_index_corpus_revision()` is a pure function of the
+/// compiled index contract, the coordinator reads no clock, and the history
+/// store is `BTreeMap`-backed, so the same call sequence yields the same
+/// candidates and the same metrics.
+fn observe_and_schedule_cass_prefetch(
+    coordinator: &Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>,
+    shutdown: &AtomicBool,
+    agent_id: &str,
+    workspace_id: &str,
+    topic: &str,
+    index_generation: Option<u64>,
+) -> Option<&'static str> {
+    // Speculative work is the first thing to go when the daemon is stopping.
+    if shutdown.load(Ordering::SeqCst) {
+        return None;
+    }
+    // Fail closed rather than stamping a placeholder generation.
+    let generation = PrefetchGeneration::new(0, index_generation?);
+    let corpus_revision = crate::core::index::expected_index_corpus_revision();
+    // `AgentScope::new` maps an empty or whitespace-only owner onto the
+    // `unknown` sentinel, so an unidentified caller still gets its own
+    // isolated history bucket rather than sharing one with a named agent.
+    let agent_scope = AgentScope::new(agent_id);
+
+    let mut prefetch = coordinator
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // Schedule BEFORE observing, and not the other way round.
+    //
+    // `CassPrefetchHistoryStore::observe` re-stamps the WHOLE history with the
+    // generation it is handed, so observing first would overwrite the
+    // generation the earlier requests were actually measured against. The
+    // gate would then always compare a generation against itself and the
+    // stale-generation path could never fire — the invalidation this bead
+    // exists to enforce would be dead code.
+    //
+    // Reading first is also the right semantics: "given the requests I have
+    // already seen, what should I warm next?", gated against the index
+    // generation live right now.
+    let degraded = prefetch
+        .schedule(&agent_scope, workspace_id, generation, corpus_revision)
+        .degraded;
+
+    // Now record the current request so the NEXT context call has it.
+    // `observe` redacts the topic at `TopicId` construction (bd-3aczq), so a
+    // secret-bearing task string never reaches the history or the candidates.
+    prefetch.observe(
+        agent_scope,
+        workspace_id.to_owned(),
+        topic.to_owned(),
+        generation,
+        corpus_revision,
+    );
+
+    degraded
 }
 
 fn attach_daemon_context_search_advisories_for_delivery(
@@ -6347,6 +6464,214 @@ mod tests {
         );
         request.workspace_id = Some("/tmp/ee-daemon-search-contract".to_owned());
         request
+    }
+
+    // ---- bd-16pwc.4 increment 2: daemon CASS prefetch wiring ----
+
+    const PREFETCH_WORKSPACE: &str = "/tmp/ee-daemon-prefetch";
+
+    fn prefetch_coordinator() -> Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>> {
+        Mutex::new(CassPrefetchCoordinator::new())
+    }
+
+    /// One `ee.daemon.context` call's worth of prefetch work.
+    fn prefetch_call(
+        coordinator: &Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>,
+        shutdown: &AtomicBool,
+        agent_id: &str,
+        topic: &str,
+        index_generation: Option<u64>,
+    ) -> Option<&'static str> {
+        observe_and_schedule_cass_prefetch(
+            coordinator,
+            shutdown,
+            agent_id,
+            PREFETCH_WORKSPACE,
+            topic,
+            index_generation,
+        )
+    }
+
+    fn prefetch_metrics(
+        coordinator: &Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>,
+    ) -> crate::core::cass_prefetch::CassPrefetchMetrics {
+        coordinator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .metrics_for(PREFETCH_WORKSPACE)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Observations recorded for one `(agent, workspace)` bucket. Histories
+    /// are keyed per agent; metrics are keyed per workspace, so this must go
+    /// through `history_for` rather than any metrics count.
+    fn prefetch_history_len(
+        coordinator: &Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>,
+        agent_id: &str,
+    ) -> usize {
+        coordinator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .history_for(&AgentScope::new(agent_id), PREFETCH_WORKSPACE)
+            .map_or(0, |history| history.len())
+    }
+
+    #[test]
+    fn cass_prefetch_skips_run_without_index_generation_bd_16pwc_4() {
+        let coordinator = prefetch_coordinator();
+        let shutdown = AtomicBool::new(false);
+
+        // An L2 cache hit can land with no SLO actuals. Admitting it against a
+        // fabricated generation would let the history outlive a reindex.
+        let degraded = prefetch_call(&coordinator, &shutdown, TEST_AGENT_ID, "deploy", None);
+
+        assert_eq!(degraded, None);
+        assert_eq!(
+            prefetch_history_len(&coordinator, TEST_AGENT_ID),
+            0,
+            "a run with no observed index generation must not record history"
+        );
+    }
+
+    #[test]
+    fn cass_prefetch_skips_while_shutting_down_bd_16pwc_4() {
+        let coordinator = prefetch_coordinator();
+        let shutdown = AtomicBool::new(true);
+
+        let degraded = prefetch_call(&coordinator, &shutdown, TEST_AGENT_ID, "deploy", Some(7));
+
+        assert_eq!(degraded, None);
+        assert_eq!(
+            prefetch_history_len(&coordinator, TEST_AGENT_ID),
+            0,
+            "speculative work must not start once the shutdown latch is set"
+        );
+    }
+
+    #[test]
+    fn cass_prefetch_first_call_reports_history_too_short_bd_16pwc_4() {
+        let coordinator = prefetch_coordinator();
+        let shutdown = AtomicBool::new(false);
+
+        let degraded = prefetch_call(&coordinator, &shutdown, TEST_AGENT_ID, "deploy", Some(7));
+
+        // Nothing to predict from yet, but the request is now on record.
+        assert_eq!(degraded, None);
+        let metrics = prefetch_metrics(&coordinator);
+        assert_eq!(metrics.history_too_short, 1);
+        assert_eq!(metrics.candidates_emitted, 0);
+        assert_eq!(
+            prefetch_history_len(&coordinator, TEST_AGENT_ID),
+            1,
+            "the first call must still record its observation for the next call"
+        );
+    }
+
+    #[test]
+    fn cass_prefetch_emits_candidates_once_history_has_signal_bd_16pwc_4() {
+        let coordinator = prefetch_coordinator();
+        let shutdown = AtomicBool::new(false);
+
+        // Call 1 records "deploy"; call 2 records "release". The predictor
+        // skips the most-recent topic, so only call 3 can emit a candidate.
+        assert_eq!(
+            prefetch_call(&coordinator, &shutdown, TEST_AGENT_ID, "deploy", Some(7)),
+            None
+        );
+        assert_eq!(
+            prefetch_call(&coordinator, &shutdown, TEST_AGENT_ID, "release", Some(7)),
+            None
+        );
+        assert_eq!(
+            prefetch_call(&coordinator, &shutdown, TEST_AGENT_ID, "rollback", Some(7)),
+            None
+        );
+
+        let metrics = prefetch_metrics(&coordinator);
+        assert!(
+            metrics.candidates_emitted > 0,
+            "a history with a non-most-recent topic must yield at least one candidate, got {metrics:?}"
+        );
+        assert_eq!(metrics.stale_generation_drop, 0);
+        assert_eq!(metrics.stale_corpus_revision_drop, 0);
+    }
+
+    #[test]
+    fn cass_prefetch_drops_history_after_index_regeneration_bd_16pwc_4() {
+        let coordinator = prefetch_coordinator();
+        let shutdown = AtomicBool::new(false);
+
+        prefetch_call(&coordinator, &shutdown, TEST_AGENT_ID, "deploy", Some(7));
+        prefetch_call(&coordinator, &shutdown, TEST_AGENT_ID, "release", Some(7));
+
+        // A reindex bumps the generation; the accumulated trail was measured
+        // against the previous index and must be refused rather than warmed.
+        let degraded = prefetch_call(&coordinator, &shutdown, TEST_AGENT_ID, "rollback", Some(8));
+
+        assert_eq!(
+            degraded,
+            Some(crate::core::cass_prefetch::CASS_PREFETCH_STALE_GENERATION_CODE),
+            "a generation bump must surface the stale-generation code on the envelope"
+        );
+        assert_eq!(prefetch_metrics(&coordinator).stale_generation_drop, 1);
+    }
+
+    #[test]
+    fn cass_prefetch_isolates_histories_per_agent_bd_16pwc_4() {
+        let coordinator = prefetch_coordinator();
+        let shutdown = AtomicBool::new(false);
+
+        // Two agents in the SAME workspace must not read each other's trail.
+        prefetch_call(&coordinator, &shutdown, "agent-alpha", "deploy", Some(7));
+        prefetch_call(&coordinator, &shutdown, "agent-alpha", "release", Some(7));
+        prefetch_call(&coordinator, &shutdown, "agent-beta", "unrelated", Some(7));
+
+        assert_eq!(
+            prefetch_history_len(&coordinator, "agent-alpha"),
+            2,
+            "alpha's two calls belong to alpha's bucket"
+        );
+        assert_eq!(
+            prefetch_history_len(&coordinator, "agent-beta"),
+            1,
+            "beta must not inherit alpha's trail"
+        );
+
+        let guard = coordinator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let beta = guard
+            .history_for(&AgentScope::new("agent-beta"), PREFETCH_WORKSPACE)
+            .expect("beta recorded one observation");
+        assert!(
+            beta.iter()
+                .all(|observation| observation.topic_id != "deploy"
+                    && observation.topic_id != "release"),
+            "alpha's topics must never appear in beta's history"
+        );
+    }
+
+    #[test]
+    fn cass_prefetch_never_alters_the_rendered_pack_bd_16pwc_4() {
+        // The coordinator is handed no response value at all, so a prefetch
+        // outcome cannot reach pack content by construction. This pins that
+        // property against a future refactor that tries to thread the response
+        // through for "richer" candidates.
+        let coordinator = prefetch_coordinator();
+        let shutdown = AtomicBool::new(false);
+
+        for topic in ["deploy", "release", "rollback"] {
+            prefetch_call(&coordinator, &shutdown, TEST_AGENT_ID, topic, Some(7));
+        }
+
+        let metrics = prefetch_metrics(&coordinator);
+        assert_eq!(
+            metrics.hits + metrics.misses,
+            0,
+            "scheduling alone must not record warm-fetch hits or misses; only \
+             record_warm_fetch may, and nothing executes fetches yet"
+        );
     }
 
     #[test]
