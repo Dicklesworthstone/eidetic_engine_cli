@@ -63,6 +63,26 @@ fn ensure_contains(haystack: &str, needle: &str, context: &str) -> TestResult {
     }
 }
 
+/// Assert that one line of `haystack` binds `method` to `path`.
+///
+/// ADR 0033 documents its endpoints as a markdown table, so the method and the
+/// path are separate cells (`| `GET` | `/v1/events` | ...`) and never appear as
+/// one contiguous string. Checking the row keeps the binding asserted -- a doc
+/// that named the path but dropped the method, or moved the path under a
+/// different verb, still fails -- without depending on cell formatting.
+fn ensure_row_binds_method(haystack: &str, method: &str, path: &str, context: &str) -> TestResult {
+    if haystack
+        .lines()
+        .any(|line| line.contains(method) && line.contains(path))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{context} has no single line binding `{method}` to `{path}`"
+        ))
+    }
+}
+
 #[test]
 fn serve_startup_schema_pins_bind_auth_and_limit_contract() -> TestResult {
     let schema = parse_schema("docs/schemas/ee.serve.startup.v1.json")?;
@@ -202,11 +222,24 @@ fn serve_schemas_stay_aligned_with_adr_0033_terms() -> TestResult {
         "EE_SERVE_TOKEN",
         "Content-Length",
         "GET /v1/context",
-        "GET /v1/events",
         "TcpStream",
     ] {
         ensure_contains(&adr, needle, "ADR 0033")?;
     }
+
+    // `GET /v1/events` was asserted as a contiguous substring and has been red
+    // since the needle was added (5e63c9031, 2026-05-21). `git log -S 'GET
+    // /v1/events' -- docs/adr/0033-serve-localhost-v2-design.md` is EMPTY: the
+    // string has never existed in that file, which was created a week earlier
+    // (fd35db158, 2026-05-14). The ADR does document the endpoint, at the table
+    // row `| `GET` | `/v1/events` | SSE stream for read-only progress events |`.
+    //
+    // `GET /v1/context` satisfies the substring form only by an accident of
+    // prose further down the ADR, a sentence listing the endpoints that return
+    // CLI-equivalent payloads -- which deliberately EXCLUDES /v1/events,
+    // because an SSE stream does not. So the needle that passes and the needle
+    // that fails differ by the ADR being correct, not by the ADR being wrong.
+    ensure_row_binds_method(&adr, "GET", "/v1/events", "ADR 0033")?;
 
     let startup = read_repo_file("docs/schemas/ee.serve.startup.v1.json")?;
     let endpoint = read_repo_file("docs/schemas/ee.serve.endpoint.v1.json")?;
