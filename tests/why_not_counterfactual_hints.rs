@@ -8,8 +8,8 @@
 
 use ee::models::{MemoryId, ProvenanceUri, UnitScore};
 use ee::pack::{
-    ContextPackProfile, PackCandidate, PackCandidateInput, PackProvenance, PackSection,
-    TokenBudget, WhyNotSelectedInput, explain_why_not_selected,
+    ContextPackProfile, PackAssemblyOptions, PackCandidate, PackCandidateInput, PackProvenance,
+    PackSection, TokenBudget, WhyNotSelectedInput, explain_why_not_selected,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -72,13 +72,33 @@ fn hint_kinds(json: &Value) -> Vec<String> {
 fn token_budget_omission_suggests_raising_the_budget() -> TestResult {
     let selected = candidate(1, 1.0, 20, "format before release")?;
     let target = candidate(2, 0.95, 20, "target reaches selection but does not fit")?;
-    let report = explain_why_not_selected(WhyNotSelectedInput::new(
-        "prepare release",
-        target.clone(),
-        TokenBudget::new(60).map_err(|error| format!("{error:?}"))?,
-        ContextPackProfile::Compact,
-        vec![selected, target],
-    ))
+    // This fixture's arithmetic -- two 20-token candidates against a 60-token
+    // budget -- only omits under the pre-LOD single-tier budget policy it was
+    // written for (2026-06-07). `311481ec0` (2026-06-12) gave
+    // `WhyNotSelectedInput` an `options` field defaulting to the LOD selector,
+    // and says so in its own doc comment: the options "must match the options
+    // of the pack being explained, or the report describes a different selector
+    // (LOD default vs classic) than the one that ran." Under LOD tier budgets
+    // the target fits, so the report honestly says `selected`.
+    //
+    // The same commit repaired the structurally identical fixture in the inline
+    // test module with `.with_options(classic_pack_options())` and did not
+    // touch this file. This declares the same selector; every assertion below
+    // is unchanged.
+    let classic = PackAssemblyOptions {
+        lod_budget_shares: None,
+        ..PackAssemblyOptions::default()
+    };
+    let report = explain_why_not_selected(
+        WhyNotSelectedInput::new(
+            "prepare release",
+            target.clone(),
+            TokenBudget::new(60).map_err(|error| format!("{error:?}"))?,
+            ContextPackProfile::Compact,
+            vec![selected, target],
+        )
+        .with_options(classic),
+    )
     .map_err(|error| format!("{error:?}"))?;
     let json = serde_json::to_value(&report).map_err(|error| error.to_string())?;
 
