@@ -13729,6 +13729,121 @@ mod tests {
         )
     }
 
+    /// bd-reality-core-convergence-1azkt.13, plan section C negative matrix:
+    /// the "incompatible schema" class.
+    ///
+    /// `manifest_schema_mismatch` appeared **exactly once in the whole tree** —
+    /// at the site that constructs it. Nothing asserted it, so the gate that
+    /// stops this binary from restoring a manifest format it does not
+    /// understand was unproven.
+    ///
+    /// The manifest is **re-authenticated after the mutation**, and that
+    /// re-authentication is itself asserted. Without it the tampered manifest
+    /// would also fail its MAC, `verify_backup` would report an authentication
+    /// issue too, and the test could pass while the schema check did nothing —
+    /// the isolation is the point, not an incidental detail.
+    #[test]
+    fn verify_rejects_a_manifest_whose_schema_this_binary_does_not_support() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(workspace.join("backups")),
+            label: Some("schema-mismatch".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let verify = || -> Result<BackupVerifyReport, String> {
+            verify_backup(&BackupVerifyOptions {
+                workspace_path: workspace.clone(),
+                backup_path: PathBuf::from(&created.backup_path),
+            })
+            .map_err(|error| error.message())
+        };
+
+        // Control: as produced, this binary understands the manifest.
+        let accepted = verify()?;
+        ensure(
+            !accepted
+                .issues
+                .iter()
+                .any(|issue| issue.code == "manifest_schema_mismatch"),
+            format!(
+                "a freshly created backup must not report a schema mismatch: {:?}",
+                accepted.issues
+            ),
+        )?;
+
+        // Declare a manifest format this binary does not support, then restore
+        // the manifest's own authentication so the schema check is the only
+        // thing left to object to.
+        let mut manifest: JsonValue = serde_json::from_slice(
+            &fs::read(&created.manifest_path).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        manifest["schema"] = json!("ee.backup.manifest.v99");
+        let root =
+            StoreAuthRoot::open(workspace_keys_dir(&workspace)).map_err(|error| error.message())?;
+        authenticate_backup_manifest(&mut manifest, &root).map_err(|error| error.message())?;
+        verify_backup_manifest_authentication(&workspace, &manifest).map_err(|issue| {
+            format!("re-authenticated fixture must authenticate, else this test proves nothing: {issue:?}")
+        })?;
+        fs::write(
+            &created.manifest_path,
+            serde_json::to_vec(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let rejected = verify()?;
+        ensure_equal(
+            rejected.status.as_str(),
+            "failed",
+            "an unsupported manifest schema must fail verification",
+        )?;
+        let issue = rejected
+            .issues
+            .iter()
+            .find(|issue| issue.code == "manifest_schema_mismatch")
+            .ok_or_else(|| {
+                format!(
+                    "expected a manifest_schema_mismatch issue: {:?}",
+                    rejected.issues
+                )
+            })?;
+        // The operator has to be told what was expected and what was found;
+        // a bare refusal is not actionable.
+        ensure_equal(
+            issue.actual.as_deref(),
+            Some("ee.backup.manifest.v99"),
+            "the mismatch must report the schema actually found",
+        )?;
+        ensure(
+            issue
+                .expected
+                .as_deref()
+                .is_some_and(|expected| expected.contains("ee.backup.manifest")),
+            format!(
+                "the mismatch must report the supported schemas: {:?}",
+                issue.expected
+            ),
+        )?;
+        // And the rejection must still be attributable to the schema alone.
+        ensure(
+            !rejected
+                .issues
+                .iter()
+                .any(|issue| issue.code.starts_with("manifest_authentication")),
+            format!(
+                "re-authentication should have left no auth issue: {:?}",
+                rejected.issues
+            ),
+        )
+    }
+
     fn remap_workspace_fixture(id: &str) -> crate::db::StoredWorkspace {
         crate::db::StoredWorkspace {
             id: id.to_owned(),
