@@ -52212,7 +52212,26 @@ mod tests {
             Some("procedural"),
             false,
         )?;
-        ensure_equal(&procedural.len(), &1, "filter by procedural returns 1")?;
+        // bd-tmv70: `expired_rule` is a clone of `rule`, so it is ALSO procedural.
+        // The identity reader returns both revisions; the applicability reader is
+        // what narrows to the one still in force. Updating only the unfiltered
+        // assertions above and leaving this one at 1 is what kept this row red.
+        ensure_equal(
+            &procedural.len(),
+            &2,
+            "identity level filter returns both procedural revisions",
+        )?;
+        let procedural_in_force = connection.list_memories_valid_at(
+            "wsp_01234567890123456789012345",
+            Some("procedural"),
+            false,
+            "2026-09-16T00:00:00Z",
+        )?;
+        ensure_equal(
+            &procedural_in_force.len(),
+            &1,
+            "applicability level filter returns only the in-force procedural row",
+        )?;
         ensure_equal(
             &procedural[0].kind.as_str(),
             &"rule",
