@@ -81,6 +81,41 @@ while IFS=$'\t' read -r _code fixture; do
     FIXTURES+=("$fixture")
 done < <(printf '%s\n' "${FIXTURE_ROWS[@]}" | LC_ALL=C sort -t $'\t' -k1,1)
 
+# Render a value as a markdown code span.
+#
+# Repair and message strings routinely quote a command, so the value can
+# itself contain backticks. A plain `$value` wrapper closes the span at
+# the value's first backtick and leaves a stray one in the rendered doc.
+# CommonMark allows a longer fence: pick one backtick longer than the
+# longest run in the value and pad with spaces so the padding is stripped.
+code_span() {
+    local value="$1"
+    local longest=0
+    local run=0
+    local i
+    local char
+    for ((i = 0; i < ${#value}; i++)); do
+        char="${value:i:1}"
+        if [ "$char" = '`' ]; then
+            run=$((run + 1))
+            if [ "$run" -gt "$longest" ]; then
+                longest="$run"
+            fi
+        else
+            run=0
+        fi
+    done
+    if [ "$longest" -eq 0 ]; then
+        printf '`%s`' "$value"
+        return
+    fi
+    local fence=''
+    while [ "${#fence}" -le "$longest" ]; do
+        fence="${fence}"'`'
+    done
+    printf '%s %s %s' "$fence" "$value" "$fence"
+}
+
 # Build the file body. Header documents auto-generation contract;
 # operators reading the doc see it cannot be hand-edited without
 # being overwritten on the next regen.
@@ -225,13 +260,13 @@ HEADER
         fi
 
         echo ""
-        echo "**Expected emission.** Message contains: \`$message_contains\`"
+        echo "**Expected emission.** Message contains: $(code_span "$message_contains")"
         if [ "$repair_present" = "true" ] && [ -n "$repair_string" ] && [ "$repair_string" != "null" ]; then
             echo ""
             echo "**Repair hint.** $repair_string"
         elif [ "$repair_present" = "true" ] && [ -n "$repair_contains" ] && [ "$repair_contains" != "null" ]; then
             echo ""
-            echo "**Repair hint.** \`$repair_contains\`"
+            echo "**Repair hint.** $(code_span "$repair_contains")"
         elif [ "$repair_present" = "true" ]; then
             echo ""
             echo "**Repair hint.** Present in fixture; see the response payload's \`error.repair\` field at runtime."

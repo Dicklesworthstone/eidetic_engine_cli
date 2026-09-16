@@ -7426,7 +7426,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `archive/database parity drift`
 
-**Repair hint.** `Run `am doctor check``
+**Repair hint.** `` Run `am doctor check` ``
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_agent_mail_archive_mismatch.json`](../tests/fixtures/failure_modes/hotset_agent_mail_archive_mismatch.json)
 
@@ -7516,7 +7516,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `Beads JSONL export`
 
-**Repair hint.** `Run `br sync --flush-only` to export tracker state, then re-collect.`
+**Repair hint.** `` Run `br sync --flush-only` to export tracker state, then re-collect. ``
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_beads_unavailable.json`](../tests/fixtures/failure_modes/hotset_beads_unavailable.json)
 
@@ -7546,7 +7546,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `bv --robot-next`
 
-**Repair hint.** `Run `bv --robot-next` manually`
+**Repair hint.** `` Run `bv --robot-next` manually ``
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_bv_no_output.json`](../tests/fixtures/failure_modes/hotset_bv_no_output.json)
 
@@ -7696,7 +7696,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `git status probe could not run`
 
-**Repair hint.** `Run `git status --porcelain` in the workspace to inspect`
+**Repair hint.** `` Run `git status --porcelain` in the workspace to inspect ``
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_git_unavailable.json`](../tests/fixtures/failure_modes/hotset_git_unavailable.json)
 
@@ -7870,7 +7870,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `source-authority snapshot`
 
-**Repair hint.** `Capture the sourceAuthority block from `ee swarm work-packet`
+**Repair hint.** `` Capture the sourceAuthority block from `ee swarm work-packet ``
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_source_authority_missing.json`](../tests/fixtures/failure_modes/hotset_source_authority_missing.json)
 
