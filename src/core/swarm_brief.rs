@@ -10326,6 +10326,23 @@ fn should_redact_absolute_path_candidate(candidate: &str) -> bool {
         .is_some_and(|without_root| without_root.contains('/'))
 }
 
+/// Render a path for a shared surface, via one of **two** branches.
+///
+/// A path under `$HOME` is rewritten to `~/relative` first. That strips the
+/// username — the actual identifying component — and the result no longer
+/// starts with `/`, so `should_redact_absolute_path_candidate` declines it and
+/// it is emitted readable. A path outside `$HOME` cannot be shortened safely,
+/// so it falls through to `[REDACTED_PATH:<blake3-prefix>]`.
+///
+/// Two consequences that are not visible at the call site:
+///
+/// - The output *shape* depends on where the repository lives, not on the
+///   caller. A developer running in `~/projects/ee` never sees a digest.
+/// - The digest branch is **not golden-stable**: the hash is taken over the
+///   absolute path, so a temp-dir fixture produces a different value every run.
+///   Every test fixture lives outside `$HOME` and therefore takes exactly the
+///   branch a developer never sees. A surface that renders a path through here
+///   cannot be pinned by a golden.
 fn redact_path_label(path: &Path) -> String {
     let raw = path.display().to_string();
     let home = std::env::var_os("HOME").map(PathBuf::from);
