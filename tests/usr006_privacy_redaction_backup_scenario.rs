@@ -367,14 +367,12 @@ fn strict_memory_redaction_truncates_content_and_adds_hash() -> TestResult {
     use ee::output::jsonl_export::redact_memory_record;
 
     let content = "strict-redaction-fixture ".repeat(16);
-    // e02f110e: the export builder canonicalizes required string fields
-    // (trim), so the stored body — and therefore the attached digest —
-    // covers the trimmed content, not the raw builder input.
-    let canonical_body = content.trim();
-    let expected_hash = format!(
-        "blake3:{}",
-        blake3::hash(canonical_body.as_bytes()).to_hex()
-    );
+    // The memory body is deliberately NOT canonicalized. It bypasses
+    // `required_string` and keeps its exact bytes precisely so the attached
+    // digest verifies what was stored — see the comment at
+    // src/models/jsonl.rs:1292. Hash the raw builder input, as the paranoid
+    // sibling below already does.
+    let expected_hash = format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex());
     let memory = ExportMemoryRecord::builder()
         .memory_id("mem-strict-001234567890")
         .workspace_id("ws-test")
