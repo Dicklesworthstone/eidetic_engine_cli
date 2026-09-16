@@ -963,7 +963,11 @@ impl StatusSkylineReport {
             .map(|skyline| skyline.rows)
             .unwrap_or_default();
         let mut degraded = Vec::new();
-        push_status_skyline_feature_disabled_degradation(&mut degraded, skyline_feature_enabled);
+        push_status_skyline_feature_disabled_degradation(
+            &mut degraded,
+            skyline_feature_enabled,
+            graph_capability_unavailable_for_build(),
+        );
         push_skyline_degenerate_communities_degradation(&mut degraded, skyline_community_count);
 
         Self {
@@ -2659,9 +2663,13 @@ impl StatusReport {
             );
         }
         push_graph_capability_degradation(&mut degradations, graph_compute.status);
+        // Derived from the already-computed report rather than re-probing, so
+        // the two degradations can never disagree about whether graph compute
+        // is available within one response.
         push_status_skyline_feature_disabled_degradation(
             &mut degradations,
             skyline_feature_enabled,
+            matches!(graph_compute.status, GraphComputeStatus::Unavailable),
         );
         push_skyline_degenerate_communities_degradation(&mut degradations, skyline_community_count);
         push_toon_output_capability_degradation(&mut degradations, capabilities.output_toon);
@@ -4620,11 +4628,38 @@ fn push_skyline_degenerate_communities_degradation(
     });
 }
 
+/// Is graph compute absent for build reasons rather than config reasons?
+///
+/// Mirrors exactly what `gather_graph_compute_with_connection` decides when it
+/// returns [`GraphComputeStatus::Unavailable`]: the binary was built without
+/// the `graph` feature, or a diagnostic run forced the capability gap. Kept as
+/// a separate predicate so the skyline emitter can be unit-tested without
+/// mutating the process-global `EE_DIAG_FORCE_CAPABILITY_GAP`, which would race
+/// every other test in the binary.
+fn graph_capability_unavailable_for_build() -> bool {
+    !cfg!(feature = "graph") || diag_forced_capability_gap("graph")
+}
+
 fn push_status_skyline_feature_disabled_degradation(
     degradations: &mut Vec<DegradationReport>,
     enabled: Option<bool>,
+    graph_unavailable: bool,
 ) {
     if enabled != Some(false) {
+        return;
+    }
+    // When graph compute is absent for BUILD reasons, the config key is not the
+    // reason the skyline is missing and flipping it cannot help. Emitting this
+    // code there would tell an operator to set `graph.feature.skyline.enabled
+    // true` on a binary that has no graph feature at all — the exact symmetric
+    // twin of the defect bd-reality-core-convergence-1azkt.31 fixed in the
+    // other direction, and what .34's planted negative requires: a graph-less
+    // build reports the build-time `graph_feature_disabled`, not this one.
+    //
+    // `push_graph_capability_degradation` already carries that build-time code
+    // on the main status surface, so suppressing here removes a misleading
+    // second answer rather than removing the explanation.
+    if graph_unavailable {
         return;
     }
     // Not `graph_feature_disabled`: that code means the binary was built
@@ -7466,6 +7501,109 @@ mod tests {
                 .collect(),
             vec!["Unset `EE_DISABLE_TOON` or use `--format json`."],
             "toon degraded repair",
+        )
+    }
+
+    /// bd-reality-core-convergence-1azkt.34 planted negative.
+    ///
+    /// This is the acceptance item the 2026-09-05 pass explicitly left
+    /// unexecuted: *"a build without the `graph` feature still reports the
+    /// build-time `graph_feature_disabled`, not the config code."* Before this
+    /// gate a graph-less build emitted BOTH, and the config code's repair —
+    /// `ee config set graph.feature.skyline.enabled true` — cannot help on a
+    /// binary with no graph feature. That is the symmetric twin of the defect
+    /// bd-…​.31 fixed in the other direction.
+    ///
+    /// The graph-availability input is a parameter rather than a read of
+    /// `EE_DIAG_FORCE_CAPABILITY_GAP`, so this runs on the DEFAULT build and in
+    /// the default CI lane. A `#[cfg(not(feature = "graph"))]` test would be
+    /// invisible there, and mutating a process-global env var inside a `#[test]`
+    /// would race every other test in the binary.
+    #[test]
+    fn status_skyline_config_degradation_yields_to_a_build_time_graph_gap() -> TestResult {
+        // Graph available + config disabled: the config code is the right and
+        // only answer. This arm is what makes the negative below meaningful —
+        // without it, a function that never emitted anything would also pass.
+        let mut enabled_build = Vec::new();
+        push_status_skyline_feature_disabled_degradation(&mut enabled_build, Some(false), false);
+        ensure(
+            enabled_build
+                .iter()
+                .map(|degradation| degradation.code)
+                .collect::<Vec<_>>(),
+            vec!["graph_skyline_disabled"],
+            "a graph-enabled build must still explain the config choice",
+        )?;
+        ensure(
+            enabled_build
+                .iter()
+                .map(|degradation| degradation.repair)
+                .collect::<Vec<_>>(),
+            vec!["ee config set graph.feature.skyline.enabled true"],
+            "the config repair must stay actionable on a graph-enabled build",
+        )?;
+
+        // Graph absent for build reasons: the config code must not appear. The
+        // build-time code is pushed by push_graph_capability_degradation, which
+        // is asserted separately below.
+        let mut graph_less_build = Vec::new();
+        push_status_skyline_feature_disabled_degradation(&mut graph_less_build, Some(false), true);
+        ensure(
+            graph_less_build.is_empty(),
+            true,
+            "a graph-less build must not advise setting a config key that cannot help",
+        )?;
+
+        // And the build-time code IS what such a build reports.
+        let mut capability = Vec::new();
+        push_graph_capability_degradation(&mut capability, GraphComputeStatus::Unavailable);
+        ensure(
+            capability
+                .iter()
+                .map(|degradation| degradation.code)
+                .collect::<Vec<_>>(),
+            vec!["graph_feature_disabled"],
+            "a graph-less build must report the build-time code",
+        )?;
+
+        // Composed: exactly one explanation, and it is the build-time one.
+        let mut combined = Vec::new();
+        push_graph_capability_degradation(&mut combined, GraphComputeStatus::Unavailable);
+        push_status_skyline_feature_disabled_degradation(&mut combined, Some(false), true);
+        ensure(
+            combined
+                .iter()
+                .map(|degradation| degradation.code)
+                .collect::<Vec<_>>(),
+            vec!["graph_feature_disabled"],
+            "a graph-less build must report the build-time code and no config code",
+        )?;
+
+        // The suppression is scoped to the disabled case only: an enabled or
+        // unknown config still emits nothing, so the gate cannot be credited
+        // for silence it did not cause.
+        for enabled in [Some(true), None] {
+            let mut other = Vec::new();
+            push_status_skyline_feature_disabled_degradation(&mut other, enabled, false);
+            ensure(
+                other.is_empty(),
+                true,
+                "only an explicitly disabled config emits the skyline code",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The build predicate must agree with the report the status surface
+    /// actually computes, or the two degradations could disagree within one
+    /// response.
+    #[test]
+    fn graph_capability_predicate_matches_the_compute_report_1azkt_34() -> TestResult {
+        let report = gather_graph_compute(None);
+        ensure(
+            graph_capability_unavailable_for_build(),
+            matches!(report.status, GraphComputeStatus::Unavailable),
+            "skyline gate and graph compute report must agree on availability",
         )
     }
 
