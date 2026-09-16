@@ -35094,7 +35094,7 @@ where
 {
     match validate_graph_read_options(GraphReadOptions::from(args)) {
         Ok(()) => {}
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 
     #[cfg(feature = "graph")]
@@ -35112,7 +35112,7 @@ where
                 );
                 write_graph_surface_data(cli, stdout, data)
             }
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     }
 
@@ -35135,7 +35135,7 @@ where
 {
     match validate_graph_read_options(GraphReadOptions::from(args)) {
         Ok(()) => {}
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 
     #[cfg(feature = "graph")]
@@ -35153,7 +35153,7 @@ where
                 );
                 write_graph_surface_data(cli, stdout, data)
             }
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     }
 
@@ -35180,7 +35180,7 @@ where
 {
     match validate_graph_read_options(GraphReadOptions::from(args)) {
         Ok(()) => {}
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 
     #[cfg(feature = "graph")]
@@ -35194,7 +35194,7 @@ where
                             message: error.to_string(),
                             repair: Some("ee graph snapshot refresh --workspace .".to_string()),
                         };
-                        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                        return write_domain_error(&error, cli.renderer(), stdout, stderr);
                     }
                 };
                 let data = graph_metric_data(
@@ -35209,7 +35209,7 @@ where
                 );
                 write_graph_surface_data(cli, stdout, data)
             }
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     }
 
@@ -35234,7 +35234,7 @@ where
         .and_then(|()| validate_graph_louvain_args(args))
     {
         Ok(()) => {}
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 
     #[cfg(feature = "graph")]
@@ -35252,7 +35252,7 @@ where
                 let data = graph_communities_data("graph louvain", &input, communities, args.limit);
                 write_graph_surface_data(cli, stdout, data)
             }
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     }
 
@@ -35275,7 +35275,7 @@ where
 {
     match validate_graph_read_options(GraphReadOptions::from(args)) {
         Ok(()) => {}
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 
     #[cfg(feature = "graph")]
@@ -35287,7 +35287,7 @@ where
                     graph_communities_data("graph communities", &input, communities, args.limit);
                 write_graph_surface_data(cli, stdout, data)
             }
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     }
 
@@ -35314,7 +35314,7 @@ where
 {
     match validate_graph_read_options(GraphReadOptions::from(args)) {
         Ok(()) => {}
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 
     #[cfg(feature = "graph")]
@@ -35350,7 +35350,7 @@ where
                 );
                 write_graph_surface_data(cli, stdout, data)
             }
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     }
 
@@ -35373,7 +35373,7 @@ where
 {
     match validate_graph_read_options(GraphReadOptions::from(args)) {
         Ok(()) => {}
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 
     #[cfg(feature = "graph")]
@@ -35393,7 +35393,7 @@ where
                 );
                 write_graph_surface_data(cli, stdout, data)
             }
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     }
 
@@ -35422,7 +35422,7 @@ where
         .and_then(|()| validate_graph_memory_pair(&args.src_memory_id, &args.dst_memory_id))
     {
         Ok(()) => {}
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 
     #[cfg(feature = "graph")]
@@ -35457,7 +35457,7 @@ where
                 );
                 write_graph_surface_data(cli, stdout, data)
             }
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     }
 
@@ -35482,7 +35482,7 @@ where
         .and_then(|()| validate_graph_memory_pair(&args.src_memory_id, &args.dst_memory_id))
     {
         Ok(()) => {}
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 
     #[cfg(feature = "graph")]
@@ -35518,7 +35518,7 @@ where
                 );
                 write_graph_surface_data(cli, stdout, data)
             }
-            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     }
 
@@ -35768,13 +35768,13 @@ where
         let input = match graph_algorithm_input(cli, options) {
             Ok(input) => input,
             Err(domain_error) => {
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
         let database_path = match graph_database_path(cli, args.database.as_deref()) {
             Ok(path) => path,
             Err(domain_error) => {
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
         let conn = match crate::db::DbConnection::open_file(&database_path) {
@@ -35784,7 +35784,7 @@ where
                     message: format!("Failed to open database: {error}"),
                     repair: Some("ee doctor --json".to_string()),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
 
@@ -35801,7 +35801,7 @@ where
             resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
         let workspace_id = match bound_cli_workspace_id(&conn, &workspace_path) {
             Ok(workspace_id) => workspace_id,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         let snapshot = match conn.get_latest_graph_snapshot(
             &workspace_id,
@@ -35813,7 +35813,7 @@ where
                     message: format!("Failed to query retrieval-affinity snapshot: {error}"),
                     repair: Some("ee doctor --json".to_owned()),
                 };
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
         };
         // A present snapshot must be readable in full. Dropping malformed
@@ -35846,7 +35846,7 @@ where
                                     .to_owned(),
                             ),
                         };
-                        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                        return write_domain_error(&error, cli.renderer(), stdout, stderr);
                     }
                 };
                 Some(
@@ -35874,7 +35874,7 @@ where
                         message: format!("Failed to query suggestion memory content: {error}"),
                         repair: Some("ee doctor --json".to_owned()),
                     };
-                    return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                    return write_domain_error(&error, cli.renderer(), stdout, stderr);
                 }
             };
             edges.retain(|(a, b), _| {
@@ -35899,7 +35899,7 @@ where
                     message: format!("Failed to query suggestion memory tags: {error}"),
                     repair: Some("ee doctor --json".to_owned()),
                 };
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
         };
         let tags: BTreeMap<String, BTreeSet<String>> = tags_raw
@@ -35999,7 +35999,7 @@ where
                                 ),
                                 repair: Some("ee doctor --json".to_owned()),
                             };
-                            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                            return write_domain_error(&error, cli.renderer(), stdout, stderr);
                         }
                     }
                 }
@@ -36122,7 +36122,7 @@ where
                         message: format!("{failure_context}: {error}"),
                         repair: Some("ee doctor --json".to_owned()),
                     };
-                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                    return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
                 }
             }
         }
@@ -36671,7 +36671,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match crate::db::DbConnection::open_file(&database_path) {
@@ -36681,12 +36681,12 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
         Ok(workspace_id) => workspace_id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let options = crate::graph::CentralityRefreshOptions {
@@ -36723,7 +36723,7 @@ where
                 message: error.to_string(),
                 repair: Some("ee graph centrality-refresh --dry-run".to_string()),
             };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -36748,7 +36748,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match crate::db::DbConnection::open_file(&database_path) {
@@ -36758,12 +36758,12 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
         Ok(workspace_id) => workspace_id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let graph_types = match graph_snapshot_refresh_types(&args.graph) {
         Ok(graph_types) => graph_types,
@@ -36775,7 +36775,7 @@ where
                         .to_string(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -36803,7 +36803,7 @@ where
                     message: error.to_string(),
                     repair: Some("ee graph snapshot refresh --dry-run".to_string()),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         }
     }
@@ -36879,7 +36879,7 @@ where
                         .to_owned(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -36891,7 +36891,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     let conn = match crate::db::DbConnection::open_file(&database_path) {
         Ok(conn) => conn,
@@ -36900,13 +36900,13 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
         Ok(workspace_id) => workspace_id,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -36923,7 +36923,7 @@ where
                     message: format!("Failed to list graph snapshots: {error}"),
                     repair: Some("ee doctor --workspace . --json".to_owned()),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
 
@@ -37008,7 +37008,7 @@ where
                 message: format!("Persisted snapshot payload unreadable: {error}"),
                 repair: Some("ee graph snapshot refresh --workspace . --json".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -37062,7 +37062,7 @@ where
             message: "--limit must be greater than zero".to_string(),
             repair: Some("Use --limit 10 or omit the flag.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let workspace =
@@ -37074,7 +37074,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match crate::db::DbConnection::open_file(&database_path) {
@@ -37084,21 +37084,21 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
     let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
         Ok(workspace_id) => workspace_id,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
     let report = match build_graph_centrality_read_report(&conn, &workspace_id, args) {
         Ok(report) => report,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let exit_code = if args.require_fresh
@@ -37540,7 +37540,7 @@ where
             message: "--max-features must be greater than zero".to_string(),
             repair: Some("Omit --max-features to use the default cap.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     if let Some(min_combined_score) = args.min_combined_score {
@@ -37549,7 +37549,7 @@ where
                 message: "--min-combined-score must be a finite value in [0.0, 1.0]".to_string(),
                 repair: Some("Use a value like 0.01 or omit the flag.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     }
 
@@ -37559,7 +37559,7 @@ where
                 message: "--max-selection-boost must be a finite non-negative value".to_string(),
                 repair: Some("Use a value like 0.15 or omit the flag.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     }
 
@@ -37572,7 +37572,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match crate::db::DbConnection::open_file(&database_path) {
@@ -37582,7 +37582,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -37606,7 +37606,7 @@ where
                         .to_string(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         let burst_options = crate::core::singleflight::GraphFeatureEnrichmentBurstOptions {
             identical_requests,
@@ -37655,7 +37655,7 @@ where
     let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
         Ok(workspace_id) => workspace_id,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let snapshot = match conn
@@ -37667,7 +37667,7 @@ where
                 message: format!("Failed to query graph snapshot: {error}"),
                 repair: Some("ee graph centrality-refresh".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let workspace_generation = snapshot
@@ -37879,7 +37879,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match crate::db::DbConnection::open_file(&database_path) {
@@ -37889,7 +37889,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     if let Err(error) = conn.migrate() {
@@ -37897,13 +37897,13 @@ where
             message: format!("Failed to migrate graph database: {error}"),
             repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let workspace_id = match resolve_graph_export_workspace_id(&conn, &workspace, args) {
         Ok(workspace_id) => workspace_id,
         Err(domain_error) => {
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -37917,7 +37917,7 @@ where
                         .to_string(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -37935,7 +37935,7 @@ where
                 message: error.to_string(),
                 repair: Some("ee graph centrality-refresh".to_string()),
             };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -38039,7 +38039,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let direction = match args.direction.as_str() {
@@ -38051,7 +38051,7 @@ where
                 message: format!("Unknown direction filter: {other}"),
                 repair: Some("Use one of incoming, outgoing, both.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -38067,7 +38067,7 @@ where
                             .to_string(),
                     ),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         },
     };
@@ -38077,7 +38077,7 @@ where
             message: "--limit must be greater than zero".to_string(),
             repair: Some("Omit --limit to keep all neighbors.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match crate::db::DbConnection::open_file(&database_path) {
@@ -38087,7 +38087,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -38132,7 +38132,7 @@ where
                 message: error.to_string(),
                 repair: Some("ee graph centrality-refresh".to_string()),
             };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
