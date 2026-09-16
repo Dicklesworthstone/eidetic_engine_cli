@@ -1,0 +1,1276 @@
+//! bd-reality-core-convergence-1azkt.10: a source-attested retrieval/index
+//! regression oracle, built BEFORE any publication/model fix.
+//!
+//! # What this is
+//!
+//! An instrument, not a tripwire. It answers one question about a candidate
+//! build — *does concurrent retrieval over one published generation diverge?* —
+//! and it is required to answer with one of four verdicts, never to guess:
+//!
+//! | Verdict | Meaning |
+//! | --- | --- |
+//! | `RaceAbsent` | A quorum of probes completed, every one agreed with the serial baseline, and the observations were substantive. |
+//! | `RaceReproduced` | At least two probes that **both completed** disagreed on identical state. Positive evidence. |
+//! | `Inconclusive` | Too few probes completed to judge. A resource signal (CPU starvation, load), explicitly **not** a race. |
+//! | `InfraError` | The candidate could not be attested, or the fixture/baseline was unusable. Never a product pass **or** a product fail. |
+//!
+//! # The separation rule
+//!
+//! This is the whole design, and it is why the oracle exists rather than just
+//! another concurrency test:
+//!
+//! > **A probe that fails to complete contributes a resource signal, never a
+//! > semantic one.** Divergence is computed *only* across probes that
+//! > completed successfully. Non-completion can therefore never manufacture a
+//! > `RaceReproduced`; and because declaring absence requires a quorum of
+//! > completions, a starved run can never manufacture a `RaceAbsent` either.
+//!
+//! An oracle that cannot separate "the answers disagreed" from "the box was
+//! busy" is worse than no oracle, because it produces confident wrong answers
+//! in *both* directions: it calls starvation a regression, and it calls a
+//! lucky quiet round a clean bill of health. The prior art for this bead's
+//! closed dependency, `tests/concurrent_search_lexical_arm_e2e.rs` (bd-…​.23),
+//! is a correct *proof* of that specific fix but has exactly this weakness —
+//! any nonzero child exit returns `Err` indistinguishably from a semantic
+//! disagreement. This oracle does not replace it and does not re-run its
+//! diagnosis; it adds the classification layer.
+//!
+//! # Vacuity guards
+//!
+//! Per the bead: *"No empty/abstention/OR assertion can count as positive
+//! behavior."* Enforced in two places:
+//!
+//! 1. The serial baseline must carry every **required** field as a non-empty
+//!    value. If a field is missing or empty — including because a JSON path
+//!    was renamed — the verdict is `InfraError` naming the exact pointer, not
+//!    a pass. Comparisons can never silently degrade into `null == null`.
+//! 2. A probe that returns an empty result set while the baseline returned a
+//!    non-empty one is counted as a **divergence**, not as agreement. That is
+//!    the classic signature of the lost-lexical-arm race (a process that fails
+//!    the index open serves zero results), and treating it as "agreement about
+//!    emptiness" would hide the exact failure this oracle hunts.
+//!
+//! # On `LabRuntime`
+//!
+//! Deliberately not used here, and the reason is worth recording rather than
+//! papering over: the behavior under test is *cross-process* contention for
+//! OS-level index locks. `LabRuntime` gives deterministic scheduling of
+//! asupersync tasks **inside one process**; it has no authority over how two
+//! separate `ee` processes interleave their file-lock acquisitions. Wrapping
+//! these probes in a seeded runtime would add ceremony and determinism
+//! language without constraining the thing that actually races. The
+//! determinism this oracle *can* offer is different and real: a fixed,
+//! substantive baseline, exact-value comparison, and repeated rounds whose
+//! verdict must be stable.
+//!
+//! # How a red is read
+//!
+//! `RaceReproduced` failing this test is the oracle **working**, not a defect
+//! in the test — the bead says "reproduce or fail to reproduce … either
+//! outcome becomes the implementation baseline". `Inconclusive` and
+//! `InfraError` also fail, because the bead forbids counting them as a product
+//! pass. Every failure message begins with its verdict class so a reader never
+//! has to infer which of the four happened.
+//!
+//! The live probe is `#[ignore]` on purpose. Under concurrent swarm load
+//! `Inconclusive` is the *likely* outcome, and a load-dependent red in the
+//! shared suite would be precisely the manufactured-wrong-answer failure this
+//! design exists to prevent. It is pointed at a candidate deliberately. The
+//! classifier itself is covered by ordinary always-on tests below, so the
+//! instrument cannot rot unobserved.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+use serde_json::Value;
+
+type TestResult = Result<(), String>;
+
+const BEAD_ID: &str = "bd-reality-core-convergence-1azkt.10";
+const TEST_EVENT_SCHEMA: &str = "ee.test_event.v1";
+
+/// Degraded codes that mean a process could not see an index. When the index
+/// status simultaneously reports a valid, current generation, this is a
+/// semantic fault, not a configuration one — the bead names it explicitly.
+const INDEX_INVISIBLE_CODES: [&str; 4] = [
+    "index_missing",
+    "search_index_not_found",
+    "index_not_found",
+    "search_unavailable",
+];
+
+/// Degraded codes that mean the lexical arm was lost. Retained from the
+/// bd-…​.23 proof because a silent drop to semantic-only ranking is a
+/// divergence in retrieval semantics even when the id order survives.
+const LEXICAL_LOSS_CODES: [&str; 2] = ["source_mode_fallback", "lexical_unavailable"];
+
+// ── Verdicts ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Verdict {
+    RaceAbsent,
+    RaceReproduced(Vec<String>),
+    Inconclusive(String),
+    InfraError(String),
+}
+
+impl Verdict {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::RaceAbsent => "RACE_ABSENT",
+            Self::RaceReproduced(_) => "RACE_REPRODUCED",
+            Self::Inconclusive(_) => "INCONCLUSIVE",
+            Self::InfraError(_) => "INFRA_ERROR",
+        }
+    }
+
+    fn detail(&self) -> String {
+        match self {
+            Self::RaceAbsent => "a quorum of probes completed and all agreed".to_owned(),
+            Self::RaceReproduced(divergences) => divergences.join("; "),
+            Self::Inconclusive(reason) | Self::InfraError(reason) => reason.clone(),
+        }
+    }
+
+    /// Only `RaceAbsent` is a product pass. `InfraError` is never a product
+    /// pass *or* a product fail — it fails the test so it can never be
+    /// mistaken for green, and it is labelled so it is never mistaken for a
+    /// regression either.
+    fn is_product_pass(&self) -> bool {
+        matches!(self, Self::RaceAbsent)
+    }
+}
+
+// ── Observations ────────────────────────────────────────────────────────────
+
+/// One probe's comparable record: canonical field name → rendered value.
+///
+/// Rendering to strings up front makes the comparison exact and total; there
+/// is no float tolerance to tune and no partial ordering to get wrong.
+type Record = BTreeMap<String, String>;
+
+#[derive(Debug, Clone)]
+enum ProbeOutcome {
+    /// The probe ran to completion and produced a parseable success envelope.
+    Completed(Record),
+    /// The probe did not produce a usable answer: spawn failure, nonzero exit,
+    /// timeout, or unparseable output. A **resource** signal. Never semantic.
+    DidNotComplete(String),
+}
+
+/// Which fields must be present and non-empty in the serial baseline before any
+/// comparison is meaningful. A missing one is `InfraError`, never a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeKind {
+    Search,
+    Pack,
+}
+
+impl ProbeKind {
+    fn required_fields(self) -> &'static [&'static str] {
+        match self {
+            // An ordered id list and a named backend. Without both, "agreement"
+            // would be agreement about nothing.
+            Self::Search => &["results.order", "embed_backend"],
+            // A pack hash is the pack's whole identity.
+            Self::Pack => &["pack.hash"],
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Search => "search",
+            Self::Pack => "pack",
+        }
+    }
+}
+
+// ── The classifier (pure; this is what the always-on tests cover) ───────────
+
+/// Classify one round of probes against the serial baseline.
+///
+/// `index_generation_valid` is read from `ee index status` *outside* the
+/// concurrent phase: it says a current, healthy generation exists. Only then
+/// does an "index not found" degradation from a concurrent probe mean a
+/// semantic fault rather than an unbuilt index.
+fn classify_round(
+    kind: ProbeKind,
+    baseline: &Record,
+    outcomes: &[ProbeOutcome],
+    quorum: usize,
+    index_generation_valid: bool,
+) -> Verdict {
+    // Vacuity guard #1: the baseline must be substantive, or nothing below can
+    // mean anything.
+    for field in kind.required_fields() {
+        match baseline.get(*field) {
+            None => {
+                return Verdict::InfraError(format!(
+                    "{} baseline carried no `{field}`; every comparison below would be vacuous (the JSON path is probably renamed)",
+                    kind.label()
+                ));
+            }
+            Some(value) if value.is_empty() => {
+                return Verdict::InfraError(format!(
+                    "{} baseline carried an empty `{field}`; an empty/abstaining baseline cannot count as positive behavior",
+                    kind.label()
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+
+    let mut divergences = Vec::new();
+    let mut incomplete = Vec::new();
+    let mut completed = 0_usize;
+
+    for (index, outcome) in outcomes.iter().enumerate() {
+        match outcome {
+            ProbeOutcome::DidNotComplete(reason) => {
+                // Deliberately NOT a divergence. This is the separation rule.
+                incomplete.push(format!("#{index}: {reason}"));
+            }
+            ProbeOutcome::Completed(record) => {
+                completed = completed.saturating_add(1);
+                divergences.extend(compare_probe(
+                    kind,
+                    index,
+                    baseline,
+                    record,
+                    index_generation_valid,
+                ));
+            }
+        }
+    }
+
+    // An observed divergence is positive evidence and outranks quorum: other
+    // probes agreeing cannot un-observe two that disagreed.
+    if !divergences.is_empty() {
+        return Verdict::RaceReproduced(divergences);
+    }
+
+    if completed < quorum {
+        return Verdict::Inconclusive(format!(
+            "only {completed} of {} {} probes completed (quorum {quorum}); this is a resource signal, NOT evidence that the race is absent — incomplete: [{}]",
+            outcomes.len(),
+            kind.label(),
+            incomplete.join(", ")
+        ));
+    }
+
+    Verdict::RaceAbsent
+}
+
+/// Compare one completed probe against the baseline, returning every
+/// divergence it exhibits.
+fn compare_probe(
+    kind: ProbeKind,
+    index: usize,
+    baseline: &Record,
+    probe: &Record,
+    index_generation_valid: bool,
+) -> Vec<String> {
+    let mut divergences = Vec::new();
+    let label = kind.label();
+
+    // Vacuity guard #2: emptiness is never agreement. A probe that serves zero
+    // results while the baseline served some is the classic lost-arm
+    // signature, not a matching opinion.
+    for field in kind.required_fields() {
+        if probe.get(*field).is_none_or(String::is_empty) {
+            divergences.push(format!(
+                "{label} probe #{index} produced an empty/absent `{field}` while the serial baseline produced `{}`; an abstaining probe is a divergence, not agreement",
+                baseline.get(*field).map_or("<absent>", String::as_str)
+            ));
+        }
+    }
+
+    // Exact comparison over every field the baseline actually observed. A field
+    // present in the baseline but missing from a probe is itself a divergence:
+    // the value did not merely change, it vanished.
+    for (field, expected) in baseline {
+        if field.starts_with("degraded.") {
+            continue;
+        }
+        match probe.get(field) {
+            Some(actual) if actual == expected => {}
+            Some(actual) => divergences.push(format!(
+                "{label} probe #{index} reported {field}={actual} but the serial baseline reported {field}={expected}"
+            )),
+            None => divergences.push(format!(
+                "{label} probe #{index} did not report {field} at all; the serial baseline reported {expected}"
+            )),
+        }
+    }
+
+    // The bead's named failure classes that are semantic even in one probe.
+    let degraded = probe
+        .get("degraded.codes")
+        .map(|codes| {
+            codes
+                .split(',')
+                .filter(|code| !code.is_empty())
+                .map(str::to_owned)
+                .collect::<BTreeSet<String>>()
+        })
+        .unwrap_or_default();
+
+    if index_generation_valid {
+        for code in INDEX_INVISIBLE_CODES {
+            if degraded.contains(code) {
+                divergences.push(format!(
+                    "{label} probe #{index} reported `{code}` while index status showed a healthy, current generation; the index exists but this process could not see it"
+                ));
+            }
+        }
+    }
+    for code in LEXICAL_LOSS_CODES {
+        if degraded.contains(code) {
+            divergences.push(format!(
+                "{label} probe #{index} lost the lexical arm (`{code}`); retrieval semantics changed under concurrency"
+            ));
+        }
+    }
+
+    divergences
+}
+
+/// Fold per-round verdicts into one.
+///
+/// A race observed in any round is real — agreement in later rounds cannot
+/// retract an observation. Absence requires *every* round to have reached it,
+/// which is what makes repetition worth doing: one quiet round is not proof.
+fn fold_rounds(rounds: &[Verdict]) -> Verdict {
+    if rounds.is_empty() {
+        return Verdict::InfraError("no rounds were executed".to_owned());
+    }
+    for verdict in rounds {
+        if matches!(verdict, Verdict::InfraError(_)) {
+            return verdict.clone();
+        }
+    }
+    let mut divergences = Vec::new();
+    for (round, verdict) in rounds.iter().enumerate() {
+        if let Verdict::RaceReproduced(round_divergences) = verdict {
+            for divergence in round_divergences {
+                divergences.push(format!("round {round}: {divergence}"));
+            }
+        }
+    }
+    if !divergences.is_empty() {
+        return Verdict::RaceReproduced(divergences);
+    }
+    let inconclusive: Vec<String> = rounds
+        .iter()
+        .enumerate()
+        .filter_map(|(round, verdict)| match verdict {
+            Verdict::Inconclusive(reason) => Some(format!("round {round}: {reason}")),
+            _ => None,
+        })
+        .collect();
+    if !inconclusive.is_empty() {
+        return Verdict::Inconclusive(inconclusive.join(" | "));
+    }
+    Verdict::RaceAbsent
+}
+
+// ── Extraction (exact JSON pointers, verified against the renderers) ────────
+
+fn pointer_string(value: &Value, pointer: &str) -> Option<String> {
+    value.pointer(pointer).and_then(|found| match found {
+        Value::String(text) => Some(text.clone()),
+        Value::Null => None,
+        other => Some(other.to_string()),
+    })
+}
+
+fn degraded_codes(value: &Value) -> BTreeSet<String> {
+    value
+        .pointer("/degraded")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.pointer("/code").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Render `data.results[]` as one canonical, order-sensitive string.
+///
+/// `memoryId` and `score` are the documented search-result fields
+/// (`preset_fields_for_command("search", …)` in `src/output/mod.rs`). If this
+/// comes back empty on an attested run, the baseline gate reports `InfraError`
+/// naming the pointer rather than passing vacuously.
+fn render_result_order(value: &Value) -> String {
+    value
+        .pointer("/data/results")
+        .and_then(Value::as_array)
+        .map(|results| {
+            results
+                .iter()
+                .map(|result| {
+                    let id = result
+                        .pointer("/memoryId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<no-memoryId>");
+                    let score = result
+                        .pointer("/score")
+                        .map_or_else(|| "<no-score>".to_owned(), ToString::to_string);
+                    format!("{id}@{score}")
+                })
+                .collect::<Vec<_>>()
+                .join("|")
+        })
+        .unwrap_or_default()
+}
+
+fn search_record(value: &Value) -> Record {
+    let mut record = Record::new();
+    record.insert("results.order".to_owned(), render_result_order(value));
+    for (name, pointer) in [
+        ("embed_backend", "/data/embed_backend"),
+        ("status", "/data/status"),
+        ("sourceModeApplied", "/data/metrics/sourceModeApplied"),
+    ] {
+        if let Some(found) = pointer_string(value, pointer) {
+            record.insert(name.to_owned(), found);
+        }
+    }
+    record.insert(
+        "degraded.codes".to_owned(),
+        degraded_codes(value)
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    record
+}
+
+fn pack_record(value: &Value) -> Record {
+    let mut record = Record::new();
+    for (name, pointer) in [
+        ("pack.hash", "/data/pack/hash"),
+        (
+            "pack.sourceModeApplied",
+            "/data/queryPlan/sourceModeApplied",
+        ),
+    ] {
+        if let Some(found) = pointer_string(value, pointer) {
+            record.insert(name.to_owned(), found);
+        }
+    }
+    record.insert(
+        "degraded.codes".to_owned(),
+        degraded_codes(value)
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    record
+}
+
+// ── Candidate attestation ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct CandidateIdentity {
+    fields: Record,
+}
+
+impl CandidateIdentity {
+    /// The bead requires an attested candidate: exact commit, dirty state,
+    /// target triple, profile, and binary SHA-256. Failure to attest is
+    /// `InfraError`, never a product verdict.
+    fn attest(version_json: &Value, binary: &Path) -> Result<Self, Verdict> {
+        let mut fields = Record::new();
+        for (name, pointer) in [
+            ("gitCommit", "/data/source/gitCommit"),
+            ("gitDirty", "/data/source/gitDirty"),
+            ("sourceState", "/data/source/state"),
+            ("buildProfile", "/data/build/profile"),
+            ("targetTriple", "/data/build/targetTriple"),
+            ("version", "/data/version"),
+        ] {
+            fields.insert(
+                name.to_owned(),
+                pointer_string(version_json, pointer).unwrap_or_else(|| "<absent>".to_owned()),
+            );
+        }
+        let sha = sha256_file(binary).map_err(|error| {
+            Verdict::InfraError(format!("could not hash the candidate binary: {error}"))
+        })?;
+        fields.insert("binarySha256".to_owned(), sha);
+        fields.insert(
+            "binaryPath".to_owned(),
+            binary.to_string_lossy().into_owned(),
+        );
+
+        // The 2026-08 reproduction used a binary reporting `gitCommit: null`
+        // and `targetTriple: unknown`; the bead exists because that evidence
+        // could not be attributed to current source. Refuse to repeat it.
+        if require_attestation() {
+            for name in ["gitCommit", "targetTriple"] {
+                let value = fields.get(name).map_or("<absent>", String::as_str);
+                if value == "<absent>" || value == "unknown" || value == "null" {
+                    return Err(Verdict::InfraError(format!(
+                        "candidate is unattested: {name}={value}. ORACLE_REQUIRE_ATTESTATION=1 demands an exact-source candidate; run through scripts/rch_verify.sh with --base <sha> --clean-overlay so the verdict is attributable to current main"
+                    )));
+                }
+            }
+            if fields.get("gitDirty").map(String::as_str) == Some("true") {
+                return Err(Verdict::InfraError(
+                    "candidate was built from a dirty tree; a verdict from it is not attributable to a commit".to_owned(),
+                ));
+            }
+        }
+        Ok(Self { fields })
+    }
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::Digest as _;
+    let mut file = File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    // Hex-encoded by hand rather than through `{:x}` on the digest output: the
+    // `LowerHex` impl lives on the digest crate's array type and has moved
+    // between major versions, and a build break in the attestation path would
+    // read as an oracle defect rather than the dependency churn it is.
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest.as_slice() {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    Ok(hex)
+}
+
+// ── Harness knobs ──────────────────────────────────────────────────────────
+//
+// Deliberately NOT `EE_*`-prefixed: these configure the test harness, not `ee`
+// behavior, so they stay out of the `EE_*` registry contract in
+// `src/config/env_registry.rs` / `docs/env_vars.md`.
+
+fn knob(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn require_attestation() -> bool {
+    std::env::var("ORACLE_REQUIRE_ATTESTATION").is_ok_and(|value| value == "1")
+}
+
+// ── Process probes ─────────────────────────────────────────────────────────
+
+struct Fixture {
+    workspace: PathBuf,
+    data_home: PathBuf,
+    scratch: PathBuf,
+}
+
+fn ee_command(fixture: &Fixture, args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    command
+        .args(args)
+        .env_remove("EE_WORKSPACE")
+        .env_remove("EE_WORKSPACE_REGISTRY")
+        .env_remove("EE_DATABASE_PATH")
+        .env_remove("EE_INDEX_DIR")
+        .env("HOME", &fixture.data_home)
+        .env("XDG_DATA_HOME", &fixture.data_home)
+        .env("XDG_CONFIG_HOME", &fixture.data_home)
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env("EE_NO_COLOR", "1")
+        .arg("--workspace")
+        .arg(&fixture.workspace);
+    command
+}
+
+fn run_ee(fixture: &Fixture, args: &[&str]) -> Result<Value, String> {
+    let output = ee_command(fixture, args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("spawn ee {}: {error}", args.join(" ")))?;
+    if !output.status.success() {
+        // stderr is never silenced: it is the evidence for an INFRA verdict.
+        return Err(format!(
+            "ee {} exited {:?}\nstdout: {}\nstderr: {}",
+            args.join(" "),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        format!(
+            "ee {} stdout was not JSON: {error}\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
+/// Spawn `count` probes whose stdout/stderr go to files rather than pipes.
+///
+/// Files, not pipes, on purpose: a probe blocked writing into a full pipe
+/// buffer while the parent polls `try_wait` would deadlock, and that deadlock
+/// would be indistinguishable from the hang this oracle is meant to classify.
+fn spawn_probes(
+    fixture: &Fixture,
+    args: &[&str],
+    count: usize,
+    round: usize,
+    tag: &str,
+) -> Result<Vec<(Child, PathBuf, PathBuf)>, String> {
+    let mut children = Vec::with_capacity(count);
+    for index in 0..count {
+        let out_path = fixture
+            .scratch
+            .join(format!("{tag}-r{round}-p{index}.out.json"));
+        let err_path = fixture.scratch.join(format!("{tag}-r{round}-p{index}.err"));
+        let out = File::create(&out_path)
+            .map_err(|error| format!("create {}: {error}", out_path.display()))?;
+        let err = File::create(&err_path)
+            .map_err(|error| format!("create {}: {error}", err_path.display()))?;
+        let child = ee_command(fixture, args)
+            .stdout(Stdio::from(out))
+            .stderr(Stdio::from(err))
+            .spawn()
+            .map_err(|error| format!("spawn probe {index}: {error}"))?;
+        children.push((child, out_path, err_path));
+    }
+    Ok(children)
+}
+
+/// Collect probes under a deadline, converting a hang into a *resource* signal.
+///
+/// A timed-out probe is killed and recorded as `DidNotComplete`. It never
+/// becomes a divergence — a hung process has no opinion about ranking.
+fn collect_probes(
+    children: Vec<(Child, PathBuf, PathBuf)>,
+    timeout: Duration,
+    extract: fn(&Value) -> Record,
+) -> Vec<ProbeOutcome> {
+    let deadline = Instant::now() + timeout;
+    let mut outcomes = Vec::with_capacity(children.len());
+    for (mut child, out_path, err_path) in children {
+        // `Waited` / `TimedOut` / `WaitFailed` rather than an `Option<ExitStatus>`:
+        // a wait that errors is its own resource signal and must not be
+        // laundered into a synthetic exit status.
+        enum Wait {
+            Exited(std::process::ExitStatus),
+            TimedOut,
+            Failed(String),
+        }
+        let waited = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Wait::Exited(status),
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break Wait::TimedOut;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => break Wait::Failed(error.to_string()),
+            }
+        };
+        let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
+        let status = match waited {
+            Wait::Exited(status) => status,
+            Wait::TimedOut => {
+                outcomes.push(ProbeOutcome::DidNotComplete(format!(
+                    "timed out after {timeout:?} and was killed; stderr: {}",
+                    stderr.trim()
+                )));
+                continue;
+            }
+            Wait::Failed(error) => {
+                outcomes.push(ProbeOutcome::DidNotComplete(format!(
+                    "could not wait for the probe: {error}; stderr: {}",
+                    stderr.trim()
+                )));
+                continue;
+            }
+        };
+        if !status.success() {
+            outcomes.push(ProbeOutcome::DidNotComplete(format!(
+                "exited {:?}; stderr: {}",
+                status.code(),
+                stderr.trim()
+            )));
+            continue;
+        }
+        let body = match std::fs::read_to_string(&out_path) {
+            Ok(body) => body,
+            Err(error) => {
+                outcomes.push(ProbeOutcome::DidNotComplete(format!(
+                    "could not read probe stdout: {error}"
+                )));
+                continue;
+            }
+        };
+        match serde_json::from_str::<Value>(body.trim()) {
+            Ok(value) if value.pointer("/success") == Some(&Value::Bool(true)) => {
+                outcomes.push(ProbeOutcome::Completed(extract(&value)));
+            }
+            Ok(value) => outcomes.push(ProbeOutcome::DidNotComplete(format!(
+                "envelope did not report success: {value}"
+            ))),
+            Err(error) => outcomes.push(ProbeOutcome::DidNotComplete(format!(
+                "stdout was not JSON: {error}; stderr: {}",
+                stderr.trim()
+            ))),
+        }
+    }
+    outcomes
+}
+
+// ── Evidence ───────────────────────────────────────────────────────────────
+
+/// Write the `ee.test_event.v1` stream to a content-addressed file.
+///
+/// The file is named for the BLAKE3 of its own bytes, so the proof location is
+/// derived from the evidence rather than assigned to it, and two runs that
+/// observed the same thing land on the same path.
+fn write_content_addressed_evidence(dir: &Path, events: &[Value]) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    let mut body = String::new();
+    for event in events {
+        body.push_str(&event.to_string());
+        body.push('\n');
+    }
+    let digest = blake3::hash(body.as_bytes()).to_hex().to_string();
+    let path = dir.join(format!("{digest}.ee-test-event.jsonl"));
+    std::fs::write(&path, body.as_bytes())
+        .map_err(|error| format!("write {}: {error}", path.display()))?;
+    Ok(path)
+}
+
+fn event(phase: &str, status: &str, details: Value) -> Value {
+    serde_json::json!({
+        "schema": TEST_EVENT_SCHEMA,
+        "surface": "retrieval_index_regression_oracle",
+        "bead_id": BEAD_ID,
+        "phase": phase,
+        "status": status,
+        "details": details,
+    })
+}
+
+// ── The live oracle ────────────────────────────────────────────────────────
+
+/// Point the oracle at the candidate `ee` built into this test binary.
+///
+/// Invocation (see the bead; ScarletMill runs this on the attested RCH lane):
+///
+/// ```text
+/// ORACLE_REQUIRE_ATTESTATION=1 ORACLE_PROOF_DIR=<dir> \
+///   cargo test --locked --test integration_n_r -- \
+///   --ignored --exact --nocapture --test-threads=1 \
+///   retrieval_index_regression_oracle::concurrent_retrieval_over_one_generation_is_classified
+/// ```
+///
+/// The filter follows `--` so it reaches the test harness, not Cargo.
+///
+/// `--test-threads=1` matters: the oracle owns the machine's contention budget
+/// for its window. Sharing it with other tests turns `RaceAbsent` runs into
+/// `Inconclusive` ones and wastes the lane. `--nocapture` matters because the
+/// verdict, its reasoning, and the evidence path are all in the failure
+/// message, and a suppressed one is an unreadable result.
+#[test]
+#[ignore = "oracle: point it at a candidate deliberately (see bd-reality-core-convergence-1azkt.10); under swarm load the honest verdict is INCONCLUSIVE, which must not become a shared-suite red"]
+fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
+    let probes = knob("ORACLE_PROBES", 8);
+    let rounds = knob("ORACLE_ROUNDS", 3);
+    let quorum = knob("ORACLE_QUORUM", probes.saturating_sub(1).max(1));
+    let timeout = Duration::from_secs(knob("ORACLE_TIMEOUT_SECS", 120) as u64);
+
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let fixture = Fixture {
+        workspace: tempdir.path().join("workspace"),
+        data_home: tempdir.path().join("home"),
+        scratch: tempdir.path().join("scratch"),
+    };
+    for dir in [&fixture.workspace, &fixture.data_home, &fixture.scratch] {
+        std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    }
+
+    let mut events = Vec::new();
+    let proof_dir = std::env::var("ORACLE_PROOF_DIR")
+        .map_or_else(|_| tempdir.path().join("proof"), PathBuf::from);
+
+    // ── Attest the candidate before observing anything ──────────────────────
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
+    let version = match run_ee(&fixture, &["version", "--json"]) {
+        Ok(value) => value,
+        Err(error) => {
+            return finish(
+                &Verdict::InfraError(format!("candidate did not report a version: {error}")),
+                &proof_dir,
+                &mut events,
+            );
+        }
+    };
+    let identity = match CandidateIdentity::attest(&version, &binary) {
+        Ok(identity) => identity,
+        Err(verdict) => return finish(&verdict, &proof_dir, &mut events),
+    };
+    events.push(event(
+        "attest_candidate",
+        "pass",
+        serde_json::json!({ "identity": &identity.fields }),
+    ));
+
+    // ── Realistic isolated workspace ────────────────────────────────────────
+    let setup = (|| -> Result<(), String> {
+        run_ee(&fixture, &["init", "--json"])?;
+        let rules = [
+            "Run cargo fmt --check before every release tag.",
+            "Release verification must go through the remote RCH lane, never local cargo.",
+            "Clippy nursery and pedantic lints are errors in CI; fix them before a release.",
+            "Never publish a release without a SHA-256 checksum for every asset.",
+            "The release workflow triggers on a version tag pushed to main.",
+            "Backups must be verified before a release restore drill.",
+            "Search index generation must equal DB generation before release smoke tests.",
+            "Frontend CSS tweaks are unrelated to release verification.",
+        ];
+        for rule in rules {
+            run_ee(
+                &fixture,
+                &[
+                    "remember",
+                    rule,
+                    "--level",
+                    "procedural",
+                    "--kind",
+                    "rule",
+                    "--json",
+                ],
+            )?;
+        }
+        run_ee(&fixture, &["index", "rebuild", "--json"])?;
+        Ok(())
+    })();
+    if let Err(error) = setup {
+        return finish(
+            &Verdict::InfraError(format!("fixture setup failed: {error}")),
+            &proof_dir,
+            &mut events,
+        );
+    }
+
+    // ── Is there a valid, current generation to be invisible? ───────────────
+    let status = match run_ee(&fixture, &["index", "status", "--json"]) {
+        Ok(value) => value,
+        Err(error) => {
+            return finish(
+                &Verdict::InfraError(format!("index status unavailable: {error}")),
+                &proof_dir,
+                &mut events,
+            );
+        }
+    };
+    let db_generation = pointer_string(&status, "/data/dbGeneration");
+    let index_generation = pointer_string(&status, "/data/indexGeneration");
+    let health = pointer_string(&status, "/data/health").unwrap_or_default();
+    let index_generation_valid =
+        health == "ready" && db_generation.is_some() && db_generation == index_generation;
+    events.push(event(
+        "index_generation",
+        if index_generation_valid {
+            "pass"
+        } else {
+            "info"
+        },
+        serde_json::json!({
+            "health": health,
+            "dbGeneration": db_generation,
+            "indexGeneration": index_generation,
+            "embeddingMode": pointer_string(&status, "/data/embedding/mode"),
+            "embeddingSemantic": pointer_string(&status, "/data/embedding/semantic"),
+            "fastModelId": pointer_string(&status, "/data/embedding/fast_model_id"),
+        }),
+    ));
+
+    let search_args = [
+        "search",
+        "release verification remote lane",
+        "--limit",
+        "5",
+        "--json",
+    ];
+    let pack_args = [
+        "pack",
+        "prepare release",
+        "--read-only",
+        "--max-tokens",
+        "1500",
+        "--json",
+    ];
+
+    // ── Serial baselines, cold then warm ────────────────────────────────────
+    // The cold baseline is the first touch after the rebuild (cold model/index
+    // caches); the warm one follows it. Both must agree, or the candidate is
+    // already non-deterministic serially and the concurrent verdict would be
+    // unreadable.
+    let cold = match run_ee(&fixture, &search_args) {
+        Ok(value) => search_record(&value),
+        Err(error) => {
+            return finish(
+                &Verdict::InfraError(format!("cold serial baseline failed: {error}")),
+                &proof_dir,
+                &mut events,
+            );
+        }
+    };
+    let warm = match run_ee(&fixture, &search_args) {
+        Ok(value) => search_record(&value),
+        Err(error) => {
+            return finish(
+                &Verdict::InfraError(format!("warm serial baseline failed: {error}")),
+                &proof_dir,
+                &mut events,
+            );
+        }
+    };
+    if cold != warm {
+        let verdict = Verdict::RaceReproduced(vec![format!(
+            "serial cold and warm baselines already disagree without any concurrency: cold={cold:?} warm={warm:?}"
+        )]);
+        return finish(&verdict, &proof_dir, &mut events);
+    }
+    let pack_baseline = match run_ee(&fixture, &pack_args) {
+        Ok(value) => pack_record(&value),
+        Err(error) => {
+            return finish(
+                &Verdict::InfraError(format!("serial pack baseline failed: {error}")),
+                &proof_dir,
+                &mut events,
+            );
+        }
+    };
+    events.push(event(
+        "serial_baseline",
+        "pass",
+        serde_json::json!({ "search": warm, "pack": pack_baseline }),
+    ));
+
+    // ── Concurrent rounds ───────────────────────────────────────────────────
+    let mut round_verdicts = Vec::new();
+    for round in 0..rounds {
+        for (kind, args, baseline, extract) in [
+            (
+                ProbeKind::Search,
+                search_args.as_slice(),
+                &warm,
+                search_record as fn(&Value) -> Record,
+            ),
+            (
+                ProbeKind::Pack,
+                pack_args.as_slice(),
+                &pack_baseline,
+                pack_record as fn(&Value) -> Record,
+            ),
+        ] {
+            let children = match spawn_probes(&fixture, args, probes, round, kind.label()) {
+                Ok(children) => children,
+                Err(error) => {
+                    return finish(
+                        &Verdict::InfraError(format!("could not spawn probes: {error}")),
+                        &proof_dir,
+                        &mut events,
+                    );
+                }
+            };
+            let outcomes = collect_probes(children, timeout, extract);
+            let verdict = classify_round(kind, baseline, &outcomes, quorum, index_generation_valid);
+            events.push(event(
+                "concurrent_round",
+                match &verdict {
+                    Verdict::RaceAbsent => "pass",
+                    _ => "fail",
+                },
+                serde_json::json!({
+                    "round": round,
+                    "kind": kind.label(),
+                    "probes": probes,
+                    "quorum": quorum,
+                    "verdict": verdict.class(),
+                    "detail": verdict.detail(),
+                    "completed": outcomes.iter().filter(|outcome| matches!(outcome, ProbeOutcome::Completed(_))).count(),
+                    "incomplete": outcomes.iter().filter_map(|outcome| match outcome {
+                        ProbeOutcome::DidNotComplete(reason) => Some(reason.clone()),
+                        ProbeOutcome::Completed(_) => None,
+                    }).collect::<Vec<_>>(),
+                }),
+            ));
+            round_verdicts.push(verdict);
+        }
+    }
+
+    // ── Durable mutation under read-only ────────────────────────────────────
+    // Every probe above was a read (`search`, and `pack --read-only`). If the
+    // generation moved, something wrote during a read-only window.
+    match run_ee(&fixture, &["index", "status", "--json"]) {
+        Ok(after) => {
+            let after_db = pointer_string(&after, "/data/dbGeneration");
+            let after_index = pointer_string(&after, "/data/indexGeneration");
+            if after_db != db_generation || after_index != index_generation {
+                round_verdicts.push(Verdict::RaceReproduced(vec![format!(
+                    "durable mutation under read-only probes: generation moved from db={db_generation:?}/index={index_generation:?} to db={after_db:?}/index={after_index:?}"
+                )]));
+            }
+        }
+        Err(error) => round_verdicts.push(Verdict::InfraError(format!(
+            "post-probe index status unavailable, so durable mutation could not be checked: {error}"
+        ))),
+    }
+
+    let verdict = fold_rounds(&round_verdicts);
+    events.push(event(
+        "verdict",
+        if verdict.is_product_pass() {
+            "pass"
+        } else {
+            "fail"
+        },
+        serde_json::json!({
+            "verdict": verdict.class(),
+            "detail": verdict.detail(),
+            "identity": &identity.fields,
+        }),
+    ));
+    finish(&verdict, &proof_dir, &mut events)
+}
+
+/// Persist evidence and map the verdict onto a test outcome.
+///
+/// Only `RACE_ABSENT` passes. Every other class fails with its label first, so
+/// a reader never has to infer whether they are looking at a regression, a
+/// starved box, or broken infrastructure.
+fn finish(verdict: &Verdict, proof_dir: &Path, events: &mut Vec<Value>) -> TestResult {
+    let proof = write_content_addressed_evidence(proof_dir, events)
+        .unwrap_or_else(|error| PathBuf::from(format!("<evidence unwritable: {error}>")));
+    if verdict.is_product_pass() {
+        return Ok(());
+    }
+    Err(format!(
+        "{}: {}\nevidence: {}",
+        verdict.class(),
+        verdict.detail(),
+        proof.display()
+    ))
+}
+
+// ── Always-on tests of the classifier itself ───────────────────────────────
+//
+// The live oracle is `#[ignore]`; these are not. They are what keeps the
+// instrument from rotting, and they are the actual proof that the three-arm
+// separation works rather than merely being described in a doc comment.
+
+#[cfg(test)]
+mod classifier {
+    use super::{ProbeKind, ProbeOutcome, Record, Verdict, classify_round, fold_rounds};
+
+    fn baseline() -> Record {
+        let mut record = Record::new();
+        record.insert("results.order".to_owned(), "mem_a@1.0|mem_b@0.5".to_owned());
+        record.insert("embed_backend".to_owned(), "hash_fallback".to_owned());
+        record.insert("degraded.codes".to_owned(), String::new());
+        record
+    }
+
+    fn agreeing() -> ProbeOutcome {
+        ProbeOutcome::Completed(baseline())
+    }
+
+    #[test]
+    fn starvation_is_inconclusive_and_never_a_race() {
+        // The arm that matters most: seven probes never completed. That is a
+        // busy box, not a regression, and it must not be reported as either a
+        // race or a clean bill of health.
+        let mut outcomes = vec![agreeing()];
+        for index in 0..7 {
+            outcomes.push(ProbeOutcome::DidNotComplete(format!(
+                "#{index} timed out after 120s"
+            )));
+        }
+        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 6, true);
+        assert_eq!(verdict.class(), "INCONCLUSIVE", "got {verdict:?}");
+        assert!(
+            verdict.detail().contains("resource signal"),
+            "the message must say why it is not a race: {}",
+            verdict.detail()
+        );
+    }
+
+    #[test]
+    fn agreement_below_quorum_is_inconclusive_not_absent() {
+        // Two probes agreed and six never ran. Agreement among survivors is
+        // not evidence of absence — this is the false-green direction.
+        let outcomes = vec![
+            agreeing(),
+            agreeing(),
+            ProbeOutcome::DidNotComplete("killed".to_owned()),
+        ];
+        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 6, true);
+        assert_eq!(verdict.class(), "INCONCLUSIVE", "got {verdict:?}");
+    }
+
+    #[test]
+    fn quorum_of_agreeing_probes_is_absent() {
+        let outcomes = vec![
+            agreeing(),
+            agreeing(),
+            agreeing(),
+            agreeing(),
+            agreeing(),
+            agreeing(),
+        ];
+        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 6, true);
+        assert_eq!(verdict.class(), "RACE_ABSENT", "got {verdict:?}");
+    }
+
+    #[test]
+    fn divergent_order_reproduces_the_race() {
+        let mut divergent = baseline();
+        divergent.insert("results.order".to_owned(), "mem_b@0.5|mem_a@1.0".to_owned());
+        let outcomes = vec![agreeing(), ProbeOutcome::Completed(divergent)];
+        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 2, true);
+        assert_eq!(verdict.class(), "RACE_REPRODUCED", "got {verdict:?}");
+    }
+
+    #[test]
+    fn divergence_outranks_a_missed_quorum() {
+        // One disagreement plus mass starvation is still a reproduction: other
+        // probes failing to run cannot un-observe what two completed probes
+        // showed.
+        let mut divergent = baseline();
+        divergent.insert("embed_backend".to_owned(), "model2vec".to_owned());
+        let outcomes = vec![
+            agreeing(),
+            ProbeOutcome::Completed(divergent),
+            ProbeOutcome::DidNotComplete("timeout".to_owned()),
+            ProbeOutcome::DidNotComplete("timeout".to_owned()),
+        ];
+        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 8, true);
+        assert_eq!(verdict.class(), "RACE_REPRODUCED", "got {verdict:?}");
+    }
+
+    #[test]
+    fn an_empty_probe_is_divergence_not_agreement() {
+        // The lost-lexical-arm signature: a process that fails the index open
+        // serves zero results. Counting that as "agreement about emptiness"
+        // would hide the exact fault this oracle hunts.
+        let mut empty = baseline();
+        empty.insert("results.order".to_owned(), String::new());
+        let outcomes = vec![agreeing(), ProbeOutcome::Completed(empty)];
+        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes, 2, true);
+        assert_eq!(verdict.class(), "RACE_REPRODUCED", "got {verdict:?}");
+        assert!(
+            verdict.detail().contains("not agreement"),
+            "message must name the abstention: {}",
+            verdict.detail()
+        );
+    }
+
+    #[test]
+    fn a_vacuous_baseline_is_infra_error_never_a_pass() {
+        // If a JSON path is renamed, every probe reports the same nothing and
+        // a naive comparison goes green while proving nothing.
+        let mut vacuous = baseline();
+        vacuous.insert("results.order".to_owned(), String::new());
+        let outcomes = vec![ProbeOutcome::Completed(vacuous.clone())];
+        let verdict = classify_round(ProbeKind::Search, &vacuous, &outcomes, 1, true);
+        assert_eq!(verdict.class(), "INFRA_ERROR", "got {verdict:?}");
+
+        let mut missing = baseline();
+        missing.remove("embed_backend");
+        let verdict = classify_round(ProbeKind::Search, &missing, &[], 1, true);
+        assert_eq!(verdict.class(), "INFRA_ERROR", "got {verdict:?}");
+    }
+
+    #[test]
+    fn invisible_index_only_counts_against_a_valid_generation() {
+        let mut invisible = baseline();
+        invisible.insert("degraded.codes".to_owned(), "index_missing".to_owned());
+        let outcomes = vec![ProbeOutcome::Completed(invisible)];
+
+        // With a healthy current generation this is a semantic fault.
+        let verdict = classify_round(ProbeKind::Search, &baseline(), &outcomes.clone(), 1, true);
+        assert_eq!(verdict.class(), "RACE_REPRODUCED", "got {verdict:?}");
+
+        // Without one, an absent index is a configuration fact, not a race —
+        // but the degraded-code mismatch against the baseline is still caught.
+        let mut invisible_baseline = baseline();
+        invisible_baseline.insert("degraded.codes".to_owned(), "index_missing".to_owned());
+        let verdict = classify_round(ProbeKind::Search, &invisible_baseline, &outcomes, 1, false);
+        assert_eq!(verdict.class(), "RACE_ABSENT", "got {verdict:?}");
+    }
+
+    #[test]
+    fn folding_rounds_lets_one_observation_outrank_many_clean_ones() {
+        let clean = Verdict::RaceAbsent;
+        let dirty = Verdict::RaceReproduced(vec!["order flipped".to_owned()]);
+        assert_eq!(
+            fold_rounds(&[clean.clone(), dirty, clean.clone()]).class(),
+            "RACE_REPRODUCED"
+        );
+        assert_eq!(fold_rounds(&[clean.clone(), clean]).class(), "RACE_ABSENT");
+        assert_eq!(
+            fold_rounds(&[
+                Verdict::RaceAbsent,
+                Verdict::Inconclusive("busy".to_owned())
+            ])
+            .class(),
+            "INCONCLUSIVE"
+        );
+        // Infra outranks everything: an unattested candidate has no verdict.
+        assert_eq!(
+            fold_rounds(&[
+                Verdict::RaceReproduced(vec!["x".to_owned()]),
+                Verdict::InfraError("unattested".to_owned()),
+            ])
+            .class(),
+            "INFRA_ERROR"
+        );
+        assert_eq!(fold_rounds(&[]).class(), "INFRA_ERROR");
+    }
+
+    #[test]
+    fn only_race_absent_is_a_product_pass() {
+        assert!(Verdict::RaceAbsent.is_product_pass());
+        for verdict in [
+            Verdict::RaceReproduced(vec!["x".to_owned()]),
+            Verdict::Inconclusive("busy".to_owned()),
+            Verdict::InfraError("unattested".to_owned()),
+        ] {
+            assert!(
+                !verdict.is_product_pass(),
+                "{} must never count as a product pass",
+                verdict.class()
+            );
+        }
+    }
+}

@@ -205,6 +205,8 @@ mod resource_admission_queue_pressure_conformance;
 mod resource_admission_report_conformance;
 #[path = "../response_envelope_conformance_matrix.rs"]
 mod response_envelope_conformance_matrix;
+#[path = "../retrieval_index_regression_oracle.rs"]
+mod retrieval_index_regression_oracle;
 #[path = "../retrieval_pipeline_monotonic.rs"]
 mod retrieval_pipeline_monotonic;
 #[path = "../rule_mark_update_e2e.rs"]
