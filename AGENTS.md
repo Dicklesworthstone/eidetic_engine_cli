@@ -1402,6 +1402,12 @@ commit with an explicit pathspec.
 
 Every 90 days, or whenever `scripts/vision-coverage.sh --json` reports
 `gap_percentage > 5`, run the `reality-check-for-project` skill end-to-end.
+That threshold is enforced, not advisory: the gate exits non-zero on an
+ordinary commit once the gap exceeds it, and the report carries
+`max_gap_percentage` and `reality_check_due` so consumers do not hardcode the
+number. Release-tag commits still fail on any gap at all. Override the
+threshold with `VISION_COVERAGE_MAX_GAP_PERCENT` when doing so is a deliberate,
+stated decision.
 The active bridge plan lives at `CLOSE_THE_GAP_PLAN.md` while a bridge is
 in flight. When a bridge completes its parts and substantially executes, the
 file is archived to `docs/archive/close_the_gap_<YYYY-MM>.md` (e.g. the

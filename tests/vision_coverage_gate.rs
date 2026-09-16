@@ -161,6 +161,52 @@ fn extract_command_path(cli: &Cli) -> String {
     .map_err(|error| format!("failed to write fixture cli module: {error}"))
 }
 
+/// Build a fixture with a chosen documented/implemented split, so the resulting
+/// gap percentage is CONSTRUCTED rather than whatever this repo happens to be.
+///
+/// `vision_coverage_blocks_release_tag_when_gap_remains` branches on the
+/// observed gap, so when the repo is at 0% (it is today: 141/141) that test
+/// asserts SUCCESS and never exercises the failure path. A gate's proof that it
+/// can fail must not depend on a value it does not control.
+fn write_sized_vision_fixture(root: &Path, documented: usize, implemented: usize) -> TestResult {
+    fs::create_dir_all(root.join("src").join("cli"))
+        .map_err(|error| format!("failed to create fixture src/cli: {error}"))?;
+    fs::create_dir_all(root.join(".beads"))
+        .map_err(|error| format!("failed to create fixture .beads: {error}"))?;
+    fs::write(root.join(".beads").join("issues.jsonl"), "")
+        .map_err(|error| format!("failed to write fixture beads: {error}"))?;
+    fs::write(
+        root.join("COMPREHENSIVE_PLAN.md"),
+        "\
+## 20. CLI surface
+## 21. Next
+## 29. Walking skeleton
+## 30. Next
+### 20.1 Top-level
+COMMANDS:
+GLOBAL OPTIONS:
+### 20.2 Next
+",
+    )
+    .map_err(|error| format!("failed to write fixture plan: {error}"))?;
+
+    let mut readme = String::from("# Fixture\n\n## Command Reference\n\n");
+    for index in 0..documented {
+        readme.push_str(&format!("`ee cmd{index:02}`\n\n"));
+    }
+    readme.push_str("## Configuration\n");
+    fs::write(root.join("README.md"), readme)
+        .map_err(|error| format!("failed to write fixture README: {error}"))?;
+
+    let mut cli = String::from("\nfn extract_command_path(cli: &Cli) -> String {\n");
+    for index in 0..implemented {
+        cli.push_str(&format!("    \"cmd{index:02}\".to_string()\n"));
+    }
+    cli.push_str("}\n    /// Returns a stable identifier suitable\n");
+    fs::write(root.join("src").join("cli").join("mod.rs"), cli)
+        .map_err(|error| format!("failed to write fixture cli module: {error}"))
+}
+
 fn read_report(report_path: &PathBuf) -> Result<serde_json::Value, String> {
     let text = fs::read_to_string(report_path)
         .map_err(|error| format!("failed to read {}: {error}", report_path.display()))?;
@@ -464,4 +510,79 @@ fn vision_coverage_compare_ref_includes_delta_report() -> TestResult {
         )?;
     }
     Ok(())
+}
+#[test]
+fn vision_coverage_fails_above_the_published_cadence_threshold() -> TestResult {
+    // AGENTS.md "Reality-Check Cadence" publishes gap_percentage > 5. 2 of 21
+    // documented surfaces missing is 9.52%, which is over it.
+    let fixture_root = unique_fixture_root("cadence-over")?;
+    write_sized_vision_fixture(&fixture_root, 21, 19)?;
+    let report_path = fixture_root.join("report.json");
+    // NOT a release tag: this is the path that used to exit 0 at any gap.
+    let output = run_gate_in_dir(&fixture_root, &report_path, false, None)?;
+
+    let report = read_report(&report_path)?;
+    let gap = report
+        .pointer("/gap_percentage")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| "gap_percentage is not a number".to_owned())?;
+    ensure(
+        gap > 5.0,
+        &format!("fixture must construct a gap over 5%, got {gap}"),
+    )?;
+    ensure(
+        pointer_str(&report, "/status")? == "fail",
+        "an over-threshold gap must report status fail",
+    )?;
+    ensure(
+        report
+            .pointer("/reality_check_due")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true),
+        "the report must say the reality-check cadence is due",
+    )?;
+    ensure(
+        !output.status.success(),
+        &format!(
+            "the gate must exit non-zero above the cadence threshold on an ordinary commit\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
+#[test]
+fn vision_coverage_warns_below_the_published_cadence_threshold() -> TestResult {
+    // The control arm. Without it, the test above could pass because ANY gap
+    // fails, which would be a different (and stricter-than-documented) gate.
+    // 1 of 21 missing is 4.76%, under the threshold.
+    let fixture_root = unique_fixture_root("cadence-under")?;
+    write_sized_vision_fixture(&fixture_root, 21, 20)?;
+    let report_path = fixture_root.join("report.json");
+    let output = run_gate_in_dir(&fixture_root, &report_path, false, None)?;
+
+    let report = read_report(&report_path)?;
+    let gap = report
+        .pointer("/gap_percentage")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| "gap_percentage is not a number".to_owned())?;
+    ensure(
+        gap > 0.0 && gap <= 5.0,
+        &format!("fixture must construct a non-zero gap at or under 5%, got {gap}"),
+    )?;
+    ensure(
+        pointer_str(&report, "/status")? == "warn",
+        "an under-threshold gap must still warn rather than fail",
+    )?;
+    ensure(
+        report
+            .pointer("/reality_check_due")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false),
+        "the reality-check cadence must not be due under the threshold",
+    )?;
+    ensure(
+        output.status.success(),
+        "an under-threshold gap must not fail an ordinary commit",
+    )
 }

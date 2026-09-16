@@ -9,9 +9,14 @@
 #   sh ./scripts/vision-coverage.sh --json
 #   sh ./scripts/vision-coverage.sh --release-tag
 #
-# The gate warns on ordinary commits when gaps remain. It fails on release-tag
-# commits so release assets cannot be cut while documented surfaces are missing
-# or only wired to abstention sentinels.
+# The gate fails on release-tag commits when ANY gap remains, so release assets
+# cannot be cut while documented surfaces are missing or only wired to
+# abstention sentinels.
+#
+# It also fails on ordinary commits once the gap exceeds the cadence threshold
+# published in AGENTS.md ("Reality-Check Cadence": gap_percentage > 5). Below
+# that threshold an ordinary commit warns and exits 0. Override the threshold
+# with VISION_COVERAGE_MAX_GAP_PERCENT.
 
 set -eu
 
@@ -21,13 +26,17 @@ CLI_MOD="src/cli/mod.rs"
 BEADS_FILE=".beads/issues.jsonl"
 REPORT_FILE=".vision-coverage-report.json"
 COMPARE_REF="${VISION_COVERAGE_COMPARE_REF:-}"
+# AGENTS.md "Reality-Check Cadence" publishes `gap_percentage > 5` as the point
+# at which the reality-check skill must run. Keeping the number here, not only
+# in prose, is what lets the gate act on it.
+MAX_GAP_PERCENT="${VISION_COVERAGE_MAX_GAP_PERCENT:-5}"
 SOURCE_REF=""
 
 JSON_OUTPUT=false
 FORCE_RELEASE_TAG=false
 
 usage() {
-    sed -n '2,13p' "$0" | sed 's/^# //' | sed 's/^#//'
+    sed -n '2,18p' "$0" | sed 's/^# //' | sed 's/^#//'
 }
 
 while [ "$#" -gt 0 ]; do
@@ -483,7 +492,8 @@ build_report() {
         --argjson documented "$(documented_commands | json_array_from_lines)" \
         --argjson implemented "$(implemented_commands | json_array_from_lines)" \
         --argjson stubs "$(stub_surfaces)" \
-        --argjson release_tag "$RELEASE_TAG" '
+        --argjson release_tag "$RELEASE_TAG" \
+        --argjson max_gap "$MAX_GAP_PERCENT" '
         def command_surface($cmd):
           if $cmd | startswith("audit ") then "audit"
           elif $cmd | startswith("causal ") then "causal"
@@ -521,12 +531,18 @@ build_report() {
         | ($stubbed | length) as $stubbed_count
         | ($missing | length) as $missing_count
         | (if $total == 0 then 0 else (((($stubbed_count + $missing_count) * 10000 / $total) | round) / 100) end) as $gap
-        | (if $gap == 0 then "pass" elif $release_tag then "fail" else "warn" end) as $status
+        | ($gap > $max_gap) as $reality_check_due
+        | (if $gap == 0 then "pass"
+           elif $release_tag then "fail"
+           elif $reality_check_due then "fail"
+           else "warn" end) as $status
         | {
             schema: "ee.vision_coverage.v1",
             generated_at: $generated_at,
             status: $status,
             release_tag_commit: $release_tag,
+            max_gap_percentage: $max_gap,
+            reality_check_due: $reality_check_due,
             sources: {
               git_ref: (if $source_ref == "" then null else $source_ref end),
               readme: "README.md#Command Reference",
@@ -635,7 +651,13 @@ case "$STATUS" in
         exit 0
         ;;
     fail)
-        echo "error: vision coverage gap is ${GAP}% on a release-tag commit"
+        if [ "$RELEASE_TAG" = true ]; then
+            echo "error: vision coverage gap is ${GAP}% on a release-tag commit"
+        else
+            MAX_GAP=$(printf "%s\n" "$REPORT_JSON" | jq -r '.max_gap_percentage')
+            echo "error: vision coverage gap is ${GAP}%, above the ${MAX_GAP}% reality-check cadence threshold in AGENTS.md"
+            echo "hint: run the reality-check-for-project skill end-to-end, or raise VISION_COVERAGE_MAX_GAP_PERCENT deliberately"
+        fi
         exit 1
         ;;
     *)
