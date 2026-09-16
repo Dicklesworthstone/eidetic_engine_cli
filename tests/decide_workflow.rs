@@ -4,6 +4,7 @@ use ee::core::decide::{
     DECIDE_LIST_SCHEMA_V1, DECIDE_RECORD_SCHEMA_V1, DECIDE_REVISIT_SCHEMA_V1, DecideListOptions,
     DecideRecordOptions, DecideRevisitOptions, decide_list, decide_record, decide_revisit,
 };
+use ee::core::init::{InitOptions, init_workspace};
 use ee::models::ProcessExitCode;
 use serde_json::{Value, json};
 use std::ffi::OsString;
@@ -39,7 +40,32 @@ fn invoke(args: &[&str]) -> (ProcessExitCode, String, String) {
 #[test]
 fn decide_record_list_revisit_json_shape_is_stable() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-    std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+    // `decide record` has not created a store since 91cf7bcbd ("fix(storage):
+    // reject storeless write and search addresses", 2026-08-11): ordinary write
+    // surfaces preflight the addressed path through
+    // `core::ensure_addressed_database_exists` so a mistyped `--workspace`
+    // cannot plant a new store, and `ee init` owns store creation
+    // (src/core/mod.rs:876-882).
+    //
+    // This fixture predates that change and made the `.ee` DIRECTORY, relying on
+    // the write path to migrate a database into it. Its siblings in this file
+    // already run `ee init` through the CLI (`:152`, `:237`); this one uses the
+    // library surface, so it inits the same way. `init_workspace` creates
+    // <workspace>/.ee/ee.db, which is exactly what the `database_path: None`
+    // below resolves to -- no addressed path has to move.
+    let report = init_workspace(&InitOptions {
+        workspace_path: temp.path().to_path_buf(),
+        dry_run: false,
+        repair_plan: false,
+        force: false,
+        allow_symlink: false,
+        skip_boilerplate: true,
+    });
+    if !report.status.is_success() {
+        return Err(format!(
+            "initialize decide workflow fixture workspace failed: {report:?}"
+        ));
+    }
     let now = fixed_now();
 
     let recorded = decide_record(&DecideRecordOptions {
