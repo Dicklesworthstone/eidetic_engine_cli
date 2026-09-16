@@ -90,3 +90,113 @@ mod tests {
         );
     }
 }
+
+/// Prefixes that mark a filesystem path as sensitive in public output.
+///
+/// This is the union of the hand-maintained lists that used to live in each
+/// redactor, reduced to a minimal cover: every longer entry those lists carried
+/// (`/etc/ssh/`, `/var/lib/docker/`, `/private/var/run/`) is already implied by
+/// a shorter one here. Twenty copies diverged into three incompatible families,
+/// and `/root/` reached exactly one of them, so a provenance URI naming
+/// `/root/.ssh/id_rsa` was redacted on one surface and emitted verbatim by
+/// nineteen (bd-redactor-prefix-divergence-lsy52).
+const SENSITIVE_PATH_PREFIXES: &[&str] = &[
+    "/Users/",
+    "/Volumes/",
+    "/__w/",
+    "/app/",
+    "/data/",
+    "/dev/",
+    "/dp/",
+    "/etc/",
+    "/github/workspace/",
+    "/home/",
+    "/media/",
+    "/mnt/",
+    "/private/",
+    "/proc/",
+    "/repo/",
+    "/root/",
+    "/run/",
+    "/sys/",
+    "/tmp/",
+    "/var/",
+    "/workspace/",
+    "/workspaces/",
+];
+
+/// Is the byte at `start` the first character of a redactable path?
+///
+/// Three categories, because a prefix list alone cannot see the last two: a
+/// sensitive POSIX prefix, a Windows drive path (`C:\` or `C:/`), or a UNC
+/// share. A `file://` URI is redactable whatever follows its scheme, since the
+/// scheme itself declares the value to be a filesystem location.
+///
+/// The drive and UNC forms additionally require a token boundary before them so
+/// that a bare `C:` inside a word is not mistaken for a path root.
+fn sensitive_path_starts_at(value: &str, start: usize) -> bool {
+    let candidate = &value[start..];
+    if candidate
+        .get(.."file://".len())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file://"))
+    {
+        return true;
+    }
+    if SENSITIVE_PATH_PREFIXES
+        .iter()
+        .any(|prefix| candidate.starts_with(prefix))
+    {
+        return true;
+    }
+
+    let token_boundary_before = value[..start].chars().next_back().is_none_or(|previous| {
+        previous.is_whitespace() || matches!(previous, '"' | '\'' | '`' | '(' | '[' | '{' | '=')
+    });
+    if !token_boundary_before {
+        return false;
+    }
+
+    let bytes = candidate.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
+    {
+        return true;
+    }
+    candidate.starts_with(r"\\")
+}
+
+/// Replace every redactable path in `value` with `[REDACTED_PATH]`.
+///
+/// `boundary` decides where each redacted run ends and stays caller-supplied on
+/// purpose: prose surfaces terminate a path at whitespace, whole-field surfaces
+/// (a captured source path may legitimately contain spaces) terminate only at a
+/// newline. Sharing that decision would either eat the words after a path in an
+/// error message or truncate a real path at its first space, so only the
+/// *start* predicate is shared.
+pub(crate) fn redact_path_like_segments(value: &str, boundary: fn(char) -> bool) -> String {
+    const REDACTED_PATH: &str = "[REDACTED_PATH]";
+
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some(start) = value[cursor..]
+            .char_indices()
+            .map(|(relative, _)| cursor + relative)
+            .find(|start| sensitive_path_starts_at(value, *start))
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+
+        output.push_str(&value[cursor..start]);
+        output.push_str(REDACTED_PATH);
+        cursor = value[start..]
+            .char_indices()
+            .skip(1)
+            .find_map(|(index, ch)| boundary(ch).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}

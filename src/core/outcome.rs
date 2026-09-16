@@ -866,46 +866,13 @@ fn redact_outcome_public_source_ref(value: &str) -> String {
 }
 
 fn redact_outcome_public_path_like_segments(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    let mut cursor = 0;
-    while cursor < value.len() {
-        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
-        else {
-            output.push_str(&value[cursor..]);
-            break;
-        };
-        let start = cursor + relative_index;
-        if !outcome_public_path_starts_sensitive_segment(&value[start..]) {
-            output.push_str(&value[cursor..=start]);
-            cursor = start + 1;
-            continue;
-        }
-
-        output.push_str(&value[cursor..start]);
-        output.push_str("[REDACTED_PATH]");
-        cursor = value[start..]
-            .char_indices()
-            .find_map(|(index, c)| outcome_public_path_boundary(c).then_some(start + index))
-            .unwrap_or(value.len());
-    }
-    output
-}
-
-fn outcome_public_path_starts_sensitive_segment(value: &str) -> bool {
-    const PREFIXES: &[&str] = &[
-        "/Users/",
-        "/Volumes/",
-        "/private/",
-        "/var/",
-        "/tmp/",
-        "/home/",
-        "/data/",
-        "/dp/",
-        "/workspace/",
-        "/repo/",
-        "/etc/",
-    ];
-    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+    // bd-redactor-prefix-divergence-lsy52: the prefix list that used to live
+    // here was one of twenty hand-copied copies that had drifted into three
+    // incompatible families. The shared predicate additionally recognises
+    // Windows drive paths and UNC shares, which this walker could never reach
+    // because it only ever scanned for '/'. The boundary stays local: this
+    // surface redacts prose, so a path ends at whitespace.
+    crate::util::redact_path_like_segments(value, outcome_public_path_boundary)
 }
 
 fn outcome_public_path_boundary(c: char) -> bool {
