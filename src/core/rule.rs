@@ -4580,31 +4580,6 @@ fn redact_rule_public_path_like_segments(value: &str) -> String {
     crate::util::redact_path_like_segments(value, rule_public_path_boundary)
 }
 
-/// Length of an absolute-path-like prefix at the start of `remaining`, if any.
-///
-/// Matches one of the Unix prefixes verbatim, or any ASCII alphabetic drive
-/// letter followed by `:` and either `\` or `/`. This covers both casing
-/// variants (`C:\`, `c:\`) and both Windows separator conventions (`C:\`, `C:/`),
-/// mirroring `search_projection_path_prefix_len` from bd-gbfzk.
-fn rule_public_path_prefix_len(remaining: &str, unix_prefixes: &[&str]) -> Option<usize> {
-    if let Some(prefix) = unix_prefixes
-        .iter()
-        .find(|prefix| remaining.starts_with(**prefix))
-    {
-        return Some(prefix.len());
-    }
-
-    let bytes = remaining.as_bytes();
-    if bytes.first().is_some_and(|byte| byte.is_ascii_alphabetic())
-        && matches!(bytes.get(1), Some(b':'))
-        && matches!(bytes.get(2), Some(b'\\' | b'/'))
-    {
-        Some(3)
-    } else {
-        None
-    }
-}
-
 fn rule_public_path_boundary(c: char) -> bool {
     c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
 }
