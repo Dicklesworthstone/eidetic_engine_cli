@@ -26,6 +26,7 @@ use ee::graph::{
 use ee::models::model_registry::{
     ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
 };
+use ee::obs::strip_volatile_fields;
 
 type TestResult = Result<(), String>;
 
@@ -588,7 +589,7 @@ case "$cmd" in
     printf '{"sessions":[{"path":"%s","workspace":"%s","agent":"codex","started_at":"2026-04-30T00:00:00Z","message_count":2,"token_count":42,"content_hash":"hash-session-a"}]}\n' "$EE_FAKE_CASS_SESSION" "$EE_FAKE_CASS_WORKSPACE"
     ;;
   view)
-    printf '{"lines":[{"line":1,"content":"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"remember this\"}}"}]}\n'
+    printf '{"lines":[{"line":1,"content":"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"remember this\"}}"}],"total_lines":1}\n'
     ;;
   *)
     echo "unexpected cass command: $cmd" >&2
@@ -1115,15 +1116,34 @@ fn status_json_stdout_is_stable_machine_data() -> TestResult {
     )?;
     ensure_contains(&stdout, "\"success\":true", "status JSON success flag")?;
     ensure_contains(&stdout, "\"command\":\"status\"", "status JSON command")?;
-    ensure_contains(
-        &stdout,
-        "\"runtime\":\"ready\"",
-        "status JSON runtime state",
+    // This used to read `contains("\"runtime\":\"ready\"")` under the label
+    // "runtime state", but that substring matches `capabilities.runtime` -- a
+    // different field -- so it passed at every field profile including ones
+    // that omit the runtime object entirely. Assert the field, not a substring.
+    let status_json: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("status stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &status_json["data"]["capabilities"]["runtime"],
+        &serde_json::json!("ready"),
+        "status JSON runtime capability",
     )?;
-    ensure_contains(
-        &stdout,
-        "\"engine\":\"asupersync\"",
-        "status JSON runtime engine",
+    // `runtime.engine` is gated behind `profile.include_arrays()` (standard and
+    // full); the default profile is summary, which legitimately omits it.
+    // Pin both halves so a regression in either direction is visible.
+    ensure_equal(
+        &status_json["data"]["runtime"],
+        &serde_json::Value::Null,
+        "status JSON omits the runtime object at the default summary profile",
+    )?;
+    let standard = run_ee(&["status", "--json", "--fields", "standard"])?;
+    let standard_stdout = String::from_utf8_lossy(&standard.stdout);
+    ensure_command_success(&standard, "status --fields standard")?;
+    let standard_json: serde_json::Value = serde_json::from_str(&standard_stdout)
+        .map_err(|error| format!("standard status stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &standard_json["data"]["runtime"]["engine"],
+        &serde_json::json!("asupersync"),
+        "status JSON runtime engine at the standard profile",
     )?;
     ensure_ends_with(&stdout, '\n', "status JSON trailing newline")
 }
@@ -1406,9 +1426,11 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         &serde_json::json!(1),
         "model status bundled registered count",
     )?;
+    // ADR 0080 registers the bundled embedding model, so a workspace with no
+    // user-installed models still reports one available entry.
     ensure_equal(
         &status_empty_json["data"]["availableCount"],
-        &serde_json::json!(0),
+        &serde_json::json!(1),
         "model status empty available count",
     )?;
     ensure(
@@ -3831,10 +3853,42 @@ fn global_json_flag_is_order_independent() -> TestResult {
 
     ensure(before.status.success(), "--json status should succeed")?;
     ensure(after.status.success(), "status --json should succeed")?;
+    // `status` embeds wall-clock values -- measured, two back-to-back runs
+    // differ at `.data.writeGroupCommit.generatedAt` -- so byte-comparing two
+    // processes was never an order-independence check. It is an equality check
+    // with a volatile value inside it, and it can only pass if both processes
+    // land in the same microsecond: structurally unpassable, not flaky.
+    //
+    // DEFECT CLASS: a volatile value inside an equality check. The repair is to
+    // scrub the volatile channel through the canonical registry and then
+    // compare in full. Never relax the comparison to reach green.
+    let mut before_json: serde_json::Value = serde_json::from_slice(&before.stdout)
+        .map_err(|error| format!("--json status stdout must be JSON: {error}"))?;
+    let mut after_json: serde_json::Value = serde_json::from_slice(&after.stdout)
+        .map_err(|error| format!("status --json stdout must be JSON: {error}"))?;
+    let before_strip = strip_volatile_fields(&mut before_json);
+    let after_strip = strip_volatile_fields(&mut after_json);
+
+    // Countermetric: if the volatile field names are ever renamed the scrubber
+    // goes silently inert and this test starts comparing timestamps again.
+    // Prove it engaged instead of assuming it did.
+    ensure(
+        before_strip.fields_stripped_count > 0 && after_strip.fields_stripped_count > 0,
+        format!(
+            "volatile scrubber must engage on status output; stripped {:?} and {:?}",
+            before_strip.fields_stripped, after_strip.fields_stripped
+        ),
+    )?;
+    // Positive partner: scrubbing must not have hollowed out the payload.
     ensure_equal(
-        &before.stdout,
-        &after.stdout,
-        "global --json output must be order independent",
+        &before_json["data"]["command"],
+        &serde_json::json!("status"),
+        "scrubbed status output must retain substantive fields",
+    )?;
+    ensure_equal(
+        &before_json,
+        &after_json,
+        "global --json output must be order independent once volatile fields are scrubbed",
     )?;
     ensure_clean_stderr(&before.stderr, "--json status stderr must be empty")?;
     ensure_clean_stderr(&after.stderr, "status --json stderr must be empty")
@@ -4980,9 +5034,15 @@ fn backup_create_json_writes_redacted_artifacts_and_manifest() -> TestResult {
         "backup records must not contain raw sensitive content",
     )?;
     let manifest = fs::read_to_string(&manifest_path).map_err(|error| error.to_string())?;
-    ensure(
-        manifest.contains("ee.backup.manifest.v1"),
-        "backup manifest schema is present",
+    let manifest_json: serde_json::Value = serde_json::from_str(&manifest)
+        .map_err(|error| format!("backup manifest must be JSON: {error}"))?;
+    // `--include-graph-cache` defaults to true and the schema condition keys on
+    // it, so a default `backup create` emits v2. Assert the schema FIELD rather
+    // than substring-presence anywhere in the file.
+    ensure_equal(
+        &manifest_json["schema"],
+        &serde_json::json!("ee.backup.manifest.v2"),
+        "backup manifest schema",
     )
 }
 
@@ -6589,9 +6649,11 @@ fn index_reembed_json_rebuilds_index_and_records_job() -> TestResult {
         &serde_json::json!("all_documents"),
         "reembed embedding scope",
     )?;
+    // ADR 0080 (BUNDLED_EMBEDDING_MODEL_ID). `fnv1a-256` was the pre-0080
+    // deterministic-hash embedder and is no longer runtime-producible.
     ensure_equal(
         &reembed_json["data"]["embedding"]["fast_model_id"],
-        &serde_json::json!("fnv1a-256"),
+        &serde_json::json!("potion-multilingual-128M"),
         "reembed fast embedder",
     )?;
     ensure_equal(
