@@ -100,6 +100,25 @@ fn collect_mesh_phases(log_path: &Path) -> Result<(Vec<String>, bool, Option<Str
     Ok((phases, saw_assert_fail, final_fail_count))
 }
 
+/// True when `token` occurs with a word boundary on its left.
+///
+/// A bare `body.contains("nc ")` matches any word ending in `nc` followed by a
+/// space — including this script's own `"sync metadata through local file
+/// transport"`, which describes the opposite of networking. Requiring the
+/// character before the match to be a non-identifier character keeps every
+/// genuine invocation the substring check caught, including quoted ones like
+/// `eval "nc -l"`, and drops only matches glued to a preceding word, which by
+/// construction cannot be a command.
+fn contains_forbidden_token(body: &str, token: &str) -> bool {
+    body.match_indices(token).any(|(index, _)| {
+        index == 0
+            || body
+                .as_bytes()
+                .get(index - 1)
+                .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+    })
+}
+
 #[test]
 fn local_two_node_demo_script_is_non_networked_and_structured() -> TestResult {
     let script = script_path();
@@ -159,7 +178,7 @@ fn local_two_node_demo_script_is_non_networked_and_structured() -> TestResult {
         "--force",
     ] {
         ensure(
-            !body.contains(forbidden),
+            !contains_forbidden_token(&body, forbidden),
             format!("demo script contains forbidden token {forbidden:?}"),
         )?;
     }
