@@ -3246,6 +3246,17 @@ pub struct ContextArgs {
     #[arg(long = "pack-profile", value_enum, default_value_t = PackOutputProfileArg::Standard)]
     pub pack_profile: PackOutputProfileArg,
 
+    /// Shorthand for `--pack-profile lean`: drop the bulky diagnostic blocks
+    /// (selectionAudit, quality metrics, adaptive-budget detail) and the
+    /// rendered text. Memories, provenance, budget scalars, the advisory
+    /// banner and `degraded[]` are always kept.
+    ///
+    /// Conflicts with `--pack-profile` rather than silently overriding it, so
+    /// `--compact --pack-profile verbose` is a usage error instead of a
+    /// coin flip (bd-pack-compact-mode-ibksx).
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "pack_profile")]
+    pub compact: bool,
+
     /// Resource SLO profile for pack assembly: lean, standard, or swarm_heavy.
     #[arg(long = "resource-profile", value_parser = parse_pack_resource_profile_arg, default_value = "standard")]
     pub resource_profile: PackResourceProfile,
@@ -3396,6 +3407,25 @@ pub struct ContextArgs {
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
+}
+
+impl ContextArgs {
+    /// Resolve `--compact` into the profile it is shorthand for
+    /// (bd-pack-compact-mode-ibksx).
+    ///
+    /// Deliberately not a fourth profile variant: the bead is explicit that
+    /// `--compact` must not introduce a parallel enum, and every suppression
+    /// it implies already lives in
+    /// [`ContextPackOutputProfile::Lean`]'s defaults. Resolving here keeps one
+    /// source of truth for what "compact" means.
+    #[must_use]
+    pub const fn resolved_pack_profile(&self) -> PackOutputProfileArg {
+        if self.compact {
+            PackOutputProfileArg::Lean
+        } else {
+            self.pack_profile
+        }
+    }
 }
 
 /// Arguments for `ee orient`.
@@ -3568,6 +3598,17 @@ pub struct PackArgs {
     /// Pack output profile: lean, standard, or verbose.
     #[arg(long = "pack-profile", value_enum)]
     pub pack_profile: Option<PackOutputProfileArg>,
+
+    /// Shorthand for `--pack-profile lean`: drop the bulky diagnostic blocks
+    /// (selectionAudit, quality metrics, adaptive-budget detail) and the
+    /// rendered text. Memories, provenance, budget scalars, the advisory
+    /// banner and `degraded[]` are always kept.
+    ///
+    /// Conflicts with `--pack-profile` rather than silently overriding it, so
+    /// `--compact --pack-profile verbose` is a usage error instead of a coin
+    /// flip (bd-pack-compact-mode-ibksx).
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "pack_profile")]
+    pub compact: bool,
 
     /// Resource SLO profile for pack assembly: lean, standard, or swarm_heavy.
     #[arg(long = "resource-profile", value_parser = parse_pack_resource_profile_arg)]
@@ -42115,7 +42156,8 @@ where
         .clone()
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     let output_options = resolve_context_output_options(
-        args.pack_profile,
+        // bd-pack-compact-mode-ibksx: `--compact` resolves to Lean here.
+        args.resolved_pack_profile(),
         args.resource_profile,
         args.no_coverage_fill,
         args.no_rendered_text,
@@ -45552,6 +45594,12 @@ where
             changed_symbols: Vec::new(),
             changed_symbols_from_git: false,
             pack_profile: args.pack_profile.or(lens_pack_profile).unwrap_or_default(),
+            // bd-pack-compact-mode-ibksx: `ee pack --compact` parses into
+            // PackArgs; this is the bridge onto the shared ContextArgs path,
+            // so the flag has to travel with it. Clap's conflicts_with already
+            // rejected `--compact --pack-profile <x>` at parse time, so the
+            // line above and this one cannot disagree.
+            compact: args.compact,
             resource_profile: args
                 .resource_profile
                 .or(lens_resource_profile)
@@ -88524,6 +88572,83 @@ mod tests {
             }
             _ => Err("expected Pack command".to_string()),
         }
+    }
+
+    #[test]
+    // bd-pack-compact-mode-ibksx: `--compact` is shorthand for
+    // `--pack-profile lean`, not a fourth profile.
+
+    #[test]
+    fn pack_command_accepts_compact_shorthand() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "pack", "test", "--compact"])
+            .map_err(|e| format!("failed to parse --compact: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Pack(ref args)) => {
+                ensure_equal(&args.compact, &true, "pack compact")?;
+                ensure_equal(
+                    &args.pack_profile,
+                    &None,
+                    "compact must not pre-set pack_profile; it resolves later",
+                )
+            }
+            _ => Err("expected Pack command".to_string()),
+        }
+    }
+
+    #[test]
+    fn compact_resolves_to_the_lean_profile() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "context", "test", "--compact"])
+            .map_err(|e| format!("failed to parse context --compact: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Context(ref args)) => ensure_equal(
+                &args.resolved_pack_profile(),
+                &PackOutputProfileArg::Lean,
+                "compact resolves to lean",
+            ),
+            _ => Err("expected Context command".to_string()),
+        }
+    }
+
+    #[test]
+    fn without_compact_the_requested_profile_is_untouched() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "context", "test", "--pack-profile", "verbose"])
+            .map_err(|e| format!("failed to parse context --pack-profile: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Context(ref args)) => {
+                ensure_equal(&args.compact, &false, "compact defaults off")?;
+                ensure_equal(
+                    &args.resolved_pack_profile(),
+                    &PackOutputProfileArg::Verbose,
+                    "an explicit profile survives resolution",
+                )
+            }
+            _ => Err("expected Context command".to_string()),
+        }
+    }
+
+    #[test]
+    fn compact_and_explicit_pack_profile_is_a_usage_error() -> TestResult {
+        // Silently letting one win would make the response shape depend on
+        // argument order. Fail at parse time instead.
+        for command in ["pack", "context"] {
+            let parsed = Cli::try_parse_from([
+                "ee",
+                command,
+                "test",
+                "--compact",
+                "--pack-profile",
+                "verbose",
+            ]);
+            ensure_equal(
+                &parsed.is_err(),
+                &true,
+                &format!("ee {command} --compact --pack-profile must be rejected"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
