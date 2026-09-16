@@ -7052,29 +7052,6 @@ fn workspace_embedder_descriptors(
     Ok(stack_descriptors(&selection.stack))
 }
 
-/// The weight-free descriptor a set of embedder settings implies.
-///
-/// Production no longer consults this: a directory check cannot establish that
-/// a model is ready, so `workspace_embedder_descriptors` reports the resolution
-/// retrieval actually performed instead (bd-7hsgy). It is retained because the
-/// settings-to-descriptor mapping is still the pinned contract for what
-/// inspection may infer without loading weights.
-#[cfg(test)]
-fn default_embedder_descriptor(settings: &EeEmbedderSettings) -> EmbedderDescriptor {
-    if verified_default_model_dir(settings).is_some() {
-        return EmbedderDescriptor::potion();
-    }
-    match settings.download_mode {
-        EeEmbedDownloadMode::Off => EmbedderDescriptor::from_embedder(&HashEmbedder::default_256()),
-        EeEmbedDownloadMode::Auto => EmbedderDescriptor {
-            semantic: false,
-            ready: false,
-            pending_download: true,
-            ..EmbedderDescriptor::potion()
-        },
-    }
-}
-
 fn active_embedder_fingerprint(
     embedder: &dyn crate::search::Embedder,
     provider: ModelProvider,
@@ -9376,13 +9353,15 @@ mod tests {
     ///
     /// `ee model status` reported mode=neural_local / semantic=true with
     /// available_model_count=0 while `ee search` reported
-    /// embed_backend=hash_fallback, same workspace, seconds apart. The cause is
-    /// an asymmetry between two resolution paths: the posture path
-    /// (`default_embedder_descriptor`) only checks that a model DIRECTORY passes
-    /// verification and deliberately never loads the weights, while the
-    /// retrieval path (`detect_default_search_embedder`) does load and silently
-    /// falls back to the hash tier when the load fails. A directory-only check
-    /// can support a configured-intent claim, never an actual-capability one.
+    /// embed_backend=hash_fallback, same workspace, seconds apart. The cause
+    /// was an asymmetry between two resolution paths: the posture path only
+    /// checked that a model DIRECTORY passed verification and deliberately
+    /// never loaded the weights, while the retrieval path
+    /// (`detect_default_search_embedder`) does load and silently falls back to
+    /// the hash tier when the load fails. A directory-only check can support a
+    /// configured-intent claim, never an actual-capability one. `ddd0e3814`
+    /// closed that gap by making inspection share retrieval's one-time
+    /// resolution; this test pins the posture rule independently of it.
     ///
     /// This is the zero-available case constructed directly. It is reachable
     /// without a model on disk and without the process-global embedder, because
@@ -10440,38 +10419,6 @@ mod tests {
     }
 
     #[test]
-    fn default_descriptor_rejects_corrupt_files_without_starting_a_download() -> TestResult {
-        let root = unique_test_dir("descriptor-corrupt-model");
-        let model_dir = root.join(POTION_MODEL_NAME);
-        write_marker(&model_dir, "tokenizer.json", "{}")?;
-        write_marker(&model_dir, "model.safetensors", "not model weights")?;
-        for mode in [EeEmbedDownloadMode::Off, EeEmbedDownloadMode::Auto] {
-            let descriptor = default_embedder_descriptor(&EeEmbedderSettings {
-                model_root: root.clone(),
-                download_mode: mode,
-                local_source: EmbedModelSource::Configured,
-            });
-            ensure(!descriptor.semantic, "corrupt model must never be semantic")?;
-            ensure(
-                descriptor.pending_download == (mode == EeEmbedDownloadMode::Auto),
-                "only automatic mode may advertise a pending download",
-            )?;
-            ensure(
-                descriptor.ready == (mode == EeEmbedDownloadMode::Off),
-                "offline fallback is ready; automatic model download is not",
-            )?;
-        }
-        let entries = std::fs::read_dir(&model_dir)
-            .map_err(|error| error.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        ensure(
-            entries.len() == 2,
-            "inspection must not create model or receipt files",
-        )
-    }
-
-    #[test]
     #[ignore = "requires the real potion-multilingual-128M fixture"]
     fn verified_potion_descriptor_matches_real_loaded_model() -> TestResult {
         let root = crate::config::env_registry::read_os(
@@ -10486,11 +10433,10 @@ mod tests {
         };
         let directory = verified_default_model_dir(&settings)
             .ok_or_else(|| "real model fixture failed pinned verification".to_owned())?;
-        let descriptor = default_embedder_descriptor(&settings);
-        ensure(
-            descriptor.semantic && descriptor.ready,
-            "verified model must be available",
-        )?;
+        // The weight-free descriptor production actually fingerprints
+        // (`index.rs` registers Model2Vec identity from `potion()`), not an
+        // inference from a directory check -- that mapping no longer exists.
+        let descriptor = EmbedderDescriptor::potion();
         let loaded = Model2VecEmbedder::load_shared_with_name(&directory, POTION_MODEL_NAME)
             .map_err(|error| error.to_string())?;
         let manifest = ModelManifest::potion_128m();
