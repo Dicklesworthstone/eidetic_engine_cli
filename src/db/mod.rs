@@ -30078,6 +30078,26 @@ pub struct StoredMaintenanceHistory {
     pub recipes: Vec<StoredPlanRecipe>,
 }
 
+/// Per-table row counts actually WRITTEN by
+/// [`DbConnection::insert_maintenance_history_for_recovery`].
+///
+/// Counted at each successful insert rather than derived from the input's
+/// `Vec::len()`. The distinction is the whole point of the type: a counter fed
+/// by the input can only ever report what a caller *intended* to write, so it
+/// cannot notice a row-set the writer skips -- which is exactly the failure a
+/// restore counter would need to detect. Reporting these instead means a
+/// restore can never again claim rows it did not persist.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MaintenanceHistoryWriteCounts {
+    pub debt_snapshots: u64,
+    pub sentinel_specs: u64,
+    pub reflection_requests: u64,
+    pub situations: u64,
+    pub tripwires: u64,
+    pub tripwire_checks: u64,
+    pub recipes: u64,
+}
+
 impl DbConnection {
     /// Complete, stable workspace-scoped recipe catalog. Reading it never
     /// increments counters or changes recommendation chronology.
@@ -30154,7 +30174,9 @@ impl DbConnection {
     pub fn insert_maintenance_history_for_recovery(
         &self,
         history: &StoredMaintenanceHistory,
-    ) -> Result<()> {
+    ) -> Result<MaintenanceHistoryWriteCounts> {
+        // Incremented after each successful insert, never from `history.X.len()`.
+        let mut written = MaintenanceHistoryWriteCounts::default();
         for row in &history.debt_snapshots {
             self.execute_for(DbOperation::Execute,
                 "INSERT INTO debt_snapshots (workspace_id, snapshot_day, generation, report_hash, report_json, item_count, total_score, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", &[
@@ -30163,6 +30185,7 @@ impl DbConnection {
                     Value::Text(row.report_json.clone()), Value::BigInt(u64_to_i64(row.item_count, "item_count")?),
                     Value::Float(row.total_score), Value::Text(row.created_at.clone()),
                 ])?;
+            written.debt_snapshots += 1;
         }
         for row in &history.sentinel_specs {
             self.execute_for(DbOperation::Execute,
@@ -30174,6 +30197,7 @@ impl DbConnection {
                     optional_u64_value(row.stale_threshold_seconds, "stale_threshold_seconds")?,
                     Value::Text(row.created_at.clone()), Value::Text(row.updated_at.clone()),
                 ])?;
+            written.sentinel_specs += 1;
         }
         for row in &history.reflection_requests {
             self.execute_for(DbOperation::Execute,
@@ -30187,6 +30211,7 @@ impl DbConnection {
                     Value::Text(row.status.clone()), optional_text_value(row.consumed_candidate_id.as_deref()),
                     optional_text_value(row.consumed_at.as_deref()), optional_text_value(row.consumed_result_hash.as_deref()),
                 ])?;
+            written.reflection_requests += 1;
         }
         for row in &history.situations {
             self.insert_situation_record(&CreateSituationRecordInput {
@@ -30211,6 +30236,7 @@ impl DbConnection {
                 classifier_version: row.classifier_version.clone(),
                 build_version: row.build_version.clone(),
             })?;
+            written.situations += 1;
         }
         for row in &history.tripwires {
             self.execute_for(DbOperation::Execute,
@@ -30220,6 +30246,7 @@ impl DbConnection {
                     Value::Text(row.state.clone()), optional_text_value(row.message.as_deref()), Value::Text(row.created_at.clone()),
                     optional_text_value(row.last_checked_at.as_deref()), optional_text_value(row.triggered_at.as_deref()), Value::Text(row.updated_at.clone()),
                 ])?;
+            written.tripwires += 1;
         }
         for row in &history.tripwire_checks {
             self.insert_tripwire_check_event(
@@ -30240,11 +30267,13 @@ impl DbConnection {
                     schema: row.schema.clone(),
                 },
             )?;
+            written.tripwire_checks += 1;
         }
         for row in &history.recipes {
             self.insert_plan_recipe(row)?;
+            written.recipes += 1;
         }
-        Ok(())
+        Ok(written)
     }
 }
 

@@ -1723,6 +1723,10 @@ pub struct BackupMaintenanceHistoryCounts {
     pub recipes: u64,
 }
 
+/// Counts of rows we INTENDED to write. Test-side only: it describes an input,
+/// so it can express "this fixture carries N recipes" but can never detect a
+/// writer that skipped them. The restore path must not use it (bd-761x6); it
+/// uses the `MaintenanceHistoryWriteCounts` conversion below.
 impl From<&StoredMaintenanceHistory> for BackupMaintenanceHistoryCounts {
     fn from(rows: &StoredMaintenanceHistory) -> Self {
         Self {
@@ -1733,6 +1737,23 @@ impl From<&StoredMaintenanceHistory> for BackupMaintenanceHistoryCounts {
             tripwires: rows.tripwires.len() as u64,
             tripwire_checks: rows.tripwire_checks.len() as u64,
             recipes: rows.recipes.len() as u64,
+        }
+    }
+}
+
+/// Counts of rows actually PERSISTED, tallied per successful insert by
+/// [`crate::db::DbConnection::insert_maintenance_history_for_recovery`]. This is
+/// what the restore report and its audit row are built from.
+impl From<crate::db::MaintenanceHistoryWriteCounts> for BackupMaintenanceHistoryCounts {
+    fn from(written: crate::db::MaintenanceHistoryWriteCounts) -> Self {
+        Self {
+            debt_snapshots: written.debt_snapshots,
+            sentinel_specs: written.sentinel_specs,
+            reflection_requests: written.reflection_requests,
+            situations: written.situations,
+            tripwires: written.tripwires,
+            tripwire_checks: written.tripwire_checks,
+            recipes: written.recipes,
         }
     }
 }
@@ -9852,17 +9873,26 @@ fn restore_maintenance_history(
     for row in &mut rows.recipes {
         row.workspace_id.clone_from(&workspace_id);
     }
-    let counts = BackupMaintenanceHistoryCounts::from(&rows);
-    db.with_transaction(|| {
-        db.insert_maintenance_history_for_recovery(&rows)?;
-        db.insert_audit(&crate::models::AuditId::now().to_string(), &crate::db::CreateAuditInput {
-            workspace_id: Some(workspace_id.clone()), actor: Some("ee backup restore".to_owned()),
-            action: "backup.maintenance_history_restored".to_owned(), target_type: Some("backup".to_owned()), target_id: Some(backup_id.to_owned()),
-            details: Some(json!({"sourceWorkspaceId": source_id, "counts": counts,
-                "reason": "Recovered durable maintenance inputs and history. Sentinel results must be checked afresh; reflection challenge keys are not copied; historical report hashes are not attestations of redacted report bytes."}).to_string()),
-        })?;
-        Ok(())
-    }).map_err(work_history_error)?;
+    // bd-761x6: the counts reported here, and written into the audit row, come
+    // from what `insert_maintenance_history_for_recovery` actually PERSISTED --
+    // not from `rows.X.len()`, which is only what we handed it. Those two
+    // numbers agree today. Deriving them from the input meant that if they ever
+    // stopped agreeing, the restore would report and attest rows it had not
+    // written, and no assertion anywhere could see the difference.
+    let counts = db
+        .with_transaction(|| {
+            let counts = BackupMaintenanceHistoryCounts::from(
+                db.insert_maintenance_history_for_recovery(&rows)?,
+            );
+            db.insert_audit(&crate::models::AuditId::now().to_string(), &crate::db::CreateAuditInput {
+                workspace_id: Some(workspace_id.clone()), actor: Some("ee backup restore".to_owned()),
+                action: "backup.maintenance_history_restored".to_owned(), target_type: Some("backup".to_owned()), target_id: Some(backup_id.to_owned()),
+                details: Some(json!({"sourceWorkspaceId": source_id, "counts": counts,
+                    "reason": "Recovered durable maintenance inputs and history. Sentinel results must be checked afresh; reflection challenge keys are not copied; historical report hashes are not attestations of redacted report bytes."}).to_string()),
+            })?;
+            Ok(counts)
+        })
+        .map_err(work_history_error)?;
     Ok(counts)
 }
 
