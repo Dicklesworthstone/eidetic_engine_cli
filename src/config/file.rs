@@ -2916,7 +2916,8 @@ mod tests {
 
     use super::{
         ConfigFile, ConfigParseError, MeshCommandMode, MeshLane, MeshLaneDecision,
-        MeshRedactionDecision, MeshTrustLane, PathExpander, SearchSpeed, optional_string_array,
+        MeshRedactionDecision, MeshTrustLane, PathExpander, PrimerKeywordGate, PrivacyConfig,
+        SearchSpeed, optional_string_array,
     };
     use crate::models::{RedactionLevel, TrustClass};
 
