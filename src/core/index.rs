@@ -9856,7 +9856,10 @@ mod tests {
         assert_eq!(recorded.degraded_code, "context_lexical_fallback");
         assert_eq!(recorded.satisfied_at, None);
         assert!(recorded.is_pending());
-        assert_eq!(pending_index_rebuild_request(workspace.path()), Some(recorded));
+        assert_eq!(
+            pending_index_rebuild_request(workspace.path()),
+            Some(recorded)
+        );
 
         // The marker is a plain JSON document under the workspace state dir,
         // readable by an operator without ee.
@@ -10022,8 +10025,7 @@ mod tests {
         // peer-planted marker must never fail a serving path and must never
         // conscript the steward into a rebuild.
         let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir_all(workspace.path().join(".ee"))
-            .map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(workspace.path().join(".ee")).map_err(|error| error.to_string())?;
         let marker = rebuild_request_marker_path(workspace.path());
         std::fs::write(&marker, b"{not json").map_err(|error| error.to_string())?;
 
@@ -10060,8 +10062,7 @@ mod tests {
         // The marker is read on the steward tick path; an unbounded read would
         // be a cheap way to pin memory in a long-running daemon.
         let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir_all(workspace.path().join(".ee"))
-            .map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(workspace.path().join(".ee")).map_err(|error| error.to_string())?;
         let oversize = vec![b'x'; (INDEX_REBUILD_REQUEST_INSPECT_LIMIT as usize) + 1];
         std::fs::write(rebuild_request_marker_path(workspace.path()), &oversize)
             .map_err(|error| error.to_string())?;
@@ -10085,7 +10086,10 @@ mod tests {
         // A missing embedding model is deliberately NOT a rebuild trigger
         // (bd-1iupc.2): rebuilding cannot conjure a model, and requesting one
         // there would imply a repair that cannot happen.
-        assert_eq!(IndexRebuildTrigger::parse("embedding_model_unavailable"), None);
+        assert_eq!(
+            IndexRebuildTrigger::parse("embedding_model_unavailable"),
+            None
+        );
         assert_eq!(IndexRebuildTrigger::parse(""), None);
         Ok(())
     }

@@ -1279,20 +1279,22 @@ fn search_semantic_posture_from_index_status(
     index_status: Option<&Result<IndexStatusReport, ()>>,
 ) -> SearchSemanticPosture {
     match index_status {
-        Some(Ok(report)) => report.embedding.as_ref().map_or(
-            SearchSemanticPosture::NotProbed,
-            |embedding| {
-                if !embedding.semantic {
-                    SearchSemanticPosture::LexicalOnly
-                } else if embedding.vector_coverage.total > 0
-                    && embedding.vector_coverage.embedded == 0
-                {
-                    SearchSemanticPosture::LexicalOnly
-                } else {
-                    SearchSemanticPosture::Available
-                }
-            },
-        ),
+        Some(Ok(report)) => {
+            report
+                .embedding
+                .as_ref()
+                .map_or(SearchSemanticPosture::NotProbed, |embedding| {
+                    if !embedding.semantic {
+                        SearchSemanticPosture::LexicalOnly
+                    } else if embedding.vector_coverage.total > 0
+                        && embedding.vector_coverage.embedded == 0
+                    {
+                        SearchSemanticPosture::LexicalOnly
+                    } else {
+                        SearchSemanticPosture::Available
+                    }
+                })
+        }
         Some(Err(())) | None => SearchSemanticPosture::NotProbed,
     }
 }
