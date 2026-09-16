@@ -11,10 +11,10 @@
 //!   - the pack hash is byte-stable across identical runs (the #1 LOD caveat:
 //!     off-by-one-free accounting must not perturb the pack hash).
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use ee::core::context::{ContextPackOptions, ContextPackOutputOptions, run_context_pack};
+use ee::core::init::{InitOptions, init_workspace};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::models::MemoryScope;
 use ee::pack::ContextResponse;
@@ -27,6 +27,38 @@ const QUERY: &str = "lodfixture release verification";
 
 fn db_path(workspace_path: &Path) -> PathBuf {
     workspace_path.join(".ee").join("ee.db")
+}
+
+/// Create the store these fixtures write into.
+///
+/// `ee remember` has not created a store since `91cf7bcbd` ("fix(storage):
+/// reject storeless write and search addresses", 2026-08-11): ordinary write
+/// surfaces preflight the addressed path through
+/// `core::ensure_addressed_database_exists` so a mistyped `--workspace` cannot
+/// plant a new store, and `ee init` owns store creation
+/// (src/core/mod.rs:876-882).
+///
+/// These fixtures predate that change and made the `.ee` *directory*, then
+/// relied on the write path migrating a database into it. Repaired the same
+/// way as `tests/ppr_context_pack.rs` (be14b998a),
+/// `tests/contradiction_detect_properties.rs` (429a44576),
+/// `tests/why_not_core_e2e.rs` (062d2eaa7) and `tests/write_owner.rs`
+/// (95aaf6174).
+fn init_fixture_workspace(workspace_path: &Path) -> TestResult {
+    let report = init_workspace(&InitOptions {
+        workspace_path: workspace_path.to_path_buf(),
+        dry_run: false,
+        repair_plan: false,
+        force: false,
+        allow_symlink: false,
+        skip_boilerplate: true,
+    });
+    if !report.status.is_success() {
+        return Err(format!(
+            "initialize lod-packing fixture workspace failed: {report:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn remember_fixture(workspace_path: &Path, db_path: &Path, content: &str) -> TestResult<String> {
@@ -105,8 +137,7 @@ fn setup() -> TestResult<(TempDir, String, String, String, ContextResponse)> {
     let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
     let workspace_path = temp_dir.path().to_path_buf();
     let database_path = db_path(&workspace_path);
-    fs::create_dir_all(database_path.parent().ok_or("missing db parent")?)
-        .map_err(|error| error.to_string())?;
+    init_fixture_workspace(&workspace_path)?;
 
     // Large memory: ~180 distinct tokens, far beyond the Full tier share.
     let large_body = (0..180)
@@ -172,8 +203,7 @@ fn lod_pack_hash_is_byte_stable_across_runs() -> TestResult {
     let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
     let workspace_path = temp_dir.path().to_path_buf();
     let database_path = db_path(&workspace_path);
-    fs::create_dir_all(database_path.parent().ok_or("missing db parent")?)
-        .map_err(|error| error.to_string())?;
+    init_fixture_workspace(&workspace_path)?;
 
     let large_body = (0..180)
         .map(|index| format!("w{index}"))
@@ -227,8 +257,7 @@ fn lod_all_full_is_byte_identical_to_no_lod() -> TestResult {
     let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
     let workspace_path = temp_dir.path().to_path_buf();
     let database_path = db_path(&workspace_path);
-    fs::create_dir_all(database_path.parent().ok_or("missing db parent")?)
-        .map_err(|error| error.to_string())?;
+    init_fixture_workspace(&workspace_path)?;
 
     // Small candidates that comfortably fit the Full tier under a generous budget,
     // so the preview / link tiers never engage and LOD has nothing to compress.
