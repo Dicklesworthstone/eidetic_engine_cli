@@ -327,6 +327,7 @@ every step):
 | `hello_responder_no_tailscale_ip` | medium | Responder cannot find a local Tailscale address to bind | Check `tailscale status` and restart `ee daemon` |
 | `hello_responder_crash_loop` | high | Supervised responder restarted too often | Inspect daemon logs before retrying |
 | `hello_responder_rate_limited_storm` | warning | Hello probes are hitting the storm limiter | Slow probe cadence or narrow discovery policy |
+| `hello_responder_node_key_mismatch` | high | Materialized peer-group's `materializedOnNodeKey` does not match the current `selfNodeKey` at bind time; the daemon refuses to bind | Re-materialize the peer group on this node before retrying |
 | `auto_enrollment_no_eligible_peers` | info | Discovery returned zero eligible peers | (See discovery hints) |
 | `auto_enrollment_partial_failure` | warning | Some peer enrollments succeeded, some failed; transaction rolled back | Re-run; check per-peer details |
 | `auto_enrollment_blocked_by_policy` | medium | SRR6.5 trust policy rejected the auto defaults | Manual `ee mesh enroll` |
