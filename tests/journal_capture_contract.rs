@@ -33,7 +33,21 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 }
 
 fn assert_json_fixture(relative: &str, actual: Value, label: &str) -> TestResult {
-    let expected = read_json(relative)?;
+    let mut expected = read_json(relative)?;
+    // `data.version` is the crate version, and BOTH sides derive from the same
+    // constant: the builders above set it from `env!("CARGO_PKG_VERSION")`, while
+    // the golden on disk froze an older value of that same constant. Comparing
+    // them asserts a release spelling rather than journal behaviour, and it goes
+    // stale at every release — these goldens pinned 0.13.1 against a crate at
+    // 0.15.2. Normalising the field removes no real check, because a mismatch
+    // here could only ever mean "the file is older than the crate". Every other
+    // field is still compared exactly.
+    if let Some(version) = expected
+        .get_mut("data")
+        .and_then(|data| data.get_mut("version"))
+    {
+        *version = Value::String(env!("CARGO_PKG_VERSION").to_owned());
+    }
     ensure(
         actual == expected,
         format!(
