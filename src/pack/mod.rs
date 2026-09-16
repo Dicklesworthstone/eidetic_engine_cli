@@ -9562,7 +9562,6 @@ mod tests {
         }
     }
 
-    #[test]
     // bd-lexical-fallback-hint-suppression-s2c10: this classification was
     // reached by fallthrough, so nothing failed if someone reclassified the
     // code. The bead exists because the repetition is annoying; the failure
