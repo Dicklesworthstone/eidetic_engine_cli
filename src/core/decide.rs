@@ -744,10 +744,20 @@ fn load_decisions(
         &scope.workspace_id,
         &[scope.workspace_path.as_path()],
     )?;
+    // bd-tmv70: `ee decide` marks a superseded predecessor by EXPIRING it
+    // (expire_memory -> valid_to), so "current heads" here means in-force, not
+    // merely unsuperseded. list_memories answers the IDENTITY question and since
+    // V123 returns expired-but-current rows, which made an expired predecessor
+    // count as a head. The applicability reader is the right one for this branch.
     let memories = if include_superseded {
         conn.list_memories_for_retrieval(&scope.workspace_id, None, false)
     } else {
-        conn.list_memories(&scope.workspace_id, None, false)
+        conn.list_memories_valid_at(
+            &scope.workspace_id,
+            None,
+            false,
+            &crate::core::memory::normalize_validity_timestamp(now),
+        )
     }
     .map_err(|error| decide_storage_error(format!("Failed to list decisions: {error}")))?;
 
@@ -1137,24 +1147,18 @@ mod tests {
         let second = decide_record(&second_options).map_err(|error| error.to_string())?;
 
         ensure_equal(&second.decision.chain_depth, &1, "chain depth")?;
-        // bd-tmv70: supersession is recorded in `superseded_at`, and `valid_to`
-        // must be left alone -- it is the author's temporal bound and a
-        // supersede has no business writing it. This used to assert
-        // `valid_to.is_some()`, which pinned the pre-V123 conflation. Both
-        // halves are asserted so this tests the SPLIT rather than either column.
+        // `ee decide` supersedes through expire_memory, NOT through
+        // revise_memory, so the predecessor is marked by its author-facing
+        // `valid_to` and NOT by `superseded_at`. That is why this assertion is
+        // correct as originally written and must not be "corrected" to
+        // superseded_at: the two verbs mark a predecessor differently.
         ensure(
             second
                 .superseded
                 .as_ref()
-                .is_some_and(|item| item.superseded),
-            "predecessor is marked superseded",
-        )?;
-        ensure(
-            second
-                .superseded
-                .as_ref()
-                .is_some_and(|item| item.valid_to.is_none()),
-            "supersede must not write the author's valid_to",
+                .and_then(|item| item.valid_to.as_ref())
+                .is_some(),
+            "predecessor valid_to is set",
         )?;
 
         let heads = decide_list(&DecideListOptions {
