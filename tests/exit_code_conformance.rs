@@ -27,6 +27,33 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
     run_ee_with_env(args, &[])
 }
 
+/// An isolated, INITIALIZED workspace, returned with its guard.
+///
+/// `91cf7bcbd` stopped write surfaces creating a store implicitly, so a command
+/// run against an uninitialised directory now exits 10
+/// (`WorkspaceStoreMissing`) before it can reach the condition under test. The
+/// callers below previously passed no `--workspace` at all and resolved
+/// ambiently to the runner's CWD, which made their exit codes depend on whether
+/// that directory happened to carry a store -- green on a developer checkout,
+/// red on a clean worker. The exit-code assertions themselves are unchanged.
+///
+/// The TempDir is returned rather than dropped: dropping it deletes the
+/// workspace out from under the command being measured.
+fn initialized_workspace() -> Result<(tempfile::TempDir, String), String> {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    if !init.status.success() {
+        return Err(format!(
+            "fixture init failed with exit {:?}; stdout: {}; stderr: {}",
+            init.status.code(),
+            String::from_utf8_lossy(&init.stdout),
+            String::from_utf8_lossy(&init.stderr)
+        ));
+    }
+    Ok((tempdir, workspace))
+}
+
 fn run_ee_with_env(args: &[&str], envs: &[(&str, &Path)]) -> Result<Output, String> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
     command
@@ -446,7 +473,8 @@ fn exit_0_procedure_list_empty_store_returns_list_contract() -> TestResult {
 
 #[test]
 fn exit_0_economy_report_empty_workspace_abstains_with_degraded_data() -> TestResult {
-    let output = run_ee(&["economy", "report", "--json"])?;
+    let (_workspace_dir, workspace) = initialized_workspace()?;
+    let output = run_ee(&["--workspace", &workspace, "economy", "report", "--json"])?;
     persist_artifact("exit_0_economy_empty_report", &output);
 
     ensure_equal(
@@ -551,8 +579,11 @@ fn successful_json_commands_emit_stdout_only_parseable_objects() -> TestResult {
         },
     ];
 
+    let (_workspace_dir, workspace) = initialized_workspace()?;
     for case in cases {
-        let output = run_ee(case.args)?;
+        let mut args = vec!["--workspace", workspace.as_str()];
+        args.extend_from_slice(case.args);
+        let output = run_ee(&args)?;
         assert_json_success_stdout_contract(
             &output,
             EXIT_SUCCESS,
@@ -569,7 +600,15 @@ fn successful_json_commands_emit_stdout_only_parseable_objects() -> TestResult {
 
 #[test]
 fn exit_1_not_found_on_missing_procedure_promote_target() -> TestResult {
-    let output = run_ee(&["procedure", "promote", "proc_test", "--json"])?;
+    let (_workspace_dir, workspace) = initialized_workspace()?;
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "procedure",
+        "promote",
+        "proc_test",
+        "--json",
+    ])?;
     persist_artifact("exit_1_promote_missing_procedure", &output);
 
     ensure_equal(
@@ -742,8 +781,19 @@ fn exit_130_sigint_terminates_gracefully() -> TestResult {
         .map_err(|e| format!("failed to run mkfifo: {e}"))?;
     ensure(mkfifo.success(), "failed to create FIFO")?;
 
+    // Without a store the import exits 5 immediately, so the child is already
+    // gone before the SIGINT is sent and the test measures a dead process
+    // rather than graceful termination. The FIFO tempdir above is the pipe's
+    // home, not a workspace.
+    let (_workspace_dir, workspace) = initialized_workspace()?;
     let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(["import", "jsonl", "--source"])
+        .args([
+            "--workspace",
+            workspace.as_str(),
+            "import",
+            "jsonl",
+            "--source",
+        ])
         .arg(&pipe_path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -803,7 +853,15 @@ fn error_responses_use_ee_error_v1_schema() -> TestResult {
 
 #[test]
 fn json_errors_follow_documented_contract_and_keep_stderr_clean() -> TestResult {
-    let output = run_ee(&["procedure", "promote", "proc_test", "--json"])?;
+    let (_workspace_dir, workspace) = initialized_workspace()?;
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "procedure",
+        "promote",
+        "proc_test",
+        "--json",
+    ])?;
     assert_json_error_contract(&output, EXIT_USAGE, "not_found", "error_contract_full")
 }
 
