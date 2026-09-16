@@ -122,6 +122,18 @@ fn tombstone_visibility_surfaces_are_explicit_and_roundtrip_safe() -> TestResult
             "rule",
             "--tags",
             "b8,tombstone",
+            // This fixture exports from `source` and imports into a SEPARATE
+            // `imported` workspace, i.e. a cross-store import. `ee remember`
+            // defaults --trust-class to human_explicit (src/cli/mod.rs), and
+            // d6f805f50 made a native import of human_explicit rows that do
+            // not authenticate under the destination store fail closed with
+            // `unauthenticated_native_import_trust`. That control is correct
+            // and is not this test's subject, so the fixture writes at the
+            // class the refusal itself names ("import the rows at
+            // agent_validated or lower"). Every tombstone assertion below is
+            // unchanged; only the trust class of the fixture rows moves.
+            "--trust-class",
+            "agent_validated",
             "--no-propose-candidates",
             &tombstoned_content,
         ],
@@ -136,6 +148,9 @@ fn tombstone_visibility_surfaces_are_explicit_and_roundtrip_safe() -> TestResult
             "rule",
             "--tags",
             "b8,tombstone",
+            // Same cross-store reason as the tombstoned row above.
+            "--trust-class",
+            "agent_validated",
             "--no-propose-candidates",
             "b8 tombstone visibility beta active companion",
         ],
