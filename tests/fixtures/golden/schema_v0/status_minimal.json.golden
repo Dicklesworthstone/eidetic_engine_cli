@@ -4,7 +4,7 @@
   "fields": "minimal",
   "result": {
     "command": "status",
-    "version": "0.1.0",
+    "version": "[VERSION]",
     "workspace": {
       "source": "explicit",
       "root": "[WORKSPACE]",

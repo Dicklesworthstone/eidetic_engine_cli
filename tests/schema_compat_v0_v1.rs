@@ -46,6 +46,14 @@ fn scrub_for_fixture(value: &mut Value, workspace: &Path) {
                 if key.to_ascii_lowercase().contains("fingerprint") && child.is_string() {
                     *child = Value::String("[HASH]".to_string());
                 }
+                // The crate version is release state, not contract state. Leaving
+                // it literal made this golden drift on every version bump: it was
+                // written at 0.1.0 and the crate now ships 0.15.2. Scrubbing it is
+                // the established idiom here (see `[HASH]`, `[WORKSPACE]` above,
+                // and `<scrubbed:eeVersion>` in tests/agent_golden_baselines.rs).
+                if key == "version" && child.is_string() {
+                    *child = Value::String("[VERSION]".to_string());
+                }
             }
         }
         Value::Array(items) => {
