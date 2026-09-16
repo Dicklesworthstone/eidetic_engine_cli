@@ -1758,60 +1758,30 @@ pub(crate) fn redact_pack_provenance_text(value: &str) -> String {
     redact_pack_absolute_path_like_segments(&secret_redacted)
 }
 
+/// Where a redacted path ends on the pack surface.
+///
+/// Kept local on purpose: pack renders prose, so a path terminates at
+/// whitespace, and this surface additionally treats `<`, `>` and `|` as
+/// terminators, which no other redactor does. Only the START of a path is
+/// shared (bd-redactor-prefix-divergence-lsy52).
+fn pack_absolute_path_boundary(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}' | ',' | ';' | '|' | '?' | '#'
+        )
+}
+
 fn redact_pack_absolute_path_like_segments(input: &str) -> String {
-    const REDACTED_PATH: &str = "[REDACTED_PATH]";
-    const PATH_PREFIXES: &[&str] = &[
-        "/home/",
-        "/Users/",
-        "/data/",
-        "/workspace/",
-        "/Volumes/",
-        "C:\\",
-        "D:\\",
-    ];
-
-    let mut output = String::with_capacity(input.len());
-    let mut cursor = 0usize;
-    while cursor < input.len() {
-        let remaining = &input[cursor..];
-        if let Some(prefix) = PATH_PREFIXES
-            .iter()
-            .find(|prefix| remaining.starts_with(**prefix))
-        {
-            output.push_str(REDACTED_PATH);
-            cursor += prefix.len();
-            while cursor < input.len() {
-                let next = input[cursor..].chars().next().unwrap_or('\0');
-                if next.is_whitespace()
-                    || matches!(
-                        next,
-                        '"' | '\''
-                            | '`'
-                            | '<'
-                            | '>'
-                            | ')'
-                            | ']'
-                            | '}'
-                            | ','
-                            | ';'
-                            | '|'
-                            | '?'
-                            | '#'
-                    )
-                {
-                    break;
-                }
-                cursor += next.len_utf8();
-            }
-            continue;
-        }
-
-        let next = remaining.chars().next().unwrap_or('\0');
-        output.push(next);
-        cursor += next.len_utf8();
-    }
-
-    output
+    // bd-redactor-prefix-divergence-lsy52. This carried the SMALLEST prefix
+    // list of the twenty -- /home/, /Users/, /data/, /workspace/, /Volumes/ and
+    // the two Windows drives -- on the most exposed surface. Provenance URIs
+    // are user-supplied and unconstrained, so a memory recorded with
+    // `file:///root/.ssh/id_rsa` had that path emitted verbatim in all four
+    // provenance fields of every pack containing it, while fifteen other
+    // surfaces redacted the same string. Same for /etc/, /var/, /tmp/ and
+    // /private/.
+    crate::util::redact_path_like_segments(input, pack_absolute_path_boundary)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
