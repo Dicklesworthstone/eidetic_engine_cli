@@ -31,8 +31,9 @@ use crate::models::model_registry::{
 use crate::models::{CorpusRevision, INDEX_INTAKE_FALLBACK_CORPUS_REVISION_MISMATCH, MemoryId};
 use crate::models::{
     EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH, EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
-    EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, EMBEDDING_POSTURE_MODE_NEURAL_REMOTE,
-    EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_UNAVAILABLE, EMBEDDING_POSTURE_SCHEMA_V1, EmbedBackend,
+    EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_UNCONFIRMED,
+    EMBEDDING_POSTURE_MODE_NEURAL_REMOTE, EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_UNAVAILABLE,
+    EMBEDDING_POSTURE_SCHEMA_V1, EmbedBackend,
 };
 use crate::search::{
     ARTIFACT_INDEX_PROJECTION_SCHEMA_V1, CanonicalSearchDocument,
@@ -7306,7 +7307,10 @@ fn embedding_posture_from_records(
     } else if semantic && selected_registry_model.is_some() {
         "registry_observed"
     } else if semantic {
-        "neural_local"
+        // bd-7hsgy: reached only when the embedder DECLARES semantic capability
+        // and no available registry entry confirms it. Reporting "neural_local"
+        // here asserted a capability retrieval had not necessarily loaded.
+        "neural_local_unconfirmed"
     } else if pending_local_download {
         "ee_model2vec_download_pending"
     } else {
@@ -7316,8 +7320,10 @@ fn embedding_posture_from_records(
         EMBEDDING_POSTURE_MODE_NEURAL_REMOTE
     } else if fast_embedder.remote_unavailable {
         EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_UNAVAILABLE
-    } else if semantic {
+    } else if semantic && selected_registry_model.is_some() {
         EMBEDDING_POSTURE_MODE_NEURAL_LOCAL
+    } else if semantic {
+        EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_UNCONFIRMED
     } else if pending_local_download {
         EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING
     } else {
@@ -9352,6 +9358,74 @@ mod tests {
             selected_registry_model: None,
             vector_coverage: EmbeddingVectorCoverage::new(0, 10),
         }
+    }
+
+    /// bd-7hsgy: the posture must not claim `neural_local` on a directory check
+    /// alone.
+    ///
+    /// `ee model status` reported mode=neural_local / semantic=true with
+    /// available_model_count=0 while `ee search` reported
+    /// embed_backend=hash_fallback, same workspace, seconds apart. The cause is
+    /// an asymmetry between two resolution paths: the posture path
+    /// (`default_embedder_descriptor`) only checks that a model DIRECTORY passes
+    /// verification and deliberately never loads the weights, while the
+    /// retrieval path (`detect_default_search_embedder`) does load and silently
+    /// falls back to the hash tier when the load fails. A directory-only check
+    /// can support a configured-intent claim, never an actual-capability one.
+    ///
+    /// This is the zero-available case constructed directly. It is reachable
+    /// without a model on disk and without the process-global embedder, because
+    /// `embedding_posture_from_records` is a pure function of its arguments --
+    /// which is what makes the assertion able to fail on any host rather than
+    /// only on an unprovisioned one.
+    #[test]
+    fn posture_does_not_claim_neural_local_without_an_available_registry_entry() -> TestResult {
+        let coverage = EmbeddingVectorCoverage::new(0, 0);
+
+        // Declared-semantic embedder, no registry records at all.
+        let unconfirmed =
+            embedding_posture_from_records(&EmbedderDescriptor::potion(), None, &[], coverage);
+        ensure(
+            unconfirmed.available_model_count == 0,
+            format!(
+                "fixture must actually be the zero-available case, got available_model_count {}",
+                unconfirmed.available_model_count
+            ),
+        )?;
+        ensure(
+            unconfirmed.mode != EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
+            format!(
+                "posture must not claim neural_local with available_model_count 0; \
+                 got mode {:?}, source {:?}, semantic {}",
+                unconfirmed.mode, unconfirmed.source, unconfirmed.semantic
+            ),
+        )?;
+        ensure(
+            unconfirmed.mode == EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_UNCONFIRMED,
+            format!(
+                "unconfirmed local model must carry an explicit state a consumer \
+                 can branch on; got mode {:?}, source {:?}",
+                unconfirmed.mode, unconfirmed.source
+            ),
+        )?;
+
+        // Control arm: the new branch must be specific to a DECLARED-semantic
+        // embedder. Without one, the chain must still reach the hash/pending
+        // arms -- otherwise this test would pass by swallowing every case.
+        let hash = embedding_posture_from_records(
+            &EmbedderDescriptor::from_embedder(&HashEmbedder::default_256()),
+            None,
+            &[],
+            coverage,
+        );
+        ensure(
+            hash.mode != EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_UNCONFIRMED,
+            format!(
+                "non-semantic embedder must not be reported as unconfirmed-neural; \
+                 got mode {:?}, source {:?}",
+                hash.mode, hash.source
+            ),
+        )
     }
 
     fn ensure(condition: bool, message: impl Into<String>) -> TestResult {

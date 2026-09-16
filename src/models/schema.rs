@@ -104,6 +104,17 @@ pub const EMBEDDING_POSTURE_SCHEMA_V1: &str = "ee.embedding_posture.v1";
 pub const EMBEDDING_POSTURE_MODE_NEURAL_LOCAL: &str = "neural_local";
 /// Embedding posture mode: the bundled local neural model is download-capable but not loaded yet.
 pub const EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING: &str = "neural_local_pending";
+/// Embedding posture mode: a local neural model is DECLARED semantic, but no
+/// available registry entry confirms it is the embedder retrieval actually uses.
+///
+/// bd-7hsgy. The posture path verifies that a model directory exists; it
+/// deliberately does not load the weights (see `workspace_embedder_descriptors`).
+/// The retrieval path DOES load, and can fall back to the hash tier when the
+/// load fails. So a directory-only check can only support a CONFIGURED-INTENT
+/// claim, never an ACTUAL-CAPABILITY one, and reporting it as `neural_local`
+/// told consumers semantic search was active while `ee search` reported
+/// `embed_backend: hash_fallback` in the same workspace seconds later.
+pub const EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_UNCONFIRMED: &str = "neural_local_unconfirmed";
 /// Embedding posture mode: deterministic hash fallback is active.
 pub const EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH: &str = "deterministic_hash";
 /// Embedding posture mode: a neural model exists but download/load policy blocked it.

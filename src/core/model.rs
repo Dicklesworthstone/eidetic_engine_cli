@@ -4705,7 +4705,13 @@ mod tests {
                 // fixtures, so `registry_observed` is unreachable and the
                 // production selector reduces to this three-way mapping.
                 let expected = if before_semantic {
-                    "neural_local"
+                    // bd-7hsgy: these fixtures have NO available embedding
+                    // registry entry (stated two lines up), so a declared-
+                    // semantic embedder is exactly the unconfirmed case. The
+                    // posture path verifies a model directory without loading
+                    // the weights, so it cannot assert the retrieval path is
+                    // actually using them.
+                    "neural_local_unconfirmed"
                 } else if before_pending {
                     "ee_model2vec_download_pending"
                 } else {
