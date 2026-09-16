@@ -4840,7 +4840,10 @@ fn import_jsonl_json_validates_imports_and_skips_duplicates() -> TestResult {
         "imported memory trust class",
     )?;
     ensure_equal(
-        &show_json["data"]["memory"]["tags"][0]["name"],
+        // Tags are a plain string array on every surface
+        // (bd-cli-surface-consistency-cluster-1jnu1 item 2); `memory show`
+        // used to wrap them as [{"name": ...}].
+        &show_json["data"]["memory"]["tags"][0],
         &serde_json::json!("release"),
         "imported memory tag",
     )

@@ -145,8 +145,20 @@ future changelog pass expands those rows into full capability sections.
 - Recover existing attempt-family pack ledgers using exact JSON number
   validation for fractional discounts. Preserve validated promotion postures
   in replay while retaining rejection of unknown values and secret redaction.
-
-## [0.15.2] - 2026-09-12
+- **Contract break:** `ee memory show --json` now emits `data.memory.tags` as a
+  string array instead of `[{"name": "..."}]` objects. `ee remember`,
+  `ee memory tags` and `ee memory list` already used the string array, so
+  `memory show` was the single surface an agent had to special-case to read a
+  tag. Consumers indexing `tags[i].name` must read `tags[i]`.
+- `ee memory list` reports each row's `tags` as a string array, always present
+  and empty when the memory has none. Building a tag inventory previously
+  required one `ee memory show` per row; the rows are now covered by a single
+  batched tag query.
+- `ee memory link <verb> ...` reports an argument-shape error naming the
+  offending token when the first positional is a subcommand-shaped word such as
+  `list`, instead of reporting a missing `--relation` for a link creation that
+  was never requested. Listing remains `ee memory link <MEMORY_ID>` with the
+  target omitted.
 
 - Publish the corrected `eidetic-engine` package at version 0.15.2 and all
   required runtime, storage, ORM, search and graph dependencies.

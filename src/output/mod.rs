@@ -8556,9 +8556,12 @@ fn render_memory_fields(b: &mut JsonBuilder, details: &MemoryDetails) {
     if let Some(ref typed_fields) = details.typed_fields {
         b.field_raw("typedFields", &typed_fields.to_string());
     }
-    b.field_array_of_objects("tags", &details.tags, |obj, tag| {
-        obj.field_str("name", tag);
-    });
+    // bd-cli-surface-consistency-cluster-1jnu1 item 2: `memory show` was the
+    // only surface wrapping tags as `[{"name": ...}]`. `ee remember`,
+    // `ee memory tags`, and `ee memory list` all emit plain string arrays, so
+    // an agent had to special-case this one command to read a tag. Converged
+    // on the string array; the object wrapper carried no extra information.
+    b.field_array_of_strings("tags", &details.tags);
 }
 
 /// Render a memory show report as human-readable text.
@@ -20430,6 +20433,39 @@ mod tests {
 
         let toon = render_memory_list_toon(&report);
         ensure_toon_matches_json(&json, &toon, "memory list TOON local provenance")
+    }
+
+    /// bd-cli-surface-consistency-cluster-1jnu1 item 2: `memory show` was the
+    /// only surface emitting tags as `[{"name": ...}]` objects while
+    /// `remember`, `memory tags`, and `memory list` emitted string arrays.
+    /// Agents had to special-case one command to read a tag.
+    #[test]
+    fn memory_show_emits_tags_as_strings_not_objects() -> TestResult {
+        let report = MemoryShowReport::found(MemoryDetails {
+            memory: output_test_memory(None),
+            tags: vec!["contract".to_owned(), "governor".to_owned()],
+            typed_fields: None,
+        });
+
+        let json = render_memory_show_json(&report);
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &value.pointer("/data/memory/tags"),
+            &Some(&serde_json::json!(["contract", "governor"])),
+            "memory show tags converge on the string-array shape",
+        )?;
+        // The old wrapper must be gone, not merely supplemented.
+        ensure(
+            value
+                .pointer("/data/memory/tags/0")
+                .is_some_and(serde_json::Value::is_string),
+            format!("memory show tag entries must be strings: {json}"),
+        )?;
+
+        let toon = render_memory_show_toon(&report);
+        ensure_toon_matches_json(&json, &toon, "memory show TOON tags")
     }
 
     /// bd-cli-surface-consistency-cluster-1jnu1 item 3: `ee memory list`
