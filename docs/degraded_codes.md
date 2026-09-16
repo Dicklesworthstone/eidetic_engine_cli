@@ -7426,7 +7426,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `archive/database parity drift`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Run `am doctor check``
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_agent_mail_archive_mismatch.json`](../tests/fixtures/failure_modes/hotset_agent_mail_archive_mismatch.json)
 
@@ -7456,7 +7456,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `Agent Mail snapshot`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Produce a read-only snapshot with scripts/agent_mail_snapshot.sh`
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_agent_mail_unavailable.json`](../tests/fixtures/failure_modes/hotset_agent_mail_unavailable.json)
 
@@ -7486,7 +7486,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `unparseable row`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Retry after the tracker flush settles`
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_beads_stale.json`](../tests/fixtures/failure_modes/hotset_beads_stale.json)
 
@@ -7516,7 +7516,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `Beads JSONL export`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Run `br sync --flush-only` to export tracker state, then re-collect.`
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_beads_unavailable.json`](../tests/fixtures/failure_modes/hotset_beads_unavailable.json)
 
@@ -7546,7 +7546,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `bv --robot-next`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Run `bv --robot-next` manually`
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_bv_no_output.json`](../tests/fixtures/failure_modes/hotset_bv_no_output.json)
 
@@ -7576,7 +7576,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `bv --robot-next exceeded the`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Raise --bv-timeout-ms`
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_bv_timeout.json`](../tests/fixtures/failure_modes/hotset_bv_timeout.json)
 
@@ -7606,7 +7606,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `bv could not be spawned`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Install bv on PATH or pass --bv-program.`
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_bv_unavailable.json`](../tests/fixtures/failure_modes/hotset_bv_unavailable.json)
 
@@ -7636,7 +7636,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `overlap Agent Mail reservations`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Commit or hand off the contested paths`
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_dirty_overlap.json`](../tests/fixtures/failure_modes/hotset_dirty_overlap.json)
 
@@ -7666,7 +7666,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `git status probe exceeded the`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Raise --probe-timeout-ms`
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_git_timeout.json`](../tests/fixtures/failure_modes/hotset_git_timeout.json)
 
@@ -7696,7 +7696,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `git status probe could not run`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Run `git status --porcelain` in the workspace to inspect`
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_git_unavailable.json`](../tests/fixtures/failure_modes/hotset_git_unavailable.json)
 
@@ -7810,7 +7810,7 @@ ee cache hotset-manifest --workspace <uninitialized-workspace> --json
 
 **Expected emission.** Message contains: `workspace database is missing or unreadable`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Initialize or repair the workspace database`
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_retrieval_provenance_unavailable.json`](../tests/fixtures/failure_modes/hotset_retrieval_provenance_unavailable.json)
 
@@ -7840,7 +7840,7 @@ ee cache hotset-manifest --workspace . --source-authority-snapshot <snapshot.jso
 
 **Expected emission.** Message contains: `explicitly fails closed`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Repair the degraded source-authority inputs`
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_source_authority_degraded.json`](../tests/fixtures/failure_modes/hotset_source_authority_degraded.json)
 
@@ -7870,7 +7870,7 @@ ee cache hotset-manifest --workspace . --json
 
 **Expected emission.** Message contains: `source-authority snapshot`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Capture the sourceAuthority block from `ee swarm work-packet`
 
 **Fixture.** [`tests/fixtures/failure_modes/hotset_source_authority_missing.json`](../tests/fixtures/failure_modes/hotset_source_authority_missing.json)
 
