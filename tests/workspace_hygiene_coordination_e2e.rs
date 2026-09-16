@@ -9,6 +9,11 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
+#[path = "agent_mail_fixture/snapshot_v1.rs"]
+mod agent_mail_snapshot_v1;
+
+use agent_mail_snapshot_v1::{ReservationFixture, declared_snapshot_v1};
+
 type TestResult = Result<(), String>;
 
 fn run_command(command: &mut Command, context: &str) -> Result<Output, String> {
@@ -206,23 +211,25 @@ fn emit_hygiene_e2e_event(
 fn workspace_hygiene_snapshot_reservation_blocks_dirty_source_path() -> TestResult {
     let workspace = init_dirty_git_workspace()?;
     let snapshot_path = workspace.join("agent-mail-snapshot.json");
+    // The previous literal declared no `schema`, so it never reached the
+    // blocking path: an undeclared snapshot is not an error, but
+    // `agent_mail_snapshot_freshness_assessment` (swarm_brief.rs:8034) answers
+    // `freshness::unknown()` plus an AGENT_MAIL_UNAVAILABLE warning for it,
+    // which is the `agentMailAvailable: false` this test was failing on.
+    // Only a declared `ee.agent_mail.snapshot.v1` with a fresh `generated_at`
+    // is treated as authoritative, so the fixture has to satisfy the full
+    // declared-schema contract rather than a convenient subset.
     write_file(
         &snapshot_path,
-        r#"{
-          "file_reservations": [
-            {
-              "path_pattern": "src/core/workspace.rs",
-              "holder": "OtherAgent",
-              "exclusive": true,
-              "expires_at": "2099-01-01T00:00:00Z"
-            }
-          ],
-          "active_agents": [
-            {"name": "OtherAgent", "last_active_at": "2026-05-18T09:00:00Z"}
-          ],
-          "inbox": [],
-          "threads": []
-        }"#,
+        &declared_snapshot_v1(
+            &workspace,
+            "OtherAgent",
+            &[ReservationFixture {
+                path_pattern: "src/core/workspace.rs",
+                holder: "OtherAgent",
+                exclusive: true,
+            }],
+        )?,
     )?;
 
     let value = run_hygiene_with_snapshot(&workspace, &snapshot_path)?;
