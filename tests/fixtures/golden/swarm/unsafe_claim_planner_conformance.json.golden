@@ -14,19 +14,19 @@
           },
           {
             "actionsMutateState": false,
-            "deltaCount": 8,
+            "deltaCount": 7,
             "id": "bd-1n3x1.16.1",
             "mayEmitClaimCommand": false,
-            "needsFreshClaimGate": true,
+            "needsFreshClaimGate": false,
             "state": "scanned_and_unsafe",
             "workClass": "docs_only"
           },
           {
             "actionsMutateState": false,
-            "deltaCount": 8,
+            "deltaCount": 7,
             "id": "bd-1tp6p.2.1",
             "mayEmitClaimCommand": false,
-            "needsFreshClaimGate": true,
+            "needsFreshClaimGate": false,
             "state": "scanned_and_unsafe",
             "workClass": "rust_source"
           }
