@@ -43,8 +43,8 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
@@ -108,17 +108,88 @@ const WRITE_SPOOL_RECOVERY_STATE_REPLAY_REQUIRED: &str = "uncommitted_write_repl
 const WRITE_SPOOL_RECOVERY_TEMP_CREATE_ATTEMPTS: usize = 16;
 
 static WRITE_SPOOL_RECOVERY_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-static WRITE_GROUP_COMMIT_BATCHES: AtomicU64 = AtomicU64::new(0);
-static WRITE_GROUP_COMMIT_BATCH_WRITES: AtomicU64 = AtomicU64::new(0);
-static WRITE_GROUP_COMMIT_WRITES_COALESCED: AtomicU64 = AtomicU64::new(0);
-static WRITE_GROUP_COMMIT_FSYNC_COUNT: AtomicU64 = AtomicU64::new(0);
-static WRITE_GROUP_COMMIT_FSYNC_SAVED: AtomicU64 = AtomicU64::new(0);
-static WRITE_GROUP_COMMIT_LATENCY_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-static WRITE_GROUP_COMMIT_LATENCY_MAX_US: AtomicU64 = AtomicU64::new(0);
-static WRITE_GROUP_COMMIT_FALLBACK_DISABLED: AtomicU64 = AtomicU64::new(0);
-static WRITE_GROUP_COMMIT_FALLBACK_DEGRADED: AtomicU64 = AtomicU64::new(0);
-static WRITE_GROUP_COMMIT_FALLBACK_OVERSIZED: AtomicU64 = AtomicU64::new(0);
-static WRITE_GROUP_COMMIT_FALLBACK_SINGLE_WRITER: AtomicU64 = AtomicU64::new(0);
+/// Group-commit counters for ONE workspace.
+///
+/// bd-write-owner-telemetry-scope: these were eleven process-global
+/// `AtomicU64`s. `report.telemetry.fsync_count` is a number this product
+/// publishes, and a process-global counter is only correct when a process
+/// serves exactly one workspace -- a constraint nobody wrote down. A daemon
+/// hosting two workspaces attributed every write to whichever workspace the
+/// caller happened to ask about.
+#[derive(Clone, Copy, Default)]
+struct WriteGroupCommitCounters {
+    batches: u64,
+    batch_writes: u64,
+    writes_coalesced: u64,
+    fsync_count: u64,
+    fsync_saved: u64,
+    latency_total_us: u64,
+    latency_max_us: u64,
+    fallback_disabled: u64,
+    fallback_degraded: u64,
+    fallback_oversized: u64,
+    fallback_single_writer: u64,
+}
+
+impl WriteGroupCommitCounters {
+    fn merge(&mut self, other: &Self) {
+        self.batches = self.batches.saturating_add(other.batches);
+        self.batch_writes = self.batch_writes.saturating_add(other.batch_writes);
+        self.writes_coalesced = self.writes_coalesced.saturating_add(other.writes_coalesced);
+        self.fsync_count = self.fsync_count.saturating_add(other.fsync_count);
+        self.fsync_saved = self.fsync_saved.saturating_add(other.fsync_saved);
+        self.latency_total_us = self.latency_total_us.saturating_add(other.latency_total_us);
+        self.latency_max_us = self.latency_max_us.max(other.latency_max_us);
+        self.fallback_disabled = self
+            .fallback_disabled
+            .saturating_add(other.fallback_disabled);
+        self.fallback_degraded = self
+            .fallback_degraded
+            .saturating_add(other.fallback_degraded);
+        self.fallback_oversized = self
+            .fallback_oversized
+            .saturating_add(other.fallback_oversized);
+        self.fallback_single_writer = self
+            .fallback_single_writer
+            .saturating_add(other.fallback_single_writer);
+    }
+}
+
+/// Counters keyed by workspace. `None` is the unattributed bucket, used by the
+/// batch path, which runs inside `WriteOwner` and carries no workspace.
+///
+/// Nothing is dropped: a `None` query still aggregates every bucket, which is
+/// exactly what the three existing `write_group_commit_telemetry(None)` callers
+/// reported before this change.
+static WRITE_GROUP_COMMIT_COUNTERS: OnceLock<
+    Mutex<HashMap<Option<PathBuf>, WriteGroupCommitCounters>>,
+> = OnceLock::new();
+
+fn write_group_commit_counters()
+-> &'static Mutex<HashMap<Option<PathBuf>, WriteGroupCommitCounters>> {
+    WRITE_GROUP_COMMIT_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Counters for one workspace, or the aggregate across all of them when
+/// `workspace` is `None`.
+fn read_write_group_commit_counters(workspace: Option<&Path>) -> WriteGroupCommitCounters {
+    let Ok(store) = write_group_commit_counters().lock() else {
+        return WriteGroupCommitCounters::default();
+    };
+    match workspace {
+        Some(path) => store
+            .get(&Some(path.to_path_buf()))
+            .copied()
+            .unwrap_or_default(),
+        None => {
+            let mut total = WriteGroupCommitCounters::default();
+            for counters in store.values() {
+                total.merge(counters);
+            }
+            total
+        }
+    }
+}
 
 /// Default channel capacity for write requests.
 pub const DEFAULT_CHANNEL_CAPACITY: usize = 64;
@@ -1330,23 +1401,15 @@ pub fn write_group_commit_telemetry(workspace_path: Option<&Path>) -> WriteGroup
         .and_then(crate::config::workspace_config)
         .map(|config| WriteHotPathConfig::from_write_config(&config.write))
         .unwrap_or_default();
-    write_group_commit_telemetry_for_config(config.enabled)
+    write_group_commit_telemetry_for_config(workspace_path, config.enabled)
 }
 
 /// Reset process-local group-commit telemetry for integration tests.
 #[doc(hidden)]
 pub fn reset_write_group_commit_telemetry_for_test() {
-    WRITE_GROUP_COMMIT_BATCHES.store(0, Ordering::Release);
-    WRITE_GROUP_COMMIT_BATCH_WRITES.store(0, Ordering::Release);
-    WRITE_GROUP_COMMIT_WRITES_COALESCED.store(0, Ordering::Release);
-    WRITE_GROUP_COMMIT_FSYNC_COUNT.store(0, Ordering::Release);
-    WRITE_GROUP_COMMIT_FSYNC_SAVED.store(0, Ordering::Release);
-    WRITE_GROUP_COMMIT_LATENCY_TOTAL_US.store(0, Ordering::Release);
-    WRITE_GROUP_COMMIT_LATENCY_MAX_US.store(0, Ordering::Release);
-    WRITE_GROUP_COMMIT_FALLBACK_DISABLED.store(0, Ordering::Release);
-    WRITE_GROUP_COMMIT_FALLBACK_DEGRADED.store(0, Ordering::Release);
-    WRITE_GROUP_COMMIT_FALLBACK_OVERSIZED.store(0, Ordering::Release);
-    WRITE_GROUP_COMMIT_FALLBACK_SINGLE_WRITER.store(0, Ordering::Release);
+    if let Ok(mut store) = write_group_commit_counters().lock() {
+        store.clear();
+    }
 }
 
 /// Run a one-shot durable write through the group-commit intake accounting.
@@ -1380,6 +1443,7 @@ where
     let started = Instant::now();
     let result = write();
     record_write_group_commit_global(
+        Some(workspace_path),
         config.enabled,
         1,
         duration_micros_saturating(started.elapsed()),
@@ -1389,40 +1453,47 @@ where
     result
 }
 
-fn write_group_commit_telemetry_for_config(enabled: bool) -> WriteGroupCommitTelemetry {
-    let batches = WRITE_GROUP_COMMIT_BATCHES.load(Ordering::Acquire);
-    let batch_writes = WRITE_GROUP_COMMIT_BATCH_WRITES.load(Ordering::Acquire);
+fn write_group_commit_telemetry_for_config(
+    workspace: Option<&Path>,
+    enabled: bool,
+) -> WriteGroupCommitTelemetry {
+    let counters = read_write_group_commit_counters(workspace);
+    let batches = counters.batches;
+    let batch_writes = counters.batch_writes;
     let fallback_reasons = WriteGroupCommitFallbackReasons {
-        disabled: WRITE_GROUP_COMMIT_FALLBACK_DISABLED.load(Ordering::Acquire),
-        degraded: WRITE_GROUP_COMMIT_FALLBACK_DEGRADED.load(Ordering::Acquire),
-        oversized: WRITE_GROUP_COMMIT_FALLBACK_OVERSIZED.load(Ordering::Acquire),
-        single_writer: WRITE_GROUP_COMMIT_FALLBACK_SINGLE_WRITER.load(Ordering::Acquire),
+        disabled: counters.fallback_disabled,
+        degraded: counters.fallback_degraded,
+        oversized: counters.fallback_oversized,
+        single_writer: counters.fallback_single_writer,
     };
-    let fsync_count = WRITE_GROUP_COMMIT_FSYNC_COUNT.load(Ordering::Acquire);
-    let latency_total = WRITE_GROUP_COMMIT_LATENCY_TOTAL_US.load(Ordering::Acquire);
-    let latency_avg = latency_total.checked_div(fsync_count).unwrap_or(0);
+    let fsync_count = counters.fsync_count;
+    let latency_avg = counters
+        .latency_total_us
+        .checked_div(fsync_count)
+        .unwrap_or(0);
     WriteGroupCommitTelemetry {
         schema: crate::models::WRITE_GROUP_COMMIT_SCHEMA_V1,
         generated_at: write_group_commit_generated_at(),
         enabled,
         redaction_status: WRITE_GROUP_COMMIT_REDACTION_STATUS,
         batches,
-        writes_coalesced: WRITE_GROUP_COMMIT_WRITES_COALESCED.load(Ordering::Acquire),
+        writes_coalesced: counters.writes_coalesced,
         avg_batch_size: if batches == 0 {
             0.0
         } else {
             batch_writes as f64 / batches as f64
         },
         fsync_count,
-        fsync_saved: WRITE_GROUP_COMMIT_FSYNC_SAVED.load(Ordering::Acquire),
+        fsync_saved: counters.fsync_saved,
         commit_latency_p50_us: latency_avg,
-        commit_latency_p99_us: WRITE_GROUP_COMMIT_LATENCY_MAX_US.load(Ordering::Acquire),
+        commit_latency_p99_us: counters.latency_max_us,
         fallback_count: write_group_commit_fallback_count(&fallback_reasons),
         fallback_reasons,
     }
 }
 
 fn record_write_group_commit_global(
+    workspace: Option<&Path>,
     enabled: bool,
     row_count: usize,
     latency_us: u64,
@@ -1430,17 +1501,45 @@ fn record_write_group_commit_global(
     generation_advanced: bool,
 ) {
     let row_count_u64 = u64::try_from(row_count).unwrap_or(u64::MAX);
-    WRITE_GROUP_COMMIT_FSYNC_COUNT.fetch_add(1, Ordering::AcqRel);
-    WRITE_GROUP_COMMIT_LATENCY_TOTAL_US.fetch_add(latency_us, Ordering::AcqRel);
-    fetch_max_atomic(&WRITE_GROUP_COMMIT_LATENCY_MAX_US, latency_us);
 
-    if enabled {
-        WRITE_GROUP_COMMIT_BATCHES.fetch_add(1, Ordering::AcqRel);
-        WRITE_GROUP_COMMIT_BATCH_WRITES.fetch_add(row_count_u64, Ordering::AcqRel);
-        if row_count > 1 {
-            WRITE_GROUP_COMMIT_WRITES_COALESCED.fetch_add(row_count_u64, Ordering::AcqRel);
-            WRITE_GROUP_COMMIT_FSYNC_SAVED
-                .fetch_add(row_count_u64.saturating_sub(1), Ordering::AcqRel);
+    if let Ok(mut store) = write_group_commit_counters().lock() {
+        let counters = store
+            .entry(workspace.map(Path::to_path_buf))
+            .or_insert_with(WriteGroupCommitCounters::default);
+        counters.fsync_count = counters.fsync_count.saturating_add(1);
+        counters.latency_total_us = counters.latency_total_us.saturating_add(latency_us);
+        counters.latency_max_us = counters.latency_max_us.max(latency_us);
+
+        if enabled {
+            counters.batches = counters.batches.saturating_add(1);
+            counters.batch_writes = counters.batch_writes.saturating_add(row_count_u64);
+            if row_count > 1 {
+                counters.writes_coalesced = counters.writes_coalesced.saturating_add(row_count_u64);
+                counters.fsync_saved = counters
+                    .fsync_saved
+                    .saturating_add(row_count_u64.saturating_sub(1));
+            }
+        }
+
+        match fallback {
+            Some(WriteGroupCommitFallbackReason::Disabled) => {
+                counters.fallback_disabled =
+                    counters.fallback_disabled.saturating_add(row_count_u64);
+            }
+            Some(WriteGroupCommitFallbackReason::Degraded) => {
+                counters.fallback_degraded =
+                    counters.fallback_degraded.saturating_add(row_count_u64);
+            }
+            Some(WriteGroupCommitFallbackReason::Oversized) => {
+                counters.fallback_oversized =
+                    counters.fallback_oversized.saturating_add(row_count_u64);
+            }
+            Some(WriteGroupCommitFallbackReason::SingleWriter) => {
+                counters.fallback_single_writer = counters
+                    .fallback_single_writer
+                    .saturating_add(row_count_u64);
+            }
+            None => {}
         }
     }
 
@@ -1451,33 +1550,6 @@ fn record_write_group_commit_global(
             latency_us,
             "write group-commit generation advanced"
         );
-    }
-
-    match fallback {
-        Some(WriteGroupCommitFallbackReason::Disabled) => {
-            WRITE_GROUP_COMMIT_FALLBACK_DISABLED.fetch_add(row_count_u64, Ordering::AcqRel);
-        }
-        Some(WriteGroupCommitFallbackReason::Degraded) => {
-            WRITE_GROUP_COMMIT_FALLBACK_DEGRADED.fetch_add(row_count_u64, Ordering::AcqRel);
-        }
-        Some(WriteGroupCommitFallbackReason::Oversized) => {
-            WRITE_GROUP_COMMIT_FALLBACK_OVERSIZED.fetch_add(row_count_u64, Ordering::AcqRel);
-        }
-        Some(WriteGroupCommitFallbackReason::SingleWriter) => {
-            WRITE_GROUP_COMMIT_FALLBACK_SINGLE_WRITER.fetch_add(row_count_u64, Ordering::AcqRel);
-        }
-        None => {}
-    }
-}
-
-fn fetch_max_atomic(target: &AtomicU64, candidate: u64) {
-    let mut current = target.load(Ordering::Acquire);
-    while candidate > current {
-        match target.compare_exchange_weak(current, candidate, Ordering::AcqRel, Ordering::Acquire)
-        {
-            Ok(_) => break,
-            Err(observed) => current = observed,
-        }
     }
 }
 
@@ -1800,6 +1872,7 @@ impl WriteOwner {
 
             accumulator.record_commit(batch.len(), latency_us, fallback, generation_advanced);
             record_write_group_commit_global(
+                None,
                 config.enabled,
                 batch.len(),
                 latency_us,
@@ -3130,6 +3203,76 @@ impl WriteSpool {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// Two workspaces recording concurrently must each see only their own
+    /// writes.
+    ///
+    /// bd-write-owner-telemetry-scope. This is the assertion the old code could
+    /// not satisfy: the counters were eleven process-global `AtomicU64`s, so
+    /// ANY concurrent writer inflated every reader. On the old code workspace A
+    /// would observe 5 (its own 2 plus B's 3) and the `assert_eq!(.., 2)` below
+    /// would fail -- which is the point. A test that cannot fail against the
+    /// defect demonstrates nothing.
+    ///
+    /// It is also the shape that produced the original symptom: a sibling test
+    /// moved the counter that `write_group_commit_one_shot_intake_...` compared,
+    /// which is why that row read 17 where its own fixture produced 6, and why
+    /// it passes alone in 0.01s.
+    #[test]
+    fn group_commit_counters_are_scoped_per_workspace() {
+        reset_write_group_commit_telemetry_for_test();
+
+        let workspace_a = PathBuf::from("/tmp/ee-telemetry-scope-a");
+        let workspace_b = PathBuf::from("/tmp/ee-telemetry-scope-b");
+
+        // Interleaved on purpose: alternating writers are what a shared counter
+        // cannot distinguish.
+        record_write_group_commit_global(Some(&workspace_a), false, 1, 10, None, false);
+        record_write_group_commit_global(Some(&workspace_b), false, 1, 10, None, false);
+        record_write_group_commit_global(Some(&workspace_a), false, 1, 10, None, false);
+        record_write_group_commit_global(Some(&workspace_b), false, 1, 10, None, false);
+        record_write_group_commit_global(Some(&workspace_b), false, 1, 10, None, false);
+
+        let a = read_write_group_commit_counters(Some(&workspace_a));
+        let b = read_write_group_commit_counters(Some(&workspace_b));
+        assert_eq!(a.fsync_count, 2, "workspace A must see only its own writes");
+        assert_eq!(b.fsync_count, 3, "workspace B must see only its own writes");
+
+        // The unattributed bucket is where the batch path records, because
+        // `WriteOwner::run_group_commit` carries no workspace. It must not leak
+        // into either workspace's count.
+        record_write_group_commit_global(None, false, 1, 10, None, false);
+        let a_after = read_write_group_commit_counters(Some(&workspace_a));
+        assert_eq!(
+            a_after.fsync_count, 2,
+            "an unattributed write must not be charged to a workspace"
+        );
+
+        // Nothing is dropped: a `None` query still aggregates every bucket,
+        // which is what the three existing telemetry(None) callers report.
+        //
+        // Asserted as a monotone lower bound, NOT an exact total, and the
+        // reason matters. `WriteOwner::run_group_commit` records to the
+        // unattributed bucket, and sibling tests in this same binary call it
+        // concurrently -- so an exact aggregate here would be a value another
+        // thread can move, which is the precise defect this change exists to
+        // bound. Asserting it exactly would reproduce the disease in the test
+        // written to cure it. The per-workspace assertions above are immune
+        // because their keys are unique to this test, and they are the ones
+        // that fail against the old code.
+        let total = read_write_group_commit_counters(None);
+        assert!(
+            total.fsync_count >= a.fsync_count + b.fsync_count + 1,
+            "aggregate must include both workspaces and the unattributed write; \
+             got {} with a={} b={}",
+            total.fsync_count,
+            a.fsync_count,
+            b.fsync_count
+        );
+
+        reset_write_group_commit_telemetry_for_test();
+    }
+
     use proptest::test_runner::{Config as ProptestConfig, TestCaseError};
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::sync::Arc;
