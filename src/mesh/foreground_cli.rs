@@ -5040,6 +5040,7 @@ max_bytes = 1048576
         let mut autodiscovery = sample_autodiscovery("tailnet-test", "nodekey:self-materializer");
         autodiscovery.ee_capable_peers = vec![
             crate::mesh::tailscale_autodiscovery::TailscaleAutodiscoveryPeer {
+                stable_node_id: None,
                 node_key: "nodekey:new-peer".to_owned(),
                 tailscale_ip: "100.64.0.2".to_owned(),
                 magic_dns_name: Some("new-peer.tailnet.test".to_owned()),

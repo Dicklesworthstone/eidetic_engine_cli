@@ -105,6 +105,10 @@ impl TailscaleAutodiscoveryReport {
 #[serde(rename_all = "camelCase")]
 pub struct TailscaleAutodiscoveryPeer {
     pub node_key: String,
+    /// Tailscale's stable per-device id, carried through from the probe so
+    /// enrollment can anchor identity on something that survives
+    /// re-authentication (bd-mesh-no-stable-node-identity-pt7k5, hop 2 of 4).
+    pub stable_node_id: Option<String>,
     pub tailscale_ip: String,
     pub magic_dns_name: Option<String>,
     pub hostname: Option<String>,
@@ -509,6 +513,7 @@ pub fn autodiscover_tailscale_peers<P: TailscaleHelloProbe>(
                 };
                 report.ee_capable_peers.push(TailscaleAutodiscoveryPeer {
                     node_key: peer.node_key.clone(),
+                    stable_node_id: peer.stable_node_id.clone(),
                     tailscale_ip,
                     magic_dns_name: peer.magic_dns_name.clone(),
                     hostname: peer.hostname.clone(),

@@ -8329,6 +8329,7 @@ mod tests {
             probed_peer_count: 1,
             eligible_peer_count: 1,
             ee_capable_peers: vec![TailscaleAutodiscoveryPeer {
+                stable_node_id: None,
                 node_key: "nodekey:alpha".to_owned(),
                 tailscale_ip: "100.64.0.2".to_owned(),
                 magic_dns_name: Some("alpha.tailnet.test.".to_owned()),
