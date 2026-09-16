@@ -611,6 +611,7 @@ Field invariants:
 
 - **`schema`** pins the surface version. v1 is end-of-life as of 0.2.0; consumers must migrate (see `docs/migration_v0.1_to_v0.2.md`).
 - **`content`** is the single canonical field for memory body text. List views may set `content_truncated: true` and `content_preview` (in addition to, not in place of, `content`).
+- **`memoryId`** is the canonical spelling of a memory identifier, per the camelCase convention enforced at every depth by `tests/contracts/retrieval_field_naming.rs` (EE-FIELD-NAMING-001). `ee remember` additionally emits **`memory_id`** with the identical value; that duplicate is a **retained compatibility alias, not drift**, because many existing consumers read `data.memory_id`. Both are pinned to the same value by `remember_json_round_trips_every_field_to_its_own_key` so they cannot diverge unnoticed. Removing the alias is a contract change with real blast radius and needs its own bead and blast-radius accounting — it must not ride in on a shape-consistency refactor (`bd-wttt2`).
 - **`degraded[]`** is **only** populated when the response was actually affected by a degradation. Build-time feature flags belong in `capabilities.unimplemented[]`, not in per-response `degraded[]` (see E5 / `bd-17c65.5.5`).
 - **`error.details.recovery[]`** is a structured array of recovery actions (each with `priority`, `kind`, `command`), not prose-only repair strings.
 - **`posture`** (in `ee status` / `ee doctor`) is a five-state enum `ok | initializing | degraded_recoverable | degraded_required | blocked`, not a `healthy: bool`.
