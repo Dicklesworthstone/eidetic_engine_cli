@@ -81,6 +81,43 @@ fn unique_workspace(prefix: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// `ee init` a workspace before any write surface touches it.
+///
+/// `unique_workspace` only creates the directory. `91cf7bcbd` ("fix(storage):
+/// reject storeless write and search addresses", 2026-08-11) made ordinary
+/// write surfaces preflight the addressed path, so `ee remember` no longer
+/// brings a store into existence -- `ee init` owns store creation
+/// (src/core/mod.rs:876-882). Tests written before that change seeded straight
+/// into an uninitialised directory and now fail with `workspace_store_missing`.
+///
+/// `graph_link_path_and_why_outputs_compose_for_real_memory_edges` already does
+/// this inline and passes, which is what distinguishes it from the revision
+/// tests below.
+fn init_workspace(workspace_arg: &str) -> TestResult {
+    let init = run_ee(&["--workspace", workspace_arg, "--json", "init"])?;
+    ensure(
+        init.status.success(),
+        format!(
+            "ee init must succeed; stderr: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )
+}
+
+/// Turn on a graph feature that ships default-off.
+///
+/// `built_in_config` sets `proximity_enabled: Some(false)`
+/// (src/config/merge.rs:1255) and `ee proximity` refuses unless
+/// `graph.feature.proximity.enabled` is true. This mirrors the repair the
+/// product itself prints: `ee config set graph.feature.proximity.enabled true`.
+fn enable_proximity_feature(workspace: &Path) -> TestResult {
+    fs::write(
+        workspace.join(".ee").join("config.toml"),
+        "[graph.feature.proximity]\nenabled = true\n",
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn remember(workspace_arg: &str, content: &str) -> Result<String, String> {
     let output = run_ee(&[
         "--workspace",
@@ -1002,6 +1039,7 @@ fn memory_revise_and_why_emit_revision_impact_blocks() -> TestResult {
         .to_str()
         .ok_or_else(|| "workspace path should be utf8".to_string())?
         .to_string();
+    init_workspace(&workspace_arg)?;
     let root = remember(&workspace_arg, "Revision impact root memory.")?;
     let revised_id = revise_memory(&workspace_arg, &root, "Revision impact child memory.")?;
 
@@ -1081,6 +1119,7 @@ fn memory_revise_dry_run_impact_analysis_reports_branch_frontier() -> TestResult
         .to_str()
         .ok_or_else(|| "workspace path should be utf8".to_string())?
         .to_string();
+    init_workspace(&workspace_arg)?;
     let root = remember(&workspace_arg, "Revision frontier root memory.")?;
     let left = revise_memory(&workspace_arg, &root, "Revision frontier left revision.")?;
     let right = remember(&workspace_arg, "Revision frontier right branch memory.")?;
@@ -1261,6 +1300,7 @@ fn memory_revise_dry_run_impact_analysis_reports_singleton_revision_gap() -> Tes
         .to_str()
         .ok_or_else(|| "workspace path should be utf8".to_string())?
         .to_string();
+    init_workspace(&workspace_arg)?;
     let root = remember(&workspace_arg, "Revision singleton root memory.")?;
 
     let preview = run_ee(&[
@@ -1310,6 +1350,7 @@ fn why_revision_lineage_reports_ancestor_depths_for_revision_chain() -> TestResu
         .to_str()
         .ok_or_else(|| "workspace path should be utf8".to_string())?
         .to_string();
+    init_workspace(&workspace_arg)?;
     let root = remember(&workspace_arg, "Revision lineage root memory.")?;
     let child = revise_memory(&workspace_arg, &root, "Revision lineage child memory.")?;
     let grandchild = revise_memory(
@@ -1371,7 +1412,8 @@ fn why_revision_lineage_reports_ancestor_depths_for_revision_chain() -> TestResu
 #[cfg(feature = "graph")]
 #[test]
 fn proximity_json_reports_min_cut_for_seeded_memory_pair() -> TestResult {
-    let (_workspace, workspace_arg, center, neighbor, _link_id) = seed_workspace_with_link()?;
+    let (workspace, workspace_arg, center, neighbor, _link_id) = seed_workspace_with_link()?;
+    enable_proximity_feature(&workspace)?;
 
     let output = run_ee(&[
         "--workspace",
@@ -1556,7 +1598,8 @@ fn insights_proximity_hotspots_returns_seeded_min_cut_pair() -> TestResult {
 #[cfg(feature = "graph")]
 #[test]
 fn proximity_human_renderer_includes_pair_and_interpretation() -> TestResult {
-    let (_workspace, workspace_arg, center, neighbor, _link_id) = seed_workspace_with_link()?;
+    let (workspace, workspace_arg, center, neighbor, _link_id) = seed_workspace_with_link()?;
+    enable_proximity_feature(&workspace)?;
 
     let output = run_ee(&[
         "--workspace",
@@ -1593,7 +1636,19 @@ fn proximity_human_renderer_includes_pair_and_interpretation() -> TestResult {
 fn status_json_exposes_graph_result_cache_hit_rate_metric() -> TestResult {
     let (_workspace, workspace_arg, _center, _neighbor, _link_id) = seed_workspace_with_link()?;
 
-    let output = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "status"])?;
+    // `status --json` with no explicit --fields forces FieldProfile::Summary
+    // (src/cli/mod.rs:15177). `graphCompute` lives in FieldProfile::Standard
+    // (src/output/mod.rs:2015-2043), so the default projection cannot carry it.
+    // `args_contain_fields_flag` scans raw argv, so passing the flag registers as
+    // explicit even at its default value.
+    let output = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "--fields",
+        "standard",
+        "status",
+    ])?;
     ensure(
         output.status.success(),
         format!(
