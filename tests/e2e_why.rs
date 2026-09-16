@@ -176,11 +176,17 @@ fn why_rejects_negative_confidence_threshold_with_usage_error() -> TestResult {
         .to_owned();
     init_workspace(&workspace_arg)?;
 
-    let (output, parsed) = run_why_json(
-        &workspace_arg,
-        "mem_any",
-        &["--confidence-threshold", "-1.0"],
-    )?;
+    // `=` form, deliberately: passed as two arguments, clap consumes `-1.0` as
+    // an unknown FLAG and answers "unexpected argument '-1' found" before
+    // `ee`'s own validator (src/cli/mod.rs:53814) is ever reached. The
+    // assertion below then cannot fire, while the `!status.success()` check
+    // above still passes on clap's exit code -- the right result for the wrong
+    // reason. `--confidence-threshold=-1.0` is a single argument, so the value
+    // reaches the handler and the validator that this test exists to cover
+    // actually runs. The positive sibling at :154 is unaffected because `2.0`
+    // has no leading dash for clap to intercept.
+    let (output, parsed) =
+        run_why_json(&workspace_arg, "mem_any", &["--confidence-threshold=-1.0"])?;
     ensure(
         !output.status.success(),
         format!(
