@@ -11,7 +11,7 @@
 //!   `"ee why <memory-id> --confidence-threshold 0.5"`
 //! * `--confidence-threshold -1.0` -> same Usage shape
 //! * Missing database (no `ee init`) -> Storage repair
-//!   `"ee init --workspace ."`
+//!   `"ee init --workspace <workspace>"`
 //! * Non-existent memory id -> NotFound `"memory"` with repair
 //!   `"ee memory list"`
 //! * Happy path on a real memory -> stable envelope shape
@@ -224,9 +224,10 @@ fn why_surfaces_storage_error_when_database_missing() -> TestResult {
         format!("error message must explain the missing database; got {message}"),
     )?;
     let repair = error["repair"].as_str().unwrap_or_default();
+    let expected_repair = format!("ee init --workspace {workspace_arg}");
     ensure(
-        repair.contains("ee init --workspace ."),
-        format!("error repair must point at `ee init --workspace .`; got {repair}"),
+        repair.contains(&expected_repair),
+        format!("error repair must point at `{expected_repair}`; got {repair}"),
     )?;
     Ok(())
 }

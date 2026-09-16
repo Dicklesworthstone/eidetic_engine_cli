@@ -8,7 +8,7 @@
 //! Neither had dedicated real-binary pin coverage before this commit.
 //!
 //! Pins for `ee memory show`:
-//! * Missing database -> Storage repair `"ee init --workspace ."`
+//! * Missing database -> Storage repair `"ee init --workspace <workspace>"`
 //! * Non-existent memory -> NotFound `"memory"` + `"ee memory list"`
 //! * Happy path -> envelope schema=`ee.response.v2`, data.command=
 //!   `memory show`, data.found=true, data.memoryId echoed
@@ -229,7 +229,7 @@ fn memory_show_surfaces_storage_error_when_database_missing() -> TestResult {
     assert_error_with_repair(
         &parsed,
         &["Database not found at"],
-        &["ee init --workspace ."],
+        &[&format!("ee init --workspace {workspace_arg}")],
     )
 }
 
@@ -328,7 +328,7 @@ fn memory_history_surfaces_storage_error_when_database_missing() -> TestResult {
     assert_error_with_repair(
         &parsed,
         &["Database not found at"],
-        &["ee init --workspace ."],
+        &[&format!("ee init --workspace {workspace_arg}")],
     )
 }
 

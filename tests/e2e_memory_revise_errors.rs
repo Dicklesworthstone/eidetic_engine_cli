@@ -8,7 +8,7 @@
 //! pins end-to-end against the real binary:
 //!
 //! * Missing database (no `ee init`) -> Storage repair
-//!   `"ee init --workspace ."`
+//!   `"ee init --workspace <workspace>"`
 //! * `--confidence garbage` -> Usage from
 //!   `parse_memory_revise_confidence`: `"Invalid confidence
 //!   `garbage`: expected a finite number from 0.0 to 1.0"` +
@@ -185,7 +185,7 @@ fn memory_revise_surfaces_storage_error_when_database_missing() -> TestResult {
     assert_error_with_repair(
         &parsed,
         &["Database not found at"],
-        &["ee init --workspace ."],
+        &[&format!("ee init --workspace {workspace_arg}")],
     )
 }
 
