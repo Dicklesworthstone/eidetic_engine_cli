@@ -3769,8 +3769,28 @@ fn parse_validity_timestamp(
         .transpose()
 }
 
-fn normalize_validity_timestamp(timestamp: DateTime<Utc>) -> String {
+/// Canonical spelling for the AUTHOR VALIDITY columns (`valid_from`, `valid_to`).
+///
+/// `SecondsFormat::Secs` UTC, i.e. `2099-01-01T00:00:00Z`. These columns are
+/// compared LEXICALLY in SQL, so every writer and every comparison bound must
+/// use this exact spelling or the comparison silently misorders: `Z` is 0x5A
+/// and `+` is 0x2B, so a `...Z` value sorts ABOVE a `...+00:00` value bearing
+/// the same instant (bd-o22r0, bd-60tq7).
+pub(crate) fn normalize_validity_timestamp(timestamp: DateTime<Utc>) -> String {
     timestamp.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// Canonical spelling for the ROW BOOKKEEPING columns (`created_at`,
+/// `updated_at`).
+///
+/// Deliberately DIFFERENT from [`normalize_validity_timestamp`]: these columns
+/// are written as plain `to_rfc3339()` (offset form, e.g.
+/// `2026-09-16T19:45:01.123+00:00`) by `insert_memory`, and rewriting them to
+/// the `Z` spelling would touch every existing row. The two spellings coexist
+/// per column; what must never happen is MIXING them inside one column, which
+/// is what breaks the lexical `created_at` ordering V123's backfill relies on.
+pub(crate) fn normalize_row_timestamp(timestamp: DateTime<Utc>) -> String {
+    timestamp.to_rfc3339()
 }
 
 fn classify_validity_status(

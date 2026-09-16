@@ -1476,7 +1476,10 @@ pub(crate) fn admit_recent_context_memories(
     let reference_time = options.as_of.unwrap_or_else(Utc::now);
     // Match the RFC 3339 representation used when memory rows are inserted so
     // SQLite's deterministic text ordering compares like-formatted instants.
-    let reference_time_text = reference_time.to_rfc3339();
+    // bd-60tq7 / bd-o22r0: compared lexically against valid_from/valid_to, which
+    // are stored in the SecondsFormat::Secs `Z` spelling. See
+    // normalize_validity_timestamp for why the spelling must match exactly.
+    let reference_time_text = crate::core::memory::normalize_validity_timestamp(reference_time);
     let candidate_cap = limit.saturating_mul(4).max(limit);
     let mut memories = BTreeMap::new();
     for workspace_id in context_workspace_ids(&connection, &options.workspace_path, &mut degraded) {

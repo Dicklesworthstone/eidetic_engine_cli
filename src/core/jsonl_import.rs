@@ -2143,6 +2143,41 @@ fn validate_memory(
     })
 }
 
+/// Re-emit an imported RFC3339 timestamp in this repository's canonical spelling
+/// for its column class (bd-o22r0).
+///
+/// Imported records carry whatever spelling the exporting tool used. Both
+/// `...Z` and `...+00:00` parse, but `created_at`, `valid_from` and `valid_to`
+/// are compared LEXICALLY in SQL, and `Z` (0x5A) sorts above `+` (0x2B). Mixing
+/// spellings inside one column makes a row at the same instant appear NEWER
+/// than its sibling, which is how V123's supersession backfill can leave two
+/// live heads in one revision chain.
+///
+/// An unparseable value is returned unchanged: this function normalizes
+/// spelling, it does not validate. Validation stays where it already is.
+fn normalize_imported_timestamp(raw: &str, class: TimestampClass) -> String {
+    match chrono::DateTime::parse_from_rfc3339(raw) {
+        Ok(parsed) => {
+            let utc = parsed.with_timezone(&chrono::Utc);
+            match class {
+                TimestampClass::Row => crate::core::memory::normalize_row_timestamp(utc),
+                TimestampClass::Validity => crate::core::memory::normalize_validity_timestamp(utc),
+            }
+        }
+        Err(_) => raw.to_owned(),
+    }
+}
+
+/// Which canonical spelling a column uses. The two are deliberately different;
+/// see `normalize_row_timestamp` and `normalize_validity_timestamp`.
+#[derive(Clone, Copy)]
+enum TimestampClass {
+    /// `created_at`, `updated_at` -- offset form.
+    Row,
+    /// `valid_from`, `valid_to` -- `SecondsFormat::Secs` `Z` form.
+    Validity,
+}
+
 fn prepare_memory(
     validated: ValidatedMemory<'_>,
     workspace_id: &str,
@@ -2176,13 +2211,15 @@ fn prepare_memory(
     Ok(PreparedMemory {
         id: validated.id,
         logical_id: validated.logical_id,
-        created_at: memory.created_at.clone(),
-        updated_at: memory
-            .updated_at
-            .as_ref()
-            .or(memory.tombstoned_at.as_ref())
-            .unwrap_or(&memory.created_at)
-            .clone(),
+        created_at: normalize_imported_timestamp(&memory.created_at, TimestampClass::Row),
+        updated_at: normalize_imported_timestamp(
+            memory
+                .updated_at
+                .as_ref()
+                .or(memory.tombstoned_at.as_ref())
+                .unwrap_or(&memory.created_at),
+            TimestampClass::Row,
+        ),
         input: CreateMemoryInput {
             workspace_id: workspace_id.to_owned(),
             level: validated.level.as_str().to_owned(),
@@ -2203,11 +2240,15 @@ fn prepare_memory(
             trust_class: trust_class.as_str().to_owned(),
             trust_subclass,
             tags,
-            valid_from: memory.valid_from.clone(),
+            valid_from: memory
+                .valid_from
+                .as_deref()
+                .map(|raw| normalize_imported_timestamp(raw, TimestampClass::Validity)),
             valid_to: memory
                 .valid_to
-                .clone()
-                .or_else(|| memory.expires_at.clone()),
+                .as_deref()
+                .or(memory.expires_at.as_deref())
+                .map(|raw| normalize_imported_timestamp(raw, TimestampClass::Validity)),
         },
         tombstoned_at: memory.tombstoned_at.clone(),
         tombstoned_reason: memory.tombstoned_reason.clone(),

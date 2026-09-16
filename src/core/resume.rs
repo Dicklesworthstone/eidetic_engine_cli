@@ -838,7 +838,15 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
     );
     let now = Utc::now();
     let current_memories = connection
-        .list_recent_current_memories_for_retrieval(&workspace_id, &now.to_rfc3339(), u32::MAX)
+        .list_recent_current_memories_for_retrieval(
+            &workspace_id,
+            // bd-60tq7 / bd-o22r0: this bound is compared LEXICALLY against
+            // valid_from/valid_to, which are stored in the SecondsFormat::Secs
+            // `Z` spelling. Passing bare to_rfc3339() here compared `+00:00`
+            // against `Z` and misordered at the boundary instant.
+            &crate::core::memory::normalize_validity_timestamp(now),
+            u32::MAX,
+        )
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to list current resume memories: {error}"),
             repair: Some("ee doctor --workspace . --json".to_owned()),
