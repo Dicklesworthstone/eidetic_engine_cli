@@ -19,7 +19,6 @@
 # Format: one bead id per line. Blank lines and # comments are ignored.
 
 bd-3usjw.1
-bd-3usjw.2
 bd-3usjw.38
 bd-3usjw.45
 bd-3usjw.51
