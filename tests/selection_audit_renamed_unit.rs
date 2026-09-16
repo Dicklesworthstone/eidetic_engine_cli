@@ -186,9 +186,43 @@ fn default_renderers_do_not_emit_old_field_name() {
 }
 
 #[test]
-fn pack_schema_requires_selection_audit() {
-    let schema = include_str!("../docs/schemas/ee.pack.v2.json");
+fn pack_schema_requires_selection_audit() -> TestResult {
+    // ADR 0031 renamed selectionCertificate -> selectionAudit. The contract that
+    // encodes is which name is AUTHORITATIVE, not whether the old string appears
+    // anywhere in the file.
+    //
+    // A `!schema.contains("selectionCertificate")` check cannot express that, and
+    // it contradicted this file's own
+    // `legacy_selection_certificate_requires_explicit_option`, which requires ee
+    // to emit `/data/pack/selectionCertificate/algorithmId` under
+    // EE_LEGACY_SELECTION_CERTIFICATE. `data.pack` is `additionalProperties:
+    // false`, so the schema MUST declare the legacy property or that opt-in
+    // output fails its own schema.
+    let schema: Value = serde_json::from_str(include_str!("../docs/schemas/ee.pack.v2.json"))
+        .map_err(|error| format!("ee.pack.v2.json must parse: {error}"))?;
+    let pack = schema
+        .pointer("/properties/data/properties/pack")
+        .ok_or("schema must describe data.pack")?;
 
-    assert!(schema.contains("\"selectionAudit\""));
-    assert!(!schema.contains("\"selectionCertificate\""));
+    let required: Vec<&str> = pack
+        .pointer("/required")
+        .and_then(Value::as_array)
+        .ok_or("data.pack must declare a required list")?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        required.contains(&"selectionAudit"),
+        "selectionAudit must be a required pack property, got {required:?}"
+    );
+    assert!(
+        !required.contains(&"selectionCertificate"),
+        "the renamed-away selectionCertificate must never be required, got {required:?}"
+    );
+    assert!(
+        pack.pointer("/properties/selectionAudit").is_some(),
+        "selectionAudit must be a declared pack property"
+    );
+
+    Ok(())
 }
