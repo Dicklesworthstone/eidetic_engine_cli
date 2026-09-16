@@ -78,7 +78,9 @@ fn init_workspace(workspace_arg: &str) -> TestResult {
     ensure(
         init.status.success(),
         format!(
-            "ee init must succeed; stderr: {}",
+            "ee init must succeed; status={:?}; stdout: {}; stderr: {}",
+            init.status.code(),
+            String::from_utf8_lossy(&init.stdout),
             String::from_utf8_lossy(&init.stderr)
         ),
     )
@@ -264,7 +266,9 @@ fn curate_propose_derived_dry_run_does_not_mutate_database() -> TestResult {
     ensure(
         output.status.success(),
         format!(
-            "dry-run propose-derived must succeed; stderr: {}",
+            "dry-run propose-derived must succeed; status={:?}; stdout: {}; stderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ),
     )?;
@@ -308,7 +312,9 @@ fn curate_propose_derived_dry_run_does_not_mutate_database() -> TestResult {
     ensure(
         listing.status.success(),
         format!(
-            "curate candidates must succeed; stderr: {}",
+            "curate candidates must succeed; status={:?}; stdout: {}; stderr: {}",
+            listing.status.code(),
+            String::from_utf8_lossy(&listing.stdout),
             String::from_utf8_lossy(&listing.stderr)
         ),
     )?;
@@ -344,7 +350,9 @@ fn curate_propose_derived_inserts_pending_candidate_and_is_idempotent() -> TestR
     ensure(
         first_output.status.success(),
         format!(
-            "first propose-derived must succeed; stderr: {}",
+            "first propose-derived must succeed; status={:?}; stdout: {}; stderr: {}",
+            first_output.status.code(),
+            String::from_utf8_lossy(&first_output.stdout),
             String::from_utf8_lossy(&first_output.stderr)
         ),
     )?;
@@ -368,7 +376,9 @@ fn curate_propose_derived_inserts_pending_candidate_and_is_idempotent() -> TestR
     ensure(
         listing.status.success(),
         format!(
-            "curate candidates must succeed; stderr: {}",
+            "curate candidates must succeed; status={:?}; stdout: {}; stderr: {}",
+            listing.status.code(),
+            String::from_utf8_lossy(&listing.stdout),
             String::from_utf8_lossy(&listing.stderr)
         ),
     )?;
