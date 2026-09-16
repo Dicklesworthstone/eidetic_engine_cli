@@ -7,52 +7,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use chrono::{SecondsFormat, Utc};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
-
-/// Wire identifier that makes a snapshot authoritative for coordination claims.
-///
-/// Mirrors the private constant in `src/core/swarm_brief.rs`; it is a wire
-/// contract, so the literal is the contract.
-const AGENT_MAIL_SNAPSHOT_SCHEMA_V1: &str = "ee.agent_mail.snapshot.v1";
-
-/// Stamp a snapshot fixture with the v1 authority evidence the loader requires.
-///
-/// `9dacddebb` made the `ee.agent_mail.snapshot.v1` declaration the gate for
-/// treating reservation rows as claim evidence: a snapshot without it stays
-/// readable but is refused as authoritative, so `blockedByCoordination` comes
-/// back empty and every reserved path looks commit-ready. Both derived fields
-/// have to be computed here rather than hard-coded — `generated_at` because the
-/// claim-evidence horizon is five minutes, and `project_key` because the
-/// binding is a digest of *this* workspace's canonical path.
-fn agent_mail_snapshot_v1(workspace: &Path, body: &str) -> Result<String, String> {
-    let mut value: Value = serde_json::from_str(body)
-        .map_err(|error| format!("snapshot fixture is not valid JSON: {error}"))?;
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| "snapshot fixture must be a JSON object".to_owned())?;
-    let canonical = fs::canonicalize(workspace)
-        .map_err(|error| format!("canonicalize {}: {error}", workspace.display()))?;
-    let identity = canonical
-        .to_str()
-        .ok_or_else(|| format!("workspace path is not UTF-8: {}", canonical.display()))?;
-    let digest = ee::models::release::sha256_hex(identity.as_bytes());
-    object.insert(
-        "schema".to_owned(),
-        Value::from(AGENT_MAIL_SNAPSHOT_SCHEMA_V1),
-    );
-    object.insert(
-        "generated_at".to_owned(),
-        Value::from(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)),
-    );
-    object.insert(
-        "project_key".to_owned(),
-        Value::from(format!("sha256:{digest}")),
-    );
-    serde_json::to_string(&value).map_err(|error| format!("serialize snapshot fixture: {error}"))
-}
 
 fn run_command(command: &mut Command, context: &str) -> Result<Output, String> {
     command
@@ -251,9 +208,7 @@ fn workspace_hygiene_snapshot_reservation_blocks_dirty_source_path() -> TestResu
     let snapshot_path = workspace.join("agent-mail-snapshot.json");
     write_file(
         &snapshot_path,
-        &agent_mail_snapshot_v1(
-            &workspace,
-            r#"{
+        r#"{
           "file_reservations": [
             {
               "path_pattern": "src/core/workspace.rs",
@@ -268,7 +223,6 @@ fn workspace_hygiene_snapshot_reservation_blocks_dirty_source_path() -> TestResu
           "inbox": [],
           "threads": []
         }"#,
-        )?,
     )?;
 
     let value = run_hygiene_with_snapshot(&workspace, &snapshot_path)?;
@@ -350,15 +304,12 @@ fn workspace_hygiene_large_dirty_workspace_logs_truncation_metrics() -> TestResu
     let snapshot_path = workspace.with_extension("agent-mail-empty.json");
     write_file(
         &snapshot_path,
-        &agent_mail_snapshot_v1(
-            &workspace,
-            r#"{
+        r#"{
           "file_reservations": [],
           "active_agents": [],
           "inbox": [],
           "threads": []
         }"#,
-        )?,
     )?;
 
     let started = std::time::Instant::now();
@@ -410,15 +361,12 @@ fn workspace_hygiene_empty_snapshot_distinguishes_no_reservations_from_unavailab
     let snapshot_path = workspace.join("agent-mail-empty.json");
     write_file(
         &snapshot_path,
-        &agent_mail_snapshot_v1(
-            &workspace,
-            r#"{
+        r#"{
           "file_reservations": [],
           "active_agents": [],
           "inbox": [],
           "threads": []
         }"#,
-        )?,
     )?;
 
     let value = run_hygiene_with_snapshot(&workspace, &snapshot_path)?;
