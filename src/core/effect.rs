@@ -1493,11 +1493,6 @@ impl EffectManifest {
                 "impact",
                 "Estimate impact from persisted graph and memory state",
             ),
-            CommandEffect::durable_write(
-                "index backfill-tags",
-                vec!["memory_tags", "search_index_jobs", "audit_log"],
-                "Derive tags for historical tag-less memories through the audited memory-tags patch path",
-            ),
             CommandEffect::read_only_db("index status", "Show index status"),
             CommandEffect::read_only(
                 "index vacuum",
@@ -2482,6 +2477,11 @@ impl EffectManifest {
                 "memory link",
                 vec!["memory_links", "audit_log"],
                 "List or create explicit memory links with deterministic idempotent audits",
+            ),
+            CommandEffect::durable_write(
+                "index backfill-tags",
+                vec!["memory_tags", "search_index_jobs", "audit_log"],
+                "Derive tags for historical tag-less memories through the audited memory-tags patch path",
             ),
             CommandEffect::durable_write(
                 "memory tags",
