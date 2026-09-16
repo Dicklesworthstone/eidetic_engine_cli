@@ -40609,7 +40609,7 @@ where
                                 message,
                                 repair: Some("Retry the context request.".to_owned()),
                             },
-                            true,
+                            renderer,
                             stdout,
                             stderr,
                         );
@@ -40635,7 +40635,7 @@ where
                                 message,
                                 repair: Some("Retry the context request.".to_owned()),
                             },
-                            true,
+                            renderer,
                             stdout,
                             stderr,
                         );
@@ -42172,7 +42172,7 @@ where
     let mut filters = crate::models::QueryFilters::default();
     filters.temporal.as_of = args.as_of;
     if let Err(domain_error) = validate_context_stream_request(cli, args) {
-        return write_domain_error(&domain_error, true, stdout, stderr);
+        return write_domain_error(&domain_error, cli.context_renderer(), stdout, stderr);
     }
     let options = ContextPackOptions {
         workspace_path: workspace_path.clone(),
@@ -42252,7 +42252,7 @@ where
                 ),
             };
             let stdout = writer.into_inner();
-            return write_domain_error(&domain_error, true, stdout, stderr);
+            return write_domain_error(&domain_error, cli.context_renderer(), stdout, stderr);
         }
         let mut response = match run_pack() {
             Ok(run) => run.response,
@@ -42274,7 +42274,7 @@ where
                             ),
                         };
                         let stdout = writer.into_inner();
-                        write_domain_error(&domain_error, true, stdout, stderr)
+                        write_domain_error(&domain_error, cli.context_renderer(), stdout, stderr)
                     }
                 };
             }
@@ -42332,7 +42332,7 @@ where
                             ),
                         };
                         let stdout = writer.into_inner();
-                        write_domain_error(&domain_error, true, stdout, stderr)
+                        write_domain_error(&domain_error, cli.context_renderer(), stdout, stderr)
                     }
                 }
             }
@@ -59898,7 +59898,7 @@ where
                         message: format!("failed to serialize agent sources report: {error}"),
                         repair: Some("ee agent sources --json".to_string()),
                     };
-                    return write_domain_error(&domain_error, true, stdout, stderr);
+                    return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
                 }
             };
             write_stdout(
