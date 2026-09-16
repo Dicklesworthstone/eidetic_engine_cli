@@ -13957,6 +13957,165 @@ mod tests {
         )
     }
 
+    /// bd-reality-core-convergence-1azkt.13, plan section C:
+    /// "Prove evolved-store backup -> verify -> restore -> migrate -> rebuild
+    /// -> query".
+    ///
+    /// Three of those six links were already implemented but unasserted:
+    /// `restore_backup_to_side_path` runs `db.migrate()` on the recovered
+    /// database and then `rebuild_index` over the staged store before
+    /// publishing it, yet **no test asserted the restored store's schema
+    /// state, and none queried it at all**. Row-equality harnesses prove the
+    /// bytes arrived; they do not prove the result is a *working* store.
+    ///
+    /// The schema assertion is deliberately **self-calibrating**: it compares
+    /// the restored version against the SOURCE version and additionally
+    /// requires `needs_migration()` to be false, rather than pinning a literal
+    /// version number that a future migration would silently invalidate.
+    ///
+    /// The query link is asserted through the database rather than through a
+    /// vector search. That is a considered limitation, not an oversight: a
+    /// `TwoTierSearcher` query would bind this test to
+    /// `default_search_embedder_stack()`, the process-global embedder identity
+    /// filed as bd-f0q00, and would make an order- and host-dependent red look
+    /// like a recovery regression. Proving the rebuilt index is *coherent*
+    /// (health ready, generations equal) plus the rows being readable covers
+    /// the recovery contract without importing that fragility.
+    #[test]
+    fn evolved_store_restore_migrates_rebuilds_and_serves_queries() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+
+        // Baseline from the source store, so every later comparison is against
+        // observed state rather than a literal.
+        let source = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let source_schema_version = source.schema_version().map_err(|error| error.to_string())?;
+        let source_workspace_id = source
+            .list_workspaces()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "source store carries no workspace".to_owned())?
+            .id;
+        let source_memories = source
+            .list_memories(&source_workspace_id, None, false)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            !source_memories.is_empty(),
+            "the source fixture must hold at least one memory or the query link is vacuous",
+        )?;
+        source.close().map_err(|error| error.to_string())?;
+        ensure(
+            source_schema_version.is_some(),
+            "source store must report a schema version",
+        )?;
+
+        // backup
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(workspace.join("backups")),
+            label: Some("evolved-store".to_owned()),
+            redaction_level: RedactionLevel::None,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        // verify
+        let verified = verify_backup(&BackupVerifyOptions {
+            workspace_path: workspace.clone(),
+            backup_path: PathBuf::from(&created.backup_path),
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            verified.status.as_str(),
+            "verified",
+            "the backup must verify before the recovery chain means anything",
+        )?;
+
+        // restore, which internally migrates the recovered database and
+        // rebuilds its derived index before publishing the store
+        let side_path = tempdir.path().join("evolved-store-side");
+        let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path: side_path.clone(),
+            restore_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(restored.status.as_str(), "completed", "restore status")?;
+
+        // migrate: the recovered store is at the source's schema and wants
+        // nothing further.
+        let recovered = DbConnection::open_file(&restored.restored_database_path)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            recovered
+                .schema_version()
+                .map_err(|error| error.to_string())?,
+            source_schema_version,
+            "recovered store must sit at the same schema version as its source",
+        )?;
+        ensure_equal(
+            recovered
+                .needs_migration()
+                .map_err(|error| error.to_string())?,
+            false,
+            "recovered store must need no further migration",
+        )?;
+
+        // query: the recovered store answers for the records it was given.
+        let recovered_workspace_id = recovered
+            .list_workspaces()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "recovered store carries no workspace".to_owned())?
+            .id;
+        let recovered_memories = recovered
+            .list_memories(&recovered_workspace_id, None, false)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            recovered_memories
+                .iter()
+                .map(|memory| memory.id.as_str())
+                .collect::<BTreeSet<_>>(),
+            source_memories
+                .iter()
+                .map(|memory| memory.id.as_str())
+                .collect::<BTreeSet<_>>(),
+            "recovered store must return the same memory identities as the source",
+        )?;
+        recovered.close().map_err(|error| error.to_string())?;
+
+        // rebuild: the derived index published with the store is coherent with
+        // the database it was built from. A restore that produced a stale or
+        // missing index would still pass every row-equality check above.
+        let index_status =
+            crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                workspace_path: side_path,
+                database_path: None,
+                index_dir: None,
+            })
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            index_status.health,
+            crate::core::index::IndexHealth::Ready,
+            "a recovered store must publish a ready index, not a stale or missing one",
+        )?;
+        ensure(
+            index_status.db_generation.is_some(),
+            "recovered index status must report a database generation",
+        )?;
+        ensure_equal(
+            index_status.index_generation,
+            index_status.db_generation,
+            "recovered index generation must match the recovered database generation",
+        )
+    }
+
     fn remap_workspace_fixture(id: &str) -> crate::db::StoredWorkspace {
         crate::db::StoredWorkspace {
             id: id.to_owned(),
