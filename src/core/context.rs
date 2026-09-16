@@ -13057,16 +13057,18 @@ fn push_evidence_freshness_degradation(
     );
 }
 
+/// Delegates to the single taxonomy → section mapping
+/// (bd-fallback-relevance-floor-labeling-dlr6a).
+///
+/// This function previously carried its own byte-identical copy of the match
+/// arms in `crate::core::search`. Keeping two copies of the rule that decides
+/// which heading an agent reads a memory under meant either could drift
+/// silently; there is now one.
 fn section_for_memory(memory: &StoredMemory) -> PackSection {
-    match (memory.level.as_str(), memory.kind.as_str()) {
-        ("procedural", _) | (_, "rule" | "convention" | "playbook-step") => {
-            PackSection::ProceduralRules
-        }
-        (_, "decision") => PackSection::Decisions,
-        (_, "failure" | "anti-pattern" | "risk") => PackSection::Failures,
-        ("episodic", _) => PackSection::Evidence,
-        _ => PackSection::Artifacts,
-    }
+    crate::core::search::pack_section_for_level_and_kind(
+        memory.level.as_str(),
+        memory.kind.as_str(),
+    )
 }
 
 fn diversity_key_for_memory(memory: &StoredMemory, tags: &[String]) -> String {

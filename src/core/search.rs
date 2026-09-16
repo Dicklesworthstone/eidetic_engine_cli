@@ -5951,8 +5951,23 @@ fn split_tags(tags: &str) -> Vec<String> {
         .collect()
 }
 
-fn search_pack_section(level: Option<&str>, kind: Option<&str>) -> PackSection {
-    match (level.unwrap_or_default(), kind.unwrap_or_default()) {
+/// The single memory-taxonomy → [`PackSection`] mapping
+/// (bd-fallback-relevance-floor-labeling-dlr6a).
+///
+/// This lived twice: here, and as `section_for_memory` in
+/// `crate::core::context`, byte-identical but over different input types. Two
+/// copies of a rule that decides which heading an agent reads a memory under
+/// is a silent-drift hazard — change one and packs assembled through the other
+/// path quietly disagree. Both entry points now delegate here.
+///
+/// Note what this mapping is and is not: it is a *taxonomy* label derived from
+/// `level`/`kind` alone. It is deliberately **not** a relevance claim. An
+/// episodic memory is filed under `Evidence` because of what it is, not
+/// because it supports the query; query fitness is carried by the score and
+/// the relevance floor, not by the section heading.
+#[must_use]
+pub(crate) fn pack_section_for_level_and_kind(level: &str, kind: &str) -> PackSection {
+    match (level, kind) {
         ("procedural", _) | (_, "rule" | "convention" | "playbook-step") => {
             PackSection::ProceduralRules
         }
@@ -5961,6 +5976,10 @@ fn search_pack_section(level: Option<&str>, kind: Option<&str>) -> PackSection {
         ("episodic", _) => PackSection::Evidence,
         _ => PackSection::Artifacts,
     }
+}
+
+fn search_pack_section(level: Option<&str>, kind: Option<&str>) -> PackSection {
+    pack_section_for_level_and_kind(level.unwrap_or_default(), kind.unwrap_or_default())
 }
 
 fn search_hit_pack_provenance(
@@ -18799,6 +18818,50 @@ mod tests {
 
         let index_err = SearchError::Index("test".to_string());
         assert!(index_err.repair_hint().is_some());
+    }
+
+    // bd-fallback-relevance-floor-labeling-dlr6a: this mapping used to exist
+    // twice (here and in crate::core::context), so a change to one could
+    // silently disagree with the other about which heading an agent reads a
+    // memory under. Pin the whole table at the single source.
+    #[test]
+    fn pack_section_mapping_covers_the_whole_taxonomy_table() {
+        for (level, kind, expected) in [
+            ("procedural", "anything", PackSection::ProceduralRules),
+            ("semantic", "rule", PackSection::ProceduralRules),
+            ("semantic", "convention", PackSection::ProceduralRules),
+            ("semantic", "playbook-step", PackSection::ProceduralRules),
+            ("semantic", "decision", PackSection::Decisions),
+            ("episodic", "decision", PackSection::Decisions),
+            ("semantic", "failure", PackSection::Failures),
+            ("semantic", "anti-pattern", PackSection::Failures),
+            ("semantic", "risk", PackSection::Failures),
+            ("episodic", "note", PackSection::Evidence),
+            ("semantic", "fact", PackSection::Artifacts),
+            ("", "", PackSection::Artifacts),
+        ] {
+            assert_eq!(
+                pack_section_for_level_and_kind(level, kind),
+                expected,
+                "level={level:?} kind={kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_pack_section_treats_absent_level_and_kind_as_empty() {
+        // Preserves the pre-unification `unwrap_or_default()` behaviour: a
+        // search document missing both facets is an artifact, not a panic and
+        // not evidence.
+        assert_eq!(search_pack_section(None, None), PackSection::Artifacts);
+        assert_eq!(
+            search_pack_section(None, Some("rule")),
+            PackSection::ProceduralRules
+        );
+        assert_eq!(
+            search_pack_section(Some("episodic"), None),
+            PackSection::Evidence
+        );
     }
 
     #[test]
