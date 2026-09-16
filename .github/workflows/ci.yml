@@ -301,6 +301,7 @@ jobs:
         run: |
           set -euo pipefail
           heartbeat_pid=""
+          current_label=""
           cleanup() {
             if [ -n "$heartbeat_pid" ]; then
               kill "$heartbeat_pid" 2>/dev/null || true
@@ -308,7 +309,20 @@ jobs:
               heartbeat_pid=""
             fi
           }
+          # bd-rghb4: the status-based handler below only fires when the
+          # per-command `timeout` kills a command. A job-level kill (GitHub
+          # cancelling at timeout-minutes) never returns a status to test, so
+          # on the multi-command shards the running command was only ever
+          # named in ::notice:: lines. Surface it as an error annotation too.
+          on_terminate() {
+            if [ -n "$current_label" ]; then
+              echo "::error::job terminated while running $current_label; the shard exhausted its job budget before any single command reached its per-command timeout" >&2
+            fi
+            cleanup
+            exit 143
+          }
           trap cleanup EXIT
+          trap on_terminate TERM INT
 
           run_test() {
             local label="$1"
@@ -321,11 +335,13 @@ jobs:
               done
             ) &
             heartbeat_pid=$!
+            current_label="$label"
             echo "::notice::$label started at $(date -u +%FT%TZ) with CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS RUSTFLAGS=$RUSTFLAGS RUST_TEST_THREADS=$RUST_TEST_THREADS"
             set +e
             timeout --foreground --kill-after=30s 90m "$@"
             local status=$?
             set -e
+            current_label=""
             cleanup
             if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
               echo "::error::$label exceeded the 90m CI test budget; inspect the last emitted test name/output above for the hanging test." >&2
