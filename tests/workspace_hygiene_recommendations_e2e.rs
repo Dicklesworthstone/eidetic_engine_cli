@@ -9,6 +9,11 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
+#[path = "agent_mail_fixture/snapshot_v1.rs"]
+mod agent_mail_snapshot_v1;
+
+use agent_mail_snapshot_v1::{ReservationFixture, declared_snapshot_v1};
+
 type TestResult = Result<(), String>;
 
 fn run_command(command: &mut Command, context: &str) -> Result<Output, String> {
@@ -461,21 +466,27 @@ fn workspace_hygiene_recommendations_are_grouped_read_only_and_explainable() -> 
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("workspace path has no file name: {}", workspace.display()))?;
     let snapshot_path = workspace.with_file_name(format!("{workspace_name}-agent-mail.json"));
+    // An UNDECLARED snapshot is not authoritative: without the
+    // `ee.agent_mail.snapshot.v1` declaration the loader answers
+    // `freshness::unknown()` and flags AGENT_MAIL_UNAVAILABLE
+    // (swarm_brief.rs:8034), which suppresses coordination blocking entirely --
+    // so a reserved path is never stripped from staging and this assertion can
+    // never be reached. Declaring the schema opts into
+    // `validate_declared_agent_mail_snapshot_v1`, which requires all sixteen
+    // root fields plus cross-field invariants; that is why the earlier 3-field
+    // attempt (dd7b3815e) failed validation rather than freshness and was
+    // backed out in f19ed899a. The shared builder satisfies the full contract.
     write_file(
         &snapshot_path,
-        r#"{
-          "file_reservations": [
-            {
-              "path_pattern": "src/core/lib.rs",
-              "holder": "OtherAgent",
-              "exclusive": true,
-              "expires_at": "2099-01-01T00:00:00Z"
-            }
-          ],
-          "active_agents": [{"name": "OtherAgent"}],
-          "inbox": [],
-          "threads": []
-        }"#,
+        &declared_snapshot_v1(
+            &workspace,
+            "OtherAgent",
+            &[ReservationFixture {
+                path_pattern: "src/core/lib.rs",
+                holder: "OtherAgent",
+                exclusive: true,
+            }],
+        )?,
     )?;
     let before = git_status(&workspace)?;
     let value = run_hygiene_json(&workspace, &snapshot_path)?;
@@ -653,33 +664,39 @@ fn workspace_hygiene_coordination_blocked_workspace_strips_blocked_paths_from_st
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("workspace path has no file name: {}", workspace.display()))?;
     let snapshot_path = workspace.with_file_name(format!("{workspace_name}-agent-mail.json"));
+    // An UNDECLARED snapshot is not authoritative: without the
+    // `ee.agent_mail.snapshot.v1` declaration the loader answers
+    // `freshness::unknown()` and flags AGENT_MAIL_UNAVAILABLE
+    // (swarm_brief.rs:8034), which suppresses coordination blocking entirely --
+    // so a reserved path is never stripped from staging and this assertion can
+    // never be reached. Declaring the schema opts into
+    // `validate_declared_agent_mail_snapshot_v1`, which requires all sixteen
+    // root fields plus cross-field invariants; that is why the earlier 3-field
+    // attempt (dd7b3815e) failed validation rather than freshness and was
+    // backed out in f19ed899a. The shared builder satisfies the full contract.
     write_file(
         &snapshot_path,
-        r#"{
-          "file_reservations": [
-            {
-              "path_pattern": "src/core/lib.rs",
-              "holder": "OtherAgent",
-              "exclusive": true,
-              "expires_at": "2099-01-01T00:00:00Z"
-            },
-            {
-              "path_pattern": "src/core/api.rs",
-              "holder": "OtherAgent",
-              "exclusive": true,
-              "expires_at": "2099-01-01T00:00:00Z"
-            },
-            {
-              "path_pattern": "src/core/util.rs",
-              "holder": "OtherAgent",
-              "exclusive": true,
-              "expires_at": "2099-01-01T00:00:00Z"
-            }
-          ],
-          "active_agents": [{"name": "OtherAgent"}],
-          "inbox": [],
-          "threads": []
-        }"#,
+        &declared_snapshot_v1(
+            &workspace,
+            "OtherAgent",
+            &[
+                ReservationFixture {
+                    path_pattern: "src/core/lib.rs",
+                    holder: "OtherAgent",
+                    exclusive: true,
+                },
+                ReservationFixture {
+                    path_pattern: "src/core/api.rs",
+                    holder: "OtherAgent",
+                    exclusive: true,
+                },
+                ReservationFixture {
+                    path_pattern: "src/core/util.rs",
+                    holder: "OtherAgent",
+                    exclusive: true,
+                },
+            ],
+        )?,
     )?;
 
     let before = git_status(&workspace)?;
