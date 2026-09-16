@@ -1986,7 +1986,22 @@ fn workspace_hygiene_next_actions(
             "Leave doNotCommit paths unstaged unless a human explicitly overrides.".to_string(),
         );
     }
-    if degraded_codes.contains(&WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE) {
+    // Coordination-sensitive means "a path this report is steering toward a
+    // commit": one it recommends for staging, or one it flags for human review
+    // that a human may then commit. Paths in `do_not_commit` are steered away
+    // from a commit, and a path in no bucket at all is not a commit candidate,
+    // so neither can make reservation staleness matter.
+    //
+    // The three actions above are each conditioned on the content they talk
+    // about. This one was conditioned only on Agent Mail's availability, which
+    // is a capability state rather than a statement about this response — so it
+    // fired on a workspace with zero dirty paths, advising an agent to refresh
+    // reservations before committing when there was nothing to commit. The
+    // condition was wrong rather than absent.
+    let has_commit_candidate = !staging_groups.is_empty() || !needs_human_review.is_empty();
+    if has_commit_candidate
+        && degraded_codes.contains(&WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE)
+    {
         actions.push(
             "Refresh Agent Mail reservations before committing coordination-sensitive paths."
                 .to_string(),
