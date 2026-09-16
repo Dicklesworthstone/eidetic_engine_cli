@@ -13605,6 +13605,130 @@ mod tests {
         )
     }
 
+    /// bd-reality-core-convergence-1azkt.13, plan section C negative matrix:
+    /// the "missing side path" class, which turns out to be mislabelled.
+    ///
+    /// `ensure_side_path_is_isolated` had **no** test — its only two references
+    /// were its definition and its single call site in
+    /// `restore_backup_to_side_path`. Two of its four refusals appeared exactly
+    /// once in the whole file, i.e. only where they are constructed.
+    ///
+    /// Reading it also corrects the matrix label: a side path that does **not
+    /// exist** is explicitly `Ok(())` — that is the normal case, and restore
+    /// creates it. The refusals that actually protect the operator are the
+    /// non-empty directory and the non-directory, and the non-empty one is the
+    /// mechanism behind this bead's acceptance line "no overwrite of a live
+    /// workspace".
+    ///
+    /// The accepting arm is asserted first and deliberately: without it every
+    /// refusal below would pass equally for a function that rejected every
+    /// path, which would make restore unusable while looking well-tested.
+    #[test]
+    fn side_path_isolation_accepts_a_fresh_target_and_refuses_unsafe_ones() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        // Canonicalized on purpose. Neither this check nor production's
+        // `normalize_restore_side_path` resolves symlinks before scanning, so
+        // on a host whose temp dir traverses one (macOS `/var` -> `/private/var`)
+        // an uncanonicalized fixture path would be refused for the HOST's
+        // layout rather than for anything this test is asserting. Resolving it
+        // up front keeps the accepting arms host-independent; the symlink arms
+        // below build their own links under this canonical root.
+        let root = tempdir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+
+        // Control: an absent target is the ordinary restore case.
+        ensure_side_path_is_isolated(&root.join("fresh-target")).map_err(|error| {
+            format!("an absent side path must be accepted: {}", error.message())
+        })?;
+
+        // Control: an existing but EMPTY directory is also fine.
+        let empty = root.join("empty-target");
+        fs::create_dir_all(&empty).map_err(|error| error.to_string())?;
+        ensure_side_path_is_isolated(&empty).map_err(|error| {
+            format!(
+                "an existing empty side path must be accepted: {}",
+                error.message()
+            )
+        })?;
+
+        // Refusal: the target exists but is not a directory.
+        let regular_file = root.join("not-a-directory");
+        fs::write(&regular_file, b"occupied").map_err(|error| error.to_string())?;
+        let not_a_dir = ensure_side_path_is_isolated(&regular_file)
+            .err()
+            .ok_or_else(|| "a non-directory side path must be refused".to_owned())?;
+        ensure(
+            not_a_dir
+                .message()
+                .contains("exists but is not a directory"),
+            format!("unexpected non-directory refusal: {}", not_a_dir.message()),
+        )?;
+
+        // Refusal: the target is a non-empty directory. This is the guard that
+        // keeps a restore from landing on top of a live workspace.
+        let occupied = root.join("occupied-target");
+        fs::create_dir_all(&occupied).map_err(|error| error.to_string())?;
+        fs::write(occupied.join("ee.db"), b"live store").map_err(|error| error.to_string())?;
+        let non_empty = ensure_side_path_is_isolated(&occupied)
+            .err()
+            .ok_or_else(|| "a non-empty side path must be refused".to_owned())?;
+        ensure(
+            non_empty
+                .message()
+                .contains("is not empty; restore refuses to overwrite existing data"),
+            format!("unexpected non-empty refusal: {}", non_empty.message()),
+        )?;
+        // The refusal must not have touched what it declined to overwrite.
+        ensure_equal(
+            fs::read(occupied.join("ee.db"))
+                .map_err(|error| error.to_string())?
+                .as_slice(),
+            b"live store".as_slice(),
+            "a refused side path must leave existing bytes untouched",
+        )?;
+
+        Ok(())
+    }
+
+    /// Same class, symlink arm: a symlinked side path, and a path that merely
+    /// traverses one, are both refused as policy rather than storage errors.
+    #[cfg(unix)]
+    #[test]
+    fn side_path_isolation_refuses_symlinked_and_traversing_targets() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        // Same reason as above: the only symlink these arms may trip over must
+        // be the one they create themselves.
+        let root = tempdir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let real_target = root.join("real-elsewhere");
+        fs::create_dir_all(&real_target).map_err(|error| error.to_string())?;
+
+        let linked = root.join("linked-target");
+        std::os::unix::fs::symlink(&real_target, &linked).map_err(|error| error.to_string())?;
+        let direct = ensure_side_path_is_isolated(&linked)
+            .err()
+            .ok_or_else(|| "a symlinked side path must be refused".to_owned())?;
+        ensure(
+            direct.message().contains("is a symbolic link"),
+            format!("unexpected symlink refusal: {}", direct.message()),
+        )?;
+
+        // A target *under* a symlinked parent is refused with the traversal
+        // message, so the two cases stay distinguishable in operator output.
+        let through = linked.join("nested");
+        let traversed = ensure_side_path_is_isolated(&through)
+            .err()
+            .ok_or_else(|| "a side path traversing a symlink must be refused".to_owned())?;
+        ensure(
+            traversed.message().contains("traverses symbolic link"),
+            format!("unexpected traversal refusal: {}", traversed.message()),
+        )
+    }
+
     fn remap_workspace_fixture(id: &str) -> crate::db::StoredWorkspace {
         crate::db::StoredWorkspace {
             id: id.to_owned(),
