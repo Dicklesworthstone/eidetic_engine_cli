@@ -31136,7 +31136,7 @@ where
 {
     let mut enabled_sources = match parse_swarm_brief_sources(&args.sources, args.include_rch) {
         Ok(sources) => sources,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     if args.sources.trim().eq_ignore_ascii_case("default") {
         enabled_sources.insert(SwarmBriefSourceKind::Rch);
@@ -31194,9 +31194,9 @@ where
                     )
                 }
             }
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         },
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let unavailable_sources = environment_attestation_unavailable_sources(&report);
     if args.require_sources && !unavailable_sources.is_empty() {
@@ -31210,7 +31210,7 @@ where
                     .to_string(),
             ),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     match cli.renderer() {
@@ -32189,7 +32189,7 @@ where
         Ok(report) => report,
         Err(error) => {
             let domain_error = read_only_report_storage_error("diag provenance", error);
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -32302,7 +32302,7 @@ where
                 &args.fixture,
                 None,
             );
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let fixture = match serde_json::from_str::<serde_json::Value>(&raw) {
@@ -32315,7 +32315,7 @@ where
                 &args.fixture,
                 None,
             );
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let Some(object) = fixture.as_object() else {
@@ -32326,7 +32326,7 @@ where
             &args.fixture,
             None,
         );
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     };
     let found_schema = object.get("schema").and_then(serde_json::Value::as_str);
     if found_schema != Some("ee.swarm_incident.v1") {
@@ -32340,7 +32340,7 @@ where
             &args.fixture,
             found_schema,
         );
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if let Some(missing_field) = incident_missing_required_field(&fixture) {
         let domain_error = incident_fixture_error(
@@ -32350,7 +32350,7 @@ where
             &args.fixture,
             found_schema,
         );
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let response = diag_incident_response(&args.fixture, &fixture);
@@ -32698,7 +32698,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match crate::db::DbConnection::open_file(&database_path) {
@@ -32708,7 +32708,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     if let Err(error) = conn.migrate() {
@@ -32716,12 +32716,12 @@ where
             message: format!("Failed to migrate advisory lock diagnostic database: {error}"),
             repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
         Ok(workspace_id) => workspace_id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let resource_id = args
         .resource_id
@@ -32736,7 +32736,7 @@ where
             message: "Use either --list or --release, not both.".to_owned(),
             repair: Some("Run ee diag advisory-lock --list --workspace . --json".to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     if args.force && !args.release {
@@ -32746,7 +32746,7 @@ where
                 "Run ee diag advisory-lock --release --force --workspace . --json".to_owned(),
             ),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     if args.list {
@@ -32757,7 +32757,7 @@ where
                     message: format!("Failed to list advisory locks: {error}"),
                     repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
         let filter_resource = args.resource_id.is_some();
@@ -32845,7 +32845,7 @@ where
                     message: format!("Failed to release advisory lock: {error}"),
                     repair: Some(release_repair.clone()),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
 
@@ -32946,7 +32946,7 @@ where
                     ),
                     repair: Some(list_repair.clone()),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
             crate::db::AdvisoryLockReleaseOutcome::HolderAlive { held, pid } => {
                 let domain_error = DomainError::Storage {
@@ -32958,7 +32958,7 @@ where
                         "Wait for the holder to finish, then retry {release_repair}"
                     )),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
             crate::db::AdvisoryLockReleaseOutcome::HolderUnprobeable { held, reason } => {
                 let domain_error = DomainError::Storage {
@@ -32971,7 +32971,7 @@ where
                             .to_owned(),
                     ),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         }
     }
@@ -32988,7 +32988,7 @@ where
                 message: format!("Failed to acquire advisory lock: {error}"),
                 repair: Some(release_repair),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -33086,7 +33086,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let method = match args.method.as_str() {
@@ -33096,7 +33096,7 @@ where
                 message: format!("Invalid causal evidence method: {}", args.method),
                 repair: Some("Use manual, graph-inferred, or cass-derived.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -33107,7 +33107,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     if let Err(error) = conn.migrate() {
@@ -33115,7 +33115,7 @@ where
             message: format!("Failed to migrate causal diagnostic database: {error}"),
             repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let workspace_id = args
@@ -33148,7 +33148,7 @@ where
             message: format!("Failed to seed causal evidence diagnostic row: {error}"),
             repair: Some("Check memory IDs and workspace database health.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let response = serde_json::json!({
@@ -33208,7 +33208,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
     if !source_database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&source_database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let skew_sql = match args.skew.as_str() {
@@ -33259,7 +33259,7 @@ where
                         .to_string(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -33276,21 +33276,21 @@ where
                         .to_string(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         (Some(_), true) => {
             let domain_error = DomainError::Usage {
                 message: "--output-database cannot be combined with --in-place.".to_string(),
                 repair: Some("Choose copied skew output or in-place mutation.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
     if !args.in_place
         && let Err(error) = ensure_diag_database_output_path_is_safe(&output_database_path)
     {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     if !args.in_place && output_database_path.exists() {
@@ -33301,7 +33301,7 @@ where
             ),
             repair: Some("Choose a fresh --output-database path.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let source_conn = match crate::db::DbConnection::open_file(&source_database_path) {
@@ -33311,7 +33311,7 @@ where
                 message: format!("Failed to open source database: {error}"),
                 repair: Some("ee init --workspace .".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     if let Err(error) = source_conn.migrate() {
@@ -33319,7 +33319,7 @@ where
             message: format!("Failed to migrate source database before diagnostic skew: {error}"),
             repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     let workspace_id = stable_causal_workspace_id(&workspace);
 
@@ -33331,7 +33331,7 @@ where
                 message: format!("Failed to close source database before diagnostic copy: {error}"),
                 repair: Some("Retry after closing other ee processes.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
 
         if let Some(parent) = output_database_path.parent()
@@ -33341,14 +33341,14 @@ where
                 message: format!("Failed to create output database directory: {error}"),
                 repair: Some("Choose a writable --output-database path.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         if let Err(error) = fs::copy(&source_database_path, &output_database_path) {
             let domain_error = DomainError::Storage {
                 message: format!("Failed to copy diagnostic database: {error}"),
                 repair: Some("Choose a writable --output-database path.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
 
         match crate::db::DbConnection::open_file(&output_database_path) {
@@ -33358,7 +33358,7 @@ where
                     message: format!("Failed to open diagnostic database copy: {error}"),
                     repair: Some("Choose a fresh --output-database path.".to_string()),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         }
     };
@@ -33369,7 +33369,7 @@ where
                 "Check that the source database is migrated with the current binary.".to_string(),
             ),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let response = serde_json::json!({
@@ -33428,7 +33428,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let snapshot_status = match args.status.parse::<crate::db::GraphSnapshotStatus>() {
@@ -33438,7 +33438,7 @@ where
                 message: error,
                 repair: Some("Use one of valid, stale, invalid, or archived.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -33449,7 +33449,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     if let Err(error) = conn.migrate() {
@@ -33457,12 +33457,12 @@ where
             message: format!("Failed to migrate graph diagnostic database: {error}"),
             repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
         Ok(workspace_id) => workspace_id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let latest_version = match conn.list_graph_snapshots(
@@ -33478,7 +33478,7 @@ where
                 message: format!("Failed to inspect graph snapshots: {error}"),
                 repair: Some("ee graph centrality-refresh".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let snapshot_version = latest_version.saturating_add(1).max(1);
@@ -33513,7 +33513,7 @@ where
             message: format!("Failed to seed graph snapshot diagnostic row: {error}"),
             repair: Some("Check --metrics-json and workspace database health.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     if snapshot_status != crate::db::GraphSnapshotStatus::Valid {
@@ -33522,7 +33522,7 @@ where
                 message: format!("Failed to update graph snapshot diagnostic status: {error}"),
                 repair: Some("Retry `ee diag graph-snapshot`.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     }
 
@@ -33583,21 +33583,21 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if args.valid_from.is_some() && args.clear_valid_from {
         let domain_error = DomainError::Usage {
             message: "Use either --valid-from or --clear-valid-from, not both.".to_string(),
             repair: Some("Choose one diagnostic mutation for valid_from.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if args.valid_to.is_some() && args.clear_valid_to {
         let domain_error = DomainError::Usage {
             message: "Use either --valid-to or --clear-valid-to, not both.".to_string(),
             repair: Some("Choose one diagnostic mutation for valid_to.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if args.valid_from.is_none()
         && args.valid_to.is_none()
@@ -33611,7 +33611,7 @@ where
                     .to_string(),
             ),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match crate::db::DbConnection::open_file(&database_path) {
@@ -33621,7 +33621,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     if let Err(error) = conn.migrate() {
@@ -33629,7 +33629,7 @@ where
             message: format!("Failed to migrate memory-validity diagnostic database: {error}"),
             repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     let memory = match conn.get_memory(&args.memory_id) {
         Ok(Some(memory)) => memory,
@@ -33639,14 +33639,14 @@ where
                 id: args.memory_id.clone(),
                 repair: Some("ee remember --workspace . '<content>' --json".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         Err(error) => {
             let domain_error = DomainError::Storage {
                 message: format!("Failed to inspect memory diagnostic row: {error}"),
                 repair: Some("ee status --workspace . --json".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -33663,7 +33663,7 @@ where
                 message: format!("Failed to seed memory validity diagnostic row: {error}"),
                 repair: Some("Check --memory-id and workspace database health.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let seed_status = if changed { "updated" } else { "unchanged" };
@@ -33724,7 +33724,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if !args.model_id.starts_with("mdl_") || args.model_id.len() != 30 {
         let domain_error = DomainError::Usage {
@@ -33732,7 +33732,7 @@ where
                 .to_string(),
             repair: Some("Use --model-id mdl_j6000000000000000000000001.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let provider = match args
@@ -33745,7 +33745,7 @@ where
                 message: error.to_string(),
                 repair: Some("Use hash, model2vec, fastembed, external, or custom.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let purpose = match args
@@ -33758,7 +33758,7 @@ where
                 message: error.to_string(),
                 repair: Some("Use embedding, reranker, classifier, or other.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let distance_metric = match &args.distance_metric {
@@ -33770,7 +33770,7 @@ where
                         message: error.to_string(),
                         repair: Some("Use cosine, dot, or l2.".to_string()),
                     };
-                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                    return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
                 }
             }
         }
@@ -33786,7 +33786,7 @@ where
                 message: error.to_string(),
                 repair: Some("Use available, unavailable, or disabled.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     if let Some(metadata) = &args.metadata_json {
@@ -33795,7 +33795,7 @@ where
                 message: format!("Invalid model registry metadata JSON: {error}"),
                 repair: Some("Pass valid JSON to --metadata-json.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     }
 
@@ -33806,7 +33806,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     if let Err(error) = conn.migrate() {
@@ -33814,12 +33814,12 @@ where
             message: format!("Failed to migrate model registry diagnostic database: {error}"),
             repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     let workspace_id =
         match resolve_graph_workspace_id(&conn, &workspace, args.workspace_id.as_deref()) {
             Ok(workspace_id) => workspace_id,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     let workspace_path = workspace.to_string_lossy().into_owned();
     let workspace_name = workspace
@@ -33839,7 +33839,7 @@ where
             message: format!("Failed to ensure model registry diagnostic workspace row: {error}"),
             repair: Some("ee init --workspace .".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let seed_status = match conn.get_model_registry_entry(&args.model_id) {
@@ -33869,7 +33869,7 @@ where
                             .to_string(),
                     ),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
             "inserted"
         }
@@ -33878,7 +33878,7 @@ where
                 message: format!("Failed to inspect model registry diagnostic row: {error}"),
                 repair: Some("ee model list --workspace . --json".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -33943,14 +33943,14 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if !args.tripwire_id.starts_with("tw_") || args.tripwire_id.trim().len() <= 3 {
         let domain_error = DomainError::Usage {
             message: "Diagnostic tripwire IDs must start with `tw_`.".to_string(),
             repair: Some("Use --tripwire-id tw_j6_unsupported_condition.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let tripwire_type = match args.tripwire_type.parse::<TripwireType>() {
@@ -33963,7 +33963,7 @@ where
                         .to_string(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let action = match args.action.parse::<TripwireAction>() {
@@ -33973,7 +33973,7 @@ where
                 message: error.to_string(),
                 repair: Some("Use halt, pause, warn, or audit.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let state = match args.state.parse::<TripwireState>() {
@@ -33983,7 +33983,7 @@ where
                 message: error.to_string(),
                 repair: Some("Use armed, triggered, disarmed, or error.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -33994,7 +33994,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     if let Err(error) = conn.migrate() {
@@ -34002,12 +34002,12 @@ where
             message: format!("Failed to migrate tripwire diagnostic database: {error}"),
             repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     let workspace_id =
         match resolve_graph_workspace_id(&conn, &workspace, args.workspace_id.as_deref()) {
             Ok(workspace_id) => workspace_id,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
 
     let seed_status = match conn.get_tripwire(&args.tripwire_id) {
@@ -34035,7 +34035,7 @@ where
                             .to_string(),
                     ),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
             "inserted"
         }
@@ -34044,7 +34044,7 @@ where
                 message: format!("Failed to inspect tripwire diagnostic row: {error}"),
                 repair: Some("ee tripwire list --workspace . --json".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -34108,7 +34108,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match crate::db::DbConnection::open_file(&database_path) {
@@ -34118,7 +34118,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     if let Err(error) = conn.migrate() {
@@ -34126,12 +34126,12 @@ where
             message: format!("Failed to migrate pack diagnostic database: {error}"),
             repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     let workspace_id =
         match resolve_graph_workspace_id(&conn, &workspace, args.workspace_id.as_deref()) {
             Ok(workspace_id) => workspace_id,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
 
     let record = match conn.get_latest_pack_record_for_query(&workspace_id, &args.query) {
@@ -34142,14 +34142,14 @@ where
                 id: args.query.clone(),
                 repair: Some("ee context <query> --workspace . --json".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         Err(error) => {
             let domain_error = DomainError::Storage {
                 message: format!("Failed to resolve latest pack record: {error}"),
                 repair: Some("ee doctor --workspace . --json".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -34211,14 +34211,14 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if !args.pack_id.starts_with("pack_") || args.pack_id.len() != 31 {
         let domain_error = DomainError::Usage {
             message: "Diagnostic pack IDs must match `pack_` plus 26 characters.".to_string(),
             repair: Some("Use --pack-id pack_j6referenceissues000000000.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if crate::models::ContextProfileName::parse(&args.profile)
         .is_none_or(|profile| profile.as_str() != args.profile)
@@ -34230,7 +34230,7 @@ where
                     .to_string(),
             ),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if args.used_tokens > args.max_tokens {
         let domain_error = DomainError::Usage {
@@ -34240,7 +34240,7 @@ where
             ),
             repair: Some("Pass --used-tokens less than or equal to --max-tokens.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if args.query.trim().is_empty() || args.max_tokens == 0 || args.created_by.trim().is_empty() {
         let domain_error = DomainError::Usage {
@@ -34248,14 +34248,14 @@ where
                 .to_owned(),
             repair: Some("Pass valid diagnostic pack metadata.".to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if !crate::db::is_canonical_blake3_hash(&args.pack_hash) {
         let domain_error = DomainError::Usage {
             message: "Diagnostic pack hash must be canonical lowercase blake3 text.".to_string(),
             repair: Some("Pass --pack-hash blake3:<64 lowercase hex characters>.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if !args.inject_reference_issue_fixture
         && (args.used_tokens != 0 || args.item_count != 0 || args.omitted_count != 0)
@@ -34268,14 +34268,14 @@ where
                     .to_owned(),
             ),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if args.inject_reference_issue_fixture && args.item_count == 0 && args.omitted_count == 0 {
         let domain_error = DomainError::Usage {
             message: "Reference-issue fixture requires a non-zero declared child count.".to_owned(),
             repair: Some("Pass --item-count 1 or --omitted-count 1.".to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match if args.dry_run {
@@ -34289,7 +34289,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     if args.dry_run {
@@ -34301,14 +34301,14 @@ where
                         .to_owned(),
                     repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
             Err(error) => {
                 let domain_error = DomainError::MigrationRequired {
                     message: format!("Failed to inspect pack diagnostic schema: {error}"),
                     repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         }
     } else if let Err(error) = conn.migrate() {
@@ -34316,12 +34316,12 @@ where
             message: format!("Failed to migrate pack diagnostic database: {error}"),
             repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     let workspace_id =
         match resolve_graph_workspace_id(&conn, &workspace, args.workspace_id.as_deref()) {
             Ok(workspace_id) => workspace_id,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
 
     let seed_status = match conn.get_pack_record(&args.pack_id) {
@@ -34333,7 +34333,7 @@ where
                 ),
                 repair: Some("Choose a new --pack-id.".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         Ok(None) => {
             if args.dry_run {
@@ -34364,7 +34364,7 @@ where
                             .to_string(),
                     ),
                 };
-                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                    return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
                 }
                 "inserted"
             }
@@ -34374,7 +34374,7 @@ where
                 message: format!("Failed to inspect pack diagnostic row: {error}"),
                 repair: Some("ee diag integrity --workspace . --json".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -34473,7 +34473,7 @@ where
 
     if !database_path.exists() {
         let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     let candidate_type = match crate::curate::CandidateType::from_str(&args.candidate_type) {
         Ok(candidate_type) => candidate_type,
@@ -34482,7 +34482,7 @@ where
                 message: error.to_string(),
                 repair: Some("Use a valid curation candidate type such as `rule`.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let candidate_status = match crate::curate::CandidateStatus::from_str(&args.status) {
@@ -34492,7 +34492,7 @@ where
                 message: error.to_string(),
                 repair: Some("Use pending, approved, rejected, expired, or applied.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let source_type = match crate::curate::CandidateSource::from_str(&args.source_type) {
@@ -34505,7 +34505,7 @@ where
                         .to_string(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     let review_state = match args.review_state.as_deref() {
@@ -34519,7 +34519,7 @@ where
                             .to_string(),
                     ),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         },
         None => None,
@@ -34530,7 +34530,7 @@ where
                 .to_string(),
             repair: Some("Use --candidate-id curate_00000000000000000000000042.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if !args.confidence.is_finite() || !(0.0..=1.0).contains(&args.confidence) {
         let domain_error = DomainError::Usage {
@@ -34540,7 +34540,7 @@ where
             ),
             repair: Some("Use --confidence 0.82.".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match crate::db::DbConnection::open_file(&database_path) {
@@ -34550,7 +34550,7 @@ where
                 message: format!("Failed to open database: {error}"),
                 repair: None,
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     if let Err(error) = conn.migrate() {
@@ -34558,11 +34558,11 @@ where
             message: format!("Failed to migrate curation diagnostic database: {error}"),
             repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
         Ok(workspace_id) => workspace_id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     if args.allow_missing_target {
@@ -34573,7 +34573,7 @@ where
                 ),
                 repair: Some("Check workspace database health.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     }
     let insert_result = conn.insert_curation_candidate(
@@ -34604,7 +34604,7 @@ where
                 ),
                 repair: Some("Check workspace database health.".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     }
     if let Err(error) = insert_result {
@@ -34614,7 +34614,7 @@ where
                 "Check --candidate-type, --status, and workspace database health.".to_string(),
             ),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if review_state.is_some() || args.state_entered_at.is_some() || args.ttl_policy_id.is_some() {
         let review_state_text = review_state
@@ -34646,7 +34646,7 @@ where
                     ),
                     repair: Some("Retry `ee diag curation-candidate --json`.".to_string()),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
             Err(error) => {
                 let domain_error = DomainError::Storage {
@@ -34658,7 +34658,7 @@ where
                             .to_string(),
                     ),
                 };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         }
     }
@@ -34720,7 +34720,7 @@ where
                 .to_string(),
             repair: Some("Run `ee diag search \"<query>\" --all-arms --json`.".to_string()),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let options = SearchOptions {
@@ -34893,7 +34893,7 @@ where
                     message: format!("Failed to resolve workspace: {error}"),
                     repair: Some("ee init --workspace .".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -34907,7 +34907,7 @@ where
         // (bd-workspace-miss-init-suggestion-sfjvq).
         return write_domain_error(
             &crate::core::storeless_workspace_error(&database_path),
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -34923,7 +34923,7 @@ where
                 ),
                 repair: Some("ee doctor --json".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -34936,7 +34936,7 @@ where
                     message: format!("Failed to open database: {error}"),
                     repair: Some("ee doctor --json".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -34944,7 +34944,7 @@ where
     };
     let workspace_id = match bound_cli_workspace_id(&connection, &canonical_path) {
         Ok(workspace_id) => workspace_id,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let entry = match connection.get_trust_quarantine(&workspace_id, &args.source_uri) {
@@ -34956,7 +34956,7 @@ where
                     id: args.source_uri.clone(),
                     repair: Some("ee diag quarantine list --json".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -34967,7 +34967,7 @@ where
                     message: format!("Failed to query quarantine state: {error}"),
                     repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -50550,7 +50550,7 @@ where
     let (connection, workspace_id, workspace_path) =
         match open_agentsmd_workspace(cli, args.database.as_deref()) {
             Ok(opened) => opened,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     let options = crate::core::agentsmd::AgentsmdDriftOptions {
         file: args.file.clone(),
@@ -50564,7 +50564,7 @@ where
         Ok(report) => {
             write_agentsmd_report(cli, &report.human_summary(), &report.data_json(), stdout)
         }
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
