@@ -212,10 +212,7 @@ fn perf_compare_json_success_is_read_only_and_stdout_only() -> TestResult {
         output.status.success(),
         format!("perf compare should succeed; stderr: {stderr}"),
     )?;
-    ensure(
-        output.stderr.is_empty(),
-        "perf compare stderr must be empty",
-    )?;
+    ensure_clean_stderr(&output.stderr, "perf compare stderr must be empty")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     ensure_no_ansi(&stdout, "perf compare stdout")?;
     let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
@@ -279,8 +276,8 @@ fn perf_compare_malformed_json_returns_machine_error_on_stdout() -> TestResult {
         &candidate_arg,
     ])?;
     ensure(!output.status.success(), "perf compare should fail")?;
-    ensure(
-        output.stderr.is_empty(),
+    ensure_clean_stderr(
+        &output.stderr,
         "perf compare JSON error stderr must be empty",
     )?;
     let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
@@ -330,10 +327,7 @@ fn perf_budget_check_profile_mismatch_degrades_but_stays_read_only() -> TestResu
         output.status.success(),
         format!("perf budget check should succeed; stderr: {stderr}"),
     )?;
-    ensure(
-        output.stderr.is_empty(),
-        "perf budget check stderr must be empty",
-    )?;
+    ensure_clean_stderr(&output.stderr, "perf budget check stderr must be empty")?;
     let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("perf budget check stdout must be valid JSON: {error}"))?;
     ensure_equal(
@@ -785,10 +779,7 @@ fn parse_logged_external_json(
         run.output.status.success(),
         format!("{context} should succeed; stdout: {stdout}; stderr: {stderr}"),
     )?;
-    ensure(
-        run.output.stderr.is_empty(),
-        format!("{context} stderr must be empty"),
-    )?;
+    ensure_clean_stderr(&run.output.stderr, context)?;
     serde_json::from_slice(&run.output.stdout)
         .map_err(|error| format!("{context} stdout must be JSON: {error}"))
 }
@@ -840,6 +831,43 @@ fn ensure_ends_with(haystack: &str, suffix: char, context: &str) -> TestResult {
     )
 }
 
+/// Assert a command left stderr clean, surfacing the text when it did not.
+///
+/// `ensure(out.stderr.is_empty(), "stderr clean")` reports that the stream was
+/// dirty and then discards the one thing that explains why, so the failure
+/// arrives unresolvable and the next reader has to reproduce the run to learn
+/// anything. Print what was actually found.
+///
+/// Takes the bytes rather than the `Output` so the receiver may be an owned
+/// value, a reference, or a struct field without the call site caring.
+fn ensure_clean_stderr(stderr: &[u8], context: &str) -> TestResult {
+    ensure(
+        stderr.is_empty(),
+        format!(
+            "{context}: expected empty stderr, got {:?}",
+            String::from_utf8_lossy(stderr)
+        ),
+    )
+}
+
+/// Assert a command exited successfully, surfacing BOTH streams.
+///
+/// Under `--json` the `ee.error.v2` envelope is written to stdout and stderr
+/// stays empty, so a failure message that interpolates only stderr renders as
+/// "...; stderr: " and explains nothing. That is exactly how two import_cass
+/// rows became unresolvable. Always print stdout too, and the exit code.
+fn ensure_command_success(output: &Output, context: &str) -> TestResult {
+    ensure(
+        output.status.success(),
+        format!(
+            "{context}: expected success, got exit {:?}; stdout: {:?}; stderr: {:?}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
 #[cfg(unix)]
 fn parse_logged_response(run: &LoggedEeRun, context: &str) -> Result<serde_json::Value, String> {
     let stderr = String::from_utf8_lossy(&run.output.stderr);
@@ -848,10 +876,7 @@ fn parse_logged_response(run: &LoggedEeRun, context: &str) -> Result<serde_json:
         run.output.status.success(),
         format!("{context} should succeed; stdout: {stdout}; stderr: {stderr}"),
     )?;
-    ensure(
-        run.output.stderr.is_empty(),
-        format!("{context} stderr must be empty"),
-    )?;
+    ensure_clean_stderr(&run.output.stderr, context)?;
     ensure_no_ansi(&stdout, context)?;
     let json: serde_json::Value = serde_json::from_slice(&run.output.stdout)
         .map_err(|error| format!("{context} stdout must be JSON: {error}"))?;
@@ -1289,8 +1314,8 @@ fn profile_config_plan_and_apply_json_are_stable_machine_data() -> TestResult {
             "profile config plan after apply should succeed; stdout: {unchanged_stdout}; stderr: {unchanged_stderr}"
         ),
     )?;
-    ensure(
-        unchanged.stderr.is_empty(),
+    ensure_clean_stderr(
+        &unchanged.stderr,
         "profile config plan after apply stderr clean",
     )?;
     let unchanged_json: serde_json::Value = serde_json::from_slice(&unchanged.stdout)
@@ -3135,10 +3160,7 @@ fn curate_apply_procedure_candidate_then_harmful_outcomes_auto_retire() -> TestR
             "curate apply procedure should succeed; stdout: {apply_stdout}; stderr: {apply_stderr}"
         ),
     )?;
-    ensure(
-        apply.stderr.is_empty(),
-        "curate apply procedure JSON stderr clean",
-    )?;
+    ensure_clean_stderr(&apply.stderr, "curate apply procedure JSON stderr clean")?;
     let apply_json: serde_json::Value = serde_json::from_slice(&apply.stdout)
         .map_err(|error| format!("curate apply procedure stdout must be JSON: {error}"))?;
     ensure_equal(
@@ -3814,14 +3836,8 @@ fn global_json_flag_is_order_independent() -> TestResult {
         &after.stdout,
         "global --json output must be order independent",
     )?;
-    ensure(
-        before.stderr.is_empty(),
-        "--json status stderr must be empty",
-    )?;
-    ensure(
-        after.stderr.is_empty(),
-        "status --json stderr must be empty",
-    )
+    ensure_clean_stderr(&before.stderr, "--json status stderr must be empty")?;
+    ensure_clean_stderr(&after.stderr, "status --json stderr must be empty")
 }
 
 #[test]
@@ -4062,15 +4078,8 @@ fn import_cass_json_uses_cass_robot_contract_and_is_idempotent() -> TestResult {
     ];
 
     let first = run_ee_with_env(&args, &envs)?;
-    let first_stderr = String::from_utf8_lossy(&first.stderr);
-    ensure(
-        first.status.success(),
-        format!("first import should succeed; stderr: {first_stderr}"),
-    )?;
-    ensure(
-        first.stderr.is_empty(),
-        "first import stderr must stay clean",
-    )?;
+    ensure_command_success(&first, "first import")?;
+    ensure_clean_stderr(&first.stderr, "first import stderr must stay clean")?;
     let first_json: serde_json::Value = serde_json::from_slice(&first.stdout)
         .map_err(|error| format!("first import stdout must be JSON: {error}"))?;
     ensure_equal(
@@ -4159,10 +4168,7 @@ fn import_cass_json_uses_cass_robot_contract_and_is_idempotent() -> TestResult {
         second.status.success(),
         format!("second import should succeed; stderr: {second_stderr}"),
     )?;
-    ensure(
-        second.stderr.is_empty(),
-        "second import stderr must stay clean",
-    )?;
+    ensure_clean_stderr(&second.stderr, "second import stderr must stay clean")?;
     let second_json: serde_json::Value = serde_json::from_slice(&second.stdout)
         .map_err(|error| format!("second import stdout must be JSON: {error}"))?;
     ensure_equal(
@@ -5137,8 +5143,8 @@ fn artifact_registry_registers_indexes_exports_and_supports_context() -> TestRes
         binary_dry_run.status.success(),
         format!("binary artifact dry-run should succeed; stderr: {binary_stderr}"),
     )?;
-    ensure(
-        binary_dry_run.stderr.is_empty(),
+    ensure_clean_stderr(
+        &binary_dry_run.stderr,
         "binary artifact dry-run stderr clean",
     )?;
     let binary_json: serde_json::Value = serde_json::from_slice(&binary_dry_run.stdout)
@@ -5180,8 +5186,8 @@ fn artifact_registry_registers_indexes_exports_and_supports_context() -> TestRes
         inside_symlink.status.success(),
         format!("inside symlink dry-run should succeed; stderr: {inside_symlink_stderr}"),
     )?;
-    ensure(
-        inside_symlink.stderr.is_empty(),
+    ensure_clean_stderr(
+        &inside_symlink.stderr,
         "inside symlink dry-run stderr clean",
     )?;
     let inside_symlink_json: serde_json::Value = serde_json::from_slice(&inside_symlink.stdout)
@@ -5271,8 +5277,8 @@ fn artifact_registry_registers_indexes_exports_and_supports_context() -> TestRes
         secret_register.status.success(),
         format!("secret artifact register should succeed; stderr: {secret_register_stderr}"),
     )?;
-    ensure(
-        secret_register.stderr.is_empty(),
+    ensure_clean_stderr(
+        &secret_register.stderr,
         "secret artifact register stderr clean",
     )?;
     let secret_stdout = String::from_utf8_lossy(&secret_register.stdout);
@@ -5831,10 +5837,7 @@ fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
         support.output.status.success(),
         format!("lp4p2 support bundle dry-run should succeed; stderr: {support_stderr}"),
     )?;
-    ensure(
-        support.output.stderr.is_empty(),
-        "lp4p2 support bundle stderr clean",
-    )?;
+    ensure_clean_stderr(&support.output.stderr, "lp4p2 support bundle stderr clean")?;
     let support_json = parse_logged_response(&support, "lp4p2 support bundle dry-run")?;
     ensure_equal(
         &support_json["data"]["schema"],
@@ -6282,8 +6285,8 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
         why_after_pack.status.success(),
         format!("why after query-file pack should succeed; stderr: {why_after_pack_stderr}"),
     )?;
-    ensure(
-        why_after_pack.stderr.is_empty(),
+    ensure_clean_stderr(
+        &why_after_pack.stderr,
         "why after query-file pack stderr clean",
     )?;
     let why_after_pack_json: serde_json::Value = serde_json::from_slice(&why_after_pack.stdout)
@@ -6346,8 +6349,8 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
             "pack query-file with unknown field should succeed; stderr: {unknown_field_stderr}"
         ),
     )?;
-    ensure(
-        unknown_field_pack.stderr.is_empty(),
+    ensure_clean_stderr(
+        &unknown_field_pack.stderr,
         "unknown-field pack stderr clean",
     )?;
     ensure_no_ansi(&unknown_field_stdout, "unknown-field pack JSON stdout")?;
@@ -6388,8 +6391,8 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
         markdown_pack.status.success(),
         format!("pack query-file markdown should succeed; stderr: {markdown_stderr}"),
     )?;
-    ensure(
-        markdown_pack.stderr.is_empty(),
+    ensure_clean_stderr(
+        &markdown_pack.stderr,
         "pack query-file markdown stderr clean",
     )?;
     ensure_no_ansi(&markdown_stdout, "pack query-file markdown stdout")?;
@@ -6428,10 +6431,7 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
         toon_pack.status.success(),
         format!("pack query-file toon should succeed; stderr: {toon_stderr}"),
     )?;
-    ensure(
-        toon_pack.stderr.is_empty(),
-        "pack query-file toon stderr clean",
-    )?;
+    ensure_clean_stderr(&toon_pack.stderr, "pack query-file toon stderr clean")?;
     ensure_no_ansi(&toon_stdout, "pack query-file toon stdout")?;
     ensure_contains(
         &toon_stdout,
@@ -6471,10 +6471,7 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
         fields_pack.status.success(),
         format!("pack query-file fields should succeed; stderr: {fields_stderr}"),
     )?;
-    ensure(
-        fields_pack.stderr.is_empty(),
-        "pack query-file fields stderr clean",
-    )?;
+    ensure_clean_stderr(&fields_pack.stderr, "pack query-file fields stderr clean")?;
     ensure_no_ansi(&fields_stdout, "pack query-file fields stdout")?;
     let fields_json: serde_json::Value = serde_json::from_slice(&fields_pack.stdout)
         .map_err(|error| format!("fields pack stdout must be JSON: {error}"))?;
@@ -6536,10 +6533,7 @@ fn index_reembed_json_rebuilds_index_and_records_job() -> TestResult {
         dry_run.status.success(),
         format!("index reembed dry-run should succeed; stderr: {dry_run_stderr}"),
     )?;
-    ensure(
-        dry_run.stderr.is_empty(),
-        "index reembed dry-run stderr clean",
-    )?;
+    ensure_clean_stderr(&dry_run.stderr, "index reembed dry-run stderr clean")?;
     let dry_run_json: serde_json::Value = serde_json::from_slice(&dry_run.stdout)
         .map_err(|error| format!("dry-run stdout must be JSON: {error}"))?;
     ensure_equal(
@@ -7632,10 +7626,7 @@ fn pack_query_file_max_results_and_output_explain_are_observable() -> TestResult
         output.status.success(),
         format!("pack query-file controls should succeed; stderr: {stderr}"),
     )?;
-    ensure(
-        output.stderr.is_empty(),
-        "pack query-file controls stderr clean",
-    )?;
+    ensure_clean_stderr(&output.stderr, "pack query-file controls stderr clean")?;
     ensure_no_ansi(&stdout, "pack query-file controls stdout")?;
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)
@@ -7733,10 +7724,7 @@ fn context_explain_emits_pack_dna() -> TestResult {
         explained.status.success(),
         format!("context --explain should succeed; stderr: {explained_stderr}"),
     )?;
-    ensure(
-        explained.stderr.is_empty(),
-        "context --explain stderr clean",
-    )?;
+    ensure_clean_stderr(&explained.stderr, "context --explain stderr clean")?;
     ensure_no_ansi(&explained_stdout, "context --explain stdout")?;
     let explained_json: serde_json::Value = serde_json::from_slice(&explained.stdout)
         .map_err(|error| format!("context --explain stdout must be JSON: {error}"))?;
@@ -7770,10 +7758,7 @@ fn context_no_pack_dna_suppresses_pack_dna() -> TestResult {
         suppressed.status.success(),
         format!("context --no-pack-dna should succeed; stderr: {suppressed_stderr}"),
     )?;
-    ensure(
-        suppressed.stderr.is_empty(),
-        "context --no-pack-dna stderr clean",
-    )?;
+    ensure_clean_stderr(&suppressed.stderr, "context --no-pack-dna stderr clean")?;
     ensure_no_ansi(&suppressed_stdout, "context --no-pack-dna stdout")?;
     let suppressed_json: serde_json::Value = serde_json::from_slice(&suppressed.stdout)
         .map_err(|error| format!("context --no-pack-dna stdout must be JSON: {error}"))?;
@@ -7864,10 +7849,7 @@ fn learn_experiment_propose_json_reads_empty_persisted_ledger() -> TestResult {
             "learn experiment propose should read persisted learning records; stderr: {stderr}"
         ),
     )?;
-    ensure(
-        output.stderr.is_empty(),
-        "learn experiment propose stderr clean",
-    )?;
+    ensure_clean_stderr(&output.stderr, "learn experiment propose stderr clean")?;
     ensure_no_ansi(&stdout, "learn experiment propose JSON stdout")?;
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("learn experiment propose stdout must be JSON: {error}"))?;
@@ -8380,10 +8362,7 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         remember1.status.success(),
         format!("remember1 should succeed; stderr: {remember1_stderr}"),
     )?;
-    ensure(
-        remember1.stderr.is_empty(),
-        "remember1 stderr must be empty",
-    )?;
+    ensure_clean_stderr(&remember1.stderr, "remember1 stderr must be empty")?;
     let remember1_json: serde_json::Value = serde_json::from_slice(&remember1.stdout)
         .map_err(|error| format!("remember1 stdout must be valid JSON: {error}"))?;
     ensure_equal(
@@ -8418,10 +8397,7 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         remember2.status.success(),
         format!("remember2 should succeed; stderr: {remember2_stderr}"),
     )?;
-    ensure(
-        remember2.stderr.is_empty(),
-        "remember2 stderr must be empty",
-    )?;
+    ensure_clean_stderr(&remember2.stderr, "remember2 stderr must be empty")?;
     let remember2_json: serde_json::Value = serde_json::from_slice(&remember2.stdout)
         .map_err(|error| format!("remember2 stdout must be valid JSON: {error}"))?;
     let memory2_id = remember2_json["data"]["memory_id"]
@@ -8504,10 +8480,7 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         rebuild.status.success(),
         format!("index rebuild should succeed; stderr: {rebuild_stderr}"),
     )?;
-    ensure(
-        rebuild.stderr.is_empty(),
-        "index rebuild stderr must be empty",
-    )?;
+    ensure_clean_stderr(&rebuild.stderr, "index rebuild stderr must be empty")?;
     let rebuild_json: serde_json::Value = serde_json::from_slice(&rebuild.stdout)
         .map_err(|error| format!("index rebuild stdout must be valid JSON: {error}"))?;
     ensure_equal(
@@ -8552,10 +8525,7 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         context_json.status.success(),
         format!("context --json should succeed; stderr: {context_json_stderr}"),
     )?;
-    ensure(
-        context_json.stderr.is_empty(),
-        "context --json stderr must be empty",
-    )?;
+    ensure_clean_stderr(&context_json.stderr, "context --json stderr must be empty")?;
     let context_json_parsed: serde_json::Value = serde_json::from_slice(&context_json.stdout)
         .map_err(|error| format!("context --json stdout must be valid JSON: {error}"))?;
     ensure_equal(
@@ -8583,10 +8553,7 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         context_md.status.success(),
         format!("context --format markdown should succeed; stderr: {context_md_stderr}"),
     )?;
-    ensure(
-        context_md.stderr.is_empty(),
-        "context markdown stderr must be empty",
-    )?;
+    ensure_clean_stderr(&context_md.stderr, "context markdown stderr must be empty")?;
     ensure_contains(
         &context_md_stdout,
         "# ",
@@ -8645,10 +8612,7 @@ fn mcp_manifest_json_real_binary_smoke() -> TestResult {
         output.status.success(),
         format!("mcp manifest should succeed; stderr: {stderr}"),
     )?;
-    ensure(
-        output.stderr.is_empty(),
-        "mcp manifest stderr must be empty",
-    )?;
+    ensure_clean_stderr(&output.stderr, "mcp manifest stderr must be empty")?;
     ensure_no_ansi(&stdout, "mcp manifest stdout")?;
 
     let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
@@ -8788,10 +8752,7 @@ fn mcp_validate_json_real_binary_smoke() -> TestResult {
         output.status.success(),
         format!("mcp validate should succeed; stderr: {stderr}"),
     )?;
-    ensure(
-        output.stderr.is_empty(),
-        "mcp validate stderr must be empty",
-    )?;
+    ensure_clean_stderr(&output.stderr, "mcp validate stderr must be empty")?;
     ensure_no_ansi(&stdout, "mcp validate stdout")?;
 
     let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
@@ -8870,8 +8831,8 @@ fn mcp_serve_stdio_default_build_reports_capability_gap() -> TestResult {
         output.status.success(),
         format!("default mcp serve-stdio should report disabled capability gap; stderr: {stderr}"),
     )?;
-    ensure(
-        output.stderr.is_empty(),
+    ensure_clean_stderr(
+        &output.stderr,
         "default mcp serve-stdio stderr must be empty",
     )?;
     ensure_no_ansi(&stdout, "mcp serve-stdio stdout")?;
@@ -8940,8 +8901,8 @@ fn mcp_validate_reports_invalid_schema_fixture() -> TestResult {
         output.status.success(),
         format!("mcp validate invalid schema fixture should still report JSON; stderr: {stderr}"),
     )?;
-    ensure(
-        output.stderr.is_empty(),
+    ensure_clean_stderr(
+        &output.stderr,
         "mcp validate invalid schema stderr must be empty",
     )?;
 
