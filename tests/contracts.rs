@@ -295,6 +295,9 @@ mod canonical_content_field;
 #[path = "contracts/schema_canonical_fields.rs"]
 mod schema_canonical_fields;
 
+#[path = "contracts/schema_field_case_consistency.rs"]
+mod schema_field_case_consistency;
+
 #[path = "contracts/context_pack_dual_render.rs"]
 mod context_pack_dual_render;
 
