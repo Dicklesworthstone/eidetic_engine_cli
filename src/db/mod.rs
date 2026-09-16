@@ -10733,6 +10733,65 @@ UPDATE memories SET tombstoned_at = strftime('%Y-%m-%dT%H:%M:%f', tombstoned_at)
     "blake3:v124_timestamp_spelling_repair_2026_09_16",
 );
 
+/// V125: Re-derive supersession by INSTANT, repairing what V123's lexical
+/// comparison got wrong.
+///
+/// bd-o22r0. V123's backfill ordered a revision chain with a LEXICAL
+/// `created_at` comparison. That is unsound: `to_rfc3339()` emits VARIABLE
+/// fractional precision and imported rows carried a `Z` spelling, so at the same
+/// instant `...00Z` and `...00.000+00:00` both sort ABOVE `...00+00:00`. A
+/// predecessor could therefore look NEWER than its own successor, and V123 left
+/// BOTH rows live -- two live heads in one chain, which is exactly what this
+/// bead is named for.
+///
+/// V124 normalized the spellings but did NOT repair the damage: migrations run
+/// in version order, so V123's backfill had already written its wrong answer.
+/// Worse, V124's bookkeeping repair emits `.000+00:00` from a `Z` value, which
+/// sorts above a fraction-less `+00:00` -- the SAME inversion with a new cause.
+/// Verified by executing V123 then V124 against a constructed chain: still two
+/// live heads.
+///
+/// So this does not chase spelling at all. `julianday()` parses the timestamp
+/// and compares INSTANTS, which is immune to every spelling difference, present
+/// or future. Re-running V123's lexical predicate would not have worked; running
+/// this one does.
+///
+/// SAFETY, established by execution before this was written:
+///   - `superseded_at IS NULL` means chains V123 got RIGHT are never disturbed,
+///     and the statement is idempotent.
+///   - `julianday()` returns NULL for unparseable input, so both sides are
+///     guarded on IS NOT NULL: a row with a malformed `created_at` is left
+///     exactly as it is rather than silently re-chained.
+///   - A head carrying a future author expiry with no newer revision stays live,
+///     which is the V123 fix this must not undo.
+///   - When two rows share an instant the tie-break is `newer.id > id`. Memory
+///     IDs are ULIDs and therefore monotonic, so the later row has the greater
+///     ID. NOTE: this is the one place correctness still rests on ID shape, and
+///     a non-ULID ID would tie-break arbitrarily.
+pub const V125_SUPERSESSION_REDERIVE: Migration = Migration::new(
+    125,
+    "supersession_rederive",
+    r#"
+UPDATE memories
+   SET superseded_at = valid_to
+ WHERE superseded_at IS NULL
+   AND valid_to IS NOT NULL
+   AND julianday(created_at) IS NOT NULL
+   AND EXISTS (
+        SELECT 1
+          FROM memories newer
+         WHERE newer.workspace_id = memories.workspace_id
+           AND newer.logical_id = memories.logical_id
+           AND newer.id <> memories.id
+           AND julianday(newer.created_at) IS NOT NULL
+           AND (julianday(newer.created_at) > julianday(memories.created_at)
+                OR (julianday(newer.created_at) = julianday(memories.created_at)
+                    AND newer.id > memories.id))
+       );
+"#,
+    "blake3:v125_supersession_rederive_2026_09_16",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -10859,6 +10918,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V122_TYPED_PACK_ITEM_IDENTITY,
     V123_MEMORY_SUPERSEDED_AT,
     V124_TIMESTAMP_SPELLING_REPAIR,
+    V125_SUPERSESSION_REDERIVE,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
