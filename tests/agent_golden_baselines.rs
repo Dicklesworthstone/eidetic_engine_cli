@@ -642,6 +642,16 @@ fn normalize_version_json_for_golden(text: &str) -> String {
             *target = Value::String(sentinel.to_owned());
         }
     }
+    // The migration catalog's bounds move with every migration — V122
+    // (83a14ea70) is what drifted this golden from max 121. Pinning the literal
+    // here adds no coverage, because
+    // `version_json_advertises_supported_schemas_exactly` (:3024-3030) already
+    // asserts this field against the LIVE `ee::db::MIGRATIONS` catalog, computing
+    // min/max from the registered migrations rather than restating them. That
+    // assertion is the behaviour; this was its spelling.
+    if let Some(range) = value.pointer_mut("/data/database/supportedMigrationRange") {
+        *range = Value::String("<scrubbed:supportedMigrationRange>".to_owned());
+    }
     serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned())
 }
 
