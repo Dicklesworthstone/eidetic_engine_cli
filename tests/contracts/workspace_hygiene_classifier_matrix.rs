@@ -42,7 +42,9 @@ fn modified(path: &str) -> WorkspaceGitStatusEntry {
 
 fn snapshot(entries: Vec<WorkspaceGitStatusEntry>) -> WorkspaceGitSnapshot {
     WorkspaceGitSnapshot {
-        repository_root: "/tmp/workspace-hygiene-contract".to_owned(),
+        repository_root: ee::core::swarm_brief::WorkspacePathLabel::new(std::path::Path::new(
+            "/tmp/workspace-hygiene-contract",
+        )),
         entries,
         operation_state: WorkspaceGitOperationState::default(),
     }

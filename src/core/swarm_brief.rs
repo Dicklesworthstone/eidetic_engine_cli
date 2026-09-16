@@ -1060,10 +1060,68 @@ impl WorkspaceGitSnapshotOptions {
     }
 }
 
+/// A workspace path that is **redacted by default** when published.
+///
+/// Serializing emits the redacted label, so a consumer that does nothing at
+/// all gets the safe answer. Reading the underlying path requires naming
+/// [`WorkspacePathLabel::raw`], which is deliberately explicit and greppable:
+/// publishing a local absolute path is a decision a surface makes, never a
+/// default it inherits.
+///
+/// `Debug` renders redacted too, so the raw path cannot reach a log through an
+/// incidental `{:?}`.
+#[derive(Clone, Eq, PartialEq)]
+pub struct WorkspacePathLabel {
+    raw: String,
+}
+
+impl WorkspacePathLabel {
+    #[must_use]
+    pub fn new(path: &Path) -> Self {
+        Self {
+            raw: path.display().to_string(),
+        }
+    }
+
+    /// Publish the path verbatim.
+    ///
+    /// Correct only for a surface read by the agent standing in this
+    /// workspace, which cannot act on a path it cannot see. Any surface that
+    /// crosses agents must use the serialized form instead.
+    #[must_use]
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    /// The redacted label: `~/…` under `$HOME`, else `[REDACTED_PATH:<hash>]`.
+    #[must_use]
+    pub fn redacted(&self) -> String {
+        redact_path_label(Path::new(&self.raw))
+    }
+}
+
+impl fmt::Debug for WorkspacePathLabel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("WorkspacePathLabel")
+            .field(&self.redacted())
+            .finish()
+    }
+}
+
+impl Serialize for WorkspacePathLabel {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.redacted())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceGitSnapshot {
-    pub repository_root: String,
+    pub repository_root: WorkspacePathLabel,
     pub entries: Vec<WorkspaceGitStatusEntry>,
     #[serde(skip_serializing_if = "WorkspaceGitOperationState::is_clean")]
     pub operation_state: WorkspaceGitOperationState,
@@ -1211,7 +1269,7 @@ pub fn collect_workspace_git_snapshot(
     entries.dedup();
 
     Ok(WorkspaceGitSnapshot {
-        repository_root: redact_path_label(&repository_root_path),
+        repository_root: WorkspacePathLabel::new(&repository_root_path),
         entries,
         operation_state: collect_workspace_git_operation_state(&repository_root_path),
     })
@@ -12741,7 +12799,7 @@ mod tests {
             Err(error) => panic!("workspace git snapshot should parse: {error:?}"),
         };
 
-        assert_eq!(snapshot.repository_root, "/repo");
+        assert_eq!(snapshot.repository_root.raw(), "/repo");
         assert_eq!(
             snapshot
                 .entries

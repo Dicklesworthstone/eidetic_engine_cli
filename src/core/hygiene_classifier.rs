@@ -1026,7 +1026,9 @@ mod tests {
 
     fn snapshot(entries: Vec<WorkspaceGitStatusEntry>) -> WorkspaceGitSnapshot {
         WorkspaceGitSnapshot {
-            repository_root: "/tmp/test-repo".to_owned(),
+            repository_root: crate::core::swarm_brief::WorkspacePathLabel::new(
+                std::path::Path::new("/tmp/test-repo"),
+            ),
             entries,
             operation_state: WorkspaceGitOperationState::default(),
         }

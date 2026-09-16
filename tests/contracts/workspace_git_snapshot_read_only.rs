@@ -717,28 +717,33 @@ fn workspace_git_snapshot_provider_uses_repo_root_from_nested_workspace() -> Tes
         "provider must not change files when invoked from a subdirectory"
     );
 
-    // These three pin redaction as a property of `WorkspaceGitSnapshot`
-    // itself, not of any emitter. That is deliberate and is the stronger
-    // guarantee: "this field is never raw once collected" cannot be defeated
-    // by a new consumer, a refactor, or an author who forgets. Moving the
-    // redaction to the emitting surfaces would read as better layering and
-    // would weaken exactly this property. See
-    // bd-redaction-conceals-disclosed-path-820a3, closed wontfix on that
-    // reasoning.
+    // Redaction is a property of the PUBLISHED form, not of the stored value.
+    // `WorkspacePathLabel` serializes redacted, so a consumer that does nothing
+    // inherits the safe answer; reading the path verbatim requires naming
+    // `.raw()`, an explicit and greppable opt-out that only a surface read by
+    // the agent standing in this workspace should take. Strictly more specific
+    // than the previous form, which pinned the stored value and so could not
+    // distinguish "never collected raw" from "never published raw".
+    // See bd-redaction-conceals-disclosed-path-820a3.
     let raw_repository_root = workspace.display().to_string();
-    assert_ne!(
-        snapshot.repository_root, raw_repository_root,
-        "collected WorkspaceGitSnapshot.repository_root must never hold a raw absolute path, \
-         whatever any consumer later does with it"
+    let collected_root = snapshot.repository_root.raw().to_owned();
+    assert!(
+        collected_root.starts_with('/') && !collected_root.contains("[REDACTED_PATH:"),
+        "collected label must retain the true path for local surfaces to publish, got {collected_root}"
+    );
+    let serialized = serde_json::to_string(&snapshot)
+        .map_err(|error| format!("serialize workspace git snapshot: {error}"))?;
+    assert!(
+        !serialized.contains(&collected_root),
+        "serializing WorkspaceGitSnapshot must not emit the path it holds, got {serialized}"
     );
     assert!(
-        snapshot.repository_root.starts_with("[REDACTED_PATH:"),
-        "WorkspaceGitSnapshot.repository_root should carry the redacted path marker, got {}",
-        snapshot.repository_root
+        !serialized.contains(&raw_repository_root),
+        "serializing WorkspaceGitSnapshot must not emit the raw absolute workspace path"
     );
     assert!(
-        !snapshot.repository_root.contains(&raw_repository_root),
-        "redacted WorkspaceGitSnapshot.repository_root must not contain the raw temp path"
+        serialized.contains("[REDACTED_PATH:"),
+        "serialized repositoryRoot should carry the redacted path marker, got {serialized}"
     );
     let entry_paths = snapshot
         .entries

@@ -804,12 +804,12 @@ fn build_workspace_hygiene_report_from_inputs(
         read_only: true,
         workspace_path: inputs.workspace_path.display().to_string(),
         git_summary: WorkspaceHygieneGitSummary {
-            repository_root: inputs.snapshot.repository_root.clone(),
+            repository_root: inputs.snapshot.repository_root.raw().to_owned(),
             dirty_path_count: classifications_all.len(),
             bucket_counts: bucket_counts.clone(),
             kind_counts: kind_counts.clone(),
         },
-        repository_root: inputs.snapshot.repository_root,
+        repository_root: inputs.snapshot.repository_root.raw().to_owned(),
         dirty_path_count: classifications_all.len(),
         bucket_counts,
         kind_counts,
@@ -3156,7 +3156,9 @@ mod tests {
 
     fn hygiene_snapshot(entries: Vec<WorkspaceGitStatusEntry>) -> WorkspaceGitSnapshot {
         WorkspaceGitSnapshot {
-            repository_root: "/repo".to_owned(),
+            repository_root: crate::core::swarm_brief::WorkspacePathLabel::new(
+                std::path::Path::new("/repo"),
+            ),
             entries,
             operation_state: WorkspaceGitOperationState::default(),
         }
