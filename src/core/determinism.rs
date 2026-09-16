@@ -18,6 +18,7 @@ pub const SEED_LABELS: &[&str] = &[
     "search.score_jitter",
     "search.canonical_ties",
     "search.rerank",
+    "search.global.lexical",
     "ulid.memory",
     "ulid.audit",
     "ulid.workspace",
@@ -81,6 +82,11 @@ pub const SEED_LABEL_REGISTRY: &[SeedLabelDefinition] = &[
         "search.rerank",
         "src/core/search.rs:search_sync",
         "Rerank-stage deterministic tie-breaks",
+    ),
+    SeedLabelDefinition::new(
+        "search.global.lexical",
+        "src/core/search.rs:global_store_frankensearch_hits",
+        "Lexical-only recall against the user-global store",
     ),
     SeedLabelDefinition::new(
         "ulid.memory",

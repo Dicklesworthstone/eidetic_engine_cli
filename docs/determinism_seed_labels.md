@@ -16,6 +16,7 @@ Every production label must appear in both this document and
 | `search.score_jitter` | `src/core/search.rs:run_search` | Deterministic score perturbation for stability tests |
 | `search.canonical_ties` | `src/core/search.rs:canonicalize_equivalent_component_scores` | Stable ordering for equal-score search results |
 | `search.rerank` | `src/core/search.rs:search_sync` | Rerank-stage deterministic tie-breaks |
+| `search.global.lexical` | `src/core/search.rs:global_store_frankensearch_hits` | Lexical-only recall against the user-global store |
 | `ulid.memory` | `src/models/id.rs:Id::now_seeded` | Memory UUIDv7 generation |
 | `ulid.audit` | `src/db/mod.rs:generate_audit_id_seeded` | Audit UUIDv7 generation |
 | `ulid.workspace` | `src/core/workspace.rs:stable_workspace_id_seeded` | Workspace UUIDv7 generation |
