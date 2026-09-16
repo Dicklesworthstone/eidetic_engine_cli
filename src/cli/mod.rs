@@ -243,9 +243,8 @@ use crate::core::rule::{
 use crate::core::search::{
     FamilyRetrievalOptions, SearchAdvisorySession, SearchAdvisorySettlement, SearchContentPreview,
     SearchDedupMode, SearchDegradation, SearchError, SearchFamilyReport, SearchOptions,
-    SearchReport,
-    SearchScoreRecalibrationReport, SearchSourceMode, SimilarError, SimilarOptions, SimilarReport,
-    TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
+    SearchReport, SearchScoreRecalibrationReport, SearchSourceMode, SimilarError, SimilarOptions,
+    SimilarReport, TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
     recalibrate_search_score_calibration, run_diag_search, run_family_retrieval,
     run_search_with_filters, run_search_with_performance_and_filters, run_similar,
 };
@@ -39816,23 +39815,20 @@ mod memory_link_arg_shape_tests {
     use clap::Parser;
 
     use super::{
-        DomainError, MEMORY_SUBCOMMANDS, MemoryLinkArgs, MemoryLinkMode,
-        memory_link_mode_from_args,
+        DomainError, MEMORY_SUBCOMMANDS, MemoryLinkArgs, MemoryLinkMode, memory_link_mode_from_args,
     };
 
     fn args_from(argv: &[&str]) -> MemoryLinkArgs {
         // `copied()` yields `&str`; iterating `&[&str]` directly yields `&&str`,
         // which does not satisfy clap's `Into<OsString>` bound.
-        MemoryLinkArgs::try_parse_from(argv.iter().copied())
-            .expect("memory link args should parse")
+        MemoryLinkArgs::try_parse_from(argv.iter().copied()).expect("memory link args should parse")
     }
 
     fn usage_parts(error: &DomainError) -> (String, String) {
         match error {
-            DomainError::Usage { message, repair } => (
-                message.clone(),
-                repair.clone().unwrap_or_default(),
-            ),
+            DomainError::Usage { message, repair } => {
+                (message.clone(), repair.clone().unwrap_or_default())
+            }
             other => panic!("expected a usage error, got {other:?}"),
         }
     }
@@ -39842,8 +39838,8 @@ mod memory_link_arg_shape_tests {
     #[test]
     fn link_list_subcommand_word_reports_arg_shape_not_missing_relation() {
         let args = args_from(&["link", "list", "mem_abc"]);
-        let error = memory_link_mode_from_args(&args)
-            .expect_err("`list` as MEMORY_ID must be rejected");
+        let error =
+            memory_link_mode_from_args(&args).expect_err("`list` as MEMORY_ID must be rejected");
         let (message, repair) = usage_parts(&error);
         assert!(
             message.contains("subcommand-shaped word") && message.contains("list"),
@@ -39864,8 +39860,7 @@ mod memory_link_arg_shape_tests {
     #[test]
     fn link_list_without_target_is_rejected_with_generic_repair() {
         let args = args_from(&["link", "list"]);
-        let error = memory_link_mode_from_args(&args)
-            .expect_err("bare `list` must be rejected");
+        let error = memory_link_mode_from_args(&args).expect_err("bare `list` must be rejected");
         let (_, repair) = usage_parts(&error);
         assert!(
             repair.contains("ee memory link <MEMORY_ID>"),
@@ -39878,8 +39873,8 @@ mod memory_link_arg_shape_tests {
     #[test]
     fn memory_id_shaped_token_is_never_treated_as_a_subcommand() {
         let args = args_from(&["link", "mem_list"]);
-        let mode = memory_link_mode_from_args(&args)
-            .expect("a mem_-prefixed ID must still resolve");
+        let mode =
+            memory_link_mode_from_args(&args).expect("a mem_-prefixed ID must still resolve");
         assert!(
             matches!(mode, MemoryLinkMode::List { relation: None }),
             "omitting the target should list links"
@@ -39913,8 +39908,8 @@ mod memory_link_arg_shape_tests {
     #[test]
     fn creation_without_relation_still_reports_missing_relation() {
         let args = args_from(&["link", "mem_a", "mem_b"]);
-        let error = memory_link_mode_from_args(&args)
-            .expect_err("creation without --relation must fail");
+        let error =
+            memory_link_mode_from_args(&args).expect_err("creation without --relation must fail");
         let (message, _) = usage_parts(&error);
         assert!(
             message.contains("--relation"),
@@ -74447,6 +74442,7 @@ mod tests {
             None,
             &mut reusable.search_advisory_session,
             "workspace-reusable",
+            SearchContentPreview::Truncated,
         );
         let repeated = format_search_json_with_mesh_and_recalibration_in_process(
             &stale_report(130),
@@ -74455,6 +74451,7 @@ mod tests {
             None,
             &mut reusable.search_advisory_session,
             "workspace-reusable",
+            SearchContentPreview::Truncated,
         );
         assert_eq!(warning_count(&first), 2);
         assert_eq!(warning_count(&repeated), 0);
@@ -74472,6 +74469,7 @@ mod tests {
                 None,
                 &mut standalone.search_advisory_session,
                 "workspace-standalone",
+                SearchContentPreview::Truncated,
             );
             assert_eq!(warning_count(&rendered), 2);
         }
@@ -74494,6 +74492,7 @@ mod tests {
                 None,
                 &mut process.search_advisory_session,
                 "workspace-permanent",
+                SearchContentPreview::Truncated,
             );
             serde_json::from_str::<serde_json::Value>(&rendered)
                 .expect("permanent advisory search response JSON")
