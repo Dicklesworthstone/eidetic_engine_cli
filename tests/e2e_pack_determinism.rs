@@ -239,6 +239,56 @@ fn assert_pack_ledger_persisted(
     connection.close().map_err(|error| error.to_string())
 }
 
+/// Describe where two outputs first diverge, for a non-determinism failure.
+///
+/// The message this replaces printed the first 200 characters of each run.
+/// When two outputs differ, their leading bytes are by definition the
+/// IDENTICAL prefix -- otherwise the divergence would already be visible -- so
+/// that message reliably spent its space on the one window guaranteed not to
+/// contain the defect, and the row could not be diagnosed by anyone reading
+/// the log. This prints the first differing byte offset, both lengths, and a
+/// window centred on the divergence.
+fn describe_first_divergence(left: &str, right: &str) -> String {
+    const WINDOW: usize = 160;
+
+    let offset = left
+        .as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .position(|(a, b)| a != b)
+        .unwrap_or_else(|| left.len().min(right.len()));
+
+    // Widen to char boundaries so slicing multi-byte content cannot panic.
+    let clip = |text: &str| -> String {
+        let mut start = offset.saturating_sub(WINDOW / 2).min(text.len());
+        while start > 0 && !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = (start + WINDOW).min(text.len());
+        while end < text.len() && !text.is_char_boundary(end) {
+            end += 1;
+        }
+        text[start..end].to_owned()
+    };
+
+    let note = if offset == left.len().min(right.len()) {
+        " (one output is a prefix of the other; they differ in length)"
+    } else {
+        ""
+    };
+
+    format!(
+        "first differing byte offset: {offset}{note}\n\
+         lengths: run 0 = {} bytes, other run = {} bytes\n\
+         run 0    window: {}\n\
+         other    window: {}",
+        left.len(),
+        right.len(),
+        clip(left),
+        clip(right)
+    )
+}
+
 #[test]
 fn pack_hash_is_deterministic_across_runs() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
@@ -327,11 +377,8 @@ fn pack_hash_is_deterministic_across_runs() -> TestResult {
         ensure(
             output == first_output,
             format!(
-                "JSON output mismatch between run 0 and run {i}\n\
-                 First 200 chars of run 0: {}\n\
-                 First 200 chars of run {i}: {}",
-                &first_output[..first_output.len().min(200)],
-                &output[..output.len().min(200)]
+                "JSON output mismatch between run 0 and run {i}\n{}",
+                describe_first_divergence(first_output, output)
             ),
         )?;
     }
