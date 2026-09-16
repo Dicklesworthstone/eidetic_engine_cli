@@ -13531,6 +13531,93 @@ mod tests {
         )
     }
 
+    fn remap_workspace_fixture(id: &str) -> crate::db::StoredWorkspace {
+        crate::db::StoredWorkspace {
+            id: id.to_owned(),
+            path: format!("/tmp/{id}"),
+            name: None,
+            scope_kind: "standalone".to_owned(),
+            repository_root: None,
+            repository_fingerprint: None,
+            subproject_path: None,
+            created_at: "2026-09-02T00:00:00Z".to_owned(),
+            updated_at: "2026-09-02T00:00:00Z".to_owned(),
+        }
+    }
+
+    /// bd-reality-core-convergence-1azkt.13, plan section C sub-box 4:
+    /// "ambiguous workspace mapping" as a distinct fail-closed case.
+    ///
+    /// `remap_restored_workspace_id` had **no** direct test despite gating
+    /// workspace remapping at seventeen call sites across the restore path
+    /// (task episodes, CASS sessions/evidence, import and work history, packs,
+    /// curation, and the rest). Its sole-workspace fallback is a silent
+    /// adoption rule: if it were wrong, every restored table would land in the
+    /// wrong workspace and nothing else would notice.
+    ///
+    /// All five branches are asserted, so the fail-closed arm cannot be
+    /// credited for a function that simply always errors.
+    #[test]
+    fn restored_workspace_remap_is_exact_then_sole_then_fails_closed() -> TestResult {
+        let alpha = remap_workspace_fixture("wsp_alpha00000000000000000000");
+        let beta = remap_workspace_fixture("wsp_beta000000000000000000000");
+        let absent = "wsp_absent00000000000000000000";
+
+        // 1. An exact id match wins even when several workspaces exist, and it
+        //    is the SECOND entry here so a first-element shortcut would fail.
+        ensure_equal(
+            remap_restored_workspace_id(&[alpha.clone(), beta.clone()], Some(&beta.id), "pack")
+                .map_err(|error| error.to_string())?,
+            Some(beta.id.clone()),
+            "exact id match is preferred over position",
+        )?;
+
+        // 2. No match but exactly one workspace: adopt it. This is the
+        //    documented side-path behaviour -- a backup restored into a fresh
+        //    store whose workspace id was regenerated.
+        ensure_equal(
+            remap_restored_workspace_id(std::slice::from_ref(&alpha), Some(absent), "CASS session")
+                .map_err(|error| error.to_string())?,
+            Some(alpha.id.clone()),
+            "sole workspace adopts an unmatched record",
+        )?;
+
+        // 3. No match and TWO workspaces: ambiguous, so fail closed rather
+        //    than guess which one owns the row.
+        let ambiguous = remap_restored_workspace_id(
+            &[alpha.clone(), beta.clone()],
+            Some(absent),
+            "CASS evidence span",
+        )
+        .err()
+        .ok_or_else(|| "ambiguous workspace mapping must fail closed".to_owned())?;
+        ensure(
+            ambiguous
+                .to_string()
+                .contains("no unambiguous matching workspace"),
+            format!("unexpected ambiguous-mapping error: {ambiguous}"),
+        )?;
+        ensure(
+            ambiguous.to_string().contains("CASS evidence span"),
+            format!("ambiguity error must name the entity: {ambiguous}"),
+        )?;
+
+        // 4. No match and NO workspaces is equally unresolvable.
+        ensure(
+            remap_restored_workspace_id(&[], Some(absent), "work history").is_err(),
+            "an empty restored database cannot resolve a workspace reference",
+        )?;
+
+        // 5. A record that carries no workspace reference is not an error;
+        //    it simply has nothing to remap.
+        ensure_equal(
+            remap_restored_workspace_id(&[alpha, beta], None, "import history")
+                .map_err(|error| error.to_string())?,
+            None,
+            "an absent workspace reference maps to None",
+        )
+    }
+
     /// Build a session chunk whose envelope fields the caller can corrupt.
     ///
     /// Used by the fail-closed cases below so each one differs from a valid
@@ -13685,6 +13772,70 @@ mod tests {
 
     /// Same sub-box, duplicate-identity class: two records sharing one id must
     /// fail the recovery transaction and leave no partial rows behind.
+    #[test]
+    fn cass_recovery_fails_closed_on_ambiguous_workspace_mapping() -> TestResult {
+        // The pure-function test above proves the decision; this proves the
+        // decision is actually reached through the CASS restore path and that
+        // a refusal there leaves no partial rows.
+        let (inner, _workspace, database) = fixture().map_err(|error| error.message())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        // A second workspace removes the sole-workspace fallback, so a record
+        // naming neither one can no longer be silently adopted.
+        let second_workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(77)).to_string();
+        connection
+            .insert_workspace(
+                &second_workspace_id,
+                &CreateWorkspaceInput {
+                    path: inner
+                        .path()
+                        .join("second-workspace")
+                        .to_string_lossy()
+                        .into_owned(),
+                    name: Some("second".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            connection
+                .list_workspaces()
+                .map_err(|error| error.to_string())?
+                .len(),
+            2,
+            "fixture must hold two workspaces for the mapping to be ambiguous",
+        )?;
+        drop(connection);
+
+        let unknown_workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(88)).to_string();
+        let session_id = SessionId::from_uuid(Uuid::from_u128(4)).to_string();
+        let chunk = cass_session_chunk_with(
+            "ee.backup.derived.cass_sessions.v1",
+            "omitted_host_local",
+            0,
+            vec![backup_cass_session_fixture(
+                &session_id,
+                &unknown_workspace_id,
+            )],
+        );
+
+        let error = attempt_cass_session_recovery(inner.path(), &database, &chunk)
+            .err()
+            .ok_or_else(|| "ambiguous workspace mapping must fail CASS recovery".to_owned())?;
+        ensure(
+            error
+                .to_string()
+                .contains("no unambiguous matching workspace"),
+            format!("unexpected ambiguous-mapping error: {error}"),
+        )?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        ensure_equal(
+            connection
+                .get_session(&session_id)
+                .map_err(|error| error.to_string())?,
+            None,
+            "an ambiguous mapping must leave no session row",
+        )
+    }
+
     #[test]
     fn cass_recovery_rolls_back_on_duplicate_session_identity() -> TestResult {
         let (inner, _workspace, database) = fixture().map_err(|error| error.message())?;
