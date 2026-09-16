@@ -1439,10 +1439,24 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
             .is_some(),
         "model status fastModelId should be present",
     )?;
-    ensure_equal(
-        &status_empty_json["data"]["degradations"][0]["code"],
-        &serde_json::json!("model_registry_no_available_entry"),
-        "model status no available degradation code",
+    // ADR 0080 registers a bundled embedding model, so this workspace HAS an
+    // available entry — and `model_registry_no_available_entry` fires only when
+    // the registry has entries and none of them is available
+    // (src/core/model.rs:407-412). The old form asserted that code was present,
+    // which cannot hold once availableCount is 1.
+    //
+    // Assert that one code's ABSENCE and nothing more. Per AGENTS.md, degraded[]
+    // is populated only when the response was actually affected, so it is a live
+    // report rather than a fixed shape; pinning the whole array would forbid any
+    // other code that legitimately fires here and would break this row for
+    // reasons unrelated to what it tests.
+    ensure(
+        !status_empty_json["data"]["degradations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|entry| entry["code"] == serde_json::json!("model_registry_no_available_entry")),
+        "model status must not claim no-available-entry while a bundled model is available",
     )?;
 
     let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
