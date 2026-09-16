@@ -6288,6 +6288,84 @@ mod tests {
         assert!(check.is_topline_healthy());
         assert!(check.message.contains("could not be determined"));
     }
+
+    /// bd-pack-doctor-posture-disagreement-nts29, sub-item 2.
+    ///
+    /// A subsystem the operator deliberately turned off is not a health
+    /// problem. `Skipped` already has its own tally bucket, but nothing
+    /// pinned that it stays out of the degraded list and out of the posture
+    /// word. Without that pin, `--full` can drift back to presenting
+    /// opt-outs as degradation, which trains agents to ignore the health
+    /// banner — and an ignored banner is how a real degradation gets missed.
+    #[test]
+    fn disabled_mesh_skips_never_count_toward_degraded_posture() -> TestResult {
+        let report =
+            DoctorMeshAutoEnrollmentReport::from_probe(&mesh_auto_enrollment_disabled_probe());
+
+        ensure(report.enabled, false, "probe reports mesh disabled")?;
+        ensure(
+            report.categorized_summary.skipped,
+            report.categorized_summary.total,
+            "every readiness row lands in the skipped bucket",
+        )?;
+        ensure(
+            report.categorized_summary.warning,
+            0,
+            "a disabled subsystem emits no warning rows",
+        )?;
+        ensure(
+            report.categorized_summary.fail,
+            0,
+            "a disabled subsystem emits no fail rows",
+        )?;
+        ensure(
+            report.degraded.is_empty(),
+            true,
+            "skipped rows must never enter the degraded list",
+        )?;
+        ensure(
+            report.posture,
+            "skipped",
+            "an all-skipped readiness set reports 'skipped', never 'warning' or 'fail'",
+        )
+    }
+
+    /// bd-pack-doctor-posture-disagreement-nts29, sub-item 2 (contrast arm).
+    ///
+    /// The partition only means something if the *other* side still fires.
+    /// An enabled-but-broken mesh must still surface degraded rows and a
+    /// non-ok posture, so the test above cannot be satisfied by a blanket
+    /// "never report degradation" regression.
+    #[test]
+    fn enabled_mesh_with_real_failures_still_reports_degraded_posture() -> TestResult {
+        let report =
+            DoctorMeshAutoEnrollmentReport::from_probe(&mesh_auto_enrollment_problem_probe());
+
+        ensure(report.enabled, true, "probe reports mesh enabled")?;
+        ensure(
+            report.categorized_summary.skipped,
+            0,
+            "an enabled subsystem skips nothing",
+        )?;
+        ensure(
+            report.degraded.is_empty(),
+            false,
+            "real failures must still populate the degraded list",
+        )?;
+        ensure(
+            report.posture == "warning" || report.posture == "fail",
+            true,
+            "an enabled subsystem with real failures reports a non-ok posture",
+        )?;
+        ensure(
+            report
+                .degraded
+                .iter()
+                .all(|entry| entry.severity != "skipped"),
+            true,
+            "no degraded entry may carry the skipped severity",
+        )
+    }
 }
 
 #[cfg(test)]
