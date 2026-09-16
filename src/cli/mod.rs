@@ -49384,6 +49384,12 @@ where
     if let Err(error) = crate::core::ensure_addressed_database_exists(&addressed_database_path) {
         return write_domain_error(
             &error,
+            // NOT migrated to cli.renderer() by bd-oqrjn, deliberately: the
+            // `|| args.explain_performance` disjunct means an `--explain-performance`
+            // run receives a JSON error even without `--json`. A mechanical swap
+            // would drop that condition -- a behaviour change, not a routing fix.
+            // Excluded from the bd-oqrjn closing countermetric for the same reason
+            // as the mermaid literal in reject_unsupported_mermaid_format.
             cli.wants_json() || args.explain_performance,
             stdout,
             stderr,
@@ -49455,6 +49461,12 @@ where
             };
             return write_domain_error(
                 &error,
+                // NOT migrated to cli.renderer() by bd-oqrjn, deliberately: the
+                // `|| args.explain_performance` disjunct means an `--explain-performance`
+                // run receives a JSON error even without `--json`. A mechanical swap
+                // would drop that condition -- a behaviour change, not a routing fix.
+                // Excluded from the bd-oqrjn closing countermetric for the same reason
+                // as the mermaid literal in reject_unsupported_mermaid_format.
                 cli.wants_json() || args.explain_performance,
                 stdout,
                 stderr,
@@ -49477,6 +49489,12 @@ where
             };
             return write_domain_error(
                 &error,
+                // NOT migrated to cli.renderer() by bd-oqrjn, deliberately: the
+                // `|| args.explain_performance` disjunct means an `--explain-performance`
+                // run receives a JSON error even without `--json`. A mechanical swap
+                // would drop that condition -- a behaviour change, not a routing fix.
+                // Excluded from the bd-oqrjn closing countermetric for the same reason
+                // as the mermaid literal in reject_unsupported_mermaid_format.
                 cli.wants_json() || args.explain_performance,
                 stdout,
                 stderr,
