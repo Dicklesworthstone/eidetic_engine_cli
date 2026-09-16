@@ -268,7 +268,7 @@ fn proximity_self_pair_returns_self_interpretation_with_zero_min_cut() -> TestRe
     let a = remember(&workspace_arg, "Pin-test proximity self-pair a.")?;
     let b = remember(&workspace_arg, "Pin-test proximity self-pair b.")?;
     let database_path = workspace.join(".ee").join("ee.db");
-    insert_link(&database_path, "link_00000000000000000000pinpx01", &a, &b)?;
+    insert_link(&database_path, "link_0000000000000000000pinpx01", &a, &b)?;
 
     let (output, parsed) = run_proximity(&workspace_arg, &a, &a, &[])?;
     ensure(
@@ -326,7 +326,7 @@ fn proximity_missing_memory_returns_missing_interpretation() -> TestResult {
     let a = remember(&workspace_arg, "Pin-test proximity missing src.")?;
     let b = remember(&workspace_arg, "Pin-test proximity missing dst.")?;
     let database_path = workspace.join(".ee").join("ee.db");
-    insert_link(&database_path, "link_00000000000000000000pinpx02", &a, &b)?;
+    insert_link(&database_path, "link_0000000000000000000pinpx02", &a, &b)?;
 
     let phantom = "mem_phantom_not_in_link_graph_xyz";
     let (output, parsed) = run_proximity(&workspace_arg, &a, phantom, &[])?;
@@ -384,8 +384,8 @@ fn proximity_disconnected_pair_returns_unreachable_with_degraded_entry() -> Test
     let c = remember(&workspace_arg, "Pin-test proximity component-2 c.")?;
     let d = remember(&workspace_arg, "Pin-test proximity component-2 d.")?;
     let database_path = workspace.join(".ee").join("ee.db");
-    insert_link(&database_path, "link_00000000000000000000pinpx03", &a, &b)?;
-    insert_link(&database_path, "link_00000000000000000000pinpx04", &c, &d)?;
+    insert_link(&database_path, "link_0000000000000000000pinpx03", &a, &b)?;
+    insert_link(&database_path, "link_0000000000000000000pinpx04", &c, &d)?;
 
     let (output, parsed) = run_proximity(&workspace_arg, &a, &c, &[])?;
     ensure(
