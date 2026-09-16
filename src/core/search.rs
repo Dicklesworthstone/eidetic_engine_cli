@@ -956,7 +956,11 @@ impl QueryAssistCaptureTemplate {
 
 impl QueryAssistReport {
     #[must_use]
-    pub fn data_json(&self, output_redaction_enabled: bool) -> serde_json::Value {
+    pub fn data_json(
+        &self,
+        output_redaction_enabled: bool,
+        preview: SearchContentPreview,
+    ) -> serde_json::Value {
         serde_json::json!({
             "schema": QUERY_ASSIST_SCHEMA_V1,
             "mode": self.mode.as_str(),
@@ -965,7 +969,7 @@ impl QueryAssistReport {
             "droppedBelowFloor": self.dropped_below_floor,
             "relevanceFloor": optional_score_json(self.relevance_floor),
             "reformulations": self.reformulations.iter().map(|reformulation| reformulation.data_json(output_redaction_enabled)).collect::<Vec<_>>(),
-            "didYouMean": self.did_you_mean.iter().map(|hit| query_assist_did_you_mean_json(hit, output_redaction_enabled)).collect::<Vec<_>>(),
+            "didYouMean": self.did_you_mean.iter().map(|hit| query_assist_did_you_mean_json(hit, output_redaction_enabled, preview)).collect::<Vec<_>>(),
             "captureTemplate": self.capture_template.data_json(),
         })
     }
@@ -3641,7 +3645,7 @@ impl SearchReport {
         {
             data_object.insert(
                 "queryAssist".to_owned(),
-                query_assist.data_json(output_redaction_enabled),
+                query_assist.data_json(output_redaction_enabled, preview),
             );
         }
         // Authoritative freshness truth is emitted on every affected response,
@@ -5900,6 +5904,7 @@ fn query_assist_stopword(token: &str) -> bool {
 fn query_assist_did_you_mean_json(
     hit: &SearchHit,
     output_redaction_enabled: bool,
+    preview: SearchContentPreview,
 ) -> serde_json::Value {
     let (provenance, provenance_redacted_patterns) = hit.provenance_json(output_redaction_enabled);
     let mut obj = serde_json::json!({
@@ -5921,9 +5926,9 @@ fn query_assist_did_you_mean_json(
                 public_search_metadata(meta, output_redaction_enabled);
             redacted_patterns.extend(provenance_redacted_patterns);
             if let Some(text) = search_hit_content_text(&metadata) {
-                let preview = search_content_preview(&text, SEARCH_CONTENT_PREVIEW_MAX_CHARS);
-                let truncated = preview.chars().count() > SEARCH_CONTENT_PREVIEW_MAX_CHARS;
-                obj_map.insert("content".to_owned(), serde_json::json!(preview));
+                // `rendered`, not `preview`: `preview` is the mode parameter.
+                let (rendered, truncated) = search_content_for_preview(&text, preview);
+                obj_map.insert("content".to_owned(), serde_json::json!(rendered));
                 if truncated {
                     obj_map.insert("content_truncated".to_owned(), serde_json::json!(true));
                 }
