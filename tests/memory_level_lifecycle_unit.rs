@@ -1,6 +1,9 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::path::{Path, PathBuf};
+
 use ee::core::curate::{CurateApplyOptions, apply_curation_candidate};
+use ee::core::init::{InitOptions, init_workspace};
 use ee::core::memory::{
     ExpireMemoryOptions, MemoryLevelOptions, RememberMemoryOptions, expire_memory, remember_memory,
     update_memory_level,
@@ -18,6 +21,41 @@ use ee::output::error_response_json;
 use serde_json::Value;
 
 const WORKSPACE_ID: &str = "wsp_lifecycle00000000000000000";
+
+/// Create the store these fixtures write into, and return its addressed path.
+///
+/// `ee remember` has not created a store since `91cf7bcbd` ("fix(storage):
+/// reject storeless write and search addresses", 2026-08-11): ordinary write
+/// surfaces preflight the addressed path through
+/// `core::ensure_addressed_database_exists` so a mistyped `--workspace` cannot
+/// plant a new store, and `ee init` owns store creation
+/// (src/core/mod.rs:876-882).
+///
+/// These fixtures predate that change (last touched 2026-08-04, seven days
+/// before it) and addressed a bare `<workspace>/ee.db` that nothing ever
+/// created. `init_workspace` owns the layout and puts the store at
+/// `<workspace>/.ee/ee.db` (src/core/init.rs:373-374), so the path moves with
+/// it rather than being guessed here.
+///
+/// Repaired the same way as `tests/ppr_context_pack.rs` (be14b998a),
+/// `tests/contradiction_detect_properties.rs` (429a44576),
+/// `tests/why_not_core_e2e.rs` (062d2eaa7), `tests/write_owner.rs`
+/// (95aaf6174) and `tests/lod_packing_e2e.rs` (1b74f2db9).
+fn init_fixture_workspace(workspace_path: &Path) -> PathBuf {
+    let report = init_workspace(&InitOptions {
+        workspace_path: workspace_path.to_path_buf(),
+        dry_run: false,
+        repair_plan: false,
+        force: false,
+        allow_symlink: false,
+        skip_boilerplate: true,
+    });
+    assert!(
+        report.status.is_success(),
+        "initialize memory-level lifecycle fixture workspace failed: {report:?}"
+    );
+    workspace_path.join(".ee").join("ee.db")
+}
 
 fn open_db() -> DbConnection {
     let connection = DbConnection::open_memory().expect("memory database opens");
@@ -176,7 +214,7 @@ fn workflow_close_writes_canonical_level_transition_audit() {
 #[test]
 fn manual_level_command_applies_all_adjacent_transitions_with_transition_audit() {
     let temp = tempfile::tempdir().expect("tempdir creates");
-    let database_path = temp.path().join("ee.db");
+    let database_path = init_fixture_workspace(temp.path());
     let cases = [
         ("working", "episodic", "manual.promote_to_episodic"),
         ("episodic", "semantic", "manual.promote_to_semantic"),
@@ -260,7 +298,7 @@ fn manual_level_command_applies_all_adjacent_transitions_with_transition_audit()
 #[test]
 fn manual_level_transition_demotes_peer_human_attested_authority_atomically() {
     let temp = tempfile::tempdir().expect("tempdir creates");
-    let database_path = temp.path().join("ee.db");
+    let database_path = init_fixture_workspace(temp.path());
     let remembered = remember_memory(&RememberMemoryOptions {
         workspace_path: temp.path(),
         database_path: Some(&database_path),
@@ -384,7 +422,7 @@ fn manual_level_transition_demotes_peer_human_attested_authority_atomically() {
 #[test]
 fn manual_level_command_requires_reason_evidence() {
     let temp = tempfile::tempdir().expect("tempdir creates");
-    let database_path = temp.path().join("ee.db");
+    let database_path = init_fixture_workspace(temp.path());
     let remembered = remember_memory(&RememberMemoryOptions {
         workspace_path: temp.path(),
         database_path: Some(&database_path),
@@ -445,7 +483,7 @@ fn manual_level_command_requires_reason_evidence() {
 #[test]
 fn manual_level_command_rejects_stale_expected_level_with_transition_code() {
     let temp = tempfile::tempdir().expect("tempdir creates");
-    let database_path = temp.path().join("ee.db");
+    let database_path = init_fixture_workspace(temp.path());
     let remembered = remember_memory(&RememberMemoryOptions {
         workspace_path: temp.path(),
         database_path: Some(&database_path),
@@ -513,7 +551,7 @@ fn manual_level_command_rejects_stale_expected_level_with_transition_code() {
 #[test]
 fn manual_level_command_rejects_tombstoned_memory_with_transition_code() {
     let temp = tempfile::tempdir().expect("tempdir creates");
-    let database_path = temp.path().join("ee.db");
+    let database_path = init_fixture_workspace(temp.path());
     let remembered = remember_memory(&RememberMemoryOptions {
         workspace_path: temp.path(),
         database_path: Some(&database_path),
@@ -715,7 +753,7 @@ fn decay_tombstone_writes_legacy_and_canonical_audits_for_all_levels() {
 #[test]
 fn memory_expire_demotes_semantic_to_episodic_with_transition_audit() {
     let temp = tempfile::tempdir().expect("tempdir creates");
-    let database_path = temp.path().join("ee.db");
+    let database_path = init_fixture_workspace(temp.path());
     let remembered = remember_memory(&RememberMemoryOptions {
         workspace_path: temp.path(),
         database_path: Some(&database_path),
@@ -785,7 +823,7 @@ fn memory_expire_demotes_semantic_to_episodic_with_transition_audit() {
 #[test]
 fn curate_apply_promote_moves_episodic_to_semantic_with_transition_audit() {
     let temp = tempfile::tempdir().expect("tempdir creates");
-    let database_path = temp.path().join("ee.db");
+    let database_path = init_fixture_workspace(temp.path());
     let remembered = remember_memory(&RememberMemoryOptions {
         workspace_path: temp.path(),
         database_path: Some(&database_path),
