@@ -29,7 +29,11 @@
 
 use std::collections::BTreeMap;
 
-use crate::models::Tag;
+use std::path::Path;
+
+use crate::core::memory::{MemoryTagsMode, MemoryTagsOptions};
+use crate::db::DbConnection;
+use crate::models::{DomainError, Tag};
 
 /// Longest ticker symbol this module will accept.
 ///
@@ -616,6 +620,251 @@ pub fn proposal_log_line(proposal: &BackfillProposal, applied: bool) -> String {
 /// Schema id for one JSONL mutation-log line.
 pub const TAG_BACKFILL_LOG_SCHEMA_V1: &str = "ee.tag_backfill.log.v1";
 
+/// Options for one `ee index backfill-tags` run.
+#[derive(Clone, Copy, Debug)]
+pub struct TagBackfillOptions<'a> {
+    /// Workspace whose memories are scanned.
+    pub workspace_path: &'a Path,
+    /// Database backing that workspace.
+    pub database_path: &'a Path,
+    /// When false, plan only and write nothing.
+    pub apply: bool,
+    /// Optional cap on how many memories are patched in one run. `None`
+    /// means no cap. The plan is always computed over the whole workspace so
+    /// the reported totals stay truthful even when the writes are capped.
+    pub limit: Option<usize>,
+    /// Optional path for the JSONL mutation log.
+    pub log_path: Option<&'a Path>,
+    /// Actor recorded on each audit row.
+    pub actor: Option<&'a str>,
+}
+
+/// What one memory's patch actually did.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TagBackfillOutcome {
+    /// Memory that was patched.
+    pub memory_id: String,
+    /// Tags added.
+    pub add_tags: Vec<String>,
+    /// Audit rows minted by the patch.
+    pub audit_ids: Vec<String>,
+    /// Whether the store reported a durable write.
+    pub persisted: bool,
+    /// Whether the patch actually changed the tag set.
+    pub changed: bool,
+}
+
+/// Result of a backfill run.
+#[derive(Clone, Debug)]
+pub struct TagBackfillReport {
+    /// Report schema.
+    pub schema: &'static str,
+    /// Package version, for stable output.
+    pub version: &'static str,
+    /// True when this run only planned.
+    pub dry_run: bool,
+    /// Memories examined.
+    pub scanned_memory_count: usize,
+    /// The plan, including skips and their reasons.
+    pub plan: BackfillPlan,
+    /// Per-memory results. Empty on a dry run.
+    pub outcomes: Vec<TagBackfillOutcome>,
+    /// Proposals not attempted because `limit` was reached.
+    pub deferred_memory_count: usize,
+    /// Where the JSONL log was written, when one was requested.
+    pub log_path: Option<String>,
+}
+
+/// Report schema id.
+pub const TAG_BACKFILL_SCHEMA_V1: &str = "ee.tag_backfill.v1";
+
+impl TagBackfillReport {
+    /// Memories actually mutated by this run.
+    #[must_use]
+    pub fn applied_memory_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|outcome| outcome.changed)
+            .count()
+    }
+
+    /// Tags actually written by this run.
+    #[must_use]
+    pub fn applied_tag_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|outcome| outcome.changed)
+            .map(|outcome| outcome.add_tags.len())
+            .sum()
+    }
+}
+
+/// Read every live memory in the workspace as a backfill candidate.
+///
+/// Deliberately does NOT go through [`crate::core::memory::list_memories`]:
+/// that path truncates bodies for display (`MemorySummary::content_truncated`),
+/// and a truncated body would make the planner refuse every long memory. The
+/// store rows carry full content, so candidates are built from them directly
+/// and `content_truncated` is always false here.
+///
+/// Tombstoned memories are excluded: retagging an expired memory would be a
+/// mutation with no recall benefit, and the tag write path refuses them anyway.
+///
+/// # Errors
+///
+/// Returns a [`DomainError`] when the database cannot be opened or queried.
+pub fn collect_candidates(
+    database_path: &Path,
+    workspace_path: &Path,
+) -> Result<Vec<BackfillCandidate>, DomainError> {
+    let conn =
+        DbConnection::open_file_read_only(database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open database read-only: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    let workspace_id = crate::core::memory::workspace_id_for_database(&conn, workspace_path);
+    let stored = conn
+        .list_memories(&workspace_id, None, false)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list memories: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+
+    let ids: Vec<&str> = stored.iter().map(|memory| memory.id.as_str()).collect();
+    let tags_by_memory =
+        conn.get_memory_tags_batch(&ids)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to load memory tags: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+
+    Ok(stored
+        .into_iter()
+        .map(|memory| {
+            let existing_tags = tags_by_memory.get(&memory.id).cloned().unwrap_or_default();
+            BackfillCandidate {
+                memory_id: memory.id,
+                kind: memory.kind,
+                // Store rows are never truncated; see the doc comment above.
+                content: memory.content,
+                content_truncated: false,
+                existing_tags,
+            }
+        })
+        .collect())
+}
+
+/// Plan, and optionally apply, a content-derived tag backfill.
+///
+/// Applying reuses [`crate::core::memory::update_memory_tags`] with
+/// [`MemoryTagsMode::Patch`] rather than writing tags directly, so every
+/// mutation inherits that path's audit rows, index-job scheduling and
+/// unchanged/changed semantics. There is deliberately no second write path.
+///
+/// # Errors
+///
+/// Returns a [`DomainError`] when candidates cannot be read, when a patch
+/// fails, or when the JSONL log cannot be written.
+pub fn run_backfill(options: &TagBackfillOptions<'_>) -> Result<TagBackfillReport, DomainError> {
+    let candidates = collect_candidates(options.database_path, options.workspace_path)?;
+    let scanned_memory_count = candidates.len();
+    let plan = plan_backfill(&candidates);
+
+    let attempt_count = options.limit.map_or(plan.proposals.len(), |limit| {
+        limit.min(plan.proposals.len())
+    });
+    let deferred_memory_count = plan.proposals.len() - attempt_count;
+
+    let mut outcomes = Vec::new();
+    let mut log_lines = Vec::new();
+
+    for proposal in plan.proposals.iter().take(attempt_count) {
+        log_lines.push(proposal_log_line(proposal, options.apply));
+        if !options.apply {
+            continue;
+        }
+        let report = crate::core::memory::update_memory_tags(&MemoryTagsOptions {
+            workspace_path: options.workspace_path,
+            database_path: options.database_path,
+            memory_id: &proposal.memory_id,
+            mode: MemoryTagsMode::Patch {
+                add: proposal.add_tags.clone(),
+                remove: Vec::new(),
+            },
+            actor: options.actor,
+            dry_run: false,
+            include_tombstoned: false,
+        })?;
+        outcomes.push(TagBackfillOutcome {
+            memory_id: proposal.memory_id.clone(),
+            add_tags: proposal.add_tags.clone(),
+            audit_ids: report.audit_ids.clone(),
+            persisted: report.persisted,
+            changed: report.changed,
+        });
+    }
+
+    let log_path = match options.log_path {
+        Some(path) => {
+            write_log_lines(path, &log_lines)?;
+            Some(path.display().to_string())
+        }
+        None => None,
+    };
+
+    Ok(TagBackfillReport {
+        schema: TAG_BACKFILL_SCHEMA_V1,
+        version: env!("CARGO_PKG_VERSION"),
+        dry_run: !options.apply,
+        scanned_memory_count,
+        plan,
+        outcomes,
+        deferred_memory_count,
+        log_path,
+    })
+}
+
+/// Append `lines` to the JSONL log at `path`, creating parent directories.
+///
+/// Appends rather than truncates so a later run never destroys the record of
+/// an earlier one — the log is audit evidence, and RULE 1 applies to it.
+fn write_log_lines(path: &Path, lines: &[String]) -> Result<(), DomainError> {
+    use std::io::Write as _;
+
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to create tag-backfill log directory {}: {error}",
+                parent.display()
+            ),
+            repair: Some("Choose a writable --log path.".to_owned()),
+        })?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to open tag-backfill log {}: {error}",
+                path.display()
+            ),
+            repair: Some("Choose a writable --log path.".to_owned()),
+        })?;
+    for line in lines {
+        writeln!(file, "{line}").map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to write tag-backfill log {}: {error}",
+                path.display()
+            ),
+            repair: Some("Choose a writable --log path.".to_owned()),
+        })?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -970,6 +1219,53 @@ mod tests {
         assert_ne!(
             preview, applied,
             "a preview log must never be mistakable for a write log"
+        );
+    }
+
+    #[test]
+    fn log_appends_across_runs_instead_of_truncating() {
+        // The JSONL log is audit evidence. A second run must never erase the
+        // record of the first, so the writer opens in append mode.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("backfill.jsonl");
+
+        super::write_log_lines(&log, &["first".to_owned()]).expect("first write");
+        super::write_log_lines(&log, &["second".to_owned()]).expect("second write");
+
+        let contents = std::fs::read_to_string(&log).expect("read log");
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["first", "second"],
+            "an earlier run's log lines must survive a later run"
+        );
+    }
+
+    #[test]
+    fn log_creates_missing_parent_directories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir
+            .path()
+            .join("nested")
+            .join("deeper")
+            .join("backfill.jsonl");
+
+        super::write_log_lines(&log, &["only".to_owned()]).expect("write into new dirs");
+
+        assert!(log.is_file(), "log file must exist under created parents");
+    }
+
+    #[test]
+    fn writing_zero_lines_still_yields_a_readable_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("backfill.jsonl");
+
+        super::write_log_lines(&log, &[]).expect("empty write");
+
+        assert_eq!(
+            std::fs::read_to_string(&log).expect("read log"),
+            "",
+            "an empty run produces an empty log, not a missing one"
         );
     }
 
