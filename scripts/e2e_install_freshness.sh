@@ -151,7 +151,11 @@ case "${1:-}" in
     ;;
 esac
 EOF
-chmod +x "$WS/fixtures/path/stale/ee"
+if ! chmod +x "$WS/fixtures/path/stale/ee"; then
+    _harness_fail "stale PATH fixture could not be made executable; install check would probe a non-executable file and the shadowing assertions below would describe the wrong binary"
+    harness_summary
+    exit 1
+fi
 
 ln -s "$EE_BIN" "$WS/fixtures/path/current/ee"
 
@@ -169,6 +173,18 @@ assert_jq "$stale_install_json" '.success == true' "stale install check succeeds
 assert_jq "$stale_install_json" '.data.path.status == "duplicate"' "duplicate PATH entries are reported"
 assert_jq "$stale_install_json" 'any(.data.findings[]?; .code == "duplicate_path_binary")' "duplicate PATH finding is present"
 assert_jq "$stale_install_json" 'any(.data.findings[]?; .code == "current_binary_shadowed")' "shadowed current binary finding is present"
+# Prove the stale fixture is the binary that was actually probed, not merely
+# present. `install check` spawns every PATH candidate with `--version`
+# (src/core/install.rs:917 -> probe_ee_binary_version at :992-994) and records
+# the parsed result per candidate. Only this fixture reports 0.1.0; a
+# non-executable stub yields version null with versionStatus "probe_failed"
+# (:1000-1004), so the duplicate/shadowed findings above could otherwise hold
+# for a file that never ran.
+assert_jq "$stale_install_json" '
+  any(.data.path.binaries[]?;
+      (.path | test("fixtures/path/stale"))
+      and ((.version // "") | test("0\\.1\\.0")))
+' "stale PATH fixture was executed and reported its own 0.1.0"
 assert_jq "$stale_install_json" 'any(.data.findings[]?; .code == "offline_no_manifest")' "offline manifest absence is reported"
 
 run_ee_capture "stale_claim_gate" "stale-duplicate" "$STALE_DUPLICATE_PATH" \
