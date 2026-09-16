@@ -10256,6 +10256,18 @@ fn cached_index_status_for_search(
 /// newly queued writer cannot inherit an earlier `Ready` observation. A failed
 /// reconciliation is non-fatal: the subsequent canonical status probe emits
 /// `search_index_stale` and preserves the explicit rebuild repair.
+///
+/// The budget comes from [`search_index_auto_reconcile_timeout`], the same
+/// accessor the search path already threads through as `reconcile_timeout`
+/// (`:7532`). This entry point previously passed the raw
+/// `SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT` constant, so the pack path was the
+/// only reconcile caller whose wall-clock allowance could not be controlled.
+/// Budget exhaustion is converted to a left-`Stale` index by design, which made
+/// pack index-health assertions fail under worker load and read as logic
+/// regressions rather than as the resource signal they are.
+///
+/// In a non-test build the accessor returns that same constant, so production
+/// timing is unchanged; only test-controllability is restored.
 pub(crate) async fn reconcile_search_index_before_read_with_cx(
     cx: &asupersync::Cx,
     options: &SearchOptions,
@@ -10263,7 +10275,7 @@ pub(crate) async fn reconcile_search_index_before_read_with_cx(
     reconcile_search_index_before_read_with_cx_and_timeout(
         cx,
         options,
-        SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT,
+        search_index_auto_reconcile_timeout(),
     )
     .await;
 }
