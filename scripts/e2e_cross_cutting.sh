@@ -84,6 +84,21 @@ assert_jq_file() {
     fi
 }
 
+assert_jq_file_argjson() {
+    local path="${1:?path required}"
+    local arg_name="${2:?arg name required}"
+    local arg_value="${3:?arg value required}"
+    local filter="${4:?jq filter required}"
+    local label="${5:?label required}"
+    if jq -e --argjson "$arg_name" "$arg_value" "$filter" "$path" >/dev/null; then
+        e2e_log_assert_eq "true" "true" "$label"
+        _harness_pass "$label"
+    else
+        e2e_log_assert_eq "false" "true" "$label"
+        _harness_fail "$label"
+    fi
+}
+
 harness_init "cross_cutting"
 require_tool jq
 require_tool python3
@@ -123,6 +138,41 @@ assert_jq_file "$MIGRATION_MANIFEST" \
 assert_jq_file "$MIGRATION_MANIFEST" \
     'all(.transitionMatrix[]; .proofPosture == "rch_only_no_local_fallback")' \
     "migration transition matrix keeps RCH-only proof posture"
+
+step "migration registry stays co-committed with the compiled MIGRATIONS tail"
+# bd-zs76e. The registry's own policy.runtimeUpdateRule says "Update this
+# registry in the same change that adds a compiled migration", but nothing
+# enforced it at write time: the contracts test catches the drift only
+# afterwards, and only when its module actually reports -- bv15 timed out with
+# 65 of 199 modules silent. The drift then recurred within an hour of being
+# fixed, when V124 shipped against a registry just reconciled to V123. These
+# two checks fail the same run instead, and need no cargo.
+migration_compiled_tail="$(
+    awk '
+        /pub const MIGRATIONS/ { inside = 1 }
+        inside && /\];/ { exit }
+        inside && /^[[:space:]]*V[0-9][0-9][0-9]_/ {
+            entry = $0
+            sub(/^[[:space:]]*V/, "", entry)
+            sub(/_.*$/, "", entry)
+            last = entry
+        }
+        END { print last + 0 }
+    ' "$REPO_ROOT/src/db/mod.rs"
+)"
+migration_registry_tail="$(jq -r '.currentLastCompiledMigration' "$MIGRATION_MANIFEST")"
+e2e_log_assert_eq "$migration_registry_tail" "$migration_compiled_tail" \
+    "migration registry tail matches compiled MIGRATIONS tail"
+if [ "$migration_registry_tail" = "$migration_compiled_tail" ]; then
+    _harness_pass "migration registry tail matches compiled MIGRATIONS tail"
+else
+    _harness_fail "migration registry tail matches compiled MIGRATIONS tail: registry V${migration_registry_tail} vs compiled V${migration_compiled_tail}; update ${MIGRATION_MANIFEST#"$REPO_ROOT"/} in the same change that adds a migration"
+fi
+
+assert_jq_file_argjson "$MIGRATION_MANIFEST" \
+    tail "$migration_compiled_tail" \
+    '[.allocations[] | select(.status == "planned") | .version] | min > $tail' \
+    "migration registry reservations stay ahead of the compiled tail"
 assert_jq_file "$MIGRATION_MANIFEST" \
     '.currentLastCompiledMigration == 121 and .nextPlannedMigration == 122 and (.policy.nonInitiativeCompiledMigrations.versions.V100 | startswith("V100_PACK_EVIDENCE_ITEMS")) and (.policy.nonInitiativeCompiledMigrations.versions.V101 | startswith("V101_ATTEMPT_FAMILY_IMMUTABILITY_REPAIR")) and (.policy.nonInitiativeCompiledMigrations.versions.V121 | startswith("V121_EVIDENCE_FEEDBACK_TARGETS"))' \
     "migration registry pins compiled tail and next planned migration"
