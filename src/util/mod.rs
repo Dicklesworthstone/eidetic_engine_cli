@@ -129,16 +129,26 @@ pub(crate) const SENSITIVE_PATH_PREFIXES: &[&str] = &[
 ///
 /// Three categories, because a prefix list alone cannot see the last two: a
 /// sensitive POSIX prefix, a Windows drive path (`C:\` or `C:/`), or a UNC
-/// share. A `file://` URI is redactable whatever follows its scheme, since the
-/// scheme itself declares the value to be a filesystem location.
+/// share. Anything directly after a `file://` scheme also counts, because the
+/// scheme declares the value to be a filesystem location even when the path
+/// that follows matches no prefix (`file://relative/notes.md`).
+///
+/// The scheme itself is deliberately NOT a start position. It says "this is a
+/// path" without saying where, so redacting from the scheme destroys a signal
+/// while protecting nothing, and turns `file://[REDACTED_PATH]` into a bare
+/// `[REDACTED_PATH]`. Seven surfaces assert the prefix survives; an earlier
+/// revision of this predicate returned `true` for the scheme and broke them.
 ///
 /// The drive and UNC forms additionally require a token boundary before them so
 /// that a bare `C:` inside a word is not mistaken for a path root.
 fn sensitive_path_starts_at(value: &str, start: usize) -> bool {
+    const FILE_SCHEME: &str = "file://";
+
     let candidate = &value[start..];
-    if candidate
-        .get(.."file://".len())
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file://"))
+    if start
+        .checked_sub(FILE_SCHEME.len())
+        .and_then(|scheme_start| value.get(scheme_start..start))
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case(FILE_SCHEME))
     {
         return true;
     }
