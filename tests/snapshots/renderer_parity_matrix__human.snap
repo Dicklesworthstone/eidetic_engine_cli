@@ -7,7 +7,7 @@ ee pack "renderer parity release"
 Profile: compact | Budget: 21/500 tokens | Pack hash: blake3:renderer-parity
 embed_backend: hash_fallback
 
-Advisory: degraded — Context includes 1 degraded signal; validate advisory memory and repair degraded sources before relying on this pack.
+Advisory: degraded — This pack invocation had 1 degraded retrieval signal; that scope is this pack only, not workspace health — validate advisory memory before relying on this pack, and run `ee doctor` for workspace posture.
 
 Advisory notes:
   [medium] advisory_memory: 1 packed memory from agent assertions or CASS evidence and must be validated against provenance before being treated as policy.

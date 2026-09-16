@@ -12,7 +12,7 @@ expression: "render_context_response_for_format(&response, case.format)"
 
 **Status:** `degraded`
 
-Context includes 1 degraded signal; validate advisory memory and repair degraded sources before relying on this pack.
+This pack invocation had 1 degraded retrieval signal; that scope is this pack only, not workspace health — validate advisory memory before relying on this pack, and run `ee doctor` for workspace posture.
 
 - **medium** `advisory_memory` 1 packed memory from agent assertions or CASS evidence and must be validated against provenance before being treated as policy. Action: `validate_provenance_before_following`
 

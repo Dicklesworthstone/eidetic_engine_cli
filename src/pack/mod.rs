@@ -5695,8 +5695,14 @@ fn advisory_summary(
                     plural_s(degradation_count)
                 );
             }
+            // bd-pack-doctor-posture-disagreement-nts29: this count is the
+            // retrieval degradation observed by THIS pack invocation, not a
+            // workspace-health verdict. `ee doctor` deliberately excludes
+            // advisory-tier findings from its top line, so the two surfaces
+            // can legitimately disagree; the banner therefore names its own
+            // scope instead of implying the workspace needs repair.
             format!(
-                "Context includes {} degraded signal{}; validate advisory memory and repair degraded sources before relying on this pack.",
+                "This pack invocation had {} degraded retrieval signal{}; that scope is this pack only, not workspace health — validate advisory memory before relying on this pack, and run `ee doctor` for workspace posture.",
                 degradation_count,
                 plural_s(degradation_count)
             )
@@ -15987,6 +15993,84 @@ mod tests {
         ensure(
             report.slack() == 0,
             format!("expected slack 0, got {}", report.slack()),
+        )
+    }
+
+    /// bd-pack-doctor-posture-disagreement-nts29.
+    ///
+    /// `ee doctor` deliberately excludes advisory-tier findings from its top
+    /// line (`core::doctor::Posture::from_checks`), while this banner counts
+    /// the degradations observed by ONE pack invocation. The two surfaces
+    /// therefore can, and legitimately do, disagree on the same workspace.
+    /// The banner must say which scope it speaks for instead of sending an
+    /// agent off to repair a workspace that `ee doctor` reports as healthy —
+    /// that mismatch is the field-report defect this pins.
+    #[test]
+    fn degraded_banner_names_its_per_invocation_scope() -> TestResult {
+        let degraded = vec![
+            ContextResponseDegradation::new(
+                "advisory_memory",
+                ContextResponseSeverity::Medium,
+                "1 packed memory came from agent assertions.",
+                None,
+            )
+            .map_err(|error| format!("degradation rejected: {error:?}"))?,
+        ];
+        let summary = super::advisory_summary(
+            super::PackAdvisoryStatus::Degraded,
+            &super::PackTrustCounts::default(),
+            &degraded,
+        );
+
+        ensure(
+            summary.contains("this pack"),
+            format!("banner must name the pack invocation as its scope, got: {summary}"),
+        )?;
+        ensure(
+            summary.contains("not workspace health"),
+            format!("banner must disclaim workspace-health scope, got: {summary}"),
+        )?;
+        ensure(
+            summary.contains("ee doctor"),
+            format!("banner must point at the workspace-health surface, got: {summary}"),
+        )?;
+        ensure(
+            !summary.contains("repair degraded sources"),
+            format!(
+                "banner must not direct repair of workspace sources doctor calls healthy, got: {summary}"
+            ),
+        )
+    }
+
+    /// Companion to `degraded_banner_names_its_per_invocation_scope`: the
+    /// `embed_model_unavailable` arm describes a real workspace-level
+    /// condition that `ee doctor` also reports, so it does NOT produce the
+    /// cross-surface disagreement and keeps its own wording. This pins that
+    /// the scope rewording did not swallow the more specific message.
+    #[test]
+    fn embed_model_unavailable_banner_keeps_its_specific_wording() -> TestResult {
+        let degraded = vec![
+            ContextResponseDegradation::new(
+                "embed_model_unavailable",
+                ContextResponseSeverity::Medium,
+                "Embedding model unavailable; lexical search remains available.",
+                None,
+            )
+            .map_err(|error| format!("degradation rejected: {error:?}"))?,
+        ];
+        let summary = super::advisory_summary(
+            super::PackAdvisoryStatus::Degraded,
+            &super::PackTrustCounts::default(),
+            &degraded,
+        );
+
+        ensure(
+            summary.contains("semantic embedding is unavailable"),
+            format!("embed arm must keep its specific cause, got: {summary}"),
+        )?;
+        ensure(
+            summary.contains("lexical-only"),
+            format!("embed arm must keep its ranking guidance, got: {summary}"),
         )
     }
 }
