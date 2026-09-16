@@ -998,7 +998,7 @@ where
                 "Re-run with --limit <= {LANE_GRANT_PREVIEW_MAX_LIMIT}"
             )),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
     if args.issue_approval_token && cli.renderer() != output::Renderer::Json {
         let domain_error = DomainError::Usage {
@@ -1008,7 +1008,7 @@ where
                     .to_owned(),
             ),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let sample_strategy = match args.sample_strategy {
@@ -1028,26 +1028,26 @@ where
                 "Re-run with --limit {LANE_GRANT_PREVIEW_DEFAULT_LIMIT} --sample-strategy random --seed 0 --issue-approval-token --json."
             )),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let snapshot = match build_snapshot(cli, args.database.as_deref()) {
         Ok(snapshot) => snapshot,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     if !snapshot.initialized {
         let error = lane_grant_uninitialized_error(&snapshot);
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let database_path = Path::new(&snapshot.database_path);
     let connection = match open_mesh_connection(database_path) {
         Ok(connection) => connection,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let (config, config_bytes) = match load_mesh_config_for_approval(cli, args.database.as_deref())
     {
         Ok(config) => config,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let lane = preview_lane(args.lane);
     let approval_purpose = crate::mesh::lane_grant::ApprovalPurpose::Lane;
@@ -1063,7 +1063,7 @@ where
         &config_bytes,
     ) {
         Ok(prepared) => prepared,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     if args.issue_approval_token {
@@ -1071,12 +1071,12 @@ where
             Ok(snapshot) => snapshot,
             Err(error) => {
                 let domain_error = lane_grant_serialization_error(error);
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
         let root = match open_lane_grant_auth_root(&snapshot.workspace_path) {
             Ok(root) => root,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         let issued = match crate::mesh::lane_grant::issue(
             &root,
@@ -1089,7 +1089,7 @@ where
             Ok(issued) => issued,
             Err(error) => {
                 let domain_error = approval_token_domain_error(&error, &args.peer_id, lane);
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
         let Some(expires_at) =
@@ -1099,7 +1099,7 @@ where
                 message: "Issued mesh approval token had an invalid expiry timestamp".to_owned(),
                 repair: Some("Run `ee doctor --json` and retry the preview.".to_owned()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         };
         prepared.preview.approval_token = Some(ApprovalTokenProjection {
             schema: crate::mesh::lane_grant::APPROVAL_TOKEN_SCHEMA_V1.to_owned(),
@@ -1144,7 +1144,7 @@ where
                         .to_owned(),
                 ),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
     if authenticated_json_flow != args.preview_token_stdin {
@@ -1162,24 +1162,24 @@ where
                     .to_owned()
             }),
         };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     let snapshot = match build_snapshot(cli, args.database.as_deref()) {
         Ok(snapshot) => snapshot,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     if !snapshot.initialized {
         let error = lane_grant_uninitialized_error(&snapshot);
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let connection = match open_mesh_connection(Path::new(&snapshot.database_path)) {
         Ok(connection) => connection,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let root = match open_lane_grant_auth_root(&snapshot.workspace_path) {
         Ok(root) => root,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let lane = preview_lane(args.lane);
     let approval_purpose = crate::mesh::lane_grant::ApprovalPurpose::Lane;
@@ -1189,7 +1189,7 @@ where
             Ok(token) => token,
             Err(error) => {
                 let domain_error = approval_token_domain_error(&error, &args.peer_id, lane);
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
         let authenticated = match verify_authentic_token(
@@ -1203,7 +1203,7 @@ where
             Ok(authenticated) => authenticated,
             Err(error) => {
                 let domain_error = approval_token_domain_error(&error, &args.peer_id, lane);
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
         let (target, state, _) = match load_lane_grant_target_state(
@@ -1218,10 +1218,10 @@ where
                     &args.peer_id,
                     lane,
                 );
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
             Err(LaneGrantTargetStateError::Domain(error)) => {
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
         };
         (authenticated, target, state)
@@ -1230,7 +1230,7 @@ where
             match load_mesh_config_for_approval(cli, args.database.as_deref()) {
                 Ok(config) => config,
                 Err(error) => {
-                    return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                    return write_domain_error(&error, cli.renderer(), stdout, stderr);
                 }
             };
         let prepared = match prepare_lane_grant_preview(
@@ -1245,7 +1245,7 @@ where
             &config_bytes,
         ) {
             Ok(prepared) => prepared,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         let human = render_lane_grant_preview_human(&prepared.preview);
         let write_exit = write_stdout(stdout, &human);
@@ -1268,7 +1268,7 @@ where
                     ),
                     repair: Some("Retry interactively and enter only `y` or `yes`.".to_owned()),
                 };
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
         };
         if !confirmed {
@@ -1281,7 +1281,7 @@ where
             Ok(snapshot) => snapshot,
             Err(error) => {
                 let domain_error = lane_grant_serialization_error(error);
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
         let issuance_now = chrono::Utc::now().timestamp();
@@ -1296,7 +1296,7 @@ where
             Ok(issued) => issued,
             Err(error) => {
                 let domain_error = approval_token_domain_error(&error, &args.peer_id, lane);
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
         let authenticated = match verify_authentic_token(
@@ -1310,7 +1310,7 @@ where
             Ok(authenticated) => authenticated,
             Err(error) => {
                 let domain_error = approval_token_domain_error(&error, &args.peer_id, lane);
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
             }
         };
         (
@@ -1334,7 +1334,7 @@ where
                     &args.peer_id,
                     lane,
                 );
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
         };
     let approval_config_digest =
@@ -1357,7 +1357,7 @@ where
     // bearer invalid) or wholly after the atomic mutation.
     let locked_root = match open_lane_grant_auth_guard(&snapshot.workspace_path) {
         Ok(root) => root,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let transaction = connection.apply_mesh_lane_grant_transaction(
         &mutation,
@@ -1449,23 +1449,23 @@ where
         Ok(result) => result,
         Err(crate::db::MeshLaneGrantAtomicError::Mutation(error)) => {
             let domain_error = grant_mutation_domain_error(error, &args.peer_id, lane);
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         Err(crate::db::MeshLaneGrantAtomicError::Verification(LaneGrantEffectError::Approval(
             error,
         ))) => {
             let domain_error = approval_token_domain_error(&error, &args.peer_id, lane);
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         Err(crate::db::MeshLaneGrantAtomicError::Verification(LaneGrantEffectError::Domain(
             error,
-        ))) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        ))) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         Err(crate::db::MeshLaneGrantAtomicError::Effect(LaneGrantEffectError::Approval(error))) => {
             let domain_error = approval_token_domain_error(&error, &args.peer_id, lane);
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         Err(crate::db::MeshLaneGrantAtomicError::Effect(LaneGrantEffectError::Domain(error))) => {
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -1498,15 +1498,15 @@ where
 {
     let snapshot = match build_snapshot(cli, args.database.as_deref()) {
         Ok(snapshot) => snapshot,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     if !snapshot.initialized {
         let error = lane_grant_uninitialized_error(&snapshot);
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let connection = match open_mesh_connection(Path::new(&snapshot.database_path)) {
         Ok(connection) => connection,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let lane = preview_lane(args.lane);
     let (target_adapter, state, _) =
@@ -1514,7 +1514,7 @@ where
             Ok(target) => target,
             Err(error) => {
                 let error = error.into_domain(&args.peer_id);
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
         };
     let previous_generation = state.as_ref().map_or(0, |state| state.grant_generation);
@@ -1548,11 +1548,11 @@ where
         Ok(result) => result,
         Err(crate::db::MeshLaneGrantAtomicError::Mutation(error)) => {
             let domain_error = revoke_mutation_domain_error(error, &args.peer_id, lane);
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
         Err(crate::db::MeshLaneGrantAtomicError::Verification(never)) => match never {},
         Err(crate::db::MeshLaneGrantAtomicError::Effect(error)) => {
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
     let report = MeshLaneMutationReport {
@@ -2581,7 +2581,7 @@ where
 {
     let snapshot = match build_snapshot(cli, args.database.as_deref()) {
         Ok(snapshot) => snapshot,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let report = MeshCliInitReport {
         schema: MESH_CLI_INIT_SCHEMA_V1,
@@ -2630,7 +2630,7 @@ where
 {
     let snapshot = match build_snapshot(cli, args.database.as_deref()) {
         Ok(snapshot) => snapshot,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let local = gather_mesh_status_tailscale_local_report(snapshot.mesh_enabled);
     let autodiscovery =
@@ -2645,12 +2645,12 @@ where
             .map(|report| report.self_advertised_tags.as_slice()),
     ) {
         Ok(state) => state,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let policy_registry =
         match load_mesh_status_peer_policy_registry(cli, args.database.as_deref(), &snapshot) {
             Ok(registry) => registry,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
     let mut report = snapshot.status_report_with_autodiscovery(
         &autodiscovery,
@@ -2686,7 +2686,7 @@ where
 {
     let snapshot = match build_snapshot(cli, args.database.as_deref()) {
         Ok(snapshot) => snapshot,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let report = match snapshot.import_ledger_report() {
         Ok(report) => report,
@@ -2700,7 +2700,7 @@ where
                         .to_owned(),
                 ),
             };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
     };
     write_mesh_report(cli, &report, &render_mesh_ledger_human(&report), stdout)
@@ -2718,7 +2718,7 @@ where
 {
     let snapshot = match build_snapshot(cli, args.database.as_deref()) {
         Ok(snapshot) => snapshot,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let input = mesh_emergency_disable_input(cli, args, &snapshot);
     let report = if args.dry_run {
@@ -2729,7 +2729,7 @@ where
         match apply_emergency_disable(&input).map_err(mesh_emergency_domain_error) {
             Ok(report) => report,
             Err(error) => {
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
         }
     } else {
@@ -2763,7 +2763,7 @@ where
         match result {
             Ok(report) => report,
             Err(error) => {
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
         }
     };
@@ -2782,7 +2782,7 @@ where
 {
     let snapshot = match build_snapshot(cli, args.database.as_deref()) {
         Ok(snapshot) => snapshot,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let input = mesh_emergency_reenable_input(cli, args, &snapshot);
     let report = if args.dry_run {
@@ -2791,7 +2791,7 @@ where
             Err(error) => {
                 return write_domain_error(
                     &mesh_emergency_domain_error(error),
-                    cli.wants_json(),
+                    cli.renderer(),
                     stdout,
                     stderr,
                 );
@@ -2828,7 +2828,7 @@ where
         match result {
             Ok(report) => report,
             Err(error) => {
-                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
             }
         }
     };
@@ -3092,14 +3092,14 @@ where
 {
     let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
         Ok(store) => store,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let workspace_path = cli.resolve_workspace();
     let local = gather_mesh_status_tailscale_local_report(snapshot.mesh_enabled);
     let discovery = build_tailscale_autodiscovery_report_from_local(cli, &snapshot, local.as_ref());
     let existing_peers = match auto_enrollment_existing_peers(&snapshot) {
         Ok(peers) => peers,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let now = chrono::Utc::now().to_rfc3339();
     let mut report = plan_auto_enrollment(AutoEnrollmentInput {
@@ -3138,7 +3138,7 @@ where
         Err(error) => {
             return write_domain_error(
                 &auto_enrollment_audit_domain_error(error),
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -3153,7 +3153,7 @@ where
             &args.include,
             &args.exclude,
         ) {
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&error, cli.renderer(), stdout, stderr);
         }
         let upserts = match auto_enrollment_peer_upserts(
             &snapshot.workspace_id,
@@ -3165,7 +3165,7 @@ where
             &report.materialization.peers_to_upsert,
         ) {
             Ok(upserts) => upserts,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         let revocations = match auto_enrollment_peer_revocations(
             &snapshot.workspace_id,
@@ -3174,7 +3174,7 @@ where
             &now,
         ) {
             Ok(revocations) => revocations,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         if let Err(error) = connection.with_transaction(|| {
             for upsert in &upserts {
@@ -3189,7 +3189,7 @@ where
         }) {
             return write_domain_error(
                 &storage_error("Failed to materialize mesh auto-enrollment peers", error),
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -3206,7 +3206,7 @@ where
     ) {
         return write_domain_error(
             &auto_enrollment_audit_domain_error(error),
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -3254,7 +3254,7 @@ where
     let workspace_path = cli.resolve_workspace();
     let snapshot = match build_snapshot(cli, args.database.as_deref()) {
         Ok(snapshot) => snapshot,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let mutation = match &args.command {
@@ -3273,7 +3273,7 @@ where
         Ok(value) => value.map_or((None, None), |(mutation, audit_id)| {
             (Some(mutation), Some(audit_id))
         }),
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let local = gather_mesh_status_tailscale_local_report(snapshot.mesh_enabled);
@@ -3286,7 +3286,7 @@ where
             .map(|report| report.self_advertised_tags.as_slice()),
     ) {
         Ok(state) => state,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let report = build_discovery_policy_report(&snapshot, &state, args.explain, mutation, audit_id);
     write_mesh_report(
@@ -3463,7 +3463,7 @@ where
 {
     let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
         Ok(store) => store,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     if !snapshot.mesh_enabled {
         return write_domain_error(
@@ -3472,7 +3472,7 @@ where
                     .to_owned(),
                 repair: Some("Explicitly re-enable mesh after containment review.".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -3490,7 +3490,7 @@ where
                             "Use EE_MESH_HELLO_PORT=41888 or pass --port 41888.".to_owned(),
                         ),
                     },
-                    cli.wants_json(),
+                    cli.renderer(),
                     stdout,
                     stderr,
                 );
@@ -3505,7 +3505,7 @@ where
                     .to_owned(),
                 repair: Some("Use --port 41888 --revalidate-ms 2000.".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -3518,7 +3518,7 @@ where
                     message: format!("Cannot canonicalize responder workspace: {error}"),
                     repair: Some("Use the canonical workspace path and retry.".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -3532,7 +3532,7 @@ where
                     message: format!("Cannot canonicalize responder database: {error}"),
                     repair: Some("Run `ee migrate run`, then retry.".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -3575,7 +3575,7 @@ where
                                 "ee team create --name \"<team>\" --workspace . --json".to_owned(),
                             ),
                         },
-                        cli.wants_json(),
+                        cli.renderer(),
                         stdout,
                         stderr,
                     );
@@ -3603,7 +3603,7 @@ where
                 message: "hello-responder run needs an enrolled team peer".to_owned(),
                 repair: Some("ee team join --invite <code> --workspace . --json".to_owned()),
             },
-            cli.wants_json(),
+            cli.renderer(),
             stdout,
             stderr,
         );
@@ -3641,7 +3641,7 @@ where
                     message: format!("Failed to build responder runtime: {error}"),
                     repair: Some("Run `ee doctor --json` and retry.".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -3683,7 +3683,7 @@ where
         &lifecycle_status,
     ) {
         owner.shutdown();
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let human = format!(
         "Mesh responder owner is listening on {} with {} exact route(s).",
@@ -3706,7 +3706,7 @@ where
                     message: format!("Failed to run responder owner: {error}"),
                     repair: Some("Run `ee doctor --json` and retry.".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -3750,7 +3750,7 @@ where
     {
         let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
             Ok(store) => store,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         if !snapshot.mesh_enabled {
             return write_domain_error(
@@ -3759,7 +3759,7 @@ where
                         .to_owned(),
                     repair: Some("Explicitly re-enable mesh after containment review.".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -3772,7 +3772,7 @@ where
                         message: format!("Cannot canonicalize responder workspace: {error}"),
                         repair: Some("Use the canonical workspace path and retry.".to_owned()),
                     },
-                    cli.wants_json(),
+                    cli.renderer(),
                     stdout,
                     stderr,
                 );
@@ -3786,7 +3786,7 @@ where
                         message: format!("Cannot canonicalize responder database: {error}"),
                         repair: Some("Run `ee migrate run`, then retry.".to_owned()),
                     },
-                    cli.wants_json(),
+                    cli.renderer(),
                     stdout,
                     stderr,
                 );
@@ -3805,7 +3805,7 @@ where
                                 "Use EE_MESH_HELLO_PORT=41888 or pass --port 41888.".to_owned(),
                             ),
                         },
-                        cli.wants_json(),
+                        cli.renderer(),
                         stdout,
                         stderr,
                     );
@@ -3819,7 +3819,7 @@ where
                     message: "Responder port must be nonprivileged.".to_owned(),
                     repair: Some("Use --port 41888.".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             );
@@ -3884,7 +3884,7 @@ where
                     ),
                     details_json: serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_owned()),
                 },
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
             ),
@@ -3908,7 +3908,7 @@ fn write_responder_broker_error<W: Write, E: Write>(
         })
         .to_string(),
     };
-    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+    write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
 }
 
 fn handle_mesh_hello_responder_status<W, E>(
@@ -3923,7 +3923,7 @@ where
 {
     let snapshot = match build_snapshot(cli, args.database.as_deref()) {
         Ok(snapshot) => snapshot,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     #[cfg_attr(not(unix), allow(unused_mut))]
     let mut report = match HelloResponderStatusReport::from_environment(snapshot.mesh_enabled) {
@@ -3936,7 +3936,7 @@ where
                         .to_owned(),
                 ),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
     #[cfg(any(unix, windows))]
@@ -3975,7 +3975,7 @@ where
 {
     let snapshot = match build_snapshot(cli, args.database.as_deref()) {
         Ok(snapshot) => snapshot,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let report = snapshot.peers_report();
     write_mesh_report(cli, &report, &render_mesh_peers_human(&report), stdout)
@@ -4015,7 +4015,7 @@ where
 {
     let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
         Ok(store) => store,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let now = args
         .now
@@ -4054,7 +4054,7 @@ where
     if let Some(peer) = report.peer.as_ref()
         && let Err(error) = persist_mesh_peer_record(&connection, &snapshot.workspace_id, peer)
     {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     write_mesh_report(
         cli,
@@ -4076,11 +4076,11 @@ where
 {
     let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
         Ok(store) => store,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let peers = match list_enrolled_peer_records(&connection, &snapshot.workspace_id) {
         Ok(peers) => peers,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let report = list_peers(&peers);
     write_mesh_report(
@@ -4103,11 +4103,11 @@ where
 {
     let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
         Ok(store) => store,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let peer = match get_enrolled_peer_record(&connection, &snapshot.workspace_id, &args.peer_id) {
         Ok(peer) => peer,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let report = show_peer(&peer);
     write_mesh_report(
@@ -4130,11 +4130,11 @@ where
 {
     let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
         Ok(store) => store,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let peer = match get_enrolled_peer_record(&connection, &snapshot.workspace_id, &args.peer_id) {
         Ok(peer) => peer,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let report = rotate_peer_key(
         &peer,
@@ -4150,7 +4150,7 @@ where
     if let Some(peer) = report.peer.as_ref()
         && let Err(error) = persist_mesh_peer_record(&connection, &snapshot.workspace_id, peer)
     {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     write_mesh_report(
         cli,
@@ -4172,11 +4172,11 @@ where
 {
     let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
         Ok(store) => store,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let peer = match get_enrolled_peer_record(&connection, &snapshot.workspace_id, &args.peer_id) {
         Ok(peer) => peer,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let report = revoke_peer(
         &peer,
@@ -4187,7 +4187,7 @@ where
     if let Some(peer) = report.peer.as_ref()
         && let Err(error) = persist_mesh_peer_record(&connection, &snapshot.workspace_id, peer)
     {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     write_mesh_report(
         cli,
@@ -4209,11 +4209,11 @@ where
 {
     let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
         Ok(store) => store,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let peers = match list_enrolled_peer_records(&connection, &snapshot.workspace_id) {
         Ok(peers) => peers,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let report =
         unknown_peer_attempt_report(&peers, &snapshot.workspace_id, &args.tailscale_node_key);
@@ -4238,7 +4238,7 @@ where
     if let Some(output_path) = args.out.as_deref()
         && let Err(error) = reject_mesh_approval_bearer_path("mesh export output", output_path)
     {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let workspace_path = cli.resolve_workspace();
     let database_path = args
@@ -4248,7 +4248,7 @@ where
     if !database_path.is_file() {
         let snapshot = match build_snapshot(cli, args.database.as_deref()) {
             Ok(snapshot) => snapshot,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         };
         let error = require_enabled_mesh_export_target(&snapshot, &args.peer)
             .err()
@@ -4262,11 +4262,11 @@ where
                     workspace_path.display()
                 )),
             });
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let connection = match open_mesh_connection(&database_path) {
         Ok(connection) => connection,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let result = connection.with_write_owner_fence(
         |error| storage_error("Failed to acquire mesh export authorization fence", error),
@@ -4274,7 +4274,7 @@ where
     );
     match result {
         Ok(exit_code) => exit_code,
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -4732,25 +4732,25 @@ where
     E: Write,
 {
     if let Err(error) = reject_mesh_approval_bearer_path("mesh import source", &args.file) {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let artifact = match read_mesh_export_artifact(&args.file) {
         Ok(artifact) => artifact,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     if let Err(error) = validate_mesh_export_artifact_for_replay(&artifact) {
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
     let snapshot = match build_snapshot(cli, args.database.as_deref()) {
         Ok(snapshot) => snapshot,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let outcome = if args.dry_run {
         MeshImportOutcome::default()
     } else {
         match import_mesh_artifact(args.database.as_deref(), cli, &artifact) {
             Ok(outcome) => outcome,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     };
     let mut degraded = snapshot.degraded.clone();
@@ -4805,7 +4805,7 @@ where
 {
     let snapshot = match build_snapshot(cli, args.database.as_deref()) {
         Ok(snapshot) => snapshot,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
     let supervisor_options = MeshSyncSupervisorOptions {
         cadence_ms: args.cadence_ms,
