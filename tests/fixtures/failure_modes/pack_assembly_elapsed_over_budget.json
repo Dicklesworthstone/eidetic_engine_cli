@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "pack_assembly_elapsed_over_budget",
+  "introduced_by": {
+    "bead": "bd-jikgj",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "context",
+    "pack"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A context pack takes longer than the elapsed budget published for its resource profile. Distinct from pack_assembly_slow, which reports the deterministic candidate-scan posture: this one reports wall-clock time the caller actually waited, so it can fire even when the pack scanned few candidates. Severity follows the elapsed classification (low at the warning threshold, medium at the failure threshold). Because wall-clock time is not reproducible, this degradation is appended after the pack hash is computed and never enters pack identity.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "seed a corpus large enough that assembly plus candidate construction, scope visibility and query assist exceed the profile's elapsed_ms_warning (500ms on standard) or elapsed_ms_failure (2000ms on standard)"
+    ],
+    "invocation": "ee pack \"large workspace task\" --resource-profile standard --json"
+  },
+  "expected_emission": {
+    "code": "pack_assembly_elapsed_over_budget",
+    "severity": "medium",
+    "message_contains": [
+      "Pack assembly took",
+      "elapsed",
+      "threshold",
+      "pack contents are unaffected"
+    ],
+    "repair_contains": "--resource-profile"
+  }
+}

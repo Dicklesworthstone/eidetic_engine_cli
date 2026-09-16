@@ -3413,6 +3413,13 @@ pub struct PackOmissionMetrics {
 pub const PACK_ASSEMBLY_SLO_SCHEMA_V1: &str = "ee.pack.slo.v1";
 pub const PACK_ASSEMBLY_SLOW_CODE: &str = "pack_assembly_slow";
 pub const PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE: &str = "pack_assembly_budget_exceeded";
+/// A pack that exceeded its published *elapsed* budget (GH49 / bd-jikgj).
+///
+/// Deliberately distinct from `pack_assembly_slow`, which reports a
+/// deterministic *resource* posture (candidates scanned). This one reports
+/// wall-clock time, which is not reproducible, and it is therefore kept out of
+/// pack identity — see `PackAssemblySlo::timing_degradations`.
+pub const PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE: &str = "pack_assembly_elapsed_over_budget";
 pub const PACK_CONCURRENT_LIMIT_REACHED_CODE: &str = "pack_concurrent_limit_reached";
 pub const PACK_BUDGET_TOO_SMALL_CODE: &str = "pack_budget_too_small";
 pub const CONSENSUS_SCHEMA_V1: &str = "ee.consensus.v1";
@@ -3779,6 +3786,33 @@ impl PackAssemblySlo {
                 .ok()
             })
             .collect()
+    }
+
+    /// Elapsed-budget degradations, reported separately from
+    /// [`Self::context_degradations`] (GH49 / bd-jikgj).
+    ///
+    /// **These must never enter the pack hash.** `refresh_context_pack_hash`
+    /// takes the response `degraded[]` as hash input, and wall-clock time is
+    /// not reproducible — folding a timing entry into `self.degradations`
+    /// would make the same query over the same store hash differently on a
+    /// loaded machine, breaking the determinism contract in AGENTS.md ("same
+    /// workspace → byte-identical context pack hash"). Callers therefore
+    /// append these to the response *after* the hash is computed. That is also
+    /// why `self.degradations` stays resource-only.
+    #[must_use]
+    pub fn timing_degradations(&self) -> Vec<ContextResponseDegradation> {
+        pack_assembly_elapsed_degradation(
+            self.profile,
+            &self.budget_class,
+            &self.actuals,
+            self.elapsed_status,
+        )
+        .and_then(|entry| {
+            ContextResponseDegradation::new(entry.code, entry.severity, entry.message, entry.repair)
+                .ok()
+        })
+        .into_iter()
+        .collect()
     }
 }
 
@@ -5183,6 +5217,46 @@ fn pack_assembly_slow_degradation(
             budget.candidates_scanned_max
         )),
     }
+}
+
+/// Report an elapsed-budget overrun (GH49 / bd-jikgj).
+///
+/// Severity mirrors the elapsed classification: a `Warning` elapsed reports
+/// `Low`, a `Failure` reports `Medium`. Nothing here is a hard error — the pack
+/// itself is intact and its contents are unaffected; what is being reported is
+/// that the caller waited longer than the published budget.
+fn pack_assembly_elapsed_degradation(
+    profile: PackResourceProfile,
+    budget: &PackSloBudgetClass,
+    actuals: &PackAssemblySloActuals,
+    elapsed_status: PackAssemblySloStatus,
+) -> Option<PackAssemblySloDegradation> {
+    let (severity, threshold_ms, threshold_label) = match elapsed_status {
+        PackAssemblySloStatus::WithinBudget => return None,
+        PackAssemblySloStatus::Warning => (
+            ContextResponseSeverity::Low,
+            budget.elapsed_ms_warning,
+            "warning",
+        ),
+        PackAssemblySloStatus::Failure => (
+            ContextResponseSeverity::Medium,
+            budget.elapsed_ms_failure,
+            "failure",
+        ),
+    };
+    Some(PackAssemblySloDegradation {
+        code: PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE,
+        severity,
+        message: format!(
+            "Pack assembly took {}ms, at or over the {} resource-profile elapsed {threshold_label} threshold of {threshold_ms}ms. The pack contents are unaffected.",
+            actuals.elapsed_ms,
+            profile.as_str()
+        ),
+        repair: Some(format!(
+            "Re-run to see whether the overrun is repeatable; if it is, use --resource-profile swarm_heavy or reduce --candidate-pool below {}.",
+            budget.candidates_scanned_max
+        )),
+    })
 }
 
 fn pack_assembly_budget_exceeded_degradation(

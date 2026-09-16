@@ -6,10 +6,11 @@ use ee::models::{MemoryId, ProvenanceUri, TrustClass, UnitScore};
 use ee::output::render_context_response_json;
 use ee::pack::{
     ContextPackProfile, ContextRequest, ContextResponse, PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE,
-    PACK_ASSEMBLY_SLO_SCHEMA_V1, PACK_ASSEMBLY_SLOW_CODE, PACK_CONCURRENT_LIMIT_REACHED_CODE,
-    PackAssemblyOptions, PackAssemblySlo, PackAssemblySloActuals, PackAssemblySloStatus,
-    PackCandidate, PackCandidateInput, PackProvenance, PackResourceProfile, PackSection,
-    PackTrustSignal, TokenBudget, assemble_draft_with_profile_and_options,
+    PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE, PACK_ASSEMBLY_SLO_SCHEMA_V1, PACK_ASSEMBLY_SLOW_CODE,
+    PACK_CONCURRENT_LIMIT_REACHED_CODE, PackAssemblyOptions, PackAssemblySlo,
+    PackAssemblySloActuals, PackAssemblySloStatus, PackCandidate, PackCandidateInput,
+    PackProvenance, PackResourceProfile, PackSection, PackTrustSignal, TokenBudget,
+    assemble_draft_with_profile_and_options,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -227,6 +228,84 @@ fn pack_slo_fails_when_graph_budget_is_exceeded() {
     assert_eq!(
         slo.context_degradations()[0].code,
         PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE
+    );
+}
+
+/// GH49 / bd-jikgj: an elapsed overrun must reach `degraded[]`, not sit only
+/// in `elapsedStatus` where a caller scanning degradations would miss it.
+#[test]
+fn elapsed_overrun_is_reported_as_a_timing_degradation() {
+    let slo = PackAssemblySlo::evaluate(PackResourceProfile::Lean, actuals(20, 0, 200));
+    let timing = slo.timing_degradations();
+    assert_eq!(timing.len(), 1, "an elapsed failure must be reported");
+    assert_eq!(timing[0].code, PACK_ASSEMBLY_ELAPSED_OVER_BUDGET_CODE);
+    assert!(
+        timing[0].message.contains("200"),
+        "the message must state the observed elapsed: {}",
+        timing[0].message
+    );
+    assert!(
+        timing[0].message.contains("pack contents are unaffected"),
+        "the message must say the pack itself is intact: {}",
+        timing[0].message
+    );
+    assert!(timing[0].repair.is_some(), "a repair hint is required");
+}
+
+/// Severity tracks the elapsed classification rather than being fixed.
+#[test]
+fn timing_degradation_severity_follows_the_elapsed_classification() {
+    let warning = PackAssemblySlo::evaluate(PackResourceProfile::Lean, actuals(20, 0, 100));
+    assert_eq!(warning.elapsed_status, PackAssemblySloStatus::Warning);
+    assert_eq!(warning.timing_degradations()[0].severity.as_str(), "low");
+
+    let failure = PackAssemblySlo::evaluate(PackResourceProfile::Lean, actuals(20, 0, 200));
+    assert_eq!(failure.elapsed_status, PackAssemblySloStatus::Failure);
+    assert_eq!(failure.timing_degradations()[0].severity.as_str(), "medium");
+}
+
+/// A pack inside its elapsed budget must report nothing at all — silence is
+/// the signal, so this must not emit a `within_budget` entry.
+#[test]
+fn a_pack_within_its_elapsed_budget_reports_no_timing_degradation() {
+    let slo = PackAssemblySlo::evaluate(PackResourceProfile::Lean, actuals(20, 0, 20));
+    assert_eq!(slo.elapsed_status, PackAssemblySloStatus::WithinBudget);
+    assert!(slo.timing_degradations().is_empty());
+}
+
+/// Why `timing_degradations` is a separate accessor rather than entries
+/// appended to `degradations`.
+///
+/// `refresh_context_pack_hash` takes the response `degraded[]` as hash input,
+/// and wall-clock time is not reproducible — folding a timing entry into
+/// `slo.degradations` would make the same query over the same store hash
+/// differently on a loaded machine, breaking the determinism contract
+/// AGENTS.md calls non-negotiable.
+///
+/// The hash-level guard already exists in
+/// `pack_slo_measured_failure_preserves_signed_resource_evidence_and_cached_producer`,
+/// which pins equal pack hashes across an 18ms and a 24,457ms run; that test
+/// is what would fail if this separation were ever collapsed. This one pins
+/// the complementary half the hash test cannot see: that the timing channel
+/// *does* distinguish the two runs, so honest reporting was not traded away to
+/// buy that determinism.
+#[test]
+fn the_timing_channel_distinguishes_runs_that_pack_identity_must_not() {
+    let fast = PackAssemblySlo::evaluate(PackResourceProfile::Lean, actuals(20, 0, 5));
+    let slow = PackAssemblySlo::evaluate(PackResourceProfile::Lean, actuals(20, 0, 5_000));
+
+    assert_eq!(
+        fast.degradations, slow.degradations,
+        "elapsed time must not change the identity-bearing degradation list"
+    );
+    assert!(
+        fast.timing_degradations().is_empty(),
+        "a fast run reports no timing degradation"
+    );
+    assert_eq!(
+        slow.timing_degradations().len(),
+        1,
+        "a slow run must still be reported somewhere"
     );
 }
 

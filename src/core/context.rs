@@ -3727,7 +3727,6 @@ async fn run_context_pack_with_performance_inner(
         read_snapshot_generation,
         options.task_lens.as_ref(),
     );
-
     let persist_start = Instant::now();
     control.check()?;
     if options.persist_pack {
@@ -3843,6 +3842,24 @@ async fn run_context_pack_with_performance_inner(
     trace.pack_persistence = pack_persistence;
     trace.record_elapsed("packPersistence", persist_start);
     trace.record_read_snapshot(&read_snapshot, read_snapshot_generation);
+
+    // GH49 / bd-jikgj: surface an elapsed-budget overrun in `degraded[]`, so a
+    // pack that blew its published latency budget says so rather than carrying
+    // it only in `slo.elapsedStatus`.
+    //
+    // Placed here, immediately before the response is built, because
+    // `response_degraded` is the hash input for EVERY
+    // `refresh_context_pack_hash` call in this function — including the second
+    // one inside the persist-failure branch above. Wall-clock time is not
+    // reproducible, so letting a timing entry reach any of them would make the
+    // same query over the same store hash differently on a loaded machine,
+    // breaking the determinism guarantee AGENTS.md calls non-negotiable. This
+    // is also why it is sourced from `timing_degradations()` rather than added
+    // to `slo.degradations`, which stays resource-only and deterministic.
+    //
+    // Persistence deliberately does not see it either: the persisted pack
+    // record should match the hashed, reproducible content.
+    response_degraded.extend(slo.timing_degradations());
 
     let mut response = ContextResponse::new(request, draft, response_degraded)
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;

@@ -396,6 +396,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `no_relevant_results` | medium | bd-17c65.2.1 (B1) |
 | `output_redaction_disabled` | info | bd-17c65.2.9 (B10) |
 | `pack_assembly_budget_exceeded` | medium | bd-1zb7k.5 (S4) |
+| `pack_assembly_elapsed_over_budget` | medium | bd-jikgj (GH49) |
 | `pack_assembly_slow` | low | bd-1zb7k.5 (S4) |
 | `pack_bin_content_hash_mismatch` | high | bd-17c65.14.1 (N1) |
 | `pack_bin_magic_mismatch` | medium | bd-17c65.14.1 (N1) |
