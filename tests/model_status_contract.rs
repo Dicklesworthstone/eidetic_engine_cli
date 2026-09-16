@@ -3,6 +3,7 @@
 //! Pinning the JSON shape and the degraded-mode codes so future revisions of
 //! the model registry do not silently churn the public output.
 
+use std::fmt::Debug;
 use std::fs;
 use std::path::Path;
 
@@ -26,6 +27,42 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     } else {
         Err(message.into())
     }
+}
+
+/// Equality assertion that prints BOTH operands when it fails.
+///
+/// `ensure(a == b, "msg")` collapses the operands to a `bool` before the
+/// message is built, so the failure names the check and withholds the one fact
+/// needed to act on it. That is not a style preference: on this project a shard
+/// run costs 15-25 minutes on a contended fleet, so every value-discarding
+/// assertion charges a full run to whoever trips it, every time it fires.
+///
+/// Prints on failure only -- a green run stays silent, because output that is
+/// noisy when nothing is wrong is output people stop reading. Labels which side
+/// is which; "left/right" without names is how the write_owner row was misread.
+fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> TestResult
+where
+    T: Debug + PartialEq + ?Sized,
+{
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "{context}: actual {actual:?}, expected {expected:?}"
+        ))
+    }
+}
+
+/// Assert no degradations, naming the codes that were actually emitted.
+///
+/// `degradations.is_empty()` is the same defect in collection form: it reports
+/// that something was emitted without saying what, which is exactly the fact
+/// needed to decide whether the emission or the expectation is wrong.
+fn ensure_no_degradations(codes: &[&str], context: &str) -> TestResult {
+    ensure(
+        codes.is_empty(),
+        format!("{context}: expected no degradations, actual codes {codes:?}"),
+    )
 }
 
 fn fresh_db_for_workspace(workspace_path: &Path) -> Result<(std::path::PathBuf, String), String> {
@@ -227,8 +264,9 @@ fn model_status_auto_declares_bundled_embedding_model() -> TestResult {
         report.reranker.registered_count == 0 && report.reranker.available_count == 0,
         "reranker counts should be empty",
     )?;
-    ensure(
-        report.active.source == "ee_model2vec_download_pending",
+    ensure_equal(
+        report.active.source.as_str(),
+        "ee_model2vec_download_pending",
         "pending bundled model source",
     )?;
     ensure(
@@ -467,7 +505,14 @@ fn model_status_picks_first_available_registry_entry() -> TestResult {
 
     ensure(report.registered_count == 3, "registered_count")?;
     ensure(report.available_count == 1, "available_count")?;
-    ensure(report.degradations.is_empty(), "no degradations expected")?;
+    ensure_no_degradations(
+        &report
+            .degradations
+            .iter()
+            .map(|degradation| degradation.code)
+            .collect::<Vec<_>>(),
+        "no degradations expected",
+    )?;
     let selected = report
         .active
         .selected_registry_entry
@@ -505,8 +550,9 @@ fn model_status_reports_reranker_registry_separately() -> TestResult {
 
     ensure(report.registered_count == 2, "registered_count")?;
     ensure(report.available_count == 1, "available_count")?;
-    ensure(
-        report.active.source == "ee_model2vec_download_pending",
+    ensure_equal(
+        report.active.source.as_str(),
+        "ee_model2vec_download_pending",
         "reranker entry should not select active embedder",
     )?;
     ensure(
@@ -689,7 +735,14 @@ fn model_list_returns_entries_in_stable_order() -> TestResult {
         report.entries[2].model_name == BUNDLED_EMBEDDING_MODEL_ID,
         "bundled model should be auto-declared",
     )?;
-    ensure(report.degradations.is_empty(), "no degradations expected")?;
+    ensure_no_degradations(
+        &report
+            .degradations
+            .iter()
+            .map(|degradation| degradation.code)
+            .collect::<Vec<_>>(),
+        "no degradations expected",
+    )?;
 
     let json = report.data_json();
     ensure(

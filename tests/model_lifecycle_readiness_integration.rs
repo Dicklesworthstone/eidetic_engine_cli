@@ -1,5 +1,6 @@
 //! Integration coverage for model-lifecycle readiness on search/recall surfaces.
 
+use std::fmt::Debug;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -39,6 +40,30 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
         Ok(())
     } else {
         Err(message.into())
+    }
+}
+
+/// Equality assertion that prints BOTH operands when it fails.
+///
+/// `ensure(a == b, "msg")` collapses the operands to a `bool` before the
+/// message is built, so the failure names the check and withholds the one fact
+/// needed to act on it. That is not a style preference: on this project a shard
+/// run costs 15-25 minutes on a contended fleet, so every value-discarding
+/// assertion charges a full run to whoever trips it, every time it fires.
+///
+/// Prints on failure only -- a green run stays silent, because output that is
+/// noisy when nothing is wrong is output people stop reading. Labels which side
+/// is which; "left/right" without names is how the write_owner row was misread.
+fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> TestResult
+where
+    T: Debug + PartialEq + ?Sized,
+{
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "{context}: actual {actual:?}, expected {expected:?}"
+        ))
     }
 }
 
@@ -305,14 +330,12 @@ fn search_surface_reports_dimension_incompatible_readiness() -> TestResult {
         .semantic_surface_degradation("search")
         .ok_or("missing search lifecycle degradation")?;
 
-    ensure(
-        degradation.code == "embed_model_unavailable",
+    ensure_equal(
+        degradation.code,
+        "embed_model_unavailable",
         "dimension mismatch reuses semantic-unavailable code",
     )?;
-    ensure(
-        degradation.severity == "high",
-        "dimension mismatch severity",
-    )?;
+    ensure_equal(degradation.severity, "high", "dimension mismatch severity")?;
     ensure(
         degradation.message.contains("dimension-incompatible"),
         "search message names dimension-incompatible readiness",
@@ -342,7 +365,17 @@ fn recall_surface_reports_lexical_only_readiness() -> TestResult {
         .degraded
         .iter()
         .find(|degradation| degradation.code == "embed_model_unavailable")
-        .ok_or("missing model lifecycle degradation")?;
+        .ok_or_else(|| {
+            format!(
+                "missing model lifecycle degradation: expected code \"embed_model_unavailable\", \
+                 degraded codes actually present: {:?}",
+                report
+                    .degraded
+                    .iter()
+                    .map(|degradation| degradation.code)
+                    .collect::<Vec<_>>()
+            )
+        })?;
     ensure(
         lifecycle.message.contains("lexical-only"),
         "recall message names lexical-only readiness",
@@ -361,12 +394,18 @@ fn offline_local_model_lifecycle_matches_redacted_golden() -> TestResult {
         Some(&fixture.connection),
     )
     .map_err(|error| format!("lifecycle report: {error:?}"))?;
-    ensure(
-        report.semantic_readiness.state == "available",
+    ensure_equal(
+        report.semantic_readiness.state,
+        "available",
         "offline local model/index fixture should be semantically ready",
     )?;
-    ensure(
-        report.degraded.is_empty(),
+    ensure_equal(
+        &report
+            .degraded
+            .iter()
+            .map(|degradation| degradation.code)
+            .collect::<Vec<_>>(),
+        &Vec::new(),
         "semantically ready fixture should not emit lifecycle degradations",
     )?;
 
