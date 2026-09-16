@@ -18,7 +18,7 @@ use crate::cass::{
     CassClient, CassImportDegradation, CassImportError, CassImportOptions, CassImportReport,
     discover_import_binary, import_cass_sessions, parse_import_since_duration,
 };
-use crate::config::env_registry::{EnvVar, is_set, read, read_os};
+use crate::config::env_registry::{EnvVar, read, read_os};
 use crate::config::{
     GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY, GRAPH_FEATURE_PROXIMITY_ENABLED_KEY,
     GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY, MeshCommandMode, PathExpander,
@@ -24038,6 +24038,8 @@ fn resolve_cass_subprocess_timeout(
 #[cfg(test)]
 mod cass_timeout_tests {
     use std::time::Duration;
+
+    use crate::config::env_registry::{EnvVar, is_set};
 
     use super::resolve_cass_subprocess_timeout;
 
