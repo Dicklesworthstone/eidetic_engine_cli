@@ -22,7 +22,7 @@
 //!   approved, rejected, expired, applied)
 //! * `--target-memory garbage` -> Usage `"invalid target memory ID"`
 //!   + repair `"ee curate candidates --help"`
-//! * Missing database -> Storage repair `"ee init --workspace ."`
+//! * Missing database -> Storage repair `"ee init --workspace <workspace>"`
 //! * Happy path on empty workspace -> success envelope with empty
 //!   candidates array
 
@@ -282,7 +282,7 @@ fn curate_candidates_surfaces_storage_error_when_database_missing() -> TestResul
     assert_error_with_repair(
         &parsed,
         &["Database not found at"],
-        &["ee init --workspace ."],
+        &[&format!("ee init --workspace {workspace_arg}")],
     )
 }
 

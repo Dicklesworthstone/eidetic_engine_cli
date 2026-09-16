@@ -319,9 +319,9 @@ fn economy_report_without_init_is_a_storeless_miss() -> TestResult {
     let repair = parsed["error"]["repair"].as_str().unwrap_or_default();
     ensure(
         repair.contains("looked for")
-            && repair.ends_with(
-                "Only if you intended to create a NEW store here: ee init --workspace .",
-            ),
+            && repair.ends_with(&format!(
+                "Only if you intended to create a NEW store here: ee init --workspace {ws}"
+            )),
         format!(
             "repair must re-check addressing first and keep init conditional and last; got {repair:?}"
         ),

@@ -10,7 +10,7 @@
 //! silently break downstream agents that read the result.
 //!
 //! Pins:
-//! * Missing database -> Storage repair `"ee init --workspace ."`
+//! * Missing database -> Storage repair `"ee init --workspace <workspace>"`
 //! * Non-existent memory id -> NotFound `"memory"` + `"ee memory
 //!   list"`
 //! * `--dry-run` preview on an active memory -> data.status=
@@ -186,7 +186,7 @@ fn memory_expire_surfaces_storage_error_when_database_missing() -> TestResult {
     assert_error_with_repair(
         &parsed,
         &["Database not found at"],
-        &["ee init --workspace ."],
+        &[&format!("ee init --workspace {workspace_arg}")],
     )
 }
 

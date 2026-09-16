@@ -9,7 +9,7 @@
 //! (src/cli/mod.rs:36971) had no end-to-end coverage. This pin test
 //! locks the four primary surfaces:
 //!
-//! * Missing database -> Storage repair `"ee init --workspace ."`
+//! * Missing database -> Storage repair `"ee init --workspace <workspace>"`
 //! * Non-existent memory id -> NotFound `"memory"` + repair
 //!   `"ee memory list --json"`
 //! * Happy-path tombstone -> success report with `persisted=true`,
@@ -169,7 +169,7 @@ fn curate_tombstone_surfaces_storage_error_when_database_missing() -> TestResult
     assert_error_with_repair(
         &parsed,
         &["Database not found at"],
-        &["ee init --workspace ."],
+        &[&format!("ee init --workspace {workspace_arg}")],
     )
 }
 

@@ -244,7 +244,7 @@ fn memory_tags_surfaces_storage_error_when_database_missing() -> TestResult {
     assert_error_with_repair(
         &parsed,
         &["Database not found at"],
-        &["ee init --workspace ."],
+        &[&format!("ee init --workspace {workspace_arg}")],
     )
 }
 

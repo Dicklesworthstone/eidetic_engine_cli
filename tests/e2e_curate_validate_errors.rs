@@ -13,7 +13,7 @@
 //! * Invalid candidate id format (e.g. `bad-id`, not `curate_…`) ->
 //!   Usage `"invalid curation candidate ID"` + repair
 //!   `"ee curate candidates --json"`
-//! * Missing database -> Storage repair `"ee init --workspace ."`
+//! * Missing database -> Storage repair `"ee init --workspace <workspace>"`
 //! * Valid format but non-existent candidate id -> NotFound
 //!   `"curation candidate"` + repair `"ee curate candidates --json"`
 
@@ -166,7 +166,7 @@ fn curate_validate_surfaces_storage_error_when_database_missing() -> TestResult 
     assert_error_with_repair(
         &parsed,
         &["Database not found at"],
-        &["ee init --workspace ."],
+        &[&format!("ee init --workspace {workspace_arg}")],
     )
 }
 

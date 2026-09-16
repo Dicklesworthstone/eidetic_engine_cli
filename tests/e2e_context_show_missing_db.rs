@@ -3,7 +3,7 @@
 //!
 //! `handle_context_show` (src/cli/mod.rs:28138) checks `database_path.exists()`
 //! before opening and emits `DomainError::Storage { message: "Database not
-//! found: <path>", repair: Some("ee init --workspace .") }` when missing.
+//! found: <path>", repair: Some("ee init --workspace <workspace>") }` when missing.
 //! The existing contract test
 //! `tests/contracts/context_show_persisted_pack.rs:296` covers the NotFound
 //! branch (unknown pack id against a migrated DB) but not the missing-db
@@ -95,9 +95,10 @@ fn context_show_without_init_surfaces_database_missing_storage_error() -> TestRe
         format!("storage message must pin the Database not found guard; got {message}"),
     )?;
     let repair = error["repair"].as_str().unwrap_or_default();
+    let expected_repair = format!("ee init --workspace {workspace_arg}");
     ensure(
-        repair.contains("ee init --workspace ."),
-        format!("storage repair must point at `ee init --workspace .`; got {repair}"),
+        repair.contains(&expected_repair),
+        format!("storage repair must point at `{expected_repair}`; got {repair}"),
     )?;
     Ok(())
 }

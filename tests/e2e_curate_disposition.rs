@@ -10,7 +10,7 @@
 //! end-to-end coverage. This pin test locks the three primary
 //! surfaces:
 //!
-//! * Missing database -> Storage repair `"ee init --workspace ."`
+//! * Missing database -> Storage repair `"ee init --workspace <workspace>"`
 //! * `--now garbage_timestamp` -> Usage `"invalid --now timestamp"`
 //!   + repair `"ee curate disposition --help"`
 //! * Happy path on empty workspace -> success envelope (no error,
@@ -127,7 +127,7 @@ fn curate_disposition_surfaces_storage_error_when_database_missing() -> TestResu
     assert_error_with_repair(
         &parsed,
         &["Database not found at"],
-        &["ee init --workspace ."],
+        &[&format!("ee init --workspace {workspace_arg}")],
     )
 }
 

@@ -2,7 +2,7 @@
 //!
 //! Locks the three primary surfaces:
 //!
-//! * Missing database -> Storage repair `"ee init --workspace ."`
+//! * Missing database -> Storage repair `"ee init --workspace <workspace>"`
 //! * Empty workspace dry-run -> envelope with scanned=0, eligible=0,
 //!   `dryRun=true`, no `memory.level_transition` mutations
 //! * Explicit help renders the subcommand
@@ -103,9 +103,10 @@ fn curate_auto_promote_surfaces_storage_error_when_database_missing() -> TestRes
         format!("message must surface missing-db; got {message}"),
     )?;
     let repair = error["repair"].as_str().unwrap_or_default();
+    let expected_repair = format!("ee init --workspace {workspace_arg}");
     ensure(
-        repair.contains("ee init --workspace ."),
-        format!("repair must point at ee init; got {repair}"),
+        repair.contains(&expected_repair),
+        format!("repair must point at `{expected_repair}`; got {repair}"),
     )
 }
 
