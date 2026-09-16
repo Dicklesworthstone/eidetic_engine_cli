@@ -16509,7 +16509,7 @@ where
     let reports = match collect_eval_run_reports(scenario_id, dir) {
         Ok(reports) => reports,
         Err(CancellationAwareCliError::Cancelled(reason)) => {
-            return write_cancelled_error(&reason, cli.wants_json(), stdout, stderr);
+            return write_cancelled_error(&reason, cli.renderer(), stdout, stderr);
         }
         Err(CancellationAwareCliError::Domain(error)) => {
             return write_domain_error(&error, cli.renderer(), stdout, stderr);
@@ -16607,7 +16607,7 @@ where
     let reports = match collect_eval_run_reports(scenario_id, dir) {
         Ok(reports) => reports,
         Err(CancellationAwareCliError::Cancelled(reason)) => {
-            return write_cancelled_error(&reason, cli.wants_json(), stdout, stderr);
+            return write_cancelled_error(&reason, cli.renderer(), stdout, stderr);
         }
         Err(CancellationAwareCliError::Domain(error)) => {
             return write_domain_error(&error, cli.renderer(), stdout, stderr);
@@ -16883,7 +16883,7 @@ where
         ) {
             Ok(actuals) => actuals,
             Err(CancellationAwareCliError::Cancelled(reason)) => {
-                return write_cancelled_error(&reason, cli.wants_json(), stdout, stderr);
+                return write_cancelled_error(&reason, cli.renderer(), stdout, stderr);
             }
             Err(CancellationAwareCliError::Domain(error)) => {
                 return write_domain_error(&error, cli.renderer(), stdout, stderr);
@@ -24253,7 +24253,7 @@ where
 
 fn write_index_rebuild_error<W, E>(
     error: &IndexRebuildError,
-    wants_json: bool,
+    mode: impl Into<ErrorRenderMode>,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -24261,11 +24261,14 @@ where
     W: Write,
     E: Write,
 {
+    let mode = mode.into();
     if let IndexRebuildError::Cancelled(reason) = error {
-        return write_cancelled_error(reason, wants_json, stdout, stderr);
+        return write_cancelled_error(reason, mode, stdout, stderr);
     }
 
-    if wants_json && let IndexRebuildError::LockContention(contention) = error {
+    if mode != ErrorRenderMode::Human
+        && let IndexRebuildError::LockContention(contention) = error
+    {
         let json = serde_json::json!({
             "schema": crate::models::ERROR_SCHEMA_V2,
             "error": {
@@ -24282,7 +24285,11 @@ where
                 }
             }
         });
-        let _ = stdout.write_all(json.to_string().as_bytes());
+        let body = match mode {
+            ErrorRenderMode::Toon => output::render_toon_from_json(&json.to_string()),
+            ErrorRenderMode::Json | ErrorRenderMode::Human => json.to_string(),
+        };
+        let _ = stdout.write_all(body.as_bytes());
         let _ = stdout.write_all(b"\n");
         return ProcessExitCode::SearchIndex;
     }
@@ -24291,7 +24298,7 @@ where
         message: error.to_string(),
         repair: error.repair_hint().map(str::to_string),
     };
-    write_domain_error(&domain_error, wants_json, stdout, stderr)
+    write_domain_error(&domain_error, mode, stdout, stderr)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24505,7 +24512,7 @@ where
                 _ => write_status,
             }
         }
-        Err(error) => write_index_rebuild_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_index_rebuild_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -24590,7 +24597,7 @@ where
                 _ => write_status,
             }
         }
-        Err(error) => write_index_rebuild_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_index_rebuild_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -28992,7 +28999,7 @@ where
         Ok(t) => t,
         Err(_) => {
             return write_recorder_event_usage_error(
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
                 "invalid_recorder_event_type",
@@ -29009,7 +29016,7 @@ where
         let payload_bytes = payload.len();
         if payload_bytes > args.max_payload_bytes {
             return write_recorder_event_usage_error(
-                cli.wants_json(),
+                cli.renderer(),
                 stdout,
                 stderr,
                 "recorder_payload_too_large",
@@ -29041,7 +29048,7 @@ where
             Ok(report) => report,
             Err(error) => {
                 return write_recorder_event_validation_error(
-                    cli.wants_json(),
+                    cli.renderer(),
                     stdout,
                     stderr,
                     &error,
@@ -29056,12 +29063,7 @@ where
         match crate::core::recorder::record_and_persist_event(&conn, &options) {
             Ok(report) => report,
             Err(error) => {
-                return write_record_persisted_event_error(
-                    &error,
-                    cli.wants_json(),
-                    stdout,
-                    stderr,
-                );
+                return write_record_persisted_event_error(&error, cli.renderer(), stdout, stderr);
             }
         }
     };
@@ -29070,7 +29072,7 @@ where
 }
 
 fn write_recorder_event_usage_error<W, E>(
-    wants_json: bool,
+    mode: impl Into<ErrorRenderMode>,
     stdout: &mut W,
     stderr: &mut E,
     code: &str,
@@ -29082,7 +29084,8 @@ where
     W: Write,
     E: Write,
 {
-    if wants_json {
+    let mode = mode.into();
+    if mode != ErrorRenderMode::Human {
         let json = serde_json::json!({
             "schema": crate::models::ERROR_SCHEMA_V2,
             "error": {
@@ -29093,8 +29096,7 @@ where
                 "details": details,
             }
         });
-        let rendered = output::redact_mesh_approval_bearers(&(json.to_string() + "\n"));
-        let _ = stdout.write_all(rendered.as_bytes());
+        write_machine_error_payload(mode, &json, stdout);
     } else {
         let rendered = output::redact_mesh_approval_bearers(&format!(
             "error: {message}\n\nNext:\n  {repair}\n"
@@ -29105,7 +29107,7 @@ where
 }
 
 fn write_recorder_event_validation_error<W, E>(
-    wants_json: bool,
+    mode: impl Into<ErrorRenderMode>,
     stdout: &mut W,
     stderr: &mut E,
     error: &crate::core::recorder::RecorderEventError,
@@ -29114,13 +29116,13 @@ where
     W: Write,
     E: Write,
 {
-    if wants_json {
+    let mode = mode.into();
+    if mode != ErrorRenderMode::Human {
         let json = serde_json::json!({
             "schema": crate::models::ERROR_SCHEMA_V2,
             "error": error.data_json(),
         });
-        let rendered = output::redact_mesh_approval_bearers(&(json.to_string() + "\n"));
-        let _ = stdout.write_all(rendered.as_bytes());
+        write_machine_error_payload(mode, &json, stdout);
     } else {
         let rendered = output::redact_mesh_approval_bearers(&format!(
             "error: {}\n\nNext:\n  {}\n",
@@ -29176,7 +29178,7 @@ where
 
 fn write_record_persisted_event_error<W, E>(
     error: &crate::core::recorder::RecordPersistedEventError,
-    wants_json: bool,
+    mode: impl Into<ErrorRenderMode>,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -29184,9 +29186,10 @@ where
     W: Write,
     E: Write,
 {
+    let mode = mode.into();
     match error {
         crate::core::recorder::RecordPersistedEventError::Validation(error) => {
-            write_recorder_event_validation_error(wants_json, stdout, stderr, error)
+            write_recorder_event_validation_error(mode, stdout, stderr, error)
         }
         crate::core::recorder::RecordPersistedEventError::InvalidRunId(message) => {
             let domain_error = DomainError::Usage {
@@ -29196,7 +29199,7 @@ where
                         .to_owned(),
                 ),
             };
-            write_domain_error(&domain_error, wants_json, stdout, stderr)
+            write_domain_error(&domain_error, mode, stdout, stderr)
         }
         crate::core::recorder::RecordPersistedEventError::ChainMismatch { .. } => {
             let domain_error = DomainError::Usage {
@@ -29205,7 +29208,7 @@ where
                     "Use a valid run id from `ee recorder start --json` and the current previousEventHash.".to_owned(),
                 ),
             };
-            write_domain_error(&domain_error, wants_json, stdout, stderr)
+            write_domain_error(&domain_error, mode, stdout, stderr)
         }
         crate::core::recorder::RecordPersistedEventError::RunNotFound(run_id) => {
             let domain_error = DomainError::NotFound {
@@ -29216,14 +29219,14 @@ where
                         .to_owned(),
                 ),
             };
-            write_domain_error(&domain_error, wants_json, stdout, stderr)
+            write_domain_error(&domain_error, mode, stdout, stderr)
         }
         crate::core::recorder::RecordPersistedEventError::Storage { message } => {
             let domain_error = DomainError::Storage {
                 message: message.clone(),
                 repair: Some("ee status --json".to_owned()),
             };
-            write_domain_error(&domain_error, wants_json, stdout, stderr)
+            write_domain_error(&domain_error, mode, stdout, stderr)
         }
     }
 }
@@ -34766,7 +34769,7 @@ where
                 | output::Renderer::Hook => write_stdout(stdout, &(json + "\n")),
             }
         }
-        Err(error) => write_search_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_search_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -41405,7 +41408,7 @@ where
                 orient_component_data_from_envelope(&raw)
             }
             Err(error) => {
-                return write_context_pack_error(&error, cli.wants_json(), stdout, stderr);
+                return write_context_pack_error(&error, cli.renderer(), stdout, stderr);
             }
         }
     };
@@ -42424,7 +42427,7 @@ where
                 stderr,
             )
         }
-        Err(error) => write_context_pack_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => write_context_pack_error(&error, cli.renderer(), stdout, stderr),
     }
 }
 
@@ -45123,7 +45126,7 @@ where
     ) {
         Ok(report) => report,
         Err(CancellationAwareCliError::Cancelled(reason)) => {
-            return write_cancelled_error(&reason, cli.wants_json(), stdout, stderr);
+            return write_cancelled_error(&reason, cli.renderer(), stdout, stderr);
         }
         Err(CancellationAwareCliError::Domain(error)) => {
             return write_domain_error(&error, cli.renderer(), stdout, stderr);
@@ -45681,7 +45684,7 @@ where
     set_governor_resume_cursor(args.cursor.as_deref());
     let mut request = match load_query_file(&args.query_file) {
         Ok(request) => request,
-        Err(error) => return write_query_file_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_query_file_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let profile = match args.profile.as_deref() {
@@ -45693,7 +45696,7 @@ where
                     message,
                     Some("ee pack --help".to_string()),
                 );
-                return write_query_file_error(&error, cli.wants_json(), stdout, stderr);
+                return write_query_file_error(&error, cli.renderer(), stdout, stderr);
             }
         },
         None => request.profile,
@@ -45773,7 +45776,7 @@ where
                                     .to_string(),
                             ),
                         );
-                        return write_query_file_error(&error, cli.wants_json(), stdout, stderr);
+                        return write_query_file_error(&error, cli.renderer(), stdout, stderr);
                     }
                     cursor.offset
                 }
@@ -45787,7 +45790,7 @@ where
                                 .to_string(),
                         ),
                     );
-                    return write_query_file_error(&error, cli.wants_json(), stdout, stderr);
+                    return write_query_file_error(&error, cli.renderer(), stdout, stderr);
                 }
             },
             None => 0,
@@ -47972,7 +47975,7 @@ fn effective_pack_renderer(
 
 fn write_query_file_error<W, E>(
     error: &QueryFileError,
-    wants_json: bool,
+    mode: impl Into<ErrorRenderMode>,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -47980,7 +47983,8 @@ where
     W: Write,
     E: Write,
 {
-    if wants_json {
+    let mode = mode.into();
+    if mode != ErrorRenderMode::Human {
         let mut error_json = serde_json::json!({
             "code": error.code.as_str(),
             "message": &error.message,
@@ -47999,8 +48003,7 @@ where
             "schema": crate::models::ERROR_SCHEMA_V2,
             "error": error_json,
         });
-        let rendered = output::redact_mesh_approval_bearers(&(json.to_string() + "\n"));
-        let _ = stdout.write_all(rendered.as_bytes());
+        write_machine_error_payload(mode, &json, stdout);
     } else {
         let mut rendered = format!("error: {}: {}\n", error.code.as_str(), error.message);
         if let Some(repair) = &error.repair {
@@ -49689,7 +49692,7 @@ where
             }
         },
         Err(SimilarError::Search(SearchError::Cancelled(reason))) => {
-            write_cancelled_error(&reason, cli.wants_json(), stdout, stderr)
+            write_cancelled_error(&reason, cli.renderer(), stdout, stderr)
         }
         Err(error) => {
             let domain_error = similar_error_to_domain_error(&error);
@@ -54302,7 +54305,7 @@ where
         {
             Ok(report) => report,
             Err(error) => {
-                return write_context_pack_error(&error, cli.wants_json(), stdout, stderr);
+                return write_context_pack_error(&error, cli.renderer(), stdout, stderr);
             }
         };
         return write_coverage_gap_report(
@@ -54336,7 +54339,7 @@ where
     let report = match explain_why_not_default(&options, memory_id) {
         Ok(report) => report,
         Err(error) => {
-            return write_context_pack_error(&error, cli.wants_json(), stdout, stderr);
+            return write_context_pack_error(&error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -55769,7 +55772,7 @@ fn parse_completion_audit_evidence_input(input: &str) -> Result<EvidenceBundle, 
 
 fn write_cancelled_error<W, E>(
     reason: &CancelReason,
-    wants_json: bool,
+    mode: impl Into<ErrorRenderMode>,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -55779,7 +55782,8 @@ where
 {
     let kind = cancel_kind_code(reason.kind);
     let message = cancel_message(reason);
-    if wants_json {
+    let mode = mode.into();
+    if mode != ErrorRenderMode::Human {
         let json = serde_json::json!({
             "schema": crate::models::ERROR_SCHEMA_V2,
             "error": {
@@ -55792,8 +55796,7 @@ where
                 }
             }
         });
-        let rendered = output::redact_mesh_approval_bearers(&(json.to_string() + "\n"));
-        let _ = stdout.write_all(rendered.as_bytes());
+        write_machine_error_payload(mode, &json, stdout);
     } else {
         let rendered = output::redact_mesh_approval_bearers(&format!(
             "error: cancelled ({kind}): {message}\n"
@@ -55805,7 +55808,7 @@ where
 
 fn write_search_error<W, E>(
     error: &SearchError,
-    wants_json: bool,
+    mode: impl Into<ErrorRenderMode>,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -55813,11 +55816,12 @@ where
     W: Write,
     E: Write,
 {
+    let mode = mode.into();
     if let SearchError::Cancelled(reason) = error {
-        return write_cancelled_error(reason, wants_json, stdout, stderr);
+        return write_cancelled_error(reason, mode, stdout, stderr);
     }
     if let SearchError::WorkspaceBinding(error) = error {
-        return write_domain_error(error, wants_json, stdout, stderr);
+        return write_domain_error(error, mode, stdout, stderr);
     }
     if let SearchError::Configuration(message) = error {
         return write_domain_error(
@@ -55825,7 +55829,7 @@ where
                 message: message.clone(),
                 repair: error.repair_hint().map(str::to_owned),
             },
-            wants_json,
+            mode,
             stdout,
             stderr,
         );
@@ -55834,7 +55838,7 @@ where
         message: error.to_string(),
         repair: error.repair_hint().map(str::to_string),
     };
-    write_domain_error(&domain_error, wants_json, stdout, stderr)
+    write_domain_error(&domain_error, mode, stdout, stderr)
 }
 
 fn context_cancellation_reason(error: &ContextPackError) -> Option<&CancelReason> {
@@ -55853,7 +55857,7 @@ fn context_cancellation_reason(error: &ContextPackError) -> Option<&CancelReason
 
 fn write_context_pack_error<W, E>(
     error: &ContextPackError,
-    wants_json: bool,
+    mode: impl Into<ErrorRenderMode>,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -55861,11 +55865,12 @@ where
     W: Write,
     E: Write,
 {
+    let mode = mode.into();
     if let Some(reason) = context_cancellation_reason(error) {
-        return write_cancelled_error(reason, wants_json, stdout, stderr);
+        return write_cancelled_error(reason, mode, stdout, stderr);
     }
     let domain_error = context_error_to_domain(error);
-    write_domain_error(&domain_error, wants_json, stdout, stderr)
+    write_domain_error(&domain_error, mode, stdout, stderr)
 }
 
 /// How a command failure should be rendered.
@@ -55900,6 +55905,28 @@ impl From<output::Renderer> for ErrorRenderMode {
             output::Renderer::Human | output::Renderer::Markdown => Self::Human,
         }
     }
+}
+
+/// Emit a hand-built `ee.error.v2` payload in the requested machine format.
+///
+/// The self-rendering error writers construct their own envelope because they
+/// need a specific `details` shape and exit code, so they cannot delegate to
+/// `write_domain_error`. They must still honour the renderer: before
+/// bd-sibling-error-writers-bool-mode-y46lf they took a `wants_json: bool`,
+/// which cannot express toon, so `--format toon` fell to the human branch and
+/// wrote prose to stderr while the matching success wrote toon to stdout.
+///
+/// The Json path is byte-identical to what those writers emitted before.
+fn write_machine_error_payload<W>(mode: ErrorRenderMode, json: &serde_json::Value, stdout: &mut W)
+where
+    W: Write,
+{
+    let body = match mode {
+        ErrorRenderMode::Toon => output::render_toon_from_json(&json.to_string()),
+        ErrorRenderMode::Json | ErrorRenderMode::Human => json.to_string(),
+    };
+    let rendered = output::redact_mesh_approval_bearers(&(body + "\n"));
+    let _ = stdout.write_all(rendered.as_bytes());
 }
 
 fn write_domain_error<W, E>(
