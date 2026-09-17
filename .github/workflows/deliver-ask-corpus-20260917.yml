@@ -99,6 +99,7 @@ jobs:
       - name: Check the production library
         run: cargo check --locked --lib
       - name: Execute ask lifecycle and snapshot regressions
-        run: cargo test --locked --lib core::ask::corpus:: -- --nocapture
+        run: |
+          cargo test --locked --lib core::ask::corpus:: -- --nocapture
       - name: Execute public CLI lifecycle regressions
         run: cargo test --locked --test contracts ask_lifecycle -- --nocapture
