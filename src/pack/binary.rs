@@ -113,8 +113,14 @@ impl fmt::Display for PackBinaryError {
                 formatter.write_str("binary pack content_hash does not match canonical JSON")
             }
             Self::InvalidItemContent { index, reason } => match index {
-                Some(index) => write!(formatter, "binary pack item {index} failed verification: {reason}"),
-                None => write!(formatter, "binary pack item projection failed verification: {reason}"),
+                Some(index) => write!(
+                    formatter,
+                    "binary pack item {index} failed verification: {reason}"
+                ),
+                None => write!(
+                    formatter,
+                    "binary pack item projection failed verification: {reason}"
+                ),
             },
             Self::NonUtf8Json => formatter.write_str("binary pack canonical JSON is not UTF-8"),
         }
@@ -833,7 +839,9 @@ mod tests {
         let response = response_with_evidence(memory_count, evidence_count);
         let canonical_json = crate::output::render_context_response_json(&response);
         let batch: serde_json::Value = serde_json::from_str(&canonical_json).expect("batch JSON");
-        let batch_items = batch["data"]["pack"]["items"].as_array().expect("batch items");
+        let batch_items = batch["data"]["pack"]["items"]
+            .as_array()
+            .expect("batch items");
         assert_eq!(batch_items.len(), (memory_count + evidence_count) as usize);
 
         let frame = super::serialize_context_response_binary(&response, &canonical_json);

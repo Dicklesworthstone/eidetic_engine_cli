@@ -84,7 +84,10 @@ mod tests {
     }
 
     fn frame(contents: &[&str]) -> Vec<u8> {
-        let slices = contents.iter().map(|item| item.as_bytes()).collect::<Vec<_>>();
+        let slices = contents
+            .iter()
+            .map(|item| item.as_bytes())
+            .collect::<Vec<_>>();
         serialize_pack_binary(&json(contents), &slices, 0)
     }
 

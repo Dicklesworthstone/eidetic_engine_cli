@@ -174,7 +174,10 @@ fn calibration_workspace() -> Result<(tempfile::TempDir, PathBuf), String> {
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
     // Resolve only the trusted temporary root; production descendant-symlink
     // checks remain active on the actual calibration file.
-    let workspace = temp.path().canonicalize().map_err(|error| error.to_string())?;
+    let workspace = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     std::fs::create_dir_all(workspace.join(".ee").join("search"))
         .map_err(|error| error.to_string())?;
     Ok((temp, workspace))
@@ -233,7 +236,12 @@ fn ensure_conservative_calibration(
         .map(|entry| (entry.memory_id.as_str(), entry.rank, entry.included))
         .collect::<Vec<_>>();
     ensure(
-        entries == vec![("mem_strong", 1, true), ("mem_target", 2, true), ("mem_weak", 3, true)],
+        entries
+            == vec![
+                ("mem_strong", 1, true),
+                ("mem_target", 2, true),
+                ("mem_weak", 3, true),
+            ],
         format!("conservative fallback must retain every exact candidate: {entries:?}"),
     )
 }
@@ -254,7 +262,12 @@ fn ensure_calibrated_selection(report: &WhyConformalConfidenceIntervals) -> Test
         .map(|entry| (entry.memory_id.as_str(), entry.rank, entry.included))
         .collect::<Vec<_>>();
     ensure(
-        entries == vec![("mem_strong", 1, true), ("mem_target", 2, true), ("mem_weak", 3, false)],
+        entries
+            == vec![
+                ("mem_strong", 1, true),
+                ("mem_target", 2, true),
+                ("mem_weak", 3, false),
+            ],
         format!("valid calibration must produce the exact selective set: {entries:?}"),
     )
 }
