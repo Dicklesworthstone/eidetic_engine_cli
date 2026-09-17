@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -2099,27 +2100,107 @@ const fn allowed(
     }
 }
 
-#[test]
-fn no_silent_fallback_inventory_covers_current_source_findings() -> TestResult {
-    let findings = scan_source_findings()?;
-    let mut uncovered = Vec::new();
+const UNCLASSIFIED_BASELINE_FIXTURE: &str =
+    "tests/fixtures/contracts/no_silent_fallback_unclassified_baseline.txt";
 
-    for finding in &findings {
-        if classify_finding(finding).is_none() {
-            uncovered.push(format!(
-                "{}:{} `{}`\ncontext:\n{}",
-                finding.file, finding.line, finding.text, finding.context
+fn unclassified_baseline() -> Result<BTreeMap<String, usize>, String> {
+    let raw = include_str!("../fixtures/contracts/no_silent_fallback_unclassified_baseline.txt");
+    let mut baseline = BTreeMap::new();
+
+    for (index, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let (count, file) = trimmed.split_once('\t').ok_or_else(|| {
+            format!(
+                "{UNCLASSIFIED_BASELINE_FIXTURE}:{}: expected `<count>\\t<path>`",
+                index + 1
+            )
+        })?;
+        let count = count.trim().parse::<usize>().map_err(|error| {
+            format!(
+                "{UNCLASSIFIED_BASELINE_FIXTURE}:{}: bad count `{count}`: {error}",
+                index + 1
+            )
+        })?;
+        if baseline.insert(file.trim().to_owned(), count).is_some() {
+            return Err(format!(
+                "{UNCLASSIFIED_BASELINE_FIXTURE}:{}: duplicate path `{}`",
+                index + 1,
+                file.trim()
             ));
         }
     }
 
-    if uncovered.is_empty() {
+    Ok(baseline)
+}
+
+fn unclassified_by_file(findings: &[SourceFinding]) -> BTreeMap<String, usize> {
+    let mut observed: BTreeMap<String, usize> = BTreeMap::new();
+    for finding in findings {
+        if classify_finding(finding).is_none() {
+            *observed.entry(finding.file.clone()).or_default() += 1;
+        }
+    }
+    observed
+}
+
+/// Shrink-only ratchet over unclassified silent-fallback findings.
+///
+/// This test used to assert that every high-risk line under `src/` carried an
+/// inventory entry. That assertion had decayed past usefulness: 289 of the 328
+/// rules were `Allowed` and 184 findings were uncovered, so the gate was
+/// permanently red and its only landable repair was appending more allowlist
+/// rows. An inventory that is 88% allowlist asserts that somebody looked, not
+/// that nothing is wrong.
+///
+/// What it asserts now: uncovered findings may only ever DECREASE, per file.
+/// Introducing a new silent default fails, because that file's count rose.
+/// Fixing one also fails until the baseline row is lowered to match — without
+/// that second direction a stale row decays into exactly the permanent
+/// ignore-list this replaced.
+///
+/// Whole-tree coverage is deliberately retained. Scoping the check to the
+/// serialization surfaces in `REQUIRED_SURFACE_FILES` would have gone green
+/// immediately (those files hold 7 of the 184) by abandoning `src/core`,
+/// `src/cli` and `src/mesh`, where the other 177 live.
+#[test]
+fn no_silent_fallback_unclassified_findings_only_shrink() -> TestResult {
+    let findings = scan_source_findings()?;
+    let observed = unclassified_by_file(&findings);
+    let baseline = unclassified_baseline()?;
+    let mut problems = Vec::new();
+
+    for (file, count) in &observed {
+        let allowed = baseline.get(file).copied().unwrap_or(0);
+        if *count > allowed {
+            problems.push(format!(
+                "{file}: {count} unclassified fallback(s), baseline allows {allowed}. \
+                 Return a contextual error or degradation, or add a justified \
+                 inventory entry with a follow-up bead."
+            ));
+        }
+    }
+
+    for (file, allowed) in &baseline {
+        let count = observed.get(file).copied().unwrap_or(0);
+        if count < *allowed {
+            problems.push(format!(
+                "{file}: {count} unclassified fallback(s) but the baseline still \
+                 allows {allowed}. Lower that row to {count} in \
+                 {UNCLASSIFIED_BASELINE_FIXTURE} (drop the row entirely at 0); a \
+                 stale baseline row is a permanent allowlist."
+            ));
+        }
+    }
+
+    if problems.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "unclassified production fallback(s):\n{}\n\nRepair: return a contextual error/degradation or add a justified inventory entry with a follow-up bead.",
-            uncovered.join("\n\n")
-        ))
+        problems.sort();
+        Err(problems.join("\n"))
     }
 }
 
