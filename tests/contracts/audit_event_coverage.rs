@@ -279,6 +279,9 @@ fn ee_search_audit_payloads_carry_hashed_never_raw_query_text() -> TestResult {
             "search must record retrieval audit payloads for ADR 0070/0071 consumers".to_owned(),
         );
     }
+    // Every payload must be structurally sound -- JSON carrying a `queryHash`.
+    // That part is true of any retrieval, whoever performed it.
+    let mut recorded_hashes = Vec::new();
     for details in &search_details {
         let parsed: serde_json::Value = serde_json::from_str(details)
             .map_err(|error| format!("search audit details must be JSON: {error}: {details}"))?;
@@ -286,11 +289,21 @@ fn ee_search_audit_payloads_carry_hashed_never_raw_query_text() -> TestResult {
             .get("queryHash")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| format!("search audit payload is missing queryHash: {details}"))?;
-        if recorded != expected_hash {
-            return Err(format!(
-                "search audit payload must store the canonical query hash {expected_hash}, got {recorded}"
-            ));
-        }
+        recorded_hashes.push(recorded.to_owned());
+    }
+    // THIS query's hash must be among them. Asserting it of *every* row was only
+    // accidentally right while search was the sole writer: `remember_memory` runs
+    // with `auto_link`, whose neighbour probe (memory.rs:6044
+    // remember_search_neighbor_ids) is itself a search and records its own row
+    // under a different query's hash (bd-l8dn0). Requiring the canonical hash of a
+    // retrieval this test never performed would fail on correct behaviour. The
+    // leak checks above still cover every row, so nothing is narrowed: what is
+    // asserted is that the search really recorded, and that nothing anywhere
+    // carries the raw text.
+    if !recorded_hashes.iter().any(|hash| hash == &expected_hash) {
+        return Err(format!(
+            "search audit payloads must include the canonical query hash {expected_hash}; recorded {recorded_hashes:?}"
+        ));
     }
     Ok(())
 }
