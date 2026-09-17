@@ -168,12 +168,6 @@
     {
       "bead": "bd-36bbk.1.14",
       "label": "implements-surface",
-      "reason": "referenced test path missing: tests/fixtures/failure_modes/steward_auto_enroll_*.json",
-      "surface": "steward_auto_enroll_pass"
-    },
-    {
-      "bead": "bd-36bbk.1.14",
-      "label": "implements-surface",
       "reason": "referenced test path missing: tests/mesh_steward_audit.rs",
       "surface": "steward_auto_enroll_pass"
     },
@@ -205,12 +199,6 @@
       "bead": "bd-36bbk.1.17",
       "label": "implements-surface",
       "reason": "missing tests/golden/lane_grant_preview.snap",
-      "surface": "lane_grant_preview"
-    },
-    {
-      "bead": "bd-36bbk.1.17",
-      "label": "implements-surface",
-      "reason": "referenced test path missing: tests/fixtures/failure_modes/lane_grant_preview_*.json",
       "surface": "lane_grant_preview"
     },
     {
@@ -406,12 +394,6 @@
       "surface": "mcp_parity_test_suite"
     },
     {
-      "bead": "bd-3usjw.4",
-      "label": "defer-to-v2",
-      "reason": "missing sibling adr:serve_localhost_v2_design ADR and open v2:serve_localhost bead",
-      "surface": "serve_localhost"
-    },
-    {
       "bead": "bd-3usjw.43",
       "label": "implements-surface",
       "reason": "missing tests/golden/plan_drift_warning.snap",
@@ -579,13 +561,6 @@
       "reason": "close_reason contains abstention language",
       "surface": "insights_kCore",
       "note": "false positive: close_reason describes PLACEHOLDER_BACKED_SECTIONS retirement, not a current stub"
-    },
-    {
-      "bead": "bd-2pos6.4",
-      "label": "implements-surface",
-      "reason": "close_reason contains abstention language",
-      "surface": "insights_kTruss",
-      "note": "false positive: close_reason describes placeholder retirement, not a current stub"
     },
     {
       "bead": "bd-2pos6.5",

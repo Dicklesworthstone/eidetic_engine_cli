@@ -1192,3 +1192,193 @@ fn closure_lint_validates_audit_emission_block_shape_when_declared() -> TestResu
     }
     Ok(())
 }
+
+/// The audit baseline must fail in BOTH directions.
+///
+/// `apply_audit_baseline` filters known violations out of the verdict. Until
+/// this test existed nothing exercised that path at all, and the filter had
+/// only one arm: a NEW violation failed, a baseline entry whose violation was
+/// GONE was silently kept. That is how an exemption file decays into a
+/// permanent ignore-list -- the failure mode the closure linter exists to
+/// prevent, relocated into its own fixture. Measured on the real tree when this
+/// landed: 98 baseline entries, 94 matching, 4 stale and unreported.
+///
+/// The three arms below are one fixture walked through three baselines, so the
+/// live violation is identical across them and only the baseline changes.
+#[test]
+fn closure_lint_audit_baseline_excuses_known_debt_and_fails_on_a_stale_entry() -> TestResult {
+    let temp = closure_lint_worker_local_tempdir("closure-lint-baseline-")?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"closed-abstention","title":"[implements-surface:abstention-surface] closed with stub language","status":"closed","close_reason":"closed with a stub placeholder","labels":["implements-surface:abstention-surface"]}"#,
+        ],
+        "",
+        &["abstention-surface"],
+    )?;
+    let baseline_path = temp.path().join("audit_baseline.json");
+    let baseline_arg = baseline_path
+        .to_str()
+        .ok_or_else(|| "baseline path is not UTF-8".to_owned())?
+        .to_owned();
+
+    // ARM 1 -- the control. Without a baseline the fixture must really fail,
+    // otherwise arm 2 would prove nothing: a baseline "excusing" a violation
+    // that was never there is indistinguishable from a broken fixture.
+    let (output, report) = run_linter(temp.path())?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "the fixture must produce a real violation before any baseline is applied\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(report_status(&report)?, "fail", "unbaselined report status")?;
+    ensure_eq(report_count(&report)?, 1, "unbaselined report count")?;
+
+    // ARM 2 -- a baseline naming that exact violation must excuse it.
+    write_text_file(
+        temp.path(),
+        "audit_baseline.json",
+        r#"{
+  "violations": [
+    {
+      "bead": "closed-abstention",
+      "label": "implements-surface",
+      "surface": "abstention-surface",
+      "reason": "close_reason contains abstention language"
+    }
+  ]
+}
+"#,
+    )?;
+    let (output, report) = run_linter_with_env(
+        temp.path(),
+        &[("CLOSURE_LINT_AUDIT_BASELINE_FILE", baseline_arg.as_str())],
+    )?;
+    ensure(
+        output.status.success(),
+        format!(
+            "a baselined violation must be excused\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(report_status(&report)?, "pass", "baselined report status")?;
+    ensure_eq(report_count(&report)?, 0, "baselined report count")?;
+    ensure_eq(
+        report
+            .pointer("/auditBaseline/matched")
+            .and_then(Value::as_u64),
+        Some(1),
+        "the report must state how many violations the baseline absorbed",
+    )?;
+
+    // ARM 3 -- the arm that did not exist. A baseline entry matching nothing
+    // must FAIL and must NAME the line to delete, even though the run is
+    // otherwise clean.
+    write_text_file(
+        temp.path(),
+        "audit_baseline.json",
+        r#"{
+  "violations": [
+    {
+      "bead": "closed-abstention",
+      "label": "implements-surface",
+      "surface": "abstention-surface",
+      "reason": "close_reason contains abstention language"
+    },
+    {
+      "bead": "bd-already-fixed",
+      "label": "implements-surface",
+      "surface": "surface-that-no-longer-violates",
+      "reason": "debt that has since been paid off"
+    }
+  ]
+}
+"#,
+    )?;
+    let (output, _) = run_linter_with_env(
+        temp.path(),
+        &[("CLOSURE_LINT_AUDIT_BASELINE_FILE", baseline_arg.as_str())],
+    )?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "a stale baseline entry must fail the audit\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    ensure(
+        stderr.contains("bd-already-fixed") && stderr.contains("surface-that-no-longer-violates"),
+        format!("the stale entry must be NAMED, not merely counted\nstderr:\n{stderr}"),
+    )?;
+    ensure(
+        !stderr.contains("closed-abstention"),
+        format!("the still-matching entry must NOT be reported as stale\nstderr:\n{stderr}"),
+    )
+}
+
+/// A baseline whose violations have ALL been fixed is entirely stale.
+///
+/// This is the case a guard placed one line earlier would have hidden:
+/// `apply_audit_baseline` used to return before doing any work when there were
+/// no live violations, so a fully-paid-off baseline stayed in the tree forever
+/// with nothing to report it.
+#[test]
+fn closure_lint_reports_a_wholly_stale_baseline_on_a_clean_tree() -> TestResult {
+    let temp = closure_lint_worker_local_tempdir("closure-lint-baseline-clean-")?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"closed-clean","title":"[implements-surface:clean-surface] real implementation","status":"closed","close_reason":"implemented with durable evidence","labels":["implements-surface:clean-surface"]}"#,
+        ],
+        "",
+        &["clean-surface"],
+    )?;
+    let baseline_path = temp.path().join("audit_baseline.json");
+    let baseline_arg = baseline_path
+        .to_str()
+        .ok_or_else(|| "baseline path is not UTF-8".to_owned())?
+        .to_owned();
+
+    // Control: the tree is clean with no baseline at all.
+    let (output, report) = run_linter(temp.path())?;
+    ensure(
+        output.status.success(),
+        format!("the fixture must be clean\n{}", output_excerpt(&output)),
+    )?;
+    ensure_eq(report_status(&report)?, "pass", "clean report status")?;
+
+    write_text_file(
+        temp.path(),
+        "audit_baseline.json",
+        r#"{
+  "violations": [
+    {
+      "bead": "bd-all-paid-off",
+      "label": "implements-surface",
+      "surface": "nothing-violates-this",
+      "reason": "debt that no longer exists anywhere"
+    }
+  ]
+}
+"#,
+    )?;
+    let (output, _) = run_linter_with_env(
+        temp.path(),
+        &[("CLOSURE_LINT_AUDIT_BASELINE_FILE", baseline_arg.as_str())],
+    )?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "a baseline with no live counterpart must fail even on a clean tree\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    ensure(
+        stderr.contains("bd-all-paid-off"),
+        format!("the stale entry must be named\nstderr:\n{stderr}"),
+    )
+}

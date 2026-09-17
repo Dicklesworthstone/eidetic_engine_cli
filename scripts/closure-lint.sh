@@ -152,6 +152,10 @@ fi
 VIOLATIONS=""
 VIOLATION_COUNT=0
 BASELINED_VIOLATION_COUNT=0
+# Baseline entries that no longer correspond to a live violation. Declared here
+# so `set -u` holds on every path, including the ones where the baseline file is
+# absent and apply_audit_baseline returns early.
+STALE_AUDIT_BASELINE_ENTRIES=""
 CURRENT_BEAD_ID=""
 CURRENT_BEAD_LABELS=""
 CURRENT_BEAD_DESCRIPTION=""
@@ -557,11 +561,42 @@ write_closure_quality_report() {
 apply_audit_baseline() {
     [ "$AUDIT_MODE" = true ] || return 0
     [ -f "$AUDIT_BASELINE_FILE" ] || return 0
-    [ -n "$VIOLATIONS" ] || return 0
 
     local filtered
     local remaining_count
     local before_count
+
+    # STALE ARM, computed BEFORE the filter consumes the live set, and BEFORE
+    # the empty-violations early return: a run with no live violations means
+    # EVERY baseline entry is stale, which is the one case a guard placed
+    # earlier would have hidden.
+    #
+    # A baseline entry whose violation is gone must be deleted, or the file
+    # decays into a permanent ignore-list -- which is the exact failure mode
+    # this audit exists to prevent, relocated into its own exemption file.
+    # Both sibling baselines in this repo already fail in this direction:
+    # scripts/check-tracing-fields.sh ("baseline entr(ies) that now PASS --
+    # delete the line(s)") and scripts/e2e_invocation_audit.sh. This one only
+    # ever failed on NEW violations, so it had decayed silently.
+    STALE_AUDIT_BASELINE_ENTRIES=$(
+        violation_rows_as_json |
+            jq -r -s --slurpfile baseline "$AUDIT_BASELINE_FILE" '
+                def closure_key: [
+                    (.bead // ""),
+                    (.label // ""),
+                    (.surface // ""),
+                    (.reason // "")
+                ];
+
+                (map(closure_key) | unique) as $live
+                | (($baseline[0].violations // $baseline[0] // []) | map(closure_key) | unique)
+                | map(select((. as $entry | any($live[]; . == $entry)) | not))
+                | .[]
+                | "\(.[0])\t\(.[1])\t\(.[2])\t\(.[3])"
+            '
+    )
+
+    [ -n "$VIOLATIONS" ] || return 0
 
     before_count="$VIOLATION_COUNT"
     filtered=$(
@@ -1979,6 +2014,26 @@ reopen_expired_deferrals() {
 }
 
 reopen_expired_deferrals
+
+# A stale baseline is a failure in its own right, independent of whether any
+# live violation remains. Reported before the violation verdict so the operator
+# sees the entries to delete even on a run that would otherwise be green.
+if [ -n "$STALE_AUDIT_BASELINE_ENTRIES" ]; then
+    echo "" >&2
+    echo "error: audit baseline entr(ies) that no longer match a violation -- DELETE these lines from $AUDIT_BASELINE_FILE:" >&2
+    printf "%s\n" "$STALE_AUDIT_BASELINE_ENTRIES" |
+        while IFS="$(printf '\t')" read -r stale_bead stale_label stale_surface stale_reason; do
+            echo "  $stale_bead  $stale_label  $stale_surface" >&2
+            echo "      $stale_reason" >&2
+        done
+    echo "  A baseline that only ever grows is an ignore-list. The debt these" >&2
+    echo "  lines recorded is gone; the lines must go with it." >&2
+    if [ "$JSON_OUTPUT" = true ]; then
+        write_report "fail"
+        echo "Report written to $REPORT_FILE"
+    fi
+    exit 1
+fi
 
 # Output results
 if [ "$VIOLATION_COUNT" -gt 0 ]; then
