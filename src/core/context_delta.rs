@@ -4,6 +4,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+#[path = "context_delta_items.rs"]
+mod ordered_items;
+
 pub const CONTEXT_DELTA_SCHEMA_V2: &str = "ee.context.delta.v2";
 pub const CONTEXT_DELTA_PRIOR_UNKNOWN_CODE: &str = "context_delta_prior_unknown";
 pub const CONTEXT_DELTA_OVERSIZED_CODE: &str = "context_delta_larger_than_full";
@@ -477,7 +480,7 @@ pub fn compute_context_delta(
     new: &ContextDeltaPackSnapshot,
     options: ContextDeltaOptions,
 ) -> Result<ContextDeltaEnvelope, ContextDeltaError> {
-    let items = diff_items(&prior.items, &new.items);
+    let items = ordered_items::diff_items(&prior.items, &new.items)?;
     let mut envelope = ContextDeltaEnvelope {
         schema: CONTEXT_DELTA_SCHEMA_V2,
         success: true,
@@ -531,47 +534,6 @@ pub fn compute_context_delta(
     }
 
     Ok(envelope)
-}
-
-fn diff_items(
-    prior_items: &[ContextDeltaItemSnapshot],
-    new_items: &[ContextDeltaItemSnapshot],
-) -> ContextDeltaItems {
-    let prior_by_id = prior_items
-        .iter()
-        .map(|item| (item.id.as_str(), item))
-        .collect::<BTreeMap<_, _>>();
-    let new_by_id = new_items
-        .iter()
-        .map(|item| (item.id.as_str(), item))
-        .collect::<BTreeMap<_, _>>();
-
-    let mut added = Vec::new();
-    let mut removed = Vec::new();
-    let mut modified = Vec::new();
-
-    for (id, new_item) in &new_by_id {
-        match prior_by_id.get(id) {
-            Some(prior_item) => {
-                if let Some(change) = diff_item_fields(prior_item, new_item) {
-                    modified.push(change);
-                }
-            }
-            None => added.push((*new_item).clone()),
-        }
-    }
-
-    for id in prior_by_id.keys() {
-        if !new_by_id.contains_key(id) {
-            removed.push((*id).to_string());
-        }
-    }
-
-    ContextDeltaItems {
-        added,
-        removed,
-        modified,
-    }
 }
 
 fn diff_item_fields(
@@ -835,9 +797,12 @@ mod tests {
                 .iter()
                 .map(|item| item.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["mem_b"]
+            vec!["mem_b", "mem_c"]
         );
-        assert_eq!(delta.data.items.removed, vec!["mem_a".to_string()]);
+        assert_eq!(
+            delta.data.items.removed,
+            vec!["mem_a".to_string(), "mem_c".to_string()]
+        );
         Ok(())
     }
 
