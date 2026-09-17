@@ -36,7 +36,7 @@ recomputation, no LLM judgment.
 |---|---|---|---|
 | `stale_anchor` | anchored memory with freshness `suspect`/`stale` | suspect→low, stale→warning | `ee recall --stale` review / `ee index rebuild` |
 | `contradicted_unresolved` | pair on the conflict surface older than `[debt] conflict_age_days` (default 14) | warning; high if either side is procedural | `ee conflict resolve <a> <b> --verb … --apply` |
-| `never_retrieved` | no `search.returned_mem`/`pack.included_mem` audit row in `[debt] retrieval_window_days` (default 60) AND older than the window | low | `ee curate disposition` review |
+| `never_retrieved` | no read-evidence audit row in `[debt] retrieval_window_days` (default 60) AND older than the window. Read evidence is **any** audit row targeting the memory (`target_type = "memory"`) other than `memory.create`/`memory.update`/`memory.revise` — `search.returned_mem` and `pack.included_mem`, but also `memory.show` and the rows `ask`/`orient`/`similar` write. See `detect_never_retrieved` and the ingest at `memory_debt.rs`. | low | `ee curate disposition` review |
 | `orphan` | no links AND no retrievals in window AND utility < 0.3 | low | tombstone candidate via `ee curate` |
 | `low_trust_high_rank` | trust ∈ {cass_evidence, agent_assertion} AND pack-inclusion count ≥ 3 in window AND zero outcome events | warning (the misinformation-risk surface) | grade it: `ee outcome <id> --signal …` solicitation |
 | `decay_imminent_high_utility` | decay projection says demote/tombstone within `[debt] horizon_days` (default 14) AND utility ≥ 0.6 with recent helpful outcomes | warning (half-life misconfiguration evidence) | `[learn.decay]` half-life review w/ pre-filled key |
