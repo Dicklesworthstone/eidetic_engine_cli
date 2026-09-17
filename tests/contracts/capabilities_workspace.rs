@@ -121,17 +121,25 @@ fn capabilities_probes_the_requested_workspace_not_the_process_directory() -> Te
 }
 
 #[test]
-fn capabilities_without_a_workspace_reports_pending_rather_than_probing_the_cwd() -> TestResult {
-    // The no-argument arm must not silently substitute the process directory.
-    // The test binary runs inside this repository, which HAS a store, so a cwd
-    // probe here would report Ready and this assertion would catch it.
+fn capabilities_without_a_workspace_reports_pending() -> TestResult {
+    // The no-argument arm must report Pending rather than inventing a posture.
+    //
+    // This does NOT detect a cwd probe, and an earlier version of this comment
+    // claimed it did. The claim rested on the test binary running inside a
+    // checkout that has a store -- true on a dev Mac, false where this actually
+    // runs: `.ee/` is gitignored (.gitignore:17), so an RCH worker's clean
+    // overlay has no store in the process directory. There, a cwd probe would
+    // also report Pending and this assertion would pass while proving nothing.
+    //
+    // Kept because Pending IS the contract for "no workspace given" and a
+    // regression to Ready or Degraded would be wrong on any host. The
+    // discriminating assertion lives in the test above, which compares two
+    // different paths inside one process and cannot be satisfied by a probe
+    // that ignores the argument.
     let report = CapabilitiesReport::gather(Vec::new());
     let storage = subsystem_status(&report, "storage")?;
     ensure(
         matches!(storage, CapabilityStatus::Pending),
-        format!(
-            "capabilities with no workspace must report storage Pending rather than \
-             probing the process directory, got {storage:?}"
-        ),
+        format!("capabilities with no workspace must report storage Pending, got {storage:?}"),
     )
 }
