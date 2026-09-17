@@ -55,7 +55,17 @@ fn no_smoke_fixture_addresses_a_store_it_never_initialised() -> TestResult {
     let offenders = include_str!("smoke.rs")
         .split("\nfn ")
         .filter(|chunk| chunk.contains(needle.as_str()))
-        .filter(|chunk| !chunk.contains(init_marker.as_str()))
+        .filter(|chunk| {
+            // Comment lines are stripped before the init check. Without this
+            // the guard is defeated by the single most likely evasion there
+            // is -- `// TODO: this fixture should run "init" first` -- which
+            // is exactly what someone writes while deferring the fix. Verified:
+            // that substitution passed the first version of this guard.
+            !chunk
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .any(|line| line.contains(init_marker.as_str()))
+        })
         .filter_map(|chunk| chunk.split('(').next())
         .map(str::to_owned)
         .collect::<Vec<_>>();
