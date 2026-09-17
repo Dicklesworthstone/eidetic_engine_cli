@@ -289,9 +289,17 @@ fn starts_with_windows_drive_root(value: &str) -> bool {
 /// vulnerable, so this is not specific to `file`.
 fn sensitive_path_prefix_len(line: &str, index: usize) -> Option<usize> {
     let value = &line[index..];
+    // Ignoring ASCII case is the shared rule, not a local choice: macOS and
+    // Windows resolve `/USERS/alice` and `/Users/alice` to one file, and this
+    // repository's own leak detectors lowercase before matching `/users/`, so a
+    // case-sensitive redactor emits output our own gates classify as a leak.
     let longest = crate::util::SENSITIVE_PATH_PREFIXES
         .iter()
-        .filter(|prefix| value.starts_with(*prefix))
+        .filter(|prefix| {
+            value
+                .get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(*prefix))
+        })
         .map(|prefix| prefix.len())
         .max();
     if longest.is_some() {
@@ -308,16 +316,30 @@ fn sensitive_path_prefix_len(line: &str, index: usize) -> Option<usize> {
 /// Cheap pre-filter: might `text` contain a sensitive path anywhere?
 ///
 /// Must not be narrower than `sensitive_path_prefix_len`, or a line skips the
-/// redaction pass entirely and ships unredacted.
+/// redaction pass entirely and ships unredacted. That is why this widened to
+/// ignore ASCII case in the same commit as the walker: a case-sensitive
+/// pre-filter in front of a case-insensitive walker is exactly that failure,
+/// and it fails silently, on the lines that matter most.
 fn may_contain_sensitive_path(text: &str) -> bool {
-    if crate::util::SENSITIVE_PATH_PREFIXES
-        .iter()
-        .any(|prefix| text.contains(prefix))
-    {
+    if contains_sensitive_prefix_ignore_ascii_case(text) {
         return true;
     }
     text.char_indices()
         .any(|(index, _)| starts_with_windows_drive_root(&text[index..]))
+}
+
+/// Does a sensitive root appear anywhere in `text`, ignoring ASCII case?
+///
+/// Compares byte windows rather than lowercasing the line, because this runs on
+/// every exported line. Every entry of the shared set is non-empty ASCII, so
+/// `windows` cannot be handed a zero length here.
+fn contains_sensitive_prefix_ignore_ascii_case(text: &str) -> bool {
+    crate::util::SENSITIVE_PATH_PREFIXES.iter().any(|prefix| {
+        let prefix = prefix.as_bytes();
+        text.as_bytes()
+            .windows(prefix.len())
+            .any(|window| window.eq_ignore_ascii_case(prefix))
+    })
 }
 
 /// Redact file paths in content.
@@ -444,10 +466,14 @@ fn is_high_entropy_token(token: &str, threshold_bits_per_byte: f64) -> bool {
 }
 
 fn starts_with_sensitive_path_prefix(value: &str) -> bool {
-    if crate::util::SENSITIVE_PATH_PREFIXES
-        .iter()
-        .any(|prefix| value.starts_with(prefix))
-    {
+    // Case-insensitive for the same reason as the walker above; this one decides
+    // whether a WHOLE path field collapses to the placeholder, so a missed
+    // case-variant root here ships the entire absolute path verbatim.
+    if crate::util::SENSITIVE_PATH_PREFIXES.iter().any(|prefix| {
+        value
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    }) {
         return true;
     }
 
@@ -1517,6 +1543,61 @@ mod tests {
             redact_path("/usr/local/bin", RedactionLevel::Standard),
             "/usr/local/bin".to_owned(),
             "standard preserves system paths",
+        )
+    }
+
+    /// bd-redactor-prefix-divergence-lsy52. 93deb9193 made the shared predicate
+    /// and the search projection match roots without regard to ASCII case;
+    /// `support_bundle` was converted with the same rule. This file borrowed the
+    /// shared prefix SET but kept comparing with `starts_with`, and the guard in
+    /// `scripts/e2e_cross_cutting.sh` is keyed on a surface carrying its own
+    /// prefix LIST, so it had nothing to say about a surface that shares the list
+    /// and diverges on the match.
+    #[test]
+    fn redact_path_standard_matches_sensitive_roots_case_insensitively() -> TestResult {
+        ensure(
+            redact_path("/USERS/alice/.ssh/id_rsa", RedactionLevel::Standard),
+            REDACTED_PATH_PLACEHOLDER.to_owned(),
+            "standard redacts an upper-case home root",
+        )?;
+        ensure(
+            redact_path("/Private/Var/Run/agent.sock", RedactionLevel::Standard),
+            REDACTED_PATH_PLACEHOLDER.to_owned(),
+            "standard redacts a mixed-case macOS private root",
+        )?;
+        // Positive control: the canonical spelling redacted before this change
+        // and must still redact, so a mirror of this walker tracks both paths.
+        ensure(
+            redact_path("/Users/alice/.ssh/id_rsa", RedactionLevel::Standard),
+            REDACTED_PATH_PLACEHOLDER.to_owned(),
+            "standard still redacts the canonical home root",
+        )?;
+        // The pre-filter and the walker must widen together. This input reaches
+        // `redact_paths_in_content`, so it fails if `may_contain_sensitive_path`
+        // stays case-sensitive: the line would skip redaction entirely rather
+        // than come back half-redacted.
+        ensure(
+            redact_path(
+                "users=/USERS/alice/Notes.md tmp=/TMP/agent.sock ordinary=docs/Users.md",
+                RedactionLevel::Standard,
+            ),
+            format!(
+                "users={REDACTED_PATH_PLACEHOLDER} tmp={REDACTED_PATH_PLACEHOLDER} ordinary=docs/Users.md"
+            ),
+            "the pre-filter admits case-variant roots the walker redacts",
+        )?;
+        // Over-redaction controls. `/usr/` is not a sensitive root and must not
+        // become one by colliding with `/Users/` under a looser comparison, and
+        // a relative path naming `Users` has no root to redact.
+        ensure(
+            redact_path("/usr/local/bin", RedactionLevel::Standard),
+            "/usr/local/bin".to_owned(),
+            "case-insensitive matching does not swallow /usr/",
+        )?;
+        ensure(
+            redact_path("/notusers/x", RedactionLevel::Standard),
+            "/notusers/x".to_owned(),
+            "a root that merely contains a sensitive word stays visible",
         )
     }
 
