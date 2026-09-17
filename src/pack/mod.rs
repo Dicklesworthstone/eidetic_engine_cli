@@ -26,6 +26,10 @@ pub use crate::models::DegradationSeverity as ContextResponseSeverity;
 pub mod binary;
 pub mod budget_classifier;
 
+#[cfg(test)]
+#[path = "native_evidence_guard_tests.rs"]
+mod native_evidence_guard_tests;
+
 pub const SUBSYSTEM: &str = "pack";
 pub const PACK_COMMAND: &str = "pack";
 pub const DEFAULT_CONTEXT_MAX_TOKENS: u32 = 4_000;
@@ -2231,6 +2235,7 @@ impl PackDraft {
             .items
             .iter()
             .map(|item| item.estimated_tokens)
+            .chain(self.evidence_items.iter().map(|item| item.estimated_tokens))
             .sum::<u32>();
         self.selection_audit.selected_count = self.items.len();
         self.selection_audit.omitted_count = self.omitted.len();
