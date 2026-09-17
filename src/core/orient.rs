@@ -530,7 +530,10 @@ fn orient_fast_relevant_content(
     let context_search = run_context_search_with_preloaded_memories(
         &SearchOptions {
             workspace_path: options.workspace_path.to_path_buf(),
-            database_path: Some(database_path),
+            // Cloned rather than moved: the retrieval-audit write at the end of
+            // this function needs the same path to open a writable handle, and
+            // the read-only `connection` above cannot serve that write.
+            database_path: Some(database_path.clone()),
             index_dir: options.index_dir.map(Path::to_path_buf),
             query: options.task.to_owned(),
             limit: candidate_limit,

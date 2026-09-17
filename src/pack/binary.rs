@@ -765,7 +765,7 @@ mod tests {
             PackProvenance, PackSection, PackTrustSignal, TokenBudget, assemble_draft,
         };
 
-        let candidates = (0..memory_count)
+        let candidates: Vec<_> = (0..memory_count)
             .map(|index| {
                 let id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x1000 + u128::from(index)));
                 PackCandidate::new(PackCandidateInput {
