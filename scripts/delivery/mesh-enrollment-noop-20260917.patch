@@ -1,0 +1,125 @@
+diff --git a/src/mesh/auto_enrollment.rs b/src/mesh/auto_enrollment.rs
+--- a/src/mesh/auto_enrollment.rs
++++ b/src/mesh/auto_enrollment.rs
+@@ -677,7 +677,14 @@
+         &input.workspace_id,
+         &input.workspace_path,
+     );
+-    if existing_hash.is_some() && existing_hash == Some(intended_hash.as_str()) {
++    // The historical set hash covers current keys and lanes, not durable
++    // device bindings or pending revocations. Equal hashes cannot turn a
++    // requested management migration or stable-ID backfill into a no-op.
++    if !has_revocations
++        && stable_bindings_unchanged(input, selected)
++        && existing_hash.is_some()
++        && existing_hash == Some(intended_hash.as_str())
++    {
+         return AutoEnrollmentOutcome::AlreadyComplete;
+     }
+     if input.options.dry_run {
+@@ -687,6 +694,20 @@
+         return AutoEnrollmentOutcome::ExplainOnly;
+     }
+     AutoEnrollmentOutcome::Materialized
++}
++
++fn stable_bindings_unchanged(input: &AutoEnrollmentInput, selected: &[AutoEnrollmentCandidate]) -> bool {
++    selected.iter().all(|candidate| {
++        let Some(stable) = candidate.stable_node_id.as_deref() else {
++            // An older probe must not erase a previously stored binding.
++            return true;
++        };
++        let mut matched = input.existing_peers.iter().filter(|peer| {
++            peer.enabled && peer.node_key == candidate.node_key
++        });
++        matched.next().is_some_and(|peer| peer.stable_node_id.as_deref() == Some(stable))
++            && matched.next().is_none()
++    })
+ }
+ 
+ fn identity_guard_for_input(
+@@ -1381,6 +1402,69 @@
+         assert_eq!(right.outcome, "materialized");
+     }
+ 
++    #[test]
++    fn auto_enrollment_same_key_manual_migration_is_not_a_noop() {
++        let mut value = input(vec![candidate(VALID_NODE_KEY_ALPHA)]);
++        value.existing_peers = vec![manual_peer(VALID_NODE_KEY_ALPHA)];
++        value.options.replace_manual_with_auto = true;
++        let result = plan_auto_enrollment(value);
++        assert_eq!(result.outcome, "materialized");
++        assert!(result.materialization.writes_peer_rows);
++        assert!(result.materialization.manual_to_auto_migration_intended);
++        assert_eq!(result.materialization.peers_to_revoke, [VALID_NODE_KEY_ALPHA]);
++    }
++
++    #[test]
++    fn auto_enrollment_stable_id_backfill_is_not_hidden_by_the_key_set_hash() {
++        let mut value = input(vec![candidate(VALID_NODE_KEY_ALPHA)]);
++        value.existing_peers = vec![existing_auto_peer(VALID_NODE_KEY_ALPHA, "tailnet-alpha", Some("nodekey:self"))];
++        value.discovered_peers[0].stable_node_id = Some("stable-device".to_owned());
++        let result = plan_auto_enrollment(value);
++        assert_eq!(result.outcome, "materialized");
++        assert!(result.materialization.writes_peer_rows);
++        assert_eq!(result.materialization.peers_to_upsert[0].stable_node_id.as_deref(), Some("stable-device"));
++    }
++
++    #[test]
++    fn auto_enrollment_unchanged_stable_binding_remains_idempotent() {
++        let mut value = input(vec![candidate(VALID_NODE_KEY_ALPHA)]);
++        value.existing_peers = vec![existing_auto_peer(VALID_NODE_KEY_ALPHA, "tailnet-alpha", Some("nodekey:self"))];
++        value.existing_peers[0].stable_node_id = Some("stable-device".to_owned());
++        value.discovered_peers[0].stable_node_id = Some("stable-device".to_owned());
++        let result = plan_auto_enrollment(value.clone());
++        assert_eq!(result.outcome, "already_complete");
++        assert!(!result.materialization.writes_peer_rows);
++        value.discovered_peers[0].stable_node_id = None;
++        assert_eq!(plan_auto_enrollment(value).outcome, "already_complete");
++    }
++
++    #[test]
++    fn auto_enrollment_changed_stable_binding_reaches_the_identity_validator() {
++        let mut value = input(vec![candidate(VALID_NODE_KEY_ALPHA)]);
++        value.existing_peers = vec![existing_auto_peer(VALID_NODE_KEY_ALPHA, "tailnet-alpha", Some("nodekey:self"))];
++        value.existing_peers[0].stable_node_id = Some("original-device".to_owned());
++        value.discovered_peers[0].stable_node_id = Some("different-device".to_owned());
++        // The writer rejects the substitution. The planner must not suppress
++        // that check by claiming that matching current keys are complete.
++        assert!(plan_auto_enrollment(value).materialization.writes_peer_rows);
++    }
++
++    #[test]
++    fn auto_enrollment_binding_backfill_respects_dry_run_and_explain() {
++        let mut value = input(vec![candidate(VALID_NODE_KEY_ALPHA)]);
++        value.existing_peers = vec![existing_auto_peer(VALID_NODE_KEY_ALPHA, "tailnet-alpha", Some("nodekey:self"))];
++        value.discovered_peers[0].stable_node_id = Some("stable-device".to_owned());
++        value.options.dry_run = true;
++        let dry = plan_auto_enrollment(value.clone());
++        assert_eq!(dry.outcome, "dry_run");
++        assert!(!dry.materialization.writes_peer_rows);
++        value.options.dry_run = false;
++        value.options.explain = true;
++        let explain = plan_auto_enrollment(value);
++        assert_eq!(explain.outcome, "explained");
++        assert!(!explain.materialization.writes_peer_rows);
++    }
++
+     fn manual_peer(node_key: &str) -> ExistingAutoEnrollmentPeer {
+         ExistingAutoEnrollmentPeer {
+             peer_id: format!("peer_{}", node_key.replace("nodekey:", "")),
+diff --git a/src/cli/mesh.rs b/src/cli/mesh.rs
+--- a/src/cli/mesh.rs
++++ b/src/cli/mesh.rs
+@@ -3186,7 +3186,10 @@
+ 
+     if report.materialization.sync_once_after_materialization {
+         let sync_options = MeshSyncSupervisorOptions::default();
+-        match run_mesh_sync_supervisor(&snapshot, &sync_options) {
++        let sync_result = build_snapshot(cli, args.database.as_deref())
++            .map_err(|error| error.message())
++            .and_then(|current| run_mesh_sync_supervisor(&current, &sync_options));
++        match sync_result {
+             Ok(sync_report) => {
+                 if sync_report.degraded.is_empty() {
+                     report.record_sync_once_success(sync_report.contacted_peers);
