@@ -22,9 +22,27 @@
 //! meant to remove, still reachable through the unguarded path.
 //!
 //! This guard does NOT migrate those sites -- that is a separate decision
-//! about a 11-module sweep. It pins the population so the debt cannot grow
+//! about an 11-module sweep. It pins the population so the debt cannot grow
 //! silently, which is the one thing a prose note in a commit message cannot
 //! do. A NEW module that spawns a process without a deadline fails this test.
+//!
+//! KNOWN BOUNDARY, stated so this guard is not over-trusted. The predicate is
+//! "raw `Command::new` sites per module", which is a PROXY for "spawns without
+//! a deadline", not the property itself. Two consequences follow:
+//!
+//!   1. Migrating a site to `output_with_deadline` does not reduce its count,
+//!      because the migrated site still constructs a `Command`. After a sweep
+//!      the baseline entries become conservative rather than wrong.
+//!   2. The proxy has one real hole: a module that migrates one site AND adds
+//!      one raw site in the same change keeps its count, so the new unguarded
+//!      spawn passes. Per-module counting cannot see that; only a per-SITE
+//!      predicate that associates each `Command` with the call that consumes
+//!      it could, and that is a heavier analysis than text scanning supports.
+//!
+//! The guard is therefore sound against the common case (a new spawning
+//! module, or a module growing its spawn count) and blind to the mixed case.
+//! If the 13 sites are ever swept, replace the proxy rather than just editing
+//! the numbers down.
 //!
 //! Scanning the directory at runtime rather than an `include_str!` list is
 //! deliberate: a fixed list cannot see a spawn added in a file that did not
