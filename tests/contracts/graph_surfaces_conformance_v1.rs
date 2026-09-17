@@ -124,6 +124,28 @@ fn run_ee_bytes(workspace: &Path, args: &[&str], context: &str) -> Result<Vec<u8
 fn seed_graph_workspace(workspace: &Path) -> TestResult {
     run_ee_json(workspace, &["init", "--json"], "ee init")?;
 
+    // Every graph-derived section pinned here is disabled by default:
+    // `causal_explain`, `proximity`, `skyline` and `hits_profiles` each
+    // default to `false` (src/config/merge.rs). Left at their defaults, four
+    // of the six sections return an empty, feature-disabled payload -- so the
+    // byte-identity assertion compares two empty payloads and passes
+    // vacuously, pinning nothing about PageRank, HITS or skyline ordering,
+    // which is the cross-process reproducibility this file exists to guard.
+    //
+    // Written as a file rather than through `ee config set` because this
+    // suite is spawn-bound and four more `ee` invocations per test is a real
+    // cost. `ee init` does not create `.ee/config.toml`, so nothing is
+    // clobbered by writing it here.
+    let config_path = workspace.join(".ee").join("config.toml");
+    fs::write(
+        &config_path,
+        "[graph.feature.hits_profiles]\nenabled = true\n\n\
+         [graph.feature.skyline]\nenabled = true\n\n\
+         [graph.feature.causal_explain]\nenabled = true\n\n\
+         [graph.feature.proximity]\nenabled = true\n",
+    )
+    .map_err(|error| format!("write {}: {error}", config_path.display()))?;
+
     let seeds = [
         ("Insights conformance memory alpha.", "alpha"),
         ("Insights conformance memory beta.", "beta"),
