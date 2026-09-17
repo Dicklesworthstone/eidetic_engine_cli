@@ -158,6 +158,9 @@ if [ ! -x "$EE_BINARY" ]; then
     echo "    pass EE_BINARY/EE_BIN for an existing ee binary; this no-build harness will not run cargo" >&2
     exit 2
 fi
+# This epic re-resolves EE_BINARY from EE_BIN above instead of going through
+# epic_setup, so it records its own witness (bd-overhaul-false-binary-attestation-2rmdw).
+record_binary_witness
 
 IMPOSSIBLE_MIN_FREE_BYTES="18446744073709551615"
 report="$(PATH="$FAKE_BIN:$PATH" HOME="$FAKE_HOME" "$EE_BINARY" --workspace "$WORKSPACE" diag disk-pressure --json \

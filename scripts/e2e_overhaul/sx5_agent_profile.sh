@@ -168,6 +168,13 @@ record_outcomes() {
 require_jq
 EE_BINARY="$(resolve_ee_binary)"
 validate_ee_binary
+# This epic does not source lib/shared.sh and resolves its own binary above, so
+# it reports its own witness to the parent's attestation gate
+# (bd-overhaul-false-binary-attestation-2rmdw). The value is the POST-resolution
+# path, so a divergence from the hashed binary is caught rather than vouched for.
+if [ -n "${EE_BINARY_WITNESS:-}" ]; then
+    printf '%s' "$EE_BINARY" > "$EE_BINARY_WITNESS"
+fi
 ASSERTS_PASS=0
 ASSERTS_FAIL=0
 TMP_ROOT="${EE_E2E_TMPDIR:-${TMPDIR:-/tmp}}"

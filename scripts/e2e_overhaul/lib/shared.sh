@@ -60,6 +60,25 @@ require_ee_binary() {
     fi
 }
 
+# Report the binary this epic RESOLVED, so the parent's attestation is a
+# measurement instead of a restatement of what it passed down.
+#
+# scripts/e2e_overhaul.sh hashes one binary and then refuses to publish
+# ee_binary_hash unless every executed epic's witness equals it
+# (bd-overhaul-false-binary-attestation-2rmdw). That gate is fail-closed: an
+# epic that ran and left no witness counts exactly like a mismatch. Until this
+# call existed, NO registered epic wrote a witness -- only two non-epic scripts
+# did -- so every run reported `<letter>=no-witness`, withheld the hash, and
+# exited 4. The attestation could not be true, which is the same defect the
+# gate was built to remove, pointing the other way.
+#
+# The value written is the POST-resolution path, so an epic that re-resolves
+# the binary for itself is caught rather than vouched for.
+record_binary_witness() {
+    [ -n "${EE_BINARY_WITNESS:-}" ] || return 0
+    printf '%s' "$EE_BINARY" > "$EE_BINARY_WITNESS"
+}
+
 # ---------------------------------------------------------------------------
 # Workspace lifecycle
 # ---------------------------------------------------------------------------
@@ -506,6 +525,7 @@ epic_setup() {
     e2e_log_start "$EPIC_NAME"
     e2e_log_note "epic_setup_begin binary=$EE_BINARY"
     require_ee_binary
+    record_binary_witness
 
     EPIC_TMP_ROOT="${EE_E2E_TMPDIR:-${TMPDIR:-/tmp}}"
     e2e_log_note "epic_setup_tmp_root tmp_root=$EPIC_TMP_ROOT"
