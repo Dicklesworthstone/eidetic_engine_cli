@@ -10,19 +10,64 @@
 //! shapes, environment tweaks, current_dir, and failure text; only the
 //! serialization gate is shared.
 
+use std::io::Read;
 use std::process::{Command, Output, Stdio};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-/// Crate-wide serialization gate for every real-binary spawn below.
-static REAL_EE_SERIAL: Mutex<()> = Mutex::new(());
+/// How many real-binary spawns may run at once.
+///
+/// bd-7vtqm made this gate a crate-wide mutex -- effectively a permit count of
+/// one -- as CPU-contention hygiene. That is a throttle, not a correctness
+/// device: no two serialized spawns share any state. Of the 25 contending
+/// modules, 14 invoke `ee` with no workspace at all (`--version`, `--help`,
+/// `capabilities`) and 11 build a fresh `tempfile::tempdir()` per test. None
+/// uses a fixed shared path, so there is no shared database, no shared flock,
+/// and nothing for two concurrent spawns to corrupt.
+///
+/// A permit count of one made the suite's wall clock the SUM of every spawn,
+/// which is why contracts could not finish inside its cap even after the
+/// deadlock was bounded. Four permits keep the thundering-herd protection
+/// bd-7vtqm wanted while letting the OS scheduler do the job it exists for.
+const REAL_EE_MAX_CONCURRENT_SPAWNS: usize = 4;
 
-fn lock_real_ee_serial() -> MutexGuard<'static, ()> {
-    // A panicked peer poisons the gate, but the lock guards scheduling
-    // hygiene only; poisoned or not, later spawns must proceed.
-    REAL_EE_SERIAL
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+fn max_concurrent_spawns() -> usize {
+    std::env::var("EE_CONTRACTS_MAX_CONCURRENT_SPAWNS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|permits| *permits > 0)
+        .unwrap_or(REAL_EE_MAX_CONCURRENT_SPAWNS)
+}
+
+/// Permits currently in use, paired with the condvar waiters block on.
+static REAL_EE_PERMITS: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
+/// Releases its permit on drop, including when the test panics, so a failing
+/// peer cannot leak capacity the way a poisoned mutex once could.
+struct SpawnPermit;
+
+impl Drop for SpawnPermit {
+    fn drop(&mut self) {
+        let (lock, waiters) = &REAL_EE_PERMITS;
+        let mut in_use = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *in_use = in_use.saturating_sub(1);
+        waiters.notify_one();
+    }
+}
+
+fn lock_real_ee_serial() -> SpawnPermit {
+    let permits = max_concurrent_spawns();
+    let (lock, waiters) = &REAL_EE_PERMITS;
+    // A panicked peer poisons the gate, but it guards scheduling hygiene only;
+    // poisoned or not, later spawns must proceed.
+    let mut in_use = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    while *in_use >= permits {
+        in_use = waiters
+            .wait(in_use)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+    *in_use += 1;
+    SpawnPermit
 }
 
 /// Wall-clock cap for one serialized spawn.
@@ -80,17 +125,38 @@ fn output_with_deadline(command: &mut Command, timeout: Duration) -> std::io::Re
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn()?;
+
+    // Drain both pipes on their own threads, CONCURRENTLY with the wait.
+    //
+    // This is not optional and it is not an optimisation. `Command::output()`
+    // drains while it waits (`wait_with_output` reads both pipes). A poll loop
+    // that waits WITHOUT draining deadlocks any child that writes more than the
+    // pipe buffer -- ~64 KiB -- because the child blocks on write, never exits,
+    // and `try_wait` therefore never reports exit. The first version of this
+    // function had exactly that bug: it polled `try_wait` and only drained
+    // afterwards. It did not fire in practice because the largest contracts
+    // spawn measures ~30 KB (`ee capabilities --json`), which is under the
+    // buffer -- so the defect was real, latent, and masked by output size.
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_reader = std::thread::spawn(move || drain(stdout_pipe));
+    let stderr_reader = std::thread::spawn(move || drain(stderr_pipe));
+
     let deadline = Instant::now() + timeout;
-    loop {
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
         }
         if Instant::now() >= deadline {
-            if child.try_wait()?.is_some() {
-                return child.wait_with_output();
+            if let Some(status) = child.try_wait()? {
+                break status;
             }
             let _ = child.kill();
             let _ = child.wait();
+            // Join before returning so the reader threads cannot outlive this
+            // call; killing the child closes the pipes, so both return.
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!(
@@ -101,7 +167,26 @@ fn output_with_deadline(command: &mut Command, timeout: Duration) -> std::io::Re
             ));
         }
         std::thread::sleep(Duration::from_millis(25));
+    };
+
+    Ok(Output {
+        status,
+        stdout: stdout_reader.join().unwrap_or_default(),
+        stderr: stderr_reader.join().unwrap_or_default(),
+    })
+}
+
+/// Read a child pipe to end, returning what arrived.
+///
+/// A read error yields what was collected rather than failing the spawn: the
+/// caller's contract is the child's exit status plus its output, and a partial
+/// read is strictly more informative than an error that discards both.
+fn drain(pipe: Option<impl Read>) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    if let Some(mut pipe) = pipe {
+        let _ = pipe.read_to_end(&mut buffer);
     }
+    buffer
 }
 
 /// Path of the real `ee` binary provided by the Cargo test harness. This is
@@ -167,6 +252,35 @@ fn the_deadline_kills_a_child_that_never_exits() {
         started.elapsed() < Duration::from_secs(30),
         "the deadline did not bound the wait; elapsed {:?}",
         started.elapsed()
+    );
+}
+
+/// A child that writes more than the pipe buffer must still complete.
+///
+/// This is the regression test for the bug the first version of
+/// `output_with_deadline` had: polling `try_wait` without draining. A child
+/// writing past ~64 KiB blocks on write, so it never exits, so `try_wait` never
+/// reports exit, and the call burns the whole timeout before killing a process
+/// that was only trying to talk. 256 KiB is comfortably past the buffer on
+/// every platform we run on.
+///
+/// It did not fire in production only because the largest contracts spawn is
+/// ~30 KB. A test that used a small payload would have passed against the
+/// broken version, which is why the size is the point of this test.
+#[cfg(unix)]
+#[test]
+fn a_child_that_outgrows_the_pipe_buffer_still_completes() {
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg("i=0; while [ $i -lt 4096 ]; do printf '%064d' $i; i=$((i+1)); done");
+    let output = output_with_deadline(&mut command, Duration::from_secs(60))
+        .expect("a large-output child must not be reported as a timeout");
+    assert!(output.status.success(), "generator should exit 0: {output:?}");
+    assert_eq!(
+        output.stdout.len(),
+        4096 * 64,
+        "stdout must be captured in full, not truncated at the pipe buffer"
     );
 }
 
