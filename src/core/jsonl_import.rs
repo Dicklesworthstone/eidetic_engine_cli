@@ -4153,10 +4153,28 @@ mod tests {
             .first()
             .ok_or_else(|| "prepared memory missing".to_string())?;
 
+        // The archive spells this `...Z`; import re-emits it in OFFSET form.
+        // That asymmetry is deliberate and is the whole point of bd-o22r0:
+        // `tombstoned_at` is a ROW bookkeeping column, normalized with
+        // `normalize_row_timestamp` (plain `to_rfc3339()`), while `valid_from`
+        // and `valid_to` below are VALIDITY columns normalized with
+        // `normalize_validity_timestamp` (`SecondsFormat::Secs`, `Z`). The two
+        // spellings coexist on purpose -- `insert_memory` has always written
+        // row columns in offset form, so rewriting them to `Z` would touch
+        // every existing row (src/core/memory.rs:3783).
+        //
+        // This assertion previously expected the archive's `Z` spelling, i.e.
+        // the pre-bd-o22r0 contract, and so failed once normalization landed.
+        // Do NOT "fix" this back to `Z`: the lexical-sort hazard bd-o22r0
+        // closed is that mixing spellings inside ONE column makes a row appear
+        // newer than its sibling at the same instant, which is how V123's
+        // supersession backfill left two live heads in a chain. Matching the
+        // spelling per column class is the fix; making the two classes agree
+        // would reintroduce it.
         ensure(
             memory.tombstoned_at.as_deref(),
-            Some("2026-05-02T00:00:00Z"),
-            "tombstoned_at",
+            Some("2026-05-02T00:00:00+00:00"),
+            "tombstoned_at is normalized to the ROW offset spelling, not the archive's Z",
         )?;
         ensure(
             memory.tombstoned_reason.as_deref(),
