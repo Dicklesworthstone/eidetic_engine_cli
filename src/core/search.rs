@@ -7602,6 +7602,27 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
             run.report.embed_backend = preparation.backend;
         }
         run.report.elapsed_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+        // bd-l8dn0. Record this retrieval. The pack path (`retrieval_only`) is
+        // excluded because it hands these same facts to the context writer, which
+        // records them against its own write connection (context.rs:2975);
+        // recording here too would double-count every packed hit.
+        //
+        // This runs AFTER `finish_search_snapshot` has released the read pin: the
+        // audit write takes the flock write gate, and taking it while still holding
+        // the read snapshot would serialize a read surface behind writers.
+        if !retrieval_only
+            && let Some(facts) = &run.audit_facts
+            && let Ok(connection) = DbConnection::open_file(&database_path)
+        {
+            facts.record(
+                options,
+                &connection,
+                &run.report.results,
+                run.report.status,
+                &mut SearchAuditIdSource::Ambient,
+                &mut SearchPerformanceTrace::default(),
+            );
+        }
         return Ok(run);
     }
 
@@ -9234,27 +9255,34 @@ async fn run_search_inner_with_performance(
 
             search_checkpoint(cx)?;
 
-            let audit_facts =
-                (capture_deferred_audit || audit_connection.is_some()).then(|| SearchAuditFacts {
-                    floor_counts,
-                    kept,
-                    dropped,
-                    floor,
-                    pre_floor_top_score,
-                    redactions: if output_redaction_enabled {
-                        above_floor
-                            .iter()
-                            .map(|hit| {
-                                (
-                                    hit.doc_id.clone(),
-                                    search_hit_output_redaction_patterns(hit),
-                                )
-                            })
-                            .collect()
-                    } else {
-                        BTreeMap::new()
-                    },
-                });
+            // bd-l8dn0. These facts used to be built only for the pack path or
+            // for a caller that supplied a write connection, so a plain
+            // `ee search` produced none and recorded nothing. ADR 0071 defines
+            // `never_retrieved` as the ABSENCE of search.returned_mem rows, so a
+            // surface that never writes them makes actively-used memories read as
+            // debt. Always retain them; the caller decides whether to record.
+            // `capture_deferred_audit` is deliberately not reused as the switch --
+            // it also gates global-store hit collection below.
+            let audit_facts = Some(SearchAuditFacts {
+                floor_counts,
+                kept,
+                dropped,
+                floor,
+                pre_floor_top_score,
+                redactions: if output_redaction_enabled {
+                    above_floor
+                        .iter()
+                        .map(|hit| {
+                            (
+                                hit.doc_id.clone(),
+                                search_hit_output_redaction_patterns(hit),
+                            )
+                        })
+                        .collect()
+                } else {
+                    BTreeMap::new()
+                },
+            });
             // A missing caller-owned write connection still means no writes.
             // Remote retrieval returns these facts for the local pack writer.
             if let Some(connection) = audit_connection
