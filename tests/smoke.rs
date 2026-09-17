@@ -30,6 +30,45 @@ use ee::obs::strip_volatile_fields;
 
 type TestResult = Result<(), String>;
 
+/// bd-tvi3a as an INVARIANT rather than six separate repairs.
+///
+/// Six fixtures in this file addressed `<workspace>/.ee/ee.db` after only
+/// `create_dir_all`. `91cf7bcbd` ("reject storeless write and search addresses")
+/// made `ee init` the only thing that creates a store, so each was addressing a
+/// store that did not exist. Five were found by a failing shard run; the SIXTH
+/// was found by this rule, before any run saw it.
+///
+/// Two deliberate choices, both learned the hard way in this file:
+///
+/// 1. It splits on top-level `fn ` boundaries instead of matching braces. This
+///    file's JSON string literals contain unbalanced `{`, which desynchronises a
+///    brace counter -- that bug produced a false reading here twice, once
+///    reporting a fixed fixture as unfixed.
+/// 2. It BUILDS the pattern instead of writing it literally. A literal would
+///    appear in this function's own source, and this function has no `init`
+///    call, so the check would flag itself -- a self-accusing guard that would
+///    have to be special-cased to stay green.
+#[test]
+fn no_smoke_fixture_addresses_a_store_it_never_initialised() -> TestResult {
+    let needle = format!(".join({:?}).join({:?})", ".ee", "ee.db");
+    let init_marker = format!("{:?}", "init");
+    let offenders = include_str!("smoke.rs")
+        .split("\nfn ")
+        .filter(|chunk| chunk.contains(needle.as_str()))
+        .filter(|chunk| !chunk.contains(init_marker.as_str()))
+        .filter_map(|chunk| chunk.split('(').next())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+    ensure(
+        offenders.is_empty(),
+        format!(
+            "these fixtures target <workspace>/.ee/ee.db but never run `ee init`, \
+             so they address a store that does not exist: {offenders:?}"
+        ),
+    )
+}
+
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
