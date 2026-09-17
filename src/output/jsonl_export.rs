@@ -269,16 +269,40 @@ fn starts_with_windows_drive_root(value: &str) -> bool {
         && matches!(bytes[2], b'/' | b'\\')
 }
 
-/// Length of the sensitive-path prefix at `value`, if one starts there.
+/// Length of the sensitive-path prefix starting at `index` in `line`, if one
+/// starts there.
 ///
 /// Returns the LONGEST match so a nested path is not half-redacted.
-fn sensitive_path_prefix_len(value: &str) -> Option<usize> {
+///
+/// Takes the whole line and an index rather than a slice because a Windows
+/// drive root is a FORM, not a prefix, and deciding it needs the character
+/// BEFORE it. `crate::util::sensitive_path_starts_at` requires a token boundary
+/// there for exactly this reason; this walker did not, and the omission ate a
+/// URI scheme:
+///
+///   file:///Users/alice/x.bin  ->  fil[REDACTED_PATH]
+///
+/// because at index 3 the remaining text is `e:///Users/...`, and `e:` followed
+/// by `/` is a well-formed drive root. Redaction began three characters early
+/// and destroyed the `file://` scheme the surrounding code takes care to
+/// preserve. Any scheme whose second-to-last character is a letter is
+/// vulnerable, so this is not specific to `file`.
+fn sensitive_path_prefix_len(line: &str, index: usize) -> Option<usize> {
+    let value = &line[index..];
     let longest = crate::util::SENSITIVE_PATH_PREFIXES
         .iter()
         .filter(|prefix| value.starts_with(*prefix))
         .map(|prefix| prefix.len())
         .max();
-    longest.or_else(|| starts_with_windows_drive_root(value).then_some(3))
+    if longest.is_some() {
+        return longest;
+    }
+    // Same boundary rule as the shared predicate, so a bare `C:` inside a word
+    // is not mistaken for a path root.
+    let token_boundary_before = line[..index].chars().next_back().is_none_or(|previous| {
+        previous.is_whitespace() || matches!(previous, '"' | '\'' | '`' | '(' | '[' | '{' | '=')
+    });
+    (token_boundary_before && starts_with_windows_drive_root(value)).then_some(3)
 }
 
 /// Cheap pre-filter: might `text` contain a sensitive path anywhere?
@@ -325,7 +349,7 @@ fn redact_paths_in_line(line: &str) -> String {
     let mut cursor = 0;
     while cursor < line.len() {
         let remaining = &line[cursor..];
-        let matched_prefix_len = sensitive_path_prefix_len(remaining);
+        let matched_prefix_len = sensitive_path_prefix_len(line, cursor);
         if let Some(prefix_len) = matched_prefix_len {
             output.push_str(REDACTED_PATH_PLACEHOLDER);
             cursor += prefix_len;
