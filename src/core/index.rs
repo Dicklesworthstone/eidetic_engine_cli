@@ -5724,6 +5724,13 @@ fn verified_default_model_dir(settings: &EeEmbedderSettings) -> Option<PathBuf> 
     .then(|| settings.model_root.clone())
 }
 
+/// Test-only since 5434b5b4e (bd-kvltg). Production now resolves through
+/// `default_search_embedder_stack_with_provenance`, which carries the origin
+/// fact the posture needs; this bare wrapper survives only because the
+/// incremental-index tests want a stack without provenance. Gating it rather
+/// than deleting it keeps those tests reading naturally, and gating it rather
+/// than leaving it ungated keeps `dead_code` honest in non-test builds.
+#[cfg(test)]
 fn default_embedder_stack() -> EmbedderStack {
     default_search_embedder_stack()
 }
