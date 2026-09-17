@@ -8155,13 +8155,25 @@ async fn run_similar_with_cx_and_posture(
     };
     let determinism = Deterministic::from_seed(0);
     let mut audit_ids = SearchAuditIdSource::Ambient;
+    // bd-b9dmp. `connection` above is opened read-only, so passing it as the
+    // AUDIT connection meant every retrieval row `ee similar` tried to write
+    // failed. The batch flush is best-effort (flush_best_effort_with_connection
+    // logs a warning and swallows the error), so this lost every row silently
+    // while the call site read as correctly instrumented -- `Some(&connection)`
+    // looks like audit wiring is present. The memories `similar` returned were
+    // scored as never_retrieved, which feeds decay and trust.
+    //
+    // A separate writable handle, best-effort like the other surfaces: a read
+    // command must not fail because the write gate is busy, and None simply
+    // withholds the rows rather than erroring the search.
+    let audit_connection = DbConnection::open_file(&database_path).ok();
     let mut report = run_search_inner(
         cx,
         &search_options,
         Some(&connection),
         determinism.shared_child("search.rerank"),
         &mut audit_ids,
-        Some(&connection),
+        audit_connection.as_ref(),
         true,
         None,
     )
