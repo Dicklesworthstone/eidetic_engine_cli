@@ -268,11 +268,29 @@ where
     let _spawn_permit = acquire_spawn_permit();
     let mut command = Command::new(ee_binary());
     configure(&mut command);
-    // AFTER `configure` deliberately: eight modules `env_remove` this variable
-    // to avoid inheriting an ambient registry, which silently drops them onto
-    // the global one. Their intent is isolation; setting it here delivers that
-    // intent rather than overriding it.
-    command.env("EE_WORKSPACE_REGISTRY", isolated_registry_path());
+    // AFTER `configure`, but ONLY when the caller did not choose a registry.
+    //
+    // Two intents are indistinguishable at this point unless we look, and
+    // conflating them broke a contract row:
+    //
+    //   `env_remove` (the common case) means "isolate me". `get_envs` reports
+    //   the key with a None value, and injecting the per-spawn registry
+    //   DELIVERS that intent rather than overriding it.
+    //
+    //   `.env(path)` means "use THIS registry". Overwriting it destroys the
+    //   caller's setup. resume_schema's `run_real_ee_with_registry` exists
+    //   precisely to hand `ee` a chosen registry, and its two
+    //   registry-unavailable rows point it at one the test made unreadable.
+    //   Replacing that with a fresh, valid, isolated registry made the
+    //   precondition FALSE, so both rows asserted against a working registry
+    //   and failed -- not because `ee` regressed, but because the harness
+    //   removed the condition under test.
+    let caller_chose_registry = command
+        .get_envs()
+        .any(|(key, value)| key.to_str() == Some("EE_WORKSPACE_REGISTRY") && value.is_some());
+    if !caller_chose_registry {
+        command.env("EE_WORKSPACE_REGISTRY", isolated_registry_path());
+    }
     output_with_timeout(&mut command)
 }
 
