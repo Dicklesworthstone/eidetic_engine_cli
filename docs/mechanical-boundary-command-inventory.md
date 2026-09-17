@@ -8,13 +8,36 @@ commands start at `src/cli/mod.rs:253`, and diagnostic command-path extraction i
 `CliInvocationContext::extract_command_path` at `src/cli/mod.rs:20327`.
 
 `--help-json` is a global exit path at `src/cli/mod.rs:164` and is dispatched before subcommands
-at `src/cli/mod.rs:3778`; it is not counted as a command path. The inventory below covers the
-204 stable command paths returned by the command-path extractor.
+at `src/cli/mod.rs:3778`; it is not counted as a command path.
+
+**Scope, measured rather than asserted (bd-...-igo3a).** The command-path
+extractor returns **453** paths. This document currently covers **211** of
+them; **242** are absent. It previously claimed to cover "the 204 stable
+command paths returned by the command-path extractor" — a number typed on
+2026-05-19 that was never re-measured, and which its own Full Command
+Inventory table never matched (that table lists 196 paths, not 204). Both
+numbers are corrected here rather than left as a self-description that
+disagrees with the artifact and with the CLI.
+
+There is no separate "stable" filter to apply: the header defines this
+document's scope AS the extractor's output, so every path the extractor
+returns is in scope by construction. The single named exclusion, `--help-json`,
+is honoured — the extractor emits `help` (Clap's built-in subcommand) and does
+not emit `help-json`.
+
+How to re-measure, so the next reader does not re-derive it: mirror
+`command_paths_from_extract_function` (tests/mechanical_boundary_inventory.rs)
+over the marker-delimited body of `extract_command_path` in `src/cli/mod.rs`,
+then test each path for a backticked occurrence in a **table row** of this
+file. Do not count occurrences anywhere in the file; prose does not document a
+command.
 
 E2E audit record for this inventory:
 
 - Command source: `src/cli/mod.rs`
-- Command path count: 204
+- CLI command paths returned by the extractor: 453
+- Documented in a table row here: 211
+- Absent: 242
 - Unmapped command count: 0
 - Matrix enforcement floor: 24
 - Stdout/stderr contract: this file is static documentation; the companion test only reads source
@@ -57,6 +80,44 @@ What the matrix is FOR — which paths deserve a twelve-column row, and whether
 "absent from the matrix" is a decision or an oversight — is not settled here.
 That is the open contract question on bd-o74n4 and it needs an operator ruling.
 The floor does not answer it; it only stops the question from disappearing.
+
+## What is still absent (bd-...-igo3a)
+
+242 of the 453 extractor paths have no row here, spread across 72 families.
+Listed so the remaining work is stated in the artifact instead of being
+re-derived from the CLI a fifth time. Counts are absent-paths-per-family:
+
+`team` 35 · `diag` 25 · `mesh` 24 · `verification` 11 · `verify` 11 ·
+`hook` 9 · `curate` 7 · `memory` 6 · `sandbox` 5 · `conflict` 4 · `db` 4 ·
+`graph` 4 · `journal` 4 · `attest` 3 · `config` 3 · `decide` 3 · `lab` 3 ·
+`maintenance` 3 · `migrate` 3 · `perf` 3 · `reflect` 3 · `shadow` 3 ·
+`swarm` 3 · `backup` 2 · `bootstrap` 2 · `cache` 2 · `handoff` 2 ·
+`health` 2 · `learn` 2 · `lens` 2 · `mcp` 2 · `proof` 2 · `recorder` 2 ·
+`review` 2 · `search` 2 · `sentinel` 2 · `subscribe` 2 · and 35 families
+contributing one path each (`artifact relocate`, `ask`, `capture suggest`,
+`context-show`, `coordination evidence ingest`, `diagnose-error`,
+`export agentsmd`, `focus suggest`, `history`, `impact`, `import agentsmd`,
+`index backfill-tags`, `insights`, `link`, `model fetch`, `note`, `orient`,
+`plan recipe save`, `preflight check`, `primer`, `proximity`, `recall`,
+`regress explain`, `resume`, `rule provenance`, `serve`,
+`session-budget plan`, `similar`, `situation adopt`, `tag`, `timeline`,
+`trust report`, `why-not`, `workflow create`, `workspace hygiene`).
+
+**This list is deliberately NOT a table.** The coverage assertion requires a
+path to appear in a table ROW, so naming a command here does not document it
+and cannot turn the gate green. That separation is the whole point of the
+bd-o74n4 predicate change: a work list and a completed row have to stay
+distinguishable, or recording the backlog would silently satisfy the gate that
+tracks it.
+
+Each row still owed needs three things that cannot be generated: a real
+handler/core anchor, an honest description of the current source shape, and a
+disposition from the legend above. The effect manifest (`src/core/effect.rs`)
+now carries a reviewed declaration for all 453 paths and is the right input
+for the first two columns; the disposition is a judgement and should not be
+defaulted in bulk, because that column currently carries real findings
+("split; degrade/unavailable until evidence-backed", "fix backing data where
+health is synthetic") that a uniform fill would dilute into noise.
 
 ## Disposition Legend
 
