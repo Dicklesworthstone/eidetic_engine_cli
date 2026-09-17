@@ -57,7 +57,10 @@ mod tests {
             candidate("unrelated", "The database listens on port 5432."),
         ];
         if conflict {
-            candidates.push(candidate("opposition", "Do not run cargo fmt before release."));
+            candidates.push(candidate(
+                "opposition",
+                "Do not run cargo fmt before release.",
+            ));
         }
         evaluate_ask(
             &AskRequest {
@@ -92,7 +95,10 @@ mod tests {
         let citations = cited_memories(&report);
         assert!(std::ptr::eq(citations[0], &report.citations[0]));
         assert_eq!(citations[0].trust_class, "human_explicit");
-        assert_eq!(citations[0].provenance_uri.as_deref(), Some("manual://retrieval/format"));
+        assert_eq!(
+            citations[0].provenance_uri.as_deref(),
+            Some("manual://retrieval/format")
+        );
     }
 
     #[test]
