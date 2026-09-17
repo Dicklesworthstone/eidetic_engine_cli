@@ -1,57 +1,19 @@
-name: Deliver exact ask clustering
+name: Ask delivery (retired)
 
-# Main-only delivery of the reviewed sparse-clustering integration.
-# Retire this workflow after verifying the resulting source commit.
+# Completed one-time delivery directly to main, without PRs or force pushes.
+# Actions run 35254991516:
+# d40e84b4daf5757a45411e3dc4fd822c6565ca40 - complete scoped counterevidence
+# Actions run 35255837784:
+# 0ceafad1dbd578107c024606c6f52c996a2d05c1 - exact sparse span clustering
+# Nightly rustfmt parsed the integration and formatted ask-specific modules.
+# Added tests have not been executed; compilation/Clippy are not certified.
+# No automatic trigger, write permission, or delivery commands remain.
 on:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/deliver-ask-corpus-20260917.yml
-      - scripts/delivery/ask-sparse-clustering-20260917.patch
   workflow_dispatch:
-permissions:
-  contents: read
-concurrency:
-  group: deliver-ask-corpus-20260917
-  cancel-in-progress: false
+permissions: {}
 jobs:
-  deliver:
-    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+  retired:
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-          clean: false
-      - name: Integrate exact sparse clustering and parse Rust sources
-        shell: bash
-        env:
-          RUSTUP_TOOLCHAIN: nightly
-        run: |
-          set -euo pipefail
-          patch=scripts/delivery/ask-sparse-clustering-20260917.patch
-          git apply --check "$patch"
-          git apply "$patch"
-          rustup toolchain install nightly --profile minimal --component rustfmt
-          rustfmt +nightly --edition 2024 --config skip_children=true src/core/ask_clustering.rs src/core/ask_clustering_tests.rs src/core/ask_candidates.rs src/core/ask_candidate_selection_tests.rs
-          rustfmt +nightly --edition 2024 --config skip_children=true --emit stdout src/core/ask.rs >/dev/null
-          git diff --check
-          git diff --stat
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/core/ask.rs src/core/ask_clustering.rs src/core/ask_clustering_tests.rs src/core/ask_candidates.rs src/core/ask_candidate_selection_tests.rs
-          git commit -m 'perf(ask): use exact sparse span clustering without dropping evidence' -m 'Keep greedy seed ordering, polarity, Jaccard counts and distinct-source corroboration while avoiding comparisons between disjoint spans. Integrate seven differential and work-count regressions. Nightly rustfmt parsed the integration and formatted the ask-specific modules; Rust test execution and full-crate compilation are not claimed.'
-          for attempt in 1 2 3; do
-            if git push origin HEAD:main; then
-              printf 'Delivered source commit: '
-              git rev-parse HEAD
-              exit 0
-            fi
-            git fetch origin main
-            git merge --no-edit origin/main
-          done
-          exit 1
+      - run: echo 'This one-time delivery is retired.'
