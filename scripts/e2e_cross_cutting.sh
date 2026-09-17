@@ -174,6 +174,78 @@ assert_jq_file_argjson "$MIGRATION_MANIFEST" \
     '[.allocations[] | select(.status == "planned") | .version] | min > $tail' \
     "migration registry reservations stay ahead of the compiled tail"
 
+step "no integration shard carries a property-test load"
+# bd-in3xj. The shards are split by FILENAME, and every tests/property_*.rs
+# sorts into the N-R range, so the split had put 98 of the suite's 105 property
+# functions -- 21,832 proptest cases -- into integration_n_r alongside 771
+# ordinary tests. n_r could not reach its "test result:" line, so NONE of its
+# tests could be graded, including its 38 failures. 7a5ce6d30 moved them to
+# integration_property; this stops the next property_*.rs from landing back in
+# n_r and re-breaking it.
+#
+# The limit is a LOAD threshold, not a ban on the macro. Four small proptest
+# blocks live legitimately outside the property shard (recall_cli_golden,
+# field_selector_unit, journal_capture_property, swarm_slo_replay_parser_proptest),
+# together about 320 cases with no shard over 96. A ban on presence would fail
+# all four; 1000 leaves them ten times over while catching any real property
+# file, which carries hundreds of cases per module.
+shard_property_load="$(
+    python3 - <<'PYEOF'
+import io, os, re, glob
+
+LIMIT = 1000
+BASE = "tests/suites"
+offenders = []
+for suite in sorted(glob.glob("tests/suites/integration_*.rs")):
+    name = os.path.basename(suite)
+    if name == "integration_property.rs":
+        continue
+    cases = 0
+    registration = io.open(suite, encoding="utf-8").read()
+    for rel in re.findall(r'#\[path\s*=\s*"([^"]+)"\]', registration):
+        path = os.path.normpath(os.path.join(BASE, rel))
+        if not os.path.exists(path):
+            continue
+        text = io.open(path, encoding="utf-8", errors="replace").read()
+        helper = re.search(r"fn\s+config\s*\(\)\s*->\s*ProptestConfig\s*\{[^}]*with_cases\((\d+)\)", text)
+        helper_cases = int(helper.group(1)) if helper else None
+        for block in re.finditer(r"\bproptest!\s*\{", text):
+            start = block.end() - 1
+            depth = 0
+            for index in range(start, len(text)):
+                if text[index] == "{":
+                    depth += 1
+                elif text[index] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+            body = text[start:index]
+            functions = len(re.findall(r"\bfn\s+\w+\s*\(", body))
+            per_case = 256
+            inline = re.search(r"proptest_config\(\s*ProptestConfig::with_cases\((\d+)\)", body)
+            struct = re.search(r"ProptestConfig\s*\{[^}]*cases\s*:\s*(\d+)", body)
+            via_fn = re.search(r"proptest_config\(\s*config\(\)\s*\)", body)
+            if inline:
+                per_case = int(inline.group(1))
+            elif struct:
+                per_case = int(struct.group(1))
+            elif via_fn and helper_cases:
+                per_case = helper_cases
+            cases += functions * per_case
+    if cases > LIMIT:
+        offenders.append(f"{name} ({cases} proptest cases, limit {LIMIT})")
+print("\n".join(offenders))
+PYEOF
+)"
+if [ -z "$shard_property_load" ]; then
+    e2e_log_assert_eq "0" "0" "integration shards carry no property-test load"
+    _harness_pass "integration shards carry no property-test load"
+else
+    e2e_log_assert_eq "$(printf '%s\n' "$shard_property_load" | wc -l | tr -d ' ')" "0" \
+        "integration shards carry no property-test load"
+    _harness_fail "integration shards carry no property-test load: move these modules to tests/suites/integration_property.rs -- $(printf '%s' "$shard_property_load" | tr '\n' ' ')"
+fi
+
 step "path redactors keep one shared prefix set"
 # bd-redactor-prefix-divergence-lsy52. Twenty-one redactors each carried their
 # own hand-copied path-prefix list. They diverged into three incompatible
