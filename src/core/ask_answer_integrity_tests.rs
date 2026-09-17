@@ -146,7 +146,9 @@ fn ordinary_valid_answer_is_still_extractive() {
     assert_eq!(report.citations.len(), 1);
     let citation = &report.citations[0];
     assert_eq!(
-        candidates[0].content.get(citation.byte_start..citation.byte_end),
+        candidates[0]
+            .content
+            .get(citation.byte_start..citation.byte_end),
         Some(citation.text.as_str()),
     );
 }
@@ -296,7 +298,12 @@ fn one_shared_generic_term_is_not_enough_to_infer_a_conflict() {
 fn scoped_tls_opposition_remains_detectable() {
     let clusters = [
         span("all", 0, "TLS is required for all connections.", 0.8),
-        span("internal", 0, "TLS is not required for internal connections.", 0.7),
+        span(
+            "internal",
+            0,
+            "TLS is not required for internal connections.",
+            0.7,
+        ),
     ];
     assert!(detect_contradiction(&clusters));
 }
@@ -340,7 +347,10 @@ fn lower_ranked_opposition_emits_only_the_related_conflict_sides() {
 fn subthreshold_opposition_does_not_suppress_a_supported_answer() {
     let mut opposition = candidate("opposition", "Do not run cargo fmt before release.");
     opposition.confidence = 0.0;
-    let candidates = [candidate("format", "Run cargo fmt before release."), opposition];
+    let candidates = [
+        candidate("format", "Run cargo fmt before release."),
+        opposition,
+    ];
     let report = evaluate_ask(&request("release"), &candidates);
     assert!(!report.abstained);
     assert!(!report.conflict_detected);
