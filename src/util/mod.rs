@@ -56,6 +56,46 @@ mod tests {
         assert_eq!(path_with_canonical_prefix(path, &prefix), path);
     }
 
+    /// Both directions, because either alone is satisfiable by a redactor that
+    /// is simply wrong in the other: one that redacts everything satisfies the
+    /// absolute case, one that redacts nothing satisfies the relative case.
+    ///
+    /// The relative half is a regression pin. An earlier revision treated the
+    /// position immediately after a `file://` scheme as a redaction start, so
+    /// `ee search --json` emitted `file://[REDACTED_PATH]` for
+    /// `file://AGENTS.md#L42` and destroyed a repo-relative citation.
+    #[test]
+    fn file_scheme_redacts_absolute_targets_and_preserves_relative_ones() {
+        fn at_whitespace(ch: char) -> bool {
+            ch.is_whitespace()
+        }
+
+        // Absolute, sensitive: redacted, and the scheme SURVIVES so a reader can
+        // still tell a filesystem location was withheld.
+        assert_eq!(
+            super::redact_path_like_segments(
+                "source=file:///Users/alice/private/x.json tail",
+                at_whitespace,
+            ),
+            "source=file://[REDACTED_PATH] tail",
+        );
+
+        // Repo-relative: preserved whole. Redacting this protects nothing and
+        // destroys the provenance the pack, search and why surfaces exist to
+        // carry.
+        for preserved in [
+            "file://AGENTS.md#L42",
+            "file://docs/adr/0001-runtime.md",
+            "why=file://src/core/search.rs done",
+        ] {
+            assert_eq!(
+                super::redact_path_like_segments(preserved, at_whitespace),
+                preserved,
+                "repo-relative provenance must survive redaction",
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn canonical_prefix_preserves_symlinked_descendant() {
@@ -129,15 +169,23 @@ pub(crate) const SENSITIVE_PATH_PREFIXES: &[&str] = &[
 ///
 /// Three categories, because a prefix list alone cannot see the last two: a
 /// sensitive POSIX prefix, a Windows drive path (`C:\` or `C:/`), or a UNC
-/// share. Anything directly after a `file://` scheme also counts, because the
-/// scheme declares the value to be a filesystem location even when the path
-/// that follows matches no prefix (`file://relative/notes.md`).
+/// share.
 ///
-/// The scheme itself is deliberately NOT a start position. It says "this is a
-/// path" without saying where, so redacting from the scheme destroys a signal
-/// while protecting nothing, and turns `file://[REDACTED_PATH]` into a bare
-/// `[REDACTED_PATH]`. Seven surfaces assert the prefix survives; an earlier
-/// revision of this predicate returned `true` for the scheme and broke them.
+/// A `file://` scheme is NOT one of them, in either direction. The scheme
+/// itself is not a start position — redacting from it turns
+/// `file://[REDACTED_PATH]` into a bare `[REDACTED_PATH]`, destroying a signal
+/// while protecting nothing. But the position immediately AFTER it is not a
+/// start position either, and an earlier revision of this predicate made it
+/// one. That over-redacted every repo-relative citation: `ee search --json`
+/// emitted `file://[REDACTED_PATH]` for `file://AGENTS.md#L42`, destroying the
+/// provenance this product exists to preserve, and protecting nothing — a
+/// repo-relative path is the pinnable, non-sensitive kind.
+///
+/// No special case is needed in either direction. `file:///Users/alice/x`
+/// redacts because `/Users/` is a sensitive prefix found at offset 7, which
+/// leaves the scheme intact for free; `file://AGENTS.md` matches no prefix and
+/// stays whole. Every existing assertion on this behaviour uses an absolute
+/// path after the scheme, and all of them are unaffected.
 ///
 /// The drive and UNC forms additionally require a token boundary before them so
 /// that a bare `C:` inside a word is not mistaken for a path root.
@@ -150,16 +198,7 @@ pub(crate) const SENSITIVE_PATH_PREFIXES: &[&str] = &[
 /// `contains_forbidden_secret_or_private_path`), so a case-sensitive redactor
 /// can emit output that those gates classify as a leak.
 fn sensitive_path_starts_at(value: &str, start: usize) -> bool {
-    const FILE_SCHEME: &str = "file://";
-
     let candidate = &value[start..];
-    if start
-        .checked_sub(FILE_SCHEME.len())
-        .and_then(|scheme_start| value.get(scheme_start..start))
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case(FILE_SCHEME))
-    {
-        return true;
-    }
     if SENSITIVE_PATH_PREFIXES.iter().any(|prefix| {
         candidate
             .get(..prefix.len())
