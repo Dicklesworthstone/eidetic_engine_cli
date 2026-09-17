@@ -3188,7 +3188,10 @@ where
 
     if report.materialization.sync_once_after_materialization {
         let sync_options = MeshSyncSupervisorOptions::default();
-        match run_mesh_sync_supervisor(&snapshot, &sync_options) {
+        let sync_result = build_snapshot(cli, args.database.as_deref())
+            .map_err(|error| error.message())
+            .and_then(|current| run_mesh_sync_supervisor(&current, &sync_options));
+        match sync_result {
             Ok(sync_report) => {
                 if sync_report.degraded.is_empty() {
                     report.record_sync_once_success(sync_report.contacted_peers);
