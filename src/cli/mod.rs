@@ -84335,16 +84335,30 @@ mod tests {
             &ProcessExitCode::Usage,
             "recorder TOON error exit",
         )?;
+        // Toon is a MACHINE renderer, so its payload belongs on stdout beside
+        // json, not on stderr beside human prose. Before 59041a1d1 these
+        // writers took `wants_json: bool`, so `--format toon` fell to the human
+        // branch and emitted human text on stderr; that was the defect that
+        // commit fixed by giving the eight sibling error writers a real
+        // renderer. This arm asserted the pre-fix routing.
+        //
+        // The credential contract is stream-independent and is asserted on
+        // BOTH streams below, because "redacted on the stream we happened to
+        // check" is not a credential guarantee.
         ensure(
-            toon_stdout.is_empty(),
-            "recorder TOON error stdout must remain empty",
+            toon_stderr.is_empty(),
+            "recorder TOON error stderr must remain empty",
+        )?;
+        ensure(
+            !toon_stdout.contains(&bearer),
+            "recorder TOON error must not expose the approval bearer on stdout",
         )?;
         ensure(
             !toon_stderr.contains(&bearer),
-            "recorder TOON error must not expose the approval bearer",
+            "recorder TOON error must not expose the approval bearer on stderr",
         )?;
         ensure_contains(
-            &toon_stderr,
+            &toon_stdout,
             "[REDACTED:mesh_approval_token]",
             "recorder TOON error redaction marker",
         )
@@ -90539,21 +90553,29 @@ mod tests {
             bearer.as_str(),
         ]);
         ensure_equal(&toon_exit, &ProcessExitCode::Usage, "query TOON error exit")?;
+        // See the recorder sibling: toon is a machine renderer and its payload
+        // belongs on stdout beside json. This arm asserted the routing that
+        // existed while these writers still took `wants_json: bool`, under
+        // which `--format toon` fell through to the human branch.
         ensure(
-            toon_stdout.is_empty(),
-            "query TOON error stdout must remain empty",
+            toon_stderr.is_empty(),
+            "query TOON error stderr must remain empty",
+        )?;
+        ensure(
+            !toon_stdout.contains(&bearer),
+            "query TOON error must not expose the approval bearer on stdout",
         )?;
         ensure(
             !toon_stderr.contains(&bearer),
-            "query TOON error must not expose the approval bearer",
+            "query TOON error must not expose the approval bearer on stderr",
         )?;
         ensure_contains(
-            &toon_stderr,
+            &toon_stdout,
             "ERR_QUERY_FILE_NOT_FOUND",
             "query TOON error keeps stable code",
         )?;
         ensure_contains(
-            &toon_stderr,
+            &toon_stdout,
             "[REDACTED:mesh_approval_token]",
             "query TOON error redaction marker",
         )
