@@ -6280,7 +6280,7 @@ fn assemble_mmr_draft(
     let mut lod_usage = PackLodBudgetState::from_options(options, budget);
     let mut next_rank = 1_u32;
     let mut scratch = MmrAssemblyScratch::with_candidate_capacity(candidate_count);
-    let mut selected_memory_ids = BTreeSet::new();
+    let mut selected_item_keys = BTreeSet::new();
     let mut objective_value = 0.0_f32;
 
     if options.include_anti_pattern_first
@@ -6341,7 +6341,7 @@ fn assemble_mmr_draft(
                     let redactions = selection.redactions;
                     section_usage.add_candidate(&candidate);
                     lod_usage.add(tier, candidate.estimated_tokens);
-                    selected_memory_ids.insert(candidate.memory_id);
+                    selected_item_keys.insert((candidate.section, candidate.memory_id));
                     let selected_signature = selection.signature.clone();
                     scratch.selected_signatures.push(selection.signature);
                     update_mmr_max_similarities(
@@ -6427,7 +6427,7 @@ fn assemble_mmr_draft(
                     let redactions = selection.redactions;
                     section_usage.add_candidate(&candidate);
                     lod_usage.add(tier, candidate.estimated_tokens);
-                    selected_memory_ids.insert(candidate.memory_id);
+                    selected_item_keys.insert((candidate.section, candidate.memory_id));
                     let selected_signature = selection.signature.clone();
                     scratch.selected_signatures.push(selection.signature);
                     update_mmr_max_similarities(
@@ -6482,7 +6482,9 @@ fn assemble_mmr_draft(
         let mut coverage_fill_count = 0_usize;
         let coverage_fill_candidates = std::mem::take(&mut scratch.coverage_fill_candidates);
         for selection in coverage_fill_candidates {
-            if selected_memory_ids.contains(&selection.candidate.memory_id) {
+            if selected_item_keys
+                .contains(&(selection.candidate.section, selection.candidate.memory_id))
+            {
                 scratch.draft.omitted.push(PackOmission::from_candidate(
                     &selection.candidate,
                     PackOmissionReason::RedundantCandidate,
@@ -6564,7 +6566,7 @@ fn assemble_mmr_draft(
                         let redactions = selection.redactions;
                         section_usage.add_candidate(&candidate);
                         lod_usage.add(tier, candidate.estimated_tokens);
-                        selected_memory_ids.insert(candidate.memory_id);
+                        selected_item_keys.insert((candidate.section, candidate.memory_id));
                         scratch.selected_signatures.push(selection.signature);
                         coverage_fill_count = coverage_fill_count.saturating_add(1);
                         scratch
@@ -6694,7 +6696,7 @@ fn assemble_mmr_draft_reusing_workspace(
     let mut section_usage = SectionTokenUsage::default();
     let mut lod_usage = PackLodBudgetState::from_options(options, budget);
     let mut next_rank = 1_u32;
-    let mut selected_memory_ids = BTreeSet::new();
+    let mut selected_item_keys = BTreeSet::new();
     let mut objective_value = 0.0_f32;
 
     if options.include_anti_pattern_first
@@ -6755,7 +6757,7 @@ fn assemble_mmr_draft_reusing_workspace(
                     let redactions = selection.redactions;
                     section_usage.add_candidate(&candidate);
                     lod_usage.add(tier, candidate.estimated_tokens);
-                    selected_memory_ids.insert(candidate.memory_id);
+                    selected_item_keys.insert((candidate.section, candidate.memory_id));
                     let selected_signature = selection.signature.clone();
                     scratch.selected_signatures.push(selection.signature);
                     update_mmr_max_similarities(
@@ -6835,7 +6837,7 @@ fn assemble_mmr_draft_reusing_workspace(
                     let redactions = selection.redactions;
                     section_usage.add_candidate(&candidate);
                     lod_usage.add(tier, candidate.estimated_tokens);
-                    selected_memory_ids.insert(candidate.memory_id);
+                    selected_item_keys.insert((candidate.section, candidate.memory_id));
                     let selected_signature = selection.signature.clone();
                     scratch.selected_signatures.push(selection.signature);
                     update_mmr_max_similarities(
@@ -6890,7 +6892,9 @@ fn assemble_mmr_draft_reusing_workspace(
         let mut coverage_fill_count = 0_usize;
         let coverage_fill_candidates = std::mem::take(&mut scratch.coverage_fill_candidates);
         for selection in coverage_fill_candidates {
-            if selected_memory_ids.contains(&selection.candidate.memory_id) {
+            if selected_item_keys
+                .contains(&(selection.candidate.section, selection.candidate.memory_id))
+            {
                 scratch.draft.omitted.push(PackOmission::from_candidate(
                     &selection.candidate,
                     PackOmissionReason::RedundantCandidate,
@@ -6962,7 +6966,7 @@ fn assemble_mmr_draft_reusing_workspace(
                         let redactions = selection.redactions;
                         section_usage.add_candidate(&candidate);
                         lod_usage.add(tier, candidate.estimated_tokens);
-                        selected_memory_ids.insert(candidate.memory_id);
+                        selected_item_keys.insert((candidate.section, candidate.memory_id));
                         scratch.selected_signatures.push(selection.signature);
                         coverage_fill_count = coverage_fill_count.saturating_add(1);
                         scratch
