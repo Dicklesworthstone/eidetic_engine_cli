@@ -31,8 +31,9 @@ use ee::output::{
     render_context_response_toon,
 };
 use ee::pack::{
-    ContextRequest, ContextResponse, PackCandidate, PackCandidateInput, PackProvenance,
-    PackSection, PackTrustSignal, TokenBudget, assemble_draft,
+    ContextRequest, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
+    PackCandidate, PackCandidateInput, PackProvenance, PackSection, PackTrustSignal, TokenBudget,
+    assemble_draft,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -627,6 +628,83 @@ fn json_pack_text_matches_standalone_markdown_byte_for_byte() -> TestResult {
     if pack_text != markdown {
         return Err(format!(
             "pack.text must equal markdown render byte-for-byte.\npack.text:\n{pack_text}\nmarkdown:\n{markdown}"
+        ));
+    }
+    Ok(())
+}
+
+/// The parity fixture, carrying a degradation the default filter DROPS.
+///
+/// `multi_section_fixture` has no degradations at all, so every parity
+/// assertion in this module ran on the one input class that cannot expose a
+/// disagreement between the two renderers. `graph_snapshot_stale` is
+/// categorised `WorkspaceStateNotPerResponse`, and `included_by_default()`
+/// admits only `AffectsThisResponse`, so this entry is dropped by the default
+/// filter and kept by an unfiltered render. Any future divergence between the
+/// two paths shows up here as a byte difference.
+fn non_affecting_degradation_fixture() -> ContextResponse {
+    let mut response = multi_section_fixture();
+    response.data.degraded.push(
+        ContextResponseDegradation::new(
+            "graph_snapshot_stale",
+            ContextResponseSeverity::Medium,
+            "Graph snapshot is stale; this response did not consume graph data.",
+            None,
+        )
+        .expect("non-affecting degradation constructs"),
+    );
+    response
+}
+
+#[test]
+fn pack_text_matches_markdown_with_a_non_affecting_signal() -> TestResult {
+    // Regression for the dual-render split: `render_context_response_markdown`
+    // hard-coded `include_non_affecting = true` while `data.pack.text` rendered
+    // with `ContextJsonRenderOptions::default()`, where the same flag is false.
+    // With no degradations the two agreed by accident; with a non-affecting one
+    // they disagreed, so `ee context --format markdown` and `ee context --json`
+    // reported different degradation sets for the same response.
+    let response = non_affecting_degradation_fixture();
+    let json_str = render_context_response_json(&response);
+    let markdown = render_context_response_markdown(&response);
+
+    let json: Value =
+        serde_json::from_str(&json_str).map_err(|error| format!("JSON did not parse: {error}"))?;
+    let pack_text = json
+        .pointer("/data/pack/text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing /data/pack/text in JSON".to_string())?;
+
+    if pack_text != markdown {
+        return Err(format!(
+            "pack.text must equal markdown byte-for-byte when a non-affecting degradation is present.\npack.text:\n{pack_text}\nmarkdown:\n{markdown}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn markdown_render_honours_the_same_degradation_filter_as_the_json_envelope() -> TestResult {
+    // Pairs with the test above: parity alone is satisfiable by BOTH renderers
+    // being wrong together. This pins the direction bd-2v6r0 settled -- the
+    // default filter drops non-affecting signals -- so a future fix cannot
+    // restore parity by making markdown the unfiltered side again.
+    let response = non_affecting_degradation_fixture();
+    let markdown = render_context_response_markdown(&response);
+    if markdown.contains("graph_snapshot_stale") {
+        return Err(format!(
+            "markdown must drop non-affecting signals by default, matching data.degraded[];\nmarkdown:\n{markdown}"
+        ));
+    }
+
+    let json_str = render_context_response_json(&response);
+    let json: Value =
+        serde_json::from_str(&json_str).map_err(|error| format!("JSON did not parse: {error}"))?;
+    json.pointer("/data/pack/text")
+        .ok_or_else(|| "missing /data/pack/text in JSON".to_string())?;
+    if json_str.contains("graph_snapshot_stale") {
+        return Err(format!(
+            "data.degraded[] must drop the same non-affecting signal;\njson:\n{json_str}"
         ));
     }
     Ok(())

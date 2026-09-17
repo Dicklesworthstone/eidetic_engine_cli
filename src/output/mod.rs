@@ -3587,12 +3587,25 @@ pub fn render_context_response_mermaid(response: &ContextResponse) -> String {
 /// pack section, with provenance and why explanations preserved.
 #[must_use]
 pub fn render_context_response_markdown(response: &ContextResponse) -> String {
-    // Standalone callers keep the full degradation set (include_non_affecting =
-    // true) so existing markdown surfaces and the dual-render parity contract
-    // stay byte-identical. The JSON data.pack.text path (bd-2v6r0) instead
-    // threads the caller's include_non_affecting_degradations flag so the
-    // rendered text honors the same default-emission filter as data.degraded[].
-    render_context_response_markdown_with_options(response, true)
+    // The dual-render parity contract requires this to be byte-identical to
+    // `data.pack.text`. That text is rendered by this same function with
+    // `ContextJsonRenderOptions::include_non_affecting_degradations`, which is
+    // FALSE by default -- so hard-coding `true` here did not preserve parity,
+    // it broke it: any response carrying a BuildTimeFeatureGap or
+    // WorkspaceStateNotPerResponse signal rendered one way in `pack.text` and
+    // another way here. `ee context --format markdown` and `ee context --json`
+    // disagreed about the degradation set for the same response.
+    //
+    // The direction is settled by bd-2v6r0: `pack.text` is held in lockstep
+    // with `data.degraded[]`, and both filter by default
+    // (`pack_text_drops_non_affecting_degradation_by_default_bd_2v6r0`). So
+    // markdown is the side that moves. Reading the default rather than
+    // restating it keeps the two renderers coupled to one source of truth, so
+    // a future change to the default cannot silently reintroduce the split.
+    render_context_response_markdown_with_options(
+        response,
+        ContextJsonRenderOptions::default().include_non_affecting_degradations,
+    )
 }
 
 /// Render the context response markdown, optionally dropping non-affecting
