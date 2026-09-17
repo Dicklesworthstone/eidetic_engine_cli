@@ -12573,6 +12573,222 @@ mod tests {
         )
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum AttachmentRetryKind {
+        InjectedFailure,
+        CancelBeforePublish,
+    }
+
+    fn assert_attachment_job_retry_converges(
+        kind: AttachmentRetryKind,
+        suffix: &str,
+    ) -> TestResult {
+        let (workspace, database, index_dir, connection, workspace_id) =
+            seed_healthy_session_index_case("evidence-attachment-retry", suffix)?;
+        let memory_id = format!("mem_012345678901234567890123{suffix}");
+        let session_id = format!("sess_012345678901234567890123{suffix}");
+        let first_evidence_id = format!("ev_012345678901234567890123{suffix}");
+        let second_evidence_id = format!("ev_112345678901234567890123{suffix}");
+        let session_job_id = format!("sidx_112345678901234567890123{suffix}");
+        let attachment_job_id = format!("sidx_212345678901234567890123{suffix}");
+        let first_excerpt = "Quartz kestrel verification evidence stayed safely searchable.";
+        let second_excerpt = "Nimbus lantern provenance evidence stayed safely searchable.";
+        let first_hash = format!("blake3:{}", blake3::hash(first_excerpt.as_bytes()).to_hex());
+
+        connection
+            .with_transaction(|| {
+                connection
+                    .insert_session(&session_id, &session_index_input(&workspace_id, suffix))?;
+                connection.insert_evidence_span(
+                    &first_evidence_id,
+                    &admitted_session_evidence_input(
+                        &workspace_id,
+                        &session_id,
+                        suffix,
+                        7,
+                        first_excerpt,
+                    ),
+                )?;
+                connection.insert_evidence_span(
+                    &second_evidence_id,
+                    &admitted_session_evidence_input(
+                        &workspace_id,
+                        &session_id,
+                        suffix,
+                        11,
+                        second_excerpt,
+                    ),
+                )?;
+                connection.insert_search_index_job(
+                    &session_job_id,
+                    &crate::db::CreateSearchIndexJobInput {
+                        workspace_id: workspace_id.clone(),
+                        job_type: SearchIndexJobType::SingleDocument,
+                        document_source: Some("session".to_owned()),
+                        document_id: Some(session_id.clone()),
+                        documents_total: 1,
+                    },
+                )
+            })
+            .map_err(|error| error.to_string())?;
+        let import_report =
+            process_index_job_for_connection(&connection, &session_job_id, &index_dir)
+                .map_err(|error| error.to_string())?;
+        ensure(
+            import_report.outcome == "completed" && import_report.documents_indexed == 4,
+            format!(
+                "pre-attachment import must publish the four-document corpus: {import_report:?}"
+            ),
+        )?;
+        let attach = connection
+            .attach_evidence_span_to_memory_if_unlinked(
+                &workspace_id,
+                &first_evidence_id,
+                &first_hash,
+                &memory_id,
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            attach == crate::db::EvidenceSpanMemoryAttachResult::Attached,
+            format!("real attach API must link the unlinked span: {attach:?}"),
+        )?;
+        connection
+            .insert_search_index_job(
+                &attachment_job_id,
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: workspace_id.clone(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some(memory_id.clone()),
+                    documents_total: 1,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        match kind {
+            AttachmentRetryKind::InjectedFailure => {
+                let failed = process_pending_index_jobs_coalesced_after_snapshot(
+                    &connection,
+                    &workspace_id,
+                    &index_dir,
+                    None,
+                    || {
+                        Err(IndexRebuildError::Index(
+                            "injected pre-publish attachment failure".to_owned(),
+                        ))
+                    },
+                );
+                ensure(
+                    failed.is_err(),
+                    format!("injected attachment failure must surface: {failed:?}"),
+                )?;
+                let failed_job = connection
+                    .get_search_index_job(&attachment_job_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "failed attachment job row missing".to_owned())?;
+                ensure(
+                    failed_job.status_enum() == Some(SearchIndexJobStatus::Failed),
+                    format!("pre-publish failure must leave a truthful failed row: {failed_job:?}"),
+                )?;
+            }
+            AttachmentRetryKind::CancelBeforePublish => {
+                connection.close().map_err(|error| error.to_string())?;
+                install_before_index_publish_hook(move |cx| {
+                    cx.set_cancel_reason(asupersync::CancelReason::user(
+                        "cancel attachment index publication",
+                    ));
+                });
+                let cancel_options = IndexProcessingOptions {
+                    workspace_path: workspace.clone(),
+                    database_path: Some(database.clone()),
+                    index_dir: Some(index_dir.clone()),
+                    dry_run: false,
+                    job_limit: None,
+                };
+                let cancelled_run = crate::core::run_cli_future(async move {
+                    let cx = asupersync::Cx::for_testing();
+                    process_index_jobs_with_cx(&cx, &cancel_options).await
+                })
+                .map_err(|error| error.to_string())?;
+                ensure(
+                    matches!(cancelled_run, Err(IndexRebuildError::Cancelled(_))),
+                    format!("cancel-before-publish must stay typed: {cancelled_run:?}"),
+                )?;
+            }
+        }
+
+        let status_options = IndexStatusOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+        };
+        if matches!(kind, AttachmentRetryKind::InjectedFailure) {
+            connection.close().map_err(|error| error.to_string())?;
+        }
+        let stale = get_index_status(&status_options).map_err(|error| error.to_string())?;
+        ensure(
+            stale.health == IndexHealth::Stale
+                && stale
+                    .db_generation
+                    .zip(stale.index_generation)
+                    .is_some_and(|(database, index)| database > index),
+            format!("{kind:?} must leave honest staleness, not false Ready: {stale:?}"),
+        )?;
+
+        let retry = process_index_jobs(&IndexProcessingOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+            dry_run: false,
+            job_limit: None,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(
+            retry.completed_jobs == 1,
+            format!("public retry must requeue and complete the attachment job: {retry:?}"),
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let recovered = connection
+            .get_search_index_job(&attachment_job_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "recovered attachment job row missing".to_owned())?;
+        ensure(
+            recovered.status_enum() == Some(SearchIndexJobStatus::Completed),
+            format!("the same logical attachment job must recover to completed: {recovered:?}"),
+        )?;
+        let attached_hit = published_search_hit(
+            &connection,
+            &workspace_id,
+            &index_dir,
+            "Quartz kestrel",
+            &first_evidence_id,
+        )?;
+        ensure(
+            attached_hit.memory_id.as_deref() == Some(memory_id.as_str()),
+            format!("retry must refresh attached evidence memory_id: {attached_hit:?}"),
+        )?;
+        let ready = get_index_status_with_connection(&status_options, Some(&connection))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            ready.health == IndexHealth::Ready
+                && ready.db_generation == ready.index_generation
+                && ready.index_document_counts == IndexDocumentCounts::checked(1, 1, 0, 0, 2).ok(),
+            format!("attachment retry must restore Ready without a manual rebuild: {ready:?}"),
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn attachment_memory_job_failure_before_publish_retry_converges() -> TestResult {
+        assert_attachment_job_retry_converges(AttachmentRetryKind::InjectedFailure, "r1")
+    }
+
+    #[test]
+    fn attachment_memory_job_cancel_before_publish_retry_converges() -> TestResult {
+        assert_attachment_job_retry_converges(AttachmentRetryKind::CancelBeforePublish, "r2")
+    }
+
     fn deterministic_incremental_doc(
         slot: u8,
         term: u8,
