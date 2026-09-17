@@ -21,6 +21,31 @@
 # the marker with a real p50 the first time the stage is timed, and lower
 # UNMEASURED_STAGE_ALLOWANCE in tests/verification_drift_guard.rs in the same
 # commit -- that allowance is a ratchet and only moves down.
+# REQUIREMENT POLICY (bd-reality-core-convergence-1azkt.5)
+#
+# Every stage is REQUIRED unless it declares otherwise. A stage may declare
+#
+#     requirement = "advisory"                 # runs, must not block the wave
+#     requirement = "tracked_red"              # known red, owned by a bead
+#     tracked_red_bead = "bd-xxxxx"            # MANDATORY with tracked_red
+#
+# and those declarations carry one hard rule, ruled 2026-09-17:
+#
+#   A DECLARED-NON-REQUIRED STAGE MAY NEVER REPORT GREEN.
+#
+# ADVISORY and TRACKED_RED are terminal statuses in their own right. They are
+# never collapsed into, aliased to, or rendered as PASS, and verify.sh's summary
+# prints a census per status so the excused population appears in the same line
+# that claims success. An excuse you cannot count is an excuse nobody audits.
+#
+# The distinction this preserves: green means ONE thing, "this ran and passed".
+# The moment green can also mean "this was excused", no consumer can tell a
+# stage that worked from a stage that was allowed not to.
+#
+# ZERO stages declare a non-required requirement today. That is asserted by
+# `no_stage_is_declared_non_required_without_a_bead` in
+# tests/verification_drift_guard.rs, so introducing the first one is a
+# deliberate, reviewable act rather than a default anybody can drift into.
 total_expected_seconds = 600
 total_regression_factor = 1.5
 

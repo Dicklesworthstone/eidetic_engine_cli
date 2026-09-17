@@ -272,6 +272,14 @@ STAGE_SKIPPED_CONTENTION=0
 STAGE_SKIPPED_CONTENTION_NAMES=""
 STAGE_GATED_OFF=0
 STAGE_GATED_OFF_NAMES=""
+# Declared-non-required outcomes. Counted SEPARATELY from STAGE_PASSED on
+# purpose: an advisory or tracked-red stage did not pass, and folding it into
+# the passed count is precisely how an excuse becomes invisible. See the
+# requirement-policy block in scripts/verify-budget.toml.
+STAGE_ADVISORY=0
+STAGE_ADVISORY_NAMES=""
+STAGE_TRACKED_RED=0
+STAGE_TRACKED_RED_NAMES=""
 TOTAL_START=$(date +%s)
 
 CURRENT_SOURCE_TARGET_DIR="$(ee_cargo_target_directory || true)"
@@ -650,6 +658,25 @@ stage_budget_value() {
     ' "$VERIFY_BUDGET_FILE"
 }
 
+# A stage's declared requirement policy: "required" (the default), "advisory",
+# or "tracked_red".
+#
+# Absence means REQUIRED. A stage cannot become non-required by omission, only
+# by a declaration someone wrote and a reviewer saw.
+stage_requirement() {
+    local stage_name="$1"
+    local declared
+
+    declared="$(stage_budget_value "$stage_name" requirement)" || {
+        printf '%s\n' "required"
+        return 0
+    }
+    case "$declared" in
+        advisory | tracked_red) printf '%s\n' "$declared" ;;
+        *) printf '%s\n' "required" ;;
+    esac
+}
+
 stage_budget_thresholds() {
     local stage_name="$1"
     local p50
@@ -750,22 +777,37 @@ verification_exit_status() {
 }
 
 verification_summary_banner() {
-    local attempted=$((STAGE_PASSED + STAGE_SKIPPED_CONTENTION))
+    local attempted=$((STAGE_PASSED + STAGE_SKIPPED_CONTENTION + STAGE_ADVISORY + STAGE_TRACKED_RED))
     local declared=$((attempted + STAGE_GATED_OFF))
+    # A census, never a boolean. The excused population has to appear in the
+    # same line that claims success, or an excuse nobody counts is an excuse
+    # nobody audits (ruled 2026-09-17).
+    local census="${STAGE_PASSED} passed, ${STAGE_ADVISORY} advisory, ${STAGE_TRACKED_RED} tracked-red, ${STAGE_SKIPPED_CONTENTION} did-not-run, ${STAGE_GATED_OFF} not-applicable"
 
     if [ "$STAGE_SKIPPED_CONTENTION" -gt 0 ]; then
-        echo "=== INCOMPLETE: ${STAGE_PASSED}/${attempted} attempted stages passed; ${STAGE_SKIPPED_CONTENTION} did NOT run (lock contention) ==="
+        echo "=== INCOMPLETE: ${census} ==="
         echo ""
         echo "    This run does not establish what these stages check:"
         printf "%b" "$STAGE_SKIPPED_CONTENTION_NAMES"
+    elif [ "$STAGE_ADVISORY" -gt 0 ] || [ "$STAGE_TRACKED_RED" -gt 0 ]; then
+        # Deliberately NOT "all stages passed". Stages that did not pass were
+        # excused by declaration, and the headline says so rather than letting
+        # the reader infer a clean run from an exit code.
+        echo "=== ${census} ==="
+        echo ""
+        echo "    Excused by declaration -- these did NOT pass:"
+        printf "%b" "$STAGE_ADVISORY_NAMES"
+        printf "%b" "$STAGE_TRACKED_RED_NAMES"
     else
-        echo "=== ${STAGE_PASSED}/${attempted} attempted verification stages passed ==="
+        echo "=== ${census} ==="
     fi
 
     echo ""
     echo "Stage accounting:"
     echo "  declared                  : ${declared}"
     echo "  passed                    : ${STAGE_PASSED}"
+    echo "  advisory (did NOT pass)   : ${STAGE_ADVISORY}"
+    echo "  tracked red (did NOT pass): ${STAGE_TRACKED_RED}"
     echo "  did not run (contention)  : ${STAGE_SKIPPED_CONTENTION}"
     echo "  gated off (not attempted) : ${STAGE_GATED_OFF}"
     if [ "$STAGE_GATED_OFF" -gt 0 ]; then
@@ -831,6 +873,44 @@ run_stage() {
         # established nothing, where a bare "FAIL" implies it ran and decided.
         local stage_status
         stage_status="$(stage_status_for_exit_code "$exit_code")"
+
+        # A stage the manifest declares non-required reports its OWN terminal
+        # status and does not stop the run. It is never recorded as PASS and
+        # never counted as one -- ADVISORY and TRACKED_RED are outcomes in their
+        # own right, not a softer spelling of green (ruled 2026-09-17).
+        #
+        # The run continues, which is the entire purpose of the declaration, but
+        # the summary census below prints these counts beside the passed count
+        # so "success" can never be read without the excused population next to
+        # it. That census is what separates a classification from an escape
+        # hatch.
+        local requirement
+        requirement="$(stage_requirement "$name")"
+        case "$requirement" in
+            advisory)
+                echo "[~] ADVISORY: $name (Exit code: $exit_code, ${duration}s; declared advisory)"
+                STAGE_RESULTS="${STAGE_RESULTS}ADVISORY ${name} (exit ${exit_code}, ${duration}s)\n"
+                STAGE_ADVISORY=$((STAGE_ADVISORY + 1))
+                STAGE_ADVISORY_NAMES="${STAGE_ADVISORY_NAMES}    - ${name} (exit ${exit_code})\n"
+                rm -f "$output_file"
+                enforce_stage_budget "$name" "$duration"
+                echo ""
+                return 0
+                ;;
+            tracked_red)
+                local tracked_bead
+                tracked_bead="$(stage_budget_value "$name" tracked_red_bead || printf '%s' 'UNDECLARED')"
+                echo "[~] TRACKED_RED: $name (Exit code: $exit_code, ${duration}s; owned by ${tracked_bead})"
+                STAGE_RESULTS="${STAGE_RESULTS}TRACKED_RED ${name} (exit ${exit_code}, ${tracked_bead})\n"
+                STAGE_TRACKED_RED=$((STAGE_TRACKED_RED + 1))
+                STAGE_TRACKED_RED_NAMES="${STAGE_TRACKED_RED_NAMES}    - ${name} (${tracked_bead})\n"
+                rm -f "$output_file"
+                enforce_stage_budget "$name" "$duration"
+                echo ""
+                return 0
+                ;;
+        esac
+
         echo "[-] ${stage_status}: $name (Exit code: $exit_code, ${duration}s)"
         # Record it before exiting. Previously a failure left NO trace in
         # STAGE_RESULTS at all, because the script exits here, so the ledger

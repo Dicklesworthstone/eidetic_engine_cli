@@ -470,6 +470,119 @@ fn verify_declares_the_whole_stage_status_vocabulary() {
     }
 }
 
+/// A declared-non-required stage may NEVER report green, and the excused
+/// population must be countable (bd-reality-core-convergence-1azkt.5, ruled
+/// 2026-09-17).
+///
+/// Green must mean one thing: this ran and passed. Once green can also mean
+/// "this was excused", no consumer can tell a stage that worked from a stage
+/// that was allowed not to. This pins the three properties that keep ADVISORY
+/// and TRACKED_RED a classification rather than an escape hatch:
+///
+///   1. they are counted SEPARATELY from passed;
+///   2. the summary prints a census, so an excused stage appears in the same
+///      line that claims success;
+///   3. nothing collapses them into PASS.
+#[test]
+fn excused_stages_are_counted_and_never_reported_as_passed() {
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+
+    for counter in ["STAGE_ADVISORY=0", "STAGE_TRACKED_RED=0"] {
+        assert!(
+            script.contains(counter),
+            "verify.sh must track {counter} separately from STAGE_PASSED"
+        );
+    }
+
+    // The advisory and tracked-red branches must never touch STAGE_PASSED.
+    for token in ["ADVISORY ${name}", "TRACKED_RED ${name}"] {
+        assert!(
+            script.contains(token),
+            "the results ledger must record {token} verbatim, not a PASS alias"
+        );
+    }
+
+    // The census must name every status, including the excused ones, in the
+    // headline. A banner that prints only `passed` lets an excused stage hide
+    // behind a number that looks like a total.
+    let census_line = script
+        .lines()
+        .find(|line| line.contains("local census="))
+        .expect("verification_summary_banner must build a per-status census");
+    for label in [
+        "passed",
+        "advisory",
+        "tracked-red",
+        "did-not-run",
+        "not-applicable",
+    ] {
+        assert!(
+            census_line.contains(label),
+            "the summary census must report `{label}`; an excuse you cannot count \
+             is an excuse nobody audits"
+        );
+    }
+}
+
+/// Absence of a `requirement` declaration means REQUIRED, and no stage may be
+/// non-required today without a bead owning it.
+///
+/// Zero stages declare one at the time of writing. Asserting that makes
+/// introducing the first a deliberate, reviewable act instead of a default
+/// somebody drifts into — and the tracked_red arm refuses a stage that claims
+/// known-red status without naming who owns it.
+#[test]
+fn no_stage_is_declared_non_required_without_a_bead() {
+    let manifest = fs::read_to_string(verify_budget_path()).expect("read verify-budget.toml");
+    let blocks = budget_stage_blocks(&manifest);
+
+    let mut problems = Vec::new();
+    let mut non_required = 0_usize;
+    for block in &blocks {
+        let name = block
+            .iter()
+            .find_map(|line| line.trim().strip_prefix("name = "))
+            .map(|value| value.trim_matches('"'))
+            .expect("stage should have a name");
+        let Some(requirement) = block
+            .iter()
+            .find_map(|line| line.trim().strip_prefix("requirement = "))
+            .map(|value| value.trim_matches('"'))
+        else {
+            continue;
+        };
+
+        non_required += 1;
+        match requirement {
+            "advisory" => {}
+            "tracked_red" => {
+                if !block
+                    .iter()
+                    .any(|line| line.trim().starts_with("tracked_red_bead = "))
+                {
+                    problems.push(format!(
+                        "{name} declares requirement = \"tracked_red\" with no \
+                         tracked_red_bead; a known-red stage must name the bead that owns it"
+                    ));
+                }
+            }
+            other => problems.push(format!(
+                "{name} declares requirement = \"{other}\", which verify.sh does not \
+                 recognise and will treat as required. Use \"advisory\" or \
+                 \"tracked_red\", or drop the line."
+            )),
+        }
+    }
+
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    assert_eq!(
+        non_required, 0,
+        "stages are declared non-required. That may be correct, but it is a \
+         deliberate act: update this count in the same commit so the excused \
+         population stays visible in review."
+    );
+}
+
 /// The release-candidate capsule and the runner must share ONE status
 /// vocabulary (bd-reality-core-convergence-1azkt.5).
 ///
