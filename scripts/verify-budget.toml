@@ -468,7 +468,7 @@ name = "Beads Export Fixture Suite (bd-2p297.3)"
 expected_seconds_p50_unmeasured = true
 
 [[stage]]
-name = "Beads Export Repair Self-Test (bd-2p297.1)"
+name = "Beads Export Repair Self-Test (bd-2p297.1, bd-2p297.2)"
 expected_seconds_p50_unmeasured = true
 
 [[stage]]
