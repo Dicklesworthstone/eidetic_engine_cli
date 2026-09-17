@@ -374,13 +374,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "eidetic_engine_cli-sos5.4",
         "Handoff stale-threshold reporting should distinguish unavailable revised-memory counts from zero.",
     ),
-    must_fix(
-        "NSF-CORE-HANDOFF-TAG-LOOKUP",
-        "src/core/handoff.rs",
-        "conn.get_memory_tags(&memory.id).unwrap_or_default()",
-        "eidetic_engine_cli-sos5.7",
-        "Handoff snapshot hashes should not silently treat failed tag lookups as untagged memories.",
-    ),
     allowed(
         "NSF-CORE-INDEX-HUMAN-DIMENSION",
         "src/core/index.rs",

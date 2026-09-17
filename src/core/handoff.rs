@@ -5150,7 +5150,7 @@ fn compute_capsule_memory_snapshot(
             .list_memories_for_retrieval(&workspace.id, None, false)
             .ok()?;
         for memory in stored_memories {
-            let tags = conn.get_memory_tags(&memory.id).unwrap_or_default();
+            let tags = conn.get_memory_tags(&memory.id).ok()?;
             memories.push(snapshot_item_from_memory(&memory, &tags));
         }
     }
@@ -5427,7 +5427,7 @@ pub fn compute_workspace_state_hash(database_path: &Path) -> Option<String> {
     for workspace in &workspaces {
         let memories = conn.list_memories(&workspace.id, None, false).ok()?;
         for memory in memories {
-            let tags = conn.get_memory_tags(&memory.id).unwrap_or_default();
+            let tags = conn.get_memory_tags(&memory.id).ok()?;
             let mut tags_sorted: Vec<String> = tags;
             tags_sorted.sort();
             projections.push(format!(
