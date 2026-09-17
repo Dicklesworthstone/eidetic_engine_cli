@@ -78,6 +78,46 @@ fn run_ee(args: &[&str]) -> Result<JsonValue, String> {
     run_ee_raw(args).map(|(json, _stdout)| json)
 }
 
+fn run_ee_output(args: &[&str]) -> Result<std::process::Output, String> {
+    Command::new(ee_bin())
+        .args(args)
+        .output()
+        .map_err(|error| format!("spawn ee {}: {error}", args.join(" ")))
+}
+
+fn copy_backup_tree(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|error| format!("mkdir {}: {error}", dst.display()))?;
+    for entry in
+        fs::read_dir(src).map_err(|error| format!("read_dir {}: {error}", src.display()))?
+    {
+        let entry = entry.map_err(|error| format!("read_dir {}: {error}", src.display()))?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&from)
+            .map_err(|error| format!("symlink_metadata {}: {error}", from.display()))?;
+        if metadata.is_dir() {
+            copy_backup_tree(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)
+                .map_err(|error| format!("copy {} -> {}: {error}", from.display(), to.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_issue_codes(report: &JsonValue) -> Vec<String> {
+    report
+        .pointer("/data/issues")
+        .and_then(JsonValue::as_array)
+        .map(|issues| {
+            issues
+                .iter()
+                .filter_map(|issue| issue["code"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn run_ee_with_passphrase(
     args: &[&str],
     passphrase: &str,
@@ -1019,6 +1059,181 @@ fn backup_verify_rejects_modified_inventory_with_nonzero_exit() -> TestResult {
         !side_path.exists(),
         "rejected restore must not create its destination",
     )
+}
+
+#[test]
+fn backup_verify_and_restore_reject_real_store_tamper_matrix() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().join("workspace");
+    fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+    let ws = workspace.to_string_lossy().into_owned();
+    run_ee(&["init", "--workspace", &ws, "--json"])?;
+    run_ee(&[
+        "remember",
+        "Keep release verification evidence.",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    run_ee(&[
+        "remember",
+        "Second memory so records.jsonl has more than one body line.",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let created = run_ee(&[
+        "backup",
+        "create",
+        "--include-graph-cache=false",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let original_backup = PathBuf::from(json_str(&created, "/data/backupPath", "created backup")?);
+    let other = tempdir.path().join("other-workspace");
+    fs::create_dir(&other).map_err(|error| error.to_string())?;
+    let other_ws = other.to_string_lossy().into_owned();
+    run_ee(&["init", "--workspace", &other_ws, "--json"])?;
+
+    struct Case {
+        name: &'static str,
+        expected_code: &'static str,
+        verify_workspace: String,
+        tamper: fn(&Path) -> Result<(), String>,
+    }
+
+    let cases = [
+        Case {
+            name: "missing-records",
+            expected_code: "artifact_missing",
+            verify_workspace: ws.clone(),
+            tamper: |backup| {
+                fs::remove_file(backup.join("records.jsonl"))
+                    .map_err(|error| format!("remove records.jsonl: {error}"))
+            },
+        },
+        Case {
+            name: "truncated-records",
+            expected_code: "artifact_size_mismatch",
+            verify_workspace: ws.clone(),
+            tamper: |backup| {
+                let path = backup.join("records.jsonl");
+                let bytes = fs::read(&path).map_err(|error| format!("read records: {error}"))?;
+                ensure(bytes.len() > 16, "records.jsonl too small to truncate")?;
+                fs::write(&path, &bytes[..bytes.len() / 2])
+                    .map_err(|error| format!("truncate records: {error}"))
+            },
+        },
+        Case {
+            name: "substituted-records",
+            expected_code: "artifact_hash_mismatch",
+            verify_workspace: ws.clone(),
+            tamper: |backup| {
+                let path = backup.join("records.jsonl");
+                let mut bytes =
+                    fs::read(&path).map_err(|error| format!("read records: {error}"))?;
+                let last = bytes
+                    .last_mut()
+                    .ok_or_else(|| "records.jsonl is empty".to_owned())?;
+                *last ^= 0x5a;
+                fs::write(&path, bytes).map_err(|error| format!("substitute records: {error}"))
+            },
+        },
+        Case {
+            name: "reordered-records",
+            expected_code: "artifact_hash_mismatch",
+            verify_workspace: ws.clone(),
+            tamper: |backup| {
+                let path = backup.join("records.jsonl");
+                let text = fs::read_to_string(&path)
+                    .map_err(|error| format!("read records text: {error}"))?;
+                let mut lines: Vec<&str> = text.lines().collect();
+                ensure(
+                    lines.len() >= 2,
+                    "records.jsonl must have at least two lines to reorder",
+                )?;
+                lines.swap(0, 1);
+                let mut reordered = lines.join("\n");
+                if text.ends_with('\n') {
+                    reordered.push('\n');
+                }
+                fs::write(&path, reordered).map_err(|error| format!("reorder records: {error}"))
+            },
+        },
+        Case {
+            name: "wrong-workspace",
+            expected_code: "manifest_authentication_failed",
+            verify_workspace: other_ws,
+            tamper: |_| Ok(()),
+        },
+    ];
+
+    for case in cases {
+        let backup = tempdir.path().join(case.name);
+        copy_backup_tree(&original_backup, &backup)?;
+        (case.tamper)(&backup)?;
+        let backup_arg = backup.to_string_lossy().into_owned();
+        let verified = run_ee_output(&[
+            "backup",
+            "verify",
+            &backup_arg,
+            "--workspace",
+            &case.verify_workspace,
+            "--json",
+        ])?;
+        ensure_equal(
+            &verified.status.code(),
+            &Some(5),
+            &format!("{} verify exit", case.name),
+        )?;
+        let report: JsonValue = serde_json::from_slice(&verified.stdout).map_err(|error| {
+            format!(
+                "{} verify JSON: {error}\n{}",
+                case.name,
+                String::from_utf8_lossy(&verified.stdout)
+            )
+        })?;
+        ensure_equal(
+            &report["success"].as_bool(),
+            &Some(false),
+            &format!("{} verify envelope", case.name),
+        )?;
+        let codes = verify_issue_codes(&report);
+        ensure(
+            codes.iter().any(|code| {
+                if case.expected_code == "manifest_authentication_failed" {
+                    code.starts_with("manifest_authentication")
+                } else {
+                    code == case.expected_code
+                }
+            }),
+            format!(
+                "{} expected issue {}, got {codes:?}",
+                case.name, case.expected_code
+            ),
+        )?;
+        let side_path = tempdir.path().join(format!("{}-restore", case.name));
+        let restored = run_ee_output(&[
+            "backup",
+            "restore",
+            &backup_arg,
+            "--side-path",
+            &side_path.to_string_lossy(),
+            "--workspace",
+            &case.verify_workspace,
+            "--json",
+        ])?;
+        ensure(
+            restored.status.code() != Some(0),
+            format!("{} restore must fail", case.name),
+        )?;
+        ensure(
+            !side_path.exists(),
+            format!("{} restore must not create its destination", case.name),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]
