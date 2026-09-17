@@ -16,8 +16,10 @@
 **Install**
 
 ```bash
-curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.15.2/install.sh \
-  | EE_VERSION=v0.15.2 bash -s -- --easy-mode --verify
+f="$(mktemp)"
+curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.15.2/install.sh -o "$f"
+export EE_VERSION=v0.15.2
+if [ -s "$f" ]; then bash "$f" --easy-mode --verify; else echo "Installer download failed - retry in a few minutes" >&2; fi
 ```
 
 Always verifies the release binary's SHA-256 checksum, verifies its Sigstore
@@ -354,8 +356,10 @@ symbol requirements before packaging. The x86-64 musl archive is available
 for systems without glibc.
 
 ```bash
-curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.15.2/install.sh \
-  | EE_VERSION=v0.15.2 bash -s -- --easy-mode --verify
+f="$(mktemp)"
+curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.15.2/install.sh -o "$f"
+export EE_VERSION=v0.15.2
+if [ -s "$f" ]; then bash "$f" --easy-mode --verify; else echo "Installer download failed - retry in a few minutes" >&2; fi
 ```
 
 This fetches the installer and the matching `v0.15.2` release binary from GitHub
