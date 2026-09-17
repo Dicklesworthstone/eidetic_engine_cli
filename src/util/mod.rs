@@ -168,6 +168,39 @@ mod tests {
 /// and `/root/` reached exactly one of them, so a provenance URI naming
 /// `/root/.ssh/id_rsa` was redacted on one surface and emitted verbatim by
 /// nineteen (bd-redactor-prefix-divergence-lsy52).
+///
+/// # Finding the copies, if you need to audit this population again
+///
+/// The count has moved 21 → 22 → 24 → 27, and **not once because a sweep said
+/// so**. Every correction came from resolving a grep hit to its enclosing
+/// function. Two sweeps are needed and neither is sufficient alone:
+///
+/// 1. **By data shape.** `grep -rn '"/Users/"' src/` finds copies carrying their
+///    own literal prefix list. Then resolve EVERY hit to its enclosing function
+///    and classify by hand — redactor, test assertion, or deny-list. Most hits
+///    are `assert!(!x.contains(...))`, which are leak DETECTORS, not redactors;
+///    the function name is the only thing that separates them, so counting hits
+///    is worthless.
+///
+/// 2. **By set difference**, which is what finds a copy that took the DATA and
+///    kept its own PREDICATE — invisible to sweep 1 (no literal list) and to a
+///    helper-name grep (own fn name, and it may reference the shared helper
+///    elsewhere in the same file):
+///
+///    ```text
+///    A = files referencing SENSITIVE_PATH_PREFIXES      (took the data)
+///    B = files calling redact_path_like_segments        (took the rule)
+///    A \ B                                              = divergence-capable
+///    ```
+///
+/// SHARING THE DATA IS NOT SHARING THE RULE, and that is the standing risk.
+/// Several surfaces now use this const with their own walker, so they can
+/// diverge in PREDICATE logic while every prefix-based audit reports them
+/// clean. That is exactly how the 27th broke: correct prefixes, wrong boundary
+/// rule — `src/output/jsonl_export.rs` omitted the token-boundary check that
+/// [`sensitive_path_starts_at`] applies before a Windows drive root, so the
+/// `e:` inside `file://` read as drive `e:` and it emitted
+/// `fil[REDACTED_PATH]` for `file:///Users/...`, eating the scheme (df1f10fa9).
 pub(crate) const SENSITIVE_PATH_PREFIXES: &[&str] = &[
     "/Users/",
     "/Volumes/",
