@@ -22,6 +22,7 @@ mod test_tracing;
 
 type TestResult = Result<(), String>;
 const CONTEXT_QUERY: &str = "Always run cargo fmt --check before release";
+const SECRET_CANARY: &str = "api_key=cli-backup-secret-canary";
 const JSONL_GRAPH_FIELDS: &[&str] = &[
     "pagerank_score",
     "betweenness_score",
@@ -103,6 +104,37 @@ fn copy_backup_tree(src: &Path, dst: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn tree_must_not_contain(root: &Path, canary: &str) -> TestResult {
+    fn walk(path: &Path, canary: &str, hits: &mut Vec<String>) -> TestResult {
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| format!("symlink_metadata {}: {error}", path.display()))?;
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path)
+                .map_err(|error| format!("read_dir {}: {error}", path.display()))?
+            {
+                let entry =
+                    entry.map_err(|error| format!("read_dir {}: {error}", path.display()))?;
+                walk(&entry.path(), canary, hits)?;
+            }
+            return Ok(());
+        }
+        if metadata.file_type().is_symlink() {
+            return Ok(());
+        }
+        let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+        if String::from_utf8_lossy(&bytes).contains(canary) {
+            hits.push(path.display().to_string());
+        }
+        Ok(())
+    }
+    let mut hits = Vec::new();
+    walk(root, canary, &mut hits)?;
+    ensure(
+        hits.is_empty(),
+        format!("secret canary leaked into {}", hits.join(", ")),
+    )
 }
 
 fn verify_issue_codes(report: &JsonValue) -> Vec<String> {
@@ -1425,6 +1457,199 @@ fn backup_restore_roundtrips_pack_history_and_query_surfaces() -> TestResult {
             .and_then(JsonValue::as_bool),
         &Some(true),
         "restored pack succeeded",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn backup_restore_roundtrips_cli_families_and_redacts_secrets() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().join("workspace");
+    let backup_dir = tempdir.path().join("backups");
+    let side_path = tempdir.path().join("restored");
+    fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+    let ws = workspace.to_string_lossy().into_owned();
+    let backup_dir_arg = backup_dir.to_string_lossy().into_owned();
+    let side_path_arg = side_path.to_string_lossy().into_owned();
+    run_ee(&["init", "--workspace", &ws, "--json"])?;
+    let remembered = run_ee(&[
+        "remember",
+        CONTEXT_QUERY,
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let memory_id = json_str(&remembered, "/data/memory_id", "remember rule")?;
+    run_ee(&[
+        "remember",
+        "FrankenSQLite is the durable source of truth.",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let secret_content = format!("Recover using {SECRET_CANARY}");
+    run_ee(&[
+        "remember",
+        &secret_content,
+        "--level",
+        "semantic",
+        "--kind",
+        "note",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let packed = run_ee(&["pack", CONTEXT_QUERY, "--workspace", &ws, "--json"])?;
+    ensure_equal(
+        &packed.pointer("/success").and_then(JsonValue::as_bool),
+        &Some(true),
+        "source pack succeeded",
+    )?;
+    let outcome_reason = format!("{SECRET_CANARY} confirmed the release rule");
+    let outcome = run_ee(&[
+        "outcome",
+        memory_id,
+        "--signal",
+        "helpful",
+        "--reason",
+        &outcome_reason,
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    ensure_equal(
+        &outcome.pointer("/success").and_then(JsonValue::as_bool),
+        &Some(true),
+        "source outcome succeeded",
+    )?;
+    let created = run_ee(&[
+        "backup",
+        "create",
+        "--include-graph-cache=false",
+        "--output-dir",
+        &backup_dir_arg,
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    ensure(
+        !created.to_string().contains(SECRET_CANARY),
+        "backup create JSON leaked the secret canary",
+    )?;
+    let backup_id = json_str(&created, "/data/backupId", "created backup")?;
+    let backup_path = PathBuf::from(json_str(&created, "/data/backupPath", "created backup")?);
+    tree_must_not_contain(&backup_path, SECRET_CANARY)?;
+    let restored = run_ee(&[
+        "backup",
+        "restore",
+        backup_id,
+        "--output-dir",
+        &backup_dir_arg,
+        "--side-path",
+        &side_path_arg,
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    ensure(
+        !restored.to_string().contains(SECRET_CANARY),
+        "backup restore JSON leaked the secret canary",
+    )?;
+    ensure_equal(
+        &restored
+            .pointer("/data/counts/memoriesImported")
+            .and_then(JsonValue::as_u64),
+        &Some(3),
+        "restored all planted memories",
+    )?;
+    let pack_records = restored
+        .pointer("/data/counts/packHistoryRestored/records")
+        .and_then(JsonValue::as_u64)
+        .unwrap_or(0);
+    ensure(
+        pack_records >= 1,
+        format!("expected restored pack history, got {pack_records} records"),
+    )?;
+    let feedback = restored
+        .pointer("/data/counts/feedbackEventsRestored")
+        .and_then(JsonValue::as_u64)
+        .unwrap_or(0);
+    ensure(
+        feedback >= 1,
+        format!("expected restored feedback events, got {feedback}"),
+    )?;
+    let searched = run_ee(&[
+        "search",
+        CONTEXT_QUERY,
+        "--workspace",
+        &side_path_arg,
+        "--json",
+    ])?;
+    ensure_equal(
+        &searched.pointer("/success").and_then(JsonValue::as_bool),
+        &Some(true),
+        "restored search succeeded",
+    )?;
+    ensure(
+        !searched.to_string().contains(SECRET_CANARY),
+        "restored search leaked the secret canary",
+    )?;
+    let why = run_ee(&["why", memory_id, "--workspace", &side_path_arg, "--json"])?;
+    ensure_equal(
+        &why.pointer("/success").and_then(JsonValue::as_bool),
+        &Some(true),
+        "restored why succeeded",
+    )?;
+    let restored_pack = run_ee(&[
+        "pack",
+        CONTEXT_QUERY,
+        "--workspace",
+        &side_path_arg,
+        "--json",
+    ])?;
+    ensure_equal(
+        &restored_pack
+            .pointer("/success")
+            .and_then(JsonValue::as_bool),
+        &Some(true),
+        "restored pack succeeded",
+    )?;
+    ensure(
+        !restored_pack.to_string().contains(SECRET_CANARY),
+        "restored pack leaked the secret canary",
+    )?;
+    let curated = run_ee(&[
+        "curate",
+        "candidates",
+        "--all",
+        "--workspace",
+        &side_path_arg,
+        "--json",
+    ])?;
+    ensure_equal(
+        &curated.pointer("/success").and_then(JsonValue::as_bool),
+        &Some(true),
+        "restored curate candidates succeeded",
+    )?;
+    let maintain = run_ee(&[
+        "maintenance",
+        "status",
+        "--workspace",
+        &side_path_arg,
+        "--json",
+    ])?;
+    ensure_equal(
+        &maintain.pointer("/success").and_then(JsonValue::as_bool),
+        &Some(true),
+        "restored maintenance status succeeded",
     )?;
     Ok(())
 }
