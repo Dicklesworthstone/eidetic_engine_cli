@@ -1530,6 +1530,28 @@ fn backup_restore_roundtrips_cli_families_and_redacts_secrets() -> TestResult {
         &Some(true),
         "source outcome succeeded",
     )?;
+    let proposed = run_ee(&[
+        "curate",
+        "propose-derived",
+        "--source-memory",
+        memory_id,
+        "--level",
+        "semantic",
+        "--kind",
+        "insight",
+        "--content",
+        "Derived insight: format before release.",
+        "--producer-kind",
+        "e2e_test",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    ensure_equal(
+        &proposed.pointer("/success").and_then(JsonValue::as_bool),
+        &Some(true),
+        "source curate propose-derived succeeded",
+    )?;
     let created = run_ee(&[
         "backup",
         "create",
@@ -1585,6 +1607,14 @@ fn backup_restore_roundtrips_cli_families_and_redacts_secrets() -> TestResult {
     ensure(
         feedback >= 1,
         format!("expected restored feedback events, got {feedback}"),
+    )?;
+    let curation = restored
+        .pointer("/data/counts/curationCandidatesRestored")
+        .and_then(JsonValue::as_u64)
+        .unwrap_or(0);
+    ensure(
+        curation >= 1,
+        format!("expected restored curation candidates, got {curation}"),
     )?;
     let searched = run_ee(&[
         "search",
