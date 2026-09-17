@@ -586,3 +586,103 @@ fn vision_coverage_warns_below_the_published_cadence_threshold() -> TestResult {
         "an under-threshold gap must not fail an ordinary commit",
     )
 }
+
+/// `surfaces.stubbed` is one of the two terms in `gap_percentage`, and a zero
+/// there must say which kind of zero it is.
+///
+/// `stub_surfaces()` greps ONE file (`src/cli/mod.rs`) for
+/// `const *_UNAVAILABLE_CODE`. Measured 2026-09-17 (bd-wn8xh): that file
+/// declares ZERO of them while 43 exist elsewhere under `src/`, and none of
+/// those maps to a documented surface. So the published `stubbed: 0` has not
+/// been "no surfaces are stubbed" — it has been a reading over an empty
+/// population, and the two were indistinguishable in the report.
+///
+/// This test does not claim the detector is correct. It claims the report now
+/// DISTINGUISHES the two cases, which is the part that was missing.
+#[test]
+fn vision_coverage_says_when_the_stub_term_is_reading_an_empty_population() -> TestResult {
+    let fixture_root = unique_fixture_root("stub-empty")?;
+    write_minimal_vision_fixture(&fixture_root, "status")?;
+    let report_path = fixture_root.join("report.json");
+    // The gate's own verdict is irrelevant here and deliberately unasserted:
+    // this minimal fixture documents a surface it does not implement, so it
+    // exits 1 on a 100% gap. What is under test is what the REPORT says about
+    // the stub detector, and the report is written either way.
+    let _ = run_gate_in_dir(&fixture_root, &report_path, false, None)?;
+
+    let report = read_report(&report_path)?;
+    ensure_eq_u64(
+        &report,
+        "/stub_detector/candidate_constants",
+        0,
+        "a fixture cli module with no sentinel constants has no candidates",
+    )?;
+    ensure(
+        report
+            .pointer("/stub_detector/population_empty")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true),
+        "the report must say the stub term is reading an empty population",
+    )?;
+    ensure_eq_u64(
+        &report,
+        "/surfaces/stubbed",
+        0,
+        "the stubbed count itself is still zero",
+    )
+}
+
+/// The paired control. Without it the field above could be hardcoded `true` and
+/// this file would still be green — which is the same defect the field exists
+/// to remove, one level up.
+#[test]
+fn vision_coverage_reports_a_non_empty_stub_population_when_constants_exist() -> TestResult {
+    let fixture_root = unique_fixture_root("stub-populated")?;
+    write_minimal_vision_fixture(&fixture_root, "status")?;
+    // Same fixture, one difference: the scanned module now declares a sentinel
+    // constant, so the detector has something to look at.
+    let cli_mod = fixture_root.join("src").join("cli").join("mod.rs");
+    let existing = std::fs::read_to_string(&cli_mod)
+        .map_err(|error| format!("read fixture cli module: {error}"))?;
+    std::fs::write(
+        &cli_mod,
+        format!(
+            "{existing}\nconst DEMO_EXECUTION_UNAVAILABLE_CODE: &str = \"demo_unavailable\";\n"
+        ),
+    )
+    .map_err(|error| format!("write fixture cli module: {error}"))?;
+
+    let report_path = fixture_root.join("report.json");
+    // Same as the arm above: the verdict is not what this asserts.
+    let _ = run_gate_in_dir(&fixture_root, &report_path, false, None)?;
+
+    let report = read_report(&report_path)?;
+    let candidates = report
+        .pointer("/stub_detector/candidate_constants")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "stub_detector.candidate_constants is not a number".to_owned())?;
+    ensure(
+        candidates >= 1,
+        &format!("a declared sentinel constant must be counted, got {candidates}"),
+    )?;
+    ensure(
+        report
+            .pointer("/stub_detector/population_empty")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false),
+        "population_empty must be false once the scanned file declares a constant",
+    )
+}
+
+fn ensure_eq_u64(
+    report: &serde_json::Value,
+    pointer: &str,
+    expected: u64,
+    context: &str,
+) -> TestResult {
+    let actual = pointer_u64(report, pointer)?;
+    ensure(
+        actual == expected,
+        &format!("{context}: expected {expected} at {pointer}, got {actual}"),
+    )
+}

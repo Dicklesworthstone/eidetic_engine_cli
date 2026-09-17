@@ -429,6 +429,30 @@ open_implement_surfaces_json() {
     '
 }
 
+# How many candidate constants the stub detector's grep can even see.
+#
+# `stubbed` is one of the two terms in gap_percentage, and stub_surfaces()
+# derives it by grepping ONE file ($CLI_MOD) for `const *_UNAVAILABLE_CODE`.
+# When that file declares none, `stubbed: 0` is not a measurement of "no
+# surfaces are stubbed" -- it is the detector reporting on an empty population,
+# and the two are indistinguishable in the published number.
+#
+# Measured 2026-09-17 (bd-wn8xh): src/cli/mod.rs declares ZERO such constants
+# while 41 exist elsewhere under src/, and none of those 41 maps to a documented
+# surface. So this term has been structurally pinned at 0, and the gap has been
+# carried entirely by `missing`, with nothing in the report saying so.
+#
+# This does NOT fix the detector -- widening its grep to all of src/ was
+# measured to change nothing, because the vocabulary it was written to find
+# (the 20-case table in constant_surface) has left the codebase. What it fixes
+# is the silence: a zero over an empty population now says it is one.
+stub_detector_candidate_count() {
+    read_source "$CLI_MOD" |
+        { grep -c 'const [A-Z0-9_]*_UNAVAILABLE_CODE' || true; } |
+        head -1 |
+        tr -d '[:space:]'
+}
+
 stub_surfaces() {
     open_json=$(open_implement_surfaces_json)
     read_source "$CLI_MOD" |
@@ -492,6 +516,8 @@ build_report() {
         --argjson documented "$(documented_commands | json_array_from_lines)" \
         --argjson implemented "$(implemented_commands | json_array_from_lines)" \
         --argjson stubs "$(stub_surfaces)" \
+        --arg stub_detector_file "$CLI_MOD" \
+        --argjson stub_detector_candidates "$(stub_detector_candidate_count)" \
         --argjson release_tag "$RELEASE_TAG" \
         --argjson max_gap "$MAX_GAP_PERCENT" '
         def command_surface($cmd):
@@ -559,6 +585,14 @@ build_report() {
               with_open_implements_bead: ([ $stubs[] | select(.implements_bead != null) ] | length)
             },
             gap_percentage: $gap,
+            # Whether `surfaces.stubbed` is a measurement or a reading taken
+            # over an empty population. Both publish 0; only one of them means
+            # "no surfaces are stubbed" (bd-wn8xh).
+            stub_detector: {
+              scanned_file: $stub_detector_file,
+              candidate_constants: $stub_detector_candidates,
+              population_empty: ($stub_detector_candidates == 0)
+            },
             implemented_surfaces: $implemented_doc,
             missing_surfaces: $missing,
             documented_stubbed_surfaces: $documented_stubbed_surface_records,
@@ -631,6 +665,12 @@ else
     echo "Stubbed surfaces: $STUBBED"
     echo "Missing surfaces: $MISSING"
     echo "Gap: ${GAP}%"
+    if [ "$(printf "%s\n" "$REPORT_JSON" | jq -r '.stub_detector.population_empty')" = "true" ]; then
+        # Say it out loud rather than letting a structural zero read as a clean
+        # bill of health. `stubbed` is half of gap_percentage (bd-wn8xh).
+        echo "Stubbed: 0 — NOT A MEASUREMENT: $(printf "%s\n" "$REPORT_JSON" | jq -r '.stub_detector.scanned_file') declares no *_UNAVAILABLE_CODE constants,"
+        echo "         so the stub half of the gap is reporting on an empty population, not on an absence of stubs."
+    fi
     echo "Report: $REPORT_FILE"
 fi
 
