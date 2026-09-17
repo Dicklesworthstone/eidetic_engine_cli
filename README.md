@@ -16,10 +16,8 @@
 **Install**
 
 ```bash
-f="$(mktemp)"
-curl -fsSL "https://cdn.jsdelivr.net/gh/Dicklesworthstone/eidetic_engine_cli@main/install.sh" -o "$f" \
-  || curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh" -o "$f"
-if [ -s "$f" ]; then bash "$f" --easy-mode --verify; else echo "Installer download failed - retry in a few minutes" >&2; fi
+curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.15.2/install.sh \
+  | EE_VERSION=v0.15.2 bash -s -- --easy-mode --verify
 ```
 
 Always verifies the release binary's SHA-256 checksum, verifies its Sigstore
@@ -335,12 +333,12 @@ Hard constraints. CI fails if any of them break.
 
 ### Installation status
 
-| Method | Status | Evidence |
-|---|---|---|
-| GitHub release installer | Six targets; the release page identifies the current published version | [latest release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest) |
-| Homebrew tap | Apple Silicon, Intel Mac, Linux ARM64 and Linux x86-64; updated after release asset verification | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
-| crates.io | Registry-only packages require nightly Rust; use 0.15.2 or newer | [published versions](https://crates.io/crates/eidetic-engine/versions) |
-| Source build | available now | this README |
+| Path | Status | Provenance | Tracking |
+|---|---|---|---|
+| GitHub release installer | available; latest published tag is v0.15.2 | SHA-256 required; SLSA provenance JSON and its Sigstore bundle optional via `--require-provenance` (v0.15.2 published unsigned) | [latest release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest) |
+| Homebrew tap | available; formula version 0.15.2 | release-asset sha256 in the tap formula | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
+| crates.io | available; package `eidetic-engine` 0.15.2; binary remains `ee` | crates.io checksum | [published versions](https://crates.io/crates/eidetic-engine/versions) |
+| Source build | available now | local build only | this README |
 
 When upgrading from a version earlier than 0.15.0, rebuild each workspace's semantic index with
 `ee index rebuild --workspace .` and reinstall managed hooks for the new snippets.
@@ -354,6 +352,19 @@ Starting with v0.14.5, the GNU/Linux release builds target glibc 2.28 or
 newer on x86-64 and ARM64. Build hosts verify the finished binary's glibc
 symbol requirements before packaging. The x86-64 musl archive is available
 for systems without glibc.
+
+```bash
+curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.15.2/install.sh \
+  | EE_VERSION=v0.15.2 bash -s -- --easy-mode --verify
+```
+
+This fetches the installer and the matching `v0.15.2` release binary from GitHub
+release assets, not from mutable `main`. To install a different published tag,
+change both the URL path and `EE_VERSION`.
+
+If you want the installer script from current `main` instead of a release tag
+(for installer-script development only), jsDelivr then `raw.githubusercontent.com`
+remain the fallback:
 
 ```bash
 f="$(mktemp)"
@@ -386,9 +397,9 @@ completions, repairs writable zsh/bash startup files (creating the active
 shell's file for a fresh home), and runs `ee --version` plus `ee doctor --json`.
 The informational agent scan prints setup guidance without changing agent settings. Open a new shell (or source its rc file) afterward.
 Re-running the command repairs `PATH` and completions and re-verifies a matching version without downloading or rebuilding it.
-Pass `--require-provenance` to require both a verified release signature and a
-verified SLSA provenance attestation; otherwise a missing bundle is reported
-and the checksum-verified install continues.
+Pass `--require-provenance` to require the SLSA provenance JSON and its Sigstore
+bundle; otherwise a missing bundle is reported and the checksum-verified
+install continues.
 
 [Release binaries](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest)
 cover macOS (`aarch64`, `x86_64`), Linux (`aarch64` and `x86_64` GNU,
@@ -397,6 +408,16 @@ installer prefers the portable musl build, then automatically retries the
 compatible GNU build when that release does not include musl.
 
 #### Windows (PowerShell)
+
+```powershell
+$f = Join-Path $env:TEMP 'install-ee.ps1'
+Invoke-WebRequest -UseBasicParsing "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.15.2/install.ps1" -OutFile $f
+if (Test-Path $f) { & $f -Version "0.15.2" -Verify } else { Write-Error "Installer download failed - retry in a few minutes" }
+```
+
+This pins both the installer script and the installed binary to the `v0.15.2`
+release assets. The mutable-`main` jsDelivr / `raw.githubusercontent.com`
+fallback remains for installer-script development only:
 
 ```powershell
 $f = Join-Path $env:TEMP 'install-ee.ps1'

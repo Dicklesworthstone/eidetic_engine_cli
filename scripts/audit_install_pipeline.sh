@@ -468,24 +468,28 @@ readme_installation_status() {
     if grep -qE '^### Installation status$' "$readme" 2>/dev/null; then
         has_status=true
     fi
-    if grep -qF '| GitHub release installer | planned; no release assets published yet | SLSA provenance planned; installer supports `--require-provenance` | `bd-3usjw.9` / `bd-3usjw.9.1` |' "$readme" 2>/dev/null; then
+    # bd-he3xx: these used to grep 2026-05 "planned; no release assets" rows.
+    # Live channels on 2026-09-17 are v0.15.2 (GitHub release, Homebrew
+    # formula, crates.io eidetic-engine). Restoring the planned strings
+    # would make planned_markers_present true by lying.
+    if grep -qF '| GitHub release installer | available; latest published tag is v0.15.2 |' "$readme" 2>/dev/null; then
         release_planned=true
     fi
-    if grep -qF '| Homebrew tap | planned; tap formula not published yet | release-asset provenance applies after tap publish | `bd-3usjw.13` |' "$readme" 2>/dev/null; then
+    if grep -qF '| Homebrew tap | available; formula version 0.15.2 |' "$readme" 2>/dev/null; then
         homebrew_planned=true
     fi
-    if grep -qF '| crates.io | planned; package name selected as `eidetic-engine`; binary remains `ee`; `publish = false` today | n/a | `bd-3usjw.10` |' "$readme" 2>/dev/null; then
+    if grep -qF '| crates.io | available; package `eidetic-engine` 0.15.2; binary remains `ee` |' "$readme" 2>/dev/null; then
         cargo_planned=true
     fi
     if grep -qF '| Source build | available now | local build only | this README |' "$readme" 2>/dev/null; then
         source_available=true
     fi
-    if grep -qF 'releases/download/v0.1.0/install.sh' "$readme" 2>/dev/null \
-        && grep -qF 'releases/download/v0.1.0/install.ps1' "$readme" 2>/dev/null; then
+    if grep -qF 'releases/download/v0.15.2/install.sh' "$readme" 2>/dev/null \
+        && grep -qF 'releases/download/v0.15.2/install.ps1' "$readme" 2>/dev/null; then
         release_assets=true
     fi
-    if grep -qF 'EE_VERSION=v0.1.0 sh' "$readme" 2>/dev/null \
-        && grep -qF -- '-Version "0.1.0"' "$readme" 2>/dev/null; then
+    if grep -qF 'EE_VERSION=v0.15.2 bash' "$readme" 2>/dev/null \
+        && grep -qF -- '-Version "0.15.2"' "$readme" 2>/dev/null; then
         release_version_pinned=true
     fi
     if grep -qF '| Path | Status | Provenance | Tracking |' "$readme" 2>/dev/null; then
