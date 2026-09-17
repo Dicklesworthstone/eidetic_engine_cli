@@ -7159,16 +7159,51 @@ fn workspace_embedder_descriptors(
             | RegisteredModel2VecResolution::BundledDefaultDeclared => {}
         }
     }
+    // bd-qf3l4. Below, this function shares execution's resolution so inspection
+    // cannot claim a neural backend that retrieval falls back from (bd-7hsgy).
+    // That sharing must READ the resolution, never force it. `get_or_init` here
+    // made `ee index status` and `ee doctor` load the embedding model: a
+    // registered workspace probed with a model root configured allocated ~2 GB
+    // RSS against ~48 MB without, for the same read-only command. The comment
+    // below justifies the cost as "what retrieval would have paid anyway", which
+    // holds for `ee search` and not for a probe that never retrieves -- and these
+    // are the commands an agent runs when something is already wrong.
+    //
+    // This file already states the rule twice, for `active_semantic_identity` and
+    // `active_embedder_identity_hint`: a diagnostic that initialised the global
+    // would fix the very identity it claims to report, turning an observation
+    // into a mutation. The same applies here.
+    //
+    // When the process HAS resolved, behaviour is unchanged and bd-7hsgy's
+    // guarantee holds exactly. When it has not, answer from the registry rather
+    // than forcing a load -- the same answer the unconfigured branch above
+    // already gives. The tradeoff is real and deliberate: an unresolved process
+    // may describe a registered model optimistically, where before it would have
+    // loaded the weights to be certain. A 2 GB allocation on `ee doctor` is the
+    // worse defect, and the execution path still resolves for real before any
+    // retrieval reports a posture.
+    let Some(selection) = DEFAULT_SEARCH_EMBEDDER.get() else {
+        return match resolve_registered_model2vec(db, workspace_id, |_| {
+            Ok(EmbedderDescriptor::potion())
+        })? {
+            RegisteredModel2VecResolution::Ready(descriptor) => Ok((descriptor, None)),
+            RegisteredModel2VecResolution::Rejected(_)
+            | RegisteredModel2VecResolution::NotRegistered
+            | RegisteredModel2VecResolution::BundledDefaultDeclared => {
+                Ok(stack_descriptors(&hash_fallback_embedder_stack()))
+            }
+        };
+    };
     // Inspection shares execution's one-time resolution rather than answering
     // from discovery alone. A verified model directory establishes that the
     // files are present, never that the weights load: the retrieval path warns
     // and falls to the hash tier when the load fails, which is how `ee model
     // status` came to report a neural backend seconds after `ee search`
     // reported `hash_fallback` for the same workspace (bd-7hsgy). The
-    // resolution is memoised process-wide, so sharing it here costs the first
-    // caller what retrieval would have paid anyway and costs later callers
-    // nothing.
-    let selection = DEFAULT_SEARCH_EMBEDDER.get_or_init(detect_default_search_embedder);
+    // resolution is memoised process-wide, so sharing it costs a caller that was
+    // going to retrieve nothing extra, and costs later callers nothing. It is
+    // read above via `get`, never forced: the first caller to pay for it must be
+    // one that actually needed the weights.
     let (mut fast, quality) = stack_descriptors(&selection.stack);
     // Read from the selection in hand rather than from process-global state.
     // The failure belongs to THIS selection, and a stack that a caller or a
