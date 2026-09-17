@@ -124,6 +124,35 @@ fn describe_directory_drift(
     drift
 }
 
+/// The path out of a `describe_directory_drift` entry (`"created: a/b"`).
+fn drift_path(entry: &str) -> String {
+    entry
+        .split_once(": ")
+        .map_or_else(|| entry.to_owned(), |(_, path)| path.to_owned())
+}
+
+/// `true` if a drift entry is evidence of a DURABLE WRITE, not merely of a
+/// read-write handle having been opened.
+///
+/// The distinction is load-bearing and was established by a run, not by
+/// reading: bd-czj3e's original filing saw only `.ee/ee.db-shm` and
+/// `.ee/ee.write.lock` move and concluded "no audit row landed". Both of
+/// those change on any `(File, ReadWrite)` open, because the write-owner gate
+/// publishes a holder epoch at open time (`src/db/mod.rs:1130-1137`) and
+/// SQLite maps the shared-memory index. `ee why` opens read-write to run
+/// `migrate()` and moves them without writing a thing.
+///
+/// `.ee/ee.db` and `.ee/ee.db-wal` are different: content only moves there
+/// when something commits. `-wal-cert` is a FrankenSQLite certification
+/// sidecar that tracks the WAL, so it is engine-level corroboration rather
+/// than an independent signal, and is deliberately NOT accepted on its own.
+fn is_durable_write(entry: &str) -> bool {
+    let path = drift_path(entry);
+    let database = format!(".ee{}ee.db", std::path::MAIN_SEPARATOR);
+    let wal = format!("{database}-wal");
+    path == database || path == wal
+}
+
 /// Assert a surface left the workspace byte-identical, NAMING what moved.
 ///
 /// The CONDITION is unchanged -- full-tree `hash_directory` equality, exactly
@@ -562,8 +591,11 @@ fn retrieval_surfaces_append_exactly_one_audit_row_and_nothing_else() -> TestRes
         "index rebuild should succeed",
     )?;
 
-    // Negative control: a genuine read must not move a byte.
-    let control_before = hash_directory(workspace);
+    // Negative control: `ee why` also takes a WRITABLE handle -- it opens
+    // read-write to run `migrate()` before reading (src/cli/mod.rs:54012) --
+    // so it exercises the open-artifact paths without appending anything. If
+    // the discriminator below called that a write, it would call every
+    // command a write and pin nothing.
     let control_snapshot = snapshot_directory(workspace);
     let why = run_ee(&[
         "--workspace",
@@ -581,7 +613,14 @@ fn retrieval_surfaces_append_exactly_one_audit_row_and_nothing_else() -> TestRes
             String::from_utf8_lossy(&why.stderr)
         ),
     )?;
-    ensure_workspace_unchanged(workspace, control_before, &control_snapshot, "why")?;
+    let control_drift = describe_directory_drift(&control_snapshot, &snapshot_directory(workspace));
+    ensure(
+        control_drift
+            .iter()
+            .any(|entry| is_durable_write(entry.as_str())),
+        false,
+        &format!("why must not write the database or WAL; drift was {control_drift:?}"),
+    )?;
 
     let before = hash_directory(workspace);
     let before_snapshot = snapshot_directory(workspace);
@@ -618,18 +657,11 @@ fn retrieval_surfaces_append_exactly_one_audit_row_and_nothing_else() -> TestRes
     // entry is append_only_write("search", ["audit_log"]) with empty
     // `derived_paths` and empty `workspace_files`, and `append_only`'s
     // contract explicitly permits "queues or refreshes derived index after
-    // new records commit". So the pin is: nothing outside the store moved. A
-    // stricter `.ee/ee.db*`-only rule would also fail on a legitimate index
-    // reconcile and would be asserting a contract ee never made.
+    // new records commit". So the pin is: nothing outside the store moved.
     let store_root = format!(".ee{}", std::path::MAIN_SEPARATOR);
-    let drift_path = |entry: &str| -> String {
-        entry
-            .split_once(": ")
-            .map_or_else(|| entry.to_owned(), |(_, path)| path.to_owned())
-    };
     let outside: Vec<String> = drift
         .iter()
-        .map(|entry| drift_path(entry))
+        .map(|entry| drift_path(entry.as_str()))
         .filter(|path| path != ".ee" && !path.starts_with(&store_root))
         .collect();
     ensure(
@@ -637,19 +669,15 @@ fn retrieval_surfaces_append_exactly_one_audit_row_and_nothing_else() -> TestRes
         true,
         &format!("search must write no workspace file outside the store; drift was {drift:?}"),
     )?;
-    // Non-vacuity guard, not a restatement of the line above: an empty `drift`
-    // satisfies `outside.is_empty()` for free, and the two walks are taken at
-    // different instants, so the emptiness has to be excluded explicitly
-    // rather than inferred from the hash inequality. This is also the half
-    // that names the declared surface: the DATABASE is what an audit-row
-    // append has to move.
-    let database_prefix = format!("{store_root}ee.db");
+    // The declared surface actually moved. This is the half the control
+    // above makes meaningful: `.ee/ee.db-shm` and `.ee/ee.write.lock` change
+    // on any read-write OPEN, so matching them would prove only that a handle
+    // was taken. `is_durable_write` ignores both and requires the database or
+    // its WAL, which is what appending a row moves.
     ensure(
-        drift
-            .iter()
-            .any(|entry| drift_path(entry).starts_with(&database_prefix)),
+        drift.iter().any(|entry| is_durable_write(entry.as_str())),
         true,
-        &format!("search must write the database itself; drift was {drift:?}"),
+        &format!("search must write the database or its WAL; drift was {drift:?}"),
     )
 }
 
