@@ -455,19 +455,14 @@ fn canonical_database_reads_leave_initialized_workspace_byte_identical() -> Test
         "index rebuild should succeed",
     )?;
 
+    // `search` is deliberately ABSENT from these cases. It appends a retrieval
+    // audit row on every user-facing query (ADR 0071, bd-l8dn0), so it cannot
+    // leave the workspace byte-identical and never could -- this case asserted
+    // the behaviour the manifest claimed, not the behaviour the code has.
+    // `retrieval_surfaces_append_exactly_one_audit_row_and_nothing_else` below
+    // replaces it with the opposite assertion, which is the stronger one:
+    // deleting a case only stops a red, and stops it by asking less.
     let cases = [
-        (
-            "search",
-            vec![
-                "--workspace",
-                workspace_arg,
-                "--json",
-                "search",
-                "format before release",
-                "--source-mode",
-                "lexical_only",
-            ],
-        ),
         (
             "why",
             vec![
@@ -513,6 +508,137 @@ fn canonical_database_reads_leave_initialized_workspace_byte_identical() -> Test
         ensure_workspace_unchanged(workspace, before, &before_snapshot, surface)?;
     }
     Ok(())
+}
+
+/// The behavioural half of bd-czj3e: `ee search` is a writer.
+///
+/// `search` was declared `read_only_db` and listed above as a canonical
+/// database read while the production path opens a WRITABLE handle after
+/// releasing the read pin and appends a retrieval audit row
+/// (`src/core/search.rs:7652-7669`). ADR 0071 reads the absence of those rows
+/// as `never_retrieved`, so the write is deliberate and the declaration was
+/// the wrong half.
+///
+/// `why` runs first as a NEGATIVE CONTROL. Without it this test would pass on
+/// any store churn at all -- a WAL or `-shm` touch from merely opening the
+/// database read-only would look exactly like an audit append. `why` reads the
+/// same store through the same binary and must leave it byte-identical, so a
+/// green here means the detector discriminates rather than that everything
+/// dirties the workspace.
+#[test]
+fn retrieval_surfaces_append_exactly_one_audit_row_and_nothing_else() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace = temp.path();
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be valid UTF-8".to_owned())?;
+
+    let init = run_ee(&["--workspace", workspace_arg, "--json", "init"])?;
+    ensure(init.status.success(), true, "init should succeed")?;
+    let remember = run_ee(&[
+        "--workspace",
+        workspace_arg,
+        "--json",
+        "remember",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "Run cargo fmt --check before release.",
+    ])?;
+    ensure(remember.status.success(), true, "remember should succeed")?;
+    let remember_json: serde_json::Value = serde_json::from_slice(&remember.stdout)
+        .map_err(|error| format!("parse remember JSON: {error}"))?;
+    let memory_id = remember_json["data"]["public_id"]
+        .as_str()
+        .or_else(|| remember_json["data"]["memory_id"].as_str())
+        .or_else(|| remember_json["data"]["id"].as_str())
+        .ok_or_else(|| format!("remember response missing memory id: {remember_json}"))?
+        .to_owned();
+    let rebuild = run_ee(&["--workspace", workspace_arg, "--json", "index", "rebuild"])?;
+    ensure(
+        rebuild.status.success(),
+        true,
+        "index rebuild should succeed",
+    )?;
+
+    // Negative control: a genuine read must not move a byte.
+    let control_before = hash_directory(workspace);
+    let control_snapshot = snapshot_directory(workspace);
+    let why = run_ee(&[
+        "--workspace",
+        workspace_arg,
+        "--json",
+        "why",
+        memory_id.as_str(),
+    ])?;
+    ensure(
+        why.status.success() || why.status.code() == Some(3),
+        true,
+        &format!(
+            "why should complete; stdout={} stderr={}",
+            String::from_utf8_lossy(&why.stdout),
+            String::from_utf8_lossy(&why.stderr)
+        ),
+    )?;
+    ensure_workspace_unchanged(workspace, control_before, &control_snapshot, "why")?;
+
+    let before = hash_directory(workspace);
+    let before_snapshot = snapshot_directory(workspace);
+    let search = run_ee(&[
+        "--workspace",
+        workspace_arg,
+        "--json",
+        "search",
+        "format before release",
+        "--source-mode",
+        "lexical_only",
+    ])?;
+    ensure(
+        search.status.success(),
+        true,
+        &format!(
+            "search should succeed; stdout={} stderr={}",
+            String::from_utf8_lossy(&search.stdout),
+            String::from_utf8_lossy(&search.stderr)
+        ),
+    )?;
+
+    let after = hash_directory(workspace);
+    let drift = describe_directory_drift(&before_snapshot, &snapshot_directory(workspace));
+    if after == before {
+        return Err(
+            "search must append a retrieval audit row: the workspace was byte-identical, so \
+             either the ADR 0071 recording regressed or the manifest's append_only_write \
+             declaration for `search` is now wrong"
+                .to_owned(),
+        );
+    }
+    // The append lands in the store, and nowhere else. A search that started
+    // writing pack records or side-path artifacts would still trip the
+    // inequality above and must not pass as "the audit row we declared".
+    let store_prefix = format!(".ee{}ee.db", std::path::MAIN_SEPARATOR);
+    let outside: Vec<&String> = drift
+        .iter()
+        .filter(|entry| {
+            let path = entry.split_once(": ").map_or(entry.as_str(), |(_, p)| p);
+            !path.starts_with(&store_prefix)
+        })
+        .collect();
+    ensure(
+        outside.is_empty(),
+        true,
+        &format!("search must touch only the store; drift was {drift:?}"),
+    )?;
+    // Non-vacuity guard, not a restatement of the line above: an empty `drift`
+    // satisfies `outside.is_empty()` for free, and the two walks are taken at
+    // different instants, so the emptiness has to be excluded explicitly
+    // rather than inferred from the hash inequality.
+    ensure(
+        drift.iter().any(|entry| entry.contains("ee.db")),
+        true,
+        &format!("search must write the database itself; drift was {drift:?}"),
+    )
 }
 
 #[test]
@@ -902,12 +1028,13 @@ fn effect_manifest_covers_recent_read_only_surfaces() -> TestResult {
     use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
 
     let manifest = EffectManifest::build();
-    for command in [
-        "diag toolchain-provenance",
-        "hook status",
-        "similar",
-        "timeline",
-    ] {
+    // `similar` was in this list and is not any more: it opens a writable
+    // audit handle (`src/core/search.rs:8169`, made writable deliberately by
+    // 76991fe96) and appends a retrieval audit row. It is re-pinned positively
+    // by `retrieval_surfaces_declare_the_audit_row_they_append` in
+    // src/core/effect.rs -- dropping a name from a read-only list without
+    // asserting what it became would leave the surface unpinned (bd-czj3e).
+    for command in ["diag toolchain-provenance", "hook status", "timeline"] {
         let effect = manifest
             .get(command)
             .ok_or_else(|| format!("{command} not in manifest"))?;

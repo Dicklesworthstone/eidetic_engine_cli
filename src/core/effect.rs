@@ -1535,10 +1535,8 @@ impl EffectManifest {
                 "recall",
                 "Code-anchored reverse lookup from paths, symbols, or a git diff to anchored memories",
             ),
-            CommandEffect::read_only_db(
-                "similar",
-                "Find embedding-native nearest-neighbor memories for a persisted seed memory",
-            ),
+            // `similar` moved to append_only_write_commands (bd-czj3e): it
+            // opens a WRITABLE audit handle and appends a retrieval audit row.
             CommandEffect::read_only_db(
                 "learn agenda",
                 "Show learning agenda with prioritized gaps",
@@ -1734,11 +1732,9 @@ impl EffectManifest {
             CommandEffect::read_only_db("rule show", "Show procedural rule"),
             CommandEffect::read_only("schema export", "Export public response schemas"),
             CommandEffect::read_only("schema list", "List response schemas"),
-            CommandEffect::read_only_db("search", "Search memories"),
-            CommandEffect::read_only_db(
-                "search --all-workspaces",
-                "Read-only diagnostic: run one query across every workspace registered in the addressed database plus the global lane, rows labeled per workspace; inspection surface, never a pack input",
-            ),
+            // `search`, `search --all-workspaces` and `similar` all moved to
+            // append_only_write_commands (bd-czj3e): every user retrieval
+            // appends a retrieval audit row.
             CommandEffect::read_only_db(
                 "sentinel explain",
                 "Explain sentinel specifications and prior results",
@@ -2232,6 +2228,66 @@ impl EffectManifest {
                 vec!["audit_log"],
                 "audit row id",
                 "Render handoff resume payload, appending an audit row when capsule HMAC verification fails or is bypassed",
+            ),
+            // `search`, `search --all-workspaces` and `similar` are RETRIEVAL
+            // surfaces that nevertheless append to the audit hash-chain on
+            // every user-facing invocation, so they are declared for what they
+            // do rather than for what they look like (bd-czj3e).
+            //
+            // src/core/search.rs:7652-7669, in production
+            // run_search_with_performance_and_filters_with_cx_and_reconcile_timeout:
+            //
+            //     // bd-l8dn0. Record this retrieval. ...
+            //     // the audit write takes the flock write gate, ...
+            //     if record_retrieval_audit && !retrieval_only
+            //         && let Some(facts) = &run.audit_facts
+            //         && let Ok(connection) = DbConnection::open_file(&database_path)
+            //
+            // `DbConnection::open_file` is DatabaseConfig::file = ReadWrite, and
+            // the write-owner gate is taken for exactly (File, ReadWrite) at
+            // OPEN (src/db/mod.rs:1130-1137) -- so the flock is taken even
+            // before a row is written. run_search_with_performance_and_filters
+            // passes record_retrieval_audit: true, so a bare `ee search`
+            // reaches it with no flag. `ee similar` does the same at :8169,
+            // deliberately: 76991fe96 "give ee similar a writable audit handle
+            // so its rows are not lost".
+            //
+            // The rows land in `audit_log` via SearchAuditBatch ->
+            // DbConnection::insert_audit_batch -> AUDIT_INSERT_SQL_PREFIX
+            // (src/db/mod.rs:28410), inside one transaction that extends the
+            // audit hash chain.
+            //
+            // NOT FIXED BY SUPPRESSING THE WRITE. Retrieval audit feeds
+            // `never_retrieved`, decay and trust (ADR 0071); bd-b9dmp records
+            // that passing a read-only handle here silently lost every row and
+            // scored retrieved memories as never-retrieved. The declaration was
+            // the wrong half.
+            //
+            // `search --all-workspaces` is the same writer, fanned out:
+            // handle_search_all_workspaces (src/cli/mod.rs:49345) calls the
+            // recording `run_search` once per registered workspace, up to
+            // ALL_WORKSPACES_SCAN_CAP = 16 of them, so a single invocation
+            // appends an audit row to as many as sixteen databases. Its old
+            // description called it a "Read-only diagnostic ... inspection
+            // surface"; the read-only handle it opens at :49282 is only for
+            // enumerating the workspaces, not for the searches it then runs.
+            CommandEffect::append_only_write(
+                "search",
+                vec!["audit_log"],
+                "retrieval audit row id",
+                "Search memories, appending one retrieval audit row per user-facing query",
+            ),
+            CommandEffect::append_only_write(
+                "search --all-workspaces",
+                vec!["audit_log"],
+                "retrieval audit row id",
+                "Run one query across every workspace registered in the addressed database plus the global lane, rows labeled per workspace, appending one retrieval audit row to each workspace searched; inspection surface, never a pack input",
+            ),
+            CommandEffect::append_only_write(
+                "similar",
+                vec!["audit_log"],
+                "retrieval audit row id",
+                "Find embedding-native nearest-neighbor memories for a persisted seed memory, appending one retrieval audit row",
             ),
             CommandEffect::append_only_write(
                 "artifact register",
@@ -4249,10 +4305,15 @@ mod tests {
     #[test]
     fn db_backed_read_only_commands_declare_read_snapshot_requirement() -> TestResult {
         let manifest = EffectManifest::build();
+        // `search` and `similar` are deliberately ABSENT from this list: both
+        // append a retrieval audit row, so they are append-only writers, not
+        // db-backed reads (bd-czj3e). They are re-pinned POSITIVELY by
+        // retrieval_surfaces_declare_the_audit_row_they_append below -- removing
+        // a name from a read-only list without asserting what it became is the
+        // silencing this repo forbids.
         let db_backed = [
             "context",
             "orient",
-            "search",
             "why",
             "status",
             "doctor",
@@ -4295,6 +4356,91 @@ mod tests {
                 &format!("{command} does not require a DB read snapshot"),
             )?;
         }
+
+        Ok(())
+    }
+
+    /// The positive half of moving the three retrieval surfaces out of the
+    /// read-only lists (bd-czj3e).
+    ///
+    /// All three open a WRITABLE handle after the read pin is released and
+    /// append a retrieval audit row on every user-facing invocation
+    /// (`src/core/search.rs:7652-7669` and `:8169`; the `--all-workspaces`
+    /// fan-out reaches the same writer once per workspace through
+    /// `run_search`). A declaration of `read_only_db` told agents and the
+    /// boundary inventory that they take no write gate and leave the database
+    /// byte-identical; both statements were false. Asserting what they ARE,
+    /// rather than only deleting them from a list, is what keeps the next
+    /// read-only sweep from quietly putting them back.
+    #[test]
+    fn retrieval_surfaces_declare_the_audit_row_they_append() -> TestResult {
+        let manifest = EffectManifest::build();
+
+        for command in ["search", "search --all-workspaces", "similar"] {
+            let effect = manifest
+                .get(command)
+                .ok_or_else(|| format!("{command} not in manifest"))?;
+            ensure(
+                effect.default_effect,
+                EffectClass::DurableMemoryWrite,
+                &format!("{command} appends a durable audit row"),
+            )?;
+            ensure(
+                effect.mutation_contract.side_effect_class,
+                SideEffectClass::AppendOnly,
+                &format!("{command} appends, never rewrites"),
+            )?;
+            ensure(
+                effect.write_surfaces.db_tables.as_slice(),
+                ["audit_log"].as_slice(),
+                &format!("{command} writes exactly the audit log"),
+            )?;
+            ensure(
+                effect.write_surfaces.derived_paths.is_empty()
+                    && effect.write_surfaces.workspace_files.is_empty(),
+                true,
+                &format!("{command} touches no derived path or workspace file"),
+            )?;
+            ensure(
+                effect.requires_audit,
+                true,
+                &format!("{command} requires audit"),
+            )?;
+            // A retrieval that cannot be re-run is not a retrieval surface: the
+            // audit row is keyed, so a repeated query does not multiply rows.
+            ensure(
+                effect.idempotency,
+                IdempotencyClass::Idempotent,
+                &format!("{command} stays idempotent under retry"),
+            )?;
+            // The read-only lists these three came from all carry
+            // `requires_read_snapshot`. Append-only writers must not, or
+            // `db_backed_read_only_commands_declare_read_snapshot_requirement`
+            // and this test could both pass with the entry in both places.
+            ensure(
+                effect.read_snapshot(),
+                false,
+                &format!("{command} is no longer a read-snapshot surface"),
+            )?;
+        }
+
+        // The neighbouring recalibration path is a DIFFERENT write, not the
+        // same one: it rewrites a derived artifact and touches no DB table.
+        // Pinning the contrast is what makes the two classifications mean
+        // something rather than both collapsing to "mutates".
+        let recalibrate = manifest
+            .get("search --recalibrate-now")
+            .ok_or_else(|| "search --recalibrate-now not in manifest".to_owned())?;
+        ensure(
+            recalibrate.write_surfaces.db_tables.is_empty(),
+            true,
+            "search --recalibrate-now writes no DB table",
+        )?;
+        ensure(
+            recalibrate.write_surfaces.derived_paths.as_slice(),
+            [".ee/search/calibration.jsonl"].as_slice(),
+            "search --recalibrate-now rewrites the derived calibration artifact",
+        )?;
 
         Ok(())
     }

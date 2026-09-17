@@ -50906,24 +50906,14 @@ where
         }
     };
 
-    let candidate_ids: Vec<_> = stored
-        .iter()
-        .map(|memory| memory.id.as_str())
-        .collect();
-    let contradictions = match crate::core::ask::load_scoped_contradictions(
-        &connection,
-        &candidate_ids,
-    ) {
-        Ok(links) => links,
-        Err(error) => {
-            return write_domain_error(
-                &error,
-                cli.renderer(),
-                stdout,
-                stderr,
-            );
-        }
-    };
+    let candidate_ids: Vec<_> = stored.iter().map(|memory| memory.id.as_str()).collect();
+    let contradictions =
+        match crate::core::ask::load_scoped_contradictions(&connection, &candidate_ids) {
+            Ok(links) => links,
+            Err(error) => {
+                return write_domain_error(&error, cli.renderer(), stdout, stderr);
+            }
+        };
 
     let candidates: Vec<crate::core::ask::AskCandidate> = stored
         .into_iter()
@@ -96641,6 +96631,12 @@ demos:
             Ok((path, effect.default_effect.is_mutating()))
         };
 
+        // Plain `ee search` mutates too, since bd-czj3e: it appends a
+        // retrieval audit row (ADR 0071). The contrast this test exists to pin
+        // is therefore no longer write-versus-no-write but WHICH SURFACE each
+        // path writes -- the audit table for an ordinary query, the derived
+        // calibration artifact for `--recalibrate-now`. Asserting the boolean
+        // alone would now pass for both and pin nothing.
         let (read_path, read_mutates) = effect_for(&["ee", "search", "release"])?;
         ensure_equal(
             &read_path,
@@ -96648,8 +96644,20 @@ demos:
             "ordinary search command path",
         )?;
         ensure(
-            !read_mutates,
-            "ordinary search must remain a read-only snapshot",
+            read_mutates,
+            "ordinary search appends a retrieval audit row and must declare it",
+        )?;
+        let ordinary = manifest
+            .get("search")
+            .ok_or_else(|| "no effect manifest entry for search".to_string())?;
+        ensure_equal(
+            &ordinary.write_surfaces.db_tables,
+            &vec!["audit_log"],
+            "ordinary search writes the audit log and no other table",
+        )?;
+        ensure(
+            ordinary.write_surfaces.derived_paths.is_empty(),
+            "ordinary search rewrites no derived artifact",
         )?;
 
         let (recalibrate_path, recalibrate_mutates) =
@@ -96662,6 +96670,18 @@ demos:
         ensure(
             recalibrate_mutates,
             "search --recalibrate-now must declare its derived artifact write",
+        )?;
+        let recalibrating = manifest
+            .get("search --recalibrate-now")
+            .ok_or_else(|| "no effect manifest entry for search --recalibrate-now".to_string())?;
+        ensure_equal(
+            &recalibrating.write_surfaces.derived_paths,
+            &vec![".ee/search/calibration.jsonl"],
+            "recalibrating search rewrites the derived calibration artifact",
+        )?;
+        ensure(
+            recalibrating.write_surfaces.db_tables.is_empty(),
+            "recalibrating search writes no DB table",
         )
     }
 
