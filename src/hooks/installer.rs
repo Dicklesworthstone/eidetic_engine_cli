@@ -3590,11 +3590,7 @@ fn redact_private_absolute_paths(input: &str) -> String {
     input
         .split_whitespace()
         .map(|segment| {
-            let sensitive = crate::util::SENSITIVE_PATH_PREFIXES.iter().any(|prefix| {
-                segment
-                    .get(..prefix.len())
-                    .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-            });
+            let sensitive = crate::util::sensitive_path_starts_at(segment, 0);
             if sensitive {
                 "[REDACTED:path]".to_owned()
             } else {

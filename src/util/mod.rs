@@ -294,7 +294,7 @@ fn uri_authority_slash_at(value: &str, start: usize) -> bool {
         .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
 }
 
-fn sensitive_path_starts_at(value: &str, start: usize) -> bool {
+pub(crate) fn sensitive_path_starts_at(value: &str, start: usize) -> bool {
     if uri_authority_slash_at(value, start) {
         return false;
     }

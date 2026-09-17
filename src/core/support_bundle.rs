@@ -6224,12 +6224,7 @@ fn redact_path_like_segments(input: &str) -> String {
 /// local prefix is still covered (`/var/folders/` by `/var/`), so this widens
 /// redaction and cannot narrow it.
 fn path_like_prefix_at(input: &str, index: usize) -> bool {
-    let candidate = &input[index..];
-    crate::util::SENSITIVE_PATH_PREFIXES.iter().any(|prefix| {
-        candidate
-            .get(..prefix.len())
-            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-    })
+    crate::util::sensitive_path_starts_at(input, index)
 }
 
 fn path_like_segment_end(input: &str, start: usize) -> usize {

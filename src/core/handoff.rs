@@ -2372,12 +2372,7 @@ fn redact_handoff_path_segments(input: &str) -> String {
 /// got matched, not what got emitted. Every former prefix stays covered
 /// (`/var/folders/` by `/var/`), so this widens redaction and cannot narrow it.
 fn handoff_path_prefix_at(input: &str, index: usize) -> bool {
-    let candidate = &input[index..];
-    crate::util::SENSITIVE_PATH_PREFIXES.iter().any(|prefix| {
-        candidate
-            .get(..prefix.len())
-            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-    })
+    crate::util::sensitive_path_starts_at(input, index)
 }
 
 fn handoff_path_segment_end(input: &str, start: usize) -> usize {

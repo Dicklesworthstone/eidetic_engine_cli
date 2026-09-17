@@ -288,6 +288,9 @@ fn starts_with_windows_drive_root(value: &str) -> bool {
 /// preserve. Any scheme whose second-to-last character is a letter is
 /// vulnerable, so this is not specific to `file`.
 fn sensitive_path_prefix_len(line: &str, index: usize) -> Option<usize> {
+    if !crate::util::sensitive_path_starts_at(line, index) {
+        return None;
+    }
     let value = &line[index..];
     // Ignoring ASCII case is the shared rule, not a local choice: macOS and
     // Windows resolve `/USERS/alice` and `/Users/alice` to one file, and this

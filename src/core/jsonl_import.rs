@@ -394,13 +394,10 @@ fn jsonl_import_source_path_redaction_start(value: &str, separator_start: usize)
 }
 
 fn jsonl_import_source_path_starts_sensitive_unix_segment(value: &str) -> bool {
-    // bd-redactor-prefix-divergence-lsy52: shares the one prefix set instead of
-    // an eleven-entry local copy. This file keeps its own WALKER -- it scans on
-    // both separators and backs up to include a drive letter, which the shared
-    // walker does not do -- so only the data is shared.
-    crate::util::SENSITIVE_PATH_PREFIXES
-        .iter()
-        .any(|prefix| value.starts_with(prefix))
+    // bd-redactor-prefix-divergence-lsy52: share the start RULE, not just the
+    // prefix set. This file keeps its own WALKER -- it scans on both separators
+    // and backs up to include a drive letter, which the shared walker does not.
+    crate::util::sensitive_path_starts_at(value, 0)
 }
 
 fn jsonl_import_source_path_starts_sensitive_windows_segment(value: &str) -> bool {
@@ -417,9 +414,7 @@ fn jsonl_import_source_path_starts_sensitive_windows_segment(value: &str) -> boo
         .take(WINDOW)
         .map(|c| if c == '\\' { '/' } else { c })
         .collect();
-    crate::util::SENSITIVE_PATH_PREFIXES
-        .iter()
-        .any(|prefix| head.starts_with(prefix))
+    crate::util::sensitive_path_starts_at(&head, 0)
 }
 
 fn jsonl_import_source_path_starts_unc_path(value: &str) -> bool {
