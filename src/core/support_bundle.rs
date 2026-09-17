@@ -6201,18 +6201,35 @@ fn redact_path_like_segments(input: &str) -> String {
     output
 }
 
+/// bd-redactor-prefix-divergence-lsy52. This was the TWENTY-SECOND hand-copied
+/// prefix list, and it survived a consolidation that closed twenty-one.
+///
+/// It survived because the guard written to catch a 22nd copy
+/// (`scripts/e2e_cross_cutting.sh`, "path redactors keep one shared prefix set")
+/// skips any file whose text lacks the literal `REDACTED_PATH`. This file
+/// renders `[REDACTED:path]` through `redaction_placeholder`, so it was never in
+/// that guard's population at all — the filter excluded precisely the files
+/// whose placeholder had diverged, which are the ones most likely to have
+/// diverged in prefixes too.
+///
+/// The seven prefixes here omitted sixteen entries of the shared cover and
+/// matched case-sensitively. Executed against the shared rule, this surface
+/// emitted `/root/.ssh/id_rsa`, `/etc/ssh/sshd_config`, `/tmp/…` and
+/// `/USERS/…` verbatim — on the support bundle, which is the artifact handed to
+/// someone outside the workspace. `/root/.ssh/id_rsa` is the bead's own example.
+///
+/// Only the MATCH is shared. The walker and the `[REDACTED:path]` placeholder
+/// are deliberately kept, so no rendered support-bundle snapshot moves; the
+/// divergence was in what got matched, not in what got emitted. Every previous
+/// local prefix is still covered (`/var/folders/` by `/var/`), so this widens
+/// redaction and cannot narrow it.
 fn path_like_prefix_at(input: &str, index: usize) -> bool {
-    [
-        "/Users/",
-        "/data/",
-        "/home/",
-        "/private/",
-        "/Volumes/",
-        "/var/folders/",
-        "/workspace/",
-    ]
-    .iter()
-    .any(|prefix| input[index..].starts_with(prefix))
+    let candidate = &input[index..];
+    crate::util::SENSITIVE_PATH_PREFIXES.iter().any(|prefix| {
+        candidate
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    })
 }
 
 fn path_like_segment_end(input: &str, start: usize) -> usize {
