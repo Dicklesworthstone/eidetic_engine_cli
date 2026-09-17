@@ -1388,7 +1388,7 @@ run_stage "Global Lane E2E (bd-1bfwa.4)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e
 # Gate 6.1268: Beads export-integrity classifier self-test (bd-2p297.1/.2).
 # Fixture-driven: safe-repair candidacy, destructive-export refusal, merge
 # markers, unhealthy DB, transient partial write. No live tracker touched.
-run_stage "Beads Export Repair Self-Test (bd-2p297.1)" "./scripts/beads_export_repair.sh --self-test"
+run_stage "Beads Export Repair Self-Test (bd-2p297.1, bd-2p297.2)" "./scripts/beads_export_repair.sh --self-test"
 run_stage "Beads Export Fixture Suite (bd-2p297.3)" "./scripts/beads_export_repair.sh --fixture-suite tests/fixtures/beads_export"
 
 # Gate 6.1269: Graph-intelligence E2E (bd-3a1op.6 / ADR 0066). Real binary:
