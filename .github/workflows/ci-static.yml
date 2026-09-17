@@ -1,0 +1,90 @@
+name: CI Static
+
+# bd-o7wh0. Hosted cargo-free gate that can actually execute while the three
+# existing workflows (CI, Release, macOS EE Artifact) stay disabled_manually.
+#
+# Why a new workflow instead of enabling ci.yml:
+# - ci.yml still has `on: push: branches: [main]` plus 90-minute cargo shards.
+#   Enabling it during a 6-agent main swarm queues those shards against a
+#   predicted-red tree (Windows handoff smoke, shard caps, integration_s_z).
+# - GitHub disables workflows by id. This file is a new id, so it is not the
+#   disabled trio and can run without flipping those three back on.
+# - The cargo-free half of `verify` was re-measured green on 2026-09-17
+#   (forbidden-deps, migration-registry, closure-lint, vision-coverage,
+#   mcp_lib_tests --self-test, format, contract-drift-radar). Those are the
+#   steps this job runs. Clippy and cargo test stay on RCH until a green
+#   scratch run of the full CI exists.
+#
+# This job is the hosted system of record for those cheap invariants. It does
+# not prove the Rust test suite. Do not read a green CI Static run as "CI is
+# restored."
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-static-${{ github.workflow }}-${{ github.ref }}
+  # Cheap job: prefer the latest commit over a queue of stale static runs.
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: cargo-free static gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Checkout Franken stack path dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          project_root="$GITHUB_WORKSPACE/.ci/franken-stack/projects"
+          ./scripts/checkout-franken-stack.sh "$project_root"
+          CARGO_PATH_ROOT=".ci/franken-stack/projects" perl -0pi -e '
+            s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+            s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+          ' Cargo.toml
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Forbidden dependency audit
+        run: ./scripts/check-forbidden-deps.sh
+
+      - name: Migration registry co-commit invariant
+        run: ./scripts/check-migration-registry.sh
+
+      - name: Closure linter
+        run: ./scripts/closure-lint.sh --audit --json
+
+      - name: Vision coverage
+        run: |
+          git fetch origin +main:refs/remotes/origin/main --depth=1
+          sh ./scripts/vision-coverage.sh --json --compare-ref origin/main
+
+      - name: MCP lib unit-test guard --self-test
+        run: ./scripts/mcp_lib_tests.sh --self-test
+
+      - name: Contract drift radar
+        run: ./scripts/contract-drift-radar.sh
+
+      - name: Format
+        run: cargo fmt --check

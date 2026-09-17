@@ -225,14 +225,14 @@ jobs:
       # AGENTS.md, CLAUDE.md, CHANGELOG), so "wired into verify.sh" and "never
       # executed" were the same state.
       #
-      # This step does NOT bind today either, and saying so is the point of the
-      # bead: at the time of writing every workflow in this repo is
-      # `disabled_manually` (gh workflow list), and the last CI run was
-      # 2026-08-27 -- 899 pushed commits ago. So this is the correct HOME for
-      # the check, not proof that it runs. It binds the moment CI is
-      # re-enabled, and until then the standalone entry point
-      # (scripts/check-migration-registry.sh, under a second, no cargo) is the
-      # only way it executes. Do not read this step as enforcement.
+      # This step still does not bind in THIS workflow: ci.yml remains
+      # `disabled_manually` (bd-o7wh0, re-measured 2026-09-17: 988 commits
+      # since 575b8c80). The executing hosted home is CI Static
+      # (.github/workflows/ci-static.yml), which runs the same script on
+      # push/PR/dispatch. The standalone entry point
+      # (scripts/check-migration-registry.sh, under a second, no cargo)
+      # remains the local/RCH path. Do not read a green CI Static run as
+      # "ci.yml is restored."
       # Needs jq (installed above).
       - name: Migration registry co-commit invariant
         run: ./scripts/check-migration-registry.sh

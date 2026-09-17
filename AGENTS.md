@@ -867,8 +867,17 @@ git push origin main
 
 Pushing `main` does **not** release anything. `.github/workflows/release.yml`
 is tag-only (`on: push: tags: v*`) and refuses a tag whose version differs
-from `Cargo.toml`; as of 2026-09-02 that workflow, `ci.yml`, and the macOS
-artifact workflow are all manually disabled on GitHub. Releases are cut by
+from `Cargo.toml`. As of 2026-09-02 that workflow, `ci.yml`, and the macOS
+artifact workflow are all manually disabled on GitHub; that disable is still
+deliberate as of 2026-09-17 (`bd-o7wh0`). Enabling `ci.yml` on `push: main`
+during the unguarded window (988 commits since the last hosted run,
+`575b8c80` on 2026-08-27, conclusion=failure) would queue 90-minute cargo
+shards against a predicted-red tree. Cargo tests and clippy therefore stay
+on the pinned RCH lane (`scripts/rch_verify.sh`). The hosted executing gate
+for cargo-free invariants is `.github/workflows/ci-static.yml` (`CI Static`):
+forbidden-deps, migration-registry, closure-lint, vision-coverage, MCP
+lib-test vacuity guard, contract-drift-radar, and `cargo fmt --check`. A
+green `CI Static` run is not "CI restored." Releases are cut by
 hand with `dsr` / the local cross-compile flow (see
 `docs/` release notes and the `dsr` skill), then uploaded. Expected assets per
 release:
