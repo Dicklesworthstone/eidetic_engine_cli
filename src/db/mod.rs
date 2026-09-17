@@ -24133,7 +24133,7 @@ impl DbConnection {
     ) -> Result<Vec<StoredMemory>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND logical_id = ?2 AND tombstoned_at IS NULL AND superseded_at IS NULL ORDER BY COALESCE(valid_from, created_at) DESC, created_at DESC, id DESC LIMIT 2",
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND logical_id = ?2 AND tombstoned_at IS NULL AND superseded_at IS NULL ORDER BY julianday(COALESCE(valid_from, created_at)) DESC, julianday(created_at) DESC, id DESC LIMIT 2",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(logical_id.to_string()),
@@ -24278,6 +24278,11 @@ impl DbConnection {
     /// post-`as_of` rows before ordering by newest creation time. Callers must
     /// still run the returned rows through their normal scope, provenance, and
     /// redaction admission path.
+    ///
+    /// `created_at` / `updated_at` bounds and order use `julianday` (bd-8zzbg):
+    /// `to_rfc3339()` emits variable fractional precision, so `.000+00:00`
+    /// sorts above a fraction-less value at the same instant. Validity columns
+    /// stay lexical: they are stored in the SecondsFormat::Secs `Z` spelling.
     pub fn list_recent_current_memories_for_retrieval(
         &self,
         workspace_id: &str,
@@ -24286,7 +24291,7 @@ impl DbConnection {
     ) -> Result<Vec<StoredMemory>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND created_at <= ?2 AND updated_at <= ?2 AND (valid_from IS NULL OR valid_from <= ?2) AND (superseded_at IS NULL OR superseded_at > ?2) AND (valid_to IS NULL OR valid_to >= ?2) ORDER BY created_at DESC, id ASC LIMIT ?3",
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND julianday(created_at) <= julianday(?2) AND julianday(updated_at) <= julianday(?2) AND (valid_from IS NULL OR valid_from <= ?2) AND (superseded_at IS NULL OR superseded_at > ?2) AND (valid_to IS NULL OR valid_to >= ?2) ORDER BY julianday(created_at) DESC, id ASC LIMIT ?3",
             &[
                 Value::Text(workspace_id.to_owned()),
                 Value::Text(as_of.to_owned()),
@@ -24948,6 +24953,10 @@ impl DbConnection {
     /// newest first for determinism. Family retrieval uses this so ledger
     /// members always surface through their live revision, never a
     /// superseded historical row.
+    ///
+    /// Order is by instant (`julianday(created_at)`), then `id` (bd-8zzbg).
+    /// A lexical `created_at` sort treats `.000+00:00` as newer than a
+    /// fraction-less value at the same second.
     pub fn get_current_memory_id_for_ledger_key(
         &self,
         workspace_id: &str,
@@ -24958,7 +24967,7 @@ impl DbConnection {
             "SELECT id FROM memories \
              WHERE workspace_id = ?1 AND COALESCE(logical_id, id) = ?2 \
                AND tombstoned_at IS NULL AND superseded_at IS NULL \
-             ORDER BY created_at DESC, id DESC LIMIT 1",
+             ORDER BY julianday(created_at) DESC, id DESC LIMIT 1",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(ledger_key.to_string()),
@@ -45874,6 +45883,70 @@ UPDATE memories
             &live_after_rerun[0].id.as_str(),
             &HEAD,
             "idempotent re-run keeps the same head",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn same_instant_fractional_created_at_does_not_outrank_fractionless_head() -> TestResult {
+        // bd-8zzbg. At the same instant, `.000+00:00` sorts above
+        // fraction-less `+00:00` because '.' is 0x2E and '+' is 0x2B. A lexical
+        // ORDER BY created_at DESC LIMIT 1 therefore returns the older
+        // V124-repaired spelling even when a later ULID exists. julianday
+        // compares instants; equal instants fall through to id.
+        const OLDER: &str = "mem_01k80000000000000000000000";
+        const NEWER: &str = "mem_01k80000000000000000000001";
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        const FRACTIONAL: &str = "2026-05-01T00:00:00.000+00:00";
+        const FRACTIONLESS: &str = "2026-05-01T00:00:00+00:00";
+        const AS_OF: &str = "2026-05-01T00:00:00Z";
+
+        ensure(
+            FRACTIONAL > FRACTIONLESS,
+            ".000+00:00 (0x2E) sorts above fraction-less +00:00 (0x2B)",
+        )?;
+
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        connection.insert_memory_with_timestamps(
+            OLDER,
+            &test_memory_input(WORKSPACE, "Older fractionally spelled row."),
+            FRACTIONAL,
+            FRACTIONAL,
+            OLDER,
+        )?;
+        connection.insert_memory_with_timestamps(
+            NEWER,
+            &test_memory_input(WORKSPACE, "Newer fraction-less row."),
+            FRACTIONLESS,
+            FRACTIONLESS,
+            OLDER,
+        )?;
+
+        let head = connection.get_current_memory_id_for_ledger_key(WORKSPACE, OLDER)?;
+        ensure_equal(
+            &head.as_deref(),
+            &Some(NEWER),
+            "same-instant head selection uses id, not fractional spelling",
+        )?;
+
+        let live = connection.list_live_memory_revisions_for_logical_id(WORKSPACE, OLDER)?;
+        ensure_equal(&live.len(), &2, "both rows are live heads in this fixture")?;
+        ensure_equal(
+            &live[0].id.as_str(),
+            &NEWER,
+            "live-head listing puts the later id first at a tied instant",
+        )?;
+
+        let recent = connection.list_recent_current_memories_for_retrieval(WORKSPACE, AS_OF, 8)?;
+        ensure(
+            recent.iter().any(|memory| memory.id == OLDER)
+                && recent.iter().any(|memory| memory.id == NEWER),
+            "as_of bound includes both same-instant spellings",
         )?;
 
         connection.close()?;
