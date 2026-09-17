@@ -1,0 +1,466 @@
+--- a/src/cli/mesh.rs
++++ b/src/cli/mesh.rs
+@@ -1,3 +1,6 @@
++#[path = "mesh_peer_identity.rs"]
++mod peer_identity;
++
+ use std::collections::BTreeSet;
+ use std::fs;
+ use std::io::{Read, Write};
+@@ -5318,6 +5321,7 @@
+             peers.push(ExistingAutoEnrollmentPeer {
+                 peer_id: row.peer_id.clone(),
+                 node_key: record.endpoint.tailscale_node_key,
++                stable_node_id: record.endpoint.stable_node_id,
+                 tailnet_id: Some(record.endpoint.tailnet_id),
+                 tailnet_display_name: record.endpoint.tailnet_display_name,
+                 materialized_on_node_key: record.materialized_on_node_key,
+@@ -5332,6 +5336,7 @@
+             peers.push(ExistingAutoEnrollmentPeer {
+                 peer_id: row.peer_id.clone(),
+                 node_key: row.origin_node_id.clone(),
++                stable_node_id: None,
+                 tailnet_id: None,
+                 tailnet_display_name: None,
+                 materialized_on_node_key: None,
+@@ -5452,7 +5457,9 @@
+     existing_rows: &[crate::mesh::foreground_cli::MeshPeerRow],
+     candidates: &[AutoEnrollmentCandidate],
+ ) -> Result<Vec<UpsertMeshPeerInput>, DomainError> {
++    peer_identity::check_candidate_identities(candidates)?;
+     let mut upserts = Vec::new();
++    let mut reused_ids = BTreeSet::new();
+     for candidate in candidates {
+         let report = enroll_peer(MeshPeerEnrollInput {
+             workspace_id: workspace_id.to_owned(),
+@@ -5486,30 +5493,21 @@
+                 "Inspect the candidate hello response and retry auto-enrollment.".to_owned(),
+             ),
+         })?;
+-        let matching_rows = existing_rows
+-            .iter()
+-            .filter_map(|row| {
+-                auto_enrollment_node_key_for_row(row)
+-                    .ok()
+-                    .filter(|node_key| node_key == &candidate.node_key)
+-                    .map(|_| row)
+-            })
+-            .collect::<Vec<_>>();
+-        if matching_rows.len() > 1 {
+-            return Err(DomainError::PolicyDenied {
+-                message: format!(
+-                    "Auto-enrollment found ambiguous durable principals for {}",
+-                    candidate.node_key
+-                ),
+-                repair: Some(
+-                    "Disable the duplicate peer rows and repeat authoritative enrollment."
+-                        .to_owned(),
+-                ),
+-            });
+-        }
+-        let existing = matching_rows.first().copied();
+-        if let Some(existing) = existing {
+-            peer.peer_id.clone_from(&existing.peer_id);
++        let resolved = peer_identity::resolve_existing(
++            workspace_id, tailnet_id, candidate, existing_rows,
++        )?;
++        let existing = resolved.as_ref().map(|(row, _)| *row);
++        if let Some((row, previous)) = &resolved {
++            if !reused_ids.insert(row.peer_id.clone()) {
++                return Err(DomainError::PolicyDenied {
++                    message: "Auto-enrollment candidates address the same durable principal".to_owned(),
++                    repair: Some("Retry discovery after resolving duplicate device bindings.".to_owned()),
++                });
++            }
++            peer.peer_id.clone_from(&row.peer_id);
++            if let Some(previous) = previous {
++                peer_identity::retain_identity(&mut peer, previous, now)?;
++            }
+         }
+         peer.trust_established_by = "tailscale_auto_enrollment".to_owned();
+         peer.materialized_on_node_key = self_node_key.map(str::to_owned);
+--- a/src/mesh/auto_enrollment.rs
++++ b/src/mesh/auto_enrollment.rs
+@@ -126,6 +126,7 @@
+ pub struct ExistingAutoEnrollmentPeer {
+     pub peer_id: String,
+     pub node_key: String,
++    pub stable_node_id: Option<String>,
+     pub tailnet_id: Option<String>,
+     pub tailnet_display_name: Option<String>,
+     pub materialized_on_node_key: Option<String>,
+@@ -142,15 +143,7 @@
+     pub fn candidate(&self) -> AutoEnrollmentCandidate {
+         AutoEnrollmentCandidate {
+             node_key: self.node_key.clone(),
+-            // `ExistingAutoEnrollmentPeer` is rehydrated from an already
+-            // persisted row, and nothing persists the anchor yet, so there is
+-            // none to carry. It must stay `None` rather than be invented here.
+-            //
+-            // HAZARD for hop 4 and the migration that follows: this candidate
+-            // feeds an upsert, so once the anchor IS stored, a `None` here
+-            // must never overwrite a stored value. Reuse the stored anchor on
+-            // upsert instead of writing the candidate's `None` over it.
+-            stable_node_id: None,
++            stable_node_id: self.stable_node_id.clone(),
+             tailscale_ip: self.tailscale_ip.clone(),
+             magic_dns_name: self.magic_dns_name.clone(),
+             hostname: self.hostname.clone(),
+@@ -1392,6 +1385,7 @@
+         ExistingAutoEnrollmentPeer {
+             peer_id: format!("peer_{}", node_key.replace("nodekey:", "")),
+             node_key: node_key.to_owned(),
++            stable_node_id: None,
+             tailnet_id: Some("tailnet-alpha".to_owned()),
+             tailnet_display_name: Some("alpha.example".to_owned()),
+             materialized_on_node_key: None,
+@@ -1412,6 +1406,7 @@
+         ExistingAutoEnrollmentPeer {
+             peer_id: format!("peer_{}", node_key.replace("nodekey:", "")),
+             node_key: node_key.to_owned(),
++            stable_node_id: None,
+             tailnet_id: Some(tailnet_id.to_owned()),
+             tailnet_display_name: Some("alpha.example".to_owned()),
+             materialized_on_node_key: materialized_on_node_key.map(str::to_owned),
+--- /dev/null
++++ b/src/cli/mesh_peer_identity.rs
+@@ -0,0 +1,124 @@
++//! Reuse durable, opaque peer principals across a verified device's key rotation.
++//!
++//! Stable IDs are lookup bindings, never bytes from which an ee principal is
++//! derived. They are meaningful only inside the probed tailnet and workspace.
++//! This runs after discovery/hello admission; it does not grant any new lane.
++
++use super::*;
++use crate::mesh::foreground_cli::MeshPeerRow;
++use crate::mesh::peer::MeshPeerState;
++
++fn identity_error(message: &str) -> DomainError {
++    DomainError::PolicyDenied {
++        message: message.to_owned(),
++        repair: Some(
++            "Inspect ee mesh peer list --json and resolve the stored enrollment before retrying."
++                .to_owned(),
++        ),
++    }
++}
++
++fn stable_id(value: Option<&str>) -> Result<Option<&str>, DomainError> {
++    match value {
++        Some(value) if value.is_empty() || value.len() > 256 || value.trim() != value || value.chars().any(char::is_control) => {
++            Err(identity_error("Mesh enrollment contains an invalid stable device identity"))
++        }
++        value => Ok(value),
++    }
++}
++
++/// Resolve at most one existing principal. A conflicting stable binding on the
++/// same current key is an error, not permission to mint a second principal.
++pub(super) fn resolve_existing<'a>(
++    workspace_id: &str,
++    tailnet_id: &str,
++    candidate: &AutoEnrollmentCandidate,
++    rows: &'a [MeshPeerRow],
++) -> Result<Option<(&'a MeshPeerRow, Option<MeshPeerRecord>)>, DomainError> {
++    let incoming = stable_id(candidate.stable_node_id.as_deref())?;
++    let mut matched = None;
++    for row in rows {
++        let record = enrolled_peer_record_from_policy_summary(
++            row.policy_summary_json.as_deref(),
++            &row.peer_id,
++        )?;
++        let matches = if let Some(record) = &record {
++            if record.workspace_id != workspace_id || record.endpoint.tailnet_id != tailnet_id {
++                continue;
++            }
++            let stored = stable_id(record.endpoint.stable_node_id.as_deref())?;
++            let same_key = record.endpoint.tailscale_node_key == candidate.node_key;
++            if same_key && incoming.is_some() && stored.is_some() && incoming != stored {
++                return Err(identity_error("Mesh node key conflicts with its stored stable device identity"));
++            }
++            same_key || incoming.is_some_and(|id| Some(id) == stored)
++        } else {
++            // Pre-enrollment rows have only the original exact-key binding.
++            // No stable-ID, hostname, DNS or IP inference is permitted here.
++            row.origin_node_id == candidate.node_key
++        };
++        if !matches {
++            continue;
++        }
++        if matched.is_some() {
++            return Err(identity_error("Auto-enrollment found ambiguous durable principals"));
++        }
++        if !row.enabled || record.as_ref().is_some_and(|record| {
++            record.state == MeshPeerState::Revoked
++                || record.revoked_at.is_some()
++                || record.key.revoked_at.is_some()
++        }) {
++            return Err(identity_error("Auto-enrollment cannot reactivate a disabled or revoked peer"));
++        }
++        matched = Some((row, record));
++    }
++    Ok(matched)
++}
++
++/// Keep continuity metadata while accepting a freshly admitted endpoint and
++/// conservative capabilities. Never erase a known stable binding when a
++/// manual-to-auto candidate (or an older probe) supplies none.
++pub(super) fn retain_identity(
++    peer: &mut MeshPeerRecord,
++    previous: &MeshPeerRecord,
++    now: &str,
++) -> Result<(), DomainError> {
++    if peer.endpoint.stable_node_id.is_none() {
++        peer.endpoint.stable_node_id.clone_from(&previous.endpoint.stable_node_id);
++    }
++    peer.enrolled_at.clone_from(&previous.enrolled_at);
++    peer.origin_workspace_id.clone_from(&previous.origin_workspace_id);
++    let fingerprint = peer.key.public_key_fingerprint.clone();
++    peer.key = previous.key.clone();
++    if peer.key.public_key_fingerprint != fingerprint {
++        peer.key.generation = peer.key.generation.checked_add(1).ok_or_else(|| {
++            identity_error("Mesh peer key generation is exhausted; rotation withheld")
++        })?;
++        peer.key.public_key_fingerprint = fingerprint;
++        peer.key.rotated_at = Some(now.to_owned());
++    }
++    Ok(())
++}
++
++/// Two independently admitted candidates cannot address one principal in the
++/// same batch, even when their current keys differ. No last-write-wins merge.
++pub(super) fn check_candidate_identities(
++    candidates: &[AutoEnrollmentCandidate],
++) -> Result<(), DomainError> {
++    let mut keys = BTreeSet::new();
++    let mut stable_ids = BTreeSet::new();
++    for candidate in candidates {
++        if !keys.insert(candidate.node_key.as_str()) {
++            return Err(identity_error("Auto-enrollment contains duplicate current node keys"));
++        }
++        if let Some(id) = stable_id(candidate.stable_node_id.as_deref())?
++            && !stable_ids.insert(id)
++        {
++            return Err(identity_error("Auto-enrollment contains ambiguous stable device identities"));
++        }
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++#[path = "mesh_peer_identity_tests.rs"]
++mod tests;
+--- /dev/null
++++ b/src/cli/mesh_peer_identity_tests.rs
+@@ -0,0 +1,217 @@
++#![allow(clippy::expect_used, clippy::unwrap_used)]
++
++use super::*;
++use crate::db::{CreateWorkspaceInput, MeshLaneGrantTargetAdapter, ObserveMeshPeerTransportIdentityInput};
++use crate::models::WorkspaceId;
++
++const WORKSPACE: &str = "wsp_stable_peer_test";
++const TAILNET: &str = "tailnet-device-test";
++const BEFORE: &str = "2026-09-17T10:00:00Z";
++const AFTER: &str = "2026-09-17T11:00:00Z";
++
++fn candidate(key: char, stable: Option<&str>) -> AutoEnrollmentCandidate {
++    AutoEnrollmentCandidate {
++        node_key: format!("nodekey:{}", key.to_string().repeat(64)),
++        stable_node_id: stable.map(str::to_owned),
++        tailscale_ip: "100.64.0.2".to_owned(),
++        magic_dns_name: Some("same-name.tailnet.test".to_owned()),
++        hostname: "same-name".to_owned(),
++        ee_protocol_version: "1.0".to_owned(),
++        discovery_policy_decision: "service_tag_match".to_owned(),
++    }
++}
++
++fn compose(workspace: &str, tailnet: &str, now: &str, rows: &[MeshPeerRow], candidates: &[AutoEnrollmentCandidate]) -> Result<Vec<UpsertMeshPeerInput>, DomainError> {
++    auto_enrollment_peer_upserts(workspace, tailnet, None, Some("nodekey:self"), now, rows, candidates)
++}
++
++fn as_row(input: &UpsertMeshPeerInput) -> MeshPeerRow {
++    MeshPeerRow {
++        peer_id: input.peer_id.clone(),
++        origin_node_id: input.origin_node_id.clone(),
++        display_name: input.display_name.clone(),
++        enabled: input.enabled,
++        last_seen_at: input.last_seen_at.clone().unwrap(),
++        policy_summary_json: input.policy_summary_json.clone(),
++    }
++}
++
++fn record(input: &UpsertMeshPeerInput) -> MeshPeerRecord {
++    serde_json::from_str(input.policy_summary_json.as_deref().unwrap()).unwrap()
++}
++
++fn original(stable: Option<&str>) -> UpsertMeshPeerInput {
++    compose(WORKSPACE, TAILNET, BEFORE, &[], &[candidate('a', stable)]).unwrap().remove(0)
++}
++
++fn alter(row: &mut MeshPeerRow, change: impl FnOnce(&mut MeshPeerRecord)) {
++    let mut peer: MeshPeerRecord = serde_json::from_str(row.policy_summary_json.as_deref().unwrap()).unwrap();
++    change(&mut peer);
++    row.policy_summary_json = Some(serde_json::to_string(&peer).unwrap());
++}
++
++#[test]
++fn stable_device_reuses_both_opaque_principals_after_node_key_rotation() {
++    let first = original(Some("nDeviceStableDistinctFromPublicKey"));
++    let prior = record(&first);
++    let fresh = candidate('b', Some("nDeviceStableDistinctFromPublicKey"));
++    assert_ne!(fresh.stable_node_id.as_deref(), Some(fresh.node_key.as_str()));
++    let rotated = compose(WORKSPACE, TAILNET, AFTER, &[as_row(&first)], &[fresh]).unwrap().remove(0);
++    let current = record(&rotated);
++    assert_eq!(rotated.peer_id, first.peer_id);
++    assert_eq!(rotated.origin_node_id, first.origin_node_id);
++    assert_eq!(current.enrolled_at, prior.enrolled_at);
++    assert_eq!(current.key.created_at, prior.key.created_at);
++    assert_eq!(current.key.generation, prior.key.generation + 1);
++    assert_eq!(current.key.rotated_at.as_deref(), Some(AFTER));
++    assert_eq!(current.endpoint.tailscale_node_key, candidate('b', None).node_key);
++    assert_eq!(current.handshake.responder_node_key, current.endpoint.tailscale_node_key);
++    assert!(!current.capabilities.may_receive.body && !current.capabilities.may_send.body);
++    assert_eq!(rotated.last_seen_at.as_deref(), Some(AFTER));
++}
++
++#[test]
++fn unchanged_key_preserves_the_known_anchor_and_key_history() {
++    let first = original(Some("nStable"));
++    let refreshed = compose(WORKSPACE, TAILNET, AFTER, &[as_row(&first)], &[candidate('a', None)]).unwrap().remove(0);
++    assert_eq!(record(&refreshed), record(&first));
++    assert_eq!(refreshed.peer_id, first.peer_id);
++    assert_eq!(refreshed.origin_node_id, first.origin_node_id);
++}
++
++#[test]
++fn exact_key_upgrade_binds_a_legacy_peer_before_later_rotation() {
++    let legacy = original(None);
++    let bound = compose(WORKSPACE, TAILNET, AFTER, &[as_row(&legacy)], &[candidate('a', Some("nStable"))]).unwrap().remove(0);
++    assert_eq!(bound.peer_id, legacy.peer_id);
++    let rotated = compose(WORKSPACE, TAILNET, AFTER, &[as_row(&bound)], &[candidate('b', Some("nStable"))]).unwrap().remove(0);
++    assert_eq!(rotated.peer_id, legacy.peer_id);
++    assert_eq!(rotated.origin_node_id, legacy.origin_node_id);
++    assert_eq!(record(&rotated).key.generation, 2);
++}
++
++#[test]
++fn missing_anchor_never_guesses_rotation_from_hostname_dns_or_ip() {
++    let first = original(None);
++    let next = compose(WORKSPACE, TAILNET, AFTER, &[as_row(&first)], &[candidate('b', None)]).unwrap().remove(0);
++    assert_ne!(next.peer_id, first.peer_id);
++    assert_ne!(next.origin_node_id, first.origin_node_id);
++}
++
++#[test]
++fn stable_binding_is_scoped_to_both_tailnet_and_workspace() {
++    let first = original(Some("nStable"));
++    for (workspace, tailnet) in [("wsp_other", TAILNET), (WORKSPACE, "tailnet-other")] {
++        let next = compose(workspace, tailnet, AFTER, &[as_row(&first)], &[candidate('b', Some("nStable"))]).unwrap().remove(0);
++        assert_ne!(next.peer_id, first.peer_id);
++        assert_ne!(next.origin_node_id, first.origin_node_id);
++    }
++}
++
++#[test]
++fn same_key_cannot_be_rebound_to_a_different_stable_device() {
++    let first = original(Some("nOriginal"));
++    let error = compose(WORKSPACE, TAILNET, AFTER, &[as_row(&first)], &[candidate('a', Some("nSubstitute"))]).unwrap_err();
++    assert!(error.message().contains("conflicts"));
++}
++
++#[test]
++fn duplicate_stable_bindings_fail_independently_of_row_order() {
++    let one = as_row(&original(Some("nStable")));
++    let two = as_row(&compose(WORKSPACE, TAILNET, BEFORE, &[], &[candidate('b', Some("nStable"))]).unwrap().remove(0));
++    for rows in [vec![one.clone(), two.clone()], vec![two, one]] {
++        let error = compose(WORKSPACE, TAILNET, AFTER, &rows, &[candidate('c', Some("nStable"))]).unwrap_err();
++        assert!(error.message().contains("ambiguous durable principals"));
++    }
++}
++
++#[test]
++fn disabled_or_revoked_peers_cannot_evade_revocation_by_rotating_keys() {
++    let original = as_row(&original(Some("nStable")));
++    for state in 0..4 {
++        let mut row = original.clone();
++        match state {
++            0 => row.enabled = false,
++            1 => alter(&mut row, |record| record.state = MeshPeerState::Revoked),
++            2 => alter(&mut row, |record| record.revoked_at = Some(BEFORE.to_owned())),
++            _ => alter(&mut row, |record| record.key.revoked_at = Some(BEFORE.to_owned())),
++        }
++        assert!(compose(WORKSPACE, TAILNET, AFTER, &[row], &[candidate('b', Some("nStable"))]).is_err());
++    }
++}
++
++#[test]
++fn duplicate_candidates_cannot_overwrite_one_principal_in_a_batch() {
++    assert!(compose(WORKSPACE, TAILNET, AFTER, &[], &[candidate('a', Some("nStable")), candidate('b', Some("nStable"))]).is_err());
++    assert!(compose(WORKSPACE, TAILNET, AFTER, &[], &[candidate('a', None), candidate('a', None)]).is_err());
++}
++
++#[test]
++fn stable_and_legacy_key_matches_cannot_reuse_one_row_twice() {
++    let first = original(Some("nStable"));
++    assert!(compose(WORKSPACE, TAILNET, AFTER, &[as_row(&first)], &[candidate('a', None), candidate('b', Some("nStable"))]).is_err());
++}
++
++#[test]
++fn invalid_identity_and_malformed_policy_do_not_silently_mint_new_peers() {
++    for value in ["", " nStable", "nStable\n"] {
++        assert!(compose(WORKSPACE, TAILNET, AFTER, &[], &[candidate('a', Some(value))]).is_err());
++    }
++    let mut row = as_row(&original(Some("nStable")));
++    row.policy_summary_json = Some("{".to_owned());
++    assert!(compose(WORKSPACE, TAILNET, AFTER, &[row], &[candidate('b', Some("nStable"))]).is_err());
++}
++
++#[test]
++fn key_generation_exhaustion_fails_without_saturating_or_resetting_history() {
++    let mut row = as_row(&original(Some("nStable")));
++    alter(&mut row, |record| record.key.generation = u32::MAX);
++    assert!(compose(WORKSPACE, TAILNET, AFTER, &[row], &[candidate('b', Some("nStable"))]).unwrap_err().message().contains("exhausted"));
++}
++
++#[test]
++fn existing_peer_candidates_keep_the_persisted_stable_identity() {
++    let existing = ExistingAutoEnrollmentPeer {
++        peer_id: "peer_opaque".to_owned(), node_key: candidate('a', None).node_key,
++        stable_node_id: Some("nStable".to_owned()), tailnet_id: Some(TAILNET.to_owned()),
++        tailnet_display_name: None, materialized_on_node_key: None, hostname: "same-name".to_owned(),
++        tailscale_ip: "100.64.0.2".to_owned(), magic_dns_name: None, ee_protocol_version: "1.0".to_owned(),
++        enrollment_source: "explicit_human_consent".to_owned(), enabled: true,
++    };
++    assert_eq!(existing.candidate().stable_node_id, existing.stable_node_id);
++}
++
++#[test]
++fn real_store_rotation_keeps_one_peer_and_invalidates_prior_transport_authority() {
++    let root = tempfile::tempdir().unwrap();
++    let connection = DbConnection::open_file(&root.path().join("mesh.db")).unwrap();
++    connection.migrate().unwrap();
++    let workspace = WorkspaceId::from_uuid(uuid::Uuid::from_bytes([71; 16])).to_string();
++    connection.insert_workspace(&workspace, &CreateWorkspaceInput { path: root.path().to_string_lossy().into_owned(), name: None }).unwrap();
++    let first = compose(&workspace, TAILNET, BEFORE, &[], &[candidate('a', Some("nStable"))]).unwrap().remove(0);
++    connection.upsert_mesh_peer(&first).unwrap();
++    let bound = connection.observe_mesh_peer_transport_identity(&ObserveMeshPeerTransportIdentityInput {
++        workspace_id: workspace.clone(), peer_id: first.peer_id.clone(), tailnet_id: TAILNET.to_owned(),
++        stable_node_id: "nStable".to_owned(), current_node_pubkey: candidate('a', None).node_key,
++        observed_at: Some(BEFORE.to_owned()),
++    }).unwrap();
++    assert!(bound.transport_identity.is_some());
++    let rotated = compose(&workspace, TAILNET, AFTER, &[MeshPeerRow::from(&bound)], &[candidate('b', Some("nStable"))]).unwrap().remove(0);
++    let saved = connection.upsert_mesh_peer(&rotated).unwrap();
++    assert_eq!(connection.list_mesh_peers(&workspace).unwrap().len(), 1);
++    assert_eq!(saved.peer_id, bound.peer_id);
++    assert_eq!(saved.origin_node_id, bound.origin_node_id);
++    assert!(saved.transport_identity.is_none(), "endpoint refresh is NOT a LocalAPI authorization observation");
++    let adapter = MeshLaneGrantTargetAdapter::new(saved.peer_id.clone(), saved.origin_node_id.clone());
++    assert_eq!(adapter.peer_id, first.peer_id);
++    let persisted: MeshPeerRecord = serde_json::from_str(saved.policy_summary_json.as_deref().unwrap()).unwrap();
++    assert_eq!(persisted.key.generation, 2);
++    assert_eq!(persisted.endpoint.stable_node_id.as_deref(), Some("nStable"));
++    assert_eq!(persisted.enrolled_at, BEFORE);
++}
