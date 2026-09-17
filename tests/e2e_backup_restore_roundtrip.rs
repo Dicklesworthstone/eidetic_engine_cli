@@ -1237,6 +1237,86 @@ fn backup_verify_and_restore_reject_real_store_tamper_matrix() -> TestResult {
 }
 
 #[test]
+fn backup_list_does_not_accept_create_staging_debris() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().join("workspace");
+    fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+    let backup_dir = tempdir.path().join("backups");
+    let ws = workspace.to_string_lossy().into_owned();
+    let backup_dir_arg = backup_dir.to_string_lossy().into_owned();
+    run_ee(&["init", "--workspace", &ws, "--json"])?;
+    run_ee(&[
+        "remember",
+        "Atomic create must not list unpublished staging.",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let created = run_ee(&[
+        "backup",
+        "create",
+        "--include-graph-cache=false",
+        "--output-dir",
+        &backup_dir_arg,
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let backup_id = json_str(&created, "/data/backupId", "created backup")?;
+    let backup_path = PathBuf::from(json_str(&created, "/data/backupPath", "created backup")?);
+    let debris = backup_dir.join(".ee-backup-debris-fixture");
+    copy_backup_tree(&backup_path, &debris)?;
+    ensure(
+        debris.join("manifest.json").is_file(),
+        "planted staging debris has a complete manifest",
+    )?;
+    let listed = run_ee(&[
+        "backup",
+        "list",
+        "--output-dir",
+        &backup_dir_arg,
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let backups = listed
+        .pointer("/data/backups")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| "backup list missing data.backups".to_owned())?;
+    ensure_equal(
+        &backups.len(),
+        &1usize,
+        "list accepts only the published backup",
+    )?;
+    let listed_backup = backups
+        .first()
+        .ok_or_else(|| "backup list missing published entry".to_owned())?;
+    ensure_equal(
+        &listed_backup.get("backupId").and_then(JsonValue::as_str),
+        &Some(backup_id),
+        "listed backup id",
+    )?;
+    let listed_path = listed_backup
+        .get("backupPath")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    ensure(
+        !listed_path.contains(".ee-backup-"),
+        format!("list accepted staging path {listed_path}"),
+    )?;
+    let names: Vec<_> = fs::read_dir(&backup_dir)
+        .map_err(|error| error.to_string())?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    ensure(
+        names.iter().any(|name| name == ".ee-backup-debris-fixture"),
+        "planted staging debris remains on disk",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
     let _trace = test_tracing::init_test_tracing(
         "bd-3usjw.53",

@@ -83,6 +83,63 @@ const MANIFEST_AUTH_FAMILY: &str = "ee.backup.manifest";
 const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
 const RECOVERY_KEYS_FILE: &str = "store-auth.recovery.json";
 const CASS_SESSION_RESTORE_METADATA_SCHEMA_V1: &str = "ee.backup.restored_cass_session_metadata.v1";
+const BACKUP_STAGING_PREFIX: &str = ".ee-backup-";
+
+#[cfg(test)]
+type BackupCreateWriteFault = Box<dyn FnOnce(&Path) -> Result<(), DomainError>>;
+#[cfg(test)]
+std::thread_local! {
+    static BACKUP_CREATE_WRITE_FAULT: std::cell::RefCell<Option<(&'static str, BackupCreateWriteFault)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn install_backup_create_write_fault(
+    stage: &'static str,
+    hook: impl FnOnce(&Path) -> Result<(), DomainError> + 'static,
+) {
+    BACKUP_CREATE_WRITE_FAULT.with(|slot| {
+        *slot.borrow_mut() = Some((stage, Box::new(hook)));
+    });
+}
+
+#[cfg(test)]
+fn clear_backup_create_write_fault() {
+    BACKUP_CREATE_WRITE_FAULT.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+}
+
+fn maybe_fail_backup_create(stage: &'static str, staging: &Path) -> Result<(), DomainError> {
+    #[cfg(test)]
+    {
+        let hook = BACKUP_CREATE_WRITE_FAULT.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot
+                .as_ref()
+                .is_some_and(|(expected, _)| *expected == stage)
+            {
+                slot.take()
+            } else {
+                None
+            }
+        });
+        if let Some((_, hook)) = hook {
+            hook(staging)?;
+        }
+    }
+    #[cfg(not(test))]
+    {
+        let _ = (stage, staging);
+    }
+    Ok(())
+}
+
+fn is_backup_create_staging_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(BACKUP_STAGING_PREFIX))
+}
 
 /// Explicit key recovery stays separate from ordinary redacted data backups.
 #[derive(Clone, Debug)]
@@ -2731,10 +2788,11 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         })?;
     manifest_bytes.push(b'\n');
 
-    ensure_backup_directory(&backup_root, &backup_path)?;
-    write_new_file(&records_path, &records_bytes)?;
+    let staging_path = reserve_backup_staging_directory(&backup_root, &backup_path)?;
+    write_new_file(&staging_path.join(RECORDS_FILE), &records_bytes)?;
+    maybe_fail_backup_create("after_records", &staging_path)?;
     for payload in &derived_payloads {
-        write_new_relative_file(&backup_path, &payload.report.path, &payload.bytes)?;
+        write_new_relative_file(&staging_path, &payload.report.path, &payload.bytes)?;
         tracing::info!(
             target: "ee::backup",
             event = "backup_create_derived_included",
@@ -2747,7 +2805,11 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
             "backup derived asset included"
         );
     }
-    write_new_file(&manifest_path, &manifest_bytes)?;
+    maybe_fail_backup_create("after_derived", &staging_path)?;
+    write_new_file(&staging_path.join(MANIFEST_FILE), &manifest_bytes)?;
+    maybe_fail_backup_create("after_manifest", &staging_path)?;
+    sync_staged_tree(&staging_path, "backup staging")?;
+    publish_backup_directory(&staging_path, &backup_path)?;
 
     let records_hash = hash_file(&records_path)?;
     let manifest_hash = hash_file(&manifest_path)?;
@@ -2932,6 +2994,9 @@ pub fn list_backups(options: &BackupListOptions) -> Result<BackupListReport, Dom
         backup_paths.sort();
 
         for path in backup_paths {
+            if is_backup_create_staging_dir(&path) {
+                continue;
+            }
             let Some(backup_path) = backup_list_child_dir(path, &mut degraded)? else {
                 continue;
             };
@@ -4002,16 +4067,20 @@ fn published_restore_asset_path(
 }
 
 fn sync_restore_tree(path: &Path) -> Result<(), DomainError> {
+    sync_staged_tree(path, "staged restore")
+}
+
+fn sync_staged_tree(path: &Path, role: &str) -> Result<(), DomainError> {
     let sync = || -> io::Result<()> {
         let metadata = fs::symlink_metadata(path)?;
         if metadata.is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
-            return Err(io::Error::other(
-                "restore staging contains a non-regular entry",
-            ));
+            return Err(io::Error::other(format!(
+                "{role} contains a non-regular entry"
+            )));
         }
         if metadata.is_dir() {
             for entry in fs::read_dir(path)? {
-                sync_restore_tree(&entry?.path())
+                sync_staged_tree(&entry?.path(), role)
                     .map_err(|error| io::Error::other(error.message()))?;
             }
         }
@@ -4027,17 +4096,28 @@ fn sync_restore_tree(path: &Path) -> Result<(), DomainError> {
         Ok(())
     };
     sync().map_err(|error| DomainError::Storage {
-        message: format!(
-            "failed to sync staged restore '{}': {error}",
-            path.display()
-        ),
-        repair: Some("inspect disk health; the staged restore remains unpublished".to_owned()),
+        message: format!("failed to sync {role} '{}': {error}", path.display()),
+        repair: Some(format!(
+            "inspect disk health; the {role} remains unpublished"
+        )),
     })
 }
 
+fn publish_backup_directory(staging: &Path, published: &Path) -> Result<(), DomainError> {
+    publish_directory_no_replace(staging, published, "backup directory")
+}
+
 fn publish_restored_store(staging: &Path, published: &Path) -> Result<(), DomainError> {
-    ensure_backup_write_path_has_no_symlink_components(staging, "restore staging store")?;
-    ensure_backup_write_path_has_no_symlink_components(published, "restore destination store")?;
+    publish_directory_no_replace(staging, published, "restored store")
+}
+
+fn publish_directory_no_replace(
+    staging: &Path,
+    published: &Path,
+    role: &str,
+) -> Result<(), DomainError> {
+    ensure_backup_write_path_has_no_symlink_components(staging, "staging store")?;
+    ensure_backup_write_path_has_no_symlink_components(published, "published destination")?;
     #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     let result = rustix::fs::renameat_with(
         rustix::fs::CWD,
@@ -4062,14 +4142,25 @@ fn publish_restored_store(staging: &Path, published: &Path) -> Result<(), Domain
         "atomic no-replace directory publication is unavailable on this platform",
     ));
     result.map_err(|error| DomainError::Storage {
-        message: format!("failed to publish restored store '{}': {error}; staging retained at '{}'", published.display(), staging.display()),
-        repair: Some("inspect the destination and retry with a fresh --side-path; existing data was not replaced".to_owned()),
+        message: format!(
+            "failed to publish {role} '{}': {error}; staging retained at '{}'",
+            published.display(),
+            staging.display()
+        ),
+        repair: Some(format!(
+            "inspect the destination; existing data was not replaced and the {role} staging was retained"
+        )),
     })?;
     #[cfg(unix)]
     if let Some(parent) = published.parent() {
         fs::File::open(parent).and_then(|file| file.sync_all()).map_err(|error| DomainError::Storage {
-            message: format!("restored store is visible at '{}' but its directory durability could not be confirmed: {error}", published.display()),
-            repair: Some("inspect disk health and verify the restored store before relying on it".to_owned()),
+            message: format!(
+                "{role} is visible at '{}' but its directory durability could not be confirmed: {error}",
+                published.display()
+            ),
+            repair: Some(format!(
+                "inspect disk health and verify the {role} before relying on it"
+            )),
         })?;
     }
     Ok(())
@@ -12208,9 +12299,33 @@ fn redaction_pattern_degradations(
         .collect()
 }
 
-fn ensure_backup_directory(backup_root: &Path, backup_path: &Path) -> Result<(), DomainError> {
+fn reserve_backup_staging_directory(
+    backup_root: &Path,
+    backup_path: &Path,
+) -> Result<PathBuf, DomainError> {
     ensure_backup_create_path_has_no_symlink_components(backup_root, "backup root")?;
     ensure_backup_create_path_has_no_symlink_components(backup_path, "backup directory")?;
+    match fs::symlink_metadata(backup_path) {
+        Ok(_) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "backup directory '{}' already exists; existing backup directories are never overwritten",
+                    backup_path.display()
+                ),
+                repair: Some("retry backup creation; a new backup id will be allocated".to_owned()),
+            });
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "failed to inspect backup directory '{}': {error}",
+                    backup_path.display()
+                ),
+                repair: Some("choose a writable --output-dir".to_owned()),
+            });
+        }
+    }
     fs::create_dir_all(backup_root).map_err(|error| DomainError::Storage {
         message: format!(
             "failed to create backup root '{}': {error}",
@@ -12218,15 +12333,24 @@ fn ensure_backup_directory(backup_root: &Path, backup_path: &Path) -> Result<(),
         ),
         repair: Some("choose a writable --output-dir".to_owned()),
     })?;
-    fs::create_dir(backup_path).map_err(|error| DomainError::Storage {
-        message: format!(
-            "failed to create backup directory '{}': {error}",
-            backup_path.display()
-        ),
-        repair: Some(
-            "retry backup creation; existing backup directories are never overwritten".to_owned(),
-        ),
-    })
+    let staging_path = backup_root.join(format!("{BACKUP_STAGING_PREFIX}{}", uuid::Uuid::now_v7()));
+    ensure_backup_create_path_has_no_symlink_components(&staging_path, "backup staging directory")?;
+    let staging_builder = &mut fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        staging_builder.mode(0o700);
+    }
+    staging_builder
+        .create(&staging_path)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to reserve backup staging directory '{}': {error}",
+                staging_path.display()
+            ),
+            repair: Some("retry backup creation with a writable --output-dir".to_owned()),
+        })?;
+    Ok(staging_path)
 }
 
 fn ensure_backup_create_path_has_no_symlink_components(
@@ -16097,6 +16221,155 @@ mod tests {
             "listed backup id",
         )?;
         ensure_equal(entry.issue_count, 0, "listed issue count")
+    }
+
+    struct ClearBackupCreateWriteFault;
+
+    impl Drop for ClearBackupCreateWriteFault {
+        fn drop(&mut self) {
+            clear_backup_create_write_fault();
+        }
+    }
+
+    #[test]
+    fn create_backup_publishes_atomically_without_staging_debris() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let out = workspace.join("atomic-backups");
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            output_dir: Some(out.clone()),
+            label: Some("atomic".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let names = directory_entry_names(&out)?;
+        ensure_equal(
+            names.clone(),
+            vec![created.backup_id.clone()],
+            "published backup is the only root entry",
+        )?;
+        ensure(
+            Path::new(&created.backup_path)
+                .join(MANIFEST_FILE)
+                .is_file(),
+            "published backup has a manifest",
+        )?;
+        ensure(
+            Path::new(&created.records_path).is_file(),
+            "published backup has records",
+        )
+    }
+
+    #[test]
+    fn list_backups_does_not_accept_create_staging_debris() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let out = workspace.join("listed-backups");
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out.clone()),
+            label: Some("listed".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let debris = out.join(format!("{BACKUP_STAGING_PREFIX}{}", Uuid::now_v7()));
+        fs::create_dir(&debris).map_err(|error| error.to_string())?;
+        fs::copy(Path::new(&created.records_path), debris.join(RECORDS_FILE))
+            .map_err(|error| error.to_string())?;
+        fs::copy(
+            Path::new(&created.manifest_path),
+            debris.join(MANIFEST_FILE),
+        )
+        .map_err(|error| error.to_string())?;
+        let listed = list_backups(&BackupListOptions {
+            workspace_path: workspace,
+            output_dir: Some(out),
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(listed.backups.len(), 1, "staging debris is not accepted")?;
+        let entry = listed
+            .backups
+            .first()
+            .ok_or_else(|| "missing listed backup".to_owned())?;
+        ensure_equal(
+            entry.backup_id.as_str(),
+            created.backup_id.as_str(),
+            "listed backup id",
+        )?;
+        ensure(
+            listed.degraded.is_empty(),
+            "staging skip is silent, not an unreadable-backup warning",
+        )
+    }
+
+    #[test]
+    fn failed_create_write_leaves_no_accepted_backup() -> TestResult {
+        let _guard = ClearBackupCreateWriteFault;
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let out = workspace.join("faulted-backups");
+        install_backup_create_write_fault("after_records", |_| {
+            Err(DomainError::Storage {
+                message: "injected backup create write fault after records".to_owned(),
+                repair: Some("retry backup creation".to_owned()),
+            })
+        });
+        let error = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out.clone()),
+            label: Some("faulted".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .err()
+        .ok_or_else(|| "write fault must fail backup create".to_owned())?;
+        ensure(
+            error
+                .message()
+                .contains("injected backup create write fault after records"),
+            format!("unexpected create failure: {}", error.message()),
+        )?;
+        let names = directory_entry_names(&out)?;
+        ensure_equal(names.len(), 1, "only unpublished staging remains")?;
+        let staging_name = names
+            .first()
+            .ok_or_else(|| "missing unpublished staging directory".to_owned())?;
+        ensure(
+            staging_name.starts_with(BACKUP_STAGING_PREFIX),
+            "debris uses the unpublished staging prefix",
+        )?;
+        let staging = out.join(staging_name);
+        ensure(
+            staging.join(RECORDS_FILE).is_file(),
+            "partial records remain inspectable",
+        )?;
+        ensure(
+            !staging.join(MANIFEST_FILE).exists(),
+            "manifest must not be written after the records fault",
+        )?;
+        let listed = list_backups(&BackupListOptions {
+            workspace_path: workspace,
+            output_dir: Some(out),
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            listed.backups.len(),
+            0,
+            "partial staging is not an accepted backup",
+        )?;
+        ensure(
+            listed.degraded.is_empty(),
+            "list does not treat unpublished staging as an unreadable backup",
+        )
     }
 
     #[test]
