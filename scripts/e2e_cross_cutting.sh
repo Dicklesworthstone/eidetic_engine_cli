@@ -174,6 +174,33 @@ assert_jq_file_argjson "$MIGRATION_MANIFEST" \
     '[.allocations[] | select(.status == "planned") | .version] | min > $tail' \
     "migration registry reservations stay ahead of the compiled tail"
 
+step "the derived mesh node id never becomes a responder principal"
+# bd-mesh-no-stable-node-identity-pt7k5. `build_peer_origin_node_id`
+# (src/mesh/peer.rs) derives a node id from the Tailscale node key. Its own doc
+# says it "is never an admissible responder principal", because a DERIVED
+# principal is guessable by anyone who can see the peer's public node key --
+# production mints a RANDOM one via `generate_peer_origin_node_id`
+# (getrandom::fill) instead.
+#
+# That invariant lived only in a doc comment. The function is `pub`, currently
+# has no production caller, and nothing stopped enrollment from being wired to
+# it -- which would silently make every peer's principal derivable from a public
+# value. This is the check that says so out loud.
+#
+# Tests may call it freely: it exists for artifact compatibility, and two test
+# files construct legacy ids with it. Only src/ is constrained, and the budget
+# is ONE reference -- the definition itself.
+derived_principal_refs="$(rg -o 'build_peer_origin_node_id' src/ 2>/dev/null | wc -l | tr -d ' ')"
+if [ "${derived_principal_refs:-0}" -le 1 ]; then
+    e2e_log_assert_eq "$derived_principal_refs" "1" \
+        "derived mesh node id has no production caller"
+    _harness_pass "derived mesh node id has no production caller"
+else
+    e2e_log_assert_eq "$derived_principal_refs" "1" \
+        "derived mesh node id has no production caller"
+    _harness_fail "derived mesh node id has no production caller: build_peer_origin_node_id now has ${derived_principal_refs} references under src/ (expected 1, the definition). A derived principal is guessable from the peer's public node key; mint with generate_peer_origin_node_id instead -- $(rg -n 'build_peer_origin_node_id' src/ | tr '\n' ' ')"
+fi
+
 step "no integration shard carries a property-test load"
 # bd-in3xj. The shards are split by FILENAME, and every tests/property_*.rs
 # sorts into the N-R range, so the split had put 98 of the suite's 105 property
