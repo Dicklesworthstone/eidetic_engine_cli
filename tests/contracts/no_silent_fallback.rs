@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -2061,6 +2061,80 @@ fn unclassified_by_file(findings: &[SourceFinding]) -> BTreeMap<String, usize> {
 /// serialization surfaces in `REQUIRED_SURFACE_FILES` would have gone green
 /// immediately (those files hold 7 of the 184) by abandoning `src/core`,
 /// `src/cli` and `src/mesh`, where the other 177 live.
+/// A file compiled ONLY for tests must not be scanned as product code.
+///
+/// `ignored_test_module_lines` sees `#[cfg(test)] mod tests { … }` inside one
+/// file. It cannot see a whole file gated from elsewhere, so
+/// `src/core/ask_privacy_tests.rs` — included by `src/core/ask_corpus.rs:263`
+/// behind `#[cfg(test)]` — was scanned as product, and an `assert!` in a test
+/// at its :127 counted as a silent-fallback finding.
+///
+/// Paired deliberately. The positive arm alone would pass against a detector
+/// that skipped every file; the negative arm is what proves real product code
+/// is still scanned after the exclusion.
+#[test]
+fn cfg_test_only_files_are_not_scanned_as_product_code() -> TestResult {
+    let gated = cfg_test_only_files()?;
+    let findings = scan_source_findings()?;
+    let mut problems = Vec::new();
+
+    if !gated.contains("src/core/ask_privacy_tests.rs") {
+        problems.push(
+            "src/core/ask_privacy_tests.rs is included behind #[cfg(test)] from \
+             src/core/ask_corpus.rs and must be recognised as test-only"
+                .to_owned(),
+        );
+    }
+    if gated.len() < 5 {
+        problems.push(format!(
+            "only {} cfg(test)-only files detected; a near-empty set would make \
+             this check vacuous while the blind spot stayed open",
+            gated.len()
+        ));
+    }
+
+    // The negative arm. Both of these are included with NO cfg(test) --
+    // `mod context_delta_evidence;` (src/cli/mod.rs) and
+    // `#[path = "ask_candidates.rs"] mod selection;` (src/core/ask.rs) -- and
+    // both really do carry findings, so excluding them would silently shrink
+    // the gate's subject rather than sharpen it.
+    for product in [
+        "src/cli/context_delta_evidence.rs",
+        "src/core/ask_candidates.rs",
+        "src/cli/mod.rs",
+    ] {
+        if gated.contains(product) {
+            problems.push(format!(
+                "{product} is product code and must still be scanned"
+            ));
+        }
+    }
+
+    if findings
+        .iter()
+        .any(|finding| finding.file == "src/core/ask_privacy_tests.rs")
+    {
+        problems.push(
+            "a finding was reported from a cfg(test)-only file; an assert! inside \
+             a test is not a silent fallback"
+                .to_owned(),
+        );
+    }
+    if findings.len() < 400 {
+        problems.push(format!(
+            "only {} findings scanned; the exclusion must remove test-only files, \
+             not most of the tree",
+            findings.len()
+        ));
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
 #[test]
 fn no_silent_fallback_unclassified_findings_only_shrink() -> TestResult {
     let findings = scan_source_findings()?;
@@ -2279,16 +2353,93 @@ fn classify_finding(finding: &SourceFinding) -> Option<&'static InventoryRule> {
         .find(|rule| rule.file == finding.file && finding.context.contains(rule.fragment))
 }
 
+/// Files under `src/` that are compiled ONLY for tests, because some other file
+/// includes them behind `#[cfg(test)]`.
+///
+/// `ignored_test_module_lines` recognises `#[cfg(test)]` followed by
+/// `mod tests {` WITHIN one file. It cannot see this shape, which gates a whole
+/// file from somewhere else:
+///
+/// ```ignore
+/// // src/core/ask_corpus.rs
+/// #[cfg(test)]
+/// #[path = "ask_privacy_tests.rs"]
+/// mod privacy_tests;
+/// ```
+///
+/// The included file therefore got scanned as product code, and an `assert!`
+/// inside a test counted as a silent-fallback finding
+/// (`src/core/ask_privacy_tests.rs:127`). Thirteen files under `src/` are
+/// included this way; measured when this was written, ZERO of the baselined
+/// findings sat in any of them, so this closes a latent hole rather than
+/// rewriting live debt — which is the cheap moment to close it, before a
+/// spurious entry gets baselined and has to be unpicked.
+fn cfg_test_only_files() -> Result<BTreeSet<String>, String> {
+    let mut files = Vec::new();
+    collect_rust_files(&repo_path("src"), &mut files)?;
+    let mut gated = BTreeSet::new();
+
+    for path in &files {
+        let source = fs::read_to_string(path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        let lines = source.lines().collect::<Vec<_>>();
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+
+        for (index, line) in lines.iter().enumerate() {
+            if line.trim() != "#[cfg(test)]" {
+                continue;
+            }
+            // `#[path = "X.rs"] mod y;` — the include names the file directly.
+            // `mod y;` — the sibling `y.rs` is the file.
+            let mut included: Option<String> = None;
+            for follow in lines.iter().skip(index + 1).take(3) {
+                let trimmed = follow.trim();
+                if let Some(rest) = trimmed.strip_prefix("#[path = \"") {
+                    if let Some(name) = rest.split('"').next() {
+                        included = Some(name.to_owned());
+                    }
+                } else if let Some(rest) = trimmed.strip_prefix("mod ") {
+                    if let Some(name) = rest.strip_suffix(';') {
+                        if included.is_none() {
+                            included = Some(format!("{name}.rs"));
+                        }
+                    }
+                    break;
+                } else if !trimmed.starts_with('#') {
+                    break;
+                }
+            }
+
+            if let Some(name) = included {
+                let candidate = parent.join(name);
+                if candidate.is_file() {
+                    gated.insert(relative_path(&candidate)?);
+                }
+            }
+        }
+    }
+
+    Ok(gated)
+}
+
 fn scan_source_findings() -> Result<Vec<SourceFinding>, String> {
     let mut files = Vec::new();
     collect_rust_files(&repo_path("src"), &mut files)?;
     files.sort();
+    let test_only = cfg_test_only_files()?;
 
     let mut findings = Vec::new();
     for path in files {
         let source = fs::read_to_string(&path)
             .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
         let relative = relative_path(&path)?;
+        // Test-only by inclusion, not by an in-file module. See
+        // `cfg_test_only_files`.
+        if test_only.contains(&relative) {
+            continue;
+        }
         let ignored = ignored_test_module_lines(&source);
         let lines = source.lines().collect::<Vec<_>>();
 
