@@ -49,22 +49,6 @@ fn open_db() -> DbConnection {
     connection
 }
 
-#[test]
-#[ignore = "explicit bd-in3xj initialization timing diagnostic"]
-fn database_initialization_timing() {
-    let started = std::time::Instant::now();
-    eprintln!("origin diagnostic: open begin");
-    let connection = DbConnection::open_memory().expect("open in-memory db");
-    eprintln!("origin diagnostic: open finished {:?}", started.elapsed());
-    let started = std::time::Instant::now();
-    eprintln!("origin diagnostic: migrate begin");
-    connection.migrate().expect("migrate");
-    eprintln!(
-        "origin diagnostic: migrate finished {:?}",
-        started.elapsed()
-    );
-}
-
 fn arb_text() -> impl Strategy<Value = String> {
     proptest::string::string_regex("[ -~]{0,48}").unwrap()
 }
