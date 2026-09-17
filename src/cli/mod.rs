@@ -43491,6 +43491,7 @@ fn handle_db_inspect<W>(cli: &Cli, args: &DbInspectArgs, stdout: &mut W) -> Proc
 where
     W: Write,
 {
+    let started = Instant::now();
     let workspace_path = cli.resolve_workspace();
     let database_path = args
         .database
@@ -43512,14 +43513,14 @@ where
 
     if !report.exists {
         report.error = Some("Database file not found".to_string());
-        return write_db_inspect_output(cli, &report, stdout);
+        return finish_db_inspect(cli, &workspace_path, &report, stdout, started);
     }
 
     let conn = match crate::db::DbConnection::open_schema_only(&database_path) {
         Ok(conn) => conn,
         Err(error) => {
             report.error = Some(format!("Failed to open database: {error}"));
-            return write_db_inspect_output(cli, &report, stdout);
+            return finish_db_inspect(cli, &workspace_path, &report, stdout, started);
         }
     };
 
@@ -43527,7 +43528,7 @@ where
         Ok(tables) => tables,
         Err(error) => {
             report.error = Some(format!("Failed to list tables: {error}"));
-            return write_db_inspect_output(cli, &report, stdout);
+            return finish_db_inspect(cli, &workspace_path, &report, stdout, started);
         }
     };
     report.available_tables = tables.clone();
@@ -43537,14 +43538,14 @@ where
             "Table '{}' was not found in this database",
             args.table
         ));
-        return write_db_inspect_output(cli, &report, stdout);
+        return finish_db_inspect(cli, &workspace_path, &report, stdout, started);
     }
 
     report.table_row_count = match conn.count_table_rows(&args.table) {
         Ok(count) => Some(count),
         Err(error) => {
             report.error = Some(format!("Failed to count table rows: {error}"));
-            return write_db_inspect_output(cli, &report, stdout);
+            return finish_db_inspect(cli, &workspace_path, &report, stdout, started);
         }
     };
 
@@ -43554,7 +43555,7 @@ where
         Ok(rows) => rows,
         Err(error) => {
             report.error = Some(format!("Failed to inspect table columns: {error}"));
-            return write_db_inspect_output(cli, &report, stdout);
+            return finish_db_inspect(cli, &workspace_path, &report, stdout, started);
         }
     };
     report.columns = column_rows
@@ -43580,13 +43581,59 @@ where
         Ok(rows) => rows,
         Err(error) => {
             report.error = Some(format!("Failed to read table rows: {error}"));
-            return write_db_inspect_output(cli, &report, stdout);
+            return finish_db_inspect(cli, &workspace_path, &report, stdout, started);
         }
     };
 
     report.rows = rows.iter().map(db_inspect_row_json).collect();
     report.returned_row_count = report.rows.len();
-    write_db_inspect_output(cli, &report, stdout)
+    finish_db_inspect(cli, &workspace_path, &report, stdout, started)
+}
+
+/// The `db_inspect` surface's conformant tracing event (bd-3usjw.1).
+///
+/// Unlike `trace_mcp_validate`, which reports "unbound" because `ee mcp
+/// validate` opens no workspace store, `ee db inspect` genuinely resolves one,
+/// so the resolved path is reported rather than a placeholder.
+///
+/// `degraded_codes` is derived from the same helper the writer uses, so the
+/// event and the response agree by construction instead of by coincidence.
+fn trace_db_inspect(workspace_path: &Path, report: &DbInspectReport, elapsed: Duration) {
+    let degraded = db_diagnostic_failure_degraded("db_inspect", report.error.as_deref());
+    let degraded_codes: Vec<&str> = degraded
+        .iter()
+        .filter_map(|entry| entry.get("code").and_then(serde_json::Value::as_str))
+        .collect();
+    tracing::info!(
+        target: "ee::db::inspect",
+        workspace_id = %workspace_path.display(),
+        request_id = "ee_db_inspect",
+        bead_id = "bd-3usjw.1",
+        surface = "db_inspect",
+        phase = "response",
+        elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+        degraded_codes = ?degraded_codes,
+        database_exists = report.exists,
+        returned_row_count = report.returned_row_count,
+        available_table_count = report.available_tables.len(),
+        "db inspect completed"
+    );
+}
+
+/// Every exit from `handle_db_inspect` funnels through here, including the
+/// three error paths ("Database file not found", "Failed to open database",
+/// "Failed to list tables"). A degraded response is still a response: tracing
+/// only the happy path would leave the surface observable exactly when nothing
+/// went wrong, which is the opposite of useful.
+fn finish_db_inspect<W: Write>(
+    cli: &Cli,
+    workspace_path: &Path,
+    report: &DbInspectReport,
+    stdout: &mut W,
+    started: Instant,
+) -> ProcessExitCode {
+    trace_db_inspect(workspace_path, report, started.elapsed());
+    write_db_inspect_output(cli, report, stdout)
 }
 
 fn write_db_inspect_output<W: Write>(
