@@ -1,0 +1,243 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/ee.release_candidate_proof.v1.json",
+  "title": "ee.release_candidate_proof.v1",
+  "description": "Content-addressed release-candidate proof capsule (bd-reality-core-convergence-1azkt.5). Binds, in one tamper-detecting record, the identities a release admission decision depends on: source tree, effective dependencies, toolchain, verification manifest, candidate binaries, test inventory, per-stage results, performance samples, CI/RCH run identifiers, and evidence hashes. THIS SCHEMA DEFINES THE SKELETON ONLY. `.5` emits a capsule that declares what it binds and what it has not established; `.19` is what populates a complete, green capsule for an immutable clean-main candidate. A capsule is therefore NOT a pass certificate: `completeness.populated` and `completeness.unestablished` are required precisely so an unpopulated skeleton cannot be mistaken for a verified candidate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "capsuleHash",
+    "generatedAt",
+    "completeness",
+    "source",
+    "effectiveDependencies",
+    "toolchain",
+    "manifest",
+    "binaries",
+    "testInventory",
+    "results",
+    "performance",
+    "runIdentifiers",
+    "evidenceHashes"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.release_candidate_proof.v1"
+    },
+    "capsuleHash": {
+      "type": "string",
+      "description": "Content address of every OTHER field of this capsule, canonicalized with sorted keys and this field omitted. Recomputing it over the received document is what makes the capsule tamper-detecting; a consumer that does not recompute it is trusting a string.",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Emission time. Excluded from capsuleHash, because a capsule re-emitted over identical inputs must content-address identically."
+    },
+    "completeness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["populated", "unestablished"],
+      "description": "The honesty field. A skeleton emitted by .5 sets populated=false and lists what it has not established; only .19 may emit populated=true. Absent this, an empty capsule and a verified one are the same shape.",
+      "properties": {
+        "populated": {
+          "type": "boolean",
+          "description": "True only when every required binding carries real, verified content. A capsule with any placeholder, any unrun stage, or any unresolved identity MUST report false."
+        },
+        "unestablished": {
+          "type": "array",
+          "description": "Named things this capsule does NOT establish, each with the reason. A platform the host cannot build for belongs here, never silently omitted.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["item", "reason"],
+            "properties": {
+              "item": { "type": "string" },
+              "reason": { "type": "string" },
+              "blockedBy": {
+                "type": ["string", "null"],
+                "description": "Tracker id when a specific bead or platform limitation owns the gap."
+              }
+            }
+          }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["treeish", "commit", "dirty"],
+      "description": "The tree the candidate was built from. `dirty` true is disqualifying for a release capsule and is recorded rather than refused here, so the refusal happens at admission with a reason.",
+      "properties": {
+        "treeish": { "type": "string" },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "dirty": { "type": "boolean" },
+        "sourceHash": { "type": ["string", "null"] }
+      }
+    },
+    "effectiveDependencies": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lockfileHash", "siblingPins"],
+      "description": "What was actually linked, not what the manifest requested. Franken-stack siblings are path dependencies whose resolved revision is not visible in Cargo.lock alone, which is why each is pinned explicitly.",
+      "properties": {
+        "lockfileHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "siblingPins": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["crate", "resolved"],
+            "properties": {
+              "crate": { "type": "string" },
+              "resolved": { "type": "string" },
+              "path": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rustc", "cargo", "channel", "target"],
+      "properties": {
+        "rustc": { "type": "string" },
+        "cargo": { "type": "string" },
+        "channel": { "type": "string" },
+        "target": { "type": "string" },
+        "features": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stageCount", "manifestHash"],
+      "description": "Identity of the verification manifest this run executed. The stage registry is already pinned bijectively to verify.sh's run_stage calls by `verify_budget_manifest_declares_every_verify_stage`, so a capsule naming a different stage count than the registry is detectable.",
+      "properties": {
+        "stageCount": { "type": "integer", "minimum": 0 },
+        "manifestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "manifestPath": { "type": ["string", "null"] }
+      }
+    },
+    "binaries": {
+      "type": "array",
+      "description": "Every candidate binary by identity, never by PATH lookup. A capsule that names a binary it did not hash is describing whatever happened to be installed.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256", "version", "target"],
+        "properties": {
+          "path": { "type": "string" },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "version": { "type": "string" },
+          "target": { "type": "string" },
+          "features": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "testInventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logicalTests", "shards"],
+      "description": "Exact inventory, so an omitted or duplicated logical test is visible. A logical test appearing in two shards is a defect, not redundancy.",
+      "properties": {
+        "logicalTests": { "type": "integer", "minimum": 0 },
+        "shards": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "tests"],
+            "properties": {
+              "name": { "type": "string" },
+              "tests": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "results": {
+      "type": "array",
+      "description": "Per-stage outcome using the SAME vocabulary verify.sh emits (STAGE_STATUS_VOCABULARY, scripts/verify.sh). One vocabulary across the runner and the capsule is the point: a capsule that invented its own status names would let 'did not run' and 'ran and passed' converge again at the release boundary.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["stage", "status"],
+        "properties": {
+          "stage": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PASS",
+              "FAIL",
+              "NOT_APPLICABLE",
+              "SKIP",
+              "ADVISORY",
+              "TRACKED_RED",
+              "INFRA_ERROR",
+              "TIMEOUT",
+              "CANCELLED"
+            ]
+          },
+          "exitCode": { "type": ["integer", "null"] },
+          "durationSeconds": { "type": ["number", "null"] },
+          "attempts": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "description": "Retry count. Retained so a stage that passed on attempt 4 is not reported identically to one that passed first time."
+          },
+          "reason": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["samples"],
+      "properties": {
+        "samples": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["metric", "value", "unit"],
+            "properties": {
+              "metric": { "type": "string" },
+              "value": { "type": "number" },
+              "unit": { "type": "string" },
+              "host": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "runIdentifiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rch", "hostedCi"],
+      "description": "Run ids on both admission lanes. `hostedCi` is nullable and MUST be null rather than fabricated while the hosted workflows are disabled_manually (bd-o7wh0) — a capsule claiming a hosted run that did not happen is the failure this whole record exists to prevent.",
+      "properties": {
+        "rch": { "type": ["string", "null"] },
+        "hostedCi": { "type": ["string", "null"] }
+      }
+    },
+    "evidenceHashes": {
+      "type": "array",
+      "description": "Content addresses of the artifacts this capsule attests to. Repo-relative paths only: an absolute path is not reproducible across hosts and cannot be pinned.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^[^/].*$"
+          },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    }
+  }
+}

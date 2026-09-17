@@ -470,6 +470,118 @@ fn verify_declares_the_whole_stage_status_vocabulary() {
     }
 }
 
+/// The release-candidate capsule and the runner must share ONE status
+/// vocabulary (bd-reality-core-convergence-1azkt.5).
+///
+/// This is the lockstep that makes "one executable truth" mean something at the
+/// release boundary. If the capsule's enum could drift from what verify.sh
+/// emits, then `SKIP` and `NOT_APPLICABLE` — "was supposed to run and did not"
+/// versus "declared inapplicable" — could converge again in the record an
+/// admission decision reads, which is exactly the collapse this bead exists to
+/// undo one layer down.
+///
+/// Asserted as set equality in BOTH directions: a status in the script but not
+/// the schema is unrepresentable in a capsule, and a status in the schema but
+/// not the script is a promise nothing can emit.
+#[test]
+fn the_proof_capsule_and_verify_share_one_status_vocabulary() {
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let declared = script
+        .lines()
+        .find(|line| line.starts_with("STAGE_STATUS_VOCABULARY="))
+        .expect("verify.sh must declare STAGE_STATUS_VOCABULARY");
+    let script_statuses: BTreeSet<String> = declared
+        .split_once('=')
+        .expect("vocabulary line must be an assignment")
+        .1
+        .trim_matches('"')
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+
+    let capsule_path = project_root().join("docs/schemas/ee.release_candidate_proof.v1.json");
+    let capsule: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&capsule_path).expect("read the release-candidate proof schema"),
+    )
+    .expect("the proof capsule schema must be valid JSON");
+    let schema_statuses: BTreeSet<String> = capsule
+        .pointer("/properties/results/items/properties/status/enum")
+        .and_then(serde_json::Value::as_array)
+        .expect("capsule must enumerate per-stage status values")
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect();
+
+    assert!(
+        script_statuses.len() >= 9,
+        "the extraction found only {} statuses; a truncated parse would make this \
+         comparison vacuous",
+        script_statuses.len()
+    );
+    assert_eq!(
+        script_statuses, schema_statuses,
+        "verify.sh's STAGE_STATUS_VOCABULARY and the capsule's results[].status \
+         enum must be the same set"
+    );
+}
+
+/// A skeleton capsule must be unable to pose as a verified one.
+///
+/// `.5` emits the skeleton and `.19` populates a green capsule, so the shape
+/// itself has to carry the difference — otherwise an empty capsule and a
+/// verified candidate are the same document. That is the "attestation for a
+/// binary that never ran" failure, at the release boundary.
+#[test]
+fn the_proof_capsule_cannot_omit_its_own_incompleteness() {
+    let capsule_path = project_root().join("docs/schemas/ee.release_candidate_proof.v1.json");
+    let capsule: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&capsule_path).expect("read the release-candidate proof schema"),
+    )
+    .expect("the proof capsule schema must be valid JSON");
+
+    let required: BTreeSet<String> = capsule
+        .pointer("/required")
+        .and_then(serde_json::Value::as_array)
+        .expect("capsule must declare required fields")
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect();
+    for field in ["completeness", "capsuleHash", "binaries", "results"] {
+        assert!(
+            required.contains(field),
+            "`{field}` must be REQUIRED; an optional one can be omitted by the \
+             emitter that most needs to declare it"
+        );
+    }
+
+    let completeness_required: BTreeSet<String> = capsule
+        .pointer("/properties/completeness/required")
+        .and_then(serde_json::Value::as_array)
+        .expect("completeness must declare required fields")
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        completeness_required.contains("populated")
+            && completeness_required.contains("unestablished"),
+        "completeness must require BOTH the populated flag and the list of what \
+         was not established; a flag alone can say `false` without saying why"
+    );
+
+    // hostedCi must be nullable rather than mandatory-string: while the hosted
+    // workflows are disabled_manually a capsule MUST be able to say "no hosted
+    // run" instead of being forced to invent an id.
+    let hosted = capsule
+        .pointer("/properties/runIdentifiers/properties/hostedCi/type")
+        .and_then(serde_json::Value::as_array)
+        .expect("runIdentifiers.hostedCi must declare its type");
+    assert!(
+        hosted.iter().any(|value| value.as_str() == Some("null")),
+        "hostedCi must accept null, or a capsule emitted while hosted CI is \
+         disabled would have to fabricate a run identifier"
+    );
+}
+
 /// A deliberately gated-off stage and a contention skip are different facts and
 /// must not share a token in the results ledger. They both read "SKIP" before
 /// bd-...-1azkt.5, which made a declared not-applicable indistinguishable from
