@@ -1,7 +1,11 @@
 use std::fmt;
 use std::ops::Range;
+use std::sync::OnceLock;
 
 use super::ContextResponse;
+
+#[path = "binary_validation.rs"]
+mod validation;
 
 pub const PACK_BINARY_SCHEMA_V1: &str = "ee.pack.bin.v1";
 pub const PACK_BINARY_MAGIC: [u8; 4] = *b"EEPK";
@@ -41,6 +45,12 @@ pub enum PackBinaryError {
         expected: [u8; 32],
         actual: [u8; 32],
     },
+    /// The item projection cannot be verified against the hash-checked JSON.
+    /// Reasons are static and never include private memory/evidence content.
+    InvalidItemContent {
+        index: Option<usize>,
+        reason: &'static str,
+    },
     NonUtf8Json,
 }
 
@@ -54,7 +64,9 @@ impl PackBinaryError {
             Self::ItemCountTooLarge { .. } => "pack_bin_item_count_too_large",
             Self::TotalBytesMismatch { .. } => "pack_bin_total_bytes_mismatch",
             Self::InvalidOffset { .. } => "pack_bin_invalid_offset",
-            Self::ContentHashMismatch { .. } => "pack_bin_content_hash_mismatch",
+            Self::ContentHashMismatch { .. } | Self::InvalidItemContent { .. } => {
+                "pack_bin_content_hash_mismatch"
+            }
             Self::NonUtf8Json => "pack_bin_json_non_utf8",
         }
     }
@@ -100,6 +112,10 @@ impl fmt::Display for PackBinaryError {
             Self::ContentHashMismatch { .. } => {
                 formatter.write_str("binary pack content_hash does not match canonical JSON")
             }
+            Self::InvalidItemContent { index, reason } => match index {
+                Some(index) => write!(formatter, "binary pack item {index} failed verification: {reason}"),
+                None => write!(formatter, "binary pack item projection failed verification: {reason}"),
+            },
             Self::NonUtf8Json => formatter.write_str("binary pack canonical JSON is not UTF-8"),
         }
     }
@@ -157,10 +173,16 @@ pub struct PackBinaryView<'a> {
     header: PackBinaryHeader,
     entries: Vec<PackBinaryItemEntry>,
     canonical_json_range: Range<usize>,
+    item_validation: OnceLock<Result<(), PackBinaryError>>,
 }
 
 impl<'a> PackBinaryView<'a> {
-    /// Parse and validate an `ee.pack.bin.v1` frame.
+    /// Parse the geometry and canonical JSON hash of an `ee.pack.bin.v1` frame.
+    ///
+    /// Item contents are verified lazily before the first [`Self::item_slice`]
+    /// call. Use [`Self::parse_verified`] to verify them eagerly, including for
+    /// empty packs. This low-level constructor preserves access to the footer
+    /// for inspection even when it is not a valid context-response document.
     ///
     /// # Errors
     ///
@@ -312,7 +334,36 @@ impl<'a> PackBinaryView<'a> {
             },
             entries,
             canonical_json_range: canonical_json_start..canonical_json_end,
+            item_validation: OnceLock::new(),
         })
+    }
+
+    /// Parse and eagerly verify the entire binary context pack.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`PackBinaryError`] for invalid frame geometry, JSON, item
+    /// counts, or content that disagrees with the hash-checked response.
+    pub fn parse_verified(bytes: &'a [u8]) -> Result<Self, PackBinaryError> {
+        let view = Self::parse(bytes)?;
+        view.validate_item_contents()?;
+        Ok(view)
+    }
+
+    /// Verify every item against `data.pack.items` in the canonical response.
+    ///
+    /// Both success and failure are cached for this immutable borrowed frame.
+    /// Temporary decoded strings are discarded; subsequent reads remain O(1)
+    /// zero-copy slices. The hash provides integrity, not sender authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PackBinaryError::InvalidItemContent`] for an invalid content
+    /// projection, or [`PackBinaryError::NonUtf8Json`] for a non-UTF-8 footer.
+    pub fn validate_item_contents(&self) -> Result<(), PackBinaryError> {
+        self.item_validation
+            .get_or_init(|| validation::validate(self))
+            .clone()
     }
 
     #[must_use]
@@ -335,11 +386,14 @@ impl<'a> PackBinaryView<'a> {
         format!("blake3:{}", hex32(&self.header.content_hash))
     }
 
-    /// Return a borrowed item-content slice directly from the frame.
+    /// Return a verified, borrowed item-content slice directly from the frame.
+    ///
+    /// No item is exposed until all items agree with the canonical response.
     ///
     /// # Errors
     ///
-    /// Returns [`PackBinaryError::InvalidOffset`] if `index` is out of range.
+    /// Returns [`PackBinaryError::InvalidOffset`] if `index` is out of range,
+    /// or a content-validation error if the item projection is inconsistent.
     pub fn item_slice(&self, index: usize) -> Result<&'a [u8], PackBinaryError> {
         let Some(entry) = self.entries.get(index) else {
             return Err(PackBinaryError::InvalidOffset {
@@ -349,6 +403,7 @@ impl<'a> PackBinaryView<'a> {
                 total: self.bytes.len(),
             });
         };
+        self.validate_item_contents()?;
         Ok(&self.bytes[entry.offset..entry.offset + entry.len])
     }
 
@@ -893,8 +948,13 @@ mod geometry_tests {
     #[test]
     fn contiguous_empty_items_and_empty_packs_remain_valid() {
         for items in [&[][..], &[&b""[..], &b"alpha"[..], &b""[..]][..]] {
-            let bytes = serialize_pack_binary("{}", items, 0);
-            let view = PackBinaryView::parse(&bytes).expect("canonical geometry");
+            let json = if items.is_empty() {
+                r#"{"data":{"pack":{"items":[]}}}"#
+            } else {
+                r#"{"data":{"pack":{"items":[{"content":""},{"content":"alpha"},{"content":""}]}}}"#
+            };
+            let bytes = serialize_pack_binary(json, items, 0);
+            let view = PackBinaryView::parse_verified(&bytes).expect("canonical pack");
             assert_eq!(view.item_count(), items.len());
             for (index, expected) in items.iter().enumerate() {
                 assert_eq!(view.item_slice(index).expect("valid item"), *expected);
