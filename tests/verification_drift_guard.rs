@@ -378,6 +378,121 @@ printf 'survived=1 passed=%s contended=%s' "$STAGE_PASSED" "$STAGE_SKIPPED_CONTE
     (stdout, output.status.code().unwrap_or(-1))
 }
 
+/// Run verify.sh's REAL `stage_status_for_exit_code` over one exit code.
+///
+/// Extracted from the script rather than mirrored: a copy of a `case` statement
+/// proves only that the copy agrees with itself.
+fn stage_status_for(exit_code: i32) -> String {
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"
+set -uo pipefail
+BEADS_LOCK_SKIP_CODE=75
+eval "$(awk '/^stage_status_for_exit_code\(\) /,/^}/' "$VERIFY_SCRIPT")"
+stage_status_for_exit_code "$CODE"
+"#,
+        )
+        .env("VERIFY_SCRIPT", verify_script_path())
+        .env("CODE", exit_code.to_string())
+        .current_dir(project_root())
+        .output()
+        .expect("run stage_status_for_exit_code");
+    assert_ne!(
+        output.status.code(),
+        Some(127),
+        "exit 127 means stage_status_for_exit_code was never defined; the awk \
+         extraction found nothing and this test would be vacuous"
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// bd-reality-core-convergence-1azkt.5: a stage outcome must name WHICH kind it
+/// is. Before this, five distinguishable outcomes shared two tokens, and every
+/// failure class printed "FAIL" -- so a timeout, which establishes nothing, was
+/// spelled exactly like a real assertion failure, which establishes that the
+/// checked thing is broken.
+///
+/// The default arm is asserted too. A classifier that returned FAIL for
+/// everything would satisfy the FAIL cases alone.
+#[test]
+fn stage_status_names_the_kind_of_outcome_not_just_pass_or_fail() {
+    for (code, expected) in [
+        (0, "PASS"),
+        (75, "SKIP"),
+        (124, "TIMEOUT"),
+        (137, "INFRA_ERROR"),
+        (130, "CANCELLED"),
+        (143, "CANCELLED"),
+    ] {
+        assert_eq!(
+            stage_status_for(code),
+            expected,
+            "exit {code} must classify as {expected}"
+        );
+    }
+
+    // Unrecognised codes stay FAIL. This is the arm that keeps the classifier
+    // honest: it must not invent a gentler status for a code it does not know.
+    for code in [1, 2, 101, 255] {
+        assert_eq!(
+            stage_status_for(code),
+            "FAIL",
+            "exit {code} is not a recognised infrastructure signal and must stay FAIL"
+        );
+    }
+}
+
+/// The vocabulary must be declared in full, so a status nothing emits is
+/// visible as an undelivered promise rather than silently absent.
+#[test]
+fn verify_declares_the_whole_stage_status_vocabulary() {
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let declared = script
+        .lines()
+        .find(|line| line.starts_with("STAGE_STATUS_VOCABULARY="))
+        .expect("verify.sh must declare STAGE_STATUS_VOCABULARY");
+    for status in [
+        "PASS",
+        "FAIL",
+        "NOT_APPLICABLE",
+        "SKIP",
+        "ADVISORY",
+        "TRACKED_RED",
+        "INFRA_ERROR",
+        "TIMEOUT",
+        "CANCELLED",
+    ] {
+        assert!(
+            declared.contains(status),
+            "the stage status vocabulary must declare {status}"
+        );
+    }
+}
+
+/// A deliberately gated-off stage and a contention skip are different facts and
+/// must not share a token in the results ledger. They both read "SKIP" before
+/// bd-...-1azkt.5, which made a declared not-applicable indistinguishable from
+/// a stage that was supposed to run and did not.
+#[test]
+fn a_gated_off_stage_is_not_applicable_not_a_skip() {
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let body: String = script
+        .lines()
+        .skip_while(|line| !line.starts_with("record_gated_off() "))
+        .take_while(|line| *line != "}")
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        body.contains("STAGE_RESULTS") && body.contains("NOT_APPLICABLE ${name}"),
+        "record_gated_off must record NOT_APPLICABLE, not SKIP; body was:\n{body}"
+    );
+    assert!(
+        !body.contains("}SKIP ${name}"),
+        "record_gated_off must no longer emit the SKIP token; body was:\n{body}"
+    );
+}
+
 /// THE DELETION CONDITION for bd-closure-lint-gate-cannot-fail-6hb5b: an
 /// injected closure-lint failure must make verify.sh exit non-zero.
 ///
@@ -682,9 +797,11 @@ fn fake_oidc_idp_selfcheck_wiring() {
     // Now asserts BOTH halves, which is strictly more than the literal did:
     //   1. the label is registered exactly once through the sanctioned helper
     //      -- a label silently dropped from verify.sh still fails here;
-    //   2. that helper actually renders `SKIP {label} (ci-smoke)` -- checked
-    //      by executing it, so a change to the helper's output format fails
-    //      too, which the old source grep could not see.
+    //   2. that helper actually renders `NOT_APPLICABLE {label} (ci-smoke)` --
+    //      checked by executing it, so a change to the helper's output format
+    //      fails too, which the old source grep could not see. That is how this
+    //      test caught the bd-...-1azkt.5 token change instead of passing
+    //      through it.
     for label in [
         "Fake OIDC IdP Harness E2E (T7.7)",
         "Fake OIDC IdP Defects E2E (T7.7)",
@@ -704,7 +821,10 @@ fn fake_oidc_idp_selfcheck_wiring() {
             output_excerpt(&rendered)
         );
         let stdout = String::from_utf8_lossy(&rendered.stdout);
-        let expected = format!("SKIP {label} (ci-smoke)");
+        // NOT_APPLICABLE since bd-...-1azkt.5. A ci-smoke exclusion is a
+        // DECLARED not-applicable, and it used to share the SKIP token with a
+        // contention skip -- a stage that was supposed to run and did not.
+        let expected = format!("NOT_APPLICABLE {label} (ci-smoke)");
         assert_eq!(
             stdout.matches(&expected).count(),
             1,

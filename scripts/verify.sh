@@ -219,6 +219,54 @@ STAGE_RESULTS=""
 # incompleteness, never a verification failure, so it must not collide with a
 # real stage failure's exit code.
 VERIFY_EXIT_INCOMPLETE="$BEADS_LOCK_SKIP_CODE"
+
+# --- stage status vocabulary (bd-reality-core-convergence-1azkt.5) -----------
+#
+# Every stage outcome must name WHICH of these it is. Before this existed the
+# script emitted two tokens, PASS and SKIP, for five distinguishable outcomes:
+# a passing stage, a stage skipped by lock contention, a stage deliberately
+# gated off, and any failure at all -- where "any failure" collapsed a real
+# assertion failure, a timeout and an OOM kill into one line reading
+# "FAIL: <name> (Exit code: 124)".
+#
+# That collapse is not cosmetic. A 124 is GNU timeout firing, which says the
+# stage did not finish and therefore established nothing; a 1 says the stage ran
+# and the thing it checks is broken. Reporting both as FAIL means a reader
+# cannot tell "this is red" from "this never ran", which is the same confusion
+# the contention counter already exists to prevent.
+#
+# Measured evidence for the mapping, from this repo's own RCH lane on
+# 2026-09-17: an integration_s_z run returned 124 with no `test result:` line
+# anywhere in its log, having died mid-compile. Re-run with a longer wrapper and
+# unchanged code, the identical command returned 0 with 16 passed. The exit code
+# was the only thing that distinguished "no verdict" from "verdict".
+#
+# ADVISORY and TRACKED_RED are declared here but not yet ROUTED: neither has a
+# declaration surface on a stage, and inventing one silently would make the
+# vocabulary claim more than it enforces. That gap is recorded on the bead
+# rather than hidden behind a constant that nothing emits.
+STAGE_STATUS_VOCABULARY="PASS FAIL NOT_APPLICABLE SKIP ADVISORY TRACKED_RED INFRA_ERROR TIMEOUT CANCELLED"
+
+# Classify a stage's exit code into the vocabulary above.
+#
+# Only PASS and SKIP are success-shaped; every other status is a non-success and
+# keeps the script's existing fail-fast exit. This function ADDS information to
+# a failure, it never converts one into a pass.
+stage_status_for_exit_code() {
+    case "$1" in
+        0) printf '%s\n' "PASS" ;;
+        "$BEADS_LOCK_SKIP_CODE") printf '%s\n' "SKIP" ;;
+        # GNU timeout(1). The stage did not finish, so it established nothing.
+        124) printf '%s\n' "TIMEOUT" ;;
+        # 128+9 SIGKILL: the OOM killer and `kill -9` both land here. The stage
+        # was destroyed from outside rather than deciding anything.
+        137) printf '%s\n' "INFRA_ERROR" ;;
+        # 128+2 SIGINT, 128+15 SIGTERM: operator or supervisor cancellation.
+        130|143) printf '%s\n' "CANCELLED" ;;
+        *) printf '%s\n' "FAIL" ;;
+    esac
+}
+
 STAGE_PASSED=0
 STAGE_SKIPPED_CONTENTION=0
 STAGE_SKIPPED_CONTENTION_NAMES=""
@@ -673,7 +721,13 @@ enforce_stage_budget() {
 record_gated_off() {
     local name="$1"
     local reason="$2"
-    STAGE_RESULTS="${STAGE_RESULTS}SKIP ${name} (${reason})\n"
+    # NOT_APPLICABLE, not SKIP. These are two different facts that this ledger
+    # used to spell identically: a gated-off stage was DECLARED not to apply to
+    # this run (a profile flag, --ci-smoke, an absent optional toolchain), while
+    # a SKIP means a stage that was supposed to run did not. Only the first may
+    # sit inside a green run, and a reader could not tell them apart while both
+    # printed "SKIP <name>".
+    STAGE_RESULTS="${STAGE_RESULTS}NOT_APPLICABLE ${name} (${reason})\n"
     STAGE_GATED_OFF=$((STAGE_GATED_OFF + 1))
     STAGE_GATED_OFF_NAMES="${STAGE_GATED_OFF_NAMES}    - ${name} (${reason})\n"
 }
@@ -771,7 +825,17 @@ run_stage() {
             echo ""
             return 0
         fi
-        echo "[-] FAIL: $name (Exit code: $exit_code, ${duration}s)"
+        # Name WHICH kind of non-success this is. The exit is unchanged -- every
+        # status reached here is still fatal and still propagates the original
+        # code -- but "TIMEOUT" and "INFRA_ERROR" tell a reader the stage
+        # established nothing, where a bare "FAIL" implies it ran and decided.
+        local stage_status
+        stage_status="$(stage_status_for_exit_code "$exit_code")"
+        echo "[-] ${stage_status}: $name (Exit code: $exit_code, ${duration}s)"
+        # Record it before exiting. Previously a failure left NO trace in
+        # STAGE_RESULTS at all, because the script exits here, so the ledger
+        # silently described only the stages that had already succeeded.
+        STAGE_RESULTS="${STAGE_RESULTS}${stage_status} ${name} (exit ${exit_code}, ${duration}s)\n"
         rm -f "$output_file"
         exit $exit_code
     fi
