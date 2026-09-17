@@ -64,12 +64,16 @@ fn run_git(args: &[&str]) -> Result<String, String> {
 /// `git status` and `git ls-files` both fail there. Two assertions in this
 /// module used to surface that as a contract failure, which is a false red:
 /// the repository was clean, the tree simply had no git metadata to read.
+/// Checked on disk rather than by shelling out to `git rev-parse`, for two
+/// reasons: `spawn_deadline_coverage` requires every new process spawn to
+/// carry a deadline via `crate::common_spawn`, and this suite is already
+/// spawn-bound. `.git` is a directory in a normal clone and a file in a
+/// worktree; `exists()` accepts both. Ancestors are walked so a crate nested
+/// inside a repository is not mistaken for a git-less export.
 fn git_work_tree_available() -> bool {
-    Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(repo_root())
-        .output()
-        .is_ok_and(|output| output.status.success())
+    repo_root()
+        .ancestors()
+        .any(|ancestor| ancestor.join(".git").exists())
 }
 
 /// Root-level entries present on disk, used where git metadata is absent.
