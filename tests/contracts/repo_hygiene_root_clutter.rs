@@ -58,6 +58,35 @@ fn run_git(args: &[&str]) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|error| format!("git output was not utf-8: {error}"))
 }
 
+/// Whether this checkout carries git metadata.
+///
+/// The pinned verify lane syncs a committed-tree *export* (no `.git`), so
+/// `git status` and `git ls-files` both fail there. Two assertions in this
+/// module used to surface that as a contract failure, which is a false red:
+/// the repository was clean, the tree simply had no git metadata to read.
+fn git_work_tree_available() -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(repo_root())
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// Root-level entries present on disk, used where git metadata is absent.
+fn root_entry_names() -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(repo_root())
+        .map_err(|error| format!("read repo root: {error}"))?
+        .flatten()
+    {
+        if let Some(name) = entry.file_name().to_str() {
+            names.push(name.to_owned());
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
 fn root_only(path: &str) -> bool {
     !path.is_empty() && !path.contains('/')
 }
@@ -123,6 +152,20 @@ fn root_scratchpad_patterns_are_registered_for_git_and_rch() -> TestResult {
 
 #[test]
 fn matching_root_scratchpads_are_ignored_not_untracked() -> TestResult {
+    // "untracked vs ignored" is a working-tree property. A committed-tree
+    // export has no working tree and no `.git`, so this assertion cannot be
+    // evaluated there -- it is not satisfied, and it is not violated. The
+    // export lane is covered by `no_matching_root_scratchpad_is_tracked`,
+    // which reads the same invariant off the files that are present.
+    if !git_work_tree_available() {
+        eprintln!(
+            "repo_hygiene_root_clutter: no git work tree (committed-tree export); \
+             untracked-vs-ignored is unevaluable here. Committed-tree coverage is \
+             asserted by no_matching_root_scratchpad_is_tracked."
+        );
+        return Ok(());
+    }
+
     let status = run_git(&[
         "status",
         "--porcelain",
@@ -156,15 +199,31 @@ fn matching_root_scratchpads_are_ignored_not_untracked() -> TestResult {
 
 #[test]
 fn no_matching_root_scratchpad_is_tracked() -> TestResult {
-    let tracked = run_git(&["ls-files", "-z"])?;
-    let offenders: Vec<&str> = tracked
-        .split('\0')
+    // Both arms answer the same question -- "is a scratchpad part of the
+    // source tree?" -- from whichever record of it this checkout has. A git
+    // checkout has the index; a committed-tree export has only the files it
+    // was built from, which are by construction exactly the tracked ones.
+    let (source, candidates) = if git_work_tree_available() {
+        let tracked = run_git(&["ls-files", "-z"])?;
+        (
+            "git index",
+            tracked
+                .split('\0')
+                .map(str::to_owned)
+                .collect::<Vec<String>>(),
+        )
+    } else {
+        ("committed-tree export", root_entry_names()?)
+    };
+
+    let offenders: Vec<&String> = candidates
+        .iter()
         .filter(|path| matches_root_scratchpad(path))
         .collect();
 
     if !offenders.is_empty() {
         return Err(format!(
-            "repo-root scratchpad pattern matched tracked file(s): {offenders:?}"
+            "repo-root scratchpad pattern matched file(s) in the {source}: {offenders:?}"
         ));
     }
 
