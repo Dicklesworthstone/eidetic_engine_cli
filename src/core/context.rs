@@ -12585,19 +12585,32 @@ fn rule_linked_memory_id(
         }
     };
     let projection = RuleIndexProjection::new(rule, stored_workspace_path, tags, source_memory_ids);
-    let indexed_revision = hit
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("entity_revision"))
-        .and_then(serde_json::Value::as_str);
-    if !projection.is_pack_admissible() || indexed_revision != Some(projection.entity_revision()) {
+    if !projection.is_pack_admissible() {
         push_degradation(
             degraded,
             "context_rule_hit_unhydrated",
             ContextResponseSeverity::Low,
-            format!(
-                "Rule {rule_id} is no longer pack-admissible or its derived index revision is stale."
-            ),
+            format!("Rule {rule_id} is no longer pack-admissible."),
+            Some("ee index rebuild --json".to_owned()),
+        );
+        return None;
+    }
+    // Semantic hits carry ids and scores only. Treating missing
+    // entity_revision as stale dropped every neural/hybrid rule hit from
+    // packs while `ee search` still returned the rule (bd-3h6bz,
+    // north_star_3b_pack_surfaces_promoted_rule on hz2).
+    if let Some(indexed_revision) = hit
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("entity_revision"))
+        .and_then(serde_json::Value::as_str)
+        && indexed_revision != projection.entity_revision()
+    {
+        push_degradation(
+            degraded,
+            "context_rule_hit_unhydrated",
+            ContextResponseSeverity::Low,
+            format!("Rule {rule_id} matched a stale derived index revision."),
             Some("ee index rebuild --json".to_owned()),
         );
         return None;
