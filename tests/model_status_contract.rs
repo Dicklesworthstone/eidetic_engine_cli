@@ -89,8 +89,8 @@ fn ensure_posture_does_not_claim_unavailable_capability(
     context: &str,
 ) -> TestResult {
     ensure_equal(
-        report.available_count,
-        0,
+        &report.available_count,
+        &0,
         &format!("{context}: fixture must actually be the zero-available case"),
     )?;
     ensure(
