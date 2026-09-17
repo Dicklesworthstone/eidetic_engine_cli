@@ -2359,16 +2359,25 @@ fn redact_handoff_path_segments(input: &str) -> String {
     output
 }
 
+/// bd-redactor-prefix-divergence-lsy52: the TWENTY-THIRD hand-copied prefix
+/// list, found by enumerating the population by DATA shape after the 22nd
+/// (`support_bundle.rs`) proved the helper-name grep undercounts.
+///
+/// Five prefixes against the shared cover's twenty-two, matched
+/// case-sensitively. It omitted `/root/`, `/etc/`, `/tmp/`, `/data/` and
+/// `/workspace/`, so a handoff carrying `/root/.ssh/id_rsa` emitted it verbatim.
+///
+/// Only the MATCH is shared. The walker and this surface's placeholder are
+/// untouched, so no rendered handoff changes shape — the divergence was in what
+/// got matched, not what got emitted. Every former prefix stays covered
+/// (`/var/folders/` by `/var/`), so this widens redaction and cannot narrow it.
 fn handoff_path_prefix_at(input: &str, index: usize) -> bool {
-    [
-        "/Users/",
-        "/home/",
-        "/private/",
-        "/Volumes/",
-        "/var/folders/",
-    ]
-    .iter()
-    .any(|prefix| input[index..].starts_with(prefix))
+    let candidate = &input[index..];
+    crate::util::SENSITIVE_PATH_PREFIXES.iter().any(|prefix| {
+        candidate
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    })
 }
 
 fn handoff_path_segment_end(input: &str, start: usize) -> usize {

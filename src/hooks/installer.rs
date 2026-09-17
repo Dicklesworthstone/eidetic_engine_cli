@@ -3573,11 +3573,29 @@ fn redact_harness_conformance_text(input: &str) -> HarnessConformanceRedaction {
     }
 }
 
+/// bd-redactor-prefix-divergence-lsy52: the TWENTY-FIFTH hand-copied prefix
+/// rule, and the narrowest found so far — two prefixes against the shared
+/// cover's twenty-two, matched case-sensitively.
+///
+/// Like `support_bundle.rs`, it emits `[REDACTED:path]` rather than the
+/// `REDACTED_PATH` literal, so it was invisible to the guard that was supposed
+/// to catch a 22nd copy: that scan skips any file not containing the literal.
+/// The placeholder and the whitespace-segment strategy are kept; only the MATCH
+/// is shared, so installer transcripts keep their shape.
+///
+/// Widens only: `/Users/` and `/home/` remain covered, and `/root/`, `/etc/`,
+/// `/tmp/`, `/private/`, `/Volumes/` and the rest now redact instead of
+/// shipping verbatim in an installer transcript.
 fn redact_private_absolute_paths(input: &str) -> String {
     input
         .split_whitespace()
         .map(|segment| {
-            if segment.starts_with("/Users/") || segment.starts_with("/home/") {
+            let sensitive = crate::util::SENSITIVE_PATH_PREFIXES.iter().any(|prefix| {
+                segment
+                    .get(..prefix.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+            });
+            if sensitive {
                 "[REDACTED:path]".to_owned()
             } else {
                 segment.to_owned()
