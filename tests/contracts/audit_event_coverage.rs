@@ -439,3 +439,176 @@ fn ee_memory_show_writes_memory_show_row() -> TestResult {
     }
     Ok(())
 }
+
+/// An initialised workspace with NO memories, so `ee ask` has nothing to cite
+/// and must abstain.
+///
+/// Deliberately not `build_workspace()` with an off-topic question: that would
+/// make abstention depend on a relevance threshold, and a scoring change would
+/// then silently convert the paired negative below into a vacuous pass. An
+/// empty corpus cannot produce a candidate, so the abstention is structural.
+fn build_empty_workspace() -> Result<(TempDir, PathBuf, PathBuf), String> {
+    let dir = tempfile::tempdir().map_err(|error| format!("tempdir failed: {error}"))?;
+    let workspace = dir
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize temp workspace failed: {error}"))?;
+    let init = init_workspace(&InitOptions {
+        workspace_path: workspace.clone(),
+        dry_run: false,
+        repair_plan: false,
+        force: false,
+        allow_symlink: false,
+        skip_boilerplate: true,
+    });
+    if !matches!(init.status, InitStatus::Created | InitStatus::AlreadyExists) {
+        return Err(format!(
+            "init_workspace must persist the workspace row: status={:?} errors={:?}",
+            init.status, init.action_errors
+        ));
+    }
+    let database = init.database_path.clone();
+    let conn = DbConnection::open_file(&database).map_err(|error| format!("open db: {error}"))?;
+    conn.migrate()
+        .map_err(|error| format!("migrate: {error}"))?;
+    drop(conn);
+    Ok((dir, workspace, database))
+}
+
+/// `ee ask` appends a `search.returned_mem` row for each memory it CITES, so
+/// ADR 0071 stops classifying answered-with memories as `never_retrieved`
+/// (bd-b9dmp).
+///
+/// Spawns the real binary deliberately. `record_ask_retrieval_best_effort`
+/// lives in `src/core/ask.rs` but is CALLED from the CLI handler
+/// (`src/cli/mod.rs:50936`, inside `handle_ask`), so an in-process test of the
+/// core ask API — which is how every other row in this file drives its surface
+/// — would exercise the recorder while leaving the wiring unproven. The defect
+/// this pins is precisely a missing call, so the call site has to be in scope.
+///
+/// NO-CLAIM: green here does NOT prove ADR 0071 reclassifies the memory. It
+/// proves the row is written with the right action and origin. Whether the debt
+/// query reads it inside its retrieval window is `src/core/shadow_tuning.rs`'s
+/// contract and is not asserted here.
+#[test]
+fn ee_ask_writes_returned_mem_rows_for_cited_memories() -> TestResult {
+    let (_dir, workspace, database, _memory_id) =
+        build_workspace().map_err(|error| format!("setup: {error}"))?;
+    let before = audit_actions_for(&database);
+    let returned_before = count_action(&before, audit_actions::SEARCH_RETURNED_MEM);
+    let miss_before = count_action(&before, audit_actions::SEARCH_MISS_RECORDED);
+
+    let output = crate::common_spawn::serialized_real_ee_with(|command| {
+        command
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("ask")
+            .arg("What should I run before cutting a release?");
+    })
+    .map_err(|error| format!("spawn ee ask: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ee ask must succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let audit = audit_actions_for(&database);
+    let returned_delta =
+        count_action(&audit, audit_actions::SEARCH_RETURNED_MEM).saturating_sub(returned_before);
+    let miss_delta =
+        count_action(&audit, audit_actions::SEARCH_MISS_RECORDED).saturating_sub(miss_before);
+
+    if returned_delta == 0 {
+        // Separate a broken recorder from an unrepresentative fixture. An
+        // abstaining ask writes a miss row and cites nothing, so there is
+        // legitimately nothing to record; a silent recorder writes neither.
+        if miss_delta > 0 {
+            return Err(
+                "fixture problem, not a contract failure: ee ask ABSTAINED, so it cited \
+                 nothing to record. Seed a memory the question actually matches."
+                    .to_owned(),
+            );
+        }
+        return Err(
+            "ee ask appended neither a retrieval row nor a miss row: its audit path did not run"
+                .to_owned(),
+        );
+    }
+
+    let ask_sourced = audit
+        .iter()
+        .filter(|(action, details)| {
+            action == audit_actions::SEARCH_RETURNED_MEM
+                && details
+                    .as_deref()
+                    .is_some_and(|value| value.contains("\"source\":\"ask\""))
+        })
+        .count();
+    if ask_sourced == 0 {
+        return Err(format!(
+            "ee ask's retrieval rows must carry source=\"ask\" so ADR 0071 can attribute them: \
+             {returned_delta} row(s) appended, none sourced to ask"
+        ));
+    }
+    Ok(())
+}
+
+/// An ABSTAINING `ee ask` appends no retrieval row (bd-b9dmp).
+///
+/// This pins the `report.abstained || report.citations.is_empty()` guard in
+/// `record_ask_retrieval_best_effort`. Without it, ask would record the corpus
+/// it SCANNED — it reads the store directly via `list_memories` — which would
+/// mark every memory retrieved and make ADR 0071's `never_retrieved` set
+/// permanently empty. That is a worse failure than the one this bead fixed,
+/// because it destroys the signal rather than under-reporting it.
+///
+/// PAIRED, not refusal-only: the zero is asserted alongside a POSITIVE
+/// observable — the `search.miss_recorded` row abstention does write. Without
+/// that anchor this row would pass just as happily if `ee ask` never ran at
+/// all, which is the vacuity mode this suite has been repeatedly bitten by.
+///
+/// NO-CLAIM: green here does NOT prove ask abstains correctly, only that when
+/// it does abstain it records no retrieval. The abstention decision itself is
+/// `evaluate_ask`'s contract.
+#[test]
+fn ee_ask_abstention_appends_no_returned_mem_row() -> TestResult {
+    let (_dir, workspace, database) =
+        build_empty_workspace().map_err(|error| format!("setup: {error}"))?;
+    let before = audit_actions_for(&database);
+    let returned_before = count_action(&before, audit_actions::SEARCH_RETURNED_MEM);
+    let miss_before = count_action(&before, audit_actions::SEARCH_MISS_RECORDED);
+
+    // Not asserting success: abstention is permitted to carry its own exit
+    // code, and the audit rows are appended before that decision is made.
+    let output = crate::common_spawn::serialized_real_ee_with(|command| {
+        command
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("ask")
+            .arg("What should I run before cutting a release?");
+    })
+    .map_err(|error| format!("spawn ee ask: {error}"))?;
+
+    let audit = audit_actions_for(&database);
+    let returned_delta =
+        count_action(&audit, audit_actions::SEARCH_RETURNED_MEM).saturating_sub(returned_before);
+    let miss_delta =
+        count_action(&audit, audit_actions::SEARCH_MISS_RECORDED).saturating_sub(miss_before);
+
+    if miss_delta == 0 {
+        return Err(format!(
+            "ask on an empty corpus must abstain and append a search.miss_recorded row; none \
+             appeared, so the zero retrieval rows below prove nothing (exit={:?}, stderr: {})",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    if returned_delta != 0 {
+        return Err(format!(
+            "an abstaining ee ask must append no search.returned_mem row, got {returned_delta}: \
+             the citations/abstained guard in record_ask_retrieval_best_effort is not holding"
+        ));
+    }
+    Ok(())
+}
