@@ -1418,8 +1418,10 @@ Part N to Part N+1 instead of creating another plan file at the repo root.
 Historical bridges (most recent first):
 - Part III (2026-08-17) — active at repo-root `CLOSE_THE_GAP_PLAN.md`.
   Mesh/team-confed honesty closeout after the Unix EE-to-EE campaign.
-  Remainders: two-human Tailscale soak, Windows-host soak, production IdP
-  soak, T2.7 remaining fuzz, T5.7 fence (`bd-d67os.28`).
+  Original mesh remainders have evidence or recorded decisions; the user-approved
+  2026-09-17 amendment (`bd-reality-core-convergence-1azkt.8`) accepts two independent
+  tailnet hosts. Independent-operator usability remains unproven; no two-human
+  soak is promised or assigned. Broader Part III §15 criteria still block archive.
 - Part I + Part II (2026-05-06 / 2026-05-14) — archived at
   `docs/archive/close_the_gap_2026-05.md`. Closed once the bd-3usjw Part II
   tree was substantially executed.
