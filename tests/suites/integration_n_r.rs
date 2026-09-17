@@ -1,8 +1,5 @@
 //! Integration modules N–R. Filter with `cargo test --test integration_n_r <module>::`.
 
-#[path = "../support/graph_generator.rs"]
-mod graph_generator;
-
 #[path = "../neural_default_docs_contract.rs"]
 mod neural_default_docs_contract;
 #[path = "../no_forbidden_suffixes.rs"]
@@ -79,62 +76,8 @@ mod procedure_distillation_skill;
 mod profile_config_golden_e2e;
 #[path = "../proof_check_schema.rs"]
 mod proof_check_schema;
-#[path = "../property_context_query_metamorphic.rs"]
-mod property_context_query_metamorphic;
-#[path = "../property_eql_query_parsing.rs"]
-mod property_eql_query_parsing;
-#[path = "../property_graph_articulation_points.rs"]
-mod property_graph_articulation_points;
-#[path = "../property_graph_dominance_frontier.rs"]
-mod property_graph_dominance_frontier;
-#[path = "../property_graph_gomory_hu.rs"]
-mod property_graph_gomory_hu;
-#[path = "../property_graph_hits.rs"]
-mod property_graph_hits;
-#[path = "../property_graph_k_truss.rs"]
-mod property_graph_k_truss;
-#[path = "../property_graph_minhash_rank.rs"]
-mod property_graph_minhash_rank;
-#[path = "../property_graph_onion_layers.rs"]
-mod property_graph_onion_layers;
-#[path = "../property_graph_pagerank.rs"]
-mod property_graph_pagerank;
-#[path = "../property_graph_topological_order.rs"]
-mod property_graph_topological_order;
-#[path = "../property_graph_transitive_closure.rs"]
-mod property_graph_transitive_closure;
-#[path = "../property_mesh_frame.rs"]
-mod property_mesh_frame;
-#[path = "../property_origin_stream.rs"]
-mod property_origin_stream;
-#[path = "../property_output_governor.rs"]
-mod property_output_governor;
-#[path = "../property_pack_metamorphic.rs"]
-mod property_pack_metamorphic;
-#[path = "../property_pack_profile_variation_metamorphic.rs"]
-mod property_pack_profile_variation_metamorphic;
-#[path = "../property_plan_cache.rs"]
-mod property_plan_cache;
-#[path = "../property_profile_probe.rs"]
-mod property_profile_probe;
-#[path = "../property_query_and_pack.rs"]
-mod property_query_and_pack;
-#[path = "../property_read_pool.rs"]
-mod property_read_pool;
-#[path = "../property_redaction_idempotence.rs"]
-mod property_redaction_idempotence;
-#[path = "../property_remember_search_metamorphic.rs"]
-mod property_remember_search_metamorphic;
-#[path = "../property_response_envelope.rs"]
-mod property_response_envelope;
-#[path = "../property_shadow_tuning.rs"]
-mod property_shadow_tuning;
-#[path = "../property_simhash.rs"]
-mod property_simhash;
 #[path = "../quick_redaction_check.rs"]
 mod quick_redaction_check;
-#[path = "../radix_ulid_sort_proptest.rs"]
-mod radix_ulid_sort_proptest;
 #[path = "../randomness_inventory_schema_unit.rs"]
 mod randomness_inventory_schema_unit;
 #[path = "../rch_compile_blocker_router.rs"]
@@ -177,8 +120,6 @@ mod recorder_event_spine_contract;
 mod recorder_persistence;
 #[path = "../recorder_tail_follow.rs"]
 mod recorder_tail_follow;
-#[path = "../redaction_fuzz.rs"]
-mod redaction_fuzz;
 #[path = "../redaction_levels_doc_consistency_test.rs"]
 mod redaction_levels_doc_consistency_test;
 #[path = "../redaction_levels_unit.rs"]
