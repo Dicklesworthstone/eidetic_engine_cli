@@ -4922,6 +4922,22 @@ fn import_jsonl_json_validates_imports_and_skips_duplicates() -> TestResult {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
 
+    // Sixth instance of the bd-tvi3a shape, found by the invariant rather than
+    // by a failing run: `create_dir_all` makes a directory, not a store, and
+    // 91cf7bcbd ("reject storeless write and search addresses") made `ee init`
+    // the only thing that creates one. The two real imports below assert
+    // status "completed", so they are writes, not probes.
+    let workspace_init_arg = workspace.to_string_lossy().into_owned();
+    let init = run_ee(&["--workspace", workspace_init_arg.as_str(), "--json", "init"])?;
+    ensure(
+        init.status.success(),
+        format!(
+            "init must succeed before the JSONL imports; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&init.stdout),
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )?;
+
     let database = workspace.join(".ee").join("ee.db");
     let source = root.join("snapshot.jsonl");
     fs::write(
