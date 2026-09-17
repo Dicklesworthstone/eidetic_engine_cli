@@ -349,6 +349,19 @@ Older dated evidence below retains its original source and date.
 | Public release/workflows | Latest remains v0.14.4 (2026-08-29), 16 assets without Sigstore/SLSA files; all three workflows report `disabled_manually` | The current public distribution is not a verified green candidate for current source. No workflow was enabled or release published by this audit. |
 | Current-source Cargo check | Both pinned RCH attempts fail syncing Asupersync after 30 seconds; the retry sets `RCH_SYNC_TIMEOUT_MS=180000` but the prescribed sidecar still reports 30000 ms. Local fallback is refused | Infrastructure failure, no compiler verdict. `check.json` and `check-retry.json` retain both attempts; `bd-glivu` owns the blocker. No current check, Clippy, or Rust-test pass is claimed. |
 
+#### Post-public measurement — 2026-09-17 (`bd-reality-core-convergence-1azkt.21`)
+
+The 2026-09-04 row above is historical. Live channels on 2026-09-17:
+
+| Channel | Observation | What it does **not** establish |
+| --- | --- | --- |
+| GitHub release `v0.15.2` | Published 2026-09-12T18:48:32Z, not draft. 16 assets: six `ee-{target}.tar.xz` + `.sha256`, `install.sh`, `install.ps1`, `SHA256SUMS`, `ee-v0.15.2-manifest.json`. Manifest `status=success`, `source.git_sha=1478b2f3b0a912d5302808f6dc6de9e56e589c05`, lockfile 573 packages. Every artifact `signed: false`. | Signature/provenance. No `.sigstore.json`, SLSA, in-toto, or SBOM asset names. The Release workflow is still `disabled_manually`; this is a hand-cut publish. |
+| crates.io `eidetic-engine` | Newest version 0.15.2. Binary name remains `ee`. | That current `main` equals the published crate. |
+| Homebrew `Dicklesworthstone/tap` `Formula/ee.rb` | `version "0.15.2"`; bottle URLs are the GitHub `v0.15.2` archives. | Formula SHA-256 re-hash on this host. |
+| Hosted CI | `CI`, `Release`, and `macOS EE Artifact` remain `disabled_manually`. New workflow `CI Static` (`ci-static.yml`, id 360498922) is active. Green run [35229903877](https://github.com/Dicklesworthstone/eidetic_engine_cli/actions/runs/35229903877) on `289da4c5d` (2026-09-17T13:52:51Z): forbidden-deps, migration-registry, closure-lint, vision-coverage, MCP self-test, contract-drift-radar, `cargo fmt --check` all success (`bd-o7wh0`). | Clippy, cargo-deny, or `cargo test --workspace --lib --bins --tests --examples`. A green CI Static run is not full CI restored. |
+
+Do not close `.27` on this inventory: that bead still requires `.20` authorization and signed provenance. Do not treat unsigned `v0.15.2` as the Part III green candidate.
+
 #### Correct the diagnosis before assigning more work
 
 1. **Retrieval:** `.23` has already removed the read-only Tantivy writer-lock
@@ -1080,10 +1093,13 @@ candidate before `.2` changes the implementation.
   Strict `cargo clippy --locked --all-targets -- -D warnings` also passes; the
   full suite, exact North Stars, and candidate capsule still require independent
   verdicts. `contract-drift-radar --json` now passes.
-- Hosted CI has no successful substantive current-main verdict because all
-  three GitHub workflows are manually disabled. Release `v0.14.4` has native
-  archives/checksums/installers and a manifest, but no Sigstore bundle or SLSA
-  provenance assets, and it predates current `main` by 26 commits.
+- Hosted `CI` / `Release` / `macOS EE Artifact` remain `disabled_manually`.
+  `CI Static` is a cargo-free hosted gate with a green run on 2026-09-17
+  (`bd-o7wh0`, 35229903877). That is not clippy or the full `--tests` suite.
+  Public latest is `v0.15.2` (2026-09-12): six native archives + checksums +
+  installers + manifest, still no Sigstore/SLSA; every manifest artifact
+  `signed: false`. crates.io and Homebrew both serve 0.15.2. Unsigned
+  publication does not close `.27`.
 
 ---
 
