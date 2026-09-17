@@ -52373,16 +52373,28 @@ mod tests {
         )?;
         let current_with_tombstones = connection
             .list_current_memories_including_tombstoned("wsp_01234567890123456789012345")?;
+        // bd-tmv70, third instance of the same miss: V123 moved supersession out
+        // of `valid_to` into `superseded_at`, and this reader was converted with
+        // it -- its SQL filters `superseded_at IS NULL` and its own doc says it
+        // "intentionally does not filter on valid_to". These two assertions were
+        // left on the pre-V123 reading, where `valid_to` did double duty as the
+        // supersession marker.
+        //
+        // All three fixtures are singleton chains, so none is superseded and all
+        // three are current heads -- including the expired-but-unsuperseded row,
+        // exactly as the identity assertion above already establishes. Asserting
+        // 2 here, and that no head carries a `valid_to`, asserts the semantics
+        // V123 removed.
         ensure_equal(
             &current_with_tombstones.len(),
-            &2,
-            "current-head listing excludes bounded revision history",
+            &3,
+            "current-head listing returns every unsuperseded row",
         )?;
         ensure(
             current_with_tombstones
                 .iter()
-                .all(|memory| memory.valid_to.is_none()),
-            "current-head listing excludes every superseded revision",
+                .any(|memory| memory.id == "mem_00000000000000000000000030"),
+            "current-head listing keeps an expired-but-unsuperseded head",
         )?;
         ensure(
             current_with_tombstones.iter().any(|memory| {
