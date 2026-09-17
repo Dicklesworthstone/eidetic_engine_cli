@@ -606,3 +606,6 @@ mod governor_truncation_registry;
 
 #[path = "contracts/spawn_deadline_coverage.rs"]
 mod spawn_deadline_coverage;
+
+#[path = "contracts/capabilities_workspace.rs"]
+mod capabilities_workspace;
