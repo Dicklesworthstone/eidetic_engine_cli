@@ -5,6 +5,7 @@
 //! through `DbConnection` and diffs every content-bearing memory + tag row
 //! between the source workspace and the restored side-path.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -418,6 +419,97 @@ fn ensure_equal<T: std::fmt::Debug + PartialEq>(actual: &T, expected: &T, ctx: &
     } else {
         Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
     }
+}
+
+/// Content-addressed inventory of every file and empty directory under `root`.
+///
+/// Dry-run must not create a marker, lock, WAL sidecar, key file, or empty
+/// output directory. A digest over relative paths plus contents is the
+/// acceptance instrument (bd-reality-core-convergence-1azkt.13).
+fn workspace_file_digests(root: &Path) -> Result<BTreeMap<String, String>, String> {
+    let mut out = BTreeMap::new();
+    collect_workspace_file_digests(root, root, &mut out)?;
+    Ok(out)
+}
+
+fn collect_workspace_file_digests(
+    root: &Path,
+    dir: &Path,
+    out: &mut BTreeMap<String, String>,
+) -> Result<(), String> {
+    let mut entries = fs::read_dir(dir)
+        .map_err(|error| format!("read_dir {}: {error}", dir.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read_dir {}: {error}", dir.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|error| format!("strip prefix {}: {error}", path.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("symlink_metadata {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            let target = fs::read_link(&path)
+                .map_err(|error| format!("read_link {}: {error}", path.display()))?;
+            out.insert(
+                rel,
+                format!("symlink:{}", target.to_string_lossy().replace('\\', "/")),
+            );
+        } else if metadata.is_dir() {
+            out.insert(format!("{rel}/"), "dir".to_owned());
+            collect_workspace_file_digests(root, &path, out)?;
+        } else {
+            let bytes =
+                fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+            out.insert(rel, format!("blake3:{}", blake3::hash(&bytes).to_hex()));
+        }
+    }
+    Ok(())
+}
+
+fn workspace_store_digest(files: &BTreeMap<String, String>) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.backup.real_store_digest.v1\0");
+    for (path, digest) in files {
+        hasher.update(&(path.len() as u64).to_le_bytes());
+        hasher.update(path.as_bytes());
+        hasher.update(&(digest.len() as u64).to_le_bytes());
+        hasher.update(digest.as_bytes());
+    }
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn ensure_store_unchanged(
+    label: &str,
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> TestResult {
+    if before == after {
+        return Ok(());
+    }
+    let mut diffs = Vec::new();
+    for path in before.keys().chain(after.keys()) {
+        if diffs.len() >= 12 {
+            break;
+        }
+        if before.get(path) == after.get(path) {
+            continue;
+        }
+        diffs.push(format!(
+            "{path}: before={} after={}",
+            before.get(path).map_or("-", String::as_str),
+            after.get(path).map_or("-", String::as_str)
+        ));
+    }
+    Err(format!(
+        "{label} mutated the real store (digest {} -> {}); named paths: {}",
+        workspace_store_digest(before),
+        workspace_store_digest(after),
+        diffs.join("; ")
+    ))
 }
 
 fn json_brief(value: &JsonValue) -> String {
@@ -1887,18 +1979,20 @@ fn export_import_export_preserves_memory_and_tag_records() -> TestResult {
 }
 
 #[test]
-fn backup_dry_run_restore_does_not_materialize_database() -> TestResult {
+fn backup_create_and_restore_dry_run_leave_real_store_hash_unchanged() -> TestResult {
     let staging = tempfile::Builder::new()
-        .prefix("ee-534m-dryrun-")
+        .prefix("ee-1azkt13-dryrun-")
         .tempdir()
         .map_err(|error| format!("create temp dir: {error}"))?;
 
     let workspace = staging.path().join("ws");
+    let nested_preview_dir = workspace.join("would-be-backup");
     let backup_dir = staging.path().join("backups");
     let side_path = staging.path().join("restored");
     std::fs::create_dir_all(&workspace).map_err(|error| format!("mkdir ws: {error}"))?;
 
     let workspace_arg = workspace.to_string_lossy().into_owned();
+    let nested_preview_arg = nested_preview_dir.to_string_lossy().into_owned();
     let backup_dir_arg = backup_dir.to_string_lossy().into_owned();
     let side_path_arg = side_path.to_string_lossy().into_owned();
 
@@ -1915,6 +2009,38 @@ fn backup_dry_run_restore_does_not_materialize_database() -> TestResult {
         "Dry-run probe memory",
     ])?;
 
+    let before_create = workspace_file_digests(&workspace)?;
+    let create_preview = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "--json",
+        "backup",
+        "create",
+        "--output-dir",
+        &nested_preview_arg,
+        "--redaction",
+        "none",
+        "--label",
+        "1azkt13-create-dry-run",
+        "--dry-run",
+    ])?;
+    ensure_equal(
+        &create_preview
+            .pointer("/data/dryRun")
+            .and_then(JsonValue::as_bool),
+        &Some(true),
+        "create reports dryRun=true",
+    )?;
+    ensure(
+        !nested_preview_dir.exists(),
+        "create --dry-run must not create its output directory",
+    )?;
+    ensure_store_unchanged(
+        "backup create --dry-run",
+        &before_create,
+        &workspace_file_digests(&workspace)?,
+    )?;
+
     let backup = run_ee(&[
         "--workspace",
         &workspace_arg,
@@ -1926,7 +2052,7 @@ fn backup_dry_run_restore_does_not_materialize_database() -> TestResult {
         "--redaction",
         "none",
         "--label",
-        "534m-dryrun",
+        "1azkt13-dryrun",
     ])?;
     let backup_id = backup
         .pointer("/data/backupId")
@@ -1934,6 +2060,7 @@ fn backup_dry_run_restore_does_not_materialize_database() -> TestResult {
         .ok_or_else(|| "missing backupId".to_owned())?
         .to_owned();
 
+    let before_restore = workspace_file_digests(&workspace)?;
     let restore = run_ee(&[
         "--workspace",
         &workspace_arg,
@@ -1953,8 +2080,17 @@ fn backup_dry_run_restore_does_not_materialize_database() -> TestResult {
         "restore reports dryRun=true",
     )?;
     ensure(
+        !side_path.exists(),
+        "dry-run restore must not create the side path",
+    )?;
+    ensure(
         !side_path.join(".ee").join("ee.db").exists(),
         "dry-run restore must not materialize a side-path database",
+    )?;
+    ensure_store_unchanged(
+        "backup restore --dry-run",
+        &before_restore,
+        &workspace_file_digests(&workspace)?,
     )?;
     Ok(())
 }
