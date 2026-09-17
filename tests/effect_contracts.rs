@@ -614,28 +614,40 @@ fn retrieval_surfaces_append_exactly_one_audit_row_and_nothing_else() -> TestRes
                 .to_owned(),
         );
     }
-    // The append lands in the store, and nowhere else. A search that started
-    // writing pack records or side-path artifacts would still trip the
-    // inequality above and must not pass as "the audit row we declared".
-    let store_prefix = format!(".ee{}ee.db", std::path::MAIN_SEPARATOR);
-    let outside: Vec<&String> = drift
+    // Bound the change to what the manifest DECLARES, and no tighter. The
+    // entry is append_only_write("search", ["audit_log"]) with empty
+    // `derived_paths` and empty `workspace_files`, and `append_only`'s
+    // contract explicitly permits "queues or refreshes derived index after
+    // new records commit". So the pin is: nothing outside the store moved. A
+    // stricter `.ee/ee.db*`-only rule would also fail on a legitimate index
+    // reconcile and would be asserting a contract ee never made.
+    let store_root = format!(".ee{}", std::path::MAIN_SEPARATOR);
+    let drift_path = |entry: &str| -> String {
+        entry
+            .split_once(": ")
+            .map_or_else(|| entry.to_owned(), |(_, path)| path.to_owned())
+    };
+    let outside: Vec<String> = drift
         .iter()
-        .filter(|entry| {
-            let path = entry.split_once(": ").map_or(entry.as_str(), |(_, p)| p);
-            !path.starts_with(&store_prefix)
-        })
+        .map(|entry| drift_path(entry))
+        .filter(|path| path != ".ee" && !path.starts_with(&store_root))
         .collect();
     ensure(
         outside.is_empty(),
         true,
-        &format!("search must touch only the store; drift was {drift:?}"),
+        &format!("search must write no workspace file outside the store; drift was {drift:?}"),
     )?;
     // Non-vacuity guard, not a restatement of the line above: an empty `drift`
     // satisfies `outside.is_empty()` for free, and the two walks are taken at
     // different instants, so the emptiness has to be excluded explicitly
-    // rather than inferred from the hash inequality.
+    // rather than inferred from the hash inequality. This is also the half
+    // that names the declared surface: the DATABASE is what an audit-row
+    // append has to move.
+    let database_prefix = format!("{store_root}ee.db");
     ensure(
-        drift.iter().any(|entry| entry.contains("ee.db")),
+        drift
+            .iter()
+            .any(|entry| drift_path(entry).starts_with(&database_prefix)),
         true,
         &format!("search must write the database itself; drift was {drift:?}"),
     )
