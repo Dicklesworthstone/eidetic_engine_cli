@@ -42,7 +42,7 @@ fn readme_install_status_table_covers_every_advertised_install_path() -> TestRes
     )?;
     ensure_contains(
         installation,
-        "| Source build | available now | this README |",
+        "| Source build | available now | local build only | this README |",
         "source build available status row",
     )?;
     ensure_contains(
@@ -57,7 +57,11 @@ fn readme_install_status_table_covers_every_advertised_install_path() -> TestRes
     )?;
 
     for method in INSTALL_METHODS {
-        ensure_contains(installation, method.status_row_prefix, method.status_row)?;
+        ensure_contains(
+            installation,
+            method.status_row_prefix,
+            method.status_row_prefix,
+        )?;
         ensure_contains(installation, method.section, method.section)?;
         ensure_contains(
             installation,
@@ -82,7 +86,11 @@ fn advertised_install_paths_are_live_and_not_marked_planned() -> TestResult {
                 method.section
             ),
         )?;
-        ensure_contains(installation, method.status_row_prefix, method.status_row)?;
+        ensure_contains(
+            installation,
+            method.status_row_prefix,
+            method.status_row_prefix,
+        )?;
     }
 
     Ok(())
