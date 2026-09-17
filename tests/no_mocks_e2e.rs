@@ -7,6 +7,10 @@
 //! without mocks, plus a real CASS subprocess import path driven by an
 //! absolute stub `cass` binary.
 
+#[cfg(unix)]
+#[path = "support/native_evidence_delta.rs"]
+mod native_evidence_delta;
+
 use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 use std::collections::BTreeSet;

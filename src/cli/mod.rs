@@ -1,3 +1,5 @@
+mod context_delta_evidence;
+
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -42882,6 +42884,14 @@ fn context_delta_snapshot_from_response(
         .items
         .iter()
         .map(context_delta_item_snapshot_from_pack_item)
+        .chain(
+            response
+                .data
+                .pack
+                .evidence_items
+                .iter()
+                .map(context_delta_evidence::from_item),
+        )
         .collect();
     ContextDeltaPackSnapshot::new(
         pack_hash,
@@ -42930,6 +42940,9 @@ fn context_delta_item_snapshot_from_pack_item(
 fn context_delta_item_snapshot_from_pack_ledger(
     item: &serde_json::Value,
 ) -> Result<ContextDeltaItemSnapshot, String> {
+    if item.get("entityKind").and_then(serde_json::Value::as_str) == Some("evidence_span") {
+        return context_delta_evidence::from_ledger(item);
+    }
     let memory_id = item
         .get("memoryId")
         .and_then(serde_json::Value::as_str)
