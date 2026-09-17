@@ -508,19 +508,117 @@ fn mechanical_boundary_inventory_covers_all_cli_command_paths() -> Result<(), St
     // This is a removal because something stronger already covers it, which is
     // the only reason that is not a weakening.
 
+    // bd-o74n4: require a TABLE ROW, not a mention anywhere in the file.
+    //
+    // This predicate used to be `INVENTORY.contains("`{command}`")` — a
+    // substring scan over the whole document. A path named in prose, in a
+    // heading, or in a flat bullet list satisfied it, so the tier could be
+    // cleared without the path ever acquiring a row.
+    //
+    // MEASURED before changing it, because "the gate is weak" and "the gate is
+    // being exploited" are different claims and only the second would make
+    // this urgent: at HEAD, 211 paths satisfy the old predicate and the SAME
+    // 211 satisfy this one. The prose-only set is EMPTY. So this closes a
+    // latent hole and changes no verdict today — which is the honest reason to
+    // do it now, while it is free, rather than after someone has filled the
+    // document with prose to clear the tier.
+    let inventory_rows = INVENTORY
+        .lines()
+        .filter(|line| line.trim_start().starts_with('|'))
+        .collect::<Vec<_>>();
+    let in_a_table_row = |command: &str| {
+        let cell = format!("`{command}`");
+        inventory_rows.iter().any(|row| row.contains(&cell))
+    };
+
     let missing = commands
         .iter()
-        .filter(|command| !INVENTORY.contains(&format!("`{command}`")))
+        .filter(|command| !in_a_table_row(command))
         .cloned()
         .collect::<Vec<_>>();
 
+    // State the CONTENT tier here even on the coverage failure. Without this,
+    // the obvious repair for the missing list below (paste the absent paths
+    // into the Full Command Inventory) turns this assertion green while
+    // twelve-column enforcement stays where it is, and no assertion anywhere
+    // would ever have named that number.
+    let enforced = matrix_enforced_command_paths(&commands)?;
     assert!(
         missing.is_empty(),
-        "mechanical boundary inventory missing command path(s): {missing:?}"
+        "mechanical boundary inventory missing command path(s) from every table row: {missing:?}\n\
+         NOTE (bd-o74n4): clearing this list does NOT raise enforcement. The twelve-column \
+         Command Boundary Matrix covers {} of {} command paths; the other {} carry no \
+         side-effect class, runtime posture, degraded code, fixture coverage, or schema \
+         expectation.",
+        enforced.len(),
+        commands.len(),
+        commands.len() - enforced.len()
     );
     assert!(
         INVENTORY.contains("Unmapped command count: 0"),
         "inventory must record the unmapped command count"
+    );
+    Ok(())
+}
+
+/// CLI command paths that carry a row in the twelve-column Command Boundary
+/// Matrix — the only tier that checks a side-effect class, a runtime posture,
+/// a degraded code, fixture coverage, or a schema expectation.
+fn matrix_enforced_command_paths(commands: &[String]) -> Result<Vec<String>, String> {
+    let rows = matrix_rows(INVENTORY)?;
+    Ok(commands
+        .iter()
+        .filter(|command| {
+            let cell = format!("`{command}`");
+            rows.iter()
+                .skip(2)
+                .any(|row| row.iter().any(|value| value.contains(&cell)))
+        })
+        .cloned()
+        .collect())
+}
+
+/// bd-o74n4: the content tier is a RATCHET with a declared floor.
+///
+/// The three `command_boundary_matrix_*` assertions iterate `matrix_rows`, so
+/// they are structurally blind to any path without a row: dropping a row
+/// silently reduces what is enforced, and nothing notices. This pins the
+/// count against a floor declared in the document itself.
+///
+/// Deliberately a floor and not an equality. An exact pin is the shape that
+/// rotted `NORMALIZED_CLI_COMMAND_COUNT` (416 against a live 453 for months):
+/// a number that must be edited on every unrelated change gets edited without
+/// being re-measured, or not at all. A floor only has to move when someone
+/// deliberately raises enforcement, and it fails in the direction that matters
+/// — enforcement shrinking.
+///
+/// This does NOT answer what the matrix should cover. That is the open
+/// contract question on bd-o74n4 and it needs an operator ruling.
+#[test]
+fn command_boundary_matrix_enforcement_floor_never_shrinks() -> Result<(), String> {
+    let commands = command_paths_from_extract_function(CLI_SOURCE)?;
+    let enforced = matrix_enforced_command_paths(&commands)?;
+
+    let declared = INVENTORY
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("- Matrix enforcement floor:")
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        })
+        .ok_or_else(|| {
+            "docs/mechanical-boundary-command-inventory.md must declare \
+             `- Matrix enforcement floor: <n>` so the content tier has an asserted \
+             denominator (bd-o74n4)"
+                .to_owned()
+        })?;
+
+    assert!(
+        enforced.len() >= declared,
+        "twelve-column matrix enforcement SHRANK: {} command paths carry a matrix row, \
+         below the declared floor of {declared}. Restore the removed row(s), or lower the \
+         floor in the same commit with a stated reason. Currently enforced: {enforced:?}",
+        enforced.len()
     );
     Ok(())
 }

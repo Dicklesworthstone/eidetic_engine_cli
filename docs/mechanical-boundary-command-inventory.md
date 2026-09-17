@@ -16,10 +16,47 @@ E2E audit record for this inventory:
 - Command source: `src/cli/mod.rs`
 - Command path count: 204
 - Unmapped command count: 0
+- Matrix enforcement floor: 24
 - Stdout/stderr contract: this file is static documentation; the companion test only reads source
   and docs through `include_str!`, so it does not write stdout artifacts or emit diagnostics.
 - First failure diagnosis: missing command paths are reported by
   `tests/mechanical_boundary_inventory.rs`.
+
+## How strongly this document is enforced (bd-o74n4)
+
+`tests/mechanical_boundary_inventory.rs` checks this file at **two different
+strengths**, and the difference is 18x. Stating it here because the weaker tier
+looks like the stronger one from the outside, and a reader who assumes one
+number covers both will over-trust the gate.
+
+| tier | what it requires | mechanism | covers |
+| --- | --- | --- | --- |
+| coverage | the path appears, backticked, in some **table row** of this file | `mechanical_boundary_inventory_covers_all_cli_command_paths` | 211 of 453 |
+| content | the path appears, backticked, in a **Command Boundary Matrix row** — the twelve columns | the three `command_boundary_matrix_*` assertions | 24 of 453 |
+
+Only the content tier checks a side-effect class, a runtime posture, a degraded
+code, fixture coverage, or a schema expectation. Everything outside those 24
+paths carries none of them.
+
+**Matrix enforcement floor** above is a RATCHET, not a target. It records how
+many CLI command paths currently carry a full matrix row, and
+`command_boundary_matrix_enforcement_floor_never_shrinks` fails if that number
+drops. It deliberately does NOT assert an exact value: raising the floor should
+take a deliberate edit, and the live count moving up on its own must not red the
+build.
+
+The floor exists because of a specific way this document can be repaired
+wrongly. The coverage tier is failing today (242 paths absent). Pasting those
+242 into the Full Command Inventory turns coverage green while content
+enforcement stays at 24 — trading a true red for a false green, with the 94.7%
+gap now invisible because no assertion mentions it. The floor makes the content
+number a maintained, asserted fact rather than an incidental one, so that
+repair cannot hide it.
+
+What the matrix is FOR — which paths deserve a twelve-column row, and whether
+"absent from the matrix" is a decision or an oversight — is not settled here.
+That is the open contract question on bd-o74n4 and it needs an operator ruling.
+The floor does not answer it; it only stops the question from disappearing.
 
 ## Disposition Legend
 
