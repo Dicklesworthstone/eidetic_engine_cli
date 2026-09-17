@@ -7,7 +7,7 @@
 use std::{
     collections::BTreeMap,
     fs::{self, File},
-    io::{BufRead, BufReader, Read},
+    io::{self, BufRead, BufReader, Read},
     path::Path,
 };
 
@@ -17,17 +17,10 @@ pub const WHY_CONFORMAL_CONFIDENCE_INTERVALS_SCHEMA_V1: &str = "ee.why.conformal
 pub const DEFAULT_CONFORMAL_COVERAGE: f32 = 0.95;
 pub const MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES: usize = 20;
 
-// Mirror the cap on the parallel reader in
-// `src/core/search.rs::MAX_SEARCH_SCORE_CALIBRATION_BYTES` (commit 27f6ad4d).
-// `.ee/search/calibration.jsonl` is workspace-local and grown by feedback
-// events, so a peer agent or a runaway emitter can plant a large file
-// between `ee why` invocations. The previous unbounded
-// `BufReader::new(file).lines()` shape would pre-size each `String` to fit
-// the line, so a multi-GB record (or multi-GB single-line file) would OOM
-// `ee why <id>`'s conformal prediction-set surface. 64 MiB matches the
-// parallel reader on the same file; a truncated tail line just fails the
-// JSON parse via `serde_json::from_str(...).ok()?` and is silently
-// dropped — the same observable shape an actually-corrupt row produces.
+// Match the search calibration reader's 64 MiB budget. Read one extra byte
+// to distinguish real EOF from a budget-truncated prefix, even when the cap
+// lands exactly on a JSONL record boundary. Incomplete or unreadable input
+// must use the conservative fallback rather than certify a partial dataset.
 const CONFORMAL_CALIBRATION_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -70,9 +63,10 @@ pub fn why_conformal_confidence_intervals(
     let residuals = workspace_path
         .map(load_conformal_nonconformity_scores)
         .unwrap_or_default();
-    let (quantile, status) = if residuals.len() >= MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES {
+    let calibration_sample_count = residuals.len();
+    let (quantile, status) = if calibration_sample_count >= MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES {
         (
-            split_conformal_quantile(residuals.clone(), DEFAULT_CONFORMAL_COVERAGE),
+            split_conformal_quantile(residuals, DEFAULT_CONFORMAL_COVERAGE),
             "calibrated",
         )
     } else {
@@ -151,7 +145,7 @@ pub fn why_conformal_confidence_intervals(
         target_memory_id: target_memory_id.to_owned(),
         score_interval: conformal_score_interval(target_score, quantile),
         nonconformity_quantile: quantile,
-        calibration_sample_count: residuals.len(),
+        calibration_sample_count,
         calibration_status: status,
         prediction_set,
     }
@@ -195,19 +189,39 @@ fn load_conformal_nonconformity_scores(workspace_path: &Path) -> Vec<f32> {
     let Some(file) = open_conformal_calibration_file_no_follow(&path) else {
         return Vec::new();
     };
-    let reader = BufReader::new(file.take(CONFORMAL_CALIBRATION_MAX_BYTES));
-    reader
-        .lines()
-        .map_while(Result::ok)
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            let value = serde_json::from_str::<Value>(line).ok()?;
-            conformal_nonconformity_from_value(&value)
-        })
-        .collect()
+    read_conformal_calibration(file, CONFORMAL_CALIBRATION_MAX_BYTES).unwrap_or_default()
+}
+
+fn read_conformal_calibration(reader: impl Read, max_bytes: u64) -> io::Result<Vec<f32>> {
+    let mut reader = BufReader::new(reader.take(max_bytes.saturating_add(1)));
+    let mut scores = Vec::new();
+    let mut line = String::new();
+    let mut bytes_read = 0_u64;
+    loop {
+        line.clear();
+        let count = reader.read_line(&mut line)?;
+        if count == 0 {
+            return Ok(scores);
+        }
+        bytes_read = bytes_read.saturating_add(count as u64);
+        if bytes_read > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "conformal calibration exceeds its byte budget",
+            ));
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // A corrupt or partially appended record invalidates this read.
+        // Keeping only its valid prefix can bias the calibration threshold.
+        let value = serde_json::from_str::<Value>(line)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if let Some(score) = conformal_nonconformity_from_value(&value) {
+            scores.push(score);
+        }
+    }
 }
 
 fn open_conformal_calibration_file_no_follow(path: &Path) -> Option<File> {
@@ -221,7 +235,12 @@ fn open_conformal_calibration_file_no_follow(path: &Path) -> Option<File> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     configure_conformal_calibration_open_no_follow(&mut options);
-    options.open(path).ok()
+    let file = options.open(path).ok()?;
+    let opened_metadata = file.metadata().ok()?;
+    if !opened_metadata.is_file() || opened_metadata.len() > CONFORMAL_CALIBRATION_MAX_BYTES {
+        return None;
+    }
+    Some(file)
 }
 
 #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
@@ -266,10 +285,12 @@ fn clamp_unit_score(score: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_CONFORMAL_COVERAGE, conformal_nonconformity_from_value, conformal_score_interval,
+        DEFAULT_CONFORMAL_COVERAGE, MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES,
+        conformal_nonconformity_from_value, conformal_score_interval, read_conformal_calibration,
         split_conformal_quantile,
     };
     use serde_json::{Value, json};
+    use std::io::{self, Cursor, Read};
 
     #[test]
     fn calibration_accepts_unit_scores_and_residual_aliases() {
@@ -380,5 +401,103 @@ mod tests {
             assert_eq!(conformal_score_interval(0.75, quantile), [0.0, 1.0]);
         }
         assert_eq!(conformal_score_interval(0.75, 0.125), [0.625, 0.875]);
+    }
+
+    #[test]
+    fn calibration_reader_accepts_complete_data_without_final_newline() {
+        let input = concat!(
+            "\n{\"metadata\": true}\n",
+            "{\"nonconformityScore\": 0.25}\r\n",
+            "{\"score\": 0.25}"
+        );
+        assert_eq!(
+            read_conformal_calibration(input.as_bytes(), input.len() as u64)
+                .expect("complete calibration"),
+            vec![0.25, 0.75]
+        );
+    }
+
+    #[test]
+    fn calibration_reader_rejects_over_budget_complete_record_prefix() {
+        let prefix =
+            "{\"nonconformityScore\":0.125}\n".repeat(MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES);
+        let input = format!("{prefix}{{\"nonconformityScore\":1.0}}\n");
+        let error = read_conformal_calibration(input.as_bytes(), prefix.len() as u64)
+            .expect_err("a complete-looking prefix is not the complete dataset");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn calibration_reader_requires_true_eof_at_exact_byte_budget() {
+        let input = b"{\"nonconformityScore\":0.25}\n";
+        assert_eq!(
+            read_conformal_calibration(input.as_slice(), input.len() as u64)
+                .expect("exact-budget complete input"),
+            vec![0.25]
+        );
+        assert!(read_conformal_calibration(input.as_slice(), input.len() as u64 - 1).is_err());
+    }
+
+    #[test]
+    fn calibration_reader_rejects_malformed_tail_after_enough_valid_samples() {
+        let prefix =
+            "{\"nonconformityScore\":0.125}\n".repeat(MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES);
+        let input = format!("{prefix}{{\"nonconformityScore\":");
+        assert!(read_conformal_calibration(input.as_bytes(), input.len() as u64).is_err());
+    }
+
+    #[test]
+    fn calibration_reader_rejects_invalid_utf8_after_valid_records() {
+        let mut input = b"{\"nonconformityScore\":0.125}\n".to_vec();
+        input.push(0xff);
+        assert!(read_conformal_calibration(input.as_slice(), input.len() as u64).is_err());
+    }
+
+    #[test]
+    fn calibration_reader_does_not_count_out_of_domain_rows() {
+        let input = concat!(
+            "{\"nonconformityScore\":0.25}\n",
+            "{\"score\":1e300}\n",
+            "{\"nonconformityScore\":-0.5}\n",
+            "{\"score\":0.25}\n"
+        );
+        assert_eq!(
+            read_conformal_calibration(input.as_bytes(), input.len() as u64)
+                .expect("syntactically complete input"),
+            vec![0.25, 0.75]
+        );
+    }
+
+    #[test]
+    fn calibration_reader_handles_empty_zero_budget_input() {
+        assert!(
+            read_conformal_calibration(b"".as_slice(), 0)
+                .expect("empty input")
+                .is_empty()
+        );
+        assert!(read_conformal_calibration(b"\n".as_slice(), 0).is_err());
+    }
+
+    #[test]
+    fn calibration_reader_propagates_read_failure_after_valid_prefix() {
+        struct FailsAfterPrefix(Cursor<Vec<u8>>);
+
+        impl Read for FailsAfterPrefix {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                let count = self.0.read(buffer)?;
+                if count == 0 && !buffer.is_empty() {
+                    return Err(io::Error::other("injected calibration read failure"));
+                }
+                Ok(count)
+            }
+        }
+
+        let prefix =
+            "{\"nonconformityScore\":0.125}\n".repeat(MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES);
+        let budget = prefix.len() as u64 + 1;
+        let reader = FailsAfterPrefix(Cursor::new(prefix.into_bytes()));
+        let error = read_conformal_calibration(reader, budget)
+            .expect_err("read errors must not return a calibrated-looking prefix");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
     }
 }
