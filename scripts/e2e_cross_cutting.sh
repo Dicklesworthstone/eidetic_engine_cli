@@ -373,6 +373,51 @@ redactor_private_lists="$(
     python3 - <<'PYEOF'
 import io, re, glob, sys
 
+# This scan used to require the private list be spelled `&[&str] = &[...]`.
+# That was a hole in this very guard, and a real list walked through it: before
+# 93deb9193, src/search/mod.rs carried a SIXTEEN-entry private prefix list as a
+# `matches!` arm (is_case_insensitive_macos_search_path_prefix). This guard
+# passed it, and that list is what silently unhooked case-insensitive matching
+# for fourteen roots when its caller switched to the shared set. A guard keyed
+# on how a list is SPELLED cannot see a list spelled another way, so the scan
+# now keys on the shape of the DATA instead: path prefixes clustered together.
+TEST_MOD = re.compile(
+    r'#\[cfg\(test\)\]\s*'
+    r'(?:(?://[^\n]*|#\[[^\]]*\])\s*)*'
+    r'mod\s+\w+\s*\{'
+)
+
+
+def strip_test_modules(text):
+    # Fixtures legitimately enumerate many paths: the bd-89312 mixed-case
+    # regression test lists sixteen. Only production code is scanned. The
+    # comment/attribute tolerance above is load-bearing -- src/search/mod.rs
+    # puts both between `#[cfg(test)]` and `mod tests {`.
+    out, i = [], 0
+    while True:
+        m = TEST_MOD.search(text, i)
+        if not m:
+            out.append(text[i:])
+            break
+        out.append(text[i:m.start()])
+        depth = 0
+        for j in range(m.end() - 1, len(text)):
+            if text[j] == '{':
+                depth += 1
+            elif text[j] == '}':
+                depth -= 1
+                if depth == 0:
+                    break
+        i = j + 1
+    return "".join(out)
+
+
+# A sensitive filesystem prefix ends at a directory boundary ("/Users/",
+# "/private/etc/ssh/") or is a Windows drive root. A JSON pointer
+# ("/rch/commandHash", "/request/query") does not, which is what keeps this off
+# the pointer tables in swarm_brief.rs, why.rs, recorder.rs and output/mod.rs.
+PATHLIT = re.compile(r'"(/(?:[A-Za-z_][\w.-]*/)+|[A-Za-z]:[\\/][^"\n]*)"')
+
 offenders = []
 for path in sorted(glob.glob("src/**/*.rs", recursive=True)):
     if path.endswith("util/mod.rs"):
@@ -380,11 +425,12 @@ for path in sorted(glob.glob("src/**/*.rs", recursive=True)):
     text = io.open(path, encoding="utf-8", errors="replace").read()
     if "REDACTED_PATH" not in text:
         continue
-    for block in re.finditer(r"&\[&str\]\s*=\s*&\[(.*?)\];", text, re.S):
-        items = re.findall(r'"((?:\\.|[^"\\])*)"', block.group(1))
-        prefixes = [i for i in items if i.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", i)]
-        if len(prefixes) >= 3:
-            offenders.append(f"{path} ({len(prefixes)} prefixes)")
+    production = strip_test_modules(text)
+    lines = [production[:m.start()].count("\n") + 1 for m in PATHLIT.finditer(production)]
+    for start in range(len(lines)):
+        window = [line for line in lines[start:] if line - lines[start] <= 20]
+        if len(window) >= 3:
+            offenders.append(f"{path} ({len(window)} clustered path prefixes)")
             break
 sys.stdout.write("\n".join(offenders))
 PYEOF
@@ -733,6 +779,88 @@ else
     e2e_log_assert_eq "$(printf '%s\n' "$bare_validity_bounds" | wc -l | tr -d ' ')" "0" \
         "validity bounds use normalize_validity_timestamp"
     _harness_fail "validity bounds use normalize_validity_timestamp: ${bare_validity_bounds}"
+fi
+
+step "liveness is decided from superseded_at, never from valid_to"
+# bd-o22r0 / bd-tmv70. `valid_to` is overloaded: one nullable timestamp expresses
+# two of four states (S0 live/in-force, S1 live/expired, S2 history/unexpired,
+# S3 history/expired). So `valid_to IS NULL` is NOT "this is the current
+# revision" -- it is "this revision has no expiry", which a superseded row can
+# also satisfy. Identity belongs to `superseded_at`; `valid_to` only ever
+# answers applicability.
+#
+# Reading identity off `valid_to` shipped twice: backup.rs chain-head selection
+# and verify.rs liveness both passed superseded revisions through as live. Both
+# are fixed -- backup.rs via filter_current_memory_ids, verify.rs via
+# get_memory_superseded_at -- and I repaired seven call sites of this class by
+# hand while enforcing nothing. This is the enforcement.
+#
+# Two shapes are deliberately NOT offences:
+#   * paired with `valid_from` -- "no validity bracket was declared at all"
+#     (context.rs, search.rs), a question about the bracket, not about identity;
+#   * a writer asking "did the caller supply a value to write" (CLI args,
+#     update_memory_validity).
+#
+# Known holes, named rather than papered over: the pairing test is a +/-2 line
+# window, so it clears update_memory_validity for proximity to an unrelated
+# `valid_from` rather than because it is a writer; it reads only `src/**/*.rs`;
+# and it sees the `.is_none()`/`.is_some()` spelling, not an equivalent
+# `match`/`if let` on the same field.
+valid_to_liveness="$(
+    python3 - <<'PYEOF'
+import io, re, glob, sys
+
+LIVENESS = re.compile(r"\bvalid_to\s*(?:\.\s*as_ref\s*\(\s*\)\s*)?\.\s*is_(none|some)\s*\(\s*\)")
+# a writer asking whether the caller supplied a bound, not a liveness test
+ARGFIELD = re.compile(r"\b(?:args|options|opts|input|request|params)\s*\.\s*valid_to\b")
+
+offenders = []
+for path in sorted(glob.glob("src/**/*.rs", recursive=True)):
+    text = io.open(path, encoding="utf-8", errors="replace").read()
+    # Strip line comments first: the repaired sites carry comments naming the old
+    # defect, and that prose contains the literal `valid_to.is_none()`. Matching
+    # it would fail the run on correct code and invite deleting the explanation
+    # to get green -- the same trap the validity-bound guard already hit.
+    lines = [re.sub(r"//.*$", "", raw) for raw in text.splitlines()]
+
+    # Test modules are excluded by brace depth, not by "first #[cfg(test)]":
+    # these files carry several test modules, and a first-hit rule would silence
+    # every production line after the earliest one.
+    spans, depth, pending, start, sdepth = [], 0, False, None, 0
+    for index, line in enumerate(lines):
+        if "#[cfg(test)]" in line:
+            pending = True
+        if pending and re.search(r"\bmod\s+\w+", line) and "{" in line:
+            pending, start, sdepth = False, index, depth
+        depth += line.count("{") - line.count("}")
+        if start is not None and depth <= sdepth and index > start:
+            spans.append((start, index))
+            start = None
+    if start is not None:
+        spans.append((start, len(lines)))
+
+    for index, line in enumerate(lines):
+        if not LIVENESS.search(line):
+            continue
+        if any(lo <= index <= hi for lo, hi in spans):
+            continue
+        if "valid_from" in " ".join(lines[max(0, index - 2) : index + 3]):
+            continue
+        if ARGFIELD.search(line):
+            continue
+        offenders.append(
+            f"{path}:{index + 1} decides liveness from valid_to; identity lives in superseded_at"
+        )
+sys.stdout.write("\n".join(sorted(set(offenders))))
+PYEOF
+)"
+if [ -z "$valid_to_liveness" ]; then
+    e2e_log_assert_eq "0" "0" "liveness is keyed on superseded_at"
+    _harness_pass "liveness is keyed on superseded_at"
+else
+    e2e_log_assert_eq "$(printf '%s\n' "$valid_to_liveness" | wc -l | tr -d ' ')" "0" \
+        "liveness is keyed on superseded_at"
+    _harness_fail "liveness is keyed on superseded_at: ${valid_to_liveness}"
 fi
 
 log_event \
