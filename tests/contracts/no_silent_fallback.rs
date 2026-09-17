@@ -151,13 +151,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "Progress records default required operation/message/timestamp fields to empty values.",
     ),
     must_fix(
-        "NSF-CORE-AUDIT-JSON",
-        "src/core/audit.rs",
-        "serde_json::to_string",
-        "eidetic_engine_cli-sos5.3",
-        "Audit timeline JSON is machine-facing output and must not silently serialize to empty.",
-    ),
-    must_fix(
         "NSF-CORE-BACKUP-IMPORT",
         "src/core/backup.rs",
         "unwrap_or_default()",
@@ -170,13 +163,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "unwrap_or_default()",
         "eidetic_engine_cli-sos5.4",
         "Claim parsing defaults optional statement/artifact collections into machine-facing records and needs an explicit contract.",
-    ),
-    must_fix(
-        "NSF-CORE-FEEDBACK-JSON",
-        "src/core/feedback.rs",
-        "serde_json::to_string",
-        "eidetic_engine_cli-sos5.3",
-        "Feedback reports are machine-facing and must not silently serialize to empty.",
     ),
     must_fix(
         "NSF-CORE-HANDOFF-JSON",
@@ -253,13 +239,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "serde_json::to_string",
         "eidetic_engine_cli-sos5.3",
         "Repro artifact JSON helpers must not silently serialize to empty.",
-    ),
-    must_fix(
-        "NSF-CORE-TRIPWIRE-JSON",
-        "src/core/tripwire.rs",
-        "serde_json::to_string",
-        "eidetic_engine_cli-sos5.3",
-        "Tripwire report JSON helpers must not silently serialize to empty.",
     ),
     allowed(
         "NSF-CASS-IMPORT-OPTIONAL-FIELDS",
