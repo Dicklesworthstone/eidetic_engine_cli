@@ -158,7 +158,12 @@ mod tests {
     ) -> ContextDeltaItems {
         let delta = diff_items(prior, new).expect("valid snapshots");
         assert_eq!(apply_documented(prior, &delta), new);
-        assert_eq!(delta.apply_to_items(prior).expect("validated client application"), new);
+        assert_eq!(
+            delta
+                .apply_to_items(prior)
+                .expect("validated client application"),
+            new
+        );
         delta
     }
 
@@ -224,7 +229,9 @@ mod tests {
     #[test]
     fn field_deletion_replaces_the_item_without_reemitting_the_removed_value() {
         let mut prior = items(&["mem_a", "rule_b", "ev_z"]);
-        prior[1].fields.insert("oldPolicy".into(), json!("private-obsolete-value"));
+        prior[1]
+            .fields
+            .insert("oldPolicy".into(), json!("private-obsolete-value"));
         let new = items(&["mem_a", "rule_b", "ev_z"]);
         let delta = assert_roundtrip(&prior, &new);
         assert_eq!(delta.removed, ["ev_z", "rule_b"]);
@@ -253,7 +260,9 @@ mod tests {
         for different_body in [false, true] {
             let mut duplicate = item("private-duplicate-id");
             if different_body {
-                duplicate.fields.insert("content".into(), json!("private-other-body"));
+                duplicate
+                    .fields
+                    .insert("content".into(), json!("private-other-body"));
             }
             let invalid = [item("private-duplicate-id"), duplicate];
             for (prior, new) in [(&invalid[..], &[][..]), (&[][..], &invalid[..])] {
@@ -297,13 +306,21 @@ mod tests {
         let envelope = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
             .expect("public delta computation");
         assert!(envelope.emits_delta());
-        assert_eq!(apply_documented(&prior.items, &envelope.data.items), new.items);
+        assert_eq!(
+            apply_documented(&prior.items, &envelope.data.items),
+            new.items
+        );
         assert_eq!(envelope.data.prior_pack_hash, prior.pack_hash);
         assert_eq!(envelope.data.new_pack_hash, new.pack_hash);
         assert_eq!(envelope.data.token_savings.net_pack_tokens, 90);
         assert_eq!(prior, prior_copy);
         assert_eq!(new, new_copy);
-        assert!(!envelope.data.server_decision.computed_from_server_verified_pack_record);
+        assert!(
+            !envelope
+                .data
+                .server_decision
+                .computed_from_server_verified_pack_record
+        );
     }
 
     fn ordered_subsets(

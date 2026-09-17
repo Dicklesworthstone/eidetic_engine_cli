@@ -71,7 +71,9 @@ impl ContextDeltaItems {
                 return Err(apply_error("an item cannot be both modified and replaced"));
             }
             let Some(&(_, original)) = prior_by_id.get(id) else {
-                return Err(apply_error("modification target is absent from the baseline"));
+                return Err(apply_error(
+                    "modification target is absent from the baseline",
+                ));
             };
             for (field, update) in &change.field_changes {
                 match update {
@@ -141,7 +143,9 @@ impl ContextDeltaEnvelope {
             return Err(apply_error("the server requested full-pack fallback"));
         }
         if decision.format != "json" || decision.delta_chained {
-            return Err(apply_error("only unchained JSON deltas are machine-applicable"));
+            return Err(apply_error(
+                "only unchained JSON deltas are machine-applicable",
+            ));
         }
         if prior.pack_hash.trim().is_empty()
             || self.data.new_pack_hash.trim().is_empty()
@@ -249,8 +253,15 @@ mod tests {
         new.pack_hash = "blake3:new".to_owned();
         let delta = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
             .expect("verified baseline fixture");
-        assert!(delta.data.server_decision.computed_from_server_verified_pack_record);
-        let applied = delta.apply_to_snapshot(&prior).expect("local reconstruction");
+        assert!(
+            delta
+                .data
+                .server_decision
+                .computed_from_server_verified_pack_record
+        );
+        let applied = delta
+            .apply_to_snapshot(&prior)
+            .expect("local reconstruction");
         assert!(!applied.server_verified_pack_record);
         assert_eq!(applied, new);
     }
@@ -260,7 +271,9 @@ mod tests {
         let (prior, delta) = envelope();
         let mut wrong_hash = prior.clone();
         wrong_hash.pack_hash = "private-other-hash".to_owned();
-        let error = delta.apply_to_snapshot(&wrong_hash).expect_err("wrong baseline");
+        let error = delta
+            .apply_to_snapshot(&wrong_hash)
+            .expect_err("wrong baseline");
         assert!(!error.to_string().contains("private-other-hash"));
         let mut wrong_generation = prior.clone();
         wrong_generation.db_generation += 1;
@@ -371,7 +384,9 @@ mod tests {
             added: vec![ContextDeltaItemSnapshot::new("a").with_field("newField", json!(null))],
             modified: Vec::new(),
         };
-        let applied = delta.apply_to_items(&prior.items).expect("complete replacement");
+        let applied = delta
+            .apply_to_items(&prior.items)
+            .expect("complete replacement");
         assert_eq!(applied[0], prior.items[1]);
         assert_eq!(applied[1], delta.added[0]);
         assert!(!applied[1].fields.contains_key("content"));
@@ -400,7 +415,9 @@ mod tests {
             ],
             ..ContextDeltaItems::default()
         };
-        let error = delta.apply_to_items(&prior.items).expect_err("stale second edit");
+        let error = delta
+            .apply_to_items(&prior.items)
+            .expect_err("stale second edit");
         assert_eq!(prior, original);
         assert!(!error.to_string().contains("private-wrong-old-value"));
         assert!(!error.to_string().contains("bravo"));
@@ -415,7 +432,9 @@ mod tests {
         };
         assert!(delta.apply_to_items(&prior.items).is_err());
         let absent = [ContextDeltaItemSnapshot::new("a")];
-        let applied = delta.apply_to_items(&absent).expect("old absent is encoded as null");
+        let applied = delta
+            .apply_to_items(&absent)
+            .expect("old absent is encoded as null");
         assert_eq!(applied[0].fields["content"], json!("new"));
     }
 
@@ -437,7 +456,11 @@ mod tests {
         };
         let applied = delta.apply_to_items(&prior).expect("one-way redaction");
         assert_eq!(applied, [item("a", "[REDACTED]")]);
-        assert!(!serde_json::to_string(&applied).unwrap().contains("private-old-secret"));
+        assert!(
+            !serde_json::to_string(&applied)
+                .unwrap()
+                .contains("private-old-secret")
+        );
         delta.modified[0].field_changes.insert(
             "content".into(),
             ContextDeltaFieldChange::Redacted(ContextDeltaFieldChangeRedaction {
@@ -453,7 +476,11 @@ mod tests {
     #[test]
     fn malformed_baseline_is_rejected_even_for_an_empty_delta() {
         let delta = ContextDeltaItems::default();
-        assert!(delta.apply_to_items(&[item("same", "a"), item("same", "b")]).is_err());
+        assert!(
+            delta
+                .apply_to_items(&[item("same", "a"), item("same", "b")])
+                .is_err()
+        );
         assert!(delta.apply_to_items(&[item(" ", "blank")]).is_err());
         assert_eq!(delta.apply_to_items(&[]).unwrap(), Vec::new());
     }
@@ -461,9 +488,12 @@ mod tests {
     #[test]
     fn item_diff_can_be_deserialized_and_applied_without_a_server_call() {
         let prior = baseline();
-        let raw = r#"{"removed":["a"],"modified":[],"added":[{"id":"a","fields":{"content":"new"}}]}"#;
+        let raw =
+            r#"{"removed":["a"],"modified":[],"added":[{"id":"a","fields":{"content":"new"}}]}"#;
         let delta: ContextDeltaItems = serde_json::from_str(raw).expect("wire item diff");
-        let applied = delta.apply_to_items(&prior.items).expect("local client application");
+        let applied = delta
+            .apply_to_items(&prior.items)
+            .expect("local client application");
         assert_eq!(applied, [item("b", "bravo"), item("a", "new")]);
     }
 }
