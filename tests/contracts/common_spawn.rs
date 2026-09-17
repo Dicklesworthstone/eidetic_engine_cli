@@ -276,7 +276,10 @@ fn a_child_that_outgrows_the_pipe_buffer_still_completes() {
         .arg("i=0; while [ $i -lt 4096 ]; do printf '%064d' $i; i=$((i+1)); done");
     let output = output_with_deadline(&mut command, Duration::from_secs(60))
         .expect("a large-output child must not be reported as a timeout");
-    assert!(output.status.success(), "generator should exit 0: {output:?}");
+    assert!(
+        output.status.success(),
+        "generator should exit 0: {output:?}"
+    );
     assert_eq!(
         output.stdout.len(),
         4096 * 64,
