@@ -12690,6 +12690,7 @@ mod tests {
                     failed_job.status_enum() == Some(SearchIndexJobStatus::Failed),
                     format!("pre-publish failure must leave a truthful failed row: {failed_job:?}"),
                 )?;
+                connection.close().map_err(|error| error.to_string())?;
             }
             AttachmentRetryKind::CancelBeforePublish => {
                 connection.close().map_err(|error| error.to_string())?;
@@ -12722,9 +12723,6 @@ mod tests {
             database_path: Some(database.clone()),
             index_dir: Some(index_dir.clone()),
         };
-        if matches!(kind, AttachmentRetryKind::InjectedFailure) {
-            connection.close().map_err(|error| error.to_string())?;
-        }
         let stale = get_index_status(&status_options).map_err(|error| error.to_string())?;
         ensure(
             stale.health == IndexHealth::Stale
