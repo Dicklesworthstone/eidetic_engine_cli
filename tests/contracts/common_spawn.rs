@@ -5,10 +5,13 @@
 //! invocation competes for CPU with every other one. The resume bridges first
 //! serialized their own spawns behind a file-local mutex
 //! (bd-resume-verb-v0f57, commit 7f50e5c7); this module promotes that pattern
-//! to one crate-wide lock so ALL direct binary spawns serialize as contention
-//! hygiene. Per-module semantics are unchanged: callers keep their argument
+//! to one crate-wide gate. That gate began as a mutex -- a permit count of one,
+//! so ALL spawns serialized -- and is now a bounded semaphore
+//! (bd-contracts-serialized-spawn-queue-loibi), because serializing 154 spawn
+//! sites made the suite's wall clock their SUM and it could not finish inside
+//! its cap. Per-module semantics are unchanged: callers keep their argument
 //! shapes, environment tweaks, current_dir, and failure text; only the
-//! serialization gate is shared.
+//! admission gate is shared.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -57,7 +60,7 @@ impl Drop for SpawnPermit {
     }
 }
 
-fn lock_real_ee_serial() -> SpawnPermit {
+fn acquire_spawn_permit() -> SpawnPermit {
     let permits = max_concurrent_spawns();
     let (lock, waiters) = &REAL_EE_PERMITS;
     // A panicked peer poisons the gate, but it guards scheduling hygiene only;
@@ -72,20 +75,26 @@ fn lock_real_ee_serial() -> SpawnPermit {
     SpawnPermit
 }
 
-/// Wall-clock cap for one serialized spawn.
+/// Wall-clock cap for one spawn.
 ///
-/// This cap does NOT exist to police test speed. It exists because the
-/// serialization guard above is held ACROSS the child's whole lifetime, so a
-/// single `ee` invocation that never exits holds the crate-wide lock forever
-/// and wedges every other contracts module behind it -- 154 invocation sites
-/// across 24 modules at the time this was added
+/// This cap does NOT exist to police test speed. A permit is held ACROSS the
+/// child's whole lifetime, so an `ee` invocation that never exits never gives
+/// its permit back.
+///
+/// At the original permit count of one, that wedged the entire suite: a single
+/// stuck child blocked all 154 invocation sites across 24 modules, which is
+/// exactly how bv15 died at 920 of 1454 rows. At a bounded permit count the
+/// blast radius is smaller but the leak is permanent -- one stuck child
+/// permanently costs a quarter of the capacity, and four cost all of it. The
+/// cap is still required; only the size of the failure changed
 /// (bd-contracts-serialized-spawn-queue-loibi).
 ///
-/// Poisoning was already handled: `lock_real_ee_serial` recovers from a
-/// PANICKED peer. A HANGING child was the remaining hole, and it is the worse
-/// one, because `ee`'s database write lock is an OS flock with `busy_timeout 0`
-/// -- a spawn blocked there while holding this mutex is a cross-layer deadlock
-/// with no timeout on either layer.
+/// Poisoning was already handled: the permit gate recovers from a PANICKED
+/// peer, and `SpawnPermit`'s `Drop` returns capacity even on unwind. A HANGING
+/// child was the remaining hole, and it is the worse one, because `ee`'s
+/// database write lock is an OS flock with `busy_timeout 0` -- a spawn blocked
+/// there while holding a permit is a cross-layer deadlock with no timeout on
+/// either layer.
 ///
 /// 120s is deliberately far above the observed per-spawn cost (~2s, with `init`
 /// and migrate operations heavier). It is a deadlock bound, not a budget: a
@@ -103,8 +112,8 @@ fn spawn_timeout() -> Duration {
         )
 }
 
-/// `Command::output()` with a deadline, so a stuck child cannot hold the
-/// crate-wide lock forever.
+/// `Command::output()` with a deadline, so a stuck child cannot hold its spawn
+/// permit forever.
 ///
 /// Same shape as `run_capped` in `tests/cli_no_panic_smoke.rs`: spawn with piped
 /// stdio, poll `try_wait`, and re-check once more before killing. That second
@@ -163,7 +172,7 @@ fn output_with_deadline(command: &mut Command, timeout: Duration) -> std::io::Re
                 std::io::ErrorKind::TimedOut,
                 format!(
                     "real ee spawn exceeded {timeout:?} and was killed while holding \
-                     the crate-wide serialization lock; raise \
+                     its spawn permit; raise \
                      EE_CONTRACTS_SPAWN_TIMEOUT_SECS if this host is genuinely slower"
                 ),
             ));
@@ -238,7 +247,7 @@ where
         .into_iter()
         .map(|argument| argument.as_ref().to_owned())
         .collect();
-    let _serial_guard = lock_real_ee_serial();
+    let _spawn_permit = acquire_spawn_permit();
     let mut command = Command::new(ee_binary());
     command
         .args(&arguments)
@@ -247,7 +256,7 @@ where
         .map_err(|error| format!("failed to run ee {}: {error}", arguments.join(" ")))
 }
 
-/// Caller-configured variant: holds the crate-wide serialization lock while
+/// Caller-configured variant: holds a spawn permit while
 /// `configure` mutates a fresh command pre-seeded with the real binary path.
 /// Use this for workspace prefixes, env removals or overrides, `current_dir`,
 /// or custom failure text; the io error is returned unmapped so each call
@@ -256,7 +265,7 @@ pub fn serialized_real_ee_with<F>(configure: F) -> std::io::Result<Output>
 where
     F: FnOnce(&mut Command),
 {
-    let _serial_guard = lock_real_ee_serial();
+    let _spawn_permit = acquire_spawn_permit();
     let mut command = Command::new(ee_binary());
     configure(&mut command);
     // AFTER `configure` deliberately: eight modules `env_remove` this variable
