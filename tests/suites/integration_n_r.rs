@@ -10,8 +10,6 @@ mod no_mocks_e2e;
 mod no_silent_fallback_e2e;
 #[path = "../no_silent_fallback_inventory.rs"]
 mod no_silent_fallback_inventory;
-#[path = "../north_star_context_e2e.rs"]
-mod north_star_context_e2e;
 #[path = "../ns_gate_first_open_race_e2e.rs"]
 mod ns_gate_first_open_race_e2e;
 #[path = "../output_negative.rs"]

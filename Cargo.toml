@@ -374,6 +374,10 @@ name = "integration_property"
 path = "tests/suites/integration_property.rs"
 
 [[test]]
+name = "integration_north_star"
+path = "tests/suites/integration_north_star.rs"
+
+[[test]]
 name = "agent_profile_e2e"
 path = "tests/agent_profile_e2e.rs"
 
