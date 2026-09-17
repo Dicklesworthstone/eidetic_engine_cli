@@ -106,6 +106,16 @@ fn run_gate_in_dir(
         .arg("--json")
         .arg("--report")
         .arg(report_path);
+    if current_dir != Path::new(env!("CARGO_MANIFEST_DIR")) {
+        // Fixture trees have no tests/ or scripts/ directory, so the
+        // behavioral-evidence term has nothing to read. The gate fails closed
+        // in that situation on purpose (bd-wn8xh), and this is the documented
+        // opt-out. It is scoped to fixture roots: a run against the real
+        // checkout never gets it, and
+        // `vision_coverage_fails_closed_when_the_evidence_corpus_is_absent`
+        // proves the refusal is still reachable without it.
+        command.env("VISION_COVERAGE_ALLOW_NO_CORPUS", "1");
+    }
     if release_tag {
         command.arg("--release-tag");
     }
@@ -671,6 +681,276 @@ fn vision_coverage_reports_a_non_empty_stub_population_when_constants_exist() ->
             .and_then(serde_json::Value::as_bool)
             == Some(false),
         "population_empty must be false once the scanned file declares a constant",
+    )
+}
+
+/// Build a fixture whose documented surfaces are split into ones an e2e script
+/// actually INVOKES and ones nothing invokes, so the behavioral gap is
+/// constructed rather than inherited from this repo.
+///
+/// `surfaces.implemented` counts parser presence, so every name here lands in
+/// the parser; only `exercised` gets an invocation written for it. That is the
+/// distinction the behavioral term exists to draw (bd-wn8xh).
+fn write_behavioral_vision_fixture(
+    root: &Path,
+    documented: &[&str],
+    exercised: &[&str],
+    baseline: &[&str],
+) -> TestResult {
+    fs::create_dir_all(root.join("src").join("cli"))
+        .map_err(|error| format!("failed to create fixture src/cli: {error}"))?;
+    fs::create_dir_all(root.join(".beads"))
+        .map_err(|error| format!("failed to create fixture .beads: {error}"))?;
+    fs::create_dir_all(root.join("scripts"))
+        .map_err(|error| format!("failed to create fixture scripts: {error}"))?;
+    fs::create_dir_all(root.join("tests").join("fixtures").join("vision_coverage"))
+        .map_err(|error| format!("failed to create fixture baseline dir: {error}"))?;
+    fs::write(root.join(".beads").join("issues.jsonl"), "")
+        .map_err(|error| format!("failed to write fixture beads: {error}"))?;
+    fs::write(
+        root.join("COMPREHENSIVE_PLAN.md"),
+        "\
+## 20. CLI surface
+## 21. Next
+## 29. Walking skeleton
+## 30. Next
+### 20.1 Top-level
+COMMANDS:
+GLOBAL OPTIONS:
+### 20.2 Next
+",
+    )
+    .map_err(|error| format!("failed to write fixture plan: {error}"))?;
+
+    let mut readme = String::from("# Fixture\n\n## Command Reference\n\n");
+    let mut cli = String::from("\nfn extract_command_path(cli: &Cli) -> String {\n");
+    for command in documented {
+        readme.push_str(&format!("`ee {command}`\n\n"));
+        cli.push_str(&format!("    \"{command}\".to_string()\n"));
+    }
+    readme.push_str("## Configuration\n");
+    cli.push_str("}\n    /// Returns a stable identifier suitable\n");
+    fs::write(root.join("README.md"), readme)
+        .map_err(|error| format!("failed to write fixture README: {error}"))?;
+    fs::write(root.join("src").join("cli").join("mod.rs"), cli)
+        .map_err(|error| format!("failed to write fixture cli module: {error}"))?;
+
+    let mut script = String::from("#!/bin/sh\n");
+    for command in exercised {
+        script.push_str(&format!("ee {command} --json\n"));
+    }
+    fs::write(root.join("scripts").join("e2e_fixture.sh"), script)
+        .map_err(|error| format!("failed to write fixture e2e script: {error}"))?;
+
+    let mut baseline_text = String::from("# fixture baseline\n");
+    for command in baseline {
+        baseline_text.push_str(command);
+        baseline_text.push('\n');
+    }
+    fs::write(
+        root.join("tests")
+            .join("fixtures")
+            .join("vision_coverage")
+            .join("unexercised_baseline.txt"),
+        baseline_text,
+    )
+    .map_err(|error| format!("failed to write fixture baseline: {error}"))
+}
+
+/// A documented surface that parses but that nothing invokes must FAIL, unless
+/// it is recorded in the baseline. This is the arm that makes parser presence
+/// insufficient on its own.
+#[test]
+fn vision_coverage_fails_on_a_documented_surface_nothing_invokes() -> TestResult {
+    let fixture_root = unique_fixture_root("behavioral-new")?;
+    write_behavioral_vision_fixture(&fixture_root, &["alpha", "beta"], &["alpha"], &[])?;
+    let report_path = fixture_root.join("report.json");
+    let output = run_gate_in_dir(&fixture_root, &report_path, false, None)?;
+
+    let report = read_report(&report_path)?;
+    ensure_eq_u64(
+        &report,
+        "/behavioral_evidence/exercised",
+        1,
+        "only alpha has an invocation",
+    )?;
+    string_array_contains(&report, "/behavioral_evidence/newly_unexercised", "beta")?;
+    ensure(
+        !output.status.success(),
+        &format!(
+            "an unbaselined unexercised surface must fail the gate\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    ensure(
+        String::from_utf8_lossy(&output.stderr).contains("beta"),
+        "the failure must NAME the offending surface, not just count it",
+    )
+}
+
+/// The control. Without it, a gate that failed on ANY unexercised surface --
+/// including every baselined one -- would satisfy the test above while being a
+/// different gate entirely.
+#[test]
+fn vision_coverage_accepts_an_unexercised_surface_that_is_baselined() -> TestResult {
+    let fixture_root = unique_fixture_root("behavioral-baselined")?;
+    write_behavioral_vision_fixture(&fixture_root, &["alpha", "beta"], &["alpha"], &["beta"])?;
+    let report_path = fixture_root.join("report.json");
+    let output = run_gate_in_dir(&fixture_root, &report_path, false, None)?;
+
+    let report = read_report(&report_path)?;
+    ensure_eq_u64(
+        &report,
+        "/behavioral_evidence/unexercised",
+        1,
+        "beta is still unexercised, it is merely accepted",
+    )?;
+    string_array_omits(&report, "/behavioral_evidence/newly_unexercised", "beta")?;
+    ensure(
+        output.status.success(),
+        &format!(
+            "a baselined unexercised surface must not fail the gate\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
+/// The shrink-only arm. A baseline that may only grow is an ignore-list; this
+/// is what stops one decaying into that.
+#[test]
+fn vision_coverage_fails_on_a_stale_unexercised_baseline_entry() -> TestResult {
+    let fixture_root = unique_fixture_root("behavioral-stale")?;
+    // alpha IS invoked, so listing it as unexercised is a decayed line.
+    write_behavioral_vision_fixture(
+        &fixture_root,
+        &["alpha", "beta"],
+        &["alpha"],
+        &["alpha", "beta"],
+    )?;
+    let report_path = fixture_root.join("report.json");
+    let output = run_gate_in_dir(&fixture_root, &report_path, false, None)?;
+
+    let report = read_report(&report_path)?;
+    string_array_contains(
+        &report,
+        "/behavioral_evidence/stale_baseline_entries",
+        "alpha",
+    )?;
+    ensure(
+        !output.status.success(),
+        &format!(
+            "a baseline entry that is now exercised must fail the gate\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    ensure(
+        String::from_utf8_lossy(&output.stderr).contains("alpha"),
+        "the stale-baseline failure must name the line to delete",
+    )
+}
+
+/// The behavioral term reads tests/ and scripts/. When neither exists it has
+/// measured nothing, and "could not look" must not share an exit code with
+/// "looked and found nothing".
+///
+/// Run WITHOUT the opt-out `run_gate_in_dir` grants fixture roots, so this
+/// proves the refusal is still reachable rather than permanently exempted.
+#[test]
+fn vision_coverage_fails_closed_when_the_evidence_corpus_is_absent() -> TestResult {
+    let fixture_root = unique_fixture_root("behavioral-no-corpus")?;
+    write_minimal_vision_fixture(&fixture_root, "swarm brief")?;
+    let report_path = fixture_root.join("report.json");
+    let script_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("vision-coverage.sh");
+    let output = Command::new("sh")
+        .current_dir(&fixture_root)
+        .arg(&script_path)
+        .arg("--json")
+        .arg("--report")
+        .arg(&report_path)
+        .output()
+        .map_err(|error| format!("failed to run vision coverage gate: {error}"))?;
+
+    ensure(
+        !output.status.success(),
+        &format!(
+            "a tree with no tests/ or scripts/ must not pass the behavioral term\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    ensure(
+        String::from_utf8_lossy(&output.stderr).contains("no evidence corpus"),
+        "the refusal must say the corpus was missing, not report a coverage number",
+    )?;
+
+    // And the opt-out actually opts out, so the exemption above is real rather
+    // than a variable nothing reads.
+    let allowed_report = fixture_root.join("allowed.json");
+    let allowed = Command::new("sh")
+        .current_dir(&fixture_root)
+        .arg(&script_path)
+        .arg("--json")
+        .arg("--report")
+        .arg(&allowed_report)
+        .env("VISION_COVERAGE_ALLOW_NO_CORPUS", "1")
+        .output()
+        .map_err(|error| format!("failed to run vision coverage gate: {error}"))?;
+    ensure(
+        allowed.status.success(),
+        &format!(
+            "VISION_COVERAGE_ALLOW_NO_CORPUS=1 must let a corpus-less fixture run\nstderr:\n{}",
+            String::from_utf8_lossy(&allowed.stderr)
+        ),
+    )?;
+    let allowed_report_json = read_report(&allowed_report)?;
+    ensure(
+        allowed_report_json
+            .pointer("/behavioral_evidence/corpus_present")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false),
+        "the report must record that the corpus was absent, not imply it was measured",
+    )
+}
+
+/// The live arm, against this repository rather than a fixture. A term that
+/// only ever runs on constructed trees gates nothing.
+#[test]
+fn vision_coverage_measures_the_real_repository_corpus() -> TestResult {
+    let report_path = unique_report_path("behavioral-live")?;
+    run_gate(&report_path, false, None)?;
+    let report = read_report(&report_path)?;
+
+    ensure(
+        report
+            .pointer("/behavioral_evidence/corpus_present")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true),
+        "this repository has tests/ and scripts/, so the corpus must be present",
+    )?;
+    let exercised = pointer_u64(&report, "/behavioral_evidence/exercised")?;
+    let unexercised = pointer_u64(&report, "/behavioral_evidence/unexercised")?;
+    let total = pointer_u64(&report, "/surfaces/total_documented")?;
+    ensure(
+        exercised > 0,
+        "an exercised count of 0 against the real corpus means the detector stopped working",
+    )?;
+    // Deliberately NOT `exercised < total`: that would make full behavioral
+    // coverage -- the outcome this term exists to drive towards -- fail the
+    // test. The invariant that actually catches a broken detector is that the
+    // two halves partition the documented set exactly, with nothing silently
+    // dropped on the floor.
+    ensure(
+        exercised + unexercised == total,
+        &format!(
+            "exercised ({exercised}) + unexercised ({unexercised}) must equal \
+             total_documented ({total}); a shortfall means surfaces vanished between \
+             the documented set and the evidence comparison"
+        ),
     )
 }
 

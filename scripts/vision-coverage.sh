@@ -32,6 +32,28 @@ COMPARE_REF="${VISION_COVERAGE_COMPARE_REF:-}"
 MAX_GAP_PERCENT="${VISION_COVERAGE_MAX_GAP_PERCENT:-5}"
 SOURCE_REF=""
 
+# --- behavioral evidence (bd-wn8xh) -----------------------------------------
+#
+# `surfaces.implemented` counts a documented command as covered when it appears
+# in the CLI parser. Parser presence is not behavior: a surface can parse and
+# still be exercised by nothing, which is how `ee model status` scored as fully
+# covered while reporting a model it did not have (bd-7hsgy).
+#
+# The behavioral term asks a different question -- does any test or e2e script
+# actually INVOKE this surface -- and gates on a shrink-only baseline rather
+# than on gap_percentage. That choice is deliberate and measured: the behavioral
+# gap on this tree is 4.96%, four hundredths under the 5% cadence threshold, and
+# the value moves by whole points with ordinary detector details (7.09% before
+# helper-mediated invocations were resolved). A number that volatile must not be
+# the thing that decides whether main is red for every agent. A named baseline
+# is checkable one entry at a time; a percentage near its own threshold is not.
+EVIDENCE_TEST_DIR="tests"
+EVIDENCE_SCRIPT_DIR="scripts"
+UNEXERCISED_BASELINE_FILE="tests/fixtures/vision_coverage/unexercised_baseline.txt"
+NEW_UNEXERCISED_CODE=4
+STALE_UNEXERCISED_BASELINE_CODE=5
+MISSING_EVIDENCE_CORPUS_CODE=6
+
 JSON_OUTPUT=false
 FORCE_RELEASE_TAG=false
 
@@ -483,6 +505,217 @@ stub_surfaces() {
         jq -s 'sort_by(.name, .stub_constant)'
 }
 
+# Shared awk helpers for both evidence extractions.
+#
+# emit_path() reduces an argument vector to the command it invokes: skip the
+# literal binary name, drop global options (and the value of the ones that take
+# one), then take the first one or two bare words. It refuses `--help`/`-h`
+# outright -- a help probe proves the parser knows the name, which is precisely
+# the evidence this term declines to accept.
+EVIDENCE_AWK='
+    function is_flag(t) { return substr(t, 1, 1) == "-" }
+    function is_word(t) { return t ~ /^[a-z][a-z0-9-]*$/ }
+    function takes_value(t,   n) {
+        n = t
+        sub(/=.*$/, "", n)
+        if (n != t) return 0
+        return (n == "--workspace" || n == "--format" || n == "--fields" ||
+                n == "--cards" || n == "--schema-version" || n == "--shadow" ||
+                n == "--policy" || n == "--database" || n == "--config" ||
+                n == "--profile" || n == "--socket" || n == "--output" ||
+                n == "--max-tokens" || n == "--limit")
+    }
+    function emit_path(n, arr,   i, first, second) {
+        first = ""; second = ""
+        for (i = 1; i <= n; i++) {
+            if (arr[i] == "ee" && first == "") continue
+            if (arr[i] == "--help" || arr[i] == "-h") return
+            if (is_flag(arr[i])) {
+                if (takes_value(arr[i]) && i < n) i++
+                continue
+            }
+            if (!is_word(arr[i])) {
+                if (first == "") continue
+                else break
+            }
+            if (first == "") { first = arr[i]; continue }
+            second = arr[i]
+            break
+        }
+        if (first == "") return
+        if (second != "") print first " " second
+        print first
+    }
+'
+
+evidence_corpus_present() {
+    [ -d "$EVIDENCE_TEST_DIR" ] || return 1
+    [ -d "$EVIDENCE_SCRIPT_DIR" ] || return 1
+    return 0
+}
+
+# Shell functions that forward their arguments to the ee binary.
+#
+# e2e suites do not call the binary directly; each one wraps it, e.g.
+# scripts/e2e_ask.sh:86 `run_json() { ... e2e_log_command "$EE_BIN" "$@" ... }`
+# and then invokes `run_json "09-ask-direct" --workspace "$WS" --json ask`.
+# Matching only a literal `ee ` would score `ask` as never exercised, which is
+# false. Find the functions whose BODY reaches the binary, then read their call
+# sites -- counting the chokepoint instead of the invocations is how a helper
+# hides the population you meant to measure.
+ee_wrapper_names() {
+    find "$EVIDENCE_SCRIPT_DIR" -name '*.sh' -type f -exec awk '
+        /^[a-z_][a-z0-9_]*\(\)[[:space:]]*\{/ {
+            fname = $0; sub(/\(\).*/, "", fname); inbody = 1; body = ""; next
+        }
+        inbody && /^\}/ {
+            if (body ~ /\$\{?EE_(BIN|BINARY)\}?/) print fname
+            inbody = 0; next
+        }
+        inbody { body = body "\n" $0 }
+    ' {} + 2>/dev/null | sort -u
+}
+
+# Every ee command path invoked anywhere in the executed corpus.
+#
+# Two independent extractions, both invocation-shaped rather than mention-shaped
+# -- comments are stripped first, because a sentence naming a command is exactly
+# what let twelve orphaned suites pass an invocation audit on Markdown prose
+# (bd-q2nq9). `--help` is likewise skipped: a help probe re-tests the parser,
+# which is the thing this term exists to stop accepting as coverage.
+exercised_commands() {
+    evidence_corpus_present || return 0
+    wrappers=$(ee_wrapper_names | tr '\n' ' ')
+    {
+        # Shell: the tail of every invocation, through the binary or a wrapper.
+        #
+        # Done entirely in one awk pass rather than grep -oE + sed. An
+        # alternation over all ~95 discovered wrapper names costs ~12s in BSD
+        # grep -o and ~13s in BSD sed, which alone would blow this stage's
+        # budget; awk matches the invoker token by lookup instead and costs
+        # nothing measurable.
+        find "$EVIDENCE_SCRIPT_DIR" -name '*.sh' -type f \
+            -exec awk -v WRAPLIST="$wrappers" "$EVIDENCE_AWK"'
+                BEGIN {
+                    n = split(WRAPLIST, w, " ")
+                    for (i = 1; i <= n; i++) wrappers[w[i]] = 1
+                    q = sprintf("%c", 39)
+                }
+                function is_invoker(t) {
+                    return (t == "ee" || t == "EEBIN" || (t in wrappers))
+                }
+                {
+                    line = $0
+                    sub(/#.*$/, "", line)
+                    # The binary is often reached through "$EE_BIN"; normalize it
+                    # before quoted strings collapse, or it becomes an opaque @.
+                    gsub(/"?\$\{?EE_(BIN|BINARY)\}?"?/, " EEBIN ", line)
+                    gsub(/"[^"]*"/, " @ ", line)
+                    gsub(q "[^" q "]*" q, " @ ", line)
+                    gsub(/\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/, " @ ", line)
+                    # `OUT=$(ee_workspace review workspace ...)` welds the
+                    # invoker to the assignment, so split the substitution
+                    # punctuation before tokenizing.
+                    gsub(/[()]/, " ", line)
+                    gsub(/[|;&<>]/, " STOP ", line)
+
+                    n = split(line, t, /[[:space:]]+/)
+                    for (i = 1; i <= n; i++) {
+                        if (!is_invoker(t[i])) continue
+                        m = 0
+                        for (j = i + 1; j <= n; j++) {
+                            if (t[j] == "STOP") break
+                            m++; a[m] = t[j]
+                        }
+                        if (m > 0) emit_path(m, a)
+                        for (j = 1; j <= m; j++) delete a[j]
+                    }
+                }
+            ' {} + 2>/dev/null
+
+        # Rust: argument vectors, per file so helper prefixes stay file-scoped.
+        find "$EVIDENCE_TEST_DIR" -name '*.rs' -type f ! -path "$EVIDENCE_TEST_DIR/fixtures/*" \
+            -exec awk "$EVIDENCE_AWK"'
+                FNR == 1 && NR > 1 { flush() }
+                { line = $0; sub(/\/\/.*$/, "", line); txt = txt " " line }
+                END { flush() }
+
+                function flush(   rest, arr, n, i, j, seg) {
+                    if (txt == "") return
+                    gsub(/&[A-Za-z_][A-Za-z0-9_]*\[[^]]*\]/, "@", txt)
+                    gsub(/&[A-Za-z_][A-Za-z0-9_.]*/, "@", txt)
+                    nprefix = 0; delete prefixes
+                    nseg = 0; delete segs
+                    rest = txt
+                    while (match(rest, /\[[^][]*\]/)) {
+                        seg = substr(rest, RSTART + 1, RLENGTH - 2)
+                        rest = substr(rest, RSTART + RLENGTH)
+                        nseg++; segs[nseg] = seg
+                        n = tokenize(seg, arr)
+                        if (n >= 2 && is_word(arr[n]) && has_global(n, arr)) {
+                            nprefix++; prefixes[nprefix] = arr[n]
+                        }
+                        for (i = 1; i <= n; i++) delete arr[i]
+                    }
+                    for (i = 1; i <= nseg; i++) {
+                        n = tokenize(segs[i], arr)
+                        if (n > 0) emit_with_prefixes(n, arr)
+                        for (j = 1; j <= n; j++) delete arr[j]
+                    }
+                    txt = ""
+                }
+
+                function tokenize(seg, arr,   n, tok) {
+                    n = 0
+                    while (match(seg, /"[^"]*"|@/)) {
+                        tok = substr(seg, RSTART, RLENGTH)
+                        if (tok != "@") tok = substr(tok, 2, length(tok) - 2)
+                        seg = substr(seg, RSTART + RLENGTH)
+                        n++; arr[n] = tok
+                    }
+                    return n
+                }
+
+                function has_global(n, arr,   i) {
+                    for (i = 1; i <= n; i++)
+                        if (arr[i] == "--json" || arr[i] == "--workspace") return 1
+                    return 0
+                }
+
+                function emit_with_prefixes(n, arr,   i, head) {
+                    emit_path(n, arr)
+                    head = first_word(n, arr)
+                    if (head == "") return
+                    for (i = 1; i <= nprefix; i++)
+                        if (prefixes[i] != head) print prefixes[i] " " head
+                }
+
+                function first_word(n, arr,   i) {
+                    for (i = 1; i <= n; i++) {
+                        if (arr[i] == "ee") continue
+                        if (arr[i] == "--help" || arr[i] == "-h") return ""
+                        if (is_flag(arr[i])) { if (takes_value(arr[i]) && i < n) i++; continue }
+                        if (!is_word(arr[i])) continue
+                        return arr[i]
+                    }
+                    return ""
+                }
+            ' {} + 2>/dev/null
+    } | sed '/^$/d' | sort -u
+}
+
+unexercised_commands() {
+    evidence_corpus_present || return 0
+    comm -23 "$1" "$2"
+}
+
+baseline_unexercised_entries() {
+    [ -f "$UNEXERCISED_BASELINE_FILE" ] || return 0
+    sed -e 's/#.*$//' -e 's/[[:space:]]*$//' "$UNEXERCISED_BASELINE_FILE" |
+        sed '/^$/d' |
+        sort -u
+}
+
 release_tag_commit() {
     if [ "$FORCE_RELEASE_TAG" = true ]; then
         return 0
@@ -604,6 +837,75 @@ build_report() {
 
 REPORT_JSON=$(build_report "")
 
+# --- behavioral evidence arms (bd-wn8xh) ------------------------------------
+#
+# Computed against the working tree only. In compare-ref mode the delta below
+# still reports gap_percentage, which is a parser-presence measure; the
+# behavioral terms are not differenced against a ref because the evidence
+# corpus at that ref is not read.
+EVIDENCE_WORK_DIR="${TMPDIR:-/tmp}/vision-coverage-evidence.$$"
+mkdir -p "$EVIDENCE_WORK_DIR"
+trap 'rm -f "$EVIDENCE_WORK_DIR"/documented "$EVIDENCE_WORK_DIR"/exercised "$EVIDENCE_WORK_DIR"/unexercised "$EVIDENCE_WORK_DIR"/baseline; rmdir "$EVIDENCE_WORK_DIR" 2>/dev/null || true' EXIT
+
+if evidence_corpus_present; then
+    EVIDENCE_CORPUS_PRESENT=true
+    # Reuse the report's documented set rather than re-running
+    # documented_commands: that normalizer spawns several seds per README line
+    # and costs ~2s, and recomputing it would also let the two answers drift.
+    printf "%s\n" "$REPORT_JSON" | jq -r '.documented_surfaces[]' | sort -u \
+        > "$EVIDENCE_WORK_DIR/documented"
+    exercised_commands > "$EVIDENCE_WORK_DIR/exercised"
+    comm -23 "$EVIDENCE_WORK_DIR/documented" "$EVIDENCE_WORK_DIR/exercised" \
+        > "$EVIDENCE_WORK_DIR/unexercised"
+    baseline_unexercised_entries > "$EVIDENCE_WORK_DIR/baseline"
+    NEW_UNEXERCISED=$(comm -23 "$EVIDENCE_WORK_DIR/unexercised" "$EVIDENCE_WORK_DIR/baseline")
+    STALE_BASELINE=$(comm -13 "$EVIDENCE_WORK_DIR/unexercised" "$EVIDENCE_WORK_DIR/baseline")
+    EXERCISED_COUNT=$(comm -12 "$EVIDENCE_WORK_DIR/documented" "$EVIDENCE_WORK_DIR/exercised" | wc -l | tr -d '[:space:]')
+    UNEXERCISED_COUNT=$(wc -l < "$EVIDENCE_WORK_DIR/unexercised" | tr -d '[:space:]')
+else
+    # Fail closed. A gate that cannot see its subject must say so, not pass:
+    # "the checker could not look" and "the checker found nothing" are the same
+    # exit code everywhere this repo has been bitten. VISION_COVERAGE_ALLOW_NO_CORPUS
+    # exists so the gate's own fixtures can run against a tree with no tests/ or
+    # scripts/ directory, and it has to be set deliberately.
+    EVIDENCE_CORPUS_PRESENT=false
+    NEW_UNEXERCISED=""
+    STALE_BASELINE=""
+    EXERCISED_COUNT=0
+    UNEXERCISED_COUNT=0
+fi
+
+REPORT_JSON=$(
+    printf "%s\n" "$REPORT_JSON" |
+        jq \
+            --argjson corpus_present "$EVIDENCE_CORPUS_PRESENT" \
+            --argjson exercised "$EXERCISED_COUNT" \
+            --argjson unexercised "$UNEXERCISED_COUNT" \
+            --argjson newly "$(printf "%s\n" "$NEW_UNEXERCISED" | json_array_from_lines)" \
+            --argjson stale "$(printf "%s\n" "$STALE_BASELINE" | json_array_from_lines)" \
+            --arg baseline_file "$UNEXERCISED_BASELINE_FILE" '
+              . + {
+                # Whether a documented surface is actually INVOKED by something
+                # that runs, as opposed to merely present in the parser. Gated
+                # by a shrink-only baseline, not by gap_percentage (bd-wn8xh).
+                behavioral_evidence: {
+                  corpus_present: $corpus_present,
+                  corpus: ["tests/**/*.rs (excluding tests/fixtures/)", "scripts/**/*.sh"],
+                  baseline_file: $baseline_file,
+                  exercised: $exercised,
+                  unexercised: $unexercised,
+                  newly_unexercised: $newly,
+                  stale_baseline_entries: $stale,
+                  gap_percentage: (
+                    if .surfaces.total_documented == 0 then 0
+                    else ((($unexercised * 10000 / .surfaces.total_documented) | round) / 100)
+                    end
+                  )
+                }
+              }
+            '
+)
+
 if compare_ref_available; then
     BASELINE_REPORT_JSON=$(build_report "$COMPARE_REF")
     REPORT_JSON=$(
@@ -671,7 +973,53 @@ else
         echo "Stubbed: 0 — NOT A MEASUREMENT: $(printf "%s\n" "$REPORT_JSON" | jq -r '.stub_detector.scanned_file') declares no *_UNAVAILABLE_CODE constants,"
         echo "         so the stub half of the gap is reporting on an empty population, not on an absence of stubs."
     fi
+    if [ "$EVIDENCE_CORPUS_PRESENT" = true ]; then
+        BEHAVIORAL_GAP=$(printf "%s\n" "$REPORT_JSON" | jq -r '.behavioral_evidence.gap_percentage')
+        echo "Exercised surfaces: $EXERCISED_COUNT of $TOTAL (behavioral gap ${BEHAVIORAL_GAP}%)"
+        echo "  Implemented: $TOTAL — parser presence, NOT behavior. A surface counted here"
+        echo "  can still be invoked by nothing; the exercised count above is the behavioral one."
+        if [ "$UNEXERCISED_COUNT" != 0 ]; then
+            echo "  Unexercised (all baselined in $UNEXERCISED_BASELINE_FILE):"
+            sed 's/^/    /' "$EVIDENCE_WORK_DIR/unexercised"
+        fi
+    else
+        echo "Exercised surfaces: NOT MEASURED — no $EVIDENCE_TEST_DIR/ or $EVIDENCE_SCRIPT_DIR/ corpus."
+    fi
     echo "Report: $REPORT_FILE"
+fi
+
+# The behavioral arms are consulted BEFORE the gap ladder below. The ladder's
+# first rung is `gap == 0 -> pass`, and on this tree the gap is structurally 0,
+# so anything checked after it is unreachable. That ordering is exactly why the
+# stub term sat dead for months without the report ever saying so.
+if [ "$EVIDENCE_CORPUS_PRESENT" != true ]; then
+    case "${VISION_COVERAGE_ALLOW_NO_CORPUS:-}" in
+        1|true|TRUE|yes|YES) ;;
+        *)
+            echo "error: no evidence corpus: $EVIDENCE_TEST_DIR/ or $EVIDENCE_SCRIPT_DIR/ is missing," >&2
+            echo "       so the behavioral-evidence term could not be measured at all." >&2
+            echo "hint: set VISION_COVERAGE_ALLOW_NO_CORPUS=1 only for fixture trees that" >&2
+            echo "      deliberately have no tests/ or scripts/ directory." >&2
+            exit "$MISSING_EVIDENCE_CORPUS_CODE"
+            ;;
+    esac
+elif [ -n "$NEW_UNEXERCISED" ] || [ -n "$STALE_BASELINE" ]; then
+    if [ -n "$NEW_UNEXERCISED" ]; then
+        echo "error: documented surfaces that no executed test or e2e script invokes," >&2
+        echo "       and that are not recorded in $UNEXERCISED_BASELINE_FILE:" >&2
+        printf "%s\n" "$NEW_UNEXERCISED" | sed 's/^/         /' >&2
+        echo "hint: add a test or e2e script that actually invokes the surface. Recording" >&2
+        echo "      it in the baseline is for surfaces you are deliberately leaving unproven." >&2
+    fi
+    if [ -n "$STALE_BASELINE" ]; then
+        echo "error: $UNEXERCISED_BASELINE_FILE lists surfaces that ARE now exercised." >&2
+        echo "       The list may only shrink; delete these lines:" >&2
+        printf "%s\n" "$STALE_BASELINE" | sed 's/^/         /' >&2
+    fi
+    if [ -n "$NEW_UNEXERCISED" ]; then
+        exit "$NEW_UNEXERCISED_CODE"
+    fi
+    exit "$STALE_UNEXERCISED_BASELINE_CODE"
 fi
 
 case "$STATUS" in

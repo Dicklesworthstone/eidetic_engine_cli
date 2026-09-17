@@ -1,0 +1,58 @@
+# bd-wn8xh — documented CLI surfaces that no executed test or e2e script invokes.
+#
+# `surfaces.implemented` counts a surface as covered when it appears in the CLI
+# parser. This file records the surfaces that pass THAT bar and still have no
+# behavioral evidence behind them: they parse, and nothing runs them.
+#
+# THIS LIST MAY ONLY SHRINK. scripts/vision-coverage.sh fails in both
+# directions: a documented surface that is newly unexercised and absent from
+# this file is an error, and an entry here that has since acquired an
+# invocation is ALSO an error telling you to delete the line. One arm without
+# the other is how a baseline decays into a permanent ignore-list.
+#
+# To retire an entry: add a test or e2e script that actually invokes the
+# surface, then remove its line. Do not remove a line to quiet the gate --
+# the stale arm exists precisely so that a removal without an invocation
+# fails louder than leaving it.
+#
+# WHY A NAMED LIST AND NOT A PERCENTAGE: the behavioral gap on this tree is
+# 4.96%, four hundredths under the 5% cadence threshold AGENTS.md publishes,
+# and it moved from 7.09% to 4.96% purely by teaching the detector about
+# helper-mediated invocations. A number that close to its own threshold, and
+# that mobile under ordinary detector changes, must not be the thing that
+# decides whether main is red for every agent. Each line below is checkable on
+# its own; a percentage is not.
+#
+# Recorded 2026-09-17. Every entry was hand-verified by enumerating spellings
+# (quoted-pair, shell invocation, and helper-mediated), not by trusting the
+# detector's own absence -- the detector's blind spots are the reason this file
+# needs hand verification at all.
+
+# No invocation of any kind anywhere in tests/ or scripts/. Zero lines mention
+# both words outside comments. These four are the clearest real gaps in the set.
+focus add
+focus explain
+focus remove
+focus show
+
+# `ee workflow create`: the only hits pairing "workflow" with "create" are
+# unrelated (`gh release create` in tests/install_workflows.rs, and prose about
+# shell startup files). Nothing invokes the surface.
+workflow create
+
+# `ee diag contention`: scripts/e2e_diag_contention.sh does exercise it, but
+# that script is itself an orphan -- it is listed in
+# tests/fixtures/e2e_invocation/orphan_baseline.txt, wired into no runner, and
+# therefore never executed. The only other hit is a string equality in
+# tests/contracts/contention_schema.rs (`== Some("diag contention")`), which
+# compares a name rather than running a command. A suite nothing runs is not
+# evidence; retiring this entry means wiring that script, which is bd-udjrq's
+# remaining work.
+diag contention
+
+# `ee import eidetic-legacy`: appears only inside an effect-contract name list
+# (tests/effect_contracts.rs, `for command in ["import cass", "import jsonl",
+# "import eidetic-legacy"]`). That asserts the command's declared effect, not
+# its behavior -- it is parser presence one layer removed, which is the exact
+# bar this term declines to accept.
+import eidetic-legacy
