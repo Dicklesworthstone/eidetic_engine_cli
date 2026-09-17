@@ -29,7 +29,7 @@ use super::memory_lifecycle::{
     LEVEL_TRANSITION_CONCURRENT_CONFLICT_CODE, LEVEL_TRANSITION_REQUIRES_EVIDENCE_CODE,
     LEVEL_TRANSITION_TOMBSTONED_REJECTED_CODE, MemoryLifecycleState, transition_for,
 };
-use super::search::{SearchOptions, SearchStatus, run_search};
+use super::search::{SearchOptions, SearchStatus, run_search, run_search_unaudited};
 use crate::config::{ConfigFile, GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY};
 use crate::curate::cluster_coherence::{ClusterCoherenceConfig, EmbeddingPoint, agglomerate};
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
@@ -6052,7 +6052,11 @@ fn remember_search_neighbor_ids(
         ));
     }
 
-    let report = run_search(&SearchOptions {
+    // bd-l8dn0. Unaudited on purpose. This probe looks for link neighbours while
+    // storing a memory; the memories it inspects were not retrieved by anyone.
+    // Recording it would mark them "retrieved" on every unrelated `remember` and
+    // suppress the `never_retrieved` debt ADR 0071 exists to surface.
+    let report = run_search_unaudited(&SearchOptions {
         workspace_path: prepared.workspace_path.clone(),
         database_path: Some(prepared.database_path.clone()),
         index_dir: Some(prepared.index_dir.clone()),

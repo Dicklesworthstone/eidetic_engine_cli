@@ -7360,11 +7360,43 @@ pub(crate) fn run_search_with_embedder(
             request_timeout,
             Some(embedder),
             false,
+            // Evaluation replays fixtures; those retrievals are not a user
+            // reading memory, so they must not count toward ADR 0071.
+            false,
         )
         .await
         .map(|run| run.report)
     })
     .map_err(|error| SearchError::Index(format!("Failed to start search runtime: {error}")))?
+}
+
+/// Retrieve without leaving a retrieval audit row.
+///
+/// bd-l8dn0. `ee search` records, because ADR 0071 reads the absence of
+/// `search.returned_mem` as `never_retrieved`. Internal probes must not: a
+/// memory that `remember`'s auto_link considered as a link neighbour is not a
+/// memory anyone retrieved, and recording it would mark it "in use" forever and
+/// suppress the debt signal. Reconcile and index behaviour are identical to
+/// `run_search`; only the audit write is withheld.
+pub fn run_search_unaudited(options: &SearchOptions) -> Result<SearchReport, SearchError> {
+    let request_timeout = search_request_timeout();
+    let reconcile_timeout = search_index_auto_reconcile_timeout();
+    let run = crate::core::run_cli_with_cx(request_timeout, |cx| async move {
+        run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+            &cx,
+            options,
+            None,
+            &[],
+            reconcile_timeout,
+            request_timeout,
+            None,
+            false,
+            false,
+        )
+        .await
+    })
+    .map_err(|error| SearchError::Index(format!("Failed to start search runtime: {error}")))?;
+    run.map(|value| value.report)
 }
 
 pub fn run_search_with_filters(
@@ -7396,6 +7428,9 @@ pub(crate) fn run_pack_search(options: &SearchOptions) -> Result<PackSearchHando
             timeout,
             None,
             true,
+            // Pack path: the context writer records these facts against its own
+            // write connection (context.rs), so recording here would double-count.
+            false,
         )
         .await
     })
@@ -7449,6 +7484,7 @@ pub fn run_search_with_performance_and_filters(
             request_timeout,
             None,
             false,
+            true,
         )
         .await
     })
@@ -7476,6 +7512,7 @@ pub async fn run_search_with_performance_and_filters_with_cx(
         request_timeout,
         None,
         false,
+        true,
     )
     .await
 }
@@ -7489,6 +7526,12 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     request_timeout: Duration,
     prepared_fast_embedder: Option<Arc<dyn crate::search::Embedder>>,
     retrieval_only: bool,
+    // bd-l8dn0. Whether this call is a USER retrieval, and so should leave a row
+    // that ADR 0071's `never_retrieved` reads. Internal probes must pass false:
+    // `remember`'s auto_link neighbour lookup is a search, but a memory being
+    // linked against is not a memory anyone retrieved. Recording it inflates
+    // retrieval and suppresses the very debt this audit trail exists to detect.
+    record_retrieval_audit: bool,
 ) -> Result<SearchPerformanceRun, SearchError> {
     let total_start = Instant::now();
     options.validate()?;
@@ -7610,7 +7653,8 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
         // This runs AFTER `finish_search_snapshot` has released the read pin: the
         // audit write takes the flock write gate, and taking it while still holding
         // the read snapshot would serialize a read surface behind writers.
-        if !retrieval_only
+        if record_retrieval_audit
+            && !retrieval_only
             && let Some(facts) = &run.audit_facts
             && let Ok(connection) = DbConnection::open_file(&database_path)
         {
