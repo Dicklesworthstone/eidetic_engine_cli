@@ -4,7 +4,7 @@
  "gateBead": "bd-1n0np.23.1",
  "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
  "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
- "currentLastCompiledMigration": 124,
+ "currentLastCompiledMigration": 125,
  "nextPlannedMigration": 125,
  "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
  "backupCoverageBead": "bd-1n0np.23.2",
@@ -67,7 +67,8 @@
     "V121": "V121_EVIDENCE_FEEDBACK_TARGETS (typed CASS evidence targets in feedback events and quarantine)",
     "V122": "V122_TYPED_PACK_ITEM_IDENTITY (typed pack-item identity; shipped into a slot the registry had reserved for attestation_bundles)",
     "V123": "V123_MEMORY_SUPERSEDED_AT (bd-tmv70 supersession/expiry column split; shipped into a slot the registry had reserved for query_miss_ledger)",
-    "V124": "V124_TIMESTAMP_SPELLING_REPAIR (bd-o22r0 forward-only repair of rows whose timestamp spelling does not match their own column's canonical form)"
+    "V124": "V124_TIMESTAMP_SPELLING_REPAIR (bd-o22r0 forward-only repair of rows whose timestamp spelling does not match their own column's canonical form)",
+    "V125": "V125_SUPERSESSION_REDERIVE (bd-o22r0 re-derives supersession by instant after V123's lexical created_at comparison left two live heads in one chain; V124 could not repair it because migrations run in version order)"
    }
   }
  },
