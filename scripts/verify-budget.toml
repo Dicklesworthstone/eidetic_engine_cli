@@ -86,7 +86,14 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Tracing Field Contract"
-expected_seconds_p50 = 3
+# 3 was the budget for a stage that ran ONLY the checker's --self-test against 8
+# synthetic fixtures. 7c25f36be gave it a real arm as well -- a full audit of 48
+# beads across the tree -- and the budget was not moved with it, so the stage has
+# been over its advisory line (p50*1.5) on every run since (bd-c79fk).
+# Re-measured 2026-09-17, 5 samples, local load average 22.97: 6 7 7 6 7.
+# 7 also covers the 15s worst case observed earlier under three concurrent RCH
+# builds, since the hard-fail line is p50*3 = 21s.
+expected_seconds_p50 = 7
 regression_factor = 1.5
 
 [[stage]]
@@ -126,7 +133,12 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Swarm SLO Replay Contract"
-expected_seconds_p50 = 5
+# Re-measured 2026-09-17, 5 samples, local load average 22.97: 0 1 0 0 0.
+# Lowered 5 -> 2 rather than to the measured 0/1: a hard-fail line of p50*3 = 6s
+# keeps 6x headroom over the observed max, where a p50 of 1 would put the line at
+# 3s and make this a flake under a heavier wave. Tightening a budget to its
+# floor is how a timing gate starts failing for reasons unrelated to the code.
+expected_seconds_p50 = 2
 regression_factor = 1.5
 
 [[stage]]
@@ -196,7 +208,13 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Vision Coverage"
-expected_seconds_p50 = 10
+# Re-measured 2026-09-17, 5 samples, local load average 22.97: 4 5 6 5 5.
+# Lowered 10 -> 6, which TIGHTENS this stage's own lines (advisory 15s -> 9s,
+# hard fail 30s -> 18s) while still leaving 3x headroom over the observed max of
+# 6s. This is a real measurement, not room made for a neighbour: the budget
+# file's own rationale forbids retuning a number to create space, and a number
+# nobody has measured is the thing that makes the file fiction.
+expected_seconds_p50 = 6
 regression_factor = 1.5
 
 [[stage]]
