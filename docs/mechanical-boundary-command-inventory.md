@@ -11,8 +11,8 @@ commands start at `src/cli/mod.rs:253`, and diagnostic command-path extraction i
 at `src/cli/mod.rs:3778`; it is not counted as a command path.
 
 **Scope, measured rather than asserted (bd-...-igo3a).** The command-path
-extractor returns **453** paths. This document currently covers **211** of
-them; **242** are absent. It previously claimed to cover "the 204 stable
+extractor returns **453** paths. This document currently covers **232** of
+them; **221** are absent. It previously claimed to cover "the 204 stable
 command paths returned by the command-path extractor" — a number typed on
 2026-05-19 that was never re-measured, and which its own Full Command
 Inventory table never matched (that table lists 196 paths, not 204). Both
@@ -36,8 +36,8 @@ E2E audit record for this inventory:
 
 - Command source: `src/cli/mod.rs`
 - CLI command paths returned by the extractor: 453
-- Documented in a table row here: 211
-- Absent: 242
+- Documented in a table row here: 232
+- Absent: 221
 - Unmapped command count: 0
 - Matrix enforcement floor: 24
 - Stdout/stderr contract: this file is static documentation; the companion test only reads source
@@ -54,7 +54,7 @@ number covers both will over-trust the gate.
 
 | tier | what it requires | mechanism | covers |
 | --- | --- | --- | --- |
-| coverage | the path appears, backticked, in some **table row** of this file | `mechanical_boundary_inventory_covers_all_cli_command_paths` | 211 of 453 |
+| coverage | the path appears, backticked, in some **table row** of this file | `mechanical_boundary_inventory_covers_all_cli_command_paths` | 232 of 453 |
 | content | the path appears, backticked, in a **Command Boundary Matrix row** — the twelve columns | the three `command_boundary_matrix_*` assertions | 24 of 453 |
 
 Only the content tier checks a side-effect class, a runtime posture, a degraded
@@ -69,8 +69,8 @@ take a deliberate edit, and the live count moving up on its own must not red the
 build.
 
 The floor exists because of a specific way this document can be repaired
-wrongly. The coverage tier is failing today (242 paths absent). Pasting those
-242 into the Full Command Inventory turns coverage green while content
+wrongly. The coverage tier is failing today (221 paths absent). Pasting those
+221 into the Full Command Inventory turns coverage green while content
 enforcement stays at 24 — trading a true red for a false green, with the 94.7%
 gap now invisible because no assertion mentions it. The floor makes the content
 number a maintained, asserted fact rather than an incidental one, so that
@@ -83,13 +83,12 @@ The floor does not answer it; it only stops the question from disappearing.
 
 ## What is still absent (bd-...-igo3a)
 
-242 of the 453 extractor paths have no row here, spread across 72 families.
+221 of the 453 extractor paths have no row here, spread across 66 families.
 Listed so the remaining work is stated in the artifact instead of being
 re-derived from the CLI a fifth time. Counts are absent-paths-per-family:
 
 `team` 35 · `diag` 25 · `mesh` 24 · `verification` 11 · `verify` 11 ·
-`hook` 9 · `curate` 7 · `memory` 6 · `sandbox` 5 · `conflict` 4 · `db` 4 ·
-`graph` 4 · `journal` 4 · `attest` 3 · `config` 3 · `decide` 3 · `lab` 3 ·
+`hook` 9 · `curate` 7 · `memory` 6 · `sandbox` 5 · `graph` 4 · `lab` 3 ·
 `maintenance` 3 · `migrate` 3 · `perf` 3 · `reflect` 3 · `shadow` 3 ·
 `swarm` 3 · `backup` 2 · `bootstrap` 2 · `cache` 2 · `handoff` 2 ·
 `health` 2 · `learn` 2 · `lens` 2 · `mcp` 2 · `proof` 2 · `recorder` 2 ·
@@ -102,6 +101,25 @@ contributing one path each (`artifact relocate`, `ask`, `capture suggest`,
 `regress explain`, `resume`, `rule provenance`, `serve`,
 `session-budget plan`, `similar`, `situation adopt`, `tag`, `timeline`,
 `trust report`, `why-not`, `workflow create`, `workspace hygiene`).
+
+Retired from this list on 2026-09-17 (bd-...-igo3a): `attest` 3, `config` 3,
+`conflict` 4, `db` 4, `decide` 3, `journal` 4 — 21 paths, six whole families,
+now carrying Full Command Inventory rows. Each disposition was checked against
+the module rather than defaulted: `journal distill` reads as synthesis from its
+name and is not (it proposes by threshold and emits an explicit
+`distill_no_candidates` degradation), and the mock-data scan over all six
+modules returned only false positives — "redaction placeholders" in
+`src/core/journal.rs` and config key names containing `SAMPLE` in
+`src/config/mod.rs`.
+
+**Anchor caveat, measured while writing those rows.** The `src/cli/mod.rs:NNNN`
+line numbers in the Handler/core anchor column DRIFT as that file grows and
+nothing verifies them: the anchor recorded for `agent detect`,
+`src/cli/mod.rs:3788`, now lands on an unrelated `#[arg]` attribute. The module
+path in each anchor is the durable half; treat a line number as a
+point-in-time hint and re-locate by dispatch arm (`Some(Command::<Variant>(`)
+before trusting it. The six rows added today cite dispatch-arm lines that were
+correct at the time of writing and will drift the same way.
 
 **This list is deliberately NOT a table.** The coverage assertion requires a
 path to appear in a table ROW, so naming a command here does not document it
@@ -441,6 +459,12 @@ ledger and the command-boundary matrix must gain concrete rows before the new pa
 | `task-frame create`, `task-frame show`, `task-frame update`, `task-frame close`, `task-frame subgoal add` | `src/cli/mod.rs:5364`, `src/core/task_frame.rs:264` | Passive task-frame store with explicit evidence links, redacted notes, status, subgoals, and blockers. | keep mechanical |
 | `tripwire list`, `tripwire check` | `src/cli/mod.rs:4611`, `src/core/tripwire.rs:247` | Persisted tripwire listing/checking. bd-qmu0 retired sample tripwires; empty persisted state stays empty and concrete checks require stored inputs plus an explicit event payload hash. | keep mechanical |
 | `workflow close` | `src/cli/mod.rs:4920`, `src/core/memory.rs:440` | Workflow lifecycle close promotes eligible working memories to episodic and records audit rows. | keep mechanical |
+| `attest memory`, `attest pack`, `attest query` | `src/cli/mod.rs:13618`, `src/core/attest.rs` | Attestation bundles over one stored memory, one stored pack, or a query string. The query form is hash-only by construction, so it asserts nothing about retrieved content. | keep mechanical |
+| `config get`, `config set`, `config show` | `src/cli/mod.rs:13754`, `src/config/mod.rs` | Merged config reads with source attribution, and a single-key write into the workspace `.ee/config.toml`. `set` is the only mutating path of the three. | keep mechanical |
+| `conflict list`, `conflict explain`, `conflict cluster`, `conflict resolve` | `src/cli/mod.rs:14602`, `src/cli/conflict.rs` | Ranked contradicting memory pairs, per-memory explanation, and k-truss + Louvain contradiction clusters over persisted memories. `resolve` performs audited mutations and is dry-run by default. | keep mechanical |
+| `db check-integrity`, `db inspect`, `db migrations`, `db reindex` | `src/cli/mod.rs:13763`, `src/db/mod.rs` | Non-mutating database surfaces: integrity check, single-table row inspection, applied/pending migration listing, and a preview of pending derived-index rebuild work. `reindex` previews rather than rebuilds. | keep mechanical |
+| `decide record`, `decide list`, `decide revisit` | `src/cli/mod.rs:15176`, `src/core/decide.rs` | Typed decision memories with revisit scheduling: record writes a durable decision, list reports current heads with optional superseded history, revisit reports decisions due or inside the warning window. | keep mechanical |
+| `journal append`, `journal distill`, `journal list`, `journal show` | `src/cli/mod.rs:14686`, `src/core/journal.rs` | Append-only observation log with JSONL batch input, newest-first listing, and full single-record reads. `distill` proposes curation candidates by threshold over scanned entries and emits an explicit `distill_no_candidates` degradation rather than inventing proposals; it is rule-based, not synthesis, and is dry-run by default. | keep mechanical |
 
 ## Mock, Sample, Stub, Or Simulated Data Anchors
 
