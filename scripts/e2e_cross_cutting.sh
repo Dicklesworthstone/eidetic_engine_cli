@@ -451,10 +451,10 @@ else
     _harness_fail "path redactors share one prefix set: these files define a private path-prefix list instead of using crate::util::SENSITIVE_PATH_PREFIXES -- $(printf '%s' "$redactor_private_lists" | tr '\n' ' ')"
 fi
 assert_jq_file "$MIGRATION_MANIFEST" \
-    '.currentLastCompiledMigration == 121 and .nextPlannedMigration == 122 and (.policy.nonInitiativeCompiledMigrations.versions.V100 | startswith("V100_PACK_EVIDENCE_ITEMS")) and (.policy.nonInitiativeCompiledMigrations.versions.V101 | startswith("V101_ATTEMPT_FAMILY_IMMUTABILITY_REPAIR")) and (.policy.nonInitiativeCompiledMigrations.versions.V121 | startswith("V121_EVIDENCE_FEEDBACK_TARGETS"))' \
+    '.currentLastCompiledMigration == 125 and .nextPlannedMigration == 126 and (.policy.nonInitiativeCompiledMigrations.versions.V100 | startswith("V100_PACK_EVIDENCE_ITEMS")) and (.policy.nonInitiativeCompiledMigrations.versions.V101 | startswith("V101_ATTEMPT_FAMILY_IMMUTABILITY_REPAIR")) and (.policy.nonInitiativeCompiledMigrations.versions.V121 | startswith("V121_EVIDENCE_FEEDBACK_TARGETS")) and (.policy.nonInitiativeCompiledMigrations.versions.V122 | startswith("V122_TYPED_PACK_ITEM_IDENTITY")) and (.policy.nonInitiativeCompiledMigrations.versions.V123 | startswith("V123_MEMORY_SUPERSEDED_AT")) and (.policy.nonInitiativeCompiledMigrations.versions.V124 | startswith("V124_TIMESTAMP_SPELLING_REPAIR")) and (.policy.nonInitiativeCompiledMigrations.versions.V125 | startswith("V125_SUPERSESSION_REDERIVE"))' \
     "migration registry pins compiled tail and next planned migration"
 assert_jq_file "$MIGRATION_MANIFEST" \
-    '([.transitionMatrix[].version] | sort) == [66,67,68,69,69,70,71,72,122,123,124] and ([.transitionMatrix[].id] | unique | length) == (.transitionMatrix | length) and ([.transitionMatrix[] | select(.status == "planned") | .version] | unique | length) == ([.transitionMatrix[] | select(.status == "planned")] | length)' \
+    '([.transitionMatrix[].version] | sort) == [66,67,68,69,69,70,71,72,126,127,128] and ([.transitionMatrix[].id] | unique | length) == (.transitionMatrix | length) and ([.transitionMatrix[] | select(.status == "planned") | .version] | unique | length) == ([.transitionMatrix[] | select(.status == "planned")] | length)' \
     "migration transition versions match the implemented/planned layout with unique ids and planned slots"
 assert_jq_file "$MIGRATION_MANIFEST" \
     '([.transitionMatrix[] | {id, version, status}] | sort_by(.id)) == ([.allocations[] | {id, version, status}] | sort_by(.id))' \
