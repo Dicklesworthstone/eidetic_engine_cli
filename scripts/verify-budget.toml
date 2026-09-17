@@ -532,6 +532,20 @@ name = "E2E Invocation Audit"
 expected_seconds_p50_unmeasured = true
 
 [[stage]]
+name = "Repo Hygiene E2E (bd-udjrq)"
+# MEASURED, not unmeasured: 0 0 1 0 0 seconds over five runs (bd-udjrq).
+# Declared 2 rather than the observed p50 of 0, so the hard-fail line lands at
+# p50*3 = 6s instead of 0s. A timing budget set to its own floor fails for
+# reasons unrelated to the code -- the same reason Swarm SLO Replay is 2 and not
+# its measured 0-1.
+#
+# It has to be measured: the unmeasured ratchet is full at 27/27, so the
+# `(first execution)` route the earlier ten orphans used is closed. That is the
+# right outcome here, because this one has real timings.
+expected_seconds_p50 = 2
+regression_factor = 1.5
+
+[[stage]]
 name = "E2E Invocation Audit Contract"
 expected_seconds_p50_unmeasured = true
 

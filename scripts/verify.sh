@@ -1059,6 +1059,22 @@ fi
 run_stage "E2E Invocation Audit Contract" "./scripts/e2e_invocation_audit.sh --self-test"
 run_stage "E2E Invocation Audit" "./scripts/e2e_invocation_audit.sh"
 
+# Gate 0.845: repo hygiene (bd-udjrq). This suite sat in the orphan baseline --
+# written, committed, invoked by nothing -- which is the failure the audit
+# immediately above exists to catch, so leaving it unwired next to that audit
+# was its own small joke.
+#
+# Wired rather than merely triaged because it is the one orphan that could be:
+# it references NO ee binary (zero EE_BIN / EE_BINARY / ee_resolve hits), so its
+# pass does not depend on the stale 0.14.2 build this host is stuck with, unlike
+# the other seven non-mesh orphans. It asserts .gitignore and .rchignore carry
+# their required patterns, and measured 0 0 1 0 0 seconds over five runs.
+#
+# Its orphan_baseline.txt row is deleted in the same commit. The audit fails on a
+# stale baseline entry as well as a new orphan, so wiring without that deletion
+# would trade one red for another.
+run_stage "Repo Hygiene E2E (bd-udjrq)" "./scripts/e2e_repo_hygiene.sh"
+
 # Gate 0.85: ee binary resolution + staleness contract (bd-smxdr). This
 # no-Cargo test proves the shared resolver refuses a stale or missing binary
 # BEFORE any e2e stage runs against one. It had existed unwired since May, so
