@@ -14,6 +14,9 @@ use super::{ContextDeltaError, ContextDeltaItemSnapshot, ContextDeltaItems, diff
 #[path = "context_delta_apply.rs"]
 mod apply;
 
+#[path = "context_delta_wire.rs"]
+mod wire;
+
 type ItemIndex<'a> = BTreeMap<&'a str, (usize, &'a ContextDeltaItemSnapshot)>;
 
 fn index_items<'a>(
