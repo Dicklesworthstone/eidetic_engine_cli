@@ -94,6 +94,34 @@ mod tests {
                 "repo-relative provenance must survive redaction",
             );
         }
+
+        // A URI AUTHORITY is not a path root, even when it is spelled like a
+        // sensitive directory. `agent://run/public-feedback` carries the
+        // literal `/run/` at offset 7 and redacted to `agent:/[REDACTED_PATH]`
+        // once `/run/` joined the shared prefix list, destroying a safe,
+        // non-filesystem source id. Pinned here as well as at the surface
+        // (`feedback_health_source_counts_preserve_safe_source_ids`) because
+        // this predicate is shared by every redactor the lsy52 sweep
+        // consolidated, so a regression here is a regression in all of them.
+        for preserved in [
+            "agent://run/public-feedback",
+            "https://run/foo",
+            "ee-export://tmp/fixture",
+        ] {
+            assert_eq!(
+                super::redact_path_like_segments(preserved, at_whitespace),
+                preserved,
+                "a URI authority must not be redacted as a path root",
+            );
+        }
+
+        // The narrowing above is confined to the authority's own slash: a real
+        // sensitive path carried AFTER an authority still redacts, and a bare
+        // `//run/` with no scheme in front of it is untouched by the rule.
+        assert_eq!(
+            super::redact_path_like_segments("agent://host/root/.ssh/id_rsa", at_whitespace),
+            "agent://host[REDACTED_PATH]",
+        );
     }
 
     #[cfg(unix)]
@@ -197,7 +225,47 @@ pub(crate) const SENSITIVE_PATH_PREFIXES: &[&str] = &[
 /// (`fixtures_do_not_leak_pids_paths_or_secrets`,
 /// `contains_forbidden_secret_or_private_path`), so a case-sensitive redactor
 /// can emit output that those gates classify as a leak.
+/// Is `start` the second slash of a `scheme://` authority marker?
+///
+/// In `scheme://authority/path` the `//` introduces an AUTHORITY, not a path,
+/// and its leading slash is not a path root. The prefix list cannot see that
+/// distinction on its own: `agent://run/public-feedback` contains the literal
+/// `/run/` at offset 7, matches the `/run/` prefix, and redacts to
+/// `agent:/[REDACTED_PATH]` -- destroying a safe, non-filesystem source id
+/// because a URI host happens to share a name with a Linux runtime directory.
+/// `feedback_health_source_counts_preserve_safe_source_ids` is the assertion
+/// that catches it.
+///
+/// This does not weaken redaction of a real path carried by a URI. Only the
+/// authority's own leading slash is excluded, so `agent://host/root/.ssh/id_rsa`
+/// still redacts from `/root/`, and a bare `//run/` with no scheme in front of
+/// it is untouched by this rule. `file://` is likewise unaffected in either
+/// direction: its authority is empty, so `file:///Users/alice/x` matches at the
+/// THIRD slash -- the genuine path root -- which is why the scheme survives.
+fn uri_authority_slash_at(value: &str, start: usize) -> bool {
+    if start == 0 || value.as_bytes().get(start) != Some(&b'/') {
+        return false;
+    }
+    if value.as_bytes().get(start - 1) != Some(&b'/') {
+        return false;
+    }
+    let Some(colon) = start.checked_sub(2) else {
+        return false;
+    };
+    if value.as_bytes().get(colon) != Some(&b':') {
+        return false;
+    }
+    value[..colon]
+        .bytes()
+        .next_back()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+}
+
 fn sensitive_path_starts_at(value: &str, start: usize) -> bool {
+    if uri_authority_slash_at(value, start) {
+        return false;
+    }
+
     let candidate = &value[start..];
     if SENSITIVE_PATH_PREFIXES.iter().any(|prefix| {
         candidate
