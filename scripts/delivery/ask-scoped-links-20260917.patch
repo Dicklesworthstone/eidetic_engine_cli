@@ -1,0 +1,70 @@
+diff --git a/src/core/ask.rs b/src/core/ask.rs
+--- a/src/core/ask.rs
++++ b/src/core/ask.rs
+@@ -18,6 +18,11 @@
+ #[path = "ask_retrieval.rs"]
+ mod retrieval;
+ 
++#[path = "ask_store.rs"]
++mod store;
++
++pub use store::load_scoped_contradictions;
++
+ #[path = "ask_candidates.rs"]
+ mod selection;
+ 
+diff --git a/src/cli/mod.rs b/src/cli/mod.rs
+--- a/src/cli/mod.rs
++++ b/src/cli/mod.rs
+@@ -1,32 +1,19 @@
+     let candidate_ids: Vec<_> = stored
+         .iter()
+-        .take(crate::core::ask::ASK_CANDIDATE_SCAN_CAP)
+         .map(|memory| memory.id.as_str())
+         .collect();
+-    let contradictions = match connection.list_memory_links_for_memories(
+-        &candidate_ids,
+-        Some(crate::db::MemoryLinkRelation::Contradicts),
+-    ) {
+-        Ok(links) => links
+-            .into_iter()
+-            .map(|link| crate::core::ask::AskContradiction {
+-                id: link.id,
+-                src_memory_id: link.src_memory_id,
+-                dst_memory_id: link.dst_memory_id,
+-                confidence: link.confidence,
+-                source: link.source,
+-            })
+-            .collect(),
++    let contradictions = match crate::core::ask::load_scoped_contradictions(
++        &connection,
++        &candidate_ids,
++    ) {
++        Ok(links) => links,
+         Err(error) => {
+             return write_domain_error(
+-                &DomainError::Storage {
+-                    message: format!("Failed to read ask contradiction evidence: {error}"),
+-                    repair: Some("ee doctor --json".to_owned()),
+-                },
++                &error,
+                 cli.renderer(),
+                 stdout,
+                 stderr,
+             );
+         }
+     };
+ 
+diff --git a/tests/contracts/audit_event_coverage.rs b/tests/contracts/audit_event_coverage.rs
+--- a/tests/contracts/audit_event_coverage.rs
++++ b/tests/contracts/audit_event_coverage.rs
+@@ -22,6 +22,9 @@
+ 
+ #![allow(clippy::unwrap_used, clippy::expect_used)]
+ 
++#[path = "ask_large_corpus.rs"]
++mod ask_large_corpus;
++
+ use std::path::PathBuf;
+ 
+ use ee::core::context::{ContextPackOptions, run_context_pack};

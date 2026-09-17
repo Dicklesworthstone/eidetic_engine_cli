@@ -1,0 +1,58 @@
+name: Deliver scoped ask counterevidence
+
+# One-time, main-only delivery of a reviewed patch to the oversized dispatcher.
+# Retire this workflow after its resulting source commit is verified.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/deliver-ask-corpus-20260917.yml
+      - scripts/delivery/ask-scoped-links-20260917.patch
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: deliver-ask-corpus-20260917
+  cancel-in-progress: false
+jobs:
+  deliver:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Apply reviewed integration and parse Rust sources
+        shell: bash
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+        run: |
+          set -euo pipefail
+          patch=scripts/delivery/ask-scoped-links-20260917.patch
+          git apply --check "$patch"
+          git apply "$patch"
+          rustup toolchain install nightly --profile minimal --component rustfmt
+          rustfmt +nightly --edition 2024 --config skip_children=true src/core/ask_store.rs src/core/ask_store_tests.rs tests/contracts/ask_large_corpus.rs
+          rustfmt +nightly --edition 2024 --config skip_children=true --emit stdout src/core/ask.rs >/dev/null
+          rustfmt +nightly --edition 2024 --config skip_children=true --emit stdout src/cli/mod.rs >/dev/null
+          rustfmt +nightly --edition 2024 --config skip_children=true --emit stdout tests/contracts/audit_event_coverage.rs >/dev/null
+          git diff --check
+          git diff --stat
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/core/ask.rs src/core/ask_store.rs src/core/ask_store_tests.rs src/cli/mod.rs tests/contracts/audit_event_coverage.rs tests/contracts/ask_large_corpus.rs
+          git commit -m 'fix(ask): retrieve complete scoped counterevidence through the public CLI' -m 'Remove the storage-order link cutoff, use bounded incident-edge queries, and register real-store plus public-CLI regression coverage. Nightly rustfmt parsed every modified Rust module and formatted the new files; Rust compilation and test execution are not claimed.'
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              printf 'Delivered source commit: '
+              git rev-parse HEAD
+              exit 0
+            fi
+            git fetch origin main
+            git merge --no-edit origin/main
+          done
+          exit 1
