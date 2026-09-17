@@ -5392,9 +5392,15 @@ fn push_reflection_redaction_class(classes: &mut Vec<String>, class: &'static st
 }
 
 fn contains_reflection_local_path(content: &str) -> bool {
-    ["/Users/", "/Volumes/", "/data/", "/dp/"]
-        .iter()
-        .any(|prefix| content.contains(prefix))
+    // bd-redactor-prefix-divergence-lsy52: same prefix set as the redactors.
+    // Widens only: `/home/`, `/tmp/`, `/etc/` and the rest now classify as
+    // local paths instead of shipping in a reflection source package.
+    crate::util::SENSITIVE_PATH_PREFIXES.iter().any(|prefix| {
+        content
+            .as_bytes()
+            .windows(prefix.len())
+            .any(|window| window.eq_ignore_ascii_case(prefix.as_bytes()))
+    })
 }
 
 fn truncate_to_byte_limit(content: &str, byte_limit: usize) -> (String, bool) {
