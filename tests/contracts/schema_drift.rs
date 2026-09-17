@@ -1879,6 +1879,12 @@ mod tests {
         "memory_sentinel_results",
         "memory_sentinel_specs",
         "memory_tags",
+        // bd-o22r0: V124's repair receipt. It is deliberately PERSISTENT rather
+        // than migration-scratch like V122's guard table: the migration records
+        // per-column repair counts taken before its updates so an operator can
+        // see what it did, and a dropped table reports nothing. This assertion
+        // is exact set equality, so a real schema object has to be named here.
+        "memory_timestamp_spelling_repair_v124",
         "mesh_body_cache_metadata",
         "mesh_import_ledger",
         "mesh_lane_grant_states",
