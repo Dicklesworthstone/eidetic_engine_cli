@@ -122,17 +122,29 @@ fn spawn_timeout() -> Duration {
 /// failure.
 ///
 /// stdio is set AFTER the caller's `configure` runs, matching `output()`, which
-/// also overrides those handles. stdin is nulled because a child waiting on
-/// stdin is its own hang class.
-fn output_with_timeout(command: &mut Command) -> std::io::Result<Output> {
-    output_with_deadline(command, spawn_timeout())
+/// also overrides those handles -- which is why a caller cannot simply set
+/// stdin itself, and why supplying one has to be a parameter. stdin defaults to
+/// null because a child waiting on stdin is its own hang class; `Some(handle)`
+/// is for the surfaces that must read it, and the caller owns reaching EOF.
+fn output_with_timeout(command: &mut Command, stdin: Option<Stdio>) -> std::io::Result<Output> {
+    output_with_deadline(command, spawn_timeout(), stdin)
 }
 
 /// The deadline loop, with the cap passed in so it can be tested without
 /// mutating a process-global env var that every other spawn reads.
-fn output_with_deadline(command: &mut Command, timeout: Duration) -> std::io::Result<Output> {
+fn output_with_deadline(
+    command: &mut Command,
+    timeout: Duration,
+    stdin: Option<Stdio>,
+) -> std::io::Result<Output> {
+    // `None` keeps the original null. A caller that supplies a handle takes
+    // responsibility for it reaching EOF: `ee remember --batch --stdin` reads
+    // until the pipe closes, and a handle that never closes is the hang class
+    // the null was here to prevent. Passing an opened File satisfies that by
+    // construction -- it EOFs at the end of the file with no writer thread and
+    // no close protocol to get wrong.
     command
-        .stdin(Stdio::null())
+        .stdin(stdin.unwrap_or_else(Stdio::null))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn()?;
@@ -252,7 +264,7 @@ where
     command
         .args(&arguments)
         .env("EE_WORKSPACE_REGISTRY", isolated_registry_path());
-    output_with_timeout(&mut command)
+    output_with_timeout(&mut command, None)
         .map_err(|error| format!("failed to run ee {}: {error}", arguments.join(" ")))
 }
 
@@ -291,7 +303,7 @@ where
     if !caller_chose_registry {
         command.env("EE_WORKSPACE_REGISTRY", isolated_registry_path());
     }
-    output_with_timeout(&mut command)
+    output_with_timeout(&mut command, None)
 }
 
 /// The deadline must actually fire on a child that never exits.
@@ -306,7 +318,7 @@ fn the_deadline_kills_a_child_that_never_exits() {
     let started = Instant::now();
     let mut command = Command::new("sleep");
     command.arg("120");
-    let result = output_with_deadline(&mut command, Duration::from_millis(400));
+    let result = output_with_deadline(&mut command, Duration::from_millis(400), None);
     let error = result.expect_err("a sleeping child must not return output");
     assert_eq!(
         error.kind(),
@@ -339,7 +351,7 @@ fn a_child_that_outgrows_the_pipe_buffer_still_completes() {
     command
         .arg("-c")
         .arg("i=0; while [ $i -lt 4096 ]; do printf '%064d' $i; i=$((i+1)); done");
-    let output = output_with_deadline(&mut command, Duration::from_secs(60))
+    let output = output_with_deadline(&mut command, Duration::from_secs(60), None)
         .expect("a large-output child must not be reported as a timeout");
     assert!(
         output.status.success(),
@@ -362,7 +374,7 @@ fn a_child_that_outgrows_the_pipe_buffer_still_completes() {
 fn the_deadline_leaves_a_fast_child_alone() {
     let mut command = Command::new("echo");
     command.arg("contracts-spawn-probe");
-    let output = output_with_deadline(&mut command, Duration::from_secs(30))
+    let output = output_with_deadline(&mut command, Duration::from_secs(30), None)
         .expect("a fast child must return output");
     assert!(output.status.success(), "echo should succeed: {output:?}");
     assert!(
