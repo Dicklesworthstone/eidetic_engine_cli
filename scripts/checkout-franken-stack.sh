@@ -127,22 +127,9 @@ checkout_repository() {
   echo "franken-stack: checked out ${repository}@${revision}"
 }
 
-# SQLModel 0.4.0 (harmonize/vlsf2-fsqlite03) still exact-pins asupersync
-# =0.4.4. ee's path override supplies the locked asupersync crate, so
-# isolated dests rewrite that one exact pin to the locked asupersync
-# version. Ranges and non-exact pins are left alone.
-relax_sqlmodel_asupersync_pin() {
-  local asu_toml="$DESTINATION_ROOT/asupersync/Cargo.toml"
-  local sql_toml="$DESTINATION_ROOT/sqlmodel_rust/Cargo.toml"
-  local asu_ver
-  [ -f "$asu_toml" ] && [ -f "$sql_toml" ] || return 0
-  asu_ver=$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' "$asu_toml" | head -n 1)
-  [ -n "$asu_ver" ] || return 0
-  if grep -Eq '^asupersync = \{ version = "=[0-9]' "$sql_toml"; then
-    perl -i -pe 's/^(asupersync = \{ version = ")=[^"]+/${1}='"$asu_ver"'/' "$sql_toml"
-    echo "franken-stack: relaxed sqlmodel asupersync exact pin to =${asu_ver}"
-  fi
-}
+# Captured sibling trees are immutable. SQLModel 0.5.0 already declares
+# asupersync 0.5.0; rewriting Cargo.toml after checkout would make the
+# materialized source differ from franken-stack.lock (bd-1azkt.18).
 
 count=0
 seen="|"
@@ -192,5 +179,3 @@ do
       ;;
   esac
 done
-
-relax_sqlmodel_asupersync_pin

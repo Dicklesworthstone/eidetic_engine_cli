@@ -159,6 +159,85 @@ fn native_reranker_enabled_and_onnx_runtime_absent() {
     );
 }
 
+/// Direct Franken-stack crates must be exact (`=version`) pins.
+///
+/// Cargo.lock already selected these versions; a caret requirement would
+/// still resolve identically under `--locked` and silently drift without it
+/// (bd-reality-core-convergence-1azkt.18).
+const FRANKEN_STACK_DIRECT_CRATES: &[&str] = &[
+    "asupersync",
+    "franken-agent-detection",
+    "fnx-algorithms",
+    "fnx-classes",
+    "fnx-runtime",
+    "frankensearch",
+    "fsqlite",
+    "sqlmodel-core",
+    "sqlmodel-frankensqlite",
+    "toon",
+];
+
+#[test]
+fn franken_stack_direct_deps_use_exact_version_pins() {
+    let manifest = std::fs::read_to_string(manifest_path())
+        .expect("Cargo.toml should be readable for franken-stack pin audit");
+    let mut missing = Vec::new();
+    let mut caret = Vec::new();
+    for name in FRANKEN_STACK_DIRECT_CRATES {
+        let prefix = format!("{name} =");
+        let lines: Vec<&str> = manifest
+            .lines()
+            .filter(|line| line.trim_start().starts_with(&prefix))
+            .collect();
+        if lines.is_empty() {
+            missing.push(*name);
+            continue;
+        }
+        for line in lines {
+            assert!(
+                line.contains("version = \""),
+                "franken-stack dep {name} must declare a version: {line}"
+            );
+            if !line.contains("version = \"=") {
+                caret.push(line.to_owned());
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "missing franken-stack direct deps in Cargo.toml: {missing:?}"
+    );
+    assert!(
+        caret.is_empty(),
+        "franken-stack direct deps must be exact (=version) pins so unlocked cargo cannot drift; caret lines: {caret:?}"
+    );
+}
+
+/// checkout-franken-stack must materialize locked revisions without rewriting
+/// captured sibling Cargo.toml files after checkout.
+#[test]
+fn checkout_franken_stack_does_not_rewrite_captured_sources() {
+    let bash = include_str!("../scripts/checkout-franken-stack.sh");
+    let powershell = include_str!("../scripts/checkout-franken-stack.ps1");
+    let rch_verify = std::fs::read_to_string(format!(
+        "{}/scripts/rch_verify.sh",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("scripts/rch_verify.sh should be readable");
+    assert!(
+        !bash.contains("relax_sqlmodel_asupersync_pin") && !bash.contains("perl -i"),
+        "checkout-franken-stack.sh must not rewrite captured SQLModel after checkout"
+    );
+    assert!(
+        !powershell.contains("relaxed sqlmodel asupersync exact pin"),
+        "checkout-franken-stack.ps1 must not rewrite captured SQLModel after checkout"
+    );
+    assert!(
+        !rch_verify.contains("perl -i -pe"),
+        "rch_verify.sh pinned-bundle materialization must not rewrite captured SQLModel"
+    );
+}
+
 fn manifest_path() -> String {
     format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"))
 }
