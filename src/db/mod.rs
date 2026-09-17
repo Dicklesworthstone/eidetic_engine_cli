@@ -45990,7 +45990,11 @@ UPDATE memories
         )?;
 
         let listed = connection.list_memories(WORKSPACE, None, false)?;
-        ensure_equal(&listed.len(), &1, "identity list returns only the live head")?;
+        ensure_equal(
+            &listed.len(),
+            &1,
+            "identity list returns only the live head",
+        )?;
         ensure_equal(&listed[0].id.as_str(), &HEAD, "listed id is the live head")?;
         ensure_equal(
             &listed[0].valid_to.as_deref(),
