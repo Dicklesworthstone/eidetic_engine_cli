@@ -260,7 +260,16 @@ step "the derived mesh node id never becomes a responder principal"
 # files construct legacy ids with it. Only src/ is constrained, and the budget
 # is ONE reference -- the definition itself.
 derived_principal_refs="$(rg -o 'build_peer_origin_node_id' src/ 2>/dev/null | wc -l | tr -d ' ')"
-if [ "${derived_principal_refs:-0}" -le 1 ]; then
+# ANCHOR: the check is meaningless if the subject is gone. At zero references the
+# function has been renamed or deleted and this guard would report PASS forever
+# while nothing constrained the invariant -- a check that cannot fail. Require
+# the definition to exist, so a rename fails here and whoever renamed it updates
+# the guard deliberately.
+derived_principal_defined="$(rg -c '^pub fn build_peer_origin_node_id' src/mesh/peer.rs 2>/dev/null || printf '0')"
+if [ "${derived_principal_defined:-0}" -eq 0 ]; then
+    e2e_log_assert_eq "0" "1" "derived mesh node id has no production caller"
+    _harness_fail "derived mesh node id has no production caller: build_peer_origin_node_id is no longer defined in src/mesh/peer.rs, so this guard has nothing to constrain. If it was renamed, point the guard at the new name; if it was deleted, delete the guard with it."
+elif [ "${derived_principal_refs:-0}" -eq 1 ]; then
     e2e_log_assert_eq "$derived_principal_refs" "1" \
         "derived mesh node id has no production caller"
     _harness_pass "derived mesh node id has no production caller"
@@ -333,7 +342,14 @@ for suite in sorted(glob.glob("tests/suites/integration_*.rs")):
 print("\n".join(offenders))
 PYEOF
 )"
-if [ -z "$shard_property_load" ]; then
+# ANCHOR: the scan globs tests/suites/integration_*.rs. If that stops matching --
+# a rename, a move, a restructure -- it inspects nothing and reports clean. Six
+# shards exist; a floor of four catches the discovery breaking.
+shard_population="$(ls tests/suites/integration_*.rs 2>/dev/null | wc -l | tr -d ' ')"
+if [ "${shard_population:-0}" -lt 4 ]; then
+    e2e_log_assert_eq "$shard_population" ">=4" "integration shards carry no property-test load"
+    _harness_fail "integration shards carry no property-test load: only ${shard_population} tests/suites/integration_*.rs files found, so the scan has no population and cannot fail. The suites were probably renamed or moved; repoint the guard."
+elif [ -z "$shard_property_load" ]; then
     e2e_log_assert_eq "0" "0" "integration shards carry no property-test load"
     _harness_pass "integration shards carry no property-test load"
 else
@@ -373,7 +389,14 @@ for path in sorted(glob.glob("src/**/*.rs", recursive=True)):
 sys.stdout.write("\n".join(offenders))
 PYEOF
 )"
-if [ -z "$redactor_private_lists" ]; then
+# ANCHOR: if nothing emits [REDACTED_PATH] the scan has no population and would
+# report clean forever. Twenty-one redactors used it when this guard was written;
+# a floor of ten catches a placeholder rename without being brittle.
+redactor_population="$(rg -l 'REDACTED_PATH' src/ 2>/dev/null | wc -l | tr -d ' ')"
+if [ "${redactor_population:-0}" -lt 10 ]; then
+    e2e_log_assert_eq "$redactor_population" ">=10" "path redactors share one prefix set"
+    _harness_fail "path redactors share one prefix set: only ${redactor_population} files under src/ mention REDACTED_PATH, so this scan has lost its population and cannot fail. The placeholder was probably renamed; repoint the guard."
+elif [ -z "$redactor_private_lists" ]; then
     e2e_log_assert_eq "0" "0" "path redactors share one prefix set"
     _harness_pass "path redactors share one prefix set"
 else
@@ -650,29 +673,56 @@ READERS = (
     "list_all_tags_valid_at",
     "get_tag_counts_valid_at",
 )
+BARE = re.compile(r"to_rfc3339\s*\(\s*\)")
+
+
+def has_bare(fragment):
+    """True when `fragment` calls to_rfc3339() rather than to_rfc3339_opts(..)."""
+    for hit in BARE.finditer(fragment):
+        if not fragment[max(0, hit.start() - 5) : hit.start()].endswith("_opts"):
+            return True
+    return False
+
+
 offenders = []
 for path in sorted(glob.glob("src/**/*.rs", recursive=True)):
     text = io.open(path, encoding="utf-8", errors="replace").read()
-    lines = text.splitlines()
+    # Strip line comments BEFORE scanning. The fixed call sites carry a comment
+    # explaining the old defect, and that prose contains the literal
+    # `to_rfc3339()` -- matching it would fail the run on correct code and invite
+    # someone to delete the explanation to get green.
+    lines = [re.sub(r"//.*$", "", raw) for raw in text.splitlines()]
+
+    # Variables bound to a bare to_rfc3339(). The defect ships in TWO shapes and
+    # an earlier version of this guard only caught one: resume.rs passed
+    # `&now.to_rfc3339()` inline, but context.rs bound
+    # `let reference_time_text = reference_time.to_rfc3339();` NINE lines above
+    # its call. A forward-only window missed it entirely -- the guard would have
+    # passed the very defect it was written for.
+    tainted = {
+        match.group(1)
+        for offset, raw in enumerate(lines)
+        for match in [re.match(r"\s*let\s+(?:mut\s+)?(\w+)\s*=\s*(.+);\s*$", raw)]
+        if match and has_bare(match.group(2))
+    }
+
     for index, line in enumerate(lines):
         if not any(reader in line for reader in READERS):
             continue
         if "fn " in line:  # the definition, not a call
             continue
-        # Strip line comments BEFORE scanning. The fixed call sites carry a
-        # comment explaining the old defect, and that prose contains the literal
-        # `to_rfc3339()` -- matching it would fail the run on correct code and
-        # invite someone to delete the explanation to get green.
-        window = " ".join(
-            re.sub(r"//.*$", "", lines[offset]) for offset in range(index, min(index + 8, len(lines)))
-        )
-        # a bare to_rfc3339() is the defect; to_rfc3339_opts(...) is the canon
-        for bare in re.finditer(r"to_rfc3339\s*\(\s*\)", window):
-            before = window[max(0, bare.start() - 5) : bare.start()]
-            if before.endswith("_opts"):
-                continue
-            offenders.append(f"{path}:{index + 1} passes a bare to_rfc3339() as a validity bound")
-            break
+        window = " ".join(lines[index : min(index + 8, len(lines))])
+        if has_bare(window):
+            offenders.append(
+                f"{path}:{index + 1} passes a bare to_rfc3339() as a validity bound"
+            )
+            continue
+        for name in sorted(tainted):
+            if re.search(rf"\b{re.escape(name)}\b", window):
+                offenders.append(
+                    f"{path}:{index + 1} passes `{name}`, bound from a bare to_rfc3339(), as a validity bound"
+                )
+                break
 sys.stdout.write("\n".join(sorted(set(offenders))))
 PYEOF
 )"
