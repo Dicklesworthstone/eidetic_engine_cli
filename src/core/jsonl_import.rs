@@ -3187,10 +3187,23 @@ mod tests {
             (0.75, 0.5, false, 7),
             "link scores and evidence",
         )?;
+        // The archive spells this `...Z`; import re-emits it in OFFSET form,
+        // because `memory_links.created_at` is a ROW column normalized by
+        // `normalize_row_timestamp` (plain `to_rfc3339()`). 7eb4af125 extended
+        // that normalization to the link path -- the sweep in 1f9f57923 had
+        // stopped at PreparedMemory -- and this expectation was not moved with
+        // it, so the assertion has pinned the pre-fix spelling ever since.
+        //
+        // Do NOT "fix" this back to `Z`. `memory_links.created_at` is indexed
+        // (idx_memory_links_created) and ordered on, and the hazard bd-o22r0
+        // closed is MIXING spellings inside one ordered column: `Z` (0x5A)
+        // sorts above `+` (0x2B), so a row at the same instant reads as newer
+        // than its sibling. `last_reinforced_at` below stays `Z` because it is
+        // a raw passthrough, not a normalized row column.
         ensure(
             stored.created_at.as_str(),
-            "2026-04-30T00:00:01Z",
-            "original timestamp",
+            "2026-04-30T00:00:01+00:00",
+            "original timestamp in the ROW offset spelling, not the archive's Z",
         )?;
         ensure(
             stored.last_reinforced_at.as_deref(),
