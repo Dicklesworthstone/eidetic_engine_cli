@@ -1252,3 +1252,140 @@ fn agent_docs_match_normal_non_benchmark_test_gate() {
         "AGENTS.md should point benchmark verification at the explicit benchmark gate"
     );
 }
+
+/// Runs the REAL ruby-availability call sites with the REAL `record_gated_off`.
+///
+/// `RUBY_MISSING` is the status the stubbed `command -v ruby` returns, so both
+/// hosts can be exercised from either host. `run_stage` is stubbed to record an
+/// ATTEMPT rather than to run anything: what is under test is which of the three
+/// buckets a ruby-less host lands in, not what the ruby scripts do.
+///
+/// Extracts the `if command -v ruby ...; then ... fi` blocks verbatim rather
+/// than restating them, so a regression that reverted the call sites to the old
+/// `run_stage "..." "ruby_gate_or_skip ..."` wrapper shape is caught here.
+fn ruby_gate_accounting(ruby_missing: bool) -> (String, i32) {
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"
+set -uo pipefail
+STAGE_RESULTS=""
+STAGE_PASSED=0
+STAGE_GATED_OFF=0
+STAGE_GATED_OFF_NAMES=""
+command() {
+    if [ "$1" = "-v" ] && [ "$2" = "ruby" ]; then
+        return "$RUBY_MISSING"
+    fi
+    builtin command "$@"
+}
+run_stage() {
+    STAGE_PASSED=$((STAGE_PASSED + 1))
+    STAGE_RESULTS="${STAGE_RESULTS}ATTEMPTED ${1}\n"
+}
+eval "$(awk '/^record_gated_off\(\) /,/^}/' "$VERIFY_SCRIPT")"
+eval "$(awk '/^if command -v ruby >\/dev\/null 2>&1; then$/,/^fi$/' "$VERIFY_SCRIPT")"
+printf 'passed=%s gated_off=%s\n' "$STAGE_PASSED" "$STAGE_GATED_OFF"
+printf '%b' "$STAGE_GATED_OFF_NAMES"
+printf '%b' "$STAGE_RESULTS"
+"#,
+        )
+        .env("VERIFY_SCRIPT", verify_script_path())
+        .env("RUBY_MISSING", if ruby_missing { "1" } else { "0" })
+        .current_dir(project_root())
+        .output()
+        .expect("run the ruby-availability call sites");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    (stdout, output.status.code().unwrap_or(-1))
+}
+
+const RUBY_PROOF_LANE_STAGES: [&str; 3] = [
+    "CI Proof-Lane Snapshot Contract",
+    "CI Proof-Lane Hygiene Contract",
+    "CI Proof-Lane Hygiene Advisory",
+];
+
+/// A ruby-less host must report the three CI Proof-Lane stages as NOT ATTEMPTED.
+///
+/// Regression test for bd-ruby-gate-skip-counts-as-passed-jb56c. The wrapper it
+/// replaced returned 0 from inside `run_stage` when ruby was absent, so a stage
+/// that never executed was counted in STAGE_PASSED and appeared in the banner as
+/// one of the "attempted stages passed".
+///
+/// Control, measured against the pre-fix call sites
+/// (`git show fe287b0a6^:scripts/verify.sh`) with the same ruby-less stub:
+/// `passed=3 gated_off=0`, all three reported PASS. After the fix:
+/// `passed=0 gated_off=3`, each named with its reason.
+#[test]
+fn a_ruby_less_host_gates_the_proof_lane_stages_off_instead_of_passing_them() {
+    let (stdout, code) = ruby_gate_accounting(true);
+    assert_eq!(code, 0, "the call sites must not error:\n{stdout}");
+    assert!(
+        stdout.contains("passed=0"),
+        "a stage that never ran must not be counted in STAGE_PASSED:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("gated_off=3"),
+        "all three CI Proof-Lane stages must land in the gated-off bucket:\n{stdout}"
+    );
+    for stage in RUBY_PROOF_LANE_STAGES {
+        assert!(
+            stdout.contains(&format!("- {stage} (ruby unavailable on this host)")),
+            "the banner must NAME {stage} and say why it did not run:\n{stdout}"
+        );
+    }
+}
+
+/// The paired positive: a ruby-capable host must still attempt all three.
+///
+/// Without it, deleting the call sites outright would satisfy the test above.
+#[test]
+fn a_ruby_capable_host_still_attempts_the_proof_lane_stages() {
+    let (stdout, code) = ruby_gate_accounting(false);
+    assert_eq!(code, 0, "the call sites must not error:\n{stdout}");
+    assert!(
+        stdout.contains("passed=3") && stdout.contains("gated_off=0"),
+        "ruby being present must attempt every proof-lane stage:\n{stdout}"
+    );
+    for stage in RUBY_PROOF_LANE_STAGES {
+        assert!(
+            stdout.contains(&format!("ATTEMPTED {stage}")),
+            "{stage} must be attempted when ruby is available:\n{stdout}"
+        );
+    }
+}
+
+/// The repaired shape must stay repaired.
+///
+/// `ruby_gate_or_skip` could not be fixed in place: `run_stage` runs its command
+/// in a pipeline, therefore a subshell, so a wrapper calling `record_gated_off`
+/// from inside the command would have its counter increments discarded. The
+/// decision has to be made BEFORE `run_stage` is entered. Reintroducing any
+/// wrapper that decides availability inside the staged command would silently
+/// restore the defect, so pin the absence by name and pin the three call sites
+/// to the guarded form.
+#[test]
+fn no_stage_wrapper_decides_availability_inside_run_stage() {
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let offenders: Vec<&str> = script
+        .lines()
+        .filter(|line| line.trim_start().starts_with("run_stage "))
+        .filter(|line| line.contains("_or_skip"))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "a stage command that decides its own availability is counted as PASSED \
+         when it declines to run; decide before run_stage instead. Offending \
+         call sites:\n{}",
+        offenders.join("\n")
+    );
+
+    for stage in RUBY_PROOF_LANE_STAGES {
+        assert!(
+            script.contains(&format!(
+                "record_gated_off \"{stage}\" \"ruby unavailable on this host\""
+            )),
+            "{stage} must route a ruby-less host through record_gated_off"
+        );
+    }
+}
