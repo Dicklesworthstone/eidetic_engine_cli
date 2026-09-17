@@ -684,6 +684,44 @@ fn pack_text_matches_markdown_with_a_non_affecting_signal() -> TestResult {
 }
 
 #[test]
+fn every_context_format_applies_the_same_degradation_filter() -> TestResult {
+    // tests/renderer_parity_matrix.rs declares data.degraded[] must appear in
+    // six formats, but its fixture uses an AFFECTING code, so it cannot catch a
+    // format that applies a DIFFERENT filter -- the same blind spot that let
+    // markdown and pack.text diverge behind a fixture with no degradations.
+    //
+    // human and jsonl read response.data.degraded directly while json,
+    // markdown, hook and toon filter by category. So `ee context --format
+    // human` listed a signal `--json` dropped, and `--format jsonl` counted it
+    // in degradedCount -- two different answers about one pack.
+    let response = non_affecting_degradation_fixture();
+
+    // Vacuity guard: the fixture must actually carry the signal, or this test
+    // passes without exercising anything.
+    if response.data.degraded.is_empty() {
+        return Err("fixture must carry a degradation to exercise the filter".to_string());
+    }
+
+    for (name, rendered) in render_all_context_formats(&response) {
+        if rendered.contains("graph_snapshot_stale") {
+            return Err(format!(
+                "format `{name}` shows a non-affecting signal that every other format drops:\n{rendered}"
+            ));
+        }
+    }
+
+    // jsonl emits only a COUNT, never the code, so the substring sweep above
+    // cannot see it. Its footer must agree with data.degraded[].
+    let jsonl = render_context_response_jsonl(&response);
+    if !jsonl.contains("\"degradedCount\":0") {
+        return Err(format!(
+            "jsonl degradedCount must match the filtered data.degraded[] (expected 0):\n{jsonl}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn markdown_render_honours_the_same_degradation_filter_as_the_json_envelope() -> TestResult {
     // Pairs with the test above: parity alone is satisfiable by BOTH renderers
     // being wrong together. This pins the direction bd-2v6r0 settled -- the

@@ -3386,8 +3386,18 @@ pub fn render_context_response_human(response: &ContextResponse) -> String {
         response.data.embed_backend.as_str()
     ));
 
-    let advisory_banner =
-        context_advisory_banner_with_aggregated_degraded(response, response.data.degraded.iter());
+    // Same default filter as json, markdown, hook and toon: a per-response
+    // surface shows the signals that affected THIS response. Build-time gaps
+    // and workspace-state conditions surface via `ee status` or an explicit
+    // --include-non-affecting-degradations.
+    let advisory_banner = context_advisory_banner_with_aggregated_degraded(
+        response,
+        response
+            .data
+            .degraded
+            .iter()
+            .filter(|entry| entry.category().included_by_default()),
+    );
     output.push_str(&format!(
         "Advisory: {} — {}\n\n",
         advisory_banner.status.as_str(),
@@ -3421,7 +3431,13 @@ pub fn render_context_response_human(response: &ContextResponse) -> String {
         }
     }
 
-    let degraded = aggregate_context_degraded(response.data.degraded.iter());
+    let degraded = aggregate_context_degraded(
+        response
+            .data
+            .degraded
+            .iter()
+            .filter(|entry| entry.category().included_by_default()),
+    );
     if !degraded.is_empty() {
         output.push_str("\nDegraded:\n");
         for d in &degraded {
@@ -3491,7 +3507,16 @@ pub fn render_context_response_jsonl(response: &ContextResponse) -> String {
         "skippedTotal",
         &response.data.pack.skipped_total().to_string(),
     );
-    let degraded = aggregate_context_degraded(response.data.degraded.iter());
+    // `degradedCount` must count the same set `--json` puts in `data.degraded[]`,
+    // or a streaming consumer correlating the two gets different numbers for one
+    // pack.
+    let degraded = aggregate_context_degraded(
+        response
+            .data
+            .degraded
+            .iter()
+            .filter(|entry| entry.category().included_by_default()),
+    );
     footer.field_raw("degradedCount", &degraded.len().to_string());
     lines.push(footer.finish());
 
