@@ -1518,7 +1518,7 @@ close_reason_contains_abstention() {
                 -e 's/degraded_codes?(:?[[:space:]]+(none|\[\]|empty))?//Ig' \
                 -e 's/[a-z][a-z0-9_]*_unavailable//Ig' \
                 -e 's/(PLACEHOLDER_[A-Z0-9_]+|[A-Z0-9_]+_PLACEHOLDER[A-Z0-9_]*)//g' \
-                -e 's/\bno[[:space:]]+placeholders?\b//Ig' \
+                -e 's/(^|[^[:alnum:]_])no[[:space:]]+placeholders?([^[:alnum:]_]|$)/\1\2/Ig' \
                 -e 's/placeholders?[[:space:]]+((backed[- ]?)?(section|mechanism|item|entry|entries|impl|implementation)s?[[:space:]]+)?(retired|removed|deleted|replaced|eliminated|dropped|gone)//Ig' \
                 -e 's/(retired|removed|deleted|replaced|eliminated|dropped)[[:space:]]+(the[[:space:]]+)?placeholders?//Ig'
     )

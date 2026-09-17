@@ -1382,3 +1382,68 @@ fn closure_lint_reports_a_wholly_stale_baseline_on_a_clean_tree() -> TestResult 
         format!("the stale entry must be named\nstderr:\n{stderr}"),
     )
 }
+
+/// The abstention scrubber must behave identically on BSD and GNU sed.
+///
+/// `closure_lint_scrubs_abstention_false_positives` above already covers this
+/// phrase, but its fixture piles EVERY documented false-positive trigger into
+/// one close_reason, so a regression in any single scrub is masked by the
+/// others. This fixture isolates one: "no placeholder mechanism remains" is the
+/// only scrubbable phrase in it, so the assertion can only pass if that
+/// particular substitution works on the host running the test.
+///
+/// Why this exists: the scrub was written as `s/\bno[[:space:]]+placeholders?\b//Ig`.
+/// `\b` is a GNU extension, not POSIX ERE. Measured 2026-09-17 on the same
+/// input:
+///     BSD sed (macOS)  "X no placeholder mechanism remains Y" -> unchanged
+///     GNU sed (Linux)  same input                             -> "X  mechanism remains Y"
+/// So the linter reached OPPOSITE verdicts on the two platforms for identical
+/// bead data: green on macOS with the violation baselined, and exit 3 on hosted
+/// CI reporting that same baseline entry as stale. Replaced with an explicit
+/// `(^|[^[:alnum:]_]) ... ([^[:alnum:]_]|$)` boundary, which both seds agree on.
+#[test]
+fn closure_lint_abstention_scrub_is_portable_across_sed_dialects() -> TestResult {
+    let temp = closure_lint_worker_local_tempdir("closure-lint-scrub-portable-")?;
+    write_workspace(
+        temp.path(),
+        &[
+            // The ONLY abstention-shaped text here is the negation "no
+            // placeholder mechanism remains". Nothing else in this close_reason
+            // can scrub it clean, so a non-portable boundary fails outright.
+            r#"{"id":"closed-negated-placeholder","title":"[implements-surface:negated-surface] real implementation","status":"closed","close_reason":"Implemented against persisted evidence; no placeholder mechanism remains.","labels":["implements-surface:negated-surface"]}"#,
+            // Paired positive: a genuine abstention must still be caught, so a
+            // scrub that deleted the whole rule cannot pass this test.
+            r#"{"id":"closed-genuine-abstention","title":"[implements-surface:genuine-surface] closed with stub language","status":"closed","close_reason":"closed with a stub placeholder","labels":["implements-surface:genuine-surface"]}"#,
+        ],
+        "",
+        &["negated-surface", "genuine-surface"],
+    )?;
+
+    let (output, report) = run_linter(temp.path())?;
+    let abstention: Vec<_> = violation_keys(&report)?
+        .into_iter()
+        .filter(|(_, _, reason)| reason == "close_reason contains abstention language")
+        .collect();
+
+    ensure(
+        !abstention
+            .iter()
+            .any(|(bead, _, _)| bead == "closed-negated-placeholder"),
+        format!(
+            "\"no placeholder mechanism remains\" is a NEGATION and must not read as an \
+             abstention. If this fails on macOS and passes on Linux, the scrub has \
+             regressed to a GNU-only \\b boundary.\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(
+        abstention.len(),
+        1,
+        "exactly the genuine abstention should be flagged",
+    )?;
+    ensure_eq(
+        abstention[0].0.as_str(),
+        "closed-genuine-abstention",
+        "the genuine abstention must be the one flagged",
+    )
+}
