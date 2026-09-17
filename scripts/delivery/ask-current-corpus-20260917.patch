@@ -1,0 +1,81 @@
+diff --git a/src/core/ask.rs b/src/core/ask.rs
+--- a/src/core/ask.rs
++++ b/src/core/ask.rs
+@@ -24,4 +24,9 @@
+ pub use store::load_scoped_contradictions;
++
++#[path = "ask_corpus.rs"]
++mod corpus;
++
++pub use corpus::{AskCorpus, load_current_ask_corpus};
+ 
+ #[path = "ask_candidates.rs"]
+ mod selection;
+diff --git a/src/cli/mod.rs b/src/cli/mod.rs
+--- a/src/cli/mod.rs
++++ b/src/cli/mod.rs
+@@ -50891,42 +50891,16 @@
+     };
+ 
+-    // Fetch non-tombstoned memories for this workspace
+-    let stored = match connection.list_memories(&workspace_id, None, false) {
+-        Ok(mems) => mems,
+-        Err(e) => {
+-            let error = DomainError::Storage {
+-                message: format!("Failed to list memories: {e}"),
+-                repair: Some("ee doctor --json".to_owned()),
+-            };
+-            return write_domain_error(&error, cli.renderer(), stdout, stderr);
+-        }
++    // Resolve temporal eligibility before scoring, hints, and contradiction lookup.
++    let corpus = match crate::core::ask::load_current_ask_corpus(
++        &connection,
++        &workspace_id,
++        chrono::Utc::now(),
++    ) {
++        Ok(corpus) => corpus,
++        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+     };
+-
+-    let candidate_ids: Vec<_> = stored.iter().map(|memory| memory.id.as_str()).collect();
+-    let contradictions =
+-        match crate::core::ask::load_scoped_contradictions(&connection, &candidate_ids) {
+-            Ok(links) => links,
+-            Err(error) => {
+-                return write_domain_error(&error, cli.renderer(), stdout, stderr);
+-            }
+-        };
+-
+-    let candidates: Vec<crate::core::ask::AskCandidate> = stored
+-        .into_iter()
+-        .map(|m| {
+-            let team_provenance = crate::core::memory_scope::team_provenance_from_memory(&m);
+-            crate::core::ask::AskCandidate {
+-                memory_id: m.id,
+-                content: m.content,
+-                confidence: m.confidence,
+-                trust_class: m.trust_class,
+-                provenance_uri: m.provenance_uri,
+-                level: m.level,
+-                kind: m.kind,
+-                team_provenance,
+-            }
+-        })
+-        .collect();
++    let candidates = corpus.candidates;
++    let contradictions = corpus.contradictions;
+ 
+     let request = AskRequest {
+         question: question.clone(),
+diff --git a/tests/contracts/audit_event_coverage.rs b/tests/contracts/audit_event_coverage.rs
+--- a/tests/contracts/audit_event_coverage.rs
++++ b/tests/contracts/audit_event_coverage.rs
+@@ -24,5 +24,8 @@
+ #[path = "ask_large_corpus.rs"]
+ mod ask_large_corpus;
++
++#[path = "ask_lifecycle.rs"]
++mod ask_lifecycle;
+ 
+ use std::path::PathBuf;
+ 
