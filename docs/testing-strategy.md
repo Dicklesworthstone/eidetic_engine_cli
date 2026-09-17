@@ -949,6 +949,17 @@ The script runs gates in order (forbidden-deps → cargo test → E2E suites),
 reports per-gate exit codes and durations, and lists artifact directories
 written by the E2E harnesses. See `./scripts/verify.sh --help` for details.
 
+Hosted GitHub Actions is split on purpose (`bd-o7wh0`). `.github/workflows/ci.yml`,
+`release.yml`, and `macos-ee-artifact.yml` remain `disabled_manually`; enabling
+`ci.yml` on `push: main` during a swarm would queue 90-minute cargo shards
+against a predicted-red tree. The hosted executing gate for cargo-free
+invariants is `.github/workflows/ci-static.yml` (`CI Static`): forbidden-deps,
+migration-registry, closure-lint, vision-coverage, MCP lib-test vacuity guard,
+contract-drift-radar, and `cargo fmt --check`. A green `CI Static` run is not
+"CI restored." Cargo tests and clippy stay on the pinned RCH lane
+(`scripts/rch_verify.sh`). Dispatch a `CI Static` scratch run when you need a
+hosted proof that will not be cancelled by the next push to `main`.
+
 ## Discovery Rules For Future Agents
 
 Future agents should be able to find the right tests with predictable searches:
