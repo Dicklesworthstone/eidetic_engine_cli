@@ -1029,6 +1029,62 @@ pub fn record_ask_query_miss_best_effort(
     }
 }
 
+/// Record that `ee ask` retrieved these memories in order to answer.
+///
+/// bd-b9dmp. `ee ask` reads the store directly (the handler builds candidates
+/// with `list_memories`), so it never produced the audit row that
+/// `memory_debt`'s read signal is built from. A memory cited as the answer to a
+/// question every day still accrued `never_retrieved` debt and was surfaced for
+/// `ee curate disposition` review -- a recommendation to discard a memory good
+/// enough to be the cited answer.
+///
+/// Only CITED memories are recorded, never the scanned corpus. `ask` scans
+/// broadly, and recording the scan would mark every memory retrieved on every
+/// question -- the same inflation removed from the auto_link probe (d1092fec7)
+/// and the daemon warm-up (ae9a8a244). The row targets the memory, which is what
+/// `memory_debt.rs:883` ingests, and carries only the hashed query.
+pub fn record_ask_retrieval_best_effort(
+    connection: &DbConnection,
+    workspace_id: &str,
+    report: &AskReport,
+) {
+    if report.abstained || report.citations.is_empty() {
+        return;
+    }
+    let query_hash = audit_query_hash(&report.question);
+    let mut recorded: BTreeSet<&str> = BTreeSet::new();
+    for citation in &report.citations {
+        // One row per memory, not per claim: a memory cited by three claims was
+        // retrieved once, and counting it thrice would skew the read signal.
+        if !recorded.insert(citation.memory_id.as_str()) {
+            continue;
+        }
+        let audit_id = generate_audit_id();
+        let details = serde_json::json!({
+            "queryHash": &query_hash,
+            "rank": citation.index as u32,
+            "source": ASK_QUERY_MISS_ORIGIN,
+            "trustClass": &citation.trust_class,
+        })
+        .to_string();
+        let input = CreateAuditInput {
+            workspace_id: Some(workspace_id.to_owned()),
+            actor: None,
+            action: audit_actions::SEARCH_RETURNED_MEM.to_owned(),
+            target_type: Some("memory".to_owned()),
+            target_id: Some(citation.memory_id.clone()),
+            details: Some(details),
+        };
+        if let Err(error) = connection.insert_audit(&audit_id, &input) {
+            tracing::warn!(
+                target: "ee::core::ask::audit",
+                error = %error,
+                "best-effort ask retrieval audit append failed"
+            );
+        }
+    }
+}
+
 fn ask_query_miss_audit_details(query_hash: &str, report: &AskReport, reason: &str) -> String {
     let nearest_count = report.nearest_evidence.as_ref().map_or(0, Vec::len);
     serde_json::json!({

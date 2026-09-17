@@ -50793,7 +50793,8 @@ where
 {
     use crate::core::ask::{
         ASK_MAX_EVIDENCE_DEFAULT, ASK_MIN_CONFIDENCE_DEFAULT, AskDegradedEntry, AskRequest,
-        ask_data_json, evaluate_ask, record_ask_query_miss_best_effort, render_ask_markdown,
+        ask_data_json, evaluate_ask, record_ask_query_miss_best_effort,
+        record_ask_retrieval_best_effort, render_ask_markdown,
     };
 
     // Resolve question from positional arg or --stdin
@@ -50929,6 +50930,10 @@ where
 
     let report = evaluate_ask(&request, &candidates);
     record_ask_query_miss_best_effort(&connection, &workspace_id, &report);
+    // bd-b9dmp. The miss row above feeds ADR 0071's demand half. This feeds the
+    // retrieval half, which ask fed nothing to: memories it cited as the answer
+    // read as never_retrieved and were surfaced for disposition review.
+    record_ask_retrieval_best_effort(&connection, &workspace_id, &report);
 
     // Build degradation entries
     let mut degraded: Vec<serde_json::Value> = Vec::new();
