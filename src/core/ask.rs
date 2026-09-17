@@ -18,6 +18,9 @@ use crate::obs::audit_events::query_hash as audit_query_hash;
 #[path = "ask_retrieval.rs"]
 mod retrieval;
 
+#[path = "ask_candidates.rs"]
+mod selection;
+
 // ─── schema constants ───────────────────────────────────────────────────────
 
 /// Response data schema identifier carried under `ee.response.v2 data.answer`.
@@ -32,7 +35,7 @@ pub const ASK_MIN_CONFIDENCE_DEFAULT: f32 = 0.55;
 /// Default maximum number of evidence spans to emit in the answer (ADR §3).
 pub const ASK_MAX_EVIDENCE_DEFAULT: usize = 3;
 
-/// Defensive ceiling on memories scanned per invocation.
+/// Defensive ceiling on distinct memories admitted to span clustering.
 pub const ASK_CANDIDATE_SCAN_CAP: usize = 512;
 
 /// Retention horizon for ask miss audit rows, aligned with search miss demand.
@@ -636,14 +639,9 @@ fn explicit_conflict(
     let mut links: Vec<_> = request
         .contradictions
         .iter()
-        .filter(|link| {
-            matches!(link.source.as_str(), "human" | "agent")
-                && link.confidence.is_finite()
-                && (request.min_confidence..=1.0).contains(&link.confidence)
-                && link.src_memory_id != link.dst_memory_id
-        })
+        .filter(|link| selection::eligible_link(request, link))
         .collect();
-    links.sort_by(|a, b| a.id.cmp(&b.id));
+    links.sort_by(|a, b| selection::compare_links(a, b));
     for anchor in ranked_spans.iter().take(1) {
         if anchor.score < request.min_confidence {
             break;
@@ -663,17 +661,15 @@ fn explicit_conflict(
             };
             let anchor_trust = anchor.memory_confidence * trust_tilt(&anchor.trust_class);
             let other_trust = other.memory_confidence * trust_tilt(&other.trust_class);
-            if !anchor_trust.is_finite() || !other_trust.is_finite() {
+            let Some(evidence_score) = selection::conflict_score(
+                anchor.score,
+                anchor_trust,
+                other_trust,
+                link.confidence,
+                request.min_confidence,
+            ) else {
                 continue;
-            }
-            let evidence_score = anchor
-                .score
-                .min(link.confidence)
-                .min(anchor_trust)
-                .min(other_trust);
-            if evidence_score < request.min_confidence {
-                continue;
-            }
+            };
             let mut opposing = (*other).clone();
             opposing.score = evidence_score;
             return Some(((*link).clone(), vec![anchor.clone(), opposing]));
@@ -783,7 +779,19 @@ mod answer_integrity_tests;
 pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskReport {
     let question_terms = tokenize_for_ask(&request.question);
     let max_n = request.max_evidence.max(1);
-    let candidates = &candidates[..candidates.len().min(ASK_CANDIDATE_SCAN_CAP)];
+    // Validate the full scoped input and rank before applying the clustering
+    // budget. A caller's database order must not decide whether an answer exists.
+    let candidates_scanned = candidates.len();
+    let selected_candidates = match selection::select_candidates(
+        request,
+        &question_terms,
+        candidates,
+        ASK_CANDIDATE_SCAN_CAP,
+    ) {
+        Ok(selected) => selected,
+        Err(_) => return extractiveness_failure_report(request, candidates_scanned),
+    };
+    let candidates = selected_candidates.as_slice();
 
     // Build a content lookup map (memory_id → content) for the extractiveness check.
     let content_map: std::collections::HashMap<&str, &str> = candidates
@@ -911,7 +919,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
             conflict_detected,
             conflict_link: None,
             extractiveness_violated: false,
-            candidates_scanned: candidates.len(),
+            candidates_scanned,
         };
     }
 
@@ -967,7 +975,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
             compose_side(&negating, second_label),
         ) {
             (Ok(first), Ok(second)) => vec![first, second],
-            _ => return extractiveness_failure_report(request, candidates.len()),
+            _ => return extractiveness_failure_report(request, candidates_scanned),
         };
 
         return AskReport {
@@ -984,7 +992,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
             conflict_detected: true,
             conflict_link,
             extractiveness_violated: false,
-            candidates_scanned: candidates.len(),
+            candidates_scanned,
         };
     }
 
@@ -1004,9 +1012,9 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
             conflict_detected: false,
             conflict_link: None,
             extractiveness_violated: false,
-            candidates_scanned: candidates.len(),
+            candidates_scanned,
         },
-        Err(_reason) => extractiveness_failure_report(request, candidates.len()),
+        Err(_reason) => extractiveness_failure_report(request, candidates_scanned),
     }
 }
 
