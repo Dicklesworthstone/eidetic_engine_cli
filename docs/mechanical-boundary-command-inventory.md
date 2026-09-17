@@ -11,8 +11,8 @@ commands start at `src/cli/mod.rs:253`, and diagnostic command-path extraction i
 at `src/cli/mod.rs:3778`; it is not counted as a command path.
 
 **Scope, measured rather than asserted (bd-...-igo3a).** The command-path
-extractor returns **453** paths. This document currently covers **268** of
-them; **185** are absent. It previously claimed to cover "the 204 stable
+extractor returns **453** paths. This document currently covers **280** of
+them; **173** are absent. It previously claimed to cover "the 204 stable
 command paths returned by the command-path extractor" — a number typed on
 2026-05-19 that was never re-measured, and which its own Full Command
 Inventory table never matched (that table lists 196 paths, not 204). Both
@@ -36,8 +36,8 @@ E2E audit record for this inventory:
 
 - Command source: `src/cli/mod.rs`
 - CLI command paths returned by the extractor: 453
-- Documented in a table row here: 268
-- Absent: 185
+- Documented in a table row here: 280
+- Absent: 173
 - Unmapped command count: 0
 - Matrix enforcement floor: 24
 - Stdout/stderr contract: this file is static documentation; the companion test only reads source
@@ -54,7 +54,7 @@ number covers both will over-trust the gate.
 
 | tier | what it requires | mechanism | covers |
 | --- | --- | --- | --- |
-| coverage | the path appears, backticked, in some **table row** of this file | `mechanical_boundary_inventory_covers_all_cli_command_paths` | 268 of 453 |
+| coverage | the path appears, backticked, in some **table row** of this file | `mechanical_boundary_inventory_covers_all_cli_command_paths` | 280 of 453 |
 | content | the path appears, backticked, in a **Command Boundary Matrix row** — the twelve columns | the three `command_boundary_matrix_*` assertions | 24 of 453 |
 
 Only the content tier checks a side-effect class, a runtime posture, a degraded
@@ -69,8 +69,8 @@ take a deliberate edit, and the live count moving up on its own must not red the
 build.
 
 The floor exists because of a specific way this document can be repaired
-wrongly. The coverage tier is failing today (185 paths absent). Pasting those
-185 into the Full Command Inventory turns coverage green while content
+wrongly. The coverage tier is failing today (173 paths absent). Pasting those
+173 into the Full Command Inventory turns coverage green while content
 enforcement stays at 24 — trading a true red for a false green, with the 94.7%
 gap now invisible because no assertion mentions it. The floor makes the content
 number a maintained, asserted fact rather than an incidental one, so that
@@ -83,12 +83,11 @@ The floor does not answer it; it only stops the question from disappearing.
 
 ## What is still absent (bd-...-igo3a)
 
-185 of the 453 extractor paths have no row here, spread across 60 families.
+173 of the 453 extractor paths have no row here, spread across 58 families.
 Listed so the remaining work is stated in the artifact instead of being
 re-derived from the CLI a fifth time. Counts are absent-paths-per-family:
 
-`team` 35 · `diag` 25 · `mesh` 24 · `hook` 9 · `curate` 7 · `sandbox` 5 ·
-`lab` 3 ·
+`team` 35 · `diag` 25 · `mesh` 24 · `hook` 9 · `lab` 3 ·
 `maintenance` 3 · `migrate` 3 · `perf` 3 · `reflect` 3 · `shadow` 3 ·
 `swarm` 3 · `backup` 2 · `bootstrap` 2 · `cache` 2 ·
 `health` 2 · `lens` 2 · `mcp` 2 · `proof` 2 · `recorder` 2 ·
@@ -104,8 +103,8 @@ contributing one path each (`artifact relocate`, `ask`, `capture suggest`,
 
 Retired from this list on 2026-09-17 (bd-...-igo3a): `attest` 3, `config` 3,
 `conflict` 4, `db` 4, `decide` 3, `journal` 4, then `graph` 4, `handoff` 2,
-`learn` 2, `memory` 6, then `verify` 11 and `verification` 11 — 57 paths,
-twelve whole families, now carrying Full Command Inventory rows. Each disposition was checked against
+`learn` 2, `memory` 6, then `verify` 11 and `verification` 11, `curate` 7 and `sandbox` 5 — 69 paths,
+fourteen whole families, now carrying Full Command Inventory rows. Each disposition was checked against
 the module rather than defaulted: `journal distill` reads as synthesis from its
 name and is not (it proposes by threshold and emits an explicit
 `distill_no_candidates` degradation), and the mock-data scan over all six
@@ -465,6 +464,8 @@ ledger and the command-boundary matrix must gain concrete rows before the new pa
 | `conflict list`, `conflict explain`, `conflict cluster`, `conflict resolve` | `src/cli/mod.rs:14602`, `src/cli/conflict.rs` | Ranked contradicting memory pairs, per-memory explanation, and k-truss + Louvain contradiction clusters over persisted memories. `resolve` performs audited mutations and is dry-run by default. | keep mechanical |
 | `db check-integrity`, `db inspect`, `db migrations`, `db reindex` | `src/cli/mod.rs:13763`, `src/db/mod.rs` | Non-mutating database surfaces: integrity check, single-table row inspection, applied/pending migration listing, and a preview of pending derived-index rebuild work. `reindex` previews rather than rebuilds. | keep mechanical |
 | `decide record`, `decide list`, `decide revisit` | `src/cli/mod.rs:15176`, `src/core/decide.rs` | Typed decision memories with revisit scheduling: record writes a durable decision, list reports current heads with optional superseded history, revisit reports decisions due or inside the warning window. | keep mechanical |
+| `curate auto-promote`, `curate doctor`, `curate propose-derived`, `curate retire`, `curate show`, `curate tombstone`, `curate untombstone` | `src/cli/mod.rs:15028`, `src/core/curate.rs` | The remainder of the review queue beyond the accept/reject/apply row above. `auto-promote` is threshold-driven, not a judgement: it reports its effective thresholds (`CurateAutoPromoteThresholds`, `src/core/curate.rs:1011`) specifically so an operator can audit why a memory was or was not proposed. `doctor` diagnoses memory-debt queues from persisted state. `tombstone` writes an audit record WITHOUT deleting the row, and `untombstone` restores one, both audited. | keep mechanical |
+| `sandbox apply`, `sandbox curate`, `sandbox diff`, `sandbox import`, `sandbox remember` | `src/cli/mod.rs:14603`, `src/cli/sandbox.rs`, `src/core/sandbox.rs` | A proposal overlay over the durable store. Four of the five write NOTHING durable — `remember`, `import` and `curate` propose into the overlay and `diff` shows baseline-vs-overlay. `apply` is the only durable path, and it promotes the session's additive proposals through the normal audited remember route rather than a private write. That split is the boundary worth checking if this family is ever revisited. | keep mechanical |
 | `verify broker lookup`, `verify closeout capsule`, `verify closure-guidance`, `verify ingest`, `verify proofs`, `verify provenance`, `verify rch blockers`, `verify rch ingest`, `verify rch runs`, `verify rch topology-audit`, `verify record` | `src/cli/mod.rs:15310`, `src/models/verification.rs`, `src/core/verify.rs`, `src/core/verify_ledger.rs` | Durable verification-evidence ingestion, proof/provenance ledger reads, closure guidance, and RCH run/blocker/topology reports over persisted records. **This surface is exposed twice** — see the `verification …` row below. | keep mechanical |
 | `verification broker lookup`, `verification closeout capsule`, `verification closure-guidance`, `verification ingest`, `verification proofs`, `verification provenance`, `verification rch blockers`, `verification rch ingest`, `verification rch runs`, `verification rch topology-audit`, `verification record` | `src/cli/mod.rs:15343`, `src/models/verification.rs`, `src/core/verify.rs`, `src/core/verify_ledger.rs` | The SAME surface as `verify …` under a second top-level name: `Verify(VerifyCommand)` and `Verification(VerifyCommand)` (`src/cli/mod.rs:1361-1365`) are two clap variants over one argument type, and both dispatch to the same handlers — `verify record` and `verification record` both call `handle_verification_ingest`. Neither is a clap `alias`, and neither emits the `deprecated_alias` degraded entry that marks `ee context` as the non-canonical spelling of `ee pack`, so nothing tells a consumer which of the two is canonical. 22 of the 453 extractor paths are these 11 commands counted twice. | keep mechanical; resolve the duplicate spelling |
 | `graph centrality`, `graph diff`, `graph snapshot refresh`, `graph suggest-links` | `src/cli/mod.rs:14745`, `src/graph/mod.rs`, `src/core/suggest_links.rs` | Reads of persisted memory-link snapshots: stored centrality scores, add/remove and community deltas between two snapshots, and snapshot refresh. `suggest-links` predicts missing links but is deterministic, not a model: Jaccard over token sets with a blended batch-normalized score in [0, 1] and an explicit `min_score` cut (ADR 0066). | keep mechanical |
