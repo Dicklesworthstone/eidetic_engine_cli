@@ -1497,3 +1497,113 @@ fn the_banner_denominator_covers_every_declared_stage() {
         uncounted.join("\n")
     );
 }
+
+/// The double-quoted runs of a shell line, with `\"` kept as literal text.
+///
+/// `run_stage "<name>" "<command>"` puts the command in the LAST run. Splitting
+/// naively on `"` would cut a command like `"\"${VAR}\" eval run ..."` in half
+/// and hide exactly the pinned form this check must recognise.
+fn shell_quoted_runs(line: &str) -> Vec<String> {
+    let mut runs = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut escaped = false;
+    for ch in line.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => {
+                escaped = true;
+                if in_quote {
+                    current.push(ch);
+                }
+            }
+            '"' if in_quote => {
+                runs.push(std::mem::take(&mut current));
+                in_quote = false;
+            }
+            '"' => in_quote = true,
+            _ => {
+                if in_quote {
+                    current.push(ch);
+                }
+            }
+        }
+    }
+    runs
+}
+
+/// The executable a staged command would run, with leading `NAME=value`
+/// environment assignments stripped the way the shell strips them.
+fn staged_command_head(command: &str) -> Option<String> {
+    let mut tokens = command.split_whitespace();
+    for token in tokens.by_ref() {
+        let is_env_assignment = token.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+        if !is_env_assignment {
+            return Some(token.to_owned());
+        }
+    }
+    None
+}
+
+/// No verify.sh stage may resolve the BINARY UNDER TEST through PATH.
+///
+/// Regression test for bd-smxdr. Gate 8.76 used to read
+///
+///     run_stage "Ask Eval Quality Gate (bd-169v0.4)" "ee eval run ask_v1 --json"
+///
+/// and `run_stage` executes its command with `eval`, so a bare `ee` resolved
+/// through PATH. On the machine where this was found, `command -v ee` was a
+/// 25-day-old installed build with no relationship to the tree being verified:
+/// the gate graded some other `ee` and reported PASS for this one.
+///
+/// The distinction this asserts is narrow on purpose. `cargo` and `python3` are
+/// also PATH-resolved by other stages and that is CORRECT -- they are tools.
+/// `ee` is the artifact under test, and grading an artifact with a different
+/// copy of itself is the defect. So only `ee` is named here.
+///
+/// Detector validated against the pre-fix script rather than trusted because it
+/// came back clean: run over `git show 40a562a21^:scripts/verify.sh` it reports
+/// exactly one offender, verify.sh:1613, the line above. Over HEAD it reports
+/// none.
+#[test]
+fn no_verify_stage_resolves_the_ee_binary_through_path() {
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let mut offenders: Vec<String> = Vec::new();
+    let mut staged = 0usize;
+
+    for (index, line) in script.lines().enumerate() {
+        if !line.trim_start().starts_with("run_stage ") {
+            continue;
+        }
+        let runs = shell_quoted_runs(line);
+        if runs.len() < 2 {
+            continue;
+        }
+        staged += 1;
+        let command = runs.last().expect("command run");
+        if staged_command_head(command).as_deref() == Some("ee") {
+            offenders.push(format!("  verify.sh:{}  {}", index + 1, line.trim()));
+        }
+    }
+
+    assert!(
+        staged > 100,
+        "expected to have parsed the full stage population; parsed {staged} -- the \
+         parser, not the script, is the likely fault"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these stages invoke a PATH-resolved `ee`, so they grade whatever build is \
+         installed rather than the tree under verification; pin them to \
+         CURRENT_SOURCE_EE_BINARY:\n{}",
+        offenders.join("\n")
+    );
+}
