@@ -61,7 +61,9 @@ pub fn load_scoped_contradictions(
                 {
                     return Err(DomainError::Storage {
                         message: "Ask contradiction evidence changed during retrieval".to_owned(),
-                        repair: Some("retry ee ask after concurrent link changes settle".to_owned()),
+                        repair: Some(
+                            "retry ee ask after concurrent link changes settle".to_owned(),
+                        ),
                     });
                 }
             } else {

@@ -50908,29 +50908,16 @@ where
 
     let candidate_ids: Vec<_> = stored
         .iter()
-        .take(crate::core::ask::ASK_CANDIDATE_SCAN_CAP)
         .map(|memory| memory.id.as_str())
         .collect();
-    let contradictions = match connection.list_memory_links_for_memories(
+    let contradictions = match crate::core::ask::load_scoped_contradictions(
+        &connection,
         &candidate_ids,
-        Some(crate::db::MemoryLinkRelation::Contradicts),
     ) {
-        Ok(links) => links
-            .into_iter()
-            .map(|link| crate::core::ask::AskContradiction {
-                id: link.id,
-                src_memory_id: link.src_memory_id,
-                dst_memory_id: link.dst_memory_id,
-                confidence: link.confidence,
-                source: link.source,
-            })
-            .collect(),
+        Ok(links) => links,
         Err(error) => {
             return write_domain_error(
-                &DomainError::Storage {
-                    message: format!("Failed to read ask contradiction evidence: {error}"),
-                    repair: Some("ee doctor --json".to_owned()),
-                },
+                &error,
                 cli.renderer(),
                 stdout,
                 stderr,

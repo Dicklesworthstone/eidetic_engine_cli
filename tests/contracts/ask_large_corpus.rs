@@ -2,7 +2,9 @@
 //! among the old database-order prefix. These tests use the real store/binary.
 
 use ee::core::ask::ASK_CANDIDATE_SCAN_CAP;
-use ee::db::{CreateMemoryInput, CreateMemoryLinkInput, DbConnection, MemoryLinkRelation, MemoryLinkSource};
+use ee::db::{
+    CreateMemoryInput, CreateMemoryLinkInput, DbConnection, MemoryLinkRelation, MemoryLinkSource,
+};
 use serde_json::Value;
 
 #[test]
@@ -48,9 +50,11 @@ fn ask_discloses_late_counterevidence_and_keeps_the_confidence_gate() -> Result<
     assert_eq!(stored.len(), count);
     let anchor = &stored[ASK_CANDIDATE_SCAN_CAP];
     let opposite = &stored[ASK_CANDIDATE_SCAN_CAP + 1];
-    assert!(stored[..ASK_CANDIDATE_SCAN_CAP].iter().all(|memory| {
-        memory.id != anchor.id && memory.id != opposite.id
-    }));
+    assert!(
+        stored[..ASK_CANDIDATE_SCAN_CAP]
+            .iter()
+            .all(|memory| { memory.id != anchor.id && memory.id != opposite.id })
+    );
     let link_id = "link_00000000000000000000000001";
     connection
         .insert_memory_link(
@@ -89,7 +93,11 @@ fn ask_discloses_late_counterevidence_and_keeps_the_confidence_gate() -> Result<
         .map_err(|error| format!("spawn ee ask: {error}"))
     };
     let output = run(&anchor.content, false)?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let response: Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("ask stdout must be exactly one JSON response: {error}"))?;
     assert_eq!(response["schema"], ee::models::RESPONSE_SCHEMA_V2);
@@ -100,7 +108,12 @@ fn ask_discloses_late_counterevidence_and_keeps_the_confidence_gate() -> Result<
     assert_eq!(data["conflictLink"]["id"], link_id);
     assert_eq!(data["candidatesScanned"].as_u64(), Some(count as u64));
     assert!(data["answerText"].is_null());
-    assert!(data["citations"].as_array().expect("citations array").is_empty());
+    assert!(
+        data["citations"]
+            .as_array()
+            .expect("citations array")
+            .is_empty()
+    );
     let sides = data["sides"].as_array().expect("both conflict sides");
     assert_eq!(sides.len(), 2);
     for (side, source) in sides.iter().zip([&anchor, &opposite]) {
@@ -108,26 +121,44 @@ fn ask_discloses_late_counterevidence_and_keeps_the_confidence_gate() -> Result<
         assert_eq!(citations.len(), 1);
         let citation = &citations[0];
         assert_eq!(citation["memoryId"], source.id);
-        assert_eq!(citation["provenanceUri"].as_str(), source.provenance_uri.as_deref());
+        assert_eq!(
+            citation["provenanceUri"].as_str(),
+            source.provenance_uri.as_deref()
+        );
         let start = citation["span"]["byteStart"].as_u64().expect("byte start") as usize;
         let end = citation["span"]["byteEnd"].as_u64().expect("byte end") as usize;
         assert_eq!(source.content.get(start..end), citation["text"].as_str());
     }
     let repeated = run(&anchor.content, false)?;
     assert!(repeated.status.success());
-    let repeated: Value = serde_json::from_slice(&repeated.stdout).map_err(|error| error.to_string())?;
-    assert_eq!(repeated["data"], *data, "audit writes must not change answer bytes");
+    let repeated: Value =
+        serde_json::from_slice(&repeated.stdout).map_err(|error| error.to_string())?;
+    assert_eq!(
+        repeated["data"], *data,
+        "audit writes must not change answer bytes"
+    );
 
     let unrelated = run("orbital veterinary anesthesia", false)?;
     assert!(unrelated.status.success());
-    let unrelated: Value = serde_json::from_slice(&unrelated.stdout).map_err(|error| error.to_string())?;
+    let unrelated: Value =
+        serde_json::from_slice(&unrelated.stdout).map_err(|error| error.to_string())?;
     assert_eq!(unrelated["data"]["abstained"], true);
     assert!(unrelated["data"]["sides"].is_null());
-    assert!(unrelated["data"]["citations"].as_array().expect("citations").is_empty());
+    assert!(
+        unrelated["data"]["citations"]
+            .as_array()
+            .expect("citations")
+            .is_empty()
+    );
 
     let strict = run(&anchor.content, true)?;
-    assert_eq!(strict.status.code(), Some(6), "supported conflict must still fail a 0.9 confidence requirement");
-    let strict: Value = serde_json::from_slice(&strict.stdout).map_err(|error| error.to_string())?;
+    assert_eq!(
+        strict.status.code(),
+        Some(6),
+        "supported conflict must still fail a 0.9 confidence requirement"
+    );
+    let strict: Value =
+        serde_json::from_slice(&strict.stdout).map_err(|error| error.to_string())?;
     assert_eq!(strict["success"], false);
     Ok(())
 }

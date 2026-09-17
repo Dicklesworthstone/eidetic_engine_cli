@@ -43,7 +43,13 @@ fn fixture(count: usize) -> (tempfile::TempDir, DbConnection, Vec<String>) {
     (root, connection, ids)
 }
 
-fn link(connection: &DbConnection, number: usize, source: &str, target: &str, relation: MemoryLinkRelation) {
+fn link(
+    connection: &DbConnection,
+    number: usize,
+    source: &str,
+    target: &str,
+    relation: MemoryLinkRelation,
+) {
     connection
         .insert_memory_link(
             &format!("link_{number:026}"),
@@ -67,9 +73,27 @@ fn link(connection: &DbConnection, number: usize, source: &str, target: &str, re
 #[test]
 fn late_and_cross_batch_edges_are_loaded_once_in_stable_order() {
     let (_root, connection, ids) = fixture(LINK_QUERY_BATCH_SIZE * 2 + 7);
-    link(&connection, 1, &ids[0], &ids[LINK_QUERY_BATCH_SIZE], MemoryLinkRelation::Contradicts);
-    link(&connection, 2, &ids[LINK_QUERY_BATCH_SIZE * 2], &ids[LINK_QUERY_BATCH_SIZE * 2 + 1], MemoryLinkRelation::Contradicts);
-    link(&connection, 3, &ids[1], &ids[2], MemoryLinkRelation::Related);
+    link(
+        &connection,
+        1,
+        &ids[0],
+        &ids[LINK_QUERY_BATCH_SIZE],
+        MemoryLinkRelation::Contradicts,
+    );
+    link(
+        &connection,
+        2,
+        &ids[LINK_QUERY_BATCH_SIZE * 2],
+        &ids[LINK_QUERY_BATCH_SIZE * 2 + 1],
+        MemoryLinkRelation::Contradicts,
+    );
+    link(
+        &connection,
+        3,
+        &ids[1],
+        &ids[2],
+        MemoryLinkRelation::Related,
+    );
     let mut scope: Vec<_> = ids.iter().map(String::as_str).collect();
     let before = connection.list_audit_entries(None, None).expect("audits");
     let actual = load_scoped_contradictions(&connection, &scope).expect("complete link scan");
@@ -82,15 +106,36 @@ fn late_and_cross_batch_edges_are_loaded_once_in_stable_order() {
     scope.reverse();
     scope.push(ids[0].as_str());
     let reversed = load_scoped_contradictions(&connection, &scope).expect("permuted scope");
-    assert_eq!(actual.iter().map(|link| &link.id).collect::<Vec<_>>(), reversed.iter().map(|link| &link.id).collect::<Vec<_>>());
-    assert_eq!(before.len(), connection.list_audit_entries(None, None).expect("audits after reads").len());
+    assert_eq!(
+        actual.iter().map(|link| &link.id).collect::<Vec<_>>(),
+        reversed.iter().map(|link| &link.id).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        before.len(),
+        connection
+            .list_audit_entries(None, None)
+            .expect("audits after reads")
+            .len()
+    );
 }
 
 #[test]
 fn an_incident_link_cannot_reintroduce_an_excluded_memory() {
     let (_root, connection, ids) = fixture(3);
-    link(&connection, 1, &ids[0], &ids[1], MemoryLinkRelation::Contradicts);
-    link(&connection, 2, &ids[0], &ids[2], MemoryLinkRelation::Contradicts);
+    link(
+        &connection,
+        1,
+        &ids[0],
+        &ids[1],
+        MemoryLinkRelation::Contradicts,
+    );
+    link(
+        &connection,
+        2,
+        &ids[0],
+        &ids[2],
+        MemoryLinkRelation::Contradicts,
+    );
     let links = load_scoped_contradictions(&connection, &[&ids[0], &ids[1]]).expect("scoped links");
     assert_eq!(links.len(), 1);
     assert_eq!(links[0].dst_memory_id, ids[1]);
@@ -100,7 +145,11 @@ fn an_incident_link_cannot_reintroduce_an_excluded_memory() {
 fn empty_scope_needs_no_link_table_but_missing_storage_for_a_real_scope_fails() {
     let root = tempfile::tempdir().expect("temporary database");
     let connection = DbConnection::open_file(&root.path().join("unmigrated.db")).expect("open");
-    assert!(load_scoped_contradictions(&connection, &[]).expect("empty scope").is_empty());
+    assert!(
+        load_scoped_contradictions(&connection, &[])
+            .expect("empty scope")
+            .is_empty()
+    );
     assert!(matches!(
         load_scoped_contradictions(&connection, &["mem_00000000000000000000000001"]),
         Err(DomainError::Storage { .. })

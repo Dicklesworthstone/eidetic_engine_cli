@@ -18,6 +18,11 @@ use crate::obs::audit_events::query_hash as audit_query_hash;
 #[path = "ask_retrieval.rs"]
 mod retrieval;
 
+#[path = "ask_store.rs"]
+mod store;
+
+pub use store::load_scoped_contradictions;
+
 #[path = "ask_candidates.rs"]
 mod selection;
 

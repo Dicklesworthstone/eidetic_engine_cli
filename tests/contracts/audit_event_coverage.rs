@@ -21,6 +21,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "ask_large_corpus.rs"]
+mod ask_large_corpus;
+
 use std::path::PathBuf;
 
 use ee::core::context::{ContextPackOptions, run_context_pack};
