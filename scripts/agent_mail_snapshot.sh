@@ -262,7 +262,24 @@ def has_recognized_bool(item: dict[str, Any], keys: list[str]) -> bool:
 
 def canonical_thread_identifier(item: dict[str, Any]) -> str | None:
     thread_id = canonical_string_alias(item, ["thread_id", "threadId"])
-    if "thread_id" in item or "threadId" in item:
+    # Fall back on PRESENCE of a usable value, not presence of the KEY.
+    #
+    # `am mail inbox` emits `thread_id: null` for a message that belongs to no
+    # thread, which is legitimate and common: 8 of 20 rows in a live mailbox.
+    # Keying on `"thread_id" in item` returned None for exactly those rows and
+    # never reached the message-id fallback below, so `inbox_payload_valid`
+    # rejected a well-formed payload, the inbox was replaced with
+    # `invalid_response`, and the snapshot published
+    # `agent_mail_snapshot_source_unavailable` while the source had answered
+    # correctly with exit 0.
+    #
+    # That made the degraded signal permanently saturated: it fired on every
+    # run whether or not Agent Mail was reachable, so it could not distinguish
+    # the two. Restoring the fallback is what gives the signal back its meaning
+    # (bd-fc0zs). A row with neither a usable thread id NOR a usable message id
+    # still returns None, so the invalid arm stays reachable -- see
+    # `inbox_rows_without_any_identifier_are_still_invalid` in the self-test.
+    if thread_id is not None:
         return thread_id
     message_id = item.get("id")
     if isinstance(message_id, str) and message_id.strip():
@@ -1611,6 +1628,56 @@ def run_self_test() -> int:
     assert http_error_output["producer_status"] == "degraded"
     assert http_error_output["fallback_active"] is True
     assert http_error_output["summary"]["degraded_count"] == 1
+
+    # bd-fc0zs: a message that belongs to no thread carries `thread_id: null`,
+    # which is legitimate and accounted for 8 of 20 rows in a live mailbox. The
+    # real arm hit this on EVERY run while this stage stayed green, because the
+    # stage runs only this self-test and no case covered a null thread id.
+    #
+    # Paired on purpose. The positive arm alone would be satisfied by a
+    # validator that accepted anything; the negative arm is what proves the
+    # invalid path is still reachable after the fallback was restored.
+    unthreaded_rows = [
+        {"id": 3603, "thread_id": None, "subject": "direct message", "created_ts": "2026-09-17T18:00:00Z"},
+        {"id": 3402, "thread_id": "br-123", "subject": "threaded", "created_ts": "2026-09-17T18:01:00Z"},
+    ]
+    assert canonical_thread_identifier(unthreaded_rows[0]) == "3603", (
+        "a null thread_id must fall back to the message id, not report the row "
+        "unidentifiable"
+    )
+    assert canonical_thread_identifier(unthreaded_rows[1]) == "br-123"
+    assert inbox_payload_valid(unthreaded_rows) is True, (
+        "a mailbox containing an unthreaded message is a valid payload"
+    )
+
+    inbox_rows_without_any_identifier_are_still_invalid = [
+        {"thread_id": None, "id": None, "subject": "no identifier at all"},
+    ]
+    assert canonical_thread_identifier(inbox_rows_without_any_identifier_are_still_invalid[0]) is None
+    assert inbox_payload_valid(inbox_rows_without_any_identifier_are_still_invalid) is False, (
+        "restoring the message-id fallback must not make the invalid arm "
+        "unreachable: a row with no usable identifier is still malformed"
+    )
+
+    unthreaded_commands = healthy_commands()
+    unthreaded_commands[2] = synthetic_command(
+        unthreaded_commands[2]["argv"],
+        unthreaded_rows,
+    )
+    unthreaded_output = build_snapshot_output(
+        project,
+        agent,
+        unthreaded_commands,
+        thread_limit=10,
+    )
+    assert unthreaded_output["summary"]["degraded_count"] == 0, (
+        "an inbox containing an unthreaded message must not publish "
+        "agent_mail_snapshot_source_unavailable; the source answered fine"
+    )
+    assert unthreaded_output["producer_status"] != "degraded"
+    assert unthreaded_output["summary"]["thread_count"] == 2, (
+        "both the threaded and the unthreaded message must be represented"
+    )
 
     rendered = json.dumps({"snapshot": output, "coordination": coordination}, sort_keys=True)
     recovery_rendered = json.dumps(recovery_output, sort_keys=True)
