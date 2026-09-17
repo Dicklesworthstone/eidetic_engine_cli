@@ -1,42 +1,84 @@
-name: Core source handoff
+name: Stable peer implementation
 
 on:
   push:
     branches: [main]
-    paths: [.github/workflows/deliver-ask-corpus-20260917.yml]
+    paths:
+      - .github/workflows/deliver-ask-corpus-20260917.yml
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: deliver-core-20260917
+  cancel-in-progress: false
 jobs:
-  source:
+  deliver:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.deliver.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Package tracked source and task inventory
+          ref: main
+          fetch-depth: 0
+          clean: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - id: deliver
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD > "$RUNNER_TEMP/source-sha.txt"
-          git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/source.tar.gz"
-          python3 - <<'PY'
-          import json
-          from collections import Counter
-          rows = [json.loads(line) for line in open('.beads/issues.jsonl') if line.strip()]
-          print('STATUS COUNTS', dict(Counter(row.get('status') for row in rows)))
-          for row in rows:
-              if row.get('status') in ('open', 'in_progress') and (row.get('priority', 9) <= 1 or row['id'].startswith('bd-reality-core-convergence-1azkt')):
-                  print(json.dumps({k: row.get(k) for k in ('id','title','status','assignee','priority')}, ensure_ascii=False))
-          PY
-      - uses: actions/upload-artifact@v4
+          patch=scripts/delivery/mesh-stable-peer-20260917.patch
+          git apply --recount --check "$patch"
+          git apply --recount "$patch"
+          rustfmt +nightly --edition 2024 --config skip_children=true src/cli/mesh_peer_identity.rs src/cli/mesh_peer_identity_tests.rs src/cli/mesh.rs src/mesh/auto_enrollment.rs
+          git diff --check
+          git diff --stat
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/cli/mesh_peer_identity.rs src/cli/mesh_peer_identity_tests.rs src/cli/mesh.rs src/mesh/auto_enrollment.rs
+          git commit -m 'fix(mesh): retain opaque device principals across enrollment key rotation' -m 'Use workspace/tailnet-scoped StableNodeID lookup, retain key history and known anchors, and fail closed on ambiguity, substitution or revoked identity. Endpoint changes still invalidate prior transport authorization and lane grants. Add 14 unit/real-store regressions. Rustfmt parsing passed; the separate verification job determines compiler/test results.'
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            git fetch origin main
+            git merge --no-edit origin/main
+          done
+          exit 1
+  verify:
+    needs: deliver
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
         with:
-          name: core-source
-          path: |
-            ${{ runner.temp }}/source-sha.txt
-            ${{ runner.temp }}/source.tar.gz
-          retention-days: 1
-          if-no-files-found: error
+          ref: ${{ needs.deliver.outputs.source }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Exact source identity
+        run: |
+          git rev-parse HEAD
+          git status --porcelain
+          rustc --version --verbose
+      - name: Compile production library
+        run: cargo check --locked --lib
+      - name: Execute stable peer regressions
+        run: |
+          cargo test --locked --lib cli::mesh::peer_identity:: -- --nocapture
+      - name: Execute existing enrollment regressions
+        run: cargo test --locked --lib auto_enrollment -- --nocapture
