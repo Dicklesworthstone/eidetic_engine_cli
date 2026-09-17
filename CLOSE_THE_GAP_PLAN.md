@@ -15,22 +15,22 @@
 > `docs/mesh/verification_matrix.md`, `README.md`.
 >
 > **2026-08-23 audit addendum (full project reality check).** All remainder
-> closures were re-verified against current Beads evidence. One Part III
-> acceptance mismatch remains: `.3.8` closed on a live TWO-HOST tailnet soak
-> whose own close note says "not two distinct humans", while §5 literally
-> requires a two-human artifact. The earlier claim that `.3.9` had an empty
+> closures were re-verified against current Beads evidence. That audit found a
+> mismatch: `.3.8` closed on two-host evidence while §5 required two humans.
+> The user approved the two-host boundary on 2026-09-17 in WildBluff's session
+> (`bd-reality-core-convergence-1azkt.8`). The earlier claim that `.3.9` had an empty
 > close reason is stale: its current reason names the property/fuzz surface,
 > remote host, duration, and commit. Windows, the publication fence, the
 > narrowed fake-IdP v1 decision, remaining fuzz, and the program closeout all
-> have recorded dispositions. Part III therefore cannot archive until the
-> two-human criterion is either satisfied or explicitly amended.
+> have recorded dispositions. The scope amendment resolves this mismatch;
+> Part III still cannot archive until the broader §15 criteria are satisfied.
 >
 > The same audit found a broader core-product bridge (§§6–13 below). The
 > implementation is substantial, but the core CASS → retrieval → pack and
 > curate → rule → retrieval loops are open, identical concurrent search/pack
 > requests are not deterministic, current verification is red or inconclusive,
 > and release/performance evidence is weaker than the README claims. This file
-> remains Part III instead of opening a competing Part IV while §5 is unresolved.
+> remains Part III instead of opening a competing Part IV while §15 is unresolved.
 >
 > **2026-08-24 independent rerun addendum.** The reality check was repeated from
 > the complete `AGENTS.md`, `README.md`, controlling plans/ADRs, implementation,
@@ -813,7 +813,7 @@ unbuilt product:
 - Two-human Tailscale, Windows-host soak, production IdP vendor soak, T2.7
   frame/session fuzz beyond origin properties, and the T5.7 publication fence
   were the **real remainders** at Part III opening. All now have evidence or an
-  allowed product decision except the literal two-distinct-human criterion.
+  allowed product decision, including the user-approved 2026-09-17 two-host amendment.
   None is an excuse to rebuild transport.
 
 **Non-negotiables for Part III:**
@@ -851,7 +851,7 @@ Unix product on `main` (proof ledger:
 
 | Gap | Bead | Current disposition |
 | --- | --- | --- |
-| Two distinct humans on a real Tailscale tailnet exchange memory; US-4 search/pack works; cursors advance; no deferred sync code | `bd-tc-epic-qzk7o.3.8` (T2.6) | **Resolved 2026-09-17 by approved scope amendment (Branch B, session operator via WildBluff; bead `bd-reality-core-convergence-1azkt.8`).** v1 boundary = two independent tailnet hosts; the closed two-host artifact stands as-is and is not relabeled two-human. Residual risk: distinct-operator ceremony/usability remains unproven; the two-human soak remains a post-v1 follow-up requiring an owner before any roadmap promise. |
+| Original two-human Tailscale criterion; US-4 search/pack, cursor advance, no deferred sync | `bd-tc-epic-qzk7o.3.8` (T2.6) | **Amended 2026-09-17:** the user in WildBluff's session approved “Accept two-host boundary” (Branch B, `bd-reality-core-convergence-1azkt.8`). Two independent tailnet hosts are the v1 boundary because the retained artifact exercises cross-host exchange and team-scoped recall. It remains two-host evidence, not two-human proof. Independent-operator usability is unproven; no two-human soak is promised or assigned. Authentication/privacy requirements and broader §15 criteria are unchanged. |
 | Frame/session/bootstrap fuzz beyond `tests/property_origin_stream.rs` | `bd-tc-epic-qzk7o.3.9` (T2.7) | Closed with frame/session/bootstrap properties and fuzz, MAC-before-counter proof, RCH host/duration, and commit `acc230aa`. |
 | Source-snapshot publication fence | `bd-d67os.28` then `.6.7` | Both closed; `.6.7` records coalesced intake plus the source-snapshot publication fence. |
 | Windows-host DACL / inbound crash / owner-only key-path | `bd-tc-epic-qzk7o.12` + `.2.4` | Closed with a retained Windows-host DACL and crash/restart artifact. Current cross-platform CI remains a separate release-readiness concern. |
@@ -894,14 +894,14 @@ Unix product on `main` (proof ledger:
 
 ## 5. Original mesh close criteria, extended by the full closeout in §15
 
-These were the mesh-only criteria at Part III opening. All rows except the
-literal two-human wording now have an evidence-backed disposition. They remain
-historical inputs to §15 rather than a second, competing close gate.
+These were the mesh-only criteria at Part III opening. All rows now have an
+evidence-backed disposition or approved amendment. They remain historical
+inputs to §15 rather than a second, competing close gate.
 
 Archive this file to `docs/archive/close_the_gap_2026-08.md` and start Part IV
 **in this same path** only when these criteria and §15 are both satisfied:
 
-- `.3.8` two-human criterion: RESOLVED 2026-09-17 by approved scope amendment — v1 boundary is two independent tailnet hosts (existing `.3.8` artifact, not relabeled); two-human soak is an owned post-v1 follow-up before any roadmap promise.
+- `.3.8`: the user-approved 2026-09-17 amendment accepts the retained two-independent-host Tailscale artifact. Independent-operator usability remains unproven; no two-human soak is promised or assigned.
 - `.12` has a Windows-host soak artifact (or an explicit fail-closed
   product decision recorded in the matrix).
 - `.8.8` has a production IdP soak artifact (or an explicit "fake-IdP is
@@ -1108,7 +1108,7 @@ candidate before `.2` changes the implementation.
 | 15 | Privacy/trust holds from ingest through index/model/pack/proof/backup/mesh | **PARTIAL / UNPROVEN** | ADR 0085 and source screening are strong; cross-source live admission, retained-generation, proof-sink, and recovery negatives remain. |
 | 16 | Graph insight and optional adapters are real or explicitly degraded | **PARTIAL / UNPROVEN** | Core graph/team/serve/insight implementations are substantial. Several formerly placeholder insight sections now have real code and regression assertions; remaining acceptance is tracked by `bd-2pos6` and `.34`, not inferred from stale placeholder labels. `.9` owns stable claims. |
 | 17 | Multi-agent local writes preserve integrity and truthful freshness | **PARTIAL / UNPROVEN** | Strong tests exist; current full-suite proof is red and evidence/linkage/index generation gaps remain. |
-| 18 | Unix team-confederation and documented environment posture | **PARTIAL** | Unix/two-host/Windows/fake-IdP evidence exists; Part III two-human wording and README disagree. `.8`. |
+| 18 | Unix team-confederation and documented environment posture | **PARTIAL** | Unix/two-host/Windows/fake-IdP evidence exists. The user-approved 2026-09-17 amendment resolves the two-human criterion mismatch (`.8`); this is not a new current-source runtime proof. |
 | 19 | Canonical readiness verification and green CI | **PARTIAL / UNPROVEN** | Historical focused checks are retained; the 2026-09-04 current-source attempt is infrastructure-blocked. The complete candidate manifest is absent and all hosted workflows remain manually disabled. `.5`, `.17`, `.18`, `.19`. |
 | 20 | Reproducible performance and usable first-agent latency | **UNPROVEN** | README now labels the old baseline historical/advisory. Current-candidate raw samples, whole-command/sequence SLOs, correctness and resource evidence remain `.6`; inner packing timers are insufficient. |
 | 21 | Hermetic multi-platform release/install chain | **PARTIAL / UNPROVEN** | Current release has archives/checksums/installers but no candidate checks/provenance set; tag-only workflow inputs remain non-hermetic. `.7`, `.18`, `.20`, `.21`. |
@@ -1156,7 +1156,7 @@ The end-to-end reality check filed one self-contained bridge epic,
 | `bd-reality-core-convergence-1azkt.5` | P0 | No single executable manifest/pinned composite RCH/proof-capsule contract | Build the verifier now; final green truth belongs to `.19`, avoiding a dependency deadlock. |
 | `bd-reality-core-convergence-1azkt.6` | P1 | Public latency/SLO claims lack reproducible correct-output evidence | RCH-built attested candidate, local M3 black-box driver, raw samples/correctness, explicit reproduce-or-remove decision. |
 | `bd-reality-core-convergence-1azkt.7` | P1 | Release staging is non-hermetic and publication currently precedes native installer proof | Private draft/local staging only; locked signed/provenance-complete assets and native smoke before human publish. |
-| `bd-reality-core-convergence-1azkt.8` | P1 | Two-human wording disagrees with two-host evidence and closed tracker | Literal proof or explicit approved scope amendment, never retroactive relabeling. |
+| `bd-reality-core-convergence-1azkt.8` | P1 | Original two-human criterion exceeded the retained two-host evidence | User approved two-host boundary on 2026-09-17; preserve artifact identity and residual independent-operator risk, without an ownerless roadmap promise. |
 | `bd-reality-core-convergence-1azkt.9` | P1 | Shipped claims, maturity, primary journey, docs, and release copy disagree | Pre-release stable/beta/experimental/reserved ledger; close blocker or demote claim; generated truthful copy. |
 | `bd-reality-core-convergence-1azkt.10` | P0 | Live race evidence lacks source authority | Build exact attested candidate and reproduce or refute before `.2` changes code. |
 | `bd-reality-core-convergence-1azkt.11` | P0 | Raw BM25 saturates public relevance and contaminates quality/admission | Frankensearch-backed calibration or explicit unknown; correct per-source domains and every downstream consumer. |
@@ -1205,8 +1205,8 @@ alone, or completion of the former `.1`–`.22` range, remains insufficient.
    harden test-oracle integrity `.17`, and bind hermetic inputs `.18`.
 3. Resolve the external personalized-PageRank path `.15`: upstream capability
    or explicit disabled/degraded influence.
-4. Resolve two-human scope `.8` now, because external coordination and product
-   scope are early critical-path decisions.
+4. Two-human scope `.8` was amended by the user on 2026-09-17 to two independent
+   tailnet hosts; keep documentation and evidence identity aligned.
 5. Record the performance branch in `.6`: reproduce each stable claim or
    remove/narrow it; measurement happens after a candidate exists.
 
