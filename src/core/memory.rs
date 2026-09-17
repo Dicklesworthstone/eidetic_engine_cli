@@ -29,7 +29,14 @@ use super::memory_lifecycle::{
     LEVEL_TRANSITION_CONCURRENT_CONFLICT_CODE, LEVEL_TRANSITION_REQUIRES_EVIDENCE_CODE,
     LEVEL_TRANSITION_TOMBSTONED_REJECTED_CODE, MemoryLifecycleState, transition_for,
 };
-use super::search::{SearchOptions, SearchStatus, run_search, run_search_unaudited};
+use super::search::{SearchOptions, SearchStatus, run_search_unaudited};
+// `run_search` is reached only from `mod tests`, which picks it up through
+// `use super::*`. Importing it unconditionally left it unused in every
+// non-test build of this crate, which `-D warnings` turns into a hard error
+// while the test build stays green -- the same asymmetry that broke the lib
+// target in bd-r24cg, mirrored. Gate it like `CreateWorkspaceInput` below.
+#[cfg(test)]
+use super::search::run_search;
 use crate::config::{ConfigFile, GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY};
 use crate::curate::cluster_coherence::{ClusterCoherenceConfig, EmbeddingPoint, agglomerate};
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};

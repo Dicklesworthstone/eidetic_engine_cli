@@ -1318,6 +1318,17 @@ impl ContextPerformanceTrace {
         });
     }
 
+    /// Test-only span lookup.
+    ///
+    /// Production deliberately does NOT source elapsed time this way -- see the
+    /// note at the `observed_elapsed_ms` computation, which explains that
+    /// `"total"` is not recorded yet at that point and that this answers 0 for
+    /// an unknown span. Its only caller is
+    /// `trace_elapsed_ms_answers_zero_for_an_unrecorded_span`, which pins that
+    /// behaviour. Leaving it ungated made it dead code in every non-test build,
+    /// which `-D warnings` turns into a hard error; `#[cfg(test)]` states the
+    /// fact instead of suppressing the symptom.
+    #[cfg(test)]
     fn elapsed_ms(&self, name: &str) -> u64 {
         self.timings
             .iter()
