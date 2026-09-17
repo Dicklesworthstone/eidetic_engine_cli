@@ -43,13 +43,18 @@ fn kernel_output_decodes_and_applies_without_a_server_roundtrip() {
             ContextDeltaItemSnapshot::new("mem_a").with_field("content", json!("updated")),
         ],
     );
-    next.items[0].fields.insert("optional".into(), JsonValue::Null);
+    next.items[0]
+        .fields
+        .insert("optional".into(), JsonValue::Null);
     let generated = compute_context_delta(&prior, &next, ContextDeltaOptions::new(None))
         .expect("generated delta");
     let encoded = serde_json::to_vec(&generated).expect("encode delta");
     let decoded = ContextDeltaEnvelope::from_json_slice(&encoded).expect("decode delta");
     assert_eq!(decoded, generated);
-    assert_eq!(decoded.apply_to_snapshot(&prior).expect("apply delta"), next);
+    assert_eq!(
+        decoded.apply_to_snapshot(&prior).expect("apply delta"),
+        next
+    );
     assert_eq!(prior, self::prior(), "baseline was not mutated");
 }
 
@@ -87,11 +92,17 @@ fn optional_metadata_and_all_degradation_severities_survive_decoding() {
         .collect();
     let decoded = decode(&value).expect("metadata");
     assert_eq!(decoded.data.workspace_id.as_deref(), Some("workspace-a"));
-    assert_eq!(decoded.data.trace.as_ref().unwrap()["stages"], json!(["read", null, 7]));
+    assert_eq!(
+        decoded.data.trace.as_ref().unwrap()["stages"],
+        json!(["read", null, 7])
+    );
     assert_eq!(decoded.degraded.len(), 6);
     assert_eq!(decoded.degraded[5].severity, "critical");
     assert_eq!(decoded.degraded[0].details.as_ref().unwrap()["count"], 2);
-    assert_eq!(serde_json::to_value(&decoded).expect("encode metadata"), value);
+    assert_eq!(
+        serde_json::to_value(&decoded).expect("encode metadata"),
+        value
+    );
 }
 
 #[test]
@@ -115,9 +126,19 @@ fn rejects_unsupported_schema_success_chaining_and_protocol_vocabulary() {
 
 #[test]
 fn closed_protocol_objects_do_not_silently_drop_future_operations() {
-    for pointer in ["", "/data", "/data/items", "/data/serverDecision", "/data/tokenSavings"] {
+    for pointer in [
+        "",
+        "/data",
+        "/data/items",
+        "/data/serverDecision",
+        "/data/tokenSavings",
+    ] {
         let mut value: JsonValue = serde_json::from_str(&no_op_json()).unwrap();
-        value.pointer_mut(pointer).unwrap().as_object_mut().unwrap()
+        value
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
             .insert("unrecognizedOperation".into(), json!({"doNotIgnore":true}));
         assert!(decode(&value).is_err(), "accepted extension at {pointer}");
     }
@@ -167,20 +188,31 @@ fn redacted_changes_apply_without_recovering_or_emitting_old_content() {
         r#"{"added":[],"removed":[],"modified":[{"id":"mem_a","fieldChanges":{"content":{"newValue":"[REDACTED]","oldValueOmitted":true,"reason":"policy_restricted"}}}]}"#,
     );
     let mut prior = prior();
-    prior.items[0].fields.insert("content".into(), json!("private-old-body"));
+    prior.items[0]
+        .fields
+        .insert("content".into(), json!("private-old-body"));
     let decoded = ContextDeltaEnvelope::from_json_slice(input.as_bytes()).unwrap();
     let applied = decoded.apply_to_snapshot(&prior).expect("one-way update");
     assert_eq!(applied.items[0].fields["content"], "[REDACTED]");
     assert_eq!(prior.items[0].fields["content"], "private-old-body");
-    assert!(!serde_json::to_string(&decoded).unwrap().contains("private-old-body"));
+    assert!(
+        !serde_json::to_string(&decoded)
+            .unwrap()
+            .contains("private-old-body")
+    );
 }
 
 #[test]
 fn fallback_and_markdown_can_be_inspected_but_not_applied() {
     for reason in [
-        "prior_unknown", "delta_larger_than_full", "redaction_drift",
-        "compute_budget_exceeded", "envelope_oversized", "prior_corrupted",
-        "format_unsupported", "feature_flag_drift",
+        "prior_unknown",
+        "delta_larger_than_full",
+        "redaction_drift",
+        "compute_budget_exceeded",
+        "envelope_oversized",
+        "prior_corrupted",
+        "format_unsupported",
+        "feature_flag_drift",
     ] {
         let mut value: JsonValue = serde_json::from_str(&no_op_json()).unwrap();
         value["data"]["serverDecision"]["fallbackReason"] = json!(reason);
@@ -196,7 +228,9 @@ fn fallback_and_markdown_can_be_inspected_but_not_applied() {
 
 #[test]
 fn exact_input_limit_includes_utf8_and_trailing_newline() {
-    let input = raw(r#"{"added":[{"id":"ev_b","fields":{"content":"café"}}],"removed":[],"modified":[]}"#) + "\n";
+    let input =
+        raw(r#"{"added":[{"id":"ev_b","fields":{"content":"café"}}],"removed":[],"modified":[]}"#)
+            + "\n";
     assert!(
         ContextDeltaEnvelope::from_json_slice_with_limit(input.as_bytes(), input.len()).is_ok()
     );
@@ -213,7 +247,9 @@ fn rejects_trailing_documents_invalid_utf8_and_excessive_nesting() {
     assert!(ContextDeltaEnvelope::from_json_slice((no_op_json() + "{}").as_bytes()).is_err());
     assert!(ContextDeltaEnvelope::from_json_slice(&[0xff, 0xfe]).is_err());
     let nested = format!("{}0{}", "[".repeat(150), "]".repeat(150));
-    let items = format!(r#"{{"added":[{{"id":"ev_b","fields":{{"nested":{nested}}}}}],"removed":[],"modified":[]}}"#);
+    let items = format!(
+        r#"{{"added":[{{"id":"ev_b","fields":{{"nested":{nested}}}}}],"removed":[],"modified":[]}}"#
+    );
     assert!(ContextDeltaEnvelope::from_json_slice(raw(&items).as_bytes()).is_err());
 }
 
@@ -276,8 +312,18 @@ fn decoded_server_claim_does_not_authorize_the_reconstructed_snapshot() {
         "\"computedFromServerVerifiedPackRecord\":true",
     );
     let decoded = ContextDeltaEnvelope::from_json_slice(input.as_bytes()).unwrap();
-    assert!(decoded.data.server_decision.computed_from_server_verified_pack_record);
+    assert!(
+        decoded
+            .data
+            .server_decision
+            .computed_from_server_verified_pack_record
+    );
     let next = decoded.apply_to_snapshot(&prior()).unwrap();
     let followup = compute_context_delta(&next, &next, ContextDeltaOptions::new(None)).unwrap();
-    assert!(!followup.data.server_decision.computed_from_server_verified_pack_record);
+    assert!(
+        !followup
+            .data
+            .server_decision
+            .computed_from_server_verified_pack_record
+    );
 }

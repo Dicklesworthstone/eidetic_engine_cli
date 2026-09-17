@@ -323,8 +323,9 @@ impl ContextDeltaEnvelope {
     ) -> Result<Self, ContextDeltaError> {
         if bytes.len() > max_bytes {
             return Err(ContextDeltaError {
-                message: "context delta exceeds the client input-byte limit; request a fresh full pack"
-                    .to_owned(),
+                message:
+                    "context delta exceeds the client input-byte limit; request a fresh full pack"
+                        .to_owned(),
             });
         }
         serde_json::from_slice(bytes).map_err(|_| ContextDeltaError {
