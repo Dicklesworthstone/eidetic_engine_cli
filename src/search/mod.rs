@@ -1293,11 +1293,13 @@ fn search_projection_path_prefix_len(
     unix_path_prefixes: &[&str],
 ) -> Option<usize> {
     let remaining = &input[cursor..];
-    if let Some(prefix) = unix_path_prefixes
-        .iter()
-        .find(|prefix| search_projection_unix_prefix_matches(remaining, prefix))
-    {
-        return Some(prefix.len());
+    if crate::util::sensitive_path_starts_at(input, cursor) {
+        if let Some(prefix) = unix_path_prefixes
+            .iter()
+            .find(|prefix| search_projection_unix_prefix_matches(remaining, prefix))
+        {
+            return Some(prefix.len());
+        }
     }
 
     if starts_with_search_projection_file_host_ref(remaining) {
