@@ -2992,8 +2992,14 @@ mod tests {
                     .map_err(|error| error.to_string())?
                     .ok_or("historical")?
                     .tombstoned_at,
-                Some("2026-05-03T00:00:00Z".to_owned()),
-                "historical tombstone survives",
+                // bd-o22r0: the archive spells this `Z`; `tombstoned_at` is a ROW
+                // column, so import re-emits it via `normalize_row_timestamp`
+                // (`to_rfc3339()`, offset form). The instant survives, the
+                // spelling does not — see the sibling assertion in
+                // `links_round_trip_...`, which pins the same rule for
+                // `created_at` and explains why `last_reinforced_at` stays `Z`.
+                Some("2026-05-03T00:00:00+00:00".to_owned()),
+                "historical tombstone survives, in the ROW offset spelling",
             )?;
             drop(connection);
             let repeat = import_jsonl_records(&options).map_err(|error| error.to_string())?;
@@ -4371,7 +4377,57 @@ mod tests {
         ensure(report.memories_imported, 4, "all chronology cases imported")?;
         let connection = DbConnection::open(DatabaseConfig::file(database_path(&options)))
             .map_err(|error| error.to_string())?;
-        for (index, &(created, updated, tombstoned, valid_from)) in cases.iter().enumerate() {
+        // bd-o22r0. `cases` above are the ARCHIVE spellings fed in; these are what
+        // import re-emits, and they are deliberately not the same strings.
+        //
+        // Import canonicalizes per COLUMN CLASS (jsonl_import.rs
+        // `normalize_imported_timestamp`): Row columns (`created_at`,
+        // `updated_at`, `tombstoned_at`) take `to_rfc3339()` — offset form,
+        // fractional seconds KEPT — while Validity columns (`valid_from`,
+        // `valid_to`) take `to_rfc3339_opts(Secs, true)` — `Z` form, fractional
+        // seconds DROPPED. The INSTANT is preserved; the SPELLING is not, and
+        // preserving spelling is exactly what bd-o22r0 gave up on purpose: `Z`
+        // (0x5A) sorts above `+` (0x2B), so mixing spellings inside one
+        // lexically-compared column makes a row look newer than its sibling at
+        // the same instant, which is how V123's backfill left two live heads.
+        //
+        // Case 0 is the load-bearing one: it carries non-UTC offsets, so it
+        // exercises timezone conversion AND per-class spelling, and its
+        // `valid_from` (defaulting to `created`) additionally loses its
+        // fractional seconds to `SecondsFormat::Secs`.
+        //
+        // These are hand-computed from the input instants ON PURPOSE. Do NOT
+        // derive them by calling `normalize_row_timestamp` /
+        // `normalize_validity_timestamp` here: that makes the assertion
+        // `normalize(x) == normalize(x)`, which cannot fail and would pass even
+        // if both functions were replaced with the identity.
+        let expected: [(&str, &str, Option<&str>, &str); 4] = [
+            (
+                "2020-01-01T21:34:05.123456789+00:00",
+                "2020-02-03T08:05:06.987654321+00:00",
+                None,
+                "2020-01-01T21:34:05Z",
+            ),
+            (
+                "2021-01-02T00:00:00+00:00",
+                "2021-03-03T00:00:00+00:00",
+                Some("2021-02-02T00:00:00+00:00"),
+                "2019-01-01T00:00:00Z",
+            ),
+            (
+                "2022-01-02T00:00:00+00:00",
+                "2022-01-02T00:00:00+00:00",
+                None,
+                "2022-01-02T00:00:00Z",
+            ),
+            (
+                "2023-01-02T00:00:00+00:00",
+                "2023-02-02T00:00:00+00:00",
+                Some("2023-02-02T00:00:00+00:00"),
+                "2023-01-02T00:00:00Z",
+            ),
+        ];
+        for (index, &(created, updated, tombstoned, valid_from)) in expected.iter().enumerate() {
             let id = MemoryId::from_uuid(Uuid::from_u128(index as u128 + 1)).to_string();
             let memory = connection
                 .get_memory(&id)
@@ -4380,22 +4436,22 @@ mod tests {
             ensure(
                 memory.created_at.as_str(),
                 created,
-                "exact original creation time",
+                "creation instant preserved, re-emitted in the ROW offset spelling",
             )?;
             ensure(
                 memory.updated_at.as_str(),
-                updated.or(tombstoned).unwrap_or(created),
+                updated,
                 "modification time survives posterior and tombstone restoration",
             )?;
             ensure(
                 memory.tombstoned_at.as_deref(),
                 tombstoned,
-                "original tombstone",
+                "original tombstone, ROW offset spelling",
             )?;
             ensure(
                 memory.valid_from.as_deref(),
-                Some(valid_from.unwrap_or(created)),
-                "validity defaults to original creation, not import time",
+                Some(valid_from),
+                "validity defaults to original creation, VALIDITY Z spelling, seconds precision",
             )?;
             ensure(
                 connection
