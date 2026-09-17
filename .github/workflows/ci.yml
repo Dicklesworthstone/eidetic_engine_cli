@@ -214,6 +214,29 @@ jobs:
       - name: Forbidden dependency audit
         run: ./scripts/check-forbidden-deps.sh
 
+      # bd-zs76e. The registry's own policy.runtimeUpdateRule -- "Update this
+      # registry in the same change that adds a compiled migration" -- was
+      # declared and did not bind. V124 and V125 each shipped without it, the
+      # second EIGHTEEN SECONDS after the enforcing check landed (8ec8bc350
+      # 17:02:23, 0226dbeaf 17:02:41). The check was correct both times; it
+      # simply never ran. It existed only inside scripts/e2e_cross_cutting.sh,
+      # reachable solely through scripts/verify.sh -- which no workflow, no git
+      # hook and no script invokes. verify.sh appears only in prose (README,
+      # AGENTS.md, CLAUDE.md, CHANGELOG), so "wired into verify.sh" and "never
+      # executed" were the same state.
+      #
+      # This step does NOT bind today either, and saying so is the point of the
+      # bead: at the time of writing every workflow in this repo is
+      # `disabled_manually` (gh workflow list), and the last CI run was
+      # 2026-08-27 -- 899 pushed commits ago. So this is the correct HOME for
+      # the check, not proof that it runs. It binds the moment CI is
+      # re-enabled, and until then the standalone entry point
+      # (scripts/check-migration-registry.sh, under a second, no cargo) is the
+      # only way it executes. Do not read this step as enforcement.
+      # Needs jq (installed above).
+      - name: Migration registry co-commit invariant
+        run: ./scripts/check-migration-registry.sh
+
       # Supply-chain RustSec advisory gate (bd-2efax). `deny.toml [advisories]`
       # is now version=2 gate mode, so this fails the build on any open
       # vulnerability / unmaintained / unsound / yanked crate in the resolved
