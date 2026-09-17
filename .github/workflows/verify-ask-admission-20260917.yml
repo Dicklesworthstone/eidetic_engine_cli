@@ -1,58 +1,16 @@
-name: Scoped ask integration
+name: Ask admission verification
 
+# Scoped CLI integration is committed at 1cbb1ef6148286050103bc18d052004ea07af5fe.
+# This workflow never writes source or moves refs. Run it manually to verify
+# the selected source revision; its conclusion is not a full-suite proof.
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/verify-ask-admission-20260917.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  deliver:
-    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    outputs:
-      sha: ${{ steps.integrate.outputs.sha }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 1
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
-      - name: Integrate the scoped CLI and regression modules
-        id: integrate
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/delivery/integrate-ask-scope-20260917.py
-          files=(src/core/ask.rs src/core/ask_corpus.rs src/core/ask_admission.rs src/core/ask_privacy_tests.rs src/core/ask_scope_tests.rs src/cli/mod.rs tests/contracts/ask_lifecycle.rs tests/contracts/ask_scope.rs)
-          rustfmt +nightly --edition 2024 --config skip_children=true "${files[@]}"
-          git diff --check
-          git diff --stat
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- "${files[@]}"
-          git commit -m 'feat(ask): expose source-of-truth memory scopes through the public CLI' -m 'Add --memory-scope with workspace, self, team, verified, global-tagged and swarm admission before scoring and conflict lookup. Bind roster and tag reads to the evidence snapshot, fail closed on missing scope data, and retain the existing answer schema. Register 8 real-store scope regressions and 3 public CLI contracts. Rustfmt parsing passed; compiler and behavioral test results are recorded by the separate verification job.'
-          for attempt in 1 2 3; do
-            if git push origin HEAD:main; then
-              echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            git fetch origin main
-            git merge --no-edit origin/main
-          done
-          exit 1
-
   verify:
-    needs: deliver
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
@@ -65,7 +23,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.deliver.outputs.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -75,7 +32,7 @@ jobs:
           path: |
             ~/.cargo/registry
             target
-          key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ needs.deliver.outputs.sha }}
+          key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
       - name: Exact source and formatting
