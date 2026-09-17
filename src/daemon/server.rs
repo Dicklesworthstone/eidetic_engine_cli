@@ -53,7 +53,7 @@ use crate::core::search::{
     SearchAdvisoryDeliveryReservation, SearchAdvisorySession, SearchAdvisorySettlement,
     SearchDedupMode, SearchOptions, SearchPerformanceTrace, SearchReport, SearchSourceMode,
     TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
-    run_search_with_performance_and_filters,
+    run_search_unaudited, run_search_with_performance_and_filters,
 };
 use crate::models::{MemoryScope, QueryFilters, RedactionLevel};
 use crate::output::{ContextJsonRenderOptions, render_context_response_json_with_options};
@@ -1323,9 +1323,17 @@ fn daemon_warm_enabled_from_env_value(value: Option<&str>) -> bool {
 /// on (embedder stack, tokenizer, embedding matrix, index reader, read pool) is
 /// resident before the first client request arrives.
 ///
-/// Deliberately reuses [`run_search_with_performance_and_filters`] rather than
-/// reaching into the embedder internals: warming a *different* path than the
-/// one being served is how warm-ups silently stop warming anything.
+/// Deliberately reuses the served search path rather than reaching into the
+/// embedder internals: warming a *different* path than the one being served is
+/// how warm-ups silently stop warming anything.
+///
+/// bd-l8dn0. It uses the unaudited entry point, which is the same path with the
+/// retrieval audit write withheld. Every cache named above is still warmed by
+/// exactly the served code path -- an audit row is not a cache. Recording here
+/// would mark whatever `DAEMON_WARM_QUERY` happens to match as retrieved on
+/// every daemon start, refreshing it forever and suppressing the
+/// `never_retrieved` debt ADR 0071 exists to surface. Nobody read that memory;
+/// a warm-up is not a retrieval.
 fn warm_daemon_search_stack(workspace_path: &Path) -> Result<(), crate::core::search::SearchError> {
     let options = SearchOptions {
         workspace_path: workspace_path.to_path_buf(),
@@ -1347,7 +1355,7 @@ fn warm_daemon_search_stack(workspace_path: &Path) -> Result<(), crate::core::se
         memory_scope: MemoryScope::default(),
         strict_scope: false,
     };
-    run_search_with_performance_and_filters(&options, None, &[]).map(|_| ())
+    run_search_unaudited(&options).map(|_| ())
 }
 
 /// Spawn the startup warm-up thread for a workspace-bound daemon.
