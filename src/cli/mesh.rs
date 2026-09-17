@@ -1,3 +1,6 @@
+#[path = "mesh_peer_identity.rs"]
+mod peer_identity;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
@@ -5318,6 +5321,7 @@ fn auto_enrollment_existing_peers(
             peers.push(ExistingAutoEnrollmentPeer {
                 peer_id: row.peer_id.clone(),
                 node_key: record.endpoint.tailscale_node_key,
+                stable_node_id: record.endpoint.stable_node_id,
                 tailnet_id: Some(record.endpoint.tailnet_id),
                 tailnet_display_name: record.endpoint.tailnet_display_name,
                 materialized_on_node_key: record.materialized_on_node_key,
@@ -5332,6 +5336,7 @@ fn auto_enrollment_existing_peers(
             peers.push(ExistingAutoEnrollmentPeer {
                 peer_id: row.peer_id.clone(),
                 node_key: row.origin_node_id.clone(),
+                stable_node_id: None,
                 tailnet_id: None,
                 tailnet_display_name: None,
                 materialized_on_node_key: None,
@@ -5452,7 +5457,9 @@ fn auto_enrollment_peer_upserts(
     existing_rows: &[crate::mesh::foreground_cli::MeshPeerRow],
     candidates: &[AutoEnrollmentCandidate],
 ) -> Result<Vec<UpsertMeshPeerInput>, DomainError> {
+    peer_identity::check_candidate_identities(candidates)?;
     let mut upserts = Vec::new();
+    let mut reused_ids = BTreeSet::new();
     for candidate in candidates {
         let report = enroll_peer(MeshPeerEnrollInput {
             workspace_id: workspace_id.to_owned(),
@@ -5486,30 +5493,23 @@ fn auto_enrollment_peer_upserts(
                 "Inspect the candidate hello response and retry auto-enrollment.".to_owned(),
             ),
         })?;
-        let matching_rows = existing_rows
-            .iter()
-            .filter_map(|row| {
-                auto_enrollment_node_key_for_row(row)
-                    .ok()
-                    .filter(|node_key| node_key == &candidate.node_key)
-                    .map(|_| row)
-            })
-            .collect::<Vec<_>>();
-        if matching_rows.len() > 1 {
-            return Err(DomainError::PolicyDenied {
-                message: format!(
-                    "Auto-enrollment found ambiguous durable principals for {}",
-                    candidate.node_key
-                ),
-                repair: Some(
-                    "Disable the duplicate peer rows and repeat authoritative enrollment."
+        let resolved =
+            peer_identity::resolve_existing(workspace_id, tailnet_id, candidate, existing_rows)?;
+        let existing = resolved.as_ref().map(|(row, _)| *row);
+        if let Some((row, previous)) = &resolved {
+            if !reused_ids.insert(row.peer_id.clone()) {
+                return Err(DomainError::PolicyDenied {
+                    message: "Auto-enrollment candidates address the same durable principal"
                         .to_owned(),
-                ),
-            });
-        }
-        let existing = matching_rows.first().copied();
-        if let Some(existing) = existing {
-            peer.peer_id.clone_from(&existing.peer_id);
+                    repair: Some(
+                        "Retry discovery after resolving duplicate device bindings.".to_owned(),
+                    ),
+                });
+            }
+            peer.peer_id.clone_from(&row.peer_id);
+            if let Some(previous) = previous {
+                peer_identity::retain_identity(&mut peer, previous, now)?;
+            }
         }
         peer.trust_established_by = "tailscale_auto_enrollment".to_owned();
         peer.materialized_on_node_key = self_node_key.map(str::to_owned);

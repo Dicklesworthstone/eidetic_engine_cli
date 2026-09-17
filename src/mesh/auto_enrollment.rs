@@ -126,6 +126,7 @@ impl AutoEnrollmentCandidate {
 pub struct ExistingAutoEnrollmentPeer {
     pub peer_id: String,
     pub node_key: String,
+    pub stable_node_id: Option<String>,
     pub tailnet_id: Option<String>,
     pub tailnet_display_name: Option<String>,
     pub materialized_on_node_key: Option<String>,
@@ -142,15 +143,7 @@ impl ExistingAutoEnrollmentPeer {
     pub fn candidate(&self) -> AutoEnrollmentCandidate {
         AutoEnrollmentCandidate {
             node_key: self.node_key.clone(),
-            // `ExistingAutoEnrollmentPeer` is rehydrated from an already
-            // persisted row, and nothing persists the anchor yet, so there is
-            // none to carry. It must stay `None` rather than be invented here.
-            //
-            // HAZARD for hop 4 and the migration that follows: this candidate
-            // feeds an upsert, so once the anchor IS stored, a `None` here
-            // must never overwrite a stored value. Reuse the stored anchor on
-            // upsert instead of writing the candidate's `None` over it.
-            stable_node_id: None,
+            stable_node_id: self.stable_node_id.clone(),
             tailscale_ip: self.tailscale_ip.clone(),
             magic_dns_name: self.magic_dns_name.clone(),
             hostname: self.hostname.clone(),
@@ -1392,6 +1385,7 @@ mod tests {
         ExistingAutoEnrollmentPeer {
             peer_id: format!("peer_{}", node_key.replace("nodekey:", "")),
             node_key: node_key.to_owned(),
+            stable_node_id: None,
             tailnet_id: Some("tailnet-alpha".to_owned()),
             tailnet_display_name: Some("alpha.example".to_owned()),
             materialized_on_node_key: None,
@@ -1412,6 +1406,7 @@ mod tests {
         ExistingAutoEnrollmentPeer {
             peer_id: format!("peer_{}", node_key.replace("nodekey:", "")),
             node_key: node_key.to_owned(),
+            stable_node_id: None,
             tailnet_id: Some(tailnet_id.to_owned()),
             tailnet_display_name: Some("alpha.example".to_owned()),
             materialized_on_node_key: materialized_on_node_key.map(str::to_owned),
