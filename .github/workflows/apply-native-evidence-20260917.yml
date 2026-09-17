@@ -1,0 +1,212 @@
+name: Apply prepared native-evidence patches (one-time)
+
+# Delivery bridge for two user-requested direct-to-main source commits.
+# It never enables or changes existing CI/release workflows. It accepts only
+# its named original push, refuses source drift, and expires after two hours.
+# No checkout, PR, force push, source execution, or Rust compilation is used.
+# Only the six fixed source/test paths in GROUPS can be written.
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/apply-native-evidence-20260917.yml]
+permissions:
+  contents: read
+concurrency:
+  group: apply-native-evidence-20260917
+  cancel-in-progress: false
+jobs:
+  apply:
+    if: >-
+      github.repository == 'Dicklesworthstone/eidetic_engine_cli' &&
+      github.event.head_commit.message == 'chore(delivery): apply prepared native-evidence patches'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Apply exact source changes in separate fast-forward commits
+        shell: bash
+        env:
+          DELIVERY_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import datetime as dt
+          import difflib
+          import functools
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+          import time
+          import urllib.error
+          import urllib.request
+
+          REPO = "Dicklesworthstone/eidetic_engine_cli"
+          TRIGGER = "chore(delivery): apply prepared native-evidence patches"
+          BASE = "https://api.github.com/repos/" + REPO + "/"
+          FORMAT_SHA = "42d9f50ff93ae9118d5895e898e1677328e71718"
+          GROUPS = [{'message': 'feat(context): retain native CASS evidence in context deltas\n\nWire live and verified historical snapshots to native evidence identity,\nrevision, trust and provenance hashes without fabricating memory IDs.\nAdd eight unit tests and an import/pack/add/no-op/remove CLI regression.\n\nApply the previously prepared patches with exact source-blob checks.\nNightly rustfmt parsing/format checks passed; Rust tests were not run.\nNo bead closure or full transcript-body delta support is claimed.', 'edits': {'src/cli/mod.rs': {'before_sha': 'df9c262faea285791517d95610bdb8a27e5072ef', 'replacements': [{'old': 'use std::borrow::Cow;\nuse std::cell::{Cell, RefCell};\nuse std::collections::{BTreeMap, BTreeSet};\n', 'new': 'mod context_delta_evidence;\n\nuse std::borrow::Cow;\nuse std::cell::{Cell, RefCell};\nuse std::collections::{BTreeMap, BTreeSet};\n'}, {'old': 'fn context_delta_snapshot_from_response(\n    response: &ContextResponse,\n    full_json: &str,\n) -> ContextDeltaPackSnapshot {\n    let pack_hash = response\n        .data\n        .pack\n        .hash\n        .clone()\n        .unwrap_or_else(|| "absent".to_string());\n    let items = response\n        .data\n        .pack\n        .items\n        .iter()\n        .map(context_delta_item_snapshot_from_pack_item)\n        .collect();\n    ContextDeltaPackSnapshot::new(\n        pack_hash,\n        0,\n        full_json.len() as u64,\n        response.data.pack.used_tokens,\n        items,\n    )\n}\n', 'new': 'fn context_delta_snapshot_from_response(\n    response: &ContextResponse,\n    full_json: &str,\n) -> ContextDeltaPackSnapshot {\n    let pack_hash = response\n        .data\n        .pack\n        .hash\n        .clone()\n        .unwrap_or_else(|| "absent".to_string());\n    let items = response\n        .data\n        .pack\n        .items\n        .iter()\n        .map(context_delta_item_snapshot_from_pack_item)\n        .chain(\n            response\n                .data\n                .pack\n                .evidence_items\n                .iter()\n                .map(context_delta_evidence::from_item),\n        )\n        .collect();\n    ContextDeltaPackSnapshot::new(\n        pack_hash,\n        0,\n        full_json.len() as u64,\n        response.data.pack.used_tokens,\n        items,\n    )\n}\n'}, {'old': 'fn context_delta_item_snapshot_from_pack_ledger(\n    item: &serde_json::Value,\n) -> Result<ContextDeltaItemSnapshot, String> {\n    let memory_id = item\n        .get("memoryId")\n        .and_then(serde_json::Value::as_str)\n        .ok_or_else(|| "verified prior pack item omitted memoryId".to_owned())?;\n', 'new': 'fn context_delta_item_snapshot_from_pack_ledger(\n    item: &serde_json::Value,\n) -> Result<ContextDeltaItemSnapshot, String> {\n    if item.get("entityKind").and_then(serde_json::Value::as_str) == Some("evidence_span") {\n        return context_delta_evidence::from_ledger(item);\n    }\n    let memory_id = item\n        .get("memoryId")\n        .and_then(serde_json::Value::as_str)\n        .ok_or_else(|| "verified prior pack item omitted memoryId".to_owned())?;\n'}]}, 'tests/no_mocks_e2e.rs': {'before_sha': '3631b97dea041952714a7df7a2fbfb3431f11b39', 'replacements': [{'old': 'use serde::Serialize;\nuse serde_json::{Value as JsonValue, json};\nuse std::collections::BTreeSet;\n', 'new': '#[cfg(unix)]\n#[path = "support/native_evidence_delta.rs"]\nmod native_evidence_delta;\n\nuse serde::Serialize;\nuse serde_json::{Value as JsonValue, json};\nuse std::collections::BTreeSet;\n'}]}}, 'added': {'src/cli/context_delta_evidence.rs': 'c4a146ac3d9722d2ea253b1ad131763d8070565d', 'tests/support/native_evidence_delta.rs': 'c60ce4b74c351b5e329a391440dce083c9d2c523'}}, {'message': 'fix(pack): count retained native evidence after conflict suppression\n\nInclude retained evidence token costs when recounting a guarded pack and\nits audit budget. Preserve native identity, content, provenance and the\nmemory-only conflict-selection policy. Add six regression tests.\n\nNightly rustfmt parsing/format checks passed; Rust tests were not run.\nNo bead closure is claimed.', 'edits': {'src/pack/mod.rs': {'before_sha': '485efcdb60f7204bacd58fa4a03ac6dad8ee364e', 'replacements': [{'old': 'pub mod binary;\npub mod budget_classifier;\n\npub const SUBSYSTEM: &str = "pack";\npub const PACK_COMMAND: &str = "pack";\n', 'new': 'pub mod binary;\npub mod budget_classifier;\n\n#[cfg(test)]\n#[path = "native_evidence_guard_tests.rs"]\nmod native_evidence_guard_tests;\n\npub const SUBSYSTEM: &str = "pack";\npub const PACK_COMMAND: &str = "pack";\n'}, {'old': '        self.items = kept;\n        self.used_tokens = self\n            .items\n            .iter()\n            .map(|item| item.estimated_tokens)\n            .sum::<u32>();\n        self.selection_audit.selected_count = self.items.len();\n        self.selection_audit.omitted_count = self.omitted.len();\n        self.selection_audit.budget_used = self.used_tokens;\n', 'new': '        self.items = kept;\n        self.used_tokens = self\n            .items\n            .iter()\n            .map(|item| item.estimated_tokens)\n            .chain(self.evidence_items.iter().map(|item| item.estimated_tokens))\n            .sum::<u32>();\n        self.selection_audit.selected_count = self.items.len();\n        self.selection_audit.omitted_count = self.omitted.len();\n        self.selection_audit.budget_used = self.used_tokens;\n'}]}}, 'added': {'src/pack/native_evidence_guard_tests.rs': '2ae0a8a32722d03a68dadd185bd891ee91ea9b71'}}]
+
+          # No checkout, no repository-code execution, no PR and no force update.
+          # The only writable paths are the six source/test files enumerated above.
+          # Only the original named push event is accepted, and it expires in two hours.
+          event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+          if (os.environ.get("GITHUB_REPOSITORY") != REPO
+              or os.environ.get("GITHUB_REF") != "refs/heads/main"
+              or os.environ.get("GITHUB_EVENT_NAME") != "push"
+              or event.get("head_commit", {}).get("message") != TRIGGER):
+              raise SystemExit("This delivery job does not apply to this event")
+          created = dt.datetime.fromisoformat(event["head_commit"]["timestamp"].replace("Z", "+00:00"))
+          age = (dt.datetime.now(dt.timezone.utc) - created).total_seconds()
+          if not 0 <= age <= 7200:
+              raise SystemExit("This one-time delivery event has expired")
+
+          TOKEN = os.environ.pop("DELIVERY_TOKEN")
+
+          def api(path, method="GET", body=None):
+              request = urllib.request.Request(
+                  BASE + path,
+                  data=None if body is None else json.dumps(body).encode(),
+                  method=method,
+                  headers={
+                      "Authorization": "Bearer " + TOKEN,
+                      "Accept": "application/vnd.github+json",
+                      "Content-Type": "application/json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "ee-native-evidence-one-time-delivery",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  return json.load(response)
+
+          def blob_sha(content):
+              return hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
+
+          @functools.lru_cache(maxsize=None)
+          def read_blob(sha):
+              result = api("git/blobs/" + sha)
+              if result.get("encoding") != "base64":
+                  raise RuntimeError("Unexpected Git blob encoding")
+              content = base64.b64decode(result["content"])
+              if blob_sha(content) != sha:
+                  raise RuntimeError("Fetched source bytes do not match their Git blob")
+              return content
+
+          @functools.lru_cache(maxsize=None)
+          def read_tree(sha):
+              result = api("git/trees/" + sha)
+              if result.get("truncated"):
+                  raise RuntimeError("Refusing an incomplete tree listing")
+              return {entry["path"]: entry for entry in result["tree"]}
+
+          def lookup(tree, path):
+              parts = path.split("/")
+              for index, part in enumerate(parts):
+                  entry = read_tree(tree).get(part)
+                  if entry is None:
+                      return None
+                  if index == len(parts) - 1:
+                      if entry["type"] != "blob" or entry["mode"] != "100644":
+                          raise RuntimeError("Refusing a nonregular source path: " + path)
+                      return entry["sha"]
+                  if entry["type"] != "tree":
+                      raise RuntimeError("Refusing a nontree source ancestor: " + path)
+                  tree = entry["sha"]
+
+          def current():
+              head = api("git/ref/heads/main")["object"]["sha"]
+              tree = api("git/commits/" + head)["tree"]["sha"]
+              return head, tree
+
+          # Verify every original and absent destination before spending time formatting.
+          _, initial_tree = current()
+          for group in GROUPS:
+              for path, spec in group["edits"].items():
+                  if lookup(initial_tree, path) != spec["before_sha"]:
+                      raise RuntimeError("Source changed; manual reconciliation required: " + path)
+              for path in group["added"]:
+                  if lookup(initial_tree, path) is not None:
+                      raise RuntimeError("Refusing to overwrite an existing destination: " + path)
+
+          # This is syntax/format validation only, NOT compilation or Rust test execution.
+          subprocess.run(["rustup", "toolchain", "install", "nightly", "--profile", "minimal",
+                          "--component", "rustfmt"], check=True, timeout=240)
+          scratch = Path(tempfile.mkdtemp(prefix="ee-native-evidence-delivery-"))
+          (scratch / "rustfmt.toml").write_bytes(read_blob(FORMAT_SHA))
+          plans = []
+          for group in GROUPS:
+              contents = {}
+              before = {}
+              for path, spec in group["edits"].items():
+                  original = read_blob(spec["before_sha"])
+                  text = original.decode("utf-8")
+                  for edit in spec["replacements"]:
+                      if text.count(edit["old"]) != 1:
+                          raise RuntimeError("Patch context is not unique: " + path)
+                      text = text.replace(edit["old"], edit["new"], 1)
+                  contents[path] = text.encode("utf-8")
+                  before[path] = spec["before_sha"]
+              for path, sha in group["added"].items():
+                  contents[path] = read_blob(sha)
+                  before[path] = None
+              for path, content in contents.items():
+                  target = scratch / path
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(content)
+              targets = [str(scratch / path) for path in contents]
+              formatter = ["rustup", "run", "nightly", "rustfmt", "--edition", "2024",
+                           "--config-path", str(scratch / "rustfmt.toml"),
+                           "--config", "skip_children=true"]
+              subprocess.run(formatter + targets, check=True, timeout=120)
+              subprocess.run(formatter + ["--check"] + targets, check=True, timeout=120)
+              after = {}
+              for path in contents:
+                  content = (scratch / path).read_bytes()
+                  old = read_blob(before[path]) if before[path] else b""
+                  changes = list(difflib.unified_diff(old.decode().splitlines(), content.decode().splitlines()))
+                  changed_lines = sum(line.startswith(("+", "-")) for line in changes[2:])
+                  if before[path] and changed_lines > 150:
+                      raise RuntimeError("Refusing unrelated formatting churn: " + path)
+                  result = api("git/blobs", "POST", {"encoding": "base64", "content": base64.b64encode(content).decode()})
+                  if result["sha"] != blob_sha(content):
+                      raise RuntimeError("Uploaded source hash mismatch")
+                  after[path] = result["sha"]
+                  print(json.dumps({"path": path, "before": before[path], "after": after[path],
+                                    "changedLines": changed_lines}), flush=True)
+              plans.append((group["message"], before, after))
+
+          for message, before, after in plans:
+              for attempt in range(6):
+                  head, tree = current()
+                  actual = {path: lookup(tree, path) for path in before}
+                  if actual == after:
+                      print("Source group already applied", flush=True)
+                      break
+                  if actual != before:
+                      raise RuntimeError("Concurrent edits changed a target; no source was overwritten")
+                  new_tree = api("git/trees", "POST", {
+                      "base_tree": tree,
+                      "tree": [{"path": path, "mode": "100644", "type": "blob", "sha": sha}
+                               for path, sha in after.items()],
+                  })["sha"]
+                  commit = api("git/commits", "POST", {
+                      "message": message, "tree": new_tree, "parents": [head],
+                  })["sha"]
+                  try:
+                      api("git/refs/heads/main", "PATCH", {"sha": commit, "force": False})
+                  except urllib.error.HTTPError as error:
+                      if error.code in (409, 422) and current()[0] != head:
+                          time.sleep(1)
+                          continue
+                      raise
+                  print("COMMITTED " + commit + " " + message.splitlines()[0], flush=True)
+                  with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                      summary.write("Committed `" + commit + "` directly to main: " + message.splitlines()[0] + "\n\n")
+                  break
+              else:
+                  raise RuntimeError("Main kept moving; refusing a force update")
+          print("DELIVERY COMPLETE; Rust tests were not run", flush=True)
+          PY
