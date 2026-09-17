@@ -355,7 +355,36 @@ fn close_inconclusive_fixture() -> Result<String, String> {
 }
 
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
-    crate::common_spawn::serialized_real_ee(args)
+    // The CLI row in this module asserts `stderr` is EMPTY, twice. `ee` puts
+    // bytes on stderr from two ambient-environment channels, neither of which
+    // this module controlled:
+    //
+    //   - a start-log envelope written straight to stderr whenever
+    //     EE_LOG_JSON is truthy or EE_LOG_FORMAT=json (src/main.rs:149);
+    //   - the tracing subscriber, `fmt().with_writer(io::stderr).json()`,
+    //     whose filter comes from RUST_LOG (src/main.rs:200).
+    //
+    // Inheriting any of them turns a statement about the PRODUCT into a
+    // statement about whoever launched the test process, and the row then
+    // fails identically whether or not `ee` is well behaved.
+    // tests/contracts/insights_stream.rs already removes EE_LOG_JSON for this
+    // reason; this module removed nothing.
+    //
+    // EE_WORKSPACE goes too: every call here passes `--workspace` explicitly,
+    // so an ambient one can only disagree with the argument. The registry is
+    // already isolated per spawn inside `serialized_real_ee_with`.
+    //
+    // No assertion is relaxed. A failure now means `ee` itself wrote to
+    // stderr, which is precisely what the row exists to catch.
+    crate::common_spawn::serialized_real_ee_with(|command| {
+        command
+            .args(args)
+            .env_remove("EE_WORKSPACE")
+            .env_remove("EE_LOG_JSON")
+            .env_remove("EE_LOG_FORMAT")
+            .env_remove("RUST_LOG");
+    })
+    .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 fn unique_workspace_dir(prefix: &str) -> Result<PathBuf, String> {
