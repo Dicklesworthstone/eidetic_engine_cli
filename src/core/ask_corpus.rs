@@ -1,14 +1,16 @@
 //! Source-of-truth corpus admission for extractive question answering.
 //!
-//! A non-tombstoned row is not necessarily current: revision and expiration
-//! retain old rows, and scheduled memories can start in the future. Apply the
-//! validity window before scoring, nearest-evidence hints, and link lookup so
-//! none of those paths can bring ineligible advice back into an answer.
+//! Current lifecycle, scope and public-evidence eligibility are resolved before
+//! scoring, nearest-evidence hints, and incident-link lookup. Memory bodies,
+//! scope metadata and links must describe one coherent database snapshot.
+
+use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
 
+use crate::core::memory_scope::MemoryScopeContext;
 use crate::db::DbConnection;
-use crate::models::DomainError;
+use crate::models::{DomainError, MemoryScope};
 
 use super::{AskCandidate, AskContradiction, load_scoped_contradictions};
 
@@ -40,6 +42,55 @@ pub fn load_current_ask_corpus(
     load_corpus_with_boundary(connection, workspace_id, reference_time, || Ok(()))
 }
 
+/// Apply the ordinary memory scope before scoring or contradiction lookup.
+/// Global scope selects tagged memories in this workspace; it never opens a
+/// global store or widens the already-resolved workspace boundary.
+pub fn load_scoped_ask_corpus(
+    connection: &DbConnection,
+    workspace_id: &str,
+    reference_time: DateTime<Utc>,
+    scope: MemoryScope,
+) -> Result<AskCorpus, DomainError> {
+    load_corpus_with_scope_boundary(
+        connection,
+        workspace_id,
+        reference_time,
+        || scope_context(connection, workspace_id, scope),
+        || Ok(()),
+    )
+}
+
+fn scope_context(
+    connection: &DbConnection,
+    workspace_id: &str,
+    scope: MemoryScope,
+) -> Result<MemoryScopeContext, DomainError> {
+    let mut context = MemoryScopeContext {
+        scope,
+        strict_scope: false,
+        current_agent: crate::core::memory_scope::current_agent_name(),
+        team_members: BTreeSet::new(),
+    };
+    if scope == MemoryScope::Team {
+        // The addressed store's authenticated roster is authority, not a
+        // config-file list or a roster from a different workspace/database.
+        for member in connection
+            .list_all_team_members()
+            .map_err(|_| corpus_storage_error())?
+        {
+            if member.workspace_id == workspace_id && member.state == "active" {
+                for name in [member.display_name, member.origin_node_id] {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        context.team_members.insert(name.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    Ok(context)
+}
+
 // The private boundary lets real-store tests commit through a second connection
 // at the exact memory/link boundary. Production passes a no-op, not a timing
 // sleep or a mock database. The owned snapshot encloses both reads regardless.
@@ -49,18 +100,58 @@ fn load_corpus_with_boundary(
     reference_time: DateTime<Utc>,
     after_memory_read: impl FnOnce() -> Result<(), DomainError>,
 ) -> Result<AskCorpus, DomainError> {
+    load_corpus_with_scope_boundary(
+        connection,
+        workspace_id,
+        reference_time,
+        || {
+            Ok(MemoryScopeContext {
+                scope: MemoryScope::Workspace,
+                strict_scope: false,
+                current_agent: None,
+                team_members: BTreeSet::new(),
+            })
+        },
+        after_memory_read,
+    )
+}
+
+fn load_corpus_with_scope_boundary(
+    connection: &DbConnection,
+    workspace_id: &str,
+    reference_time: DateTime<Utc>,
+    scope_context: impl FnOnce() -> Result<MemoryScopeContext, DomainError>,
+    after_memory_read: impl FnOnce() -> Result<(), DomainError>,
+) -> Result<AskCorpus, DomainError> {
     let snapshot = AskReadSnapshot::begin(connection)?;
     let stored = connection
         .list_memories(workspace_id, None, false)
         .map_err(|_| corpus_storage_error())?;
+    let scope = scope_context()?;
     after_memory_read()?;
+    let mut tags = std::collections::BTreeMap::new();
+    if scope.scope == MemoryScope::Global {
+        let ids: Vec<_> = stored.iter().map(|memory| memory.id.as_str()).collect();
+        for batch in ids.chunks(256) {
+            tags.extend(
+                connection
+                    .get_memory_tags_batch(batch)
+                    .map_err(|_| corpus_storage_error())?,
+            );
+        }
+    }
     let mut candidates = Vec::with_capacity(stored.len());
     for memory in stored {
         if validity_contains(
             memory.valid_from.as_deref(),
             memory.valid_to.as_deref(),
             reference_time,
-        )? && let Some(candidate) = admission::into_candidate(memory)
+        )? && memory.workspace_id == workspace_id
+            && scope.memory_in_scope_with_tags(
+                &memory,
+                tags.get(&memory.id).map(Vec::as_slice).unwrap_or(&[]),
+            )
+            && let Some(candidate) = admission::into_candidate(memory)
         {
             candidates.push(candidate);
         }
@@ -172,3 +263,7 @@ mod snapshot_tests;
 #[cfg(test)]
 #[path = "ask_privacy_tests.rs"]
 mod privacy_tests;
+
+#[cfg(test)]
+#[path = "ask_scope_tests.rs"]
+mod scope_tests;
