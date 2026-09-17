@@ -32,9 +32,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-static-${{ github.workflow }}-${{ github.ref }}
-  # Cheap job: prefer the latest commit over a queue of stale static runs.
-  cancel-in-progress: true
+  # Push/PR: latest commit wins so a 6-agent swarm does not queue a stack of
+  # franken-stack clones. workflow_dispatch: unique per run so a scratch proof
+  # (bd-o7wh0) is not cancelled by the next push to main. The first push run
+  # of this workflow (35221242320 on 548ef61d6) was cancelled that way.
+  group: ci-static-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   static:
