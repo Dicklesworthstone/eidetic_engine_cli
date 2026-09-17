@@ -289,6 +289,169 @@ fn contended_closure_lint_is_reported_as_contention_not_as_a_pass() {
     );
 }
 
+/// Runs the REAL `run_stage` over the REAL `closure_lint_or_tracked_drift`.
+///
+/// `closure_gate_status` above stops at the function boundary: it proves what
+/// the gate hands back, not what `verify.sh` then does with it. The bead's
+/// deletion condition is stricter than that -- "retire when an injected
+/// closure-lint failure makes verify.sh exit NON-ZERO" -- and the two are
+/// joined by `run_stage`, which nothing in this repo executed. A gate that
+/// returns 1 into a wrapper that swallows it is still an ungated gate.
+///
+/// Only the two subprocesses are stubbed. `run_stage` and the gate are both
+/// extracted verbatim, so this exercises the same composition as verify.sh:1062,
+/// `run_stage "Closure Linter" "closure_lint_or_tracked_drift"`.
+///
+/// Returns (stdout, process exit status). On the failing path `run_stage` calls
+/// `exit $exit_code`, so the trailing `printf` never runs and stdout is empty --
+/// that absence IS the propagation, and is asserted as such.
+fn closure_stage_through_run_stage(lint_code: i32, guard_code: i32) -> (String, i32) {
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"
+set -uo pipefail
+BEADS_LOCK_SKIP_CODE=75
+STAGE_RESULTS=""
+STAGE_PASSED=0
+STAGE_SKIPPED_CONTENTION=0
+STAGE_SKIPPED_CONTENTION_NAMES=""
+ARTIFACT_DIRS=""
+stage_budget_summary() { printf 'budget-stub'; }
+capture_test_trace_artifacts() { :; }
+enforce_stage_budget() { :; }
+with_beads_read_locks() {
+    case "$1" in
+        *closure-lint.sh)             return "$LINT_CODE" ;;
+        *verification-drift-guard.sh) return "$GUARD_CODE" ;;
+    esac
+}
+eval "$(awk '/^run_stage\(\) /,/^}/' "$VERIFY_SCRIPT")"
+eval "$(awk '/^closure_lint_or_tracked_drift\(\) /,/^}/' "$VERIFY_SCRIPT")"
+run_stage "Closure Linter" "closure_lint_or_tracked_drift" >/dev/null 2>&1
+printf 'survived=1 passed=%s contended=%s' "$STAGE_PASSED" "$STAGE_SKIPPED_CONTENTION"
+"#,
+        )
+        .env("VERIFY_SCRIPT", verify_script_path())
+        .env("LINT_CODE", lint_code.to_string())
+        .env("GUARD_CODE", guard_code.to_string())
+        .current_dir(project_root())
+        .output()
+        .expect("run run_stage over closure_lint_or_tracked_drift");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    (stdout, output.status.code().unwrap_or(-1))
+}
+
+/// THE DELETION CONDITION for bd-closure-lint-gate-cannot-fail-6hb5b: an
+/// injected closure-lint failure must make verify.sh exit non-zero.
+///
+/// Measured against the PRE-FIX function (`git show 40a562a21^:scripts/verify.sh`)
+/// composed with this same real `run_stage`, all five lint/guard pairs gave
+/// `process exit 0, STAGE_PASSED=1` -- every one recorded as a passing stage.
+/// That control is the finding; this test is the fix holding.
+#[test]
+fn an_unexcused_closure_lint_failure_exits_verify_non_zero() {
+    let (stdout, code) = closure_stage_through_run_stage(1, 1);
+    assert_eq!(
+        code, 1,
+        "an unexcused closure-lint violation must terminate verify.sh with the \
+         stage's own code; stdout was:\n{stdout}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "run_stage must `exit` rather than return on a failing stage, so nothing \
+         after it runs; stdout was:\n{stdout}"
+    );
+}
+
+/// The paired positives. Without these, a `run_stage` that exited on EVERY
+/// stage would satisfy the test above and be the same defect inverted.
+#[test]
+fn a_clean_or_excused_closure_lint_stage_is_counted_as_passed() {
+    let (stdout, code) = closure_stage_through_run_stage(0, 0);
+    assert_eq!(
+        code, 0,
+        "a clean lint must not terminate verify.sh:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("passed=1") && stdout.contains("contended=0"),
+        "a clean lint must increment STAGE_PASSED only:\n{stdout}"
+    );
+
+    let (stdout, code) = closure_stage_through_run_stage(1, 0);
+    assert_eq!(
+        code, 0,
+        "a violation the drift guard excuses must not terminate verify.sh:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("passed=1") && stdout.contains("contended=0"),
+        "an excused violation must still count as a passed stage:\n{stdout}"
+    );
+}
+
+/// A contended closure-lint must land in run_stage's CONTENTION counter, not in
+/// STAGE_PASSED -- that counter is what drives the INCOMPLETE banner and exit 75.
+///
+/// Before the fix the contended lint never reached this counter at all: the gate
+/// fell through to the drift guard and a passing guard converted a stage that
+/// NEVER EXECUTED into `passed=1`.
+#[test]
+fn a_contended_closure_lint_stage_is_counted_as_contention_not_as_passed() {
+    for guard_code in [0, 75] {
+        let (stdout, code) = closure_stage_through_run_stage(75, guard_code);
+        assert_eq!(
+            code, 0,
+            "contention must not terminate the run (guard={guard_code}):\n{stdout}"
+        );
+        assert!(
+            stdout.contains("contended=1"),
+            "a contended lint must increment STAGE_SKIPPED_CONTENTION \
+             (guard={guard_code}):\n{stdout}"
+        );
+        assert!(
+            stdout.contains("passed=0"),
+            "a stage that never executed must not count as passed \
+             (guard={guard_code}):\n{stdout}"
+        );
+    }
+}
+
+/// Vacuity guard for the harness above.
+///
+/// `eval "$(awk ...)"` that matched nothing would define neither function, the
+/// `run_stage` call would be a command-not-found returning 127, and the
+/// non-zero assertion would pass for entirely the wrong reason. Pin both
+/// extractions to a real, non-trivial body.
+#[test]
+fn the_run_stage_harness_extracts_real_functions() {
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    for name in ["run_stage", "closure_lint_or_tracked_drift"] {
+        assert!(
+            script.contains(&format!("{name}() {{")),
+            "verify.sh must define {name} at column 0 for the awk extraction to find it"
+        );
+        let body: Vec<&str> = script
+            .lines()
+            .skip_while(|line| !line.starts_with(&format!("{name}() ")))
+            .take_while(|line| *line != "}")
+            .collect();
+        assert!(
+            body.len() > 10,
+            "the awk range for {name} captured {} lines; an empty or truncated \
+             extraction would make these tests vacuous",
+            body.len()
+        );
+    }
+
+    // And the extraction must actually run: a harness that defined nothing
+    // would give 127, not 1.
+    let (_, code) = closure_stage_through_run_stage(1, 1);
+    assert_ne!(
+        code, 127,
+        "exit 127 means the extracted functions were never defined"
+    );
+}
+
 /// Runs verify.sh's own closing verdict against an injected stage tally.
 ///
 /// Extracts `verification_exit_status` and `verification_summary_banner` from
