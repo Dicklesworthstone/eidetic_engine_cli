@@ -23,7 +23,15 @@ from typing import Any
 
 REDACTION_STATUS = "paths_counts_subjects_only_no_content"
 AGENT_MAIL_SNAPSHOT_SCHEMA = "ee.agent_mail.snapshot.v1"
-DEFAULT_TIMEOUT_SEC = 5.0
+# `am status` legitimately takes ~6.2s against a populated project on this
+# deployment, so a 5.0s budget timed it out on every run. That single timeout
+# is not contained: `inbox` is derived from the status command, so it collapsed
+# to [], `fallback_active` flipped true and `producer_status` went `degraded` --
+# a claim snapshot that exits 0 while reporting itself unusable (bd-fc0zs).
+# 20.0 is ~3x the measured cost, chosen as headroom for a loaded host rather
+# than as a round number. Raise it further only with a measurement; a snapshot
+# that waits longer on a genuinely hung command is the cost of this knob.
+DEFAULT_TIMEOUT_SEC = 20.0
 DEFAULT_INBOX_LIMIT = 20
 DEFAULT_THREAD_LIMIT = 20
 MAX_WIRE_COUNT = (1 << 64) - 1
