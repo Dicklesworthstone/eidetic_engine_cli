@@ -32,13 +32,25 @@ Each gate is mapped to its conformance tests, MUST clauses, and gap status.
 
 | ID | Clause | Test | Status |
 |----|--------|------|--------|
-| FD-01 | MUST reject `tokio` in dependency tree | `tokio_is_forbidden` | PASS |
-| FD-02 | MUST reject `async-std` in dependency tree | `async_std_is_forbidden` | PASS |
-| FD-03 | MUST reject `rusqlite` in dependency tree | `rusqlite_is_forbidden` | PASS |
-| FD-04 | MUST reject `sqlx` in dependency tree | `sqlx_is_forbidden` | PASS |
-| FD-05 | MUST reject `diesel` in dependency tree | `diesel_is_forbidden` | PASS |
-| FD-06 | MUST reject `petgraph` in dependency tree | `petgraph_is_forbidden` | PASS |
-| FD-07 | MUST reject `reqwest` in dependency tree | `reqwest_is_forbidden` | PASS |
+| FD-01 | MUST reject `tokio` in dependency tree | `default_feature_tree_excludes_forbidden_crates` | PASS |
+| FD-02 | MUST reject `async-std` in dependency tree | `default_feature_tree_excludes_forbidden_crates` | PASS |
+| FD-03 | MUST reject `rusqlite` in dependency tree | `default_feature_tree_excludes_forbidden_crates` | PASS |
+| FD-04 | MUST reject `sqlx` in dependency tree | `default_feature_tree_excludes_forbidden_crates` | PASS |
+| FD-05 | MUST reject `diesel` in dependency tree | `default_feature_tree_excludes_forbidden_crates` | PASS |
+| FD-06 | MUST reject `petgraph` in dependency tree | `default_feature_tree_excludes_forbidden_crates` | PASS |
+| FD-07 | MUST reject `reqwest` in dependency tree | `default_feature_tree_excludes_forbidden_crates` | PASS |
+
+> FD-01..FD-07 cited seven per-crate test names — `tokio_is_forbidden`,
+> `async_std_is_forbidden` and so on — that exist nowhere in this repository.
+> The clauses themselves are covered: `tests/forbidden_deps.rs` checks the whole
+> `FORBIDDEN_CRATES` list (which contains all seven of these crates) against
+> three dependency trees — `default_feature_tree_excludes_forbidden_crates`,
+> `all_features_tree_excludes_forbidden_crates` and
+> `no_default_features_tree_excludes_forbidden_crates` — with the matcher itself
+> unit-tested by `detects_each_forbidden_crate_when_present` and
+> `matches_exact_crate_name_not_substring`. The rows now cite the default-tree
+> test; the other four are the same clause under different feature sets.
+> Corrected 2026-09-17 after `coverage_matrix_cites_tests_that_exist` was added.
 
 ---
 
@@ -122,13 +134,13 @@ Each gate is mapped to its conformance tests, MUST clauses, and gap status.
 | EC-07 | MUST cover all normalized CLI command paths | `effect_manifest_covers_all_normalized_cli_command_paths` | PASS |
 | EC-08 | MUST have no undocumented extra CLI paths | `effect_manifest_has_no_undocumented_extra_cli_paths` | PASS |
 | EC-09 | MUST include config write commands | `effect_manifest_includes_config_write_commands` | PASS |
-| EC-10 | MUST track degraded_unavailable as non-mutating | `effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating` | PASS |
+| EC-10 | MUST track degraded_unavailable as non-mutating | (no test names this clause) | UNCOVERED |
 | EC-11 | MUST track implemented surfaces | `effect_manifest_tracks_implemented_surfaces` | PASS |
 | EC-12 | MUST track demo run as real execution | `effect_manifest_tracks_demo_run_as_real_execution_surface` | PASS |
 | EC-13 | MUST track procedure commands as real surfaces | `effect_manifest_tracks_procedure_commands_as_real_surfaces` | PASS |
 | EC-14 | MUST track handoff/eval as real surfaces | `effect_manifest_tracks_handoff_and_eval_as_real_surfaces` | PASS |
 | EC-15 | MUST track certificate/quarantine as read_only | `effect_manifest_tracks_certificate_and_quarantine_as_real_read_only_surfaces` | PASS |
-| EC-16 | MUST enforce backup/restore no-delete contracts | `effect_manifest_backup_restore_have_side_path_no_delete_contracts` | PASS |
+| EC-16 | MUST enforce backup/restore no-delete contracts | `effect_manifest_side_path_exports_have_no_delete_contracts` | PASS |
 | EC-17 | MUST enforce export no-write-until-materialized | `effect_manifest_export_paths_do_not_write_side_paths_until_materialized` | PASS |
 | EC-18 | MUST match safe_commands count to read_only | `effect_manifest_safe_commands_count_matches_read_only` | PASS |
 | EC-19 | MUST have non-empty write surfaces for mutating commands | `effect_manifest_mutating_commands_have_non_empty_write_surfaces` | PASS |
@@ -181,7 +193,7 @@ Each gate is mapped to its conformance tests, MUST clauses, and gap status.
 | DH-12 | economy report MUST degrade instead of seed | `economy_report_degrades_instead_of_reporting_seed_metrics` | PASS |
 | DH-13 | causal trace MUST report empty evidence | `causal_trace_without_failure_id_reports_empty_evidence_query` | PASS |
 | DH-14 | procedure list MUST report persisted records | `procedure_list_reports_persisted_records_without_unavailable_sentinel` | PASS |
-| DH-15 | situation classify MUST report heuristic routing | `situation_classify_reports_heuristic_routing_without_unavailable_sentinel` | PASS |
+| DH-15 | situation classify MUST report heuristic routing | `situation_classify_reports_heuristic_routing_without_unavailable_sentinel` | RED (bd-tk7uq) |
 | DH-16 | plan/goal/explain MUST report catalog reasoning | `plan_goal_and_explain_report_catalog_reasoning_without_unavailable_sentinel` | PASS |
 | DH-17 | eval run/list MUST report fixture results | `eval_run_and_list_report_fixture_results_without_unavailable_sentinel` | PASS |
 | DH-18 | review session MUST report storage error | `review_session_reports_storage_error_without_unavailable_sentinel` | PASS |

@@ -205,3 +205,159 @@ fn plan_sweep_matrix_rows_have_evidence_or_tracking_beads() -> TestResult {
 
     Ok(())
 }
+
+/// `tests/COVERAGE.md` is hand-maintained. Its verdict column is a claim, and
+/// until this test existed nothing re-derived any part of it.
+///
+/// This does NOT check that the cited tests pass -- that would mean running
+/// them. It checks the weakest thing that still has teeth: that every test name
+/// the matrix cites RESOLVES TO A FUNCTION THAT EXISTS. A row citing a name
+/// nothing defines cannot be evidence of anything, whatever its verdict says.
+///
+/// Measured when this landed: 9 of 65 cited names existed nowhere in the
+/// repository, every one of them recorded PASS --
+///   FD-01..FD-07  `tokio_is_forbidden`, `async_std_is_forbidden`, ... (7 rows)
+///   EC-10         `effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating`
+///   EC-16         `effect_manifest_backup_restore_have_side_path_no_delete_contracts`
+/// The FD rows and EC-16 were renamed-away citations whose clauses ARE covered,
+/// and now cite the real tests. EC-10 had no covering test at all and is
+/// recorded UNCOVERED rather than pointed at something that does not cover it.
+/// Separately, DH-15 cites a test that exists and is RED (bd-tk7uq); this test
+/// deliberately says nothing about that, because it does not run anything.
+#[test]
+fn coverage_matrix_cites_tests_that_exist() -> TestResult {
+    let matrix =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/COVERAGE.md"))
+            .map_err(|error| format!("read tests/COVERAGE.md: {error}"))?;
+
+    let mut cited: BTreeSet<String> = BTreeSet::new();
+    for line in matrix.lines() {
+        let trimmed = line.trim_start();
+        // Table rows only. A backticked identifier in prose is a reference, not
+        // a coverage claim, and holding prose to this bar would push people
+        // toward writing less of it.
+        if !trimmed.starts_with('|') {
+            continue;
+        }
+        for cell in trimmed.split('|') {
+            let cell = cell.trim();
+            let Some(name) = cell.strip_prefix('`').and_then(|c| c.strip_suffix('`')) else {
+                continue;
+            };
+            // Test-function shape only: lower_snake_case, no path separators,
+            // no extension. Cells naming scripts or files are not test names.
+            if name.len() > 12
+                && name.contains('_')
+                && !name.contains('.')
+                && !name.contains('/')
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                cited.insert(name.to_owned());
+            }
+        }
+    }
+
+    ensure(
+        cited.len() > 40,
+        format!(
+            "expected the matrix's full citation set; parsed {} -- the parser, \
+             not the document, is the likely fault",
+            cited.len()
+        ),
+    )?;
+
+    let defined = defined_test_function_names()?;
+    ensure(
+        defined.len() > 1000,
+        format!(
+            "expected to have enumerated the repo's test functions; found {} -- \
+             the enumerator, not the tree, is the likely fault",
+            defined.len()
+        ),
+    )?;
+
+    let missing: Vec<&str> = cited
+        .iter()
+        .filter(|name| !defined.contains(name.as_str()))
+        .map(String::as_str)
+        .collect();
+
+    ensure(
+        missing.is_empty(),
+        format!(
+            "tests/COVERAGE.md cites {} test name(s) that are defined nowhere in \
+             src/ or tests/. A row citing a test that does not exist is a verdict \
+             with nothing behind it; fix the citation or mark the row UNCOVERED:\n  {}",
+            missing.len(),
+            missing.join("\n  ")
+        ),
+    )
+}
+
+/// Every `fn <name>(` defined under src/ and tests/, excluding fixture trees.
+///
+/// Deliberately broader than `#[test] fn`: a matrix row may legitimately cite a
+/// helper, and the question this answers is "does this name exist", not "is it
+/// a test". Over-collecting makes the check weaker but never wrong, which is
+/// the right direction for an enumerator whose failure mode would otherwise be
+/// a false accusation.
+fn defined_test_function_names() -> Result<BTreeSet<String>, String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut names = BTreeSet::new();
+    for dir in ["src", "tests"] {
+        collect_function_names(&root.join(dir), &mut names)?;
+    }
+    Ok(names)
+}
+
+fn collect_function_names(dir: &Path, names: &mut BTreeSet<String>) -> Result<(), String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if path.is_dir() {
+            if matches!(file_name, "fixtures" | "snapshots" | "golden" | "logs") {
+                continue;
+            }
+            collect_function_names(&path, names)?;
+            continue;
+        }
+        if !file_name.ends_with(".rs") {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            // Peel the modifiers in declaration order, so `pub async fn`, `pub
+            // const fn` and a bare `fn` all reach the same place.
+            let mut rest = trimmed;
+            for prefix in [
+                "pub(crate) ",
+                "pub ",
+                "async ",
+                "const ",
+                "unsafe ",
+                "extern ",
+            ] {
+                rest = rest.strip_prefix(prefix).unwrap_or(rest);
+            }
+            let Some(after) = rest.strip_prefix("fn ") else {
+                continue;
+            };
+            let name: String = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                names.insert(name);
+            }
+        }
+    }
+    Ok(())
+}
