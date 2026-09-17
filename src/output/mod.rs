@@ -2916,21 +2916,20 @@ pub fn render_context_response_json_with_options(
         d.field_object("pack", |pack| {
             pack.field_str("schema", PACK_SCHEMA_V2);
             pack.field_str("query", &response.data.pack.query);
-            match &response.data.pack.hash {
-                Some(hash) => {
-                    pack.field_str("hash", hash);
-                    // ADR 0087: digest is the current pack.hash (five-leaf
-                    // composite). S1–S10 membership and JSON score quantization
-                    // are staged; numericDomain names hash-input quantization.
-                    pack.field_object("snapshotIdentity", |identity| {
-                        identity.field_u32("version", 1);
-                        identity.field_str("digest", hash);
-                        identity.field_str("numericDomain", "q20.12");
-                        identity.field_bool("componentDigestsAvailableLocally", false);
-                    });
-                }
-                None => pack.field_raw("hash", "null"),
-            };
+            if let Some(hash) = &response.data.pack.hash {
+                pack.field_str("hash", hash);
+                // ADR 0087: digest is the current pack.hash (five-leaf
+                // composite). S1–S10 membership and JSON score quantization
+                // are staged; numericDomain names hash-input quantization.
+                pack.field_object("snapshotIdentity", |identity| {
+                    identity.field_u32("version", 1);
+                    identity.field_str("digest", hash);
+                    identity.field_str("numericDomain", "q20.12");
+                    identity.field_bool("componentDigestsAvailableLocally", false);
+                });
+            } else {
+                pack.field_raw("hash", "null");
+            }
             if let Some(text) = &rendered_text {
                 pack.field_str("text", text);
             }

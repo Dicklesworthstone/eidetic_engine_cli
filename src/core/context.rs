@@ -22374,40 +22374,41 @@ pub fn unrelated_context() -> u64 {{
             freshness_facets: Vec::new(),
             selected_in: PackSelectionPhase::StrictMmr,
         };
-        let draft = |relevance: UnitScore| PackDraft {
-            query: request.query.clone(),
-            budget: TokenBudget::default_context(),
-            used_tokens: 8,
-            items: {
-                item.relevance = relevance;
-                vec![item.clone()]
-            },
-            evidence_items: Vec::new(),
-            omitted: Vec::new(),
-            selection_audit: PackSelectionAudit {
-                profile: request.profile,
-                objective: PackSelectionObjective::MmrRedundancy,
-                algorithm_id: "q20_12_test",
-                algorithm_description: "hash quantization contract",
-                candidate_count: 1,
-                selected_count: 1,
-                omitted_count: 0,
-                budget_limit: TokenBudget::default_context().max_tokens(),
-                budget_used: 8,
-                total_objective_value: 0.0,
-                monotone: true,
-                submodular: true,
-                selected_items: Vec::new(),
-                steps: Vec::new(),
-            },
-            hash: None,
+        let draft_with = |relevance: UnitScore| {
+            let mut scored = item.clone();
+            scored.relevance = relevance;
+            PackDraft {
+                query: request.query.clone(),
+                budget: TokenBudget::default_context(),
+                used_tokens: 8,
+                items: vec![scored],
+                evidence_items: Vec::new(),
+                omitted: Vec::new(),
+                selection_audit: PackSelectionAudit {
+                    profile: request.profile,
+                    objective: PackSelectionObjective::MmrRedundancy,
+                    algorithm_id: "q20_12_test",
+                    algorithm_description: "hash quantization contract",
+                    candidate_count: 1,
+                    selected_count: 1,
+                    omitted_count: 0,
+                    budget_limit: TokenBudget::default_context().max_tokens(),
+                    budget_used: 8,
+                    total_objective_value: 0.0,
+                    monotone: true,
+                    submodular: true,
+                    selected_items: Vec::new(),
+                    steps: Vec::new(),
+                },
+                hash: None,
+            }
         };
         let quiet = UnitScore::parse(0.8).map_err(|error| error.to_string())?;
         let noisy = UnitScore::parse(0.8001).map_err(|error| error.to_string())?;
         let shifted = UnitScore::parse(0.81).map_err(|error| error.to_string())?;
-        let hash_quiet = compute_pack_hash(&request, &draft(quiet), &[]);
-        let hash_noisy = compute_pack_hash(&request, &draft(noisy), &[]);
-        let hash_shifted = compute_pack_hash(&request, &draft(shifted), &[]);
+        let hash_quiet = compute_pack_hash(&request, &draft_with(quiet), &[]);
+        let hash_noisy = compute_pack_hash(&request, &draft_with(noisy), &[]);
+        let hash_shifted = compute_pack_hash(&request, &draft_with(shifted), &[]);
         assert_eq!(
             hash_quiet, hash_noisy,
             "sub-quantum relevance noise must not fork pack.hash"
