@@ -2008,6 +2008,14 @@ mod tests {
                 "trust_subclass",
                 "valid_from",
                 "valid_to",
+                // V123. `valid_to` answers applicability ("is this in force?");
+                // `superseded_at` answers identity ("is this the current
+                // revision?"). Chain-head selection moved onto this column --
+                // filter_current_memory_ids, get_memory_superseded_at and
+                // mark_memory_superseded all key on it -- so a rebuild of
+                // `memories` that dropped it would break head selection while
+                // this gate stayed green on the strength of `valid_to` alone.
+                "superseded_at",
                 "created_at",
                 "updated_at",
                 "tombstoned_at",
