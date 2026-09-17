@@ -1570,8 +1570,13 @@ impl EffectManifest {
             CommandEffect::read_only_db("memory history", "Show memory revision history"),
             CommandEffect::read_only_db("memory list", "List memories"),
             CommandEffect::read_only_db("memory show", "Show memory details"),
+            // The CLI emits "mesh hello-responder status"; the bare parent path
+            // was never produced by `extract_command_path`, so this row matched
+            // nothing while the real status path went undeclared (bd-qked7).
+            // The sibling run/register/unregister paths are declared in
+            // `external_io_write_commands`.
             CommandEffect::read_only_db(
-                "mesh hello-responder",
+                "mesh hello-responder status",
                 "Inspect mesh hello-responder status",
             ),
             CommandEffect::read_only_db("mesh init", "Preview mesh initialization state"),
@@ -1779,9 +1784,47 @@ impl EffectManifest {
                 "Render a swarm work packet without mutating coordination state",
             ),
             CommandEffect::read_only_db("task-frame show", "Show passive task-frame state"),
+            // The six read-only members of the `team` surface (bd-qked7).
+            // Each was established by reading its delegate, not by name:
+            // `team activity` -> mesh::team::list_team_activity,
+            // `team doctor` -> inspect_team_health (reads the origin stream and
+            // probes the key-store PLATFORM constant; it never opens the store
+            // for create), `team idp status` -> team_idp_status,
+            // `team members list` -> handle_team_status (a cli->cli delegate),
+            // `team projects list` -> list_team_projects,
+            // `team status` -> local_team_status + collect_team_member_freshness.
+            // None of those bodies reaches a SQL writer or a filesystem write;
+            // the only `insert(` in the group is a local HashSet in
+            // list_team_activity. A false read_only here is worse than the
+            // missing declaration was, so treat a change to any of these six
+            // delegates as a reason to re-derive the class.
+            CommandEffect::read_only_db(
+                "team activity",
+                "List team activity projected from the local mesh origin stream",
+            ),
+            CommandEffect::read_only_db(
+                "team doctor",
+                "Report team genesis, key-store platform, and membership health checks",
+            ),
+            CommandEffect::read_only_db(
+                "team idp status",
+                "Report the team IdP policy generation and pinned OIDC provider",
+            ),
+            CommandEffect::read_only_db(
+                "team members list",
+                "List team members through the read-only team status projection",
+            ),
             CommandEffect::read_only_db(
                 "team port show",
                 "Report the folded team hello port and genesis hash without mutation",
+            ),
+            CommandEffect::read_only_db(
+                "team projects list",
+                "List team projects recorded in the local team store",
+            ),
+            CommandEffect::read_only_db(
+                "team status",
+                "Report local team status and per-member freshness",
             ),
             CommandEffect::read_only_db(
                 "timeline",
@@ -2028,6 +2071,101 @@ impl EffectManifest {
                 "process id plus listener address",
                 "Serve the optional localhost adapter",
             ),
+            // The `team` paths that leave the machine (bd-qked7). These are
+            // external I/O first and durable writers second, so they are
+            // declared here rather than with the pure DB mutations: an agent
+            // reading `durable_write` would not learn that the command dials a
+            // peer, spawns `curl`, or binds a listener.
+            //
+            //   team fetch body          peer body fetch on a cache miss
+            //                            (foreground_cli::fetch_pending_team_bodies_from_paths)
+            //   team invite --wait       binds a TcpListener and serves one
+            //                            bootstrap join plus first sync
+            //   team join                TcpStream::connect_timeout to the inviter
+            //   team members revalidate  tailscale socket + CLI probe
+            //   team idp attest          curl HTTPS GET of the pinned JWKS
+            //   team idp device --execute  curl HTTPS POST to the token endpoint
+            //   team steward run-once    peer body fetch plus a delegated mesh sync
+            CommandEffect::external_io_write(
+                "team fetch body",
+                vec!["mesh_body_cache_metadata"],
+                vec!["mesh body cache"],
+                "team id plus body cache key",
+                "Fetch a represented team body, falling back to a peer fetch that fills the local body cache",
+            ),
+            CommandEffect::external_io_write(
+                "team idp attest",
+                vec![
+                    "mesh_origin_events",
+                    "mesh_origin_event_nonces",
+                    "team_idp_token_replay",
+                    "team_member_identity",
+                ],
+                vec!["<workspace>/.ee/keys/mesh/"],
+                "id token jti plus team id",
+                "Verify a local OIDC id token against the pinned JWKS over constrained HTTPS and attest the member identity",
+            ),
+            CommandEffect::external_io_write(
+                "team idp device",
+                Vec::new(),
+                vec!["constrained curl HTTPS device-code exchange"],
+                "team id plus device code",
+                "Plan, or with --execute run, the RFC 8628 device-code ceremony through a constrained curl invocation",
+            ),
+            CommandEffect::external_io_write(
+                "team invite",
+                vec![
+                    "team_pending_invites",
+                    "team_invite_auth_floor",
+                    "team_members",
+                    "team_member_nodes",
+                    "team_member_signing_keys",
+                ],
+                vec![
+                    "<workspace>/.ee/keys/mesh/",
+                    "bootstrap join TCP listener (--wait)",
+                ],
+                "team id plus invite endpoint plus invite expiry",
+                "Mint a team invite, and with --wait serve one bootstrap join and first sync over a bound TCP listener",
+            ),
+            CommandEffect::external_io_write(
+                "team join",
+                vec![
+                    "team_members",
+                    "team_member_nodes",
+                    "team_member_signing_keys",
+                    "team_join_attempts",
+                    "team_invite_auth_floor",
+                    "mesh_peers",
+                ],
+                vec!["<workspace>/.ee/keys/mesh/"],
+                "invite id plus joining node id",
+                "Redeem an invite code against the inviter over TCP and persist the resulting membership and peer locator",
+            ),
+            CommandEffect::external_io_write(
+                "team members revalidate",
+                vec!["team_member_identity"],
+                Vec::new(),
+                "team id plus member identity snapshot",
+                "Re-probe local tailnet identity and refresh the team member identity projection",
+            ),
+            CommandEffect::external_io_write(
+                "team steward run-once",
+                vec![
+                    "team_members",
+                    "team_member_nodes",
+                    "team_member_signing_keys",
+                    "team_projects",
+                    "team_removal_acknowledgements",
+                    "mesh_body_cache_metadata",
+                    "mesh_peers",
+                    "mesh_import_ledger",
+                    "search_index_jobs",
+                ],
+                vec!["<workspace>/.ee/keys/mesh/"],
+                "team id plus steward tick",
+                "Run one team steward pass, then either fetch pending bodies from peers or delegate a single foreground mesh sync",
+            ),
         ]
     }
 
@@ -2157,6 +2295,17 @@ impl EffectManifest {
                 vec!["mesh_peers", "mesh_import_ledger", "search_index_jobs"],
                 "origin peer cursor plus event content hash",
                 "Run one foreground sync cycle over locally available peer state; network transport is deferred",
+            ),
+            // `ee team sync` checks team posture and then calls
+            // `handle_mesh_sync` directly (src/cli/team.rs), so its blast
+            // radius is `mesh sync`'s, not a separate one. Declared next to it
+            // deliberately: if the `mesh sync` surface changes, this row has to
+            // change with it (bd-qked7).
+            CommandEffect::append_only_write(
+                "team sync",
+                vec!["mesh_peers", "mesh_import_ledger", "search_index_jobs"],
+                "origin peer cursor plus event content hash",
+                "Refuse while the team is paused, then delegate one foreground mesh sync cycle",
             ),
             CommandEffect::append_only_write(
                 "verification ingest",
@@ -2605,10 +2754,156 @@ impl EffectManifest {
                 vec!["memory_tags", "search_index_jobs", "audit_log"],
                 "Add or remove memory tags through audited metadata updates",
             ),
+            // The `team` mutation surface (bd-qked7). Every table below was
+            // read out of the delegate's own SQL, not inferred from the command
+            // name: each handler in `src/cli/team.rs` calls exactly one or two
+            // `src/mesh/team.rs` entry points, and those reach the
+            // `DbConnection` methods named in the comments. Commands that also
+            // touch `<workspace>/.ee/keys/mesh/` do so through
+            // `Ed25519OriginSigner::load_or_create`, which mints and persists a
+            // signing seed on first use — that is why they carry a
+            // workspace-file surface and their siblings do not. Commands that
+            // additionally speak to the network or spawn `curl` are declared in
+            // `external_io_write_commands`, not here.
+            CommandEffect::durable_write_with_workspace_files(
+                "team create",
+                vec![
+                    "mesh_origin_events",
+                    "mesh_origin_event_nonces",
+                    "team_members",
+                    "team_member_nodes",
+                    "team_member_signing_keys",
+                    "team_invite_auth_floor",
+                ],
+                vec!["<workspace>/.ee/keys/mesh/"],
+                "Append the teamCreated genesis origin event, persist the self member, and raise the invite auth floor",
+            ),
+            CommandEffect::durable_write_with_workspace_files(
+                "team idp require",
+                vec![
+                    "mesh_origin_events",
+                    "mesh_origin_event_nonces",
+                    "team_idp_policy",
+                ],
+                vec!["<workspace>/.ee/keys/mesh/"],
+                "Pin the team IdP policy to tailnet-attested identities through a signed origin event",
+            ),
+            CommandEffect::durable_write(
+                "team idp set",
+                vec!["team_idp_oidc"],
+                "Pin a secretless-public OIDC issuer from a local discovery document",
+            ),
+            CommandEffect::durable_write(
+                "team leave",
+                vec![
+                    "team_members",
+                    "team_member_nodes",
+                    "team_invite_auth_floor",
+                    "team_removal_acknowledgements",
+                ],
+                "Retire the local member and its nodes, raise the invite auth floor, and record the removal acknowledgement",
+            ),
+            CommandEffect::durable_write_with_workspace_files(
+                "team members add-node",
+                vec![
+                    "mesh_origin_events",
+                    "mesh_origin_event_nonces",
+                    "team_members",
+                    "team_member_nodes",
+                    "team_member_signing_keys",
+                ],
+                vec!["<workspace>/.ee/keys/mesh/"],
+                "Bind an additional local node to the team through a signed origin event and a new signing key generation",
+            ),
+            CommandEffect::durable_write(
+                "team members reconcile",
+                vec![
+                    "team_members",
+                    "team_member_nodes",
+                    "team_member_signing_keys",
+                ],
+                "Reconcile the member projection against the local origin stream",
+            ),
+            CommandEffect::durable_write(
+                "team members remove",
+                vec![
+                    "team_members",
+                    "team_member_nodes",
+                    "team_invite_auth_floor",
+                    "team_removal_acknowledgements",
+                ],
+                "Retire a member and its nodes, raise the invite auth floor, and record the removal acknowledgement",
+            ),
+            CommandEffect::durable_write_with_workspace_files(
+                "team members rotate-key",
+                vec!["team_member_signing_keys"],
+                vec!["<workspace>/.ee/keys/mesh/"],
+                "Mint the next local signing key generation and persist the seed in the hardened key store",
+            ),
+            CommandEffect::durable_write(
+                "team pause",
+                vec!["team_posture"],
+                "Pause local team posture so sync refuses to run",
+            ),
             CommandEffect::durable_write(
                 "team port migrate",
                 vec!["mesh_origin_events", "mesh_peers"],
                 "Append a versioned teamPortMigrated origin event and rewrite enrolled peer locators without touching pair keys or grants",
+            ),
+            CommandEffect::durable_write(
+                "team projects adopt",
+                vec!["team_projects"],
+                "Bind a shared team project to a local workspace path",
+            ),
+            CommandEffect::durable_write(
+                "team projects reconcile",
+                vec!["team_projects"],
+                "Reconcile the team project projection against the local origin stream",
+            ),
+            CommandEffect::durable_write_with_workspace_files(
+                "team projects share",
+                vec![
+                    "mesh_origin_events",
+                    "mesh_origin_event_nonces",
+                    "team_projects",
+                ],
+                vec!["<workspace>/.ee/keys/mesh/"],
+                "Share a project with the team through a signed origin event and a project projection row",
+            ),
+            CommandEffect::durable_write(
+                "team resume",
+                vec!["team_posture"],
+                "Clear the paused team posture so sync can run again",
+            ),
+            CommandEffect::durable_write(
+                "team revoke",
+                vec!["team_pending_invites", "team_invite_auth_floor"],
+                "Revoke pending team invites and raise the invite auth floor",
+            ),
+            CommandEffect::durable_write_with_workspace_files(
+                "team share bodies",
+                vec![
+                    "mesh_origin_events",
+                    "mesh_origin_event_nonces",
+                    "mesh_body_cache_metadata",
+                ],
+                vec!["<workspace>/.ee/keys/mesh/"],
+                "Represent memory bodies to the team through a signed origin event and body-cache metadata",
+            ),
+            CommandEffect::durable_write_with_workspace_files(
+                "team share history",
+                vec![
+                    "mesh_origin_events",
+                    "mesh_origin_event_nonces",
+                    "team_history_projections",
+                ],
+                vec!["<workspace>/.ee/keys/mesh/"],
+                "Share memory history with the team through a signed origin event and a history projection row",
+            ),
+            CommandEffect::durable_write(
+                "team unshare bodies",
+                vec!["mesh_body_cache_metadata"],
+                "Withdraw represented memory bodies by clearing their body-cache metadata",
             ),
             CommandEffect::durable_write(
                 "verification provenance",

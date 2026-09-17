@@ -13417,6 +13417,40 @@ where
     CliProcess::default().run(args, stdout, stderr)
 }
 
+/// Why `--dry-run` must be refused for `command_path`, or `None` to let the
+/// command run.
+///
+/// Fails CLOSED on a manifest miss (bd-qked7). The previous form was
+/// `if let Some(effect) = manifest.get(&command_path)`, so an undeclared path
+/// skipped the guard entirely: a user asking for a dry run on a command with no
+/// effect declaration got a live run and no error. The effect manifest is the
+/// declaration agents consult before running something destructive, and a path
+/// that is absent from it is a path whose durable-write posture is *unknown* —
+/// which is not the same as known-safe. The other consumer of a miss,
+/// [`perf_effect_json`], already reports `"unknown"` rather than assuming
+/// read-only; this one now refuses rather than assuming dry-run support.
+///
+/// Extracted from `run_in_process` so the refusal can be tested directly. Both
+/// arms are otherwise hard to reach from the CLI: Clap rejects `--dry-run` for
+/// any command whose args struct has no such flag, long before this runs.
+fn dry_run_refusal_message(
+    manifest: &crate::core::effect::EffectManifest,
+    command_path: &str,
+) -> Option<String> {
+    let Some(effect) = manifest.get(command_path) else {
+        return Some(format!(
+            "error: command '{command_path}' has no effect declaration, so --dry-run is refused \
+             rather than silently running for real (declare it in src/core/effect.rs)\n"
+        ));
+    };
+    let side_effect = effect.mutation_contract.side_effect_class;
+    (!side_effect.declares_no_durable_mutation() && effect.dry_run_effect.is_none()).then(|| {
+        format!(
+            "error: command '{command_path}' mutates durable state and does not support --dry-run\n"
+        )
+    })
+}
+
 fn run_in_process<I, W, E>(
     process: &mut CliProcess,
     args: I,
@@ -13520,19 +13554,11 @@ where
         return write_stdout(stdout, &(output::agent_docs() + "\n"));
     }
 
-    let command_path = NormalizedInvocation::extract_command_path(&cli);
-    let manifest = crate::core::effect::EffectManifest::build();
-    if let Some(effect) = manifest.get(&command_path) {
-        let side_effect = effect.mutation_contract.side_effect_class;
-        let is_dry_run = args.iter().any(|arg| arg == "--dry-run");
-        if is_dry_run
-            && !side_effect.declares_no_durable_mutation()
-            && effect.dry_run_effect.is_none()
-        {
-            let msg = format!(
-                "error: command '{command_path}' mutates durable state and does not support --dry-run\n"
-            );
-            let _ = stderr.write_all(msg.as_bytes());
+    if args.iter().any(|arg| arg == "--dry-run") {
+        let command_path = NormalizedInvocation::extract_command_path(&cli);
+        let manifest = crate::core::effect::EffectManifest::build();
+        if let Some(message) = dry_run_refusal_message(&manifest, &command_path) {
+            let _ = stderr.write_all(message.as_bytes());
             return ProcessExitCode::Usage;
         }
     }
@@ -96132,6 +96158,86 @@ demos:
             &invocation.command_path,
             &"memory list".to_string(),
             "nested command_path",
+        )
+    }
+
+    /// bd-qked7: `--dry-run` on a command path with no effect declaration must
+    /// be REFUSED, not silently run for real.
+    ///
+    /// The old guard was `if let Some(effect) = manifest.get(&command_path)`,
+    /// so a manifest miss skipped the whole check. At the time the bead was
+    /// filed 32 of 453 normalized paths had no declaration, and for every one
+    /// of them a requested dry run became a live run with no error. The only
+    /// thing standing between that and a real incident was that none of the 32
+    /// happened to accept a `--dry-run` flag, so Clap rejected the invocation
+    /// first — safety by unrelated accident.
+    ///
+    /// This drives `dry_run_refusal_message` directly because the miss arm is
+    /// not reachable through `run()` once every real path is declared: Clap
+    /// rejects `--dry-run` for any command whose args struct has no such flag,
+    /// long before the guard runs.
+    #[test]
+    fn dry_run_on_an_undeclared_command_path_is_refused() -> TestResult {
+        let manifest = crate::core::effect::EffectManifest::build();
+        let undeclared = "zzz undeclared command path";
+
+        // Assert the precondition instead of assuming it: if this path ever
+        // gained a declaration the test below would pass for the wrong reason.
+        ensure(
+            manifest.get(undeclared).is_none(),
+            "fixture path must be absent from the effect manifest",
+        )?;
+
+        let message = super::dry_run_refusal_message(&manifest, undeclared)
+            .ok_or("an undeclared command path must refuse --dry-run, not fall through")?;
+        ensure(
+            message.contains(undeclared),
+            format!("refusal must name the offending command path; got {message:?}"),
+        )?;
+        ensure(
+            message.contains("no effect declaration"),
+            format!("refusal must say why it refused; got {message:?}"),
+        )
+    }
+
+    /// The paired positive: a declared command is NOT refused, so the
+    /// fail-closed change above cannot be satisfied by refusing everything.
+    #[test]
+    fn dry_run_is_allowed_for_declared_commands() -> TestResult {
+        let manifest = crate::core::effect::EffectManifest::build();
+
+        // `remember` is a durable write that declares a dry-run effect.
+        let remember = manifest
+            .get("remember")
+            .ok_or("remember must be declared")?;
+        ensure(
+            remember.default_effect.is_mutating(),
+            "fixture must be a mutating command for this to mean anything",
+        )?;
+        ensure(
+            remember.dry_run_effect.is_some(),
+            "fixture must declare a dry-run effect for this to mean anything",
+        )?;
+        ensure_equal(
+            &super::dry_run_refusal_message(&manifest, "remember"),
+            &None,
+            "declared mutating command with dry-run support",
+        )?;
+
+        // `status` is read-only: no dry-run effect is declared and none is
+        // needed, because the command mutates nothing.
+        let status = manifest.get("status").ok_or("status must be declared")?;
+        ensure(
+            status
+                .mutation_contract
+                .side_effect_class
+                .declares_no_durable_mutation(),
+            "fixture must be a non-mutating command for this to mean anything",
+        )?;
+        ensure_equal(
+            &super::dry_run_refusal_message(&manifest, "status"),
+            &None,
+            "declared read-only command",
         )
     }
 

@@ -12,7 +12,19 @@ use std::process::Command;
 
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
 const EFFECT_SOURCE: &str = include_str!("../src/core/effect.rs");
-const NORMALIZED_CLI_COMMAND_COUNT: usize = 416;
+/// Live count of the normalized command paths `extract_command_path` emits.
+///
+/// Measured, not incremented: 453 at 2026-09-17, by mirroring
+/// `command_paths_in` over the marker-delimited body of `extract_command_path`
+/// (`python3` over `src/cli/mod.rs`, same rule the gate uses — a path is
+/// recovered only from `"literal".to_string()`).
+///
+/// It sat at 416 from `c097d4da9` until now while the real inventory grew to
+/// 453. The drift is how this constant is normally wrong: an author adds one
+/// command and increments by one without re-measuring, so every count someone
+/// else forgot compounds silently. When this fails, re-measure the inventory;
+/// do not add the delta of your own change to the old number.
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 453;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",
@@ -245,6 +257,48 @@ fn extract_command_path_builds_every_path_from_a_quoted_literal() -> TestResult 
          or command_paths_in cannot see it and the effect manifest is never checked \
          for it. Non-literal construction(s): {hits:?}"
     ))
+}
+
+/// The `--dry-run` guard in `run_in_process` must not do its own manifest
+/// lookup.
+///
+/// bd-qked7: the guard used to be `if let Some(effect) =
+/// manifest.get(&command_path) { ... }`, which skipped the entire check when a
+/// path had no declaration — 32 of 453 paths at the time. It now delegates to
+/// `dry_run_refusal_message`, whose miss arm refuses (unit-tested in
+/// `src/cli/mod.rs::tests::dry_run_on_an_undeclared_command_path_is_refused`).
+///
+/// Pinning the SHAPE here because the refusal itself is unreachable through
+/// `run()`: Clap rejects `--dry-run` for any command whose args struct has no
+/// such flag, so once every path is declared no CLI invocation can reach the
+/// miss arm. A behavioural test cannot catch a regression to the fail-open
+/// form; this can.
+#[test]
+fn dry_run_guard_delegates_instead_of_reopening_the_fail_open_lookup() -> TestResult {
+    let start = "if args.iter().any(|arg| arg == \"--dry-run\") {";
+    let block_start = CLI_SOURCE
+        .find(start)
+        .ok_or_else(|| "the --dry-run guard must exist in run_in_process".to_owned())?;
+    let rest = &CLI_SOURCE[block_start..];
+    let block_end = rest
+        .find("\n    match cli.command {")
+        .ok_or_else(|| "the --dry-run guard must precede the command dispatch".to_owned())?;
+    let block = &rest[..block_end];
+
+    if !block.contains("dry_run_refusal_message(") {
+        return Err(format!(
+            "the --dry-run guard must route through dry_run_refusal_message, which fails \
+             CLOSED on a manifest miss. Guard body: {block:?}"
+        ));
+    }
+    if block.contains("manifest.get(") {
+        return Err(format!(
+            "the --dry-run guard must not look the command path up itself: an inline \
+             `manifest.get()` is how the guard silently skipped every undeclared command \
+             (bd-qked7). Guard body: {block:?}"
+        ));
+    }
+    Ok(())
 }
 
 /// Prove the gate above can fail, and that the extractor alone could not.
