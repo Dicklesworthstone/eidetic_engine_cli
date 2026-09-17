@@ -54,32 +54,11 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "CASS subprocess pipe read errors must become CassError or explicit degradations.",
     ),
     must_fix(
-        "NSF-CASS-PIPE-JOIN",
-        "src/cass/process.rs",
-        "join().unwrap_or_default()",
-        "eidetic_engine_cli-sos5.2",
-        "CASS subprocess reader thread failures must not become empty stdout/stderr.",
-    ),
-    must_fix(
-        "NSF-CASS-PIPE-TAKE",
-        "src/cass/process.rs",
-        "stdout_bytes.take().unwrap_or_default()",
-        "eidetic_engine_cli-sos5.2",
-        "CASS subprocess pipe capture should not convert a missing reader result into empty stdout/stderr.",
-    ),
-    must_fix(
         "NSF-HOOK-INSTALLER-JSON",
         "src/hooks/installer.rs",
         "serde_json::to_string",
         "eidetic_engine_cli-sos5.3",
         "Hook installer JSON is machine-facing output and must not serialize to an empty string on failure.",
-    ),
-    must_fix(
-        "NSF-OUTPUT-RENDERER-JSON",
-        "src/output/mod.rs",
-        "serde_json::to_string(report).unwrap_or_default()",
-        "eidetic_engine_cli-sos5.3",
-        "Machine-facing renderers must return a stable error/degradation instead of empty JSON.",
     ),
     must_fix(
         "NSF-OUTPUT-SHADOW-INCUMBENT",
@@ -108,13 +87,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "latest_demo_audit_by_id",
         "eidetic_engine_cli-sos5.4",
         "Demo status output should distinguish missing audit storage from an empty run map.",
-    ),
-    must_fix(
-        "NSF-CLI-DEMO-FILE",
-        "src/cli/mod.rs",
-        "fn read_text_lossy",
-        "eidetic_engine_cli-sos5.3",
-        "Demo file reads should not render missing or unreadable expected output as empty content.",
     ),
     allowed(
         "NSF-MODELS-JSONL-BUILDERS",
@@ -172,32 +144,11 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "Handoff JSON render helpers must not hide serialization failures.",
     ),
     must_fix(
-        "NSF-CORE-HANDOFF-CAPSULE",
-        "src/core/handoff.rs",
-        "capsule_content).unwrap_or_default()",
-        "eidetic_engine_cli-sos5.3",
-        "Handoff capsule serialization failure should not become an empty capsule hash input.",
-    ),
-    must_fix(
         "NSF-CORE-LAB-JSON",
         "src/core/lab.rs",
         "serde_json::to_string",
         "eidetic_engine_cli-sos5.3",
         "Lab report JSON helpers must not silently serialize to empty.",
-    ),
-    must_fix(
-        "NSF-CORE-LEARN-JSON",
-        "src/core/learn.rs",
-        "serde_json::to_string",
-        "eidetic_engine_cli-sos5.3",
-        "Learning report JSON helpers must not silently serialize to empty.",
-    ),
-    must_fix(
-        "NSF-CORE-LEGACY-JSON",
-        "src/core/legacy_import.rs",
-        "serde_json::to_string",
-        "eidetic_engine_cli-sos5.3",
-        "Legacy import TOON rendering must not treat failed JSON serialization as empty JSON.",
     ),
     allowed(
         "NSF-CORE-LEGACY-SKIP-DIR",
@@ -225,20 +176,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "serde_json::to_string",
         "eidetic_engine_cli-sos5.3",
         "Procedure report JSON helpers must not silently serialize to empty.",
-    ),
-    must_fix(
-        "NSF-CORE-REHEARSE-JSON",
-        "src/core/rehearse.rs",
-        "serde_json::to_string",
-        "eidetic_engine_cli-sos5.3",
-        "Rehearsal report JSON helpers must not silently serialize to empty.",
-    ),
-    must_fix(
-        "NSF-CORE-REPRO-JSON",
-        "src/core/repro.rs",
-        "serde_json::to_string",
-        "eidetic_engine_cli-sos5.3",
-        "Repro artifact JSON helpers must not silently serialize to empty.",
     ),
     allowed(
         "NSF-CASS-IMPORT-OPTIONAL-FIELDS",
@@ -269,20 +206,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/cli/mod.rs",
         "map(count_json_object_fields)",
         "A response without a data object has zero selectable data fields for field-selector telemetry.",
-    ),
-    must_fix(
-        "NSF-CLI-ENVELOPE-JSON-SERIALIZE",
-        "src/cli/mod.rs",
-        "serde_json::to_string(&envelope).unwrap_or_default()",
-        "eidetic_engine_cli-sos5.3",
-        "Machine-facing envelope output must not silently serialize to an empty line.",
-    ),
-    must_fix(
-        "NSF-CLI-MACHINE-JSON-SERIALIZE",
-        "src/cli/mod.rs",
-        "serde_json::to_string(&json).unwrap_or_default()",
-        "eidetic_engine_cli-sos5.3",
-        "Machine-facing CLI JSON output must return a contextual error instead of an empty line on serialization failure.",
     ),
     allowed(
         "NSF-CLI-PACK-DEFAULT-PROFILES",
@@ -2216,6 +2139,53 @@ fn no_silent_fallback_must_fix_entries_have_follow_up_beads() -> TestResult {
         Ok(())
     } else {
         Err(missing.join("\n"))
+    }
+}
+
+/// A `must_fix` row asserts an outstanding defect. When its site is repaired
+/// and the row stays behind, the inventory reports debt that no longer exists.
+/// Fourteen of thirty-nine rows did exactly that before this check existed,
+/// overstating real must-fix debt by better than a third, and nothing noticed:
+/// `..._have_follow_up_beads` verifies a row cites a known bead, not that it
+/// still describes live code.
+///
+/// Only `MustFix` rows are checked. A stale `Allowed` row matches nothing and
+/// so grants no exemption to anything; a stale `MustFix` row makes the gate
+/// lie about how much is left to do.
+///
+/// Matching mirrors `classify_finding`, which tests the fragment against a
+/// window of TRIMMED source lines. The haystack here is therefore the file's
+/// trimmed lines joined, not its raw text: several fragments span lines, and
+/// against raw text those would report a false absence.
+#[test]
+fn no_silent_fallback_must_fix_entries_still_describe_real_code() -> TestResult {
+    let mut stale = Vec::new();
+
+    for rule in INVENTORY_RULES {
+        if rule.disposition != Disposition::MustFix {
+            continue;
+        }
+
+        let path = repo_path(rule.file);
+        let Ok(source) = fs::read_to_string(&path) else {
+            stale.push(format!("{}: file {} no longer exists", rule.id, rule.file));
+            continue;
+        };
+
+        let trimmed = source.lines().map(str::trim).collect::<Vec<_>>().join("\n");
+        if !trimmed.contains(rule.fragment) {
+            stale.push(format!(
+                "{}: `{}` no longer appears in {}. If the defect is fixed, drop this row; \
+                 if it moved, point the fragment at where it went.",
+                rule.id, rule.fragment, rule.file
+            ));
+        }
+    }
+
+    if stale.is_empty() {
+        Ok(())
+    } else {
+        Err(stale.join("\n"))
     }
 }
 
