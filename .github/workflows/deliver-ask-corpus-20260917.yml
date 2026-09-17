@@ -1,7 +1,7 @@
 name: Deliver current ask corpus
 
-# Bounded main-only integration of the reviewed source patch.
-# Retire after observing the source commit; never opens a PR or force-pushes.
+# Main-only integration followed by exact-commit, read-only Rust verification.
+# Retire this one-time workflow after inspecting its results.
 on:
   push:
     branches: [main]
@@ -21,27 +21,27 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+    outputs:
+      source: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 2
           clean: false
-      - name: Integrate current-memory admission
+      - name: Integrate and parse lifecycle and snapshot source
         shell: bash
         env:
           RUSTUP_TOOLCHAIN: nightly
         run: |
           set -euo pipefail
           patch=scripts/delivery/ask-current-corpus-20260917.patch
-          if git apply --reverse --check "$patch" 2>/dev/null; then
-            echo 'Current-memory admission is already integrated.'
-            exit 0
+          if ! git apply --reverse --check "$patch" 2>/dev/null; then
+            git apply --check "$patch"
+            git apply "$patch"
           fi
-          git apply --check "$patch"
-          git apply "$patch"
           rustup toolchain install nightly --profile minimal --component rustfmt
-          rustfmt +nightly --edition 2024 --config skip_children=true src/core/ask_corpus.rs src/core/ask_corpus_tests.rs tests/contracts/ask_lifecycle.rs
+          rustfmt +nightly --edition 2024 --config skip_children=true src/core/ask_corpus.rs src/core/ask_corpus_tests.rs src/core/ask_snapshot_tests.rs tests/contracts/ask_lifecycle.rs
           rustfmt +nightly --edition 2024 --config skip_children=true --emit stdout src/core/ask.rs >/dev/null
           rustfmt +nightly --edition 2024 --config skip_children=true --emit stdout src/cli/mod.rs >/dev/null
           rustfmt +nightly --edition 2024 --config skip_children=true --emit stdout tests/contracts/audit_event_coverage.rs >/dev/null
@@ -49,8 +49,10 @@ jobs:
           git diff --stat
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/core/ask.rs src/core/ask_corpus.rs src/core/ask_corpus_tests.rs src/cli/mod.rs tests/contracts/audit_event_coverage.rs tests/contracts/ask_lifecycle.rs
-          git commit -m 'fix(ask): exclude expired and future evidence before all answer paths' -m 'Connect the current-corpus loader to the public CLI. Preserve active citations and links, withhold invalid validity metadata, and register real-store and public-CLI regressions. Nightly Rustfmt parsed the integration; compilation and behavioral tests are not claimed by this delivery step.'
+          git add src/core/ask.rs src/core/ask_corpus.rs src/core/ask_corpus_tests.rs src/core/ask_snapshot_tests.rs src/cli/mod.rs tests/contracts/audit_event_coverage.rs tests/contracts/ask_lifecycle.rs
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix(ask): integrate current evidence and coherent snapshots into CLI' -m 'Apply the reviewed lifecycle integration and nightly formatting to the ask-specific modules. Compilation and behavioral test results are reported by the separate read-only verification job, not presumed by this delivery commit.'
+          fi
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
               printf 'Delivered source commit: '
@@ -61,3 +63,42 @@ jobs:
             git merge --no-edit origin/main
           done
           exit 1
+      - id: source
+        name: Bind verification to delivered commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    name: Verify exact delivered ask source
+    needs: deliver
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.deliver.outputs.source }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Record exact source and toolchain
+        run: |
+          git rev-parse HEAD
+          git status --porcelain
+          rustc --version --verbose
+          cargo --version
+      - name: Check the production library
+        run: cargo check --locked --lib
+      - name: Execute ask lifecycle and snapshot regressions
+        run: cargo test --locked --lib core::ask::corpus:: -- --nocapture
+      - name: Execute public CLI lifecycle regressions
+        run: cargo test --locked --test contracts ask_lifecycle -- --nocapture

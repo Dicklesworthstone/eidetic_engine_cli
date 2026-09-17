@@ -23,16 +23,34 @@ pub struct AskCorpus {
 /// `reference_time` is captured once by the caller, not separately per row.
 /// Bounds are inclusive, matching search's validity-window contract. Invalid
 /// timestamps or inverted windows fail the entire read without exposing the
-/// offending body, identifier, or timestamp in the error. No writes, migrations,
-/// index/model loading, or cross-workspace expansion occur here.
+/// offending body, identifier, or timestamp in the error.
+///
+/// Memory bodies, validity metadata, and every batch of incident links come
+/// from one database read snapshot. The snapshot is released before returning
+/// owned data for scoring or best-effort audit writes. No writer fence,
+/// migrations, index/model loading, or cross-workspace expansion occur here.
 pub fn load_current_ask_corpus(
     connection: &DbConnection,
     workspace_id: &str,
     reference_time: DateTime<Utc>,
 ) -> Result<AskCorpus, DomainError> {
+    load_corpus_with_boundary(connection, workspace_id, reference_time, || Ok(()))
+}
+
+// The private boundary lets real-store tests commit through a second connection
+// at the exact memory/link boundary. Production passes a no-op, not a timing
+// sleep or a mock database. The owned snapshot encloses both reads regardless.
+fn load_corpus_with_boundary(
+    connection: &DbConnection,
+    workspace_id: &str,
+    reference_time: DateTime<Utc>,
+    after_memory_read: impl FnOnce() -> Result<(), DomainError>,
+) -> Result<AskCorpus, DomainError> {
+    let snapshot = AskReadSnapshot::begin(connection)?;
     let stored = connection
         .list_memories(workspace_id, None, false)
         .map_err(|_| corpus_storage_error())?;
+    after_memory_read()?;
     let mut candidates = Vec::with_capacity(stored.len());
     for memory in stored {
         if validity_contains(
@@ -48,10 +66,59 @@ pub fn load_current_ask_corpus(
         .map(|candidate| candidate.memory_id.as_str())
         .collect();
     let contradictions = load_scoped_contradictions(connection, &ids)?;
+    snapshot.finish()?;
     Ok(AskCorpus {
         candidates,
         contradictions,
     })
+}
+
+/// Own only the read transaction that this operation successfully began.
+/// A failed nested begin must never roll back a caller's existing transaction.
+/// Errors and unwinding release our snapshot; a failed commit is rolled back
+/// rather than leaving the connection pinned for later audit writes.
+struct AskReadSnapshot<'a> {
+    connection: &'a DbConnection,
+    active: bool,
+}
+
+impl<'a> AskReadSnapshot<'a> {
+    fn begin(connection: &'a DbConnection) -> Result<Self, DomainError> {
+        connection
+            .begin_read_snapshot()
+            .map_err(|_| snapshot_error("begin"))?;
+        Ok(Self {
+            connection,
+            active: true,
+        })
+    }
+
+    fn finish(mut self) -> Result<(), DomainError> {
+        self.connection
+            .commit_read_snapshot()
+            .map_err(|_| snapshot_error("finish"))?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for AskReadSnapshot<'_> {
+    fn drop(&mut self) {
+        if self.active && self.connection.rollback_read_snapshot().is_err() {
+            // Do not echo backend errors that may contain SQL or private paths.
+            tracing::error!(
+                target: "ee::core::ask::snapshot",
+                "failed to release ask evidence read snapshot"
+            );
+        }
+    }
+}
+
+fn snapshot_error(stage: &str) -> DomainError {
+    DomainError::Storage {
+        message: format!("Could not {stage} a coherent ask evidence snapshot; answer withheld"),
+        repair: Some("retry ee ask; use ee doctor --json if the failure persists".to_owned()),
+    }
 }
 
 fn into_candidate(memory: StoredMemory) -> AskCandidate {
@@ -101,9 +168,14 @@ fn validity_contains(
     {
         return Err(invalid_validity_error());
     }
-    Ok(from.is_none_or(|from| from <= reference_time) && to.is_none_or(|to| reference_time <= to))
+    Ok(from.is_none_or(|from| from <= reference_time)
+        && to.is_none_or(|to| reference_time <= to))
 }
 
 #[cfg(test)]
 #[path = "ask_corpus_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "ask_snapshot_tests.rs"]
+mod snapshot_tests;
