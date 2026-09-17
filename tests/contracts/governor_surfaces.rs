@@ -309,34 +309,70 @@ fn seed_memories(workspace: &Path, count: usize) -> TestResult {
             String::from_utf8_lossy(&init.stderr)
         ),
     )?;
+    // ONE batch spawn instead of `count` single ones.
+    //
+    // `ee remember --batch --stdin` is the only remember path that defers index
+    // processing (`defer_index_processing: true`, bd-2efx1): every line leaves
+    // its index job pending and one reconcile runs at the end. A single
+    // `ee remember` processes its index job inline, which resolves the
+    // embedding model -- measured at ~2 GB peak RSS and 11-14s wall apiece. At
+    // `count` = 8 that is eight model loads to seed eight rows, and this module
+    // alone accounted for 105 of the suite's 136 real-binary spawns
+    // (bd-contracts-serialized-spawn-queue-loibi).
+    //
+    // The payload goes to a file rather than a pipe deliberately: a File EOFs
+    // by construction, so there is no writer thread and no close protocol, and
+    // the child cannot block on a stdin that never ends. It is written OUTSIDE
+    // the workspace so it cannot be mistaken for workspace content by anything
+    // that scans it.
+    let mut batch = String::new();
     for index in 0..count {
         let body = format!(
             "Governor contract seed memory {index:02}: deterministic retrieval corpus row \
              about the release workflow and clippy gating conventions."
         );
-        let output = crate::common_spawn::serialized_real_ee_with(|command| {
+        batch.push_str(
+            &serde_json::json!({
+                "content": body,
+                "level": "semantic",
+                "kind": "fact",
+                "tags": "governor,contract",
+            })
+            .to_string(),
+        );
+        batch.push('\n');
+    }
+    let batch_path = env::temp_dir().join(format!(
+        "ee-governor-seed-{}-{}.jsonl",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("clock before unix epoch: {error}"))?
+            .as_nanos()
+    ));
+    fs::write(&batch_path, &batch)
+        .map_err(|error| format!("write seed batch {}: {error}", batch_path.display()))?;
+    let batch_input = fs::File::open(&batch_path)
+        .map_err(|error| format!("open seed batch {}: {error}", batch_path.display()))?;
+    let output = crate::common_spawn::serialized_real_ee_with_stdin(
+        |command| {
             command
                 .arg("--workspace")
                 .arg(workspace)
                 .arg("remember")
-                .arg(&body)
-                .arg("--level")
-                .arg("semantic")
-                .arg("--kind")
-                .arg("fact")
-                .arg("--tags")
-                .arg("governor,contract");
-        })
-        .map_err(|error| format!("failed to run ee remember: {error}"))?;
-        ensure(
-            output.status.success(),
-            format!(
-                "ee remember {index} should succeed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-        )?;
-    }
-    Ok(())
+                .arg("--batch")
+                .arg("--stdin");
+        },
+        Some(std::process::Stdio::from(batch_input)),
+    )
+    .map_err(|error| format!("failed to run ee remember --batch --stdin: {error}"))?;
+    ensure(
+        output.status.success(),
+        format!(
+            "ee remember --batch --stdin should seed {count} rows: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
 }
 
 fn seed_ready_revival_sentinels(workspace: &Path, count: usize) -> TestResult {

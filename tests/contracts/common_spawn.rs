@@ -277,6 +277,27 @@ pub fn serialized_real_ee_with<F>(configure: F) -> std::io::Result<Output>
 where
     F: FnOnce(&mut Command),
 {
+    serialized_real_ee_with_stdin(configure, None)
+}
+
+/// As [`serialized_real_ee_with`], but able to hand the child a stdin.
+///
+/// `ee remember --batch --stdin` is the only remember path that defers index
+/// processing (`defer_index_processing: true`, bd-2efx1), so N memories cost
+/// ONE embedding-model load instead of N. It was unreachable from this harness
+/// because the stdio handles are set after `configure` runs, so a caller could
+/// not supply a stdin even by trying.
+///
+/// The caller owns EOF. Pass an opened `File`: it EOFs by construction, with no
+/// writer thread and no close protocol, which keeps the hang class the default
+/// `Stdio::null()` exists to prevent.
+pub fn serialized_real_ee_with_stdin<F>(
+    configure: F,
+    stdin: Option<Stdio>,
+) -> std::io::Result<Output>
+where
+    F: FnOnce(&mut Command),
+{
     let _spawn_permit = acquire_spawn_permit();
     let mut command = Command::new(ee_binary());
     configure(&mut command);
@@ -303,7 +324,7 @@ where
     if !caller_chose_registry {
         command.env("EE_WORKSPACE_REGISTRY", isolated_registry_path());
     }
-    output_with_timeout(&mut command, None)
+    output_with_timeout(&mut command, stdin)
 }
 
 /// The deadline must actually fire on a child that never exits.
