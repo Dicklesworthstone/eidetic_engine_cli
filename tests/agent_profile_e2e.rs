@@ -62,10 +62,19 @@ fn ensure_success(output: &Output, label: &str) -> TestResult {
     if output.status.success() {
         Ok(())
     } else {
+        // Report STDOUT as well as stderr (bd-gjscw). `ee` sends machine-facing
+        // envelopes to stdout and only human diagnostics to stderr (AGENTS.md,
+        // "CLI Output Rules"), so a failure in a `--json` invocation puts its
+        // entire explanation on the stream this message used to discard. Two
+        // RCH runs of this test failed with `ee exited Some(130); stderr: ` and
+        // an empty tail, which reads as an unexplained kill; 130 is
+        // `ProcessExitCode::Cancelled` (src/models/mod.rs:2313) and the
+        // cancellation envelope was on stdout the whole time.
         Err(format!(
-            "{label}: ee exited {:?}; stderr: {}",
+            "{label}: ee exited {:?}; stderr: {}; stdout: {}",
             output.status.code(),
-            String::from_utf8_lossy(&output.stderr).trim_end()
+            String::from_utf8_lossy(&output.stderr).trim_end(),
+            String::from_utf8_lossy(&output.stdout).trim_end()
         ))
     }
 }
