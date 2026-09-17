@@ -5,8 +5,8 @@ This registry is the human-facing companion to
 owned by `bd-1n0np.23.1` and enforced by
 `tests/contracts/dueling_wizards_migration_registry.rs`.
 
-The current compiled migration tail in `src/db/mod.rs` is `V121`. The next
-planned allocation starts at `V122`. `V094_MEMORY_ATTEMPT_FAMILY` and
+The current compiled migration tail in `src/db/mod.rs` is `V125`. The next
+planned allocation starts at `V126`. `V094_MEMORY_ATTEMPT_FAMILY` and
 `V095_ATTEMPT_FAMILY_LEDGER` are non-initiative attempt-family migrations
 (bd-multiplicity-aware-trust-p0u7g), and `V096_MEMORY_SENTINEL_POLARITY` is the
 shipped inverse-sentinel migration (bd-wake-on-condition-inverse-sentinel-65uci).
@@ -46,8 +46,8 @@ needed the actual next compiled slot, then moved together again to
 compiled as `V099` and `V100`, then to `V102`-`V104` when the forward-only
 attempt-family immutability repair compiled as `V101`, then to `V105`-`V107`
 when the graph-intelligence projections and the T2.0 origin stream compiled
-as `V102`-`V104`, and now to `V122`-`V124` after the team, curation-repair,
-and evidence-feedback migrations compiled through `V121`. This preserves
+as `V102`-`V104`, and now to `V126`-`V128` after the team, curation-repair,
+and evidence-feedback migrations compiled through `V125`. This preserves
 their order and ownership without inserting placeholder migrations. Runtime
 migration versions cannot skip a reservation: the schema-version watermark
 would advance past the hole and make a later migration at that version
@@ -94,7 +94,7 @@ rollback must never be required for ordinary repair. A task that adds durable
 or derived storage must also name the backup/export/restore asset class and the
 boundary migration coverage path before source work starts.
 
-Do not reuse migration numbers. If the compiled tail moves past `V121`, update
+Do not reuse migration numbers. If the compiled tail moves past `V125`, update
 this registry in the same change that adds the runtime migration.
 
 ### V085 legacy-evidence remediation
@@ -200,7 +200,7 @@ proves all six canonical profiles plus `contradiction_suppressed` persist.
 
 The manifest's `transitionMatrix` mirrors the allocation table one-for-one.
 This is the implementation gate: `implemented` rows must name the compiled
-migration constant and stay at or behind the current compiled tail (`V121` at
+migration constant and stay at or behind the current compiled tail (`V125` at
 the time of this registry). `planned` rows must stay ahead of the compiled tail
 and keep `migrationConstant`, `boundaryMigrationEvidence`, and
 `backupCoverageEvidence` set to `required_before_implemented`.
