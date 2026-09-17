@@ -1774,48 +1774,14 @@ fn redact_feedback_health_source_id(value: &str) -> String {
     redact_feedback_health_source_path_segments(&secret_redacted)
 }
 
+/// bd-redactor-prefix-divergence-lsy52: this walker scanned only for '/' and
+/// carried its own 11-prefix list, so it missed `/proc/`, `/root/`, `/sys/`,
+/// `/run/`, `/mnt/`, `/dev/`, `/media/`, `/app/`, `/workspaces/` and the two CI
+/// roots, plus every Windows drive path and UNC share. The shared predicate
+/// covers all of them. The boundary stays local because it is genuinely
+/// per-surface.
 fn redact_feedback_health_source_path_segments(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    let mut cursor = 0;
-    while cursor < value.len() {
-        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
-        else {
-            output.push_str(&value[cursor..]);
-            break;
-        };
-        let start = cursor + relative_index;
-        if !feedback_health_source_path_starts_sensitive_segment(&value[start..]) {
-            output.push_str(&value[cursor..=start]);
-            cursor = start + 1;
-            continue;
-        }
-
-        output.push_str(&value[cursor..start]);
-        output.push_str("[REDACTED_PATH]");
-        cursor = value[start..]
-            .char_indices()
-            .find_map(|(index, c)| feedback_health_source_path_boundary(c).then_some(start + index))
-            .unwrap_or(value.len());
-    }
-    output
-}
-
-fn feedback_health_source_path_starts_sensitive_segment(value: &str) -> bool {
-    const PREFIXES: &[&str] = &[
-        "/Users/",
-        "/Volumes/",
-        "/private/",
-        "/var/",
-        "/tmp/",
-        "/home/",
-        "/data/",
-        "/dp/",
-        "/workspace/",
-        "/repo/",
-        "/etc/",
-    ];
-
-    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+    crate::util::redact_path_like_segments(value, feedback_health_source_path_boundary)
 }
 
 fn feedback_health_source_path_boundary(c: char) -> bool {
