@@ -676,6 +676,63 @@ fn orient_fast_relevant_content(
             why: why.to_owned(),
         });
     }
+    // bd-b9dmp. Record what this orientation actually delivered. `ee orient`
+    // renders memory content straight to the agent but retrieves with
+    // persist_pack=false, so it wrote no read row: every memory it surfaced was
+    // scored as though nobody had ever used it, and `never_retrieved` feeds decay
+    // and trust, not just the debt report.
+    //
+    // Rendered only -- the bounded set the caller receives -- never the candidate
+    // pool, which would mark the whole corpus retrieved on every orientation.
+    // That is the inflation removed in d1092fec7 and ae9a8a244.
+    //
+    // The id must be the one the workspace row actually carries, not the raw
+    // path hash: memory_debt filters audit rows by workspace_id
+    // (memory_debt.rs:862), so a row written under an unbound id is silently
+    // dropped and the fix would look right while doing nothing. This resolves it
+    // the way the search audit does (search.rs:1720), over the read-only
+    // connection already open here.
+    if !rendered.is_empty() {
+        let audit_workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+            &connection,
+            &active_workspace_id,
+            &[options.workspace_path],
+        )
+        .unwrap_or_else(|_| active_workspace_id.clone());
+        if let Ok(write_connection) = DbConnection::open_file(&database_path) {
+            let query_hash = crate::obs::audit_events::query_hash(options.task);
+            for (rank, item) in rendered.iter().enumerate() {
+                let input = crate::db::CreateAuditInput {
+                    workspace_id: Some(audit_workspace_id.clone()),
+                    actor: None,
+                    action: crate::db::audit_actions::SEARCH_RETURNED_MEM.to_owned(),
+                    target_type: Some("memory".to_owned()),
+                    target_id: Some(item.id.clone()),
+                    details: Some(
+                        serde_json::json!({
+                            "queryHash": &query_hash,
+                            "rank": (rank + 1) as u32,
+                            "source": "orient",
+                        })
+                        .to_string(),
+                    ),
+                };
+                if let Err(error) =
+                    write_connection.insert_audit(&crate::db::generate_audit_id(), &input)
+                {
+                    // Orientation is a read surface; a contended write gate must
+                    // never fail it. Stop after the first failure rather than
+                    // retry the rest against the same contention.
+                    tracing::warn!(
+                        target: "ee::core::orient::audit",
+                        error = %error,
+                        "best-effort orient retrieval audit append failed"
+                    );
+                    break;
+                }
+            }
+        }
+    }
     Ok((rendered, issues))
 }
 
