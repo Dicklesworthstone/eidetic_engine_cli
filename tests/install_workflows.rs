@@ -2600,3 +2600,192 @@ fn install_plan_empty_manifest_is_blocked() -> TestResult {
         "empty manifest should have finding",
     )
 }
+
+/// Slice the already-installed short-circuit out of an installer, with the
+/// extraction validated rather than trusted.
+///
+/// Both anchors are named in the failure, so a rename reads as "anchor moved"
+/// instead of silently returning a block that proves nothing. The size bound
+/// is the other half of that: an end-anchor that fails to match early would
+/// otherwise swallow the rest of the file and make every `contains` below
+/// pass for the wrong reason -- the same way a runaway brace matcher once
+/// produced a 6513-line "test body" in this repo.
+fn matching_version_short_circuit<'a>(
+    installer: &str,
+    source: &'a str,
+    start_anchor: &str,
+    end_anchor: &str,
+) -> Result<(&'a str, usize), String> {
+    let start = source
+        .find(start_anchor)
+        .ok_or_else(|| format!("{installer}: short-circuit start anchor {start_anchor:?} moved"))?;
+    let rest = &source[start..];
+    let end = rest
+        .find(end_anchor)
+        .ok_or_else(|| format!("{installer}: short-circuit end anchor {end_anchor:?} moved"))?;
+    let block = &rest[..end];
+    let lines = block.lines().count();
+    if !(2..=40).contains(&lines) {
+        return Err(format!(
+            "{installer}: extracted short-circuit is {lines} lines, which is not a short-circuit; \
+             the anchors {start_anchor:?}..{end_anchor:?} no longer bracket the branch"
+        ));
+    }
+    Ok((block, start))
+}
+
+/// bd-xww0x acceptance 4: the two installers stay aligned.
+///
+/// Acceptances 1-3 are asserted per-platform and in different languages --
+/// the Unix behaviours by the Rust tests above, the Windows ones by
+/// `WIN-PS1-014` inside `scripts/windows-installer-static-check.ps1`, which
+/// only ever runs on the Windows CI job. Nothing cross-checks that the two
+/// sides assert the SAME contract, so the platforms could drift apart with
+/// every gate still green. This is the missing cross-check, and it lives here
+/// because `installers_recommend_the_canonical_pack_surface` already
+/// establishes this file as the home for cross-installer static contracts.
+///
+/// It asserts placement, not mere presence. The original defect was not that
+/// `maybe_add_path` / `Update-UserPath` were absent from the installers -- they
+/// were there, after the lock, on the fresh-install path only. A
+/// `source.contains(...)` check would have passed on the broken code. So each
+/// call must appear INSIDE the short-circuit block, and the lock must come
+/// after it.
+#[test]
+fn installers_agree_on_the_matching_version_rerun_contract() -> TestResult {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let unix = fs::read_to_string(root.join("install.sh"))
+        .map_err(|error| format!("failed to read install.sh: {error}"))?;
+    let windows = fs::read_to_string(root.join("install.ps1"))
+        .map_err(|error| format!("failed to read install.ps1: {error}"))?;
+
+    let (unix_block, unix_start) =
+        matching_version_short_circuit("install.sh", &unix, "is already installed at", "\nfi\n")?;
+    let (windows_block, windows_start) = matching_version_short_circuit(
+        "install.ps1",
+        &windows,
+        "is already installed at",
+        "\n    }\n",
+    )?;
+
+    // (1) PATH repair, (2) completions and (3) requested verification all
+    // happen inside the branch, on both platforms.
+    for (installer, block, path_repair, completions, verify) in [
+        (
+            "install.sh",
+            unix_block,
+            "maybe_add_path",
+            "maybe_install_completions",
+            "run_install_self_test",
+        ),
+        (
+            "install.ps1",
+            windows_block,
+            "Update-UserPath",
+            "Install-Completions",
+            "Invoke-SelfTest",
+        ),
+    ] {
+        for (behaviour, call) in [
+            ("repair PATH", path_repair),
+            ("regenerate completions", completions),
+            ("honor requested verification", verify),
+        ] {
+            ensure(
+                block.contains(call),
+                &format!(
+                    "{installer}: the matching-version short-circuit must {behaviour} \
+                     ({call} is missing from the branch; being present elsewhere in the file \
+                     is exactly the bd-xww0x defect)"
+                ),
+            )?;
+        }
+    }
+
+    // (1, continued) the branch stays acquisition- and lock-free: the lock is
+    // taken only after it.
+    let unix_lock = unix
+        .find("LOCK_DIR=\"${LOCK_FILE}.d\"")
+        .ok_or_else(|| "install.sh: lock acquisition anchor moved".to_owned())?;
+    let windows_lock = windows
+        .find("Lock-Acquire\n")
+        .ok_or_else(|| "install.ps1: Lock-Acquire anchor moved".to_owned())?;
+    ensure(
+        unix_lock > unix_start,
+        "install.sh: the matching-version short-circuit must precede lock acquisition",
+    )?;
+    ensure(
+        windows_lock > windows_start,
+        "install.ps1: the matching-version short-circuit must precede Lock-Acquire",
+    )?;
+
+    // (3) The self-test verdict vocabulary agrees: a --version failure is
+    // fatal on both platforms, a degraded doctor is a warning on both. These
+    // are asserted over each installer's self-test function, which is where
+    // the two languages express the same rule differently -- `return 1` into
+    // a `|| exit 1` caller on Unix, `Write-ErrorExit` on Windows.
+    let unix_self_test = unix
+        .split("run_install_self_test() {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .ok_or_else(|| "install.sh: run_install_self_test body not found".to_owned())?;
+    let windows_self_test = windows
+        .split("function Invoke-SelfTest {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .ok_or_else(|| "install.ps1: Invoke-SelfTest body not found".to_owned())?;
+
+    ensure(
+        unix_self_test.contains("--version failed with exit code")
+            && unix_self_test.contains("return 1"),
+        "install.sh: a nonzero ee --version must be fatal",
+    )?;
+    ensure(
+        unix_self_test.contains("--version returned no output"),
+        "install.sh: an empty ee --version must be fatal",
+    )?;
+    ensure(
+        windows_self_test.contains("--version failed with exit code")
+            && windows_self_test.contains("Write-ErrorExit"),
+        "install.ps1: a nonzero ee --version must be fatal",
+    )?;
+    ensure(
+        windows_self_test.contains("--version returned no output"),
+        "install.ps1: an empty ee --version must be fatal",
+    )?;
+    // PowerShell's native-command exit status is NOT the thrown-exception
+    // path, so the absence of this check is how a broken binary produced a
+    // successful installer exit. Pin it by name.
+    ensure(
+        windows_self_test.contains("$LASTEXITCODE"),
+        "install.ps1: the self-test must check LASTEXITCODE, not just catch exceptions",
+    )?;
+
+    // The negative arm: doctor degradation must NOT be fatal on either side.
+    for (installer, body, warn_call, fatal_call) in [
+        ("install.sh", unix_self_test, "warn ", "err "),
+        (
+            "install.ps1",
+            windows_self_test,
+            "Write-Warning2",
+            "Write-ErrorExit",
+        ),
+    ] {
+        let doctor = body
+            .split("doctor --json")
+            .nth(1)
+            .ok_or_else(|| format!("{installer}: self-test no longer runs doctor --json"))?;
+        ensure(
+            doctor.contains(warn_call),
+            &format!("{installer}: a degraded doctor must warn"),
+        )?;
+        ensure(
+            !doctor.contains(fatal_call),
+            &format!(
+                "{installer}: a degraded doctor must NOT be fatal; \
+                 bd-xww0x keeps execution failure and health degradation distinct"
+            ),
+        )?;
+    }
+    Ok(())
+}
