@@ -7,10 +7,13 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::db::{DbConnection, StoredMemory};
+use crate::db::DbConnection;
 use crate::models::DomainError;
 
 use super::{AskCandidate, AskContradiction, load_scoped_contradictions};
+
+#[path = "ask_admission.rs"]
+mod admission;
 
 #[derive(Clone, Debug)]
 pub struct AskCorpus {
@@ -57,8 +60,9 @@ fn load_corpus_with_boundary(
             memory.valid_from.as_deref(),
             memory.valid_to.as_deref(),
             reference_time,
-        )? {
-            candidates.push(into_candidate(memory));
+        )? && let Some(candidate) = admission::into_candidate(memory)
+        {
+            candidates.push(candidate);
         }
     }
     let ids: Vec<_> = candidates
@@ -121,20 +125,6 @@ fn snapshot_error(stage: &str) -> DomainError {
     }
 }
 
-fn into_candidate(memory: StoredMemory) -> AskCandidate {
-    let team_provenance = crate::core::memory_scope::team_provenance_from_memory(&memory);
-    AskCandidate {
-        memory_id: memory.id,
-        content: memory.content,
-        confidence: memory.confidence,
-        trust_class: memory.trust_class,
-        provenance_uri: memory.provenance_uri,
-        level: memory.level,
-        kind: memory.kind,
-        team_provenance,
-    }
-}
-
 fn corpus_storage_error() -> DomainError {
     DomainError::Storage {
         message: "Failed to read the ask evidence corpus".to_owned(),
@@ -178,3 +168,7 @@ mod tests;
 #[cfg(test)]
 #[path = "ask_snapshot_tests.rs"]
 mod snapshot_tests;
+
+#[cfg(test)]
+#[path = "ask_privacy_tests.rs"]
+mod privacy_tests;

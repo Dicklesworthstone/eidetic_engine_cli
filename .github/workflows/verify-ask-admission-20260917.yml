@@ -1,0 +1,53 @@
+name: Ask admission verification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/core/ask*.rs
+      - tests/contracts/ask*.rs
+      - .github/workflows/verify-ask-admission-20260917.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ask-admission-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      EE_EMBED_DOWNLOAD: off
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Verify source identity and Rust parsing
+        run: |
+          git rev-parse HEAD
+          git status --porcelain
+          rustfmt --edition 2024 --config skip_children=true --emit stdout src/core/ask_corpus.rs src/core/ask_admission.rs src/core/ask_privacy_tests.rs > /dev/null
+      - name: Compile production library
+        run: cargo check --locked --lib
+      - name: Execute all ask engine and real-store regressions
+        run: cargo test --locked --lib core::ask:: -- --nocapture
+      - name: Execute public ask lifecycle contracts
+        run: cargo test --locked --test contracts ask_lifecycle -- --nocapture
