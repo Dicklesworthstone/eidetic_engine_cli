@@ -446,7 +446,9 @@ fn assert_additive_shape(
                 assert_additive_shape(surface, &child_path, expected_item, actual_child)?;
             }
         }
-        _ => {}
+        _ => {} // Primitive values (bool/string/number) are compared only by JSON
+                // type. A true->false or "ok"->"degraded" flip is in scope for
+                // insta contract snapshots, not this additive-shape gate.
     }
 
     Ok(())
@@ -510,6 +512,48 @@ fn additive_shape_accepts_a_prepended_entry_but_still_rejects_a_removed_one() ->
     if !message.contains("embed_model_unavailable") {
         return Err(format!(
             "the removal failure must name the missing entry; got: {message}"
+        ));
+    }
+    Ok(())
+}
+
+/// Values are not this contract. `qos.registryHealthy` flipping true -> false
+/// (the motivating example on bd-9qvos) must PASS here. This gate compares
+/// live CLI output to a frozen borrowed snapshot; generations, timestamps,
+/// and QoS flags are volatile across those two producers. Pinning values
+/// would turn an additive-shape check into an exact-match against
+/// `json_contract_snapshots`. Value coverage lives in
+/// `fixture_backed_agent_json_contracts_match_snapshots` (status/why/context
+/// insta), `read_pool_status_schema` (qos types), `health_structural.snap`,
+/// and `curate_candidates_after_seed_matches_snapshot`.
+///
+/// The planted negative is the key removal: same object, still a bool-typed
+/// sibling, but the field is gone. That must still fail.
+#[test]
+fn additive_shape_permits_boolean_value_flips_and_still_rejects_key_removal() -> TestResult {
+    let expected = serde_json::json!({
+        "qos": { "registryHealthy": true },
+        "summary": { "status": "ok" }
+    });
+    let flipped = serde_json::json!({
+        "qos": { "registryHealthy": false },
+        "summary": { "status": "degraded" }
+    });
+    assert_additive_shape("status", "$", &expected, &flipped)?;
+
+    let removed = serde_json::json!({
+        "qos": {},
+        "summary": { "status": "ok" }
+    });
+    let Err(message) = assert_additive_shape("status", "$", &expected, &removed) else {
+        return Err(
+            "removing qos.registryHealthy must fail the additive-shape check, but it passed"
+                .to_owned(),
+        );
+    };
+    if !message.contains("qos.registryHealthy") {
+        return Err(format!(
+            "the removal failure must name qos.registryHealthy; got: {message}"
         ));
     }
     Ok(())
