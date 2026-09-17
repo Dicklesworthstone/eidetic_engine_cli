@@ -557,6 +557,38 @@ fn search_cursor_drain_partitions_exactly() -> TestResult {
             full_ids.len()
         ),
     )?;
+    // Derive the ceiling from the envelope's OWN token estimate instead of
+    // hard-coding one. A fixed budget rots against envelope drift: the minimal
+    // projection shrank below the old 1000-token ceiling, so this row stopped
+    // truncating at all, drained in a single page, and failed `pages > 1` --
+    // while `assert_exact_partition`, the invariant the row exists to check,
+    // never ran (bv27). A ceiling that tracks the payload cannot rot that way.
+    let probe = run_ee_in(
+        &workspace,
+        &[
+            "search",
+            "release workflow clippy",
+            "--limit",
+            "8",
+            "--fields",
+            "minimal",
+            "--max-output-tokens",
+            "1000000",
+            "--json",
+        ],
+    )?;
+    let full_estimate = probe
+        .pointer("/meta/tokensEstimated")
+        .and_then(JsonValue::as_u64)
+        .ok_or("a governed search must report meta.tokensEstimated")?;
+    ensure(
+        full_estimate > 1,
+        format!("governed search estimate must be meaningful, got {full_estimate}"),
+    )?;
+    // One token under the whole envelope. The governor must then drop at least
+    // one element, and it always keeps at least one, so the drain sees two or
+    // more pages however the envelope's size moves.
+    let ceiling = full_estimate.saturating_sub(1).to_string();
     let (drained, pages) = drain_ids(
         &workspace,
         &[
@@ -567,7 +599,7 @@ fn search_cursor_drain_partitions_exactly() -> TestResult {
             "--fields",
             "minimal",
             "--max-output-tokens",
-            "1000",
+            ceiling.as_str(),
             "--json",
         ],
         "/data/results",
@@ -590,7 +622,7 @@ fn search_cursor_drain_partitions_exactly() -> TestResult {
             "--fields",
             "minimal",
             "--max-output-tokens",
-            "1000",
+            ceiling.as_str(),
             "--cursor",
             "not-a-valid-cursor",
             "--json",
