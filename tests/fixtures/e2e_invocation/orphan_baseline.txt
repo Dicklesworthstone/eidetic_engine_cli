@@ -75,3 +75,64 @@ e2e_read_coalescing.sh
 e2e_repo_hygiene.sh
 e2e_sandbox.sh
 e2e_session_budget.sh
+
+# --- scripts/e2e_overhaul/ — bd-1cn5o, recorded 2026-09-17 ---
+#
+# These 36 are NOT newly broken. They are newly VISIBLE. Until this commit the
+# audit's population was scripts/e2e_*.sh alone (93 files) while
+# scripts/e2e_overhaul/ held 115 more that the gate never looked at, so it was
+# asserting "written tests actually execute" over less than half its subject
+# and reporting "of 92 e2e scripts" as though that were the whole of it.
+#
+# Each has NO reference outside docs/ anywhere in the tree, by the same
+# predicate applied to the other entries above. The inverse was checked before
+# calling it an absence: nothing dispatches this directory generically --
+# scripts/e2e_overhaul.sh runs 23 epics by explicit basename (EPIC_SCRIPTS,
+# :55-79), and the only glob-shaped references in the tree are prose plus one
+# path-class exclusion in e2e_event_contract_radar.sh:161.
+#
+# Watch scripts/e2e_overhaul/tiered_recall.sh against the registered
+# tiered_recall_e2e.sh: a near-identical name one letter from a wired suite is
+# precisely the miss this gate exists to catch.
+#
+# Baselined rather than fixed here for the reason the file's header gives:
+# moving 36 scripts into the orphan set at once would wedge the gate for every
+# agent, and triaging them is a decision, not a side effect of finally looking.
+# THIS LIST MAY ONLY SHRINK — the stale arm above fails if any of these becomes
+# wired and the line is left behind.
+e2e_overhaul/agent_consumer.sh
+e2e_overhaul/artifact_relocation.sh
+e2e_overhaul/backup_derived.sh
+e2e_overhaul/bayes_posteriors.sh
+e2e_overhaul/cass_subprocess_supervision.sh
+e2e_overhaul/completion_audit_multi_agent.sh
+e2e_overhaul/consensus_conflict.sh
+e2e_overhaul/coordination_snapshot.sh
+e2e_overhaul/derivation_reflection_readiness.sh
+e2e_overhaul/determinism_proptest.sh
+e2e_overhaul/environment_attestation.sh
+e2e_overhaul/hook_git_readiness.sh
+e2e_overhaul/knowledge_gaps_recommendations.sh
+e2e_overhaul/lint_determinism.sh
+e2e_overhaul/mesh_command_modes.sh
+e2e_overhaul/mi_dedup.sh
+e2e_overhaul/networkx_differential.sh
+e2e_overhaul/ownership_posture.sh
+e2e_overhaul/pack_binary.sh
+e2e_overhaul/perf_explain_latency.sh
+e2e_overhaul/perf_parity.sh
+e2e_overhaul/prompt_budget.sh
+e2e_overhaul/proof_broker_admission.sh
+e2e_overhaul/regression_causality.sh
+e2e_overhaul/singleflight_burst.sh
+e2e_overhaul/submodular_resolution_b.sh
+e2e_overhaul/swarm_incident_drill.sh
+e2e_overhaul/swarm_incident_recovery_actions.sh
+e2e_overhaul/swarm_incidents.sh
+e2e_overhaul/swarm_next_action_profile.sh
+e2e_overhaul/swarm_schemas.sh
+e2e_overhaul/sx1_stream.sh
+e2e_overhaul/sx7_adaptive_budget.sh
+e2e_overhaul/tiered_recall.sh
+e2e_overhaul/verification_reuse.sh
+e2e_overhaul/workspace_git_snapshot_read_only.sh

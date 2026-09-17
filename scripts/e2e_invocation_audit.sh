@@ -55,16 +55,42 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASELINE="${REPO_ROOT}/tests/fixtures/e2e_invocation/orphan_baseline.txt"
 RETIRED="${REPO_ROOT}/tests/fixtures/e2e_invocation/retired.txt"
 
-# Print the basenames of e2e scripts in <dir> that nothing else references.
+# The scripts this audit is responsible for, as paths relative to scripts/.
+#
+# TWO directories, not one (bd-1cn5o). The original glob was scripts/e2e_*.sh
+# alone, which is 93 files -- while scripts/e2e_overhaul/ holds 115 more that
+# the gate never looked at. Measured before widening: 36 of those 115 had no
+# reference outside docs/ anywhere in the tree, so the audit was asserting
+# "written tests actually execute" over less than half its own subject.
+#
+# Overhaul scripts are identified by their path relative to scripts/
+# (e2e_overhaul/foo.sh) rather than by basename. There are zero basename
+# collisions between the two directories today, so bare names would work -- but
+# scripts/e2e_overhaul/tiered_recall.sh sitting next to a registered
+# tiered_recall_e2e.sh is exactly the near-miss this gate exists to catch, and a
+# bare-name scheme would silently merge a future collision into one entry.
+e2e_audit_paths() {
+    local script_dir="$1"
+    local path
+    for path in "$script_dir"/e2e_*.sh; do
+        [ -e "$path" ] && printf '%s\n' "${path##*/}"
+    done
+    for path in "$script_dir"/e2e_overhaul/*.sh "$script_dir"/e2e_overhaul/lib/*.sh; do
+        [ -e "$path" ] && printf 'e2e_overhaul/%s\n' "${path#"$script_dir"/e2e_overhaul/}"
+    done
+    return 0
+}
+
+# Print the identifiers of e2e scripts that nothing else references.
 # Pure function of the tree so the self-test can drive it over a fixture.
 e2e_orphans() {
     local root="$1"
     local script_dir="$root/scripts"
     [ -d "$script_dir" ] || return 0
-    local path base
-    for path in "$script_dir"/e2e_*.sh; do
-        [ -e "$path" ] || continue
-        base="$(basename "$path")"
+    local path base needle
+    while IFS= read -r base; do
+        [ -n "$base" ] || continue
+        path="$script_dir/$base"
         # This audit is a tool, not an e2e suite, despite matching the glob.
         [ "$base" = "e2e_invocation_audit.sh" ] && continue
         # The baseline file lists orphans BY NAME, so it must be excluded from
@@ -91,14 +117,22 @@ e2e_orphans() {
         # .github/. The comment exclusion above and this one are the same rule
         # applied to two spellings of the same mistake: a mention standing in
         # for an invocation.
-        if ! rg -l "^[^#]*$(printf '%s' "$base" | sed 's/\./\\./g')" "$root" \
+        #
+        # THE NEEDLE IS THE BASENAME, THE IDENTIFIER IS THE PATH. Callers name
+        # these scripts by basename -- e2e_overhaul.sh's EPIC_SCRIPTS registry
+        # holds `pack_format.sh`, not `e2e_overhaul/pack_format.sh`. Searching
+        # for the path-qualified form would find zero references for all 23
+        # registered epics and report them as orphans, which is a false
+        # positive of exactly the size that would get this gate disabled.
+        needle="${base##*/}"
+        if ! rg -l "^[^#]*$(printf '%s' "$needle" | sed 's/\./\\./g')" "$root" \
             --glob '!target' --glob '!.git' --glob "!scripts/$base" \
             --glob '!tests/fixtures/e2e_invocation/**' \
             --glob '!**/*.md' --glob '!docs/**' \
             >/dev/null 2>&1; then
             printf '%s\n' "$base"
         fi
-    done
+    done < <(e2e_audit_paths "$script_dir")
 }
 
 read_baseline() {
@@ -212,6 +246,33 @@ if [[ "${1:-}" == "--self-test" ]]; then
         failures=$((failures + 1))
     fi
 
+    # scripts/e2e_overhaul/ is in the population too (bd-1cn5o), and its
+    # entries are identified by path while the SEARCH still uses the basename.
+    # Both halves need an arm, because getting either one wrong is silent:
+    # a missing population means 115 files go unexamined, and a path-qualified
+    # search term would report all 23 registered epics as orphans at once.
+    mkdir -p "$tmp/fixture/scripts/e2e_overhaul"
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/fixture/scripts/e2e_overhaul/lonely_epic.sh"
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/fixture/scripts/e2e_overhaul/wired_epic.sh"
+    # Referenced the way e2e_overhaul.sh's EPIC_SCRIPTS registry does it: by
+    # BASENAME, with no directory prefix.
+    printf 'declare -A EPIC_SCRIPTS=(\n    [A]="wired_epic.sh"\n)\n' \
+        >"$tmp/fixture/scripts/driver_registry.sh"
+    got_overhaul="$(e2e_orphans "$tmp/fixture" | sort -u | tr '\n' ' ')"
+    if [[ "$got_overhaul" == *"e2e_overhaul/lonely_epic.sh"* ]]; then
+        echo "ok   - an unreferenced scripts/e2e_overhaul script is an orphan"
+    else
+        echo "FAIL - e2e_overhaul is outside the population, got '$got_overhaul'"
+        failures=$((failures + 1))
+    fi
+    if [[ "$got_overhaul" != *"wired_epic"* ]]; then
+        echo "ok   - an overhaul script referenced by BASENAME is not an orphan"
+    else
+        echo "FAIL - basename reference missed; a path-qualified search term would"
+        echo "       report every registered epic as orphaned, got '$got_overhaul'"
+        failures=$((failures + 1))
+    fi
+
     # Direction 1: a new orphan against an empty baseline must fail.
     printf '# empty\n' >"$tmp/baseline_empty.txt"
     new_orphans="$(comm -23 <(printf 'e2e_lonely.sh\n') <(read_baseline "$tmp/baseline_empty.txt"))"
@@ -288,7 +349,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
         echo "ok   - rejects a retired entry with an empty field"
     fi
 
-    echo "self-test: $((11 - failures))/11 passed"
+    echo "self-test: $((13 - failures))/13 passed"
     [[ "$failures" -eq 0 ]] || exit 2
     exit 0
 fi
@@ -348,7 +409,12 @@ fi
 
 # Denominator excludes this audit script, which matches the glob but is a
 # tool rather than a suite -- the same exclusion the scan loop makes.
-TOTAL=$(( $(ls "$REPO_ROOT"/scripts/e2e_*.sh 2>/dev/null | wc -l | tr -d ' ') - 1 ))
+#
+# It is derived from e2e_audit_paths, the SAME function the scan loop walks, so
+# the reported denominator cannot drift from the population actually examined.
+# It used to be an independent `ls` of one directory, which is how the gate came
+# to report "of 92 e2e scripts" while 115 more sat outside it (bd-1cn5o).
+TOTAL=$(( $(e2e_audit_paths "$REPO_ROOT/scripts" | grep -vc '^$') - 1 ))
 echo "e2e_invocation_audit: $(printf '%s\n' "$CURRENT_UNRETIRED" | grep -vc '^$') orphaned of ${TOTAL} e2e scripts; baseline holds $(printf '%s\n' "$BASE" | grep -vc '^$'); retired $(printf '%s\n' "$RETIRED_NAMES" | grep -vc '^$')" >&2
 
 exit "$rc"
