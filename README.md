@@ -6,7 +6,8 @@
 
 **Durable, local-first, explainable memory for coding agents.**
 
-[![CI](https://img.shields.io/github/actions/workflow/status/Dicklesworthstone/eidetic_engine_cli/ci.yml?branch=main&label=CI)](https://github.com/Dicklesworthstone/eidetic_engine_cli/actions)
+[![CI Static](https://img.shields.io/github/actions/workflow/status/Dicklesworthstone/eidetic_engine_cli/ci-static.yml?branch=main&label=CI%20Static)](https://github.com/Dicklesworthstone/eidetic_engine_cli/actions/workflows/ci-static.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/Dicklesworthstone/eidetic_engine_cli/ci.yml?branch=main&label=CI)](https://github.com/Dicklesworthstone/eidetic_engine_cli/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/Dicklesworthstone/eidetic_engine_cli?label=release)](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest)
 [![License: MIT+Rider](https://img.shields.io/badge/License-MIT%2BOpenAI%2FAnthropic%20Rider-yellow.svg)](./LICENSE)
 [![Rust 2024](https://img.shields.io/badge/rust-2024-orange.svg)](rust-toolchain.toml)
