@@ -1,6 +1,6 @@
 # Team Memory Confederation Plan
 
-Status: Unix live EE-to-EE shipped on `main`; remainders are two-human Tailscale, Windows-host soak, production IdP soak, T2.7 remaining fuzz, and T5.7 fence (`bd-d67os.28`). See `docs/mesh/verification_matrix.md` and `CLOSE_THE_GAP_PLAN.md` Part III.
+Status: Unix live EE-to-EE shipped on `main`. v1 remainders resolved: two-host tailnet soak closed 2026-08-17 (`.3.8`); per the approved 2026-09-17 scope amendment (`bd-reality-core-convergence-1azkt.8`) the v1 boundary is two independent hosts and a two-distinct-human soak is an owned post-v1 follow-up; Windows-host soak and production IdP decision closed 2026-08-17; T2.7 fuzz and T5.7 fence closed. See `docs/mesh/verification_matrix.md` and `CLOSE_THE_GAP_PLAN.md` Part III.
 Owning ADR: [ADR 0086 — team memory confederation](../adr/0086-team-memory-confederation.md) (decisions TC-D1…TC-D16; where plan and ADR conflict, the ADR wins and the plan gets corrected)
 Related ADRs: 0037 (optional mesh), 0038 (auto-enrollment), 0041 (anti-entropy), 0009 (trust classes), 0069 (global knowledge lane), 0083 (user-global store)
 Related beads: bd-30o6g (closed by T1.1), bd-3mw86 (in progress), bd-2gvgw (blocked on/absorbed by T1.4), bd-1bfwa (open epic + .2/.3/.4/.5)
@@ -21,8 +21,8 @@ Authorized BodyFetch hydrates the receiver's `peer_human_attested` stub
 so `--memory-scope team` search/pack can recall teammate text.
 Sneakernet export/import remains available. The live proof ledger is
 `docs/mesh/verification_matrix.md`. Windows inbound uses TeamJoin TCP (Tailscale LocalAPI stays Unix).
-A Windows-host DACL soak and production IdP vendor soak remain
-environment remainders. Criterion `team_confed` wall-time is
+A Windows-host DACL soak and production IdP vendor soak were closed 2026-08-17
+per the verification matrix. Criterion `team_confed` wall-time is
 recorded in `docs/mesh/perf_budgets.md`.
 
 This plan turns that foundation into **team confederation**: N human users, each
