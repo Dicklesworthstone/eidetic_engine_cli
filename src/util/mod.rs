@@ -141,6 +141,14 @@ pub(crate) const SENSITIVE_PATH_PREFIXES: &[&str] = &[
 ///
 /// The drive and UNC forms additionally require a token boundary before them so
 /// that a bare `C:` inside a word is not mistaken for a path root.
+///
+/// Prefixes compare case-insensitively. macOS and Windows both resolve
+/// `/USERS/alice` and `/Users/alice` to the same file, so a case-sensitive
+/// comparison redacts one spelling and emits the other. The repository's own
+/// leak detectors already lowercase before matching these exact tokens
+/// (`fixtures_do_not_leak_pids_paths_or_secrets`,
+/// `contains_forbidden_secret_or_private_path`), so a case-sensitive redactor
+/// can emit output that those gates classify as a leak.
 fn sensitive_path_starts_at(value: &str, start: usize) -> bool {
     const FILE_SCHEME: &str = "file://";
 
@@ -152,10 +160,11 @@ fn sensitive_path_starts_at(value: &str, start: usize) -> bool {
     {
         return true;
     }
-    if SENSITIVE_PATH_PREFIXES
-        .iter()
-        .any(|prefix| candidate.starts_with(prefix))
-    {
+    if SENSITIVE_PATH_PREFIXES.iter().any(|prefix| {
+        candidate
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    }) {
         return true;
     }
 

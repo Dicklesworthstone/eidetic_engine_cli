@@ -1341,36 +1341,20 @@ fn search_projection_drive_prefix_is_bounded(input: &str, cursor: usize) -> bool
             .is_none_or(|byte| !byte.is_ascii_alphanumeric())
 }
 
+/// Match a sensitive root case-insensitively.
+///
+/// This used to consult a list of prefix *spellings* that were known to need
+/// case-insensitive treatment (`/var/run/`, `/private/etc/ssh/`, ...). That
+/// list silently stopped applying when the caller switched to the shared
+/// minimal cover in `crate::util::SENSITIVE_PATH_PREFIXES`, whose shorter
+/// entries (`/var/`, `/private/`) appear nowhere in it: only `/Users/` and
+/// `/Volumes/` were in both, so fourteen roots reverted to case-sensitive
+/// matching and `/VAR/RUN/docker.sock` was emitted verbatim. Comparing every
+/// prefix case-insensitively removes the dependency on how a root is spelled.
 fn search_projection_unix_prefix_matches(remaining: &str, prefix: &str) -> bool {
-    if is_case_insensitive_macos_search_path_prefix(prefix) {
-        remaining
-            .get(..prefix.len())
-            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-    } else {
-        remaining.starts_with(prefix)
-    }
-}
-
-fn is_case_insensitive_macos_search_path_prefix(prefix: &str) -> bool {
-    matches!(
-        prefix,
-        "/Users/"
-            | "/Volumes/"
-            | "/var/run/"
-            | "/var/log/"
-            | "/var/tmp/"
-            | "/var/folders/"
-            | "/private/var/run/"
-            | "/private/var/log/"
-            | "/private/var/tmp/"
-            | "/private/var/folders/"
-            | "/private/etc/ssh/"
-            | "/private/etc/kubernetes/"
-            | "/private/etc/ssl/"
-            | "/private/etc/letsencrypt/"
-            | "/private/etc/secrets/"
-            | "/private/tmp/"
-    )
+    remaining
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
 fn starts_with_search_projection_file_host_ref(remaining: &str) -> bool {
@@ -4810,8 +4794,8 @@ mod tests {
     fn search_projection_redacts_mixed_case_macos_private_path_roots() {
         // bd-89312: On case-insensitive macOS filesystems, indexed projection
         // content can carry uppercase or mixed-case private/var/folders
-        // roots. `is_case_insensitive_macos_search_path_prefix` widened the
-        // case-insensitive list past /Users/ and /Volumes/; this regression
+        // roots. `search_projection_unix_prefix_matches` compares every
+        // sensitive root case-insensitively; this regression
         // test pins every macOS runtime/secret root the redactor MUST treat
         // case-insensitively, plus an ordinary relative reference that must
         // stay visible.
