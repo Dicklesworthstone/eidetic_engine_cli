@@ -225,6 +225,19 @@ else
 fi
 
 # --- trend: two steward snapshots around a fix show the direction ---------
+# Ordered by GENERATION, not by list position, deliberately.
+#
+# The previous form asserted snapshots[0].totalScore < snapshots[1].totalScore,
+# which means "debt fell" only while the list happens to arrive newest-first.
+# It does today -- src/db/mod.rs lists debt snapshots with
+# `ORDER BY created_at DESC, generation DESC, snapshot_day DESC` -- so that
+# assertion was correct, not broken.
+#
+# But the property it depends on lives in a DIFFERENT FILE and nothing here
+# pinned it. Flip that ORDER BY to ASC, which is a reasonable-looking change,
+# and this assertion silently starts asserting the opposite of its own event
+# name while continuing to report a verdict. Sorting by generation makes the
+# check true under either ordering, so the test cannot invert underneath us.
 run_ee remember "Second planted orphan for the trend arc." \
     --workspace "${WS}" --level semantic --kind fact --tags "planted-orphan-2" --json
 ORPHAN2="$(remember_id)"
@@ -238,7 +251,8 @@ run_ee curate doctor --workspace "${WS}" --trend --json
 T="${LAST_STDOUT}"
 if [[ "${SNAP1}" -eq 0 && "${FIX2}" -eq 0 && "${SNAP2}" -eq 0 && "${LAST_EXIT}" -eq 0 ]] \
     && jq -e '(.data.trend.snapshots | length) >= 2
-              and (.data.trend.snapshots[0].totalScore < .data.trend.snapshots[1].totalScore)' \
+              and ((.data.trend.snapshots | sort_by(.generation)) as $asc
+                   | $asc[-1].totalScore < $asc[0].totalScore)' \
         "${T}" >/dev/null 2>&1; then
     event trend_shows_debt_decreasing_after_fix pass
 else
