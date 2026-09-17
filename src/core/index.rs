@@ -1658,7 +1658,38 @@ pub async fn rebuild_index_with_cx(
     }
 
     let _recovery_action = recover_interrupted_publish(&index_dir)?;
-    let (registry_stack, _) = workspace_embedder_stack(&db, &workspace_id)?;
+    // bd-qf3l4. `ee init` rebuilds the index for a workspace holding ZERO
+    // documents, and this line forced `DEFAULT_SEARCH_EMBEDDER`
+    // (`default_search_embedder_stack_with_provenance`, :5631) to pay ~2 GB of
+    // model load in order to embed nothing. The contracts suite makes 154
+    // real-binary spawns, most of them `ee init`, against a 120s spawn budget:
+    // that is why those rows time out under any parallel load rather than
+    // failing an assertion.
+    //
+    // This does NOT skip the bd-7hsgy proof, because the proof was never
+    // performed here. `ensure_active_embedding_registry_record` delegates to
+    // `ensure_loaded_embedding_registry_record`, which returns early when the
+    // embedder is not semantic and DEFERS, with an explicit warning, when it is
+    // semantic but not yet ready. Writing the `Available` record only once
+    // weights have actually loaded IS the contract — a verified model directory
+    // never proved the weights load. Not forcing takes the deferral branch that
+    // already exists, and the proof stays where someone needs it: the first
+    // rebuild that has something to embed.
+    //
+    // Only the zero-document case changes. Any rebuild with documents resolves
+    // exactly as before, so the embedding path is untouched. Reading an already
+    // resolved selection with `.get()` is free and identical; this file uses
+    // that same non-forcing read at :4293, :4325, :6347 and :7185, for the same
+    // reason — a caller that initialises the global would fix the very identity
+    // it is reporting.
+    let registry_stack = if documents_total == 0 {
+        match DEFAULT_SEARCH_EMBEDDER.get() {
+            Some(selection) => selection.stack.clone(),
+            None => hash_fallback_embedder_stack(),
+        }
+    } else {
+        workspace_embedder_stack(&db, &workspace_id)?.0
+    };
     ensure_active_embedding_registry_record(&db, &workspace_id, &registry_stack)?;
     let build_result = publish_full_index_generation_with_stack(
         cx,
