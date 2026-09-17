@@ -25,8 +25,9 @@ for ledger semantics (cap, audited eviction, GC cascade).
 
 `--format markdown` with `--since` emits a markdown delta document
 (added items in full, changed items as field lines, removed items as
-one-line id stubs) instead of the JSON envelope — unchanged items are
-never re-emitted. Markdown output is not an `ee.response.v2` envelope,
+one-line id stubs) instead of the JSON envelope. Retained, unchanged items
+are not re-emitted; a move or complete replacement may re-emit an item's
+body under the same ID. Markdown output is not an `ee.response.v2` envelope,
 so `--max-output-tokens` does not govern it; the delta's size follows
 the pack's own `--max-tokens` budget rules. Other non-JSON formats
 still fall back to the full pack with
@@ -62,38 +63,98 @@ payload itself still costs prompt tokens.
 
 ## Applying A Delta
 
-Use item ids as keys. Keep the prior pack's item order for unchanged items,
-remove ids listed in `items.removed`, merge `items.modified` field changes into
-matching items, then append `items.added` in envelope order unless a later pack
-ordering field says otherwise.
+First validate the envelope and its association with the local baseline. It
+must be a successful `ee.context.delta.v2` JSON delta with no fallback reason,
+not an ordinary full response or a markdown document. Check `priorPackHash`,
+workspace isolation and policy compatibility before using item operations.
+A server-verification boolean is not authentication of an untrusted sender.
 
-Pseudo-code:
+Use item IDs as keys, but preserve their sequence. Remove IDs listed in
+`items.removed`, merge `items.modified` field changes into retained items,
+then append `items.added` in **envelope order**, not lexical ID order. The
+snapshot wire shape is `{id, fields: {...}}`: modifications apply inside the
+`fields` object, not to the snapshot's own `id` or wrapper.
+
+An ID may appear in both `removed` and `added`. This means **remove the old
+item completely, then append the supplied replacement**. Never cancel out
+these operations or merge the replacement with the old fields. This is how
+v2 expresses moves and field deletion without extending the schema. An ID in
+`modified` must not also be removed or added.
+
+For example, changing `[a, b, c]` to `[b, c, a]` removes `a` and re-adds it at
+the end. Inserting an item before existing items may require removing and
+re-adding the suffix. The kernel retains the longest new prefix representable
+as a subsequence of the old pack; ordinary field updates, removals and
+append-only changes remain compact.
+
+An ordinary `[old, new]` pair assigns `new`, including an explicit JSON null.
+It does not delete a field. When a field disappears, the kernel emits a full
+item replacement instead. V2 represents both an absent old field and an old
+null as null, so consumers can compare old values but cannot distinguish those
+two old states from the pair alone.
+
+Validate all operations before installing the result. Reject blank or duplicate
+IDs, unknown removal/modification targets, additions that overwrite retained
+items, conflicting operations, and mismatched old field values. Work on a copy
+so a late failure cannot leave the caller's context half-updated.
+
+Pseudo-code, after validating the envelope and all operation preconditions:
 
 ```text
-items_by_id = prior_pack.items keyed by item.id
+items = deep copy of prior_snapshot.items, preserving order
+remove every item whose id occurs in delta.data.items.removed
 
-for id in delta.items.removed:
-    delete items_by_id[id]
-
-for change in delta.items.modified:
-    item = items_by_id[change.id]
+for change in delta.data.items.modified:
+    item = the retained item with id == change.id
     for field, value in change.fieldChanges:
         if value is [old, new]:
-            item[field] = new
+            # Old-value equality was checked before any mutation.
+            item.fields[field] = new
         else if value.oldValueOmitted == true:
-            item[field] = value.newValue
+            item.fields[field] = value.newValue
 
-for item in delta.items.added:
-    items_by_id[item.id] = item
+append complete delta.data.items.added snapshots in their envelope order
 
-reconstructed_pack.items = stable order from prior pack, minus removed ids,
-then added items in delta order
-reconstructed_pack.hash = delta.data.newPackHash
+# Install only after the entire operation succeeds.
+reconstructed_snapshot.items = items
+reconstructed_snapshot.packHash = delta.data.newPackHash
 ```
 
 Redaction drift is one-way. If an item became more restricted, the delta may
 show only the new redacted value instead of an `[old, new]` pair. Agents must
-not infer or reconstruct hidden prior content.
+not infer or reconstruct hidden prior content. Redacted changes require
+`oldValueOmitted=true`; they do not compare or recover the omitted old value.
+Deleting a field through replacement likewise does not re-emit its old value.
+
+## Rust Client Application
+
+The existing types in `ee::core::context_delta` support local application:
+
+```rust
+// In-process callers with a typed envelope and matching baseline snapshot:
+let next = delta.apply_to_snapshot(&prior)?;
+
+// Wire consumers can deserialize data.items into ContextDeltaItems and apply
+// it after independently validating the enclosing envelope and baseline:
+let next_items = item_delta.apply_to_items(&prior_items)?;
+```
+
+`ContextDeltaItems::apply_to_items` validates the complete operation set and
+returns a fresh ordered item vector. `ContextDeltaEnvelope::apply_to_snapshot`
+also checks the schema/success/fallback/format/chaining markers, baseline hash,
+baseline generation, presence of the new generation, and agreement between the
+declared prior/new feature-flag hashes. Neither method mutates its input.
+Missing generation metadata is rejected by the envelope method, not invented.
+A supplied generation value of zero remains zero; it does not prove that a
+caller collected a real database generation.
+
+These methods reconstruct the **item snapshot projection**, not every field
+of the canonical context response. The new hash is copied from the envelope;
+it cannot be recomputed from this projection alone. The returned snapshot is
+not marked as a server-verified ledger record, even when the prior snapshot
+or envelope carries that marker. Workspace and policy isolation still belong
+to the caller because `ContextDeltaPackSnapshot` does not store those values.
+The methods neither authenticate network input nor widen source eligibility.
 
 ## Response Shapes
 
@@ -127,7 +188,8 @@ renderer output with `context_delta_format_unsupported`.
 
 `ee` should not add `ee pack apply-delta --base <hash> --delta-stdin` for
 v2. Sending the base and delta back to the server defeats the byte-saving goal
-and creates a second state-management surface. Agents can always re-run
+and creates a second state-management surface. The Rust helpers above run
+locally without creating a command or endpoint. Agents can always re-run
 `ee pack "<task>" --json` without `--since` to recover the canonical full
 pack.
 

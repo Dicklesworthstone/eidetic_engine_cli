@@ -11,6 +11,9 @@ use std::collections::BTreeMap;
 
 use super::{ContextDeltaError, ContextDeltaItemSnapshot, ContextDeltaItems, diff_item_fields};
 
+#[path = "context_delta_apply.rs"]
+mod apply;
+
 type ItemIndex<'a> = BTreeMap<&'a str, (usize, &'a ContextDeltaItemSnapshot)>;
 
 fn index_items<'a>(
@@ -100,11 +103,11 @@ pub(super) fn diff_items(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{
         ContextDeltaFieldChange, ContextDeltaOptions, ContextDeltaPackSnapshot,
         compute_context_delta,
     };
+    use super::*;
     use serde_json::json;
 
     fn item(id: &str) -> ContextDeltaItemSnapshot {
@@ -155,6 +158,7 @@ mod tests {
     ) -> ContextDeltaItems {
         let delta = diff_items(prior, new).expect("valid snapshots");
         assert_eq!(apply_documented(prior, &delta), new);
+        assert_eq!(delta.apply_to_items(prior).expect("validated client application"), new);
         delta
     }
 
@@ -274,10 +278,18 @@ mod tests {
     #[test]
     fn public_kernel_preserves_order_fields_hashes_and_input_immutability() {
         let prior = ContextDeltaPackSnapshot::new(
-            "blake3:prior", 10, 1_000_000, 100, items(&["mem_a", "ev_z"]),
+            "blake3:prior",
+            10,
+            1_000_000,
+            100,
+            items(&["mem_a", "ev_z"]),
         );
         let mut new = ContextDeltaPackSnapshot::new(
-            "blake3:new", 11, 1_000_000, 90, items(&["ev_z", "mem_a"]),
+            "blake3:new",
+            11,
+            1_000_000,
+            90,
+            items(&["ev_z", "mem_a"]),
         );
         new.items[0].fields.remove("provenance");
         let prior_copy = prior.clone();
@@ -294,12 +306,18 @@ mod tests {
         assert!(!envelope.data.server_decision.computed_from_server_verified_pack_record);
     }
 
-    fn ordered_subsets(prefix: Vec<&'static str>, remaining: &[&'static str], out: &mut Vec<Vec<&'static str>>) {
+    fn ordered_subsets(
+        prefix: Vec<&'static str>,
+        remaining: &[&'static str],
+        out: &mut Vec<Vec<&'static str>>,
+    ) {
         out.push(prefix.clone());
         for (index, id) in remaining.iter().enumerate() {
             let mut next = prefix.clone();
-            next.push(id);
-            let rest: Vec<_> = remaining.iter().enumerate()
+            next.push(*id);
+            let rest: Vec<_> = remaining
+                .iter()
+                .enumerate()
                 .filter(|(other, _)| *other != index)
                 .map(|(_, id)| *id)
                 .collect();
@@ -310,7 +328,11 @@ mod tests {
     #[test]
     fn all_ordered_subset_transitions_reconstruct_exactly_with_and_without_field_changes() {
         let mut sequences = Vec::new();
-        ordered_subsets(Vec::new(), &["mem_a", "ev_z", "rule_b", "mem_c"], &mut sequences);
+        ordered_subsets(
+            Vec::new(),
+            &["mem_a", "ev_z", "rule_b", "mem_c"],
+            &mut sequences,
+        );
         assert_eq!(sequences.len(), 65);
         let mut transitions = 0;
         for prior_ids in &sequences {
