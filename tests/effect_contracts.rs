@@ -131,15 +131,43 @@ fn drift_path(entry: &str) -> String {
         .map_or_else(|| entry.to_owned(), |(_, path)| path.to_owned())
 }
 
+/// The two paths whose content moves on a read-write OPEN, with no database
+/// write of any kind.
+///
+/// This is a scrubber, so it is spelled out rather than pattern-matched, and
+/// the mechanism is named so nobody has to take it on trust:
+///
+/// * `.ee/ee.write.lock` -- `advance_flock_gate_epoch` (src/db/mod.rs) does
+///   `write_all` of a 21-byte counter into this file on every successful
+///   exclusive flock, and that flock is taken for exactly
+///   `(DatabaseLocation::File, DatabaseOpenMode::ReadWrite)` at open
+///   (src/db/mod.rs:1130-1137). Opening wide is sufficient; committing is not
+///   required.
+/// * `.ee/ee.db-shm` -- SQLite's WAL shared-memory index, mapped by the
+///   connection rather than written by a transaction.
+///
+/// EXACTLY these two, and nothing else. `.ee/ee.db`, `.ee/ee.db-wal`,
+/// `-wal-cert`, and every audit, cache and pack path stay fully hashed, which
+/// is what keeps a real write catchable. bd-czj3e's own filing spells out the
+/// trap in widening this further: narrowing the instrument BEFORE the product
+/// question was settled would have turned the row green and destroyed the
+/// only signal pointing at the read-write open. That question is settled now
+/// -- `search`/`similar`/`search --all-workspaces` are declared
+/// `append_only_write` -- so the instrument may finally be aligned with the
+/// contract its own failure message states.
+fn is_open_artifact(path: &str) -> bool {
+    let database = format!(".ee{}ee.db", std::path::MAIN_SEPARATOR);
+    path == format!(".ee{}ee.write.lock", std::path::MAIN_SEPARATOR)
+        || path == format!("{database}-shm")
+}
+
 /// `true` if a drift entry is evidence of a DURABLE WRITE, not merely of a
 /// read-write handle having been opened.
 ///
 /// The distinction is load-bearing and was established by a run, not by
 /// reading: bd-czj3e's original filing saw only `.ee/ee.db-shm` and
 /// `.ee/ee.write.lock` move and concluded "no audit row landed". Both of
-/// those change on any `(File, ReadWrite)` open, because the write-owner gate
-/// publishes a holder epoch at open time (`src/db/mod.rs:1130-1137`) and
-/// SQLite maps the shared-memory index. `ee why` opens read-write to run
+/// those are [`is_open_artifact`] paths. `ee why` opens read-write to run
 /// `migrate()` and moves them without writing a thing.
 ///
 /// `.ee/ee.db` and `.ee/ee.db-wal` are different: content only moves there
@@ -153,15 +181,25 @@ fn is_durable_write(entry: &str) -> bool {
     path == database || path == wal
 }
 
-/// Assert a surface left the workspace byte-identical, NAMING what moved.
+/// Assert a surface mutated no durable state, NAMING what moved.
 ///
-/// The CONDITION is unchanged -- full-tree `hash_directory` equality, exactly
-/// as before. Only the failure message is richer. Two `u64` hashes tell you
-/// that something was written and withhold the one fact needed to act on it,
-/// and unlike a suppressed-output case this is not recoverable by re-running
-/// with --nocapture: the values are already printed, they are simply the wrong
-/// values. The snapshot diff runs ONLY on mismatch, so a passing run pays
-/// nothing beyond the extra pre-walk.
+/// The failure message has always promised "database, WAL, audit, cache, or
+/// pack state". The condition used to be full-tree `hash_directory` equality,
+/// which is strictly wider than that sentence: it also fails on
+/// [`is_open_artifact`] paths, whose content moves when a command merely opens
+/// the database read-write. `ee why` does exactly that, to run `migrate()`
+/// before reading, so under the old condition a genuine read could never pass.
+///
+/// bd-czj3e decision (2). The instrument now checks what it says it checks.
+/// The narrowing is two named paths with a cited mechanism, NOT a relaxation
+/// of the comparison: every other path -- `.ee/ee.db`, `-wal`, `-wal-cert`,
+/// audit, cache, pack, and anything outside `.ee/` -- is still hashed and
+/// still fails this assertion. A surface that appends one audit row is still
+/// caught, which is the property that made this test find bd-czj3e at all.
+///
+/// The excluded paths are REPORTED on failure rather than dropped silently,
+/// so a future reader can see what the scrubber swallowed instead of having
+/// to re-derive the exclusion list from this doc comment.
 fn ensure_workspace_unchanged(
     workspace: &Path,
     before_hash: u64,
@@ -173,9 +211,25 @@ fn ensure_workspace_unchanged(
         return Ok(());
     }
     let drift = describe_directory_drift(before_snapshot, &snapshot_directory(workspace));
+    // Hashes disagree but the snapshot walk names nothing. That is the two
+    // detectors contradicting each other, not a clean run, and it must not
+    // fall through the partition below as an empty `durable` list.
+    if drift.is_empty() {
+        return Err(format!(
+            "{surface}: workspace hash moved {before_hash} -> {after_hash} but the snapshot \
+             diff named no path; the drift detector and the hash disagree"
+        ));
+    }
+    let (ignored, durable): (Vec<&String>, Vec<&String>) = drift
+        .iter()
+        .partition(|entry| is_open_artifact(&drift_path(entry.as_str())));
+    if durable.is_empty() {
+        return Ok(());
+    }
     Err(format!(
         "{surface} must not mutate database, WAL, audit, cache, or pack state: \
-         hash {before_hash} -> {after_hash}; drift: {drift:?}"
+         hash {before_hash} -> {after_hash}; durable drift: {durable:?}; \
+         open-artifact drift ignored by design: {ignored:?}"
     ))
 }
 
@@ -1061,6 +1115,63 @@ fn effect_manifest_has_no_undocumented_extra_cli_paths() -> TestResult {
             "effect manifest has unexpected command paths not emitted by CLI normalization: {manifest_only:?}"
         ))
     }
+}
+
+/// The workspace-drift scrubber is itself tested, in both directions.
+///
+/// `ensure_workspace_unchanged` now ignores two named paths. An exclusion
+/// list that nothing exercises is how a gate quietly becomes a blanket pass:
+/// widen `is_open_artifact` by one careless pattern -- `starts_with(".ee/")`,
+/// say, or a `-wal` typo -- and every caller keeps passing while the
+/// assertion stops meaning anything. This pins both arms against synthetic
+/// drift entries, so it needs no workspace and no ee invocation.
+#[test]
+fn workspace_drift_scrubber_ignores_open_artifacts_and_nothing_else() -> TestResult {
+    let sep = std::path::MAIN_SEPARATOR;
+    for ignored in [
+        format!(".ee{sep}ee.write.lock"),
+        format!(".ee{sep}ee.db-shm"),
+    ] {
+        ensure(
+            is_open_artifact(&ignored),
+            true,
+            &format!("{ignored} is an open artifact"),
+        )?;
+    }
+    // The paths a real write lands on MUST NOT be scrubbed. `-wal` and
+    // `-wal-cert` are deliberately here: they are adjacent in name to the
+    // two exclusions and are exactly what a careless prefix rule would eat.
+    for counted in [
+        format!(".ee{sep}ee.db"),
+        format!(".ee{sep}ee.db-wal"),
+        format!(".ee{sep}ee.db-wal-cert"),
+        format!(".ee{sep}index{sep}meta.json"),
+        format!(".ee{sep}packs{sep}latest.json"),
+        "AGENTS.md".to_owned(),
+    ] {
+        ensure(
+            is_open_artifact(&counted),
+            false,
+            &format!("{counted} must still be hashed"),
+        )?;
+    }
+    // `is_durable_write` takes a drift ENTRY (`"content changed: <path>"`),
+    // not a bare path, and the two predicates must not overlap.
+    ensure(
+        is_durable_write(&format!("content changed: .ee{sep}ee.db-wal")),
+        true,
+        "a WAL content change is a durable write",
+    )?;
+    ensure(
+        is_durable_write(&format!("content changed: .ee{sep}ee.write.lock")),
+        false,
+        "a write-lock epoch bump is not a durable write",
+    )?;
+    ensure(
+        is_durable_write(&format!("content changed: .ee{sep}ee.db-shm")),
+        false,
+        "an shm remap is not a durable write",
+    )
 }
 
 #[test]
