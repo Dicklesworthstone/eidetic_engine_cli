@@ -1643,3 +1643,128 @@ fn no_verify_stage_resolves_the_ee_binary_through_path() {
         offenders.join("\n")
     );
 }
+
+/// Drive the vision-coverage gate at a scratch root with a chosen report body.
+///
+/// `--gate=cargo-test` is deliberate: it makes the other two checks return
+/// early, so the exit status is attributable to the vision check alone rather
+/// than to a `cargo tree` that has no manifest in a temp dir.
+fn run_vision_gate_with_report(report: &str, beads: Option<&str>) -> Output {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::write(temp.path().join(".vision-coverage-report.json"), report)
+        .expect("write vision report");
+    if let Some(beads) = beads {
+        fs::create_dir_all(temp.path().join(".beads")).expect("create .beads");
+        fs::write(temp.path().join(".beads/issues.jsonl"), beads).expect("write beads fixture");
+    }
+    run_drift_guard_at(temp.path(), &["--gate=cargo-test"])
+}
+
+const HEALTHY_VISION_REPORT: &str = r#"{"surfaces":{"total_documented":141,"implemented":141,"stubbed":0,"missing":0,"with_open_implements_bead":0}}"#;
+
+/// bd-ry56h. The vision check must be able to reach all three verdicts.
+///
+/// It previously reached none of them. The query was
+/// `.surfaces | to_entries | map(select(.value.status == "missing")) | length`,
+/// but `.surfaces` is a COUNTS object, not a map of per-surface records, so
+/// jq exited 5 with `Cannot index number with string "status"`. The call site
+/// ended in `2>/dev/null || echo "0"`, the error was swallowed, `0` never
+/// exceeded the threshold, and the gate reported clean by failing — for every
+/// run, on every input.
+///
+/// A one-line path fix would have restored the happy path and left the
+/// swallow in place, so the next time the query broke the gate would die
+/// silently again. The fix is therefore fail-closed reading, and this test
+/// exists to hold that: it pins the FATAL arm alongside the fire and clean
+/// arms, because a gate that cannot distinguish "nothing wrong" from "could
+/// not look" is not a gate.
+#[test]
+fn vision_coverage_gate_can_fire_can_pass_and_cannot_be_silenced() {
+    // FIRE: over the threshold with nothing tracking it.
+    let fires = run_vision_gate_with_report(
+        r#"{"surfaces":{"total_documented":141,"implemented":132,"stubbed":0,"missing":9,"with_open_implements_bead":0}}"#,
+        Some(
+            r#"{"id":"bd-unrelated","title":"placeholder","status":"open","labels":[],"description":"nothing relevant"}"#,
+        ),
+    );
+    assert_eq!(
+        fires.status.code(),
+        Some(1),
+        "9 missing surfaces with no tracking bead must be reported as drift\n{}",
+        output_excerpt(&fires)
+    );
+    assert!(
+        String::from_utf8_lossy(&fires.stdout).contains("9 missing surfaces"),
+        "the drift message must name the count it read\n{}",
+        output_excerpt(&fires)
+    );
+
+    // PASS: under the threshold. Distinguishes a real clean from the old
+    // accidental one, since this run actually parsed a number.
+    let clean = run_vision_gate_with_report(HEALTHY_VISION_REPORT, None);
+    assert_eq!(
+        clean.status.code(),
+        Some(0),
+        "0 missing surfaces is a genuine pass\n{}",
+        output_excerpt(&clean)
+    );
+
+    // FATAL: the report exists but cannot be read. This is the arm the old
+    // code failed — it is exactly the state that used to yield "clean".
+    for (label, body) in [
+        ("truncated", r#"{"surfaces": {"total_documented": 141, "#),
+        ("not json", "this is not json at all\n"),
+        (
+            "key absent",
+            r#"{"surfaces":{"total_documented":141,"implemented":141}}"#,
+        ),
+        (
+            "wrong shape",
+            r#"{"surfaces":{"missing":{"nested":"object"}}}"#,
+        ),
+    ] {
+        let broken = run_vision_gate_with_report(body, None);
+        assert_eq!(
+            broken.status.code(),
+            Some(2),
+            "an unreadable vision report ({label}) must fail the guard, never report clean\n{}",
+            output_excerpt(&broken)
+        );
+        assert!(
+            String::from_utf8_lossy(&broken.stderr).contains("Refusing to report a verdict"),
+            "the guard must say why it refused ({label})\n{}",
+            output_excerpt(&broken)
+        );
+    }
+}
+
+/// The swallow itself must not come back, in any of the three checks.
+///
+/// bd-ry56h was one instance of a shape this repo keeps rediscovering:
+/// `$(... 2>/dev/null || echo "0")` turns "I could not evaluate this" into
+/// "I evaluated this and it was fine". The vision check is fixed above; this
+/// pins the whole script so the pattern cannot be reintroduced in a sibling
+/// check and quietly kill a different gate.
+#[test]
+fn the_drift_guard_never_defaults_a_failed_probe_to_zero() {
+    let script = fs::read_to_string(project_root().join("scripts/verification-drift-guard.sh"))
+        .expect("read verification-drift-guard.sh");
+    let offenders: Vec<String> = script
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            let line = line.trim_start();
+            !line.starts_with('#')
+                && line.contains("|| echo \"0\"")
+                && !line.contains("guard_input_error")
+        })
+        .map(|(index, line)| format!("{}: {}", index + 1, line.trim()))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "a probe that defaults to 0 on failure reports clean without checking; \
+         read it through read_json_metric (or check the producer's exit status) \
+         so the guard fails instead:\n{}",
+        offenders.join("\n")
+    );
+}

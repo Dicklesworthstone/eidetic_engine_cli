@@ -39,6 +39,51 @@ done
 DRIFT_VIOLATIONS=""
 DRIFT_COUNT=0
 
+# Exit code for "the guard could not evaluate its own input". Distinct from
+# 1 (drift detected) so a caller can tell a verdict from a broken instrument.
+GUARD_INPUT_ERROR_CODE=2
+
+# A gate that cannot read its input must FAIL, never report clean.
+#
+# bd-ry56h. This is not a stylistic preference. scripts/verify.sh:958 treats
+# THIS SCRIPT EXITING 0 as grounds to excuse a failing closure linter:
+#
+#     if with_beads_read_locks ./scripts/verification-drift-guard.sh \
+#            --gate=closure-lint --json; then
+#         echo "[!] Closure linter reported tracked violations; continuing ..."
+#         return 0
+#
+# and the comment directly above it already states the intent -- "If the guard
+# itself cannot run, the excuse is not established, so the linter's own
+# failure stands." A swallowed jq error that defaults to 0 makes this script
+# exit 0 while having checked nothing, which converts a red gate into a pass.
+guard_input_error() {
+    printf '[x] verification-drift-guard: %s\n' "$1" >&2
+    printf '    Refusing to report a verdict from an unreadable input.\n' >&2
+    exit "$GUARD_INPUT_ERROR_CODE"
+}
+
+# Read one non-negative integer out of a JSON file.
+#
+# Sets JSON_METRIC. Deliberately NOT a command substitution: `x=$(f)` runs f
+# in a subshell, where `exit` would terminate only that subshell and let the
+# caller continue with an empty value -- reintroducing the very fail-open this
+# function exists to remove.
+JSON_METRIC=""
+read_json_metric() {
+    local file="$1" query="$2" label="$3" output=""
+    if ! output=$(jq -r "$query" "$file" 2>&1); then
+        guard_input_error "$label: jq failed on $file: $output"
+    fi
+    case "$output" in
+        '' | *[!0-9]*)
+            guard_input_error \
+                "$label: expected a non-negative integer from $file, got: $output"
+            ;;
+    esac
+    JSON_METRIC="$output"
+}
+
 add_drift() {
     local gate="$1"
     local reason="$2"
@@ -100,8 +145,12 @@ check_closure_lint_drift() {
         return 0
     fi
 
+    # This is the instance verify.sh:958 leans on for its closure-lint
+    # excuse, so a swallowed error here does not merely skip a check -- it
+    # forgives a red linter. Fail closed (bd-ry56h).
     local violation_count
-    violation_count=$(jq -r '.count // 0' "$CLOSURE_REPORT" 2>/dev/null || echo "0")
+    read_json_metric "$CLOSURE_REPORT" '.count // 0' "closure-lint"
+    violation_count="$JSON_METRIC"
 
     if [ "$violation_count" -gt 0 ]; then
         if ! has_open_bead_for "closure.*lint|lint.*closure|closure.*violat"; then
@@ -118,8 +167,17 @@ check_test_drift() {
 
     # Quick check: does .vision-coverage-report.json indicate test issues?
     if [ -f ".vision-coverage-report.json" ]; then
+        # bd-ry56h. The old query was `.surfaces | to_entries |
+        # map(select(.value.status == "missing")) | length`, which treats
+        # `.surfaces` as a map of per-surface objects. It is not: it is a
+        # COUNTS object, `{"total_documented":141,"implemented":141,
+        # "stubbed":0,"missing":0,"with_open_implements_bead":0}`. jq exits 5
+        # with `Cannot index number with string "status"`, the `|| echo "0"`
+        # swallowed it, and 0 never exceeded the threshold -- so this gate had
+        # been reporting clean by failing. The value was always one hop away.
         local missing_count
-        missing_count=$(jq -r '.surfaces | to_entries | map(select(.value.status == "missing")) | length' .vision-coverage-report.json 2>/dev/null || echo "0")
+        read_json_metric .vision-coverage-report.json '.surfaces.missing' "vision-coverage"
+        missing_count="$JSON_METRIC"
         if [ "$missing_count" -gt 5 ]; then
             if ! has_open_bead_for "test.*fail|fail.*test|walking.*skeleton|core.*job"; then
                 add_drift "cargo-test" "Vision coverage shows $missing_count missing surfaces but no open bead tracking core functionality gaps"
@@ -134,9 +192,22 @@ check_forbidden_deps_drift() {
         return 0
     fi
 
-    # Quick check via cargo tree
-    local forbidden_hits
-    forbidden_hits=$(cargo tree -e features 2>/dev/null | grep -cE '(^|\s)(tokio|rusqlite|petgraph|sqlx|diesel)\s' || echo "0")
+    # Quick check via cargo tree.
+    #
+    # bd-ry56h, third instance of the same shape. The old line was
+    # `cargo tree 2>/dev/null | grep -c ... || echo "0"`, which conflates two
+    # very different zeros: grep finding no forbidden dependency (a real
+    # verdict) and cargo tree failing so grep read an empty stream (no
+    # verdict at all). Only the first may be reported as clean, so the two
+    # are now separated -- cargo's own exit status is checked before grep
+    # runs, and grep's exit 1 for "no match" stays a legitimate zero.
+    local forbidden_hits tree_output=""
+    if ! tree_output=$(cargo tree -e features 2>&1); then
+        guard_input_error "forbidden-deps: cargo tree failed: $(printf '%s' "$tree_output" | tail -n 3)"
+    fi
+    forbidden_hits=$(printf '%s\n' "$tree_output" |
+        grep -cE '(^|[[:space:]])(tokio|rusqlite|petgraph|sqlx|diesel)[[:space:]]' || true)
+    [ -n "$forbidden_hits" ] || forbidden_hits=0
 
     if [ "$forbidden_hits" -gt 0 ]; then
         if ! has_open_bead_for "forbidden.*dep|dep.*forbidden|tokio|rusqlite|petgraph"; then
