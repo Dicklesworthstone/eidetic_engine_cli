@@ -681,7 +681,7 @@ fn orient_fast_relevant_content(
     }
     // bd-b9dmp. Record what this orientation actually delivered. `ee orient`
     // renders memory content straight to the agent but retrieves with
-    // persist_pack=false, so it wrote no read row: every memory it surfaced was
+    // pack persistence disabled, so it wrote no read row: every memory it surfaced was
     // scored as though nobody had ever used it, and `never_retrieved` feeds decay
     // and trust, not just the debt report.
     //
