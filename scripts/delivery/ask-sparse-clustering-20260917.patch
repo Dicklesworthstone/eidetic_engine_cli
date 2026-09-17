@@ -1,0 +1,80 @@
+diff --git a/src/core/ask.rs b/src/core/ask.rs
+--- a/src/core/ask.rs
++++ b/src/core/ask.rs
+@@ -21,6 +21,9 @@
+ #[path = "ask_candidates.rs"]
+ mod selection;
+ 
++#[path = "ask_clustering.rs"]
++mod clustering;
++
+ // ─── schema constants ───────────────────────────────────────────────────────
+ 
+ /// Response data schema identifier carried under `ee.response.v2 data.answer`.
+@@ -500,65 +503,5 @@
+ pub fn cluster_spans(spans: &[AskSpan]) -> Vec<AskSpan> {
+-    if spans.is_empty() {
+-        return Vec::new();
+-    }
+-
+-    let term_sets: Vec<Vec<String>> = spans.iter().map(|s| tokenize_for_ask(&s.text)).collect();
+-
+-    let n = spans.len();
+-    let mut assigned = vec![false; n];
+-    let mut representatives: Vec<AskSpan> = Vec::new();
+-
+-    // Greedy single-linkage clustering, ordered by score descending.
+-    // Full tiebreaker (memory_id then byte_start) guarantees deterministic seed selection.
+-    let mut order: Vec<usize> = (0..n).collect();
+-    order.sort_by(|&a, &b| {
+-        spans[b]
+-            .score
+-            .total_cmp(&spans[a].score)
+-            .then_with(|| spans[a].memory_id.cmp(&spans[b].memory_id))
+-            .then_with(|| spans[a].byte_start.cmp(&spans[b].byte_start))
+-    });
+-
+-    for &seed in &order {
+-        if assigned[seed] {
+-            continue;
+-        }
+-        assigned[seed] = true;
+-        let mut supporting_memories = BTreeSet::from([spans[seed].memory_id.as_str()]);
+-
+-        for &other in &order {
+-            if assigned[other] {
+-                continue;
+-            }
+-            // Stopword normalization removes "not". Opposing statements
+-            // can therefore have identical terms, but cannot corroborate
+-            // one another or collapse into a single winning citation.
+-            if has_negation(&spans[seed].text) != has_negation(&spans[other].text) {
+-                continue;
+-            }
+-            let sim = jaccard_similarity(&term_sets[seed], &term_sets[other]);
+-            if sim >= CLUSTER_SIMILARITY_THRESHOLD {
+-                assigned[other] = true;
+-                supporting_memories.insert(spans[other].memory_id.as_str());
+-            }
+-        }
+-
+-        let corroboration =
+-            (1.0 + 0.1 * (supporting_memories.len() as f32).ln()).min(CORROBORATION_CAP);
+-        let mut rep = spans[seed].clone();
+-        rep.score = (rep.score * corroboration).clamp(0.0, 1.0);
+-        representatives.push(rep);
+-    }
+-
+-    // Sort representatives by score desc, then memory_id for tie-breaking (ADR §3).
+-    representatives.sort_by(|a, b| {
+-        b.score
+-            .partial_cmp(&a.score)
+-            .unwrap_or(std::cmp::Ordering::Equal)
+-            .then_with(|| a.memory_id.cmp(&b.memory_id))
+-    });
+-
+-    representatives
++    clustering::cluster_spans(spans)
+ }
+ 
+ // ─── contradiction detection (ADR §4) ────────────────────────────────────────
