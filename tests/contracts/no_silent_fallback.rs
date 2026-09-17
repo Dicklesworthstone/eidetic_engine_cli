@@ -2092,11 +2092,29 @@ fn no_silent_fallback_unclassified_findings_only_shrink() -> TestResult {
     }
 
     if problems.is_empty() {
-        Ok(())
-    } else {
-        problems.sort();
-        Err(problems.join("\n"))
+        return Ok(());
     }
+
+    problems.sort();
+
+    // A per-file list alone cannot distinguish "one file's debt moved" from
+    // "this tree is not the tree the baseline was taken on". The totals do:
+    // if the scanned high-risk count differs from what the baseline was built
+    // against, the disagreement is about which sources were seen, not about
+    // classification, and chasing individual rows wastes the run.
+    let observed_total: usize = observed.values().sum();
+    let baseline_total: usize = baseline.values().sum();
+    let summary = format!(
+        "no_silent_fallback ratchet: scanned {} high-risk line(s); {} unclassified across {} file(s); \
+         baseline allows {} across {} file(s).",
+        findings.len(),
+        observed_total,
+        observed.len(),
+        baseline_total,
+        baseline.len(),
+    );
+
+    Err(format!("{summary}\n{}", problems.join("\n")))
 }
 
 #[test]
