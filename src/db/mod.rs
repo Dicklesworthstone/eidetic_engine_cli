@@ -46004,11 +46004,7 @@ UPDATE memories
 
         let by_live = connection.list_memories_by_tag(WORKSPACE, "live-tag")?;
         ensure_equal(&by_live.len(), &1, "tag list keeps one live head")?;
-        ensure_equal(
-            &by_live[0].as_str(),
-            &HEAD,
-            "tag list keeps the live head",
-        )?;
+        ensure_equal(&by_live[0].as_str(), &HEAD, "tag list keeps the live head")?;
         let by_history = connection.list_memories_by_tag(WORKSPACE, "history-tag")?;
         ensure_equal(
             &by_history.len(),
