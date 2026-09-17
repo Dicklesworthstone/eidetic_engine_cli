@@ -1,15 +1,14 @@
-name: Stable peer implementation
+name: Atomic peer enrollment
 
 on:
   push:
     branches: [main]
-    paths:
-      - .github/workflows/deliver-ask-corpus-20260917.yml
+    paths: [.github/workflows/deliver-ask-corpus-20260917.yml]
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: deliver-core-20260917
+  group: deliver-atomic-peers-20260917
   cancel-in-progress: false
 jobs:
   deliver:
@@ -33,30 +32,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-          lines = Path('scripts/delivery/mesh-stable-peer-20260917.patch').read_text().splitlines(keepends=True)
-          out = []
-          for i, line in enumerate(lines):
-              if line.startswith('--- ') and i + 1 < len(lines) and lines[i + 1].startswith('+++ b/'):
-                  path = lines[i + 1][6:].rstrip('\n')
-                  out.append(f'diff --git a/{path} b/{path}\n')
-                  if line.strip() == '--- /dev/null':
-                      out.append('new file mode 100644\n')
-              out.append(line)
-          Path(os.environ['RUNNER_TEMP'], 'mesh.patch').write_text(''.join(out))
-          PY
-          patch="$RUNNER_TEMP/mesh.patch"
-          git apply --recount --check "$patch"
-          git apply --recount "$patch"
-          rustfmt +nightly --edition 2024 --config skip_children=true src/cli/mesh_peer_identity.rs src/cli/mesh_peer_identity_tests.rs src/cli/mesh.rs src/mesh/auto_enrollment.rs
+          patch=scripts/delivery/mesh-enrollment-write-20260917.patch
+          git apply --check "$patch"
+          git apply "$patch"
+          rustfmt +nightly --edition 2024 --config skip_children=true src/cli/mesh_auto_enrollment_write.rs src/cli/mesh_auto_enrollment_write_tests.rs src/cli/mesh.rs
           git diff --check
           git diff --stat
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/cli/mesh_peer_identity.rs src/cli/mesh_peer_identity_tests.rs src/cli/mesh.rs src/mesh/auto_enrollment.rs
-          git commit -m 'fix(mesh): retain opaque device principals across enrollment key rotation' -m 'Use workspace/tailnet-scoped StableNodeID lookup, retain key history and known anchors, and fail closed on ambiguity, substitution or revoked identity. Endpoint changes still invalidate prior transport authorization and lane grants. Add 14 unit/real-store regressions. Rustfmt parsing passed; the separate verification job determines compiler/test results.'
+          git add src/cli/mesh_auto_enrollment_write.rs src/cli/mesh_auto_enrollment_write_tests.rs src/cli/mesh.rs
+          git commit -m 'fix(mesh): atomically recheck and materialize peer enrollment' -m 'Reject stale discovery snapshots before override or peer writes, validate authoritative transport bindings, and preserve migrated manual principals without overriding explicit revocation. Peer writes and consent invalidation share one transaction, with 11 real-store regressions including rollback and concurrent revocation. Rustfmt parsing passed; compiler and test outcomes are separate.'
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
               echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -95,5 +80,8 @@ jobs:
       - name: Execute stable peer regressions
         run: |
           cargo test --locked --lib cli::mesh::peer_identity:: -- --nocapture
+      - name: Execute atomic enrollment regressions
+        run: |
+          cargo test --locked --lib cli::mesh::auto_enrollment_write:: -- --nocapture
       - name: Execute existing enrollment regressions
         run: cargo test --locked --lib auto_enrollment -- --nocapture
