@@ -1,20 +1,42 @@
-name: Ask delivery (retired)
+name: Core source handoff
 
-# Production integrations committed directly to main without PRs or force pushes:
-# d40e84b4daf5757a45411e3dc4fd822c6565ca40 - complete scoped counterevidence
-# 0ceafad1dbd578107c024606c6f52c996a2d05c1 - exact sparse span clustering
-# d71032d6a62ca2c8b775fdf10b3ef20080b20557 - current evidence in the public CLI
-# ae2397d4105d5ffd0b7a58d876ff0dfa8d18e82d - coherent memory/link read snapshot
-# Lifecycle integration run 35264710898 passed its nightly Rustfmt checks.
-# Verification attempt 35265617837 separately records compiler/test outcomes.
-# A delivery commit is not a compilation or behavioral-test pass.
-# Retirement prevents new automatic runs; it does not cancel an existing run.
 on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/deliver-ask-corpus-20260917.yml]
   workflow_dispatch:
-permissions: {}
+permissions:
+  contents: read
 jobs:
-  retired:
-    if: ${{ false }}
+  source:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - run: echo 'This one-time delivery is retired.'
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Package tracked source and task inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/source-sha.txt"
+          git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/source.tar.gz"
+          python3 - <<'PY'
+          import json
+          from collections import Counter
+          rows = [json.loads(line) for line in open('.beads/issues.jsonl') if line.strip()]
+          print('STATUS COUNTS', dict(Counter(row.get('status') for row in rows)))
+          for row in rows:
+              if row.get('status') in ('open', 'in_progress') and (row.get('priority', 9) <= 1 or row['id'].startswith('bd-reality-core-convergence-1azkt')):
+                  print(json.dumps({k: row.get(k) for k in ('id','title','status','assignee','priority')}, ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-source
+          path: |
+            ${{ runner.temp }}/source-sha.txt
+            ${{ runner.temp }}/source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
