@@ -382,6 +382,16 @@ pub fn serialize_context_response_binary(
         .items
         .iter()
         .map(|item| item.content.as_bytes())
+        // Match the canonical batch renderer: memories first, then native
+        // evidence. Evidence-only packs must not become empty binary packs.
+        .chain(
+            response
+                .data
+                .pack
+                .evidence_items
+                .iter()
+                .map(|item| item.content.as_bytes()),
+        )
         .collect::<Vec<_>>();
     let flags = if response.data.pack_dna.is_some() {
         PACK_BINARY_FLAG_EXPLAIN_INCLUDED
@@ -667,5 +677,138 @@ mod tests {
             items_blob_end, canonical_json_offset,
             "items blob must end exactly where canonical_json begins"
         );
+    }
+
+    fn response_with_evidence(memory_count: u32, evidence_count: u32) -> super::ContextResponse {
+        use crate::models::{
+            EvidenceId, LineSpan, MemoryId, ProvenanceUri, SessionId, TrustClass, UnitScore,
+        };
+        use crate::pack::{
+            ContextRequest, ContextResponse, PackCandidate, PackCandidateInput, PackEvidenceItem,
+            PackProvenance, PackSection, PackTrustSignal, TokenBudget, assemble_draft,
+        };
+
+        let candidates = (0..memory_count)
+            .map(|index| {
+                let id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x1000 + u128::from(index)));
+                PackCandidate::new(PackCandidateInput {
+                    memory_id: id,
+                    section: PackSection::ProceduralRules,
+                    content: format!("Memory {index}: run the release checks."),
+                    estimated_tokens: 8,
+                    relevance: UnitScore::parse(0.9).expect("unit relevance"),
+                    utility: UnitScore::parse(0.5).expect("unit utility"),
+                    provenance: vec![
+                        PackProvenance::new(ProvenanceUri::EeMemory(id), "binary fixture")
+                            .expect("memory provenance"),
+                    ],
+                    why: "release procedure".to_string(),
+                })
+                .expect("memory candidate")
+            })
+            .collect();
+        let mut draft = assemble_draft(
+            "release checks",
+            TokenBudget::new(128).expect("token budget"),
+            candidates,
+        )
+        .expect("assembled draft");
+        assert_eq!(draft.items.len(), memory_count as usize);
+        for index in 0..evidence_count {
+            let session_id =
+                SessionId::from_uuid(uuid::Uuid::from_u128(0x2000 + u128::from(index))).to_string();
+            draft.evidence_items.push(PackEvidenceItem {
+                rank: memory_count + index + 1,
+                evidence_id: EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                    0x3000 + u128::from(index),
+                ))
+                .to_string(),
+                entity_revision: format!("blake3:{}", "a".repeat(64)),
+                session_id: session_id.clone(),
+                start_line: 3,
+                end_line: 4,
+                section: PackSection::Evidence,
+                content: format!("Evidence {index}: café deployment\npassed the checks."),
+                estimated_tokens: 8,
+                relevance: UnitScore::parse(0.8).expect("unit relevance"),
+                utility: UnitScore::parse(0.5).expect("neutral evidence utility"),
+                provenance: vec![
+                    PackProvenance::new(
+                        ProvenanceUri::CassSession {
+                            session: session_id,
+                            span: Some(LineSpan::range(3, 4).expect("line range")),
+                        },
+                        "CASS evidence",
+                    )
+                    .expect("evidence provenance"),
+                ],
+                why: "matched imported session".to_string(),
+                trust: PackTrustSignal {
+                    class: TrustClass::CassEvidence,
+                    subclass: None,
+                },
+            });
+            draft.used_tokens += 8;
+        }
+        ContextResponse::new(
+            ContextRequest::from_query("release checks").expect("request"),
+            draft,
+            Vec::new(),
+        )
+        .expect("context response")
+    }
+
+    fn assert_binary_matches_batch(memory_count: u32, evidence_count: u32) {
+        let response = response_with_evidence(memory_count, evidence_count);
+        let canonical_json = crate::output::render_context_response_json(&response);
+        let batch: serde_json::Value = serde_json::from_str(&canonical_json).expect("batch JSON");
+        let batch_items = batch["data"]["pack"]["items"].as_array().expect("batch items");
+        assert_eq!(batch_items.len(), (memory_count + evidence_count) as usize);
+
+        let frame = super::serialize_context_response_binary(&response, &canonical_json);
+        let view = super::PackBinaryView::parse(&frame).expect("valid binary pack");
+        assert_eq!(view.item_count(), batch_items.len());
+        assert_eq!(view.canonical_json().expect("UTF-8 JSON"), canonical_json);
+        assert_eq!(
+            view.header().content_hash,
+            *blake3::hash(canonical_json.as_bytes()).as_bytes()
+        );
+        for (index, item) in batch_items.iter().enumerate() {
+            assert_eq!(
+                view.item_slice(index).expect("binary item"),
+                item["content"].as_str().expect("batch content").as_bytes(),
+                "binary item {index} must match its canonical JSON item"
+            );
+            if index >= memory_count as usize {
+                let evidence = &response.data.pack.evidence_items[index - memory_count as usize];
+                assert!(item.get("memoryId").is_none());
+                assert_eq!(item["entityKind"], "evidence_span");
+                assert_eq!(item["evidenceSpanId"], evidence.evidence_id);
+                assert_eq!(item["entityRevision"], evidence.entity_revision);
+                assert_eq!(item["sessionId"], evidence.session_id);
+            }
+        }
+        assert!(view.item_slice(batch_items.len()).is_err());
+        assert_eq!(
+            frame,
+            super::serialize_context_response_binary(&response, &canonical_json),
+            "mixed-entity binary serialization must be deterministic"
+        );
+    }
+
+    #[test]
+    fn binary_context_preserves_native_evidence_after_memory_items() {
+        assert_binary_matches_batch(1, 2);
+    }
+
+    #[test]
+    fn binary_context_preserves_evidence_only_packs() {
+        assert_binary_matches_batch(0, 2);
+    }
+
+    #[test]
+    fn binary_context_preserves_memory_only_and_empty_packs() {
+        assert_binary_matches_batch(1, 0);
+        assert_binary_matches_batch(0, 0);
     }
 }
