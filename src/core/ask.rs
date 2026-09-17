@@ -15,6 +15,9 @@ use std::collections::BTreeSet;
 use crate::db::{CreateAuditInput, DbConnection, audit_actions, generate_audit_id};
 use crate::obs::audit_events::query_hash as audit_query_hash;
 
+#[path = "ask_retrieval.rs"]
+mod retrieval;
+
 // ─── schema constants ───────────────────────────────────────────────────────
 
 /// Response data schema identifier carried under `ee.response.v2 data.answer`.
@@ -1072,17 +1075,15 @@ pub fn record_ask_retrieval_best_effort(
     workspace_id: &str,
     report: &AskReport,
 ) {
-    if report.abstained || report.citations.is_empty() {
+    // A conflict answer stores its citations in sides[], not in the top-level
+    // citations array. Attribute only the displayed answer, once per memory;
+    // neither abstention nor a failed source check is a successful retrieval.
+    let citations = retrieval::cited_memories(report);
+    if citations.is_empty() {
         return;
     }
     let query_hash = audit_query_hash(&report.question);
-    let mut recorded: BTreeSet<&str> = BTreeSet::new();
-    for citation in &report.citations {
-        // One row per memory, not per claim: a memory cited by three claims was
-        // retrieved once, and counting it thrice would skew the read signal.
-        if !recorded.insert(citation.memory_id.as_str()) {
-            continue;
-        }
+    for citation in citations {
         let audit_id = generate_audit_id();
         let details = serde_json::json!({
             "queryHash": &query_hash,
@@ -1228,7 +1229,10 @@ fn nearest_evidence_to_json(ne: &AskNearestEvidence) -> serde_json::Value {
 }
 
 fn ask_query_assist_json(report: &AskReport) -> Option<serde_json::Value> {
-    if !report.abstained {
+    // A source-integrity failure is not missing knowledge. Do not invite a
+    // caller to capture a replacement memory or reformulate around corrupt
+    // evidence while the engine is deliberately withholding the answer.
+    if !report.abstained || report.extractiveness_violated {
         return None;
     }
     let nearest_evidence = report.nearest_evidence.as_deref().unwrap_or_default();
