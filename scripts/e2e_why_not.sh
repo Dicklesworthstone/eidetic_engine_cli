@@ -91,7 +91,7 @@ select_why_not_binary() {
     local target_dir=""
     target_dir="$(
         cd "$REPO_ROOT" &&
-            cargo metadata --no-deps --format-version 1 2>/dev/null |
+            cargo metadata --locked --no-deps --format-version 1 2>/dev/null |
             python3 -c 'import json,sys; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null
     )" || target_dir=""
 
