@@ -1,88 +1,19 @@
-name: Complete peer enrollment
+name: Core delivery (retired)
 
+# Production implementations committed directly to main:
+# 39f44ea12703e6b772ba89e1c3f28aebd5a3d171 - stable peer continuity
+# a1027ee095e1685e7ee2b76754e78cfbddc753c3 - atomic enrollment and migration
+# 66e68adc7e648718e145958cbc145af311760180 - planner backfill and current sync
+# Run 35278019544: library check, 14 identity tests, 53 enrollment tests passed.
+# Later exact-source verification: runs 35278739853 and 35279529566.
+# Their verdicts are separate from successful integration and Rustfmt parsing.
+# Retired: no automatic triggers, write permissions, or delivery commands.
 on:
-  push:
-    branches: [main]
-    paths: [.github/workflows/deliver-ask-corpus-20260917.yml]
   workflow_dispatch:
-permissions:
-  contents: read
-concurrency:
-  group: deliver-peer-plan-final-20260917
-  cancel-in-progress: false
+permissions: {}
 jobs:
-  deliver:
-    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+  retired:
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    outputs:
-      source: ${{ steps.deliver.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 2
-          clean: false
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
-      - id: deliver
-        shell: bash
-        run: |
-          set -euo pipefail
-          grep -q 'auto_enrollment_write::materialize(' src/cli/mesh.rs
-          patch=scripts/delivery/mesh-enrollment-noop-20260917.patch
-          git apply --check "$patch"
-          git apply "$patch"
-          rustfmt +nightly --edition 2024 --config skip_children=true src/mesh/auto_enrollment.rs src/cli/mesh.rs
-          git diff --check
-          git diff --stat
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/mesh/auto_enrollment.rs src/cli/mesh.rs
-          git commit -m 'fix(mesh): materialize identity backfills and sync the refreshed peer snapshot' -m 'Equal current-key hashes no longer suppress stable device bindings or requested manual migration. Preserve true no-op, dry-run, and explain behavior with five planner regressions. Immediate sync re-reads committed peer rows instead of the discovery snapshot. Rustfmt parsed both modules; compiler and test outcomes are recorded separately.'
-          for attempt in 1 2 3; do
-            if git push origin HEAD:main; then
-              echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            git fetch --unshallow origin main 2>/dev/null || git fetch origin main
-            git merge --no-edit origin/main
-          done
-          exit 1
-  verify:
-    needs: deliver
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    env:
-      RUSTUP_TOOLCHAIN: nightly
-      CARGO_BUILD_JOBS: '2'
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      EE_EMBED_DOWNLOAD: 'off'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.deliver.outputs.source }}
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
-      - name: Exact source identity
-        run: |
-          git rev-parse HEAD
-          git status --porcelain
-          rustc --version --verbose
-      - name: Compile production library
-        run: cargo check --locked --lib
-      - name: Execute stable peer regressions
-        run: |
-          cargo test --locked --lib cli::mesh::peer_identity:: -- --nocapture
-      - name: Execute atomic enrollment regressions
-        run: |
-          cargo test --locked --lib cli::mesh::auto_enrollment_write:: -- --nocapture
-      - name: Execute enrollment regressions including binding backfill
-        run: cargo test --locked --lib auto_enrollment -- --nocapture
+      - run: echo 'This temporary source delivery is retired.'
