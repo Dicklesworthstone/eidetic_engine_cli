@@ -1,4 +1,4 @@
-name: Atomic peer enrollment
+name: Complete peer enrollment
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: deliver-atomic-peers-20260917
+  group: deliver-peer-plan-final-20260917
   cancel-in-progress: false
 jobs:
   deliver:
@@ -32,16 +32,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          patch=scripts/delivery/mesh-enrollment-write-20260917.patch
+          grep -q 'auto_enrollment_write::materialize(' src/cli/mesh.rs
+          patch=scripts/delivery/mesh-enrollment-noop-20260917.patch
           git apply --check "$patch"
           git apply "$patch"
-          rustfmt +nightly --edition 2024 --config skip_children=true src/cli/mesh_auto_enrollment_write.rs src/cli/mesh_auto_enrollment_write_tests.rs src/cli/mesh.rs
+          rustfmt +nightly --edition 2024 --config skip_children=true src/mesh/auto_enrollment.rs src/cli/mesh.rs
           git diff --check
           git diff --stat
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/cli/mesh_auto_enrollment_write.rs src/cli/mesh_auto_enrollment_write_tests.rs src/cli/mesh.rs
-          git commit -m 'fix(mesh): atomically recheck and materialize peer enrollment' -m 'Reject stale discovery snapshots before override or peer writes, validate authoritative transport bindings, and preserve migrated manual principals without overriding explicit revocation. Peer writes and consent invalidation share one transaction, with 11 real-store regressions including rollback and concurrent revocation. Rustfmt parsing passed; compiler and test outcomes are separate.'
+          git add src/mesh/auto_enrollment.rs src/cli/mesh.rs
+          git commit -m 'fix(mesh): materialize identity backfills and sync the refreshed peer snapshot' -m 'Equal current-key hashes no longer suppress stable device bindings or requested manual migration. Preserve true no-op, dry-run, and explain behavior with five planner regressions. Immediate sync re-reads committed peer rows instead of the discovery snapshot. Rustfmt parsed both modules; compiler and test outcomes are recorded separately.'
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
               echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -83,5 +84,5 @@ jobs:
       - name: Execute atomic enrollment regressions
         run: |
           cargo test --locked --lib cli::mesh::auto_enrollment_write:: -- --nocapture
-      - name: Execute existing enrollment regressions
+      - name: Execute enrollment regressions including binding backfill
         run: cargo test --locked --lib auto_enrollment -- --nocapture
