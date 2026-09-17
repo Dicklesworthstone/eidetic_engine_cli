@@ -786,9 +786,22 @@ fn ready_index_posture_is_coherent_across_public_cli_surfaces() -> TestResult {
     let rebuild = run_ee_json(&workspace, ["index", "rebuild"], "coherence rebuild")?;
     assert_success(&rebuild, "coherence rebuild")?;
 
-    // No writes occur after this point: every command observes the same durable
-    // workspace snapshot even though each public CLI invocation is a fresh
-    // process.
+    // No GENERATION-ADVANCING write occurs after this point: every command
+    // observes the same durable workspace snapshot even though each public CLI
+    // invocation is a fresh process.
+    //
+    // The unqualified "no writes" this said before is not true any more. The
+    // `search` below appends a retrieval audit row (ADR 0071; declared as
+    // `append_only_write("search", ["audit_log"])` since bd-czj3e), so it is a
+    // durable writer and the `pack` after it does not run against a
+    // byte-identical store. The coherence assertions still hold, and the
+    // reason is worth stating rather than leaving a reader to re-derive it:
+    // `db_generation` is read from the `workspace_generations` table
+    // (src/db/mod.rs:11731), which is advanced only by triggers on `memories`,
+    // `memory_tags`, `memory_links`, `procedural_rules`, `curation_candidates`,
+    // `evidence_spans`, `rule_*`, `sessions`, `error_repair_links` and
+    // `workspaces`. `audit_log` has no such trigger, so an audit append cannot
+    // move a generation and cannot make this test's index posture disagree.
     let index_status = run_ee_json(&workspace, ["index", "status"], "coherent index status")?;
     assert_success(&index_status, "coherent index status")?;
     ensure_equal(
