@@ -16,7 +16,7 @@ diff --git a/src/core/ask.rs b/src/core/ask.rs
 diff --git a/src/cli/mod.rs b/src/cli/mod.rs
 --- a/src/cli/mod.rs
 +++ b/src/cli/mod.rs
-@@ -1,32 +1,19 @@
+@@ -51000,32 +51000,19 @@
      let candidate_ids: Vec<_> = stored
          .iter()
 -        .take(crate::core::ask::ASK_CANDIDATE_SCAN_CAP)
