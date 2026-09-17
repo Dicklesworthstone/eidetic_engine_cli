@@ -251,12 +251,126 @@ fn assert_insights_section_byte_identical(workspace: &Path, section: &str) -> Te
     let run2 = run_ee_bytes(workspace, &args, &format!("ee insights {section} #2"))?;
     if run1 != run2 {
         return Err(format!(
-            "section {section}: stdout byte-identity broken across cold processes (lens={}/{})",
-            run1.len(),
-            run2.len(),
+            "section {section}: stdout byte-identity broken across cold processes\n{}",
+            describe_byte_divergence(&run1, &run2),
         ));
     }
     Ok(())
+}
+
+/// Describe how two supposedly-identical stdout captures diverge.
+///
+/// A bare length pair cannot be acted on: it reports that the determinism
+/// contract broke without reporting what moved, so the next reader has to
+/// reproduce the run to learn anything. This names the first differing byte,
+/// shows the surrounding text from both runs, and -- when both captures parse
+/// as JSON -- lists the specific pointers whose values differ. A failing run
+/// then carries its own diagnosis.
+fn describe_byte_divergence(left: &[u8], right: &[u8]) -> String {
+    let first_diff = left
+        .iter()
+        .zip(right.iter())
+        .position(|(a, b)| a != b)
+        .unwrap_or_else(|| left.len().min(right.len()));
+
+    let mut detail = format!(
+        "  first difference at byte {first_diff} (lengths {}/{})",
+        left.len(),
+        right.len()
+    );
+
+    let start = first_diff.saturating_sub(60);
+    detail.push_str(&format!(
+        "\n  run1: {}\n  run2: {}",
+        String::from_utf8_lossy(&left[start..(first_diff + 60).min(left.len())]),
+        String::from_utf8_lossy(&right[start..(first_diff + 60).min(right.len())]),
+    ));
+
+    if let (Ok(left_json), Ok(right_json)) = (
+        serde_json::from_slice::<JsonValue>(left),
+        serde_json::from_slice::<JsonValue>(right),
+    ) {
+        let mut pointers = Vec::new();
+        collect_json_divergences(&left_json, &right_json, "", &mut pointers);
+        if !pointers.is_empty() {
+            detail.push_str("\n  differing JSON pointers:");
+            for pointer in pointers.iter().take(8) {
+                detail.push_str(&format!("\n    {pointer}"));
+            }
+            if pointers.len() > 8 {
+                detail.push_str(&format!("\n    ... and {} more", pointers.len() - 8));
+            }
+        }
+    }
+
+    detail
+}
+
+/// Collect JSON pointers whose values differ between two envelopes.
+///
+/// Capped so that a wholesale divergence reports a readable sample rather than
+/// one line per leaf.
+fn collect_json_divergences(
+    left: &JsonValue,
+    right: &JsonValue,
+    path: &str,
+    out: &mut Vec<String>,
+) {
+    if left == right || out.len() >= 64 {
+        return;
+    }
+
+    match (left, right) {
+        (JsonValue::Object(left_map), JsonValue::Object(right_map)) => {
+            let mut keys: Vec<&String> = left_map.keys().chain(right_map.keys()).collect();
+            keys.sort_unstable();
+            keys.dedup();
+            for key in keys {
+                match (left_map.get(key), right_map.get(key)) {
+                    (Some(left_value), Some(right_value)) => {
+                        collect_json_divergences(
+                            left_value,
+                            right_value,
+                            &format!("{path}/{key}"),
+                            out,
+                        );
+                    }
+                    (Some(_), None) => out.push(format!("{path}/{key} (only in run1)")),
+                    (None, Some(_)) => out.push(format!("{path}/{key} (only in run2)")),
+                    (None, None) => {}
+                }
+            }
+        }
+        (JsonValue::Array(left_items), JsonValue::Array(right_items)) => {
+            if left_items.len() != right_items.len() {
+                out.push(format!(
+                    "{path} (array length {} vs {})",
+                    left_items.len(),
+                    right_items.len()
+                ));
+                return;
+            }
+            for (index, (left_item, right_item)) in
+                left_items.iter().zip(right_items.iter()).enumerate()
+            {
+                collect_json_divergences(left_item, right_item, &format!("{path}/{index}"), out);
+            }
+        }
+        _ => out.push(format!(
+            "{path} ({} vs {})",
+            truncate_json_scalar(left),
+            truncate_json_scalar(right)
+        )),
+    }
+}
+
+fn truncate_json_scalar(value: &JsonValue) -> String {
+    let rendered = value.to_string();
+    if rendered.chars().count() <= 80 {
+        return rendered;
+    }
+    let clipped: String = rendered.chars().take(80).collect();
+    format!("{clipped}...")
 }
 
 #[test]
