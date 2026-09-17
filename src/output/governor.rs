@@ -489,6 +489,21 @@ fn govern_envelope(
     ctx: &GovernorContext<'_>,
     registry: &[TruncationPoint],
 ) -> Result<String, DomainError> {
+    // A cursor rejection written only into a report-local `data.degraded`
+    // never reaches the canonical envelope on the paths that do not rebuild
+    // the shell, so an agent handing us a corrupt cursor was served a page
+    // whose documented `degraded` array claimed nothing was wrong
+    // (bd-ejw36). `fail_closed_unsatisfiable` already enforces this rule when
+    // it rebuilds; promote here so the fitting and truncating paths enforce
+    // it too. The clone is taken only when there is something to promote,
+    // keeping the fitting path's cost posture (ADR 0063 section 1).
+    let promoted = needs_cursor_rejection_promotion(original).then(|| {
+        let mut candidate = original.clone();
+        promote_cursor_rejections(&mut candidate);
+        candidate
+    });
+    let original = promoted.as_ref().unwrap_or(original);
+
     let mut estimator = TokenEstimator::new();
     // Sizing pass on a clone so the over-ceiling probe baseline does not
     // carry the meta stamp.
@@ -1079,6 +1094,61 @@ fn append_degraded_entry(envelope: &mut JsonValue, entry: JsonValue) {
         _ => {
             object.insert("degraded".to_string(), JsonValue::Array(vec![entry]));
         }
+    }
+}
+
+/// Cursor rejections are the one warning class that must never be confined to
+/// a report-local array: they explain why a page sequence ended, and a client
+/// that reads only the documented envelope would otherwise see a served page
+/// alongside an empty `degraded` (bd-ejw36).
+fn is_cursor_rejection(entry: &JsonValue) -> bool {
+    matches!(
+        entry.get("code").and_then(JsonValue::as_str),
+        Some(CURSOR_INVALID_CODE) | Some(CURSOR_STALE_CODE)
+    )
+}
+
+/// True when `data.degraded` carries a cursor rejection the canonical
+/// envelope does not already report. Checked before cloning so a response
+/// with nothing to promote pays nothing.
+fn needs_cursor_rejection_promotion(envelope: &JsonValue) -> bool {
+    let Some(entries) = envelope
+        .get("data")
+        .and_then(|data| data.get("degraded"))
+        .and_then(JsonValue::as_array)
+    else {
+        return false;
+    };
+    entries
+        .iter()
+        .filter(|entry| is_cursor_rejection(entry))
+        .any(|entry| {
+            !envelope
+                .get("degraded")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|canonical| canonical.iter().any(|existing| existing == entry))
+        })
+}
+
+/// Mirror report-local cursor rejections into the canonical envelope.
+/// Delegates to [`append_degraded_entry`], whose dedupe leaves the
+/// report-local copy untouched, so the surface keeps reporting the rejection
+/// in both places exactly as the governed goldens specify.
+fn promote_cursor_rejections(envelope: &mut JsonValue) {
+    let Some(entries) = envelope
+        .get("data")
+        .and_then(|data| data.get("degraded"))
+        .and_then(JsonValue::as_array)
+    else {
+        return;
+    };
+    let rejections: Vec<JsonValue> = entries
+        .iter()
+        .filter(|entry| is_cursor_rejection(entry))
+        .cloned()
+        .collect();
+    for entry in rejections {
+        append_degraded_entry(envelope, entry);
     }
 }
 
