@@ -379,18 +379,59 @@ fn assert_additive_shape(
                 ));
             }
             for (index, expected_item) in expected_items.iter().enumerate() {
-                assert_additive_shape(
-                    surface,
-                    &format!("{path}[{index}]"),
-                    expected_item,
-                    &actual_items[index],
-                )?;
+                // Entries carrying a stable identity are matched BY it, never by
+                // position. `degraded[]` is the motivating case: a NEW degradation
+                // code appearing ahead of an existing one shifts every later entry,
+                // and a positional comparison then reports the shifted entry's
+                // fields as REMOVED -- inside a check whose entire purpose is to
+                // permit additions. bv27 read exactly that way:
+                //
+                //   context removed JSON field $.data.degraded[0].details
+                //
+                // with every entry still present, `embed_model_unavailable` still
+                // mapped to its Rebuild recovery action, and `details` still being
+                // built for it. Nothing had been removed; something had been added
+                // in front.
+                //
+                // Identity matching is strictly STRONGER than positional, not
+                // weaker: an entry that is genuinely gone still fails, because its
+                // identity is absent from `actual`. Only the false positive is
+                // removed, and the path in the message names the entry rather than
+                // an index that shifts.
+                let (child_path, actual_child) = match entry_identity(expected_item) {
+                    Some(identity) => {
+                        let Some(found) = actual_items
+                            .iter()
+                            .find(|item| entry_identity(item) == Some(identity))
+                        else {
+                            return Err(format!(
+                                "{surface} removed array entry {path}[{identity}]"
+                            ));
+                        };
+                        (format!("{path}[{identity}]"), found)
+                    }
+                    None => (format!("{path}[{index}]"), &actual_items[index]),
+                };
+                assert_additive_shape(surface, &child_path, expected_item, actual_child)?;
             }
         }
         _ => {}
     }
 
     Ok(())
+}
+
+/// A stable identity for an array entry, when it has one.
+///
+/// Degradation entries are identified by `code`; other identified records on
+/// these surfaces use `id` or `name`. An entry with none of those is an ordered
+/// value (a string, a number, a positional tuple) and stays positional, so this
+/// only changes behaviour for arrays whose elements are addressable records.
+fn entry_identity(value: &Value) -> Option<&str> {
+    let object = value.as_object()?;
+    ["code", "id", "name"]
+        .into_iter()
+        .find_map(|key| object.get(key).and_then(Value::as_str))
 }
 
 fn json_type(value: &Value) -> &'static str {
