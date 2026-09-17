@@ -11,7 +11,9 @@
 //! serialization gate is shared.
 
 use std::io::Read;
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -189,6 +191,35 @@ fn drain(pipe: Option<impl Read>) -> Vec<u8> {
     buffer
 }
 
+/// A private workspace registry for one spawn.
+///
+/// `ee` resolves its workspace registry to EE_WORKSPACE_REGISTRY, else
+/// XDG_DATA_HOME/ee/workspaces.db, else <home>/.local/share/ee/workspaces.db --
+/// ONE SQLite file, opened for write, under the real home directory. Its
+/// connection sets `PRAGMA busy_timeout = 0` (src/db/mod.rs:2209), so
+/// concurrent writers do not queue, they FAIL.
+///
+/// Of the 24 modules that spawn here, exactly one sets EE_WORKSPACE_REGISTRY.
+/// Eight explicitly `env_remove` it and fifteen never mention it -- so 23 of 24
+/// resolve to that shared file, and none of them overrides HOME. The suite is
+/// safe today only because no contracts test spawns a verb that writes the
+/// registry: the sole production writer is `alias_workspace`
+/// (src/core/workspace.rs:2121), which nothing here invokes. Verified by probe
+/// as well as by reading -- `ee init`, `status`, `doctor` and `capabilities`
+/// each leave the registry uncreated.
+///
+/// That is safety by accident. Giving each spawn its own path makes it safety
+/// by construction, and it is a precondition for ever raising concurrency here
+/// (bd-contracts-serialized-spawn-queue-loibi).
+fn isolated_registry_path() -> PathBuf {
+    static SPAWN_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let sequence = SPAWN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir()
+        .join("ee-contracts-registry")
+        .join(format!("{}-{sequence}", std::process::id()))
+        .join("workspaces.db")
+}
+
 /// Path of the real `ee` binary provided by the Cargo test harness. This is
 /// the only `CARGO_BIN_EXE_ee` reference allowed in `tests/contracts`.
 pub fn ee_binary() -> &'static str {
@@ -209,7 +240,9 @@ where
         .collect();
     let _serial_guard = lock_real_ee_serial();
     let mut command = Command::new(ee_binary());
-    command.args(&arguments);
+    command
+        .args(&arguments)
+        .env("EE_WORKSPACE_REGISTRY", isolated_registry_path());
     output_with_timeout(&mut command)
         .map_err(|error| format!("failed to run ee {}: {error}", arguments.join(" ")))
 }
@@ -226,6 +259,11 @@ where
     let _serial_guard = lock_real_ee_serial();
     let mut command = Command::new(ee_binary());
     configure(&mut command);
+    // AFTER `configure` deliberately: eight modules `env_remove` this variable
+    // to avoid inheriting an ambient registry, which silently drops them onto
+    // the global one. Their intent is isolation; setting it here delivers that
+    // intent rather than overriding it.
+    command.env("EE_WORKSPACE_REGISTRY", isolated_registry_path());
     output_with_timeout(&mut command)
 }
 
