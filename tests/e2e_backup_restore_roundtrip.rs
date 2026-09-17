@@ -1317,6 +1317,119 @@ fn backup_list_does_not_accept_create_staging_debris() -> TestResult {
 }
 
 #[test]
+fn backup_restore_roundtrips_pack_history_and_query_surfaces() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().join("workspace");
+    let backup_dir = tempdir.path().join("backups");
+    let side_path = tempdir.path().join("restored");
+    fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+    let ws = workspace.to_string_lossy().into_owned();
+    let backup_dir_arg = backup_dir.to_string_lossy().into_owned();
+    let side_path_arg = side_path.to_string_lossy().into_owned();
+    run_ee(&["init", "--workspace", &ws, "--json"])?;
+    let remembered = run_ee(&[
+        "remember",
+        CONTEXT_QUERY,
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let memory_id = json_str(&remembered, "/data/memory_id", "remember")?;
+    run_ee(&[
+        "remember",
+        "FrankenSQLite is the durable source of truth.",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let packed = run_ee(&["pack", CONTEXT_QUERY, "--workspace", &ws, "--json"])?;
+    ensure_equal(
+        &packed.pointer("/success").and_then(JsonValue::as_bool),
+        &Some(true),
+        "source pack succeeded",
+    )?;
+    let created = run_ee(&[
+        "backup",
+        "create",
+        "--include-graph-cache=false",
+        "--output-dir",
+        &backup_dir_arg,
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let backup_id = json_str(&created, "/data/backupId", "created backup")?;
+    let restored = run_ee(&[
+        "backup",
+        "restore",
+        backup_id,
+        "--output-dir",
+        &backup_dir_arg,
+        "--side-path",
+        &side_path_arg,
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    ensure_equal(
+        &restored
+            .pointer("/data/counts/memoriesImported")
+            .and_then(JsonValue::as_u64),
+        &Some(2),
+        "restored both memories",
+    )?;
+    let pack_records = restored
+        .pointer("/data/counts/packHistoryRestored/records")
+        .and_then(JsonValue::as_u64)
+        .unwrap_or(0);
+    ensure(
+        pack_records >= 1,
+        format!("expected restored pack history, got {pack_records} records"),
+    )?;
+    let searched = run_ee(&[
+        "search",
+        CONTEXT_QUERY,
+        "--workspace",
+        &side_path_arg,
+        "--json",
+    ])?;
+    ensure_equal(
+        &searched.pointer("/success").and_then(JsonValue::as_bool),
+        &Some(true),
+        "restored search succeeded",
+    )?;
+    let why = run_ee(&["why", memory_id, "--workspace", &side_path_arg, "--json"])?;
+    ensure_equal(
+        &why.pointer("/success").and_then(JsonValue::as_bool),
+        &Some(true),
+        "restored why succeeded",
+    )?;
+    let restored_pack = run_ee(&[
+        "pack",
+        CONTEXT_QUERY,
+        "--workspace",
+        &side_path_arg,
+        "--json",
+    ])?;
+    ensure_equal(
+        &restored_pack
+            .pointer("/success")
+            .and_then(JsonValue::as_bool),
+        &Some(true),
+        "restored pack succeeded",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
     let _trace = test_tracing::init_test_tracing(
         "bd-3usjw.53",
