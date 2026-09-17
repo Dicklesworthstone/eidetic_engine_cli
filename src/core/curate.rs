@@ -22763,7 +22763,7 @@ mod tests {
             &SearchOptions {
                 workspace_path: workspace_path.to_path_buf(),
                 database_path: Some(database_path.clone()),
-                index_dir: Some(index_dir),
+                index_dir: Some(index_dir.clone()),
                 query: "create-derived memory apply revalidates locked source hashes".to_owned(),
                 limit: 10,
                 speed: SpeedMode::Instant,
@@ -22790,6 +22790,56 @@ mod tests {
                 .iter()
                 .any(|hit| hit.doc_id == created_memory_id),
             "strict lexical search must retrieve the exact created typed memory id before read repair"
+        );
+
+        let evidence_search = run_search_with_filters(
+            &SearchOptions {
+                workspace_path: workspace_path.to_path_buf(),
+                database_path: Some(database_path.clone()),
+                index_dir: Some(index_dir.clone()),
+                query: "CASS evidence requires create-derived validation".to_owned(),
+                limit: 10,
+                speed: SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: SearchDedupMode::DocId,
+                source_mode: SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: MemoryScope::Workspace,
+                strict_scope: false,
+            },
+            None,
+            &[],
+        )
+        .map_err(|error| format!("create-derived evidence lexical search failed: {error:?}"))?;
+        let evidence_hit = evidence_search
+            .results
+            .iter()
+            .find(|hit| hit.doc_id == evidence_source_id)
+            .ok_or_else(|| {
+                format!(
+                    "strict lexical search must retrieve attached evidence {evidence_source_id} without a manual rebuild: {:?}",
+                    evidence_search
+                        .results
+                        .iter()
+                        .map(|hit| hit.doc_id.as_str())
+                        .collect::<Vec<_>>()
+                )
+            })?;
+        let evidence_memory_id = evidence_hit
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("memory_id"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(
+            evidence_memory_id,
+            Some(created_memory_id.as_str()),
+            "create-derived apply must refresh evidence memory_id in published search metadata"
         );
 
         let stored = connection

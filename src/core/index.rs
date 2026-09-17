@@ -12164,6 +12164,7 @@ mod tests {
                 content: excerpt.to_owned(),
                 provenance_uri: format!("cass-session://{session_id}#L{line}-{line}"),
                 kind: "evidence_span".to_owned(),
+                memory_id: None,
             };
             ensure(
                 hit == expected,
@@ -12283,6 +12284,292 @@ mod tests {
         assert_session_evidence_job_from_healthy_index(SessionEvidenceDrain::LimitedCoalesced, "c1")
     }
 
+    fn assert_evidence_attachment_refreshes_index_from_healthy_index(
+        mode: SessionEvidenceDrain,
+        suffix: &str,
+    ) -> TestResult {
+        let (workspace, database, index_dir, connection, workspace_id) =
+            seed_healthy_session_index_case("evidence-attachment-job", suffix)?;
+        let memory_id = format!("mem_012345678901234567890123{suffix}");
+        let session_id = format!("sess_012345678901234567890123{suffix}");
+        let first_evidence_id = format!("ev_012345678901234567890123{suffix}");
+        let second_evidence_id = format!("ev_112345678901234567890123{suffix}");
+        let session_job_id = format!("sidx_112345678901234567890123{suffix}");
+        let attachment_job_id = format!("sidx_212345678901234567890123{suffix}");
+        let first_excerpt = "Quartz kestrel verification evidence stayed safely searchable.";
+        let second_excerpt = "Nimbus lantern provenance evidence stayed safely searchable.";
+        let first_hash = format!("blake3:{}", blake3::hash(first_excerpt.as_bytes()).to_hex());
+
+        connection
+            .with_transaction(|| {
+                connection
+                    .insert_session(&session_id, &session_index_input(&workspace_id, suffix))?;
+                connection.insert_evidence_span(
+                    &first_evidence_id,
+                    &admitted_session_evidence_input(
+                        &workspace_id,
+                        &session_id,
+                        suffix,
+                        7,
+                        first_excerpt,
+                    ),
+                )?;
+                connection.insert_evidence_span(
+                    &second_evidence_id,
+                    &admitted_session_evidence_input(
+                        &workspace_id,
+                        &session_id,
+                        suffix,
+                        11,
+                        second_excerpt,
+                    ),
+                )?;
+                connection.insert_search_index_job(
+                    &session_job_id,
+                    &crate::db::CreateSearchIndexJobInput {
+                        workspace_id: workspace_id.clone(),
+                        job_type: SearchIndexJobType::SingleDocument,
+                        document_source: Some("session".to_owned()),
+                        document_id: Some(session_id.clone()),
+                        documents_total: 1,
+                    },
+                )
+            })
+            .map_err(|error| error.to_string())?;
+
+        let import_report =
+            process_index_job_for_connection(&connection, &session_job_id, &index_dir)
+                .map_err(|error| error.to_string())?;
+        ensure(
+            import_report.outcome == "completed" && import_report.documents_indexed == 4,
+            format!(
+                "pre-attachment import must publish the four-document corpus: {import_report:?}"
+            ),
+        )?;
+
+        let status_options = IndexStatusOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+        };
+        let ready_unlinked = get_index_status_with_connection(&status_options, Some(&connection))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            ready_unlinked.health == IndexHealth::Ready
+                && ready_unlinked.db_generation == ready_unlinked.index_generation
+                && ready_unlinked.index_document_counts
+                    == IndexDocumentCounts::checked(1, 1, 0, 0, 2).ok(),
+            format!(
+                "healthy pre-attachment index must be Ready with unlinked evidence: {ready_unlinked:?}"
+            ),
+        )?;
+
+        let unlinked = collect_workspace_index_source_snapshot(&connection, &workspace_id)
+            .map_err(|error| error.to_string())?;
+        let unlinked_first = unlinked
+            .documents
+            .iter()
+            .find(|document| document.id == first_evidence_id)
+            .ok_or_else(|| "pre-attachment snapshot missing first evidence document".to_owned())?;
+        ensure(
+            unlinked_first.metadata.get("memory_id").is_none(),
+            format!(
+                "imported evidence must start unlinked: {:?}",
+                unlinked_first.metadata
+            ),
+        )?;
+
+        let attach = connection
+            .attach_evidence_span_to_memory_if_unlinked(
+                &workspace_id,
+                &first_evidence_id,
+                &first_hash,
+                &memory_id,
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            attach == crate::db::EvidenceSpanMemoryAttachResult::Attached,
+            format!("real attach API must link the unlinked span: {attach:?}"),
+        )?;
+
+        connection
+            .insert_search_index_job(
+                &attachment_job_id,
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: workspace_id.clone(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some(memory_id.clone()),
+                    documents_total: 1,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let stale = get_index_status_with_connection(&status_options, Some(&connection))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            stale.health == IndexHealth::Stale
+                && stale
+                    .db_generation
+                    .zip(stale.index_generation)
+                    .is_some_and(|(database, index)| database > index),
+            format!("evidence attachment must make the healthy index stale: {stale:?}"),
+        )?;
+
+        let reports = match mode {
+            SessionEvidenceDrain::OrdinarySingle => vec![
+                process_index_job_for_connection(&connection, &attachment_job_id, &index_dir)
+                    .map_err(|error| error.to_string())?,
+            ],
+            SessionEvidenceDrain::LimitedCoalesced => process_pending_index_jobs_coalesced(
+                &connection,
+                &workspace_id,
+                &index_dir,
+                Some(1),
+            )
+            .map_err(|error| error.to_string())?,
+        };
+        ensure(
+            reports.len() == 1
+                && reports[0].outcome == "completed"
+                && reports[0].documents_indexed == 4
+                && reports[0].job_id == attachment_job_id,
+            format!(
+                "{mode:?} must republish the complete corpus from the memory job alone: {reports:?}"
+            ),
+        )?;
+
+        let snapshot = collect_workspace_index_source_snapshot(&connection, &workspace_id)
+            .map_err(|error| error.to_string())?;
+        let evidence_documents = snapshot
+            .documents
+            .iter()
+            .filter(|document| {
+                document
+                    .metadata
+                    .get("kind")
+                    .is_some_and(|kind| kind == "evidence_span")
+            })
+            .map(|document| (document.id.as_str(), document))
+            .collect::<BTreeMap<_, _>>();
+        let attached = evidence_documents
+            .get(first_evidence_id.as_str())
+            .ok_or_else(|| "post-attachment snapshot missing attached evidence".to_owned())?;
+        let unattached = evidence_documents
+            .get(second_evidence_id.as_str())
+            .ok_or_else(|| "post-attachment snapshot missing unattached evidence".to_owned())?;
+        ensure(
+            attached.metadata.get("memory_id") == Some(&memory_id)
+                && unattached.metadata.get("memory_id").is_none(),
+            format!(
+                "source snapshot must refresh only the attached evidence memory_id: attached={:?} unattached={:?}",
+                attached.metadata, unattached.metadata
+            ),
+        )?;
+
+        let indexed_ids = vector_index_snapshot(&index_dir)?
+            .into_iter()
+            .map(|row| row.doc_id)
+            .collect::<BTreeSet<_>>();
+        ensure(
+            indexed_ids.contains(&first_evidence_id) && indexed_ids.contains(&second_evidence_id),
+            format!(
+                "attachment drain must keep both evidence documents in the published index: {indexed_ids:?}"
+            ),
+        )?;
+
+        let attached_hit = published_search_hit(
+            &connection,
+            &index_dir,
+            "Quartz kestrel",
+            &first_evidence_id,
+        )?;
+        ensure(
+            attached_hit
+                == PublishedSearchHit {
+                    doc_id: first_evidence_id.clone(),
+                    content: first_excerpt.to_owned(),
+                    provenance_uri: format!("cass-session://{session_id}#L7-7"),
+                    kind: "evidence_span".to_owned(),
+                    memory_id: Some(memory_id.clone()),
+                },
+            format!(
+                "published search must hydrate the attached evidence memory_id: {attached_hit:?}"
+            ),
+        )?;
+        let unattached_hit = published_search_hit(
+            &connection,
+            &index_dir,
+            "Nimbus lantern",
+            &second_evidence_id,
+        )?;
+        ensure(
+            unattached_hit.memory_id.is_none(),
+            format!("unattached evidence must stay unlinked: {unattached_hit:?}"),
+        )?;
+
+        let ready = get_index_status_with_connection(&status_options, Some(&connection))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            ready.health == IndexHealth::Ready
+                && ready.db_generation == ready.index_generation
+                && ready.index_document_counts == IndexDocumentCounts::checked(1, 1, 0, 0, 2).ok(),
+            format!("attachment drain must restore Ready without a manual rebuild: {ready:?}"),
+        )?;
+
+        let before_repeat = index_regular_file_snapshot(&index_dir)?;
+        match mode {
+            SessionEvidenceDrain::OrdinarySingle => {
+                let repeated =
+                    process_index_job_for_connection(&connection, &attachment_job_id, &index_dir)
+                        .map_err(|error| error.to_string())?;
+                ensure(
+                    repeated.outcome == "skipped",
+                    format!(
+                        "repeat ordinary attachment drain must skip completed job: {repeated:?}"
+                    ),
+                )?;
+            }
+            SessionEvidenceDrain::LimitedCoalesced => {
+                let repeated = process_pending_index_jobs_coalesced(
+                    &connection,
+                    &workspace_id,
+                    &index_dir,
+                    Some(1),
+                )
+                .map_err(|error| error.to_string())?;
+                ensure(
+                    repeated.is_empty(),
+                    format!(
+                        "repeat coalesced attachment drain must find no pending work: {repeated:?}"
+                    ),
+                )?;
+            }
+        }
+        ensure(
+            index_regular_file_snapshot(&index_dir)? == before_repeat,
+            "idempotent attachment repeat must not mutate the published index",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn ordinary_memory_job_refreshes_attached_evidence_without_manual_rebuild() -> TestResult {
+        assert_evidence_attachment_refreshes_index_from_healthy_index(
+            SessionEvidenceDrain::OrdinarySingle,
+            "a1",
+        )
+    }
+
+    #[test]
+    fn limited_coalesced_memory_job_refreshes_attached_evidence_without_manual_rebuild()
+    -> TestResult {
+        assert_evidence_attachment_refreshes_index_from_healthy_index(
+            SessionEvidenceDrain::LimitedCoalesced,
+            "a2",
+        )
+    }
+
     fn deterministic_incremental_doc(
         slot: u8,
         term: u8,
@@ -12337,6 +12624,7 @@ mod tests {
         content: String,
         provenance_uri: String,
         kind: String,
+        memory_id: Option<String>,
     }
 
     fn vector_index_snapshot(index_dir: &Path) -> Result<Vec<VectorSnapshotRow>, String> {
@@ -12457,11 +12745,16 @@ mod tests {
         let content = required("content")?;
         let provenance_uri = required("provenance_uri")?;
         let kind = required("kind")?;
+        let memory_id = metadata
+            .get("memory_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         Ok(PublishedSearchHit {
             doc_id,
             content,
             provenance_uri,
             kind,
+            memory_id,
         })
     }
 

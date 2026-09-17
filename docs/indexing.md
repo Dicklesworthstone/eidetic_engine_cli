@@ -90,10 +90,18 @@ running a manual rebuild. Evidence projection retains only screened content and
 canonical `cass-session://...#L...` provenance; raw paths and upstream span IDs
 do not enter the index.
 
-This slice proves search-index admission only. It does not claim that an
-`EvidenceSpan` is accepted directly by context packing. Pagination, the
-remaining job-fence cases, attachment projection, and CLI E2E coverage remain
-follow-up work for `bd-3k1mg`.
+Session import and evidence-attachment now share the same writer-fenced
+snapshot publisher: draining the durable job that covers the mutation
+republishes the complete corpus, including refreshed `memory_id` metadata on
+an attached evidence document, without an operator running a manual rebuild.
+Public no-mock coverage lives in
+`ordinary_session_job_indexes_atomic_admitted_evidence_without_manual_rebuild`,
+`limited_coalesced_session_job_indexes_atomic_admitted_evidence_without_manual_rebuild`,
+`ordinary_memory_job_refreshes_attached_evidence_without_manual_rebuild`, and
+`limited_coalesced_memory_job_refreshes_attached_evidence_without_manual_rebuild`.
+The CASS CLI path is `scripts/e2e_capture.sh`. Direct `EvidenceSpan` packing
+is owned by `bd-16imy`; remaining `bd-3k1mg` follow-up is the
+failure-retry-crash matrix for the attachment job itself.
 
 ## E2E And Perf Proof
 
