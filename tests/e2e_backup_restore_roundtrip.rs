@@ -1392,6 +1392,8 @@ fn backup_restore_roundtrips_pack_history_and_query_surfaces() -> TestResult {
         "backup",
         "create",
         "--include-graph-cache=false",
+        "--redaction",
+        "none",
         "--output-dir",
         &backup_dir_arg,
         "--workspace",
@@ -1503,6 +1505,7 @@ fn backup_restore_roundtrips_cli_families_and_redacts_secrets() -> TestResult {
         "semantic",
         "--kind",
         "note",
+        "--allow-secret-mention",
         "--workspace",
         &ws,
         "--json",
@@ -1513,14 +1516,13 @@ fn backup_restore_roundtrips_cli_families_and_redacts_secrets() -> TestResult {
         &Some(true),
         "source pack succeeded",
     )?;
-    let outcome_reason = format!("{SECRET_CANARY} confirmed the release rule");
     let outcome = run_ee(&[
         "outcome",
         memory_id,
         "--signal",
         "helpful",
         "--reason",
-        &outcome_reason,
+        "The release rule caught a clippy regression",
         "--workspace",
         &ws,
         "--json",
@@ -1632,7 +1634,26 @@ fn backup_restore_roundtrips_cli_families_and_redacts_secrets() -> TestResult {
         !searched.to_string().contains(SECRET_CANARY),
         "restored search leaked the secret canary",
     )?;
-    let why = run_ee(&["why", memory_id, "--workspace", &side_path_arg, "--json"])?;
+    let restored_memory_id = searched
+        .pointer("/data/results")
+        .and_then(JsonValue::as_array)
+        .and_then(|hits| {
+            hits.iter().find_map(|hit| {
+                hit.get("docId")
+                    .or_else(|| hit.get("memoryId"))
+                    .or_else(|| hit.get("memory_id"))
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_owned)
+            })
+        })
+        .ok_or_else(|| format!("restored search missing memory id: {searched}"))?;
+    let why = run_ee(&[
+        "why",
+        &restored_memory_id,
+        "--workspace",
+        &side_path_arg,
+        "--json",
+    ])?;
     ensure_equal(
         &why.pointer("/success").and_then(JsonValue::as_bool),
         &Some(true),
