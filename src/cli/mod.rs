@@ -56685,42 +56685,38 @@ impl RememberMemoryReport {
     #[must_use]
     pub fn json_output(&self) -> String {
         use crate::output::escape_json_string;
-        let tags_json = self
-            .tags
-            .iter()
-            .map(|t| format!("\"{}\"", escape_json_string(t)))
-            .collect::<Vec<_>>()
-            .join(",");
+        // `tags` is now emitted by `field_array_of_strings`, which brackets and
+        // escapes each element itself (bd-wttt2).
         let source_json = self.source.as_ref().map_or("null".to_string(), |s| {
             format!("\"{}\"", escape_json_string(s))
         });
         let producer_json = self.producer.to_json_string_lossy();
+        // Both of these used to be `,"key":value` FRAGMENTS spliced into the
+        // envelope literal. A builder appends keys itself, so they are now
+        // plain values and absence is `None` rather than an empty string
+        // (bd-wttt2).
         let typed_fields_json = self
             .typed_fields
             .as_ref()
-            .map_or_else(String::new, |fields| format!(",\"typedFields\":{fields}"));
-        let attempt_family_json = self
-            .attempt_family
-            .as_ref()
-            .map_or_else(String::new, |family| {
-                let family_alias = crate::models::public_attempt_family_alias(&family.family_id);
-                let declared_size = family
-                    .declared_size
-                    .map_or_else(|| "null".to_string(), |size| size.to_string());
-                let attempt_index = family
-                    .attempt_index
-                    .map_or_else(|| "null".to_string(), |index| index.to_string());
-                let disposition = family.disposition.as_deref().map_or_else(
-                    || "null".to_string(),
-                    |disposition| format!("\"{}\"", escape_json_string(disposition)),
-                );
-                format!(
-                    ",\"attemptFamily\":{{\"familyAlias\":\"{}\",\"declaredSize\":{declared_size},\
+            .map(std::string::ToString::to_string);
+        let attempt_family_json = self.attempt_family.as_ref().map(|family| {
+            let family_alias = crate::models::public_attempt_family_alias(&family.family_id);
+            let declared_size = family
+                .declared_size
+                .map_or_else(|| "null".to_string(), |size| size.to_string());
+            let attempt_index = family
+                .attempt_index
+                .map_or_else(|| "null".to_string(), |index| index.to_string());
+            let disposition = family.disposition.as_deref().map_or_else(
+                || "null".to_string(),
+                |disposition| format!("\"{}\"", escape_json_string(disposition)),
+            );
+            format!(
+                "{{\"familyAlias\":\"{}\",\"declaredSize\":{declared_size},\
                  \"attemptIndex\":{attempt_index},\"disposition\":{disposition}}}",
-                    escape_json_string(&family_alias)
-                )
-            });
-        let typed_fields_json = format!("{typed_fields_json}{attempt_family_json}");
+                escape_json_string(&family_alias)
+            )
+        });
         let valid_from_json = self.valid_from.as_ref().map_or("null".to_string(), |s| {
             format!("\"{}\"", escape_json_string(s))
         });
@@ -56730,9 +56726,9 @@ impl RememberMemoryReport {
         let workflow_id_json = self.workflow_id.as_ref().map_or("null".to_string(), |s| {
             format!("\"{}\"", escape_json_string(s))
         });
-        let provenance_uri_json = self.source.as_ref().map_or(String::new(), |s| {
-            format!(",\"provenance_uri\":\"{}\"", escape_json_string(s))
-        });
+        // `provenance_uri` is emitted only when `source` is present, and with
+        // the identical value, so the builder below reuses `source_json`
+        // instead of re-escaping the same string a second way (bd-wttt2).
         let audit_id_json = self.audit_id.as_ref().map_or("null".to_string(), |id| {
             format!("\"{}\"", escape_json_string(id))
         });
@@ -56756,53 +56752,91 @@ impl RememberMemoryReport {
         let degraded_json = self.remember_degraded_json();
         let response_degraded_json = self.remember_response_degraded_json();
 
-        let mut json = format!(
-            r#"{{"schema":"ee.response.v2","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","memoryId":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}"{},"confidence":{},"tags":[{}],"source":{}{},"producer":{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"near_duplicates":{},"redaction_status":"{}","policy_bypass_used":{},"policy_bypass":{},"degraded":{}}}"#,
-            self.version,
-            self.memory_id,
-            self.memory_id,
-            escape_json_string(&self.workspace_id),
-            escape_json_string(&self.database_path.display().to_string()),
-            escape_json_string(&self.content),
-            workflow_id_json,
-            self.level.as_str(),
-            self.kind.as_str(),
-            typed_fields_json,
-            self.confidence,
-            tags_json,
-            source_json,
-            provenance_uri_json,
-            producer_json,
-            valid_from_json,
-            valid_to_json,
-            escape_json_string(&self.validity_status),
-            escape_json_string(&self.validity_window_kind),
-            self.dry_run,
-            self.persisted,
-            self.revision_number,
-            revision_group_id_json,
-            audit_id_json,
-            index_job_id_json,
-            escape_json_string(&self.index_status),
-            suggested_links_json,
-            escape_json_string(&self.suggested_link_status),
-            suggested_link_degradations_json,
-            auto_links_json,
-            escape_json_string(&self.auto_link_status),
-            auto_link_degradations_json,
-            curation_candidate_json,
-            escape_json_string(&self.curation_candidate_status),
-            curation_candidate_degradations_json,
-            near_duplicates_json,
-            escape_json_string(&self.redaction_status),
-            self.policy_bypass.is_some(),
-            policy_bypass_json,
-            degraded_json
-        );
-        json.push_str(",\"degraded\":");
-        json.push_str(&response_degraded_json);
-        json.push('}');
-        json
+        // bd-wttt2: this envelope used to be one `format!` literal with ~40
+        // same-typed positional arguments. Transposing two of them wrote a
+        // wrong value under a right key and still produced JSON that parsed,
+        // validated against the schema, and passed every key-presence
+        // assertion. Keys and values are now paired at the call site, and
+        // `remember_json_round_trips_every_field_to_its_own_key` pins each key
+        // to a DISTINCT sentinel so a transposition is detectable at all.
+        //
+        // Key ORDER is preserved exactly, so the golden artifacts that pin
+        // this envelope are untouched.
+        //
+        // `memory_id` alongside `memoryId` is a RETAINED COMPATIBILITY ALIAS,
+        // not drift (AGENTS.md, "Response envelope contract"): many consumers
+        // read `data.memory_id`. Removing it is a contract change with its own
+        // blast radius and its own bead; it must not ride in on a
+        // shape-consistency refactor.
+        let memory_id = self.memory_id.to_string();
+        let mut data = crate::output::JsonBuilder::new();
+        data.field_str("command", "remember")
+            .field_str("version", self.version)
+            .field_str("memory_id", &memory_id)
+            .field_str("memoryId", &memory_id)
+            .field_str("workspace_id", &self.workspace_id)
+            .field_str("database_path", &self.database_path.display().to_string())
+            .field_str("content", &self.content)
+            .field_raw("workflow_id", &workflow_id_json)
+            .field_str("level", self.level.as_str())
+            .field_str("kind", self.kind.as_str());
+        if let Some(typed_fields) = &typed_fields_json {
+            data.field_raw("typedFields", typed_fields);
+        }
+        if let Some(attempt_family) = &attempt_family_json {
+            data.field_raw("attemptFamily", attempt_family);
+        }
+        data.field_raw("confidence", &self.confidence.to_string())
+            .field_array_of_strings("tags", &self.tags)
+            .field_raw("source", &source_json);
+        if self.source.is_some() {
+            data.field_raw("provenance_uri", &source_json);
+        }
+        data.field_raw("producer", &producer_json)
+            .field_raw("valid_from", &valid_from_json)
+            .field_raw("valid_to", &valid_to_json)
+            .field_str("validity_status", &self.validity_status)
+            .field_str("validity_window_kind", &self.validity_window_kind)
+            .field_bool("dry_run", self.dry_run)
+            .field_bool("persisted", self.persisted)
+            .field_u32("revision_number", self.revision_number)
+            .field_raw("revision_group_id", &revision_group_id_json)
+            .field_raw("audit_id", &audit_id_json)
+            .field_raw("index_job_id", &index_job_id_json)
+            .field_str("index_status", &self.index_status)
+            // Was a hardcoded `[]` in the literal. `effect_ids` is empty at
+            // every construction site today, so this is byte-identical now,
+            // but a hardcoded value cannot round-trip to its source field and
+            // would have defeated the sentinel test.
+            .field_array_of_strings("effect_ids", &self.effect_ids)
+            .field_raw("suggested_links", &suggested_links_json)
+            .field_str("suggested_link_status", &self.suggested_link_status)
+            .field_raw(
+                "suggested_link_degradations",
+                &suggested_link_degradations_json,
+            )
+            .field_raw("auto_links", &auto_links_json)
+            .field_str("auto_link_status", &self.auto_link_status)
+            .field_raw("auto_link_degradations", &auto_link_degradations_json)
+            .field_raw("curation_candidate", &curation_candidate_json)
+            .field_str("curation_candidate_status", &self.curation_candidate_status)
+            .field_raw(
+                "curation_candidate_degradations",
+                &curation_candidate_degradations_json,
+            )
+            .field_raw("near_duplicates", &near_duplicates_json)
+            .field_str("redaction_status", &self.redaction_status)
+            .field_bool("policy_bypass_used", self.policy_bypass.is_some())
+            .field_raw("policy_bypass", &policy_bypass_json)
+            .field_raw("degraded", &degraded_json);
+
+        let mut envelope = crate::output::JsonBuilder::new();
+        envelope
+            .field_str("schema", crate::models::RESPONSE_SCHEMA_V2)
+            .field_bool("success", true)
+            .field_raw("data", &data.finish())
+            .field_raw("degraded", &response_degraded_json);
+        envelope.finish()
     }
 
     fn suggested_links_json(&self) -> String {
@@ -56947,31 +56981,33 @@ impl RememberMemoryReport {
         format!("[{items}]")
     }
 
+    /// Near-duplicate rows for the `remember` envelope.
+    ///
+    /// bd-wttt2: built with [`crate::output::JsonBuilder`] rather than a
+    /// nine-argument literal that repeated three of its inputs. Three of the
+    /// keys here are snake/camel alias PAIRS carrying the same value on
+    /// purpose -- `memory_id`/`memoryId`, `hamming_distance`/`hammingDistance`,
+    /// `next_actions`/`nextActions`. Each pair is now written from one binding,
+    /// so the two spellings cannot drift apart the way two positional
+    /// arguments could.
     fn near_duplicates_json(&self) -> String {
-        use crate::output::escape_json_string;
+        use crate::output::JsonBuilder;
 
         let items = self
             .near_duplicates
             .iter()
             .map(|duplicate| {
-                let next_actions = duplicate
-                    .next_actions
-                    .iter()
-                    .map(|action| format!("\"{}\"", escape_json_string(action)))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!(
-                    r#"{{"memory_id":"{}","memoryId":"{}","similarity":{},"threshold":{},"hamming_distance":{},"hammingDistance":{},"source":"{}","next_actions":[{}],"nextActions":[{}]}}"#,
-                    escape_json_string(&duplicate.memory_id),
-                    escape_json_string(&duplicate.memory_id),
-                    duplicate.similarity,
-                    duplicate.threshold,
-                    duplicate.hamming_distance,
-                    duplicate.hamming_distance,
-                    escape_json_string(&duplicate.source),
-                    next_actions,
-                    next_actions
-                )
+                let mut row = JsonBuilder::new();
+                row.field_str("memory_id", &duplicate.memory_id)
+                    .field_str("memoryId", &duplicate.memory_id)
+                    .field_raw("similarity", &duplicate.similarity.to_string())
+                    .field_raw("threshold", &duplicate.threshold.to_string())
+                    .field_raw("hamming_distance", &duplicate.hamming_distance.to_string())
+                    .field_raw("hammingDistance", &duplicate.hamming_distance.to_string())
+                    .field_str("source", &duplicate.source)
+                    .field_array_of_strings("next_actions", &duplicate.next_actions)
+                    .field_array_of_strings("nextActions", &duplicate.next_actions);
+                row.finish()
             })
             .collect::<Vec<_>>()
             .join(",");
@@ -71469,10 +71505,10 @@ mod tests {
     /// bd-wttt2 countermetric: every emitted key must carry ITS OWN field's
     /// value, not merely a value of the right type.
     ///
-    /// `json_output` is a hand-rolled `format!` with 40 positional arguments.
-    /// Transposing two same-typed arguments produces JSON that still parses,
-    /// still validates against the schema, and still passes any key-presence
-    /// assertion — the compiler cannot see it either. The only thing that
+    /// `json_output` WAS a hand-rolled `format!` with 40 positional arguments.
+    /// Transposing two same-typed arguments produced JSON that still parsed,
+    /// still validated against the schema, and still passed any key-presence
+    /// assertion — the compiler could not see it either. The only thing that
     /// catches it is giving every field a **distinct** sentinel and asserting
     /// the round trip field by field. Shared defaults (`""`, `0.0`, `null`,
     /// empty vec) across several fields would hide exactly the swap this
@@ -71481,8 +71517,13 @@ mod tests {
     /// Deliberately anchored to the STRUCT FIELDS rather than to the format
     /// string: if it were derived from reading the literal, a misreading would
     /// produce a test and an emitter that agree with each other and are both
-    /// wrong. This must stay an independent oracle so the planned
-    /// `JsonBuilder` migration can be checked against it.
+    /// wrong. That independence is what made it a usable oracle for the
+    /// `JsonBuilder` migration, which landed for bd-wttt2 — this test was
+    /// written BEFORE the emitter changed and was not adjusted to fit it.
+    ///
+    /// Keys are paired with values at the call site now, so a transposition is
+    /// harder to write; it is not impossible (two adjacent `field_str` calls
+    /// can still be swapped wholesale), which is why this stays.
     #[test]
     fn remember_json_round_trips_every_field_to_its_own_key() -> TestResult {
         let report = crate::core::memory::RememberMemoryReport {
@@ -71619,7 +71660,295 @@ mod tests {
             &Some("sentinel-source"),
             "remember provenance_uri mirrors source when present",
         )?;
+
+        // The two enum-backed keys. Omitted from the sentinel table above
+        // because their values come from `as_str()` on an enum rather than
+        // from a free-form String field, but they are still two adjacent
+        // same-typed emissions and therefore still swappable (bd-wttt2).
+        ensure_equal(
+            &data["level"].as_str(),
+            &Some("procedural"),
+            "remember data.level carries the level, not the kind",
+        )?;
+        ensure_equal(
+            &data["kind"].as_str(),
+            &Some("rule"),
+            "remember data.kind carries the kind, not the level",
+        )?;
+
+        // `effect_ids` was a hardcoded `[]` in the old literal; it now reads
+        // the field. Empty at every construction site today, so assert the
+        // value AND that the key is a real array rather than absent.
+        ensure_equal(
+            &data["effect_ids"],
+            &serde_json::json!([]),
+            "remember data.effect_ids reads the field",
+        )?;
+
+        // Optional keys are ABSENT, not null, when their source is None. The
+        // old literal achieved this by splicing an empty string; the builder
+        // achieves it by not calling `field_raw`. Same observable, and a
+        // regression to `null` would be a schema change.
+        ensure(
+            data.get("typedFields").is_none(),
+            "remember omits typedFields entirely when typed_fields is None",
+        )?;
+        ensure(
+            data.get("attemptFamily").is_none(),
+            "remember omits attemptFamily entirely when attempt_family is None",
+        )?;
         Ok(())
+    }
+
+    /// bd-wttt2: the old emitter escaped by ARGUMENT POSITION — every value
+    /// that needed escaping had to have `escape_json_string` applied at its
+    /// own `{}` slot, with no type-level guarantee that it was. Pin the
+    /// escaping through the builder with values that break naive emission:
+    /// a double quote, a backslash, a newline, a tab, and a control character.
+    ///
+    /// Paired with the round-trip test above deliberately: that one proves the
+    /// right value reaches the right key, this one proves the value survives
+    /// the trip unmangled. Either alone would pass while the other failed.
+    #[test]
+    fn remember_json_escapes_every_string_surface_through_the_builder() -> TestResult {
+        let nasty = "quote\" backslash\\ newline\n tab\t ctrl\u{1}";
+        let report = crate::core::memory::RememberMemoryReport {
+            version: "sentinel-version",
+            memory_id: MemoryId::from_uuid(uuid::Uuid::from_u128(0x5_002)),
+            workspace_id: format!("ws {nasty}"),
+            workspace_path: PathBuf::from("/tmp/escape-workspace"),
+            database_path: PathBuf::from("/tmp/escape-db.db"),
+            content: format!("content {nasty}"),
+            workflow_id: Some(format!("workflow {nasty}")),
+            level: crate::models::MemoryLevel::Procedural,
+            kind: crate::models::MemoryKind::Rule,
+            typed_fields: None,
+            attempt_family: None,
+            confidence: 0.5,
+            tags: vec![format!("tag {nasty}")],
+            source: Some(format!("source {nasty}")),
+            producer: crate::models::ProducerMetadata::manual_remember(
+                None,
+                Some("2026-06-18T00:00:00Z"),
+            ),
+            valid_from: None,
+            valid_to: None,
+            validity_status: format!("validity {nasty}"),
+            validity_window_kind: "unbounded".to_owned(),
+            dry_run: false,
+            persisted: true,
+            revision_number: 1,
+            revision_group_id: None,
+            audit_id: None,
+            index_job_id: None,
+            index_status: format!("index {nasty}"),
+            effect_ids: Vec::new(),
+            suggested_links: Vec::new(),
+            suggested_link_status: "not_requested".to_owned(),
+            suggested_link_degradations: Vec::new(),
+            redaction_status: "clean".to_owned(),
+            policy_bypass: None,
+            auto_links: Vec::new(),
+            auto_link_status: "not_requested".to_owned(),
+            auto_link_degradations: Vec::new(),
+            curation_candidate: None,
+            curation_candidate_status: "not_requested".to_owned(),
+            curation_candidate_degradations: Vec::new(),
+            near_duplicates: vec![crate::core::memory::RememberNearDuplicate {
+                memory_id: format!("dup {nasty}"),
+                similarity: 0.9,
+                threshold: 0.8,
+                hamming_distance: 2,
+                source: format!("dupsource {nasty}"),
+                next_actions: vec![format!("action {nasty}")],
+            }],
+        };
+
+        let rendered = report.json_output();
+        // If any surface emitted a raw control character or an unescaped
+        // quote, this parse fails and nothing below runs.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| format!("{error}: {rendered}"))?;
+        let data = &parsed["data"];
+
+        for (key, expected) in [
+            ("workspace_id", format!("ws {nasty}")),
+            ("content", format!("content {nasty}")),
+            ("workflow_id", format!("workflow {nasty}")),
+            ("source", format!("source {nasty}")),
+            ("provenance_uri", format!("source {nasty}")),
+            ("validity_status", format!("validity {nasty}")),
+            ("index_status", format!("index {nasty}")),
+        ] {
+            ensure_equal(
+                &data[key].as_str(),
+                &Some(expected.as_str()),
+                &format!("remember data.{key} round-trips through escaping"),
+            )?;
+        }
+        ensure_equal(
+            &data["tags"],
+            &serde_json::json!([format!("tag {nasty}")]),
+            "remember tags round-trip through escaping",
+        )?;
+
+        // The nested emitter is a separate literal and escapes separately.
+        let duplicate = &data["near_duplicates"][0];
+        ensure_equal(
+            &duplicate["memory_id"].as_str(),
+            &Some(format!("dup {nasty}").as_str()),
+            "near duplicate memory_id round-trips through escaping",
+        )?;
+        ensure_equal(
+            &duplicate["memoryId"].as_str(),
+            &duplicate["memory_id"].as_str(),
+            "near duplicate alias pair stays identical under escaping",
+        )?;
+        ensure_equal(
+            &duplicate["source"].as_str(),
+            &Some(format!("dupsource {nasty}").as_str()),
+            "near duplicate source round-trips through escaping",
+        )?;
+        ensure_equal(
+            &duplicate["next_actions"],
+            &serde_json::json!([format!("action {nasty}")]),
+            "near duplicate next_actions round-trip through escaping",
+        )?;
+        ensure_equal(
+            &duplicate["nextActions"],
+            &duplicate["next_actions"],
+            "near duplicate next_actions alias pair stays identical",
+        )
+    }
+
+    /// bd-wttt2 required the migration to preserve key ORDER so the goldens
+    /// that pin this envelope stay valid. Pin the order itself rather than
+    /// trusting a golden to notice: a golden covers one fixture's field set,
+    /// while this covers the emitter's full ordered sequence for a report
+    /// whose optional fields are all present.
+    #[test]
+    fn remember_json_emits_its_keys_in_a_stable_order() -> TestResult {
+        let report = crate::core::memory::RememberMemoryReport {
+            version: "order-version",
+            memory_id: MemoryId::from_uuid(uuid::Uuid::from_u128(0x5_003)),
+            workspace_id: "order-workspace".to_owned(),
+            workspace_path: PathBuf::from("/tmp/order-workspace"),
+            database_path: PathBuf::from("/tmp/order-db.db"),
+            content: "order-content".to_owned(),
+            workflow_id: Some("order-workflow".to_owned()),
+            level: crate::models::MemoryLevel::Procedural,
+            kind: crate::models::MemoryKind::Rule,
+            typed_fields: Some(serde_json::json!({"orderField": "order-typed"})),
+            attempt_family: Some(crate::db::MemoryAttemptFamily {
+                family_id: "order-family".to_owned(),
+                declared_size: Some(3),
+                attempt_index: Some(2),
+                disposition: Some("selected".to_owned()),
+            }),
+            confidence: 0.75,
+            tags: vec!["order-tag".to_owned()],
+            source: Some("order-source".to_owned()),
+            producer: crate::models::ProducerMetadata::manual_remember(
+                None,
+                Some("2026-06-18T00:00:00Z"),
+            ),
+            valid_from: Some("2031-01-02T03:04:05Z".to_owned()),
+            valid_to: None,
+            validity_status: "active".to_owned(),
+            validity_window_kind: "half_open".to_owned(),
+            dry_run: false,
+            persisted: true,
+            revision_number: 1,
+            revision_group_id: Some("order-group".to_owned()),
+            audit_id: Some("order-audit".to_owned()),
+            index_job_id: Some("order-index-job".to_owned()),
+            index_status: "queued".to_owned(),
+            effect_ids: Vec::new(),
+            suggested_links: Vec::new(),
+            suggested_link_status: "not_requested".to_owned(),
+            suggested_link_degradations: Vec::new(),
+            redaction_status: "clean".to_owned(),
+            policy_bypass: None,
+            auto_links: Vec::new(),
+            auto_link_status: "not_requested".to_owned(),
+            auto_link_degradations: Vec::new(),
+            curation_candidate: None,
+            curation_candidate_status: "not_requested".to_owned(),
+            curation_candidate_degradations: Vec::new(),
+            near_duplicates: Vec::new(),
+        };
+
+        let rendered = report.json_output();
+        // Read the key order off the SERIALIZED TEXT. serde_json's default
+        // Map is a BTreeMap, so parsing first would sort the keys and this
+        // test would pass no matter what order the emitter used.
+        let data_start = rendered
+            .find("\"data\":{")
+            .ok_or_else(|| format!("envelope must carry a data object: {rendered}"))?;
+        let data_text = &rendered[data_start..];
+        let mut cursor = 0_usize;
+        let expected = [
+            "command",
+            "version",
+            "memory_id",
+            "memoryId",
+            "workspace_id",
+            "database_path",
+            "content",
+            "workflow_id",
+            "level",
+            "kind",
+            "typedFields",
+            "attemptFamily",
+            "confidence",
+            "tags",
+            "source",
+            "provenance_uri",
+            "producer",
+            "valid_from",
+            "valid_to",
+            "validity_status",
+            "validity_window_kind",
+            "dry_run",
+            "persisted",
+            "revision_number",
+            "revision_group_id",
+            "audit_id",
+            "index_job_id",
+            "index_status",
+            "effect_ids",
+            "suggested_links",
+            "suggested_link_status",
+            "suggested_link_degradations",
+            "auto_links",
+            "auto_link_status",
+            "auto_link_degradations",
+            "curation_candidate",
+            "curation_candidate_status",
+            "curation_candidate_degradations",
+            "near_duplicates",
+            "redaction_status",
+            "policy_bypass_used",
+            "policy_bypass",
+            "degraded",
+        ];
+        for key in expected {
+            let needle = format!("\"{key}\":");
+            let at = data_text[cursor..].find(&needle).ok_or_else(|| {
+                format!("data.{key} missing or out of order after byte {cursor}: {rendered}")
+            })?;
+            cursor += at + needle.len();
+        }
+
+        // The envelope itself, same reasoning.
+        ensure(
+            rendered.starts_with("{\"schema\":\"ee.response.v2\",\"success\":true,\"data\":{"),
+            format!("envelope prefix must be stable, got {rendered}"),
+        )?;
+        ensure(
+            rendered.ends_with('}'),
+            format!("envelope must be closed, got {rendered}"),
+        )
     }
 
     fn report_memory_id_sentinel() -> String {
