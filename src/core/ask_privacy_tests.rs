@@ -73,8 +73,18 @@ fn private_bodies_are_absent_from_answers_conflicts_and_abstention_hints() {
         2,
         "Run cargo fmt before release using api_key=ask-private-canary.",
     );
-    seed(&db, &workspace, 3, crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT);
-    seed(&db, &workspace, 4, "Release notes are in /home/private/operator/release.txt.");
+    seed(
+        &db,
+        &workspace,
+        3,
+        crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+    );
+    seed(
+        &db,
+        &workspace,
+        4,
+        "Release notes are in /home/private/operator/release.txt.",
+    );
     db.insert_memory_link(
         "link_00000000000000000000000001",
         &CreateMemoryLinkInput {
@@ -103,22 +113,46 @@ fn private_bodies_are_absent_from_answers_conflicts_and_abstention_hints() {
     assert_eq!(accepted.citations[0].text, safe.content);
     let abstained = answer(&corpus, 1.0);
     assert!(abstained.abstained);
-    assert!(abstained.nearest_evidence.as_ref().is_some_and(|items| !items.is_empty()));
+    assert!(
+        abstained
+            .nearest_evidence
+            .as_ref()
+            .is_some_and(|items| !items.is_empty())
+    );
     for report in [accepted, abstained] {
-        for output in [ask_data_json(&report).to_string(), render_ask_markdown(&report)] {
-            for forbidden in [private.id.as_str(), "ask-private-canary", "/home/private", crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT] {
-                assert!(!output.contains(forbidden), "private evidence escaped admission");
+        for output in [
+            ask_data_json(&report).to_string(),
+            render_ask_markdown(&report),
+        ] {
+            for forbidden in [
+                private.id.as_str(),
+                "ask-private-canary",
+                "/home/private",
+                crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+            ] {
+                assert!(
+                    !output.contains(forbidden),
+                    "private evidence escaped admission"
+                );
             }
         }
     }
     let after = db.list_memories(&workspace, None, true).unwrap();
-    assert_eq!(before, after, "admission must not redact durable source rows");
+    assert_eq!(
+        before, after,
+        "admission must not redact durable source rows"
+    );
 }
 
 #[test]
 fn private_only_corpus_abstains_without_nearest_evidence() {
     let (_root, db, workspace) = fixture();
-    seed(&db, &workspace, 1, "Run cargo fmt with password=ask-only-secret.");
+    seed(
+        &db,
+        &workspace,
+        1,
+        "Run cargo fmt with password=ask-only-secret.",
+    );
     let corpus = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
     assert!(corpus.candidates.is_empty());
     let report = answer(&corpus, 0.0);
@@ -133,17 +167,33 @@ fn citation_metadata_is_sanitized_without_rewriting_the_body() {
     let mut memory = seed(&db, &workspace, 1, "Run cargo fmt before release.");
     memory.trust_class = "peer_human_attested".to_owned();
     memory.trust_subclass = Some(
-        "agent:/home/private/member; project=/home/private/project; produced_at=/home/private/time".to_owned(),
+        "agent:/home/private/member; project=/home/private/project; produced_at=/home/private/time"
+            .to_owned(),
     );
     memory.provenance_uri = Some("file:///home/private/citation".to_owned());
     let admitted = admission::into_candidate(memory.clone()).unwrap();
     assert_eq!(admitted.content, memory.content);
-    assert_eq!(admitted.provenance_uri, Some(format!("ee://memory/{}", memory.id)));
+    assert_eq!(
+        admitted.provenance_uri,
+        Some(format!("ee://memory/{}", memory.id))
+    );
     let team = admitted.team_provenance.as_ref().unwrap();
     assert!(!team.member_display_name.contains("/home/private"));
-    assert!(!team.project_name.as_deref().unwrap().contains("/home/private"));
+    assert!(
+        !team
+            .project_name
+            .as_deref()
+            .unwrap()
+            .contains("/home/private")
+    );
     assert!(!team.produced_at.contains("/home/private"));
-    let report = answer(&AskCorpus { candidates: vec![admitted], contradictions: vec![] }, 0.0);
+    let report = answer(
+        &AskCorpus {
+            candidates: vec![admitted],
+            contradictions: vec![],
+        },
+        0.0,
+    );
     assert!(!ask_data_json(&report).to_string().contains("/home/private"));
     assert!(!render_ask_markdown(&report).contains("/home/private"));
 }
@@ -151,13 +201,27 @@ fn citation_metadata_is_sanitized_without_rewriting_the_body() {
 #[test]
 fn public_provenance_and_unicode_byte_offsets_are_preserved() {
     let (_root, db, workspace) = fixture();
-    let memory = seed(&db, &workspace, 1, "Café release notes. Run cargo fmt before release.");
+    let memory = seed(
+        &db,
+        &workspace,
+        1,
+        "Café release notes. Run cargo fmt before release.",
+    );
     let candidate = admission::into_candidate(memory.clone()).unwrap();
     assert_eq!(candidate.provenance_uri, memory.provenance_uri);
-    let report = answer(&AskCorpus { candidates: vec![candidate], contradictions: vec![] }, 0.55);
+    let report = answer(
+        &AskCorpus {
+            candidates: vec![candidate],
+            contradictions: vec![],
+        },
+        0.55,
+    );
     assert!(!report.abstained);
     for citation in report.citations {
-        assert_eq!(memory.content.get(citation.byte_start..citation.byte_end), Some(citation.text.as_str()));
+        assert_eq!(
+            memory.content.get(citation.byte_start..citation.byte_end),
+            Some(citation.text.as_str())
+        );
     }
 }
 
@@ -181,9 +245,16 @@ fn malformed_identity_or_vocabulary_never_becomes_public_evidence() {
 fn invalid_or_absent_provenance_uses_the_real_memory_identity() {
     let (_root, db, workspace) = fixture();
     let memory = seed(&db, &workspace, 1, "Run cargo fmt before release.");
-    for uri in [None, Some("not a provenance URI".to_owned()), Some("manual://source?password=canary".to_owned())] {
+    for uri in [
+        None,
+        Some("not a provenance URI".to_owned()),
+        Some("manual://source?password=canary".to_owned()),
+    ] {
         let mut copy = memory.clone();
         copy.provenance_uri = uri;
-        assert_eq!(admission::into_candidate(copy).unwrap().provenance_uri, Some(format!("ee://memory/{}", memory.id)));
+        assert_eq!(
+            admission::into_candidate(copy).unwrap().provenance_uri,
+            Some(format!("ee://memory/{}", memory.id))
+        );
     }
 }

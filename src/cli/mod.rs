@@ -1739,6 +1739,12 @@ pub struct AskArgs {
     #[arg(long = "require-confidence", value_name = "T")]
     pub require_confidence: Option<f32>,
 
+    /// Select self, team, verified, global-tagged, workspace, or swarm memories.
+    /// Scope never expands beyond the selected workspace.
+    /// Team scope requires the workspace database, not an alternate store.
+    #[arg(long, value_parser = parse_memory_scope_arg, default_value = "workspace")]
+    pub memory_scope: MemoryScope,
+
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<std::path::PathBuf>,
@@ -50895,10 +50901,11 @@ where
     };
 
     // Resolve temporal eligibility before scoring, hints, and contradiction lookup.
-    let corpus = match crate::core::ask::load_current_ask_corpus(
+    let corpus = match crate::core::ask::load_scoped_ask_corpus(
         &connection,
         &workspace_id,
         chrono::Utc::now(),
+        args.memory_scope,
     ) {
         Ok(corpus) => corpus,
         Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),

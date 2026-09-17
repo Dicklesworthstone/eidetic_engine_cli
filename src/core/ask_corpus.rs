@@ -72,6 +72,7 @@ fn scope_context(
         team_members: BTreeSet::new(),
     };
     if scope == MemoryScope::Team {
+        admission::require_workspace_roster(connection, workspace_id)?;
         // The addressed store's authenticated roster is authority, not a
         // config-file list or a roster from a different workspace/database.
         for member in connection

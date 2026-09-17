@@ -184,3 +184,6 @@ fn public_ask_does_not_reveal_retired_advice_in_abstention_hints() -> Result<(),
     assert!(!rendered.contains("15432"));
     Ok(())
 }
+
+#[path = "ask_scope.rs"]
+mod scope;

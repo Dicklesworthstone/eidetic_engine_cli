@@ -26,7 +26,7 @@ pub use store::load_scoped_contradictions;
 #[path = "ask_corpus.rs"]
 mod corpus;
 
-pub use corpus::{AskCorpus, load_current_ask_corpus};
+pub use corpus::{AskCorpus, load_current_ask_corpus, load_scoped_ask_corpus};
 
 #[path = "ask_candidates.rs"]
 mod selection;
