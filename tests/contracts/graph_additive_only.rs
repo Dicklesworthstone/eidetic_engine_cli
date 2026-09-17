@@ -400,10 +400,9 @@ fn assert_additive_shape(
                 // an index that shifts.
                 let (child_path, actual_child) = match entry_identity(expected_item) {
                     Some(identity) => {
-                        let Some(found) = actual_items
-                            .iter()
-                            .find(|item| entry_identity(item) == Some(identity))
-                        else {
+                        let Some(found) = actual_items.iter().find(|item| {
+                            entry_identity(item).as_deref() == Some(identity.as_str())
+                        }) else {
                             return Err(format!(
                                 "{surface} removed array entry {path}[{identity}]"
                             ));
@@ -427,11 +426,76 @@ fn assert_additive_shape(
 /// these surfaces use `id` or `name`. An entry with none of those is an ordered
 /// value (a string, a number, a positional tuple) and stays positional, so this
 /// only changes behaviour for arrays whose elements are addressable records.
-fn entry_identity(value: &Value) -> Option<&str> {
+/// The negative the identity relaxation depends on.
+///
+/// Matching identified entries by identity instead of position RELAXES a
+/// comparison inside an additive-only checker, which is the diff shape that
+/// deserves the most distrust. The argument that it is nevertheless strictly
+/// stronger rests entirely on one property: an entry that is genuinely gone
+/// must still fail. That property cannot be established by the reasoning that
+/// motivated the change, so it is pinned here instead of asserted in a commit
+/// message.
+///
+/// Both directions are exercised, because either alone is satisfiable by a
+/// checker that is simply wrong in the other direction.
+#[test]
+fn additive_shape_accepts_a_prepended_entry_but_still_rejects_a_removed_one() -> TestResult {
+    let expected = serde_json::json!({
+        "degraded": [
+            {"code": "embed_model_unavailable", "details": {"recovery": []}},
+            {"code": "context_evidence_freshness_missing_source"}
+        ]
+    });
+
+    // POSITIVE: an addition that displaces index 0. This is the bv27 symptom --
+    // positional matching reported it as
+    // `context removed JSON field $.data.degraded[0].details` with every entry
+    // still present.
+    let with_prepended_entry = serde_json::json!({
+        "degraded": [
+            {"code": "neural_local_unconfirmed"},
+            {"code": "embed_model_unavailable", "details": {"recovery": []}},
+            {"code": "context_evidence_freshness_missing_source"}
+        ]
+    });
+    assert_additive_shape("context", "$", &expected, &with_prepended_entry)?;
+
+    // NEGATIVE: a genuine removal, at the SAME array length so the length guard
+    // above cannot be what catches it. Only identity matching can.
+    let with_entry_replaced = serde_json::json!({
+        "degraded": [
+            {"code": "neural_local_unconfirmed"},
+            {"code": "context_evidence_freshness_missing_source"}
+        ]
+    });
+    let Err(message) = assert_additive_shape("context", "$", &expected, &with_entry_replaced)
+    else {
+        return Err(
+            "removing an identified entry must fail the additive-shape check, but it passed"
+                .to_owned(),
+        );
+    };
+    if !message.contains("embed_model_unavailable") {
+        return Err(format!(
+            "the removal failure must name the missing entry; got: {message}"
+        ));
+    }
+    Ok(())
+}
+
+/// Numbers count as identities too. An earlier revision accepted only strings,
+/// so an entry keyed `"id": 7` silently fell back to positional matching and
+/// kept the exact false-positive this function exists to remove -- quietly,
+/// because the fallback is the old behaviour and nothing fails.
+fn entry_identity(value: &Value) -> Option<String> {
     let object = value.as_object()?;
     ["code", "id", "name"]
         .into_iter()
-        .find_map(|key| object.get(key).and_then(Value::as_str))
+        .find_map(|key| match object.get(key) {
+            Some(Value::String(text)) => Some(text.clone()),
+            Some(Value::Number(number)) => Some(number.to_string()),
+            _ => None,
+        })
 }
 
 fn json_type(value: &Value) -> &'static str {
