@@ -561,6 +561,55 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(hex)
 }
 
+fn digest_tree(root: &Path) -> Result<BTreeMap<String, String>, String> {
+    let mut out = BTreeMap::new();
+    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, String>) -> Result<(), String> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("read_dir {}: {error}", dir.display())),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let path = entry.path();
+            if path.is_dir() {
+                walk(root, &path, out)?;
+                continue;
+            }
+            if !path.is_file() {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.insert(rel, sha256_file(&path)?);
+        }
+        Ok(())
+    }
+    walk(root, root, &mut out)?;
+    Ok(out)
+}
+
+fn tree_diff(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) -> Vec<String> {
+    let mut diffs = Vec::new();
+    for (path, hash) in after {
+        match before.get(path) {
+            None => diffs.push(format!("added {path}")),
+            Some(previous) if previous != hash => diffs.push(format!("changed {path}")),
+            Some(_) => {}
+        }
+    }
+    for path in before.keys() {
+        if !after.contains_key(path) {
+            diffs.push(format!("removed {path}"));
+        }
+    }
+    diffs.sort();
+    diffs
+}
+
 // ── Harness knobs ──────────────────────────────────────────────────────────
 //
 // Deliberately NOT `EE_*`-prefixed: these configure the test harness, not `ee`
@@ -1081,6 +1130,95 @@ fn finish(verdict: &Verdict, proof_dir: &Path, events: &mut Vec<Value>) -> TestR
         verdict.detail(),
         proof.display()
     ))
+}
+
+/// Sequential proof that `ee pack --read-only` does not mutate workspace files
+/// and that a second identical pack is byte-identical.
+///
+/// The concurrent oracle (`RACE_REPRODUCED` at 294d9ca95) showed concurrent
+/// `--read-only` packs agreeing with each other and disagreeing with the
+/// serial pack. That is serial-then-later, not inter-probe disagreement. This
+/// test isolates that leaf without touching pack-hash identity files owned by
+/// ADR 0087 / bd-reality-core-convergence-1azkt.1.
+#[test]
+fn sequential_read_only_packs_are_byte_identical_and_do_not_mutate_the_workspace() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let fixture = Fixture {
+        workspace: tempdir.path().join("workspace"),
+        data_home: tempdir.path().join("home"),
+        scratch: tempdir.path().join("scratch"),
+    };
+    for dir in [&fixture.workspace, &fixture.data_home, &fixture.scratch] {
+        std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    }
+    run_ee(&fixture, &["init", "--json"])?;
+    run_ee(
+        &fixture,
+        &[
+            "remember",
+            "Run cargo fmt --check before every release tag.",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--json",
+        ],
+    )?;
+    run_ee(&fixture, &["index", "rebuild", "--json"])?;
+
+    let before_first = digest_tree(&fixture.workspace)?;
+    let first = run_ee(
+        &fixture,
+        &[
+            "pack",
+            "prepare release",
+            "--read-only",
+            "--max-tokens",
+            "1500",
+            "--json",
+        ],
+    )?;
+    let after_first = digest_tree(&fixture.workspace)?;
+    let first_hash = pointer_string(&first, "/data/pack/hash").ok_or_else(|| {
+        "first --read-only pack carried no /data/pack/hash; the JSON path is probably renamed"
+            .to_owned()
+    })?;
+    if first_hash.is_empty() {
+        return Err(
+            "first --read-only pack.hash was empty; vacuous agreement is forbidden".to_owned(),
+        );
+    }
+    let first_pack_mutations = tree_diff(&before_first, &after_first);
+
+    let second = run_ee(
+        &fixture,
+        &[
+            "pack",
+            "prepare release",
+            "--read-only",
+            "--max-tokens",
+            "1500",
+            "--json",
+        ],
+    )?;
+    let after_second = digest_tree(&fixture.workspace)?;
+    let second_hash = pointer_string(&second, "/data/pack/hash").ok_or_else(|| {
+        "second --read-only pack carried no /data/pack/hash; the JSON path is probably renamed"
+            .to_owned()
+    })?;
+    let second_pack_mutations = tree_diff(&after_first, &after_second);
+
+    if first_hash != second_hash || !second_pack_mutations.is_empty() {
+        return Err(format!(
+            "RACE_REPRODUCED: sequential --read-only packs were not byte-identical. first_hash={first_hash} second_hash={second_hash} files_changed_by_first_pack={first_pack_mutations:?} files_changed_by_second_pack={second_pack_mutations:?}"
+        ));
+    }
+    if !first_pack_mutations.is_empty() {
+        return Err(format!(
+            "RACE_REPRODUCED: first --read-only pack mutated workspace files even though the second pack hash matched: {first_pack_mutations:?}"
+        ));
+    }
+    Ok(())
 }
 
 // ── Always-on tests of the classifier itself ───────────────────────────────
