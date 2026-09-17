@@ -1389,3 +1389,111 @@ fn no_stage_wrapper_decides_availability_inside_run_stage() {
         );
     }
 }
+
+/// Every name `record_gated_off` can emit, paired with the line it came from.
+fn gated_off_registrations(script: &str) -> Vec<(usize, String)> {
+    script
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let marker = "record_gated_off \"";
+            let start = line.find(marker)? + marker.len();
+            let rest = &line[start..];
+            let end = rest.find('"')?;
+            Some((index + 1, rest[..end].to_string()))
+        })
+        .collect()
+}
+
+/// `run_stage` call sites that are indented, i.e. reached only on one branch of
+/// a conditional, paired with the line they came from.
+fn conditional_stage_sites(script: &str) -> Vec<(usize, String)> {
+    script
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with(char::is_whitespace))
+        .filter_map(|(index, line)| {
+            let marker = "run_stage \"";
+            let start = line.find(marker)? + marker.len();
+            let rest = &line[start..];
+            let end = rest.find('"')?;
+            Some((index + 1, rest[..end].to_string()))
+        })
+        .collect()
+}
+
+/// The banner's denominator must cover the whole stage population.
+///
+/// `verification_summary_banner` computes `declared` as
+/// `STAGE_PASSED + STAGE_SKIPPED_CONTENTION + STAGE_GATED_OFF` -- a TALLY of
+/// what the run accounted for, not a count of what exists. That is honest only
+/// while every stage lands in exactly one of those three buckets on every path.
+/// Two edits would quietly break it and leave the banner still reading as a
+/// full sweep:
+///
+///   1. a `record_gated_off` for a name that is not a stage, inflating `declared`
+///      past the real population;
+///   2. a `run_stage` on one branch of a conditional whose other branch neither
+///      runs a stage of that name nor records it as gated off, so the stage
+///      vanishes from all three counters.
+///
+/// Measured at the time this test was written: 112 distinct stage names, 23
+/// distinct gated-off names, ALL 23 of which are stage names; 24 distinct
+/// conditionally-reached stage names, of which exactly one -- "Native Reranker
+/// E2E (bd-1nl13.14)" -- has no gated-off record, and that one is covered
+/// because BOTH branches run a stage of that name. So the invariant holds today
+/// and nothing was asserting it.
+///
+/// Conditional reachability is detected by indentation, which is how the
+/// population above was measured; a `run_stage` at column 0 runs on every path
+/// that reaches the banner.
+#[test]
+fn the_banner_denominator_covers_every_declared_stage() {
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let stage_names = verify_stage_names(&script);
+    assert!(
+        stage_names.len() > 100,
+        "expected the full stage population; found {} -- the parser, not the \
+         script, is the likely fault",
+        stage_names.len()
+    );
+
+    let phantoms: Vec<String> = gated_off_registrations(&script)
+        .into_iter()
+        .filter(|(_, name)| !stage_names.contains(name))
+        .map(|(line, name)| format!("  verify.sh:{line}  {name}"))
+        .collect();
+    assert!(
+        phantoms.is_empty(),
+        "record_gated_off names a stage that does not exist, so `declared` counts \
+         something no run_stage could ever have attempted:\n{}",
+        phantoms.join("\n")
+    );
+
+    let gated: BTreeSet<String> = gated_off_registrations(&script)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    let sites = conditional_stage_sites(&script);
+    let mut uncounted: Vec<String> = Vec::new();
+    for (line, name) in &sites {
+        if gated.contains(name) {
+            continue;
+        }
+        // A sibling branch running a stage of the same name also keeps it in
+        // the denominator on every path.
+        let occurrences = sites.iter().filter(|(_, other)| other == name).count();
+        if occurrences > 1 {
+            continue;
+        }
+        uncounted.push(format!("  verify.sh:{line}  {name}"));
+    }
+    assert!(
+        uncounted.is_empty(),
+        "these stages are reached on only one branch and are neither recorded as \
+         gated off nor run on the other, so a run that takes that branch drops \
+         them out of `declared` entirely and the banner still reads as a full \
+         sweep:\n{}",
+        uncounted.join("\n")
+    );
+}
