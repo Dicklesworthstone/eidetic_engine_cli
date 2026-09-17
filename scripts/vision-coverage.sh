@@ -543,8 +543,14 @@ EVIDENCE_AWK='
             break
         }
         if (first == "") return
-        if (second != "") print first " " second
-        print first
+        # Emit "<command>\t<file that invokes it>". The source is what turns
+        # "134 exercised" from an aggregate into a per-surface claim someone can
+        # check, which is the whole point of proving behavioral artifacts rather
+        # than presence (bd-2mpct.1). SOURCE is set by each caller because the
+        # Rust pass buffers a whole file and flushes it after FILENAME has
+        # already advanced to the next one.
+        if (second != "") print first " " second "\t" SOURCE
+        print first "\t" SOURCE
     }
 '
 
@@ -627,7 +633,7 @@ exercised_commands() {
                             if (t[j] == "STOP") break
                             m++; a[m] = t[j]
                         }
-                        if (m > 0) emit_path(m, a)
+                        if (m > 0) { SOURCE = FILENAME; emit_path(m, a) }
                         for (j = 1; j <= m; j++) delete a[j]
                     }
                 }
@@ -637,11 +643,15 @@ exercised_commands() {
         find "$EVIDENCE_TEST_DIR" -name '*.rs' -type f ! -path "$EVIDENCE_TEST_DIR/fixtures/*" \
             -exec awk "$EVIDENCE_AWK"'
                 FNR == 1 && NR > 1 { flush() }
-                { line = $0; sub(/\/\/.*$/, "", line); txt = txt " " line }
+                { line = $0; sub(/\/\/.*$/, "", line); txt = txt " " line; curfile = FILENAME }
                 END { flush() }
 
                 function flush(   rest, arr, n, i, j, seg) {
                     if (txt == "") return
+                    # curfile, not FILENAME: at the FNR==1 that triggers this
+                    # flush, FILENAME is already the NEXT file, so attributing
+                    # evidence to it would name the wrong source every time.
+                    SOURCE = curfile
                     gsub(/&[A-Za-z_][A-Za-z0-9_]*\[[^]]*\]/, "@", txt)
                     gsub(/&[A-Za-z_][A-Za-z0-9_.]*/, "@", txt)
                     nprefix = 0; delete prefixes
@@ -687,7 +697,7 @@ exercised_commands() {
                     head = first_word(n, arr)
                     if (head == "") return
                     for (i = 1; i <= nprefix; i++)
-                        if (prefixes[i] != head) print prefixes[i] " " head
+                        if (prefixes[i] != head) print prefixes[i] " " head "\t" SOURCE
                 }
 
                 function first_word(n, arr,   i) {
@@ -854,9 +864,25 @@ if evidence_corpus_present; then
     # and costs ~2s, and recomputing it would also let the two answers drift.
     printf "%s\n" "$REPORT_JSON" | jq -r '.documented_surfaces[]' | sort -u \
         > "$EVIDENCE_WORK_DIR/documented"
-    exercised_commands > "$EVIDENCE_WORK_DIR/exercised"
+    exercised_commands > "$EVIDENCE_WORK_DIR/pairs"
+    cut -f1 "$EVIDENCE_WORK_DIR/pairs" | sort -u > "$EVIDENCE_WORK_DIR/exercised"
     comm -23 "$EVIDENCE_WORK_DIR/documented" "$EVIDENCE_WORK_DIR/exercised" \
         > "$EVIDENCE_WORK_DIR/unexercised"
+
+    # Per-surface proof artifact: which file actually invokes it, and how many
+    # distinct files do. Sorted, so the published witness is deterministic
+    # rather than whichever file the scan happened to reach first.
+    awk -F'\t' 'NR == FNR { documented[$0] = 1; next }
+                ($1 in documented) {
+                    if (!(($1 SUBSEP $2) in seen)) {
+                        seen[$1 SUBSEP $2] = 1
+                        count[$1]++
+                        if (!($1 in witness) || $2 < witness[$1]) witness[$1] = $2
+                    }
+                }
+                END { for (cmd in witness) printf "%s\t%s\t%d\n", cmd, witness[cmd], count[cmd] }' \
+        "$EVIDENCE_WORK_DIR/documented" "$EVIDENCE_WORK_DIR/pairs" |
+        sort > "$EVIDENCE_WORK_DIR/evidence"
     baseline_unexercised_entries > "$EVIDENCE_WORK_DIR/baseline"
     NEW_UNEXERCISED=$(comm -23 "$EVIDENCE_WORK_DIR/unexercised" "$EVIDENCE_WORK_DIR/baseline")
     STALE_BASELINE=$(comm -13 "$EVIDENCE_WORK_DIR/unexercised" "$EVIDENCE_WORK_DIR/baseline")
@@ -883,6 +909,15 @@ REPORT_JSON=$(
             --argjson unexercised "$UNEXERCISED_COUNT" \
             --argjson newly "$(printf "%s\n" "$NEW_UNEXERCISED" | json_array_from_lines)" \
             --argjson stale "$(printf "%s\n" "$STALE_BASELINE" | json_array_from_lines)" \
+            --argjson evidence "$(
+                if [ -f "$EVIDENCE_WORK_DIR/evidence" ]; then
+                    jq -Rsc 'split("\n") | map(select(length > 0) | split("\t"))
+                             | map({surface: .[0], witness: .[1], sources: (.[2] | tonumber)})' \
+                        < "$EVIDENCE_WORK_DIR/evidence"
+                else
+                    echo '[]'
+                fi
+            )" \
             --arg baseline_file "$UNEXERCISED_BASELINE_FILE" '
               . + {
                 # Whether a documented surface is actually INVOKED by something
@@ -896,6 +931,11 @@ REPORT_JSON=$(
                   unexercised: $unexercised,
                   newly_unexercised: $newly,
                   stale_baseline_entries: $stale,
+                  # Per-surface proof artifact. `witness` names a file that
+                  # actually invokes the surface, so "exercised" is a claim a
+                  # reader can check one row at a time instead of a total they
+                  # must take on faith (bd-2mpct.1).
+                  evidence: $evidence,
                   gap_percentage: (
                     if .surfaces.total_documented == 0 then 0
                     else ((($unexercised * 10000 / .surfaces.total_documented) | round) / 100)

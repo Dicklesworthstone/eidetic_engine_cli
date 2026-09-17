@@ -917,6 +917,71 @@ fn vision_coverage_fails_closed_when_the_evidence_corpus_is_absent() -> TestResu
     )
 }
 
+/// Every exercised surface must name a file that actually invokes it.
+///
+/// A count of 134 is something a reader has to take on faith; a witness is a
+/// claim they can check one row at a time, which is what "prove behavioral
+/// artifacts, not file presence" asks for (bd-2mpct.1).
+///
+/// The empty-witness assertion is not hypothetical. The helper-prefix emission
+/// path originally printed its command with no source, and because an empty
+/// string sorts first it WON the witness selection -- a surface with 14
+/// invocation sites published a blank witness. A row count alone would not have
+/// noticed.
+#[test]
+fn vision_coverage_names_a_witness_for_every_exercised_surface() -> TestResult {
+    let fixture_root = unique_fixture_root("behavioral-witness")?;
+    write_behavioral_vision_fixture(&fixture_root, &["alpha", "beta"], &["alpha"], &["beta"])?;
+    let report_path = fixture_root.join("report.json");
+    run_gate_in_dir(&fixture_root, &report_path, false, None)?;
+    let report = read_report(&report_path)?;
+
+    let evidence = report
+        .pointer("/behavioral_evidence/evidence")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "behavioral_evidence.evidence is not an array".to_owned())?;
+    ensure(
+        evidence.len() == 1,
+        &format!(
+            "exactly one surface is exercised, got {} rows",
+            evidence.len()
+        ),
+    )?;
+
+    let row = &evidence[0];
+    ensure(
+        row.get("surface").and_then(serde_json::Value::as_str) == Some("alpha"),
+        "the exercised surface must be the one the fixture invokes",
+    )?;
+    let witness = row
+        .get("witness")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "evidence row has no witness".to_owned())?;
+    ensure(
+        !witness.trim().is_empty(),
+        "a witness must name a file, not an empty string",
+    )?;
+
+    // The witness must be a real file that really contains the invocation.
+    // Without this the field could be any plausible-looking string.
+    let witness_path = fixture_root.join(witness);
+    let contents = fs::read_to_string(&witness_path)
+        .map_err(|error| format!("witness {witness} is not a readable file: {error}"))?;
+    ensure(
+        contents.contains("alpha"),
+        &format!("witness {witness} does not actually invoke `alpha`"),
+    )?;
+
+    // And the unexercised surface must NOT acquire a witness, or the field
+    // would be decoration rather than evidence.
+    ensure(
+        !evidence
+            .iter()
+            .any(|entry| entry.get("surface").and_then(serde_json::Value::as_str) == Some("beta")),
+        "a surface nothing invokes must not be given a witness",
+    )
+}
+
 /// The live arm, against this repository rather than a fixture. A term that
 /// only ever runs on constructed trees gates nothing.
 #[test]
@@ -950,6 +1015,46 @@ fn vision_coverage_measures_the_real_repository_corpus() -> TestResult {
             "exercised ({exercised}) + unexercised ({unexercised}) must equal \
              total_documented ({total}); a shortfall means surfaces vanished between \
              the documented set and the evidence comparison"
+        ),
+    )?;
+
+    // Against the real corpus, every exercised surface carries a witness that
+    // names an existing file. This is the arm that catches a whole class of
+    // silent breakage in the extractor: an emission path that forgets to record
+    // its source still produces the right COUNT.
+    let evidence = report
+        .pointer("/behavioral_evidence/evidence")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "behavioral_evidence.evidence is not an array".to_owned())?;
+    ensure(
+        u64::try_from(evidence.len()).unwrap_or(u64::MAX) == exercised,
+        &format!(
+            "every exercised surface needs an evidence row: {} rows for {exercised} exercised",
+            evidence.len()
+        ),
+    )?;
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut unnamed = Vec::new();
+    for row in evidence {
+        let surface = row
+            .get("surface")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<missing surface>");
+        match row.get("witness").and_then(serde_json::Value::as_str) {
+            Some(witness) if !witness.trim().is_empty() => {
+                if !repo_root.join(witness).is_file() {
+                    unnamed.push(format!("{surface}: witness {witness} is not a file"));
+                }
+            }
+            _ => unnamed.push(format!("{surface}: no witness")),
+        }
+    }
+    ensure(
+        unnamed.is_empty(),
+        &format!(
+            "every exercised surface must name a real file that invokes it:\n  {}",
+            unnamed.join("\n  ")
         ),
     )
 }
