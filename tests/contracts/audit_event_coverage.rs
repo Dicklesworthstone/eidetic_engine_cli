@@ -24,6 +24,9 @@
 #[path = "ask_large_corpus.rs"]
 mod ask_large_corpus;
 
+#[path = "ask_lifecycle.rs"]
+mod ask_lifecycle;
+
 use std::path::PathBuf;
 
 use ee::core::context::{ContextPackOptions, run_context_pack};
