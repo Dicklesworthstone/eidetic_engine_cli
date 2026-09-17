@@ -158,9 +158,15 @@ pub(super) fn conflict_score(
     link_confidence: f32,
     minimum: f32,
 ) -> Option<f32> {
-    if ![anchor_score, anchor_trust, other_trust, link_confidence, minimum]
-        .into_iter()
-        .all(f32::is_finite)
+    if ![
+        anchor_score,
+        anchor_trust,
+        other_trust,
+        link_confidence,
+        minimum,
+    ]
+    .into_iter()
+    .all(f32::is_finite)
     {
         return None;
     }
@@ -220,7 +226,10 @@ fn preserve_linked_opposition<'a>(
         {
             continue;
         }
-        if !ranked.iter().any(|entry| entry.candidate.memory_id == other.memory_id) {
+        if !ranked
+            .iter()
+            .any(|entry| entry.candidate.memory_id == other.memory_id)
+        {
             // len >= 2 above; replacing the worst item cannot evict the anchor.
             let last = ranked.len() - 1;
             ranked[last] = RankedCandidate {

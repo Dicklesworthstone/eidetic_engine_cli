@@ -8,14 +8,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{AskSpan, CLUSTER_SIMILARITY_THRESHOLD, CORROBORATION_CAP, has_negation, tokenize_for_ask};
+use super::{
+    AskSpan, CLUSTER_SIMILARITY_THRESHOLD, CORROBORATION_CAP, has_negation, tokenize_for_ask,
+};
 
 pub(super) fn cluster_spans(spans: &[AskSpan]) -> Vec<AskSpan> {
     cluster_with_observer(spans, || {})
 }
 
 fn cluster_with_observer(spans: &[AskSpan], mut on_similarity_check: impl FnMut()) -> Vec<AskSpan> {
-    let terms: Vec<Vec<String>> = spans.iter().map(|span| tokenize_for_ask(&span.text)).collect();
+    let terms: Vec<Vec<String>> = spans
+        .iter()
+        .map(|span| tokenize_for_ask(&span.text))
+        .collect();
     let negated: Vec<bool> = spans.iter().map(|span| has_negation(&span.text)).collect();
     let mut postings: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (index, span_terms) in terms.iter().enumerate() {

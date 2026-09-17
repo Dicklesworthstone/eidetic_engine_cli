@@ -25,16 +25,26 @@ fn request() -> AskRequest {
 
 fn noise(count: usize) -> Vec<AskCandidate> {
     (0..count)
-        .map(|index| candidate(&format!("noise-{index:05}"), "The database listens on port 5432."))
+        .map(|index| {
+            candidate(
+                &format!("noise-{index:05}"),
+                "The database listens on port 5432.",
+            )
+        })
         .collect()
 }
 
 fn selected_ids(candidates: &[AskCandidate], limit: usize) -> Vec<String> {
-    select_candidates(&request(), &tokenize_for_ask(&request().question), candidates, limit)
-        .unwrap()
-        .into_iter()
-        .map(|candidate| candidate.memory_id.clone())
-        .collect()
+    select_candidates(
+        &request(),
+        &tokenize_for_ask(&request().question),
+        candidates,
+        limit,
+    )
+    .unwrap()
+    .into_iter()
+    .map(|candidate| candidate.memory_id.clone())
+    .collect()
 }
 
 #[test]
@@ -47,7 +57,10 @@ fn answers_a_direct_hit_after_the_old_scan_limit() {
     assert_eq!(report.citations[0].memory_id, "answer");
     assert_eq!(report.candidates_scanned, candidates.len());
     assert!(report.semantic_degraded); // This change does not claim embeddings.
-    assert_eq!(selected_ids(&candidates, ASK_CANDIDATE_SCAN_CAP).len(), ASK_CANDIDATE_SCAN_CAP);
+    assert_eq!(
+        selected_ids(&candidates, ASK_CANDIDATE_SCAN_CAP).len(),
+        ASK_CANDIDATE_SCAN_CAP
+    );
 }
 
 #[test]
@@ -56,9 +69,15 @@ fn large_corpus_permutations_produce_the_same_answer_bytes() {
     candidates.push(candidate("answer", "Run cargo fmt before release."));
     let expected = ask_data_json(&evaluate_ask(&request(), &candidates)).to_string();
     candidates.reverse();
-    assert_eq!(ask_data_json(&evaluate_ask(&request(), &candidates)).to_string(), expected);
+    assert_eq!(
+        ask_data_json(&evaluate_ask(&request(), &candidates)).to_string(),
+        expected
+    );
     candidates.rotate_left(73);
-    assert_eq!(ask_data_json(&evaluate_ask(&request(), &candidates)).to_string(), expected);
+    assert_eq!(
+        ask_data_json(&evaluate_ask(&request(), &candidates)).to_string(),
+        expected
+    );
 }
 
 #[test]
@@ -67,7 +86,10 @@ fn admission_ties_use_memory_identity_not_input_position() {
         .rev()
         .map(|i| candidate(&format!("memory-{i:02}"), "Run cargo fmt before release."))
         .collect();
-    assert_eq!(selected_ids(&candidates, 3), ["memory-00", "memory-01", "memory-02"]);
+    assert_eq!(
+        selected_ids(&candidates, 3),
+        ["memory-00", "memory-01", "memory-02"]
+    );
 }
 
 #[test]
@@ -80,7 +102,10 @@ fn repeated_rows_do_not_consume_distinct_memory_slots() {
 #[test]
 fn best_span_admission_does_not_dilute_a_long_answer_source() {
     let mut candidates = noise(4);
-    let text = format!("{}\n\nRun cargo fmt before release.", "Unrelated database material. ".repeat(200));
+    let text = format!(
+        "{}\n\nRun cargo fmt before release.",
+        "Unrelated database material. ".repeat(200)
+    );
     candidates.push(candidate("long-source", &text));
     assert_eq!(selected_ids(&candidates, 1), ["long-source"]);
 }
@@ -98,7 +123,10 @@ fn admission_does_not_lower_the_answer_floor_to_fill_the_budget() {
 fn ambiguous_source_after_the_limit_fails_closed_in_both_orders() {
     let mut candidates = noise(ASK_CANDIDATE_SCAN_CAP + 20);
     candidates.insert(0, candidate("ambiguous", "Run cargo fmt before release."));
-    candidates.push(candidate("ambiguous", "Never run cargo fmt before release."));
+    candidates.push(candidate(
+        "ambiguous",
+        "Never run cargo fmt before release.",
+    ));
     for _ in 0..2 {
         let report = evaluate_ask(&request(), &candidates);
         assert!(report.abstained && report.extractiveness_violated);
@@ -153,8 +181,14 @@ fn zero_limit_and_empty_input_are_bounded() {
 
 #[test]
 fn identity_validation_is_not_skipped_for_a_zero_admission_limit() {
-    let candidates = [candidate("same", "First body."), candidate("same", "Different body.")];
-    assert_eq!(select_candidates(&request(), &[], &candidates, 0).unwrap_err(), SelectionError::AmbiguousSource);
+    let candidates = [
+        candidate("same", "First body."),
+        candidate("same", "Different body."),
+    ];
+    assert_eq!(
+        select_candidates(&request(), &[], &candidates, 0).unwrap_err(),
+        SelectionError::AmbiguousSource
+    );
 }
 
 #[test]
@@ -174,7 +208,10 @@ fn citations_keep_exact_utf8_source_offsets_after_admission() {
     assert!(!report.abstained);
     let citation = &report.citations[0];
     assert_eq!(citation.memory_id, "unicode");
-    assert_eq!(source.get(citation.byte_start..citation.byte_end), Some(citation.text.as_str()));
+    assert_eq!(
+        source.get(citation.byte_start..citation.byte_end),
+        Some(citation.text.as_str())
+    );
     assert_eq!(citation.text, "Run cargo fmt before release.");
 }
 
@@ -185,7 +222,10 @@ fn duplicate_rows_do_not_increase_answer_confidence() {
     let repeated = evaluate_ask(&request(), &vec![source; ASK_CANDIDATE_SCAN_CAP + 20]);
     assert_eq!(single.confidence, repeated.confidence);
     assert_eq!(single.citations.len(), repeated.citations.len());
-    assert_eq!(single.confidence_components.corroboration, repeated.confidence_components.corroboration);
+    assert_eq!(
+        single.confidence_components.corroboration,
+        repeated.confidence_components.corroboration
+    );
 }
 
 fn contradiction(id: &str, source: &str, destination: &str) -> AskContradiction {
@@ -205,7 +245,10 @@ fn crowded_conflict() -> (AskRequest, Vec<AskCandidate>) {
         .map(|i| candidate(&format!("support-{i:05}"), "Run cargo fmt before release."))
         .collect();
     candidates.push(candidate("anchor", "Run cargo fmt before release."));
-    candidates.push(candidate("opposition", "Formatting is prohibited by the deployment policy."));
+    candidates.push(candidate(
+        "opposition",
+        "Formatting is prohibited by the deployment policy.",
+    ));
     (request, candidates)
 }
 
@@ -213,10 +256,18 @@ fn crowded_conflict() -> (AskRequest, Vec<AskCandidate>) {
 fn preserves_paraphrased_opposition_outside_the_relevance_budget() {
     let (request, candidates) = crowded_conflict();
     let selected = select_candidates(
-        &request, &tokenize_for_ask(&request.question), &candidates, ASK_CANDIDATE_SCAN_CAP,
-    ).unwrap();
+        &request,
+        &tokenize_for_ask(&request.question),
+        &candidates,
+        ASK_CANDIDATE_SCAN_CAP,
+    )
+    .unwrap();
     assert_eq!(selected.len(), ASK_CANDIDATE_SCAN_CAP);
-    assert!(selected.iter().any(|candidate| candidate.memory_id == "opposition"));
+    assert!(
+        selected
+            .iter()
+            .any(|candidate| candidate.memory_id == "opposition")
+    );
     let report = evaluate_ask(&request, &candidates);
     assert!(!report.abstained && report.conflict_detected);
     assert!(report.answer_text.is_none());
@@ -227,8 +278,14 @@ fn preserves_paraphrased_opposition_outside_the_relevance_budget() {
     assert_eq!(report.conflict_link.as_ref().unwrap().id, "edge-1");
     for side in sides {
         for citation in &side.citations {
-            let original = candidates.iter().find(|source| source.memory_id == citation.memory_id).unwrap();
-            assert_eq!(original.content.get(citation.byte_start..citation.byte_end), Some(citation.text.as_str()));
+            let original = candidates
+                .iter()
+                .find(|source| source.memory_id == citation.memory_id)
+                .unwrap();
+            assert_eq!(
+                original.content.get(citation.byte_start..citation.byte_end),
+                Some(citation.text.as_str())
+            );
         }
     }
 }
@@ -236,13 +293,21 @@ fn preserves_paraphrased_opposition_outside_the_relevance_budget() {
 #[test]
 fn opposition_survives_independent_candidate_and_link_permutations() {
     let (mut request, mut candidates) = crowded_conflict();
-    request.contradictions.push(contradiction("edge-0", "missing", "anchor"));
+    request
+        .contradictions
+        .push(contradiction("edge-0", "missing", "anchor"));
     let expected = ask_data_json(&evaluate_ask(&request, &candidates)).to_string();
     candidates.reverse();
     request.contradictions.reverse();
-    assert_eq!(ask_data_json(&evaluate_ask(&request, &candidates)).to_string(), expected);
+    assert_eq!(
+        ask_data_json(&evaluate_ask(&request, &candidates)).to_string(),
+        expected
+    );
     candidates.rotate_left(17);
-    assert_eq!(ask_data_json(&evaluate_ask(&request, &candidates)).to_string(), expected);
+    assert_eq!(
+        ask_data_json(&evaluate_ask(&request, &candidates)).to_string(),
+        expected
+    );
 }
 
 #[test]
@@ -251,13 +316,22 @@ fn explicit_links_do_not_pull_missing_sources_into_scope() {
     request.contradictions = vec![contradiction("outside", "anchor", "another-workspace")];
     let report = evaluate_ask(&request, &candidates);
     assert!(!report.abstained && !report.conflict_detected);
-    assert!(report.citations.iter().all(|citation| citation.memory_id != "another-workspace"));
+    assert!(
+        report
+            .citations
+            .iter()
+            .all(|citation| citation.memory_id != "another-workspace")
+    );
 }
 
 #[test]
 fn weak_opposition_is_not_promoted_by_a_strong_link() {
     let (request, mut candidates) = crowded_conflict();
-    candidates.iter_mut().find(|candidate| candidate.memory_id == "opposition").unwrap().confidence = 0.4;
+    candidates
+        .iter_mut()
+        .find(|candidate| candidate.memory_id == "opposition")
+        .unwrap()
+        .confidence = 0.4;
     let report = evaluate_ask(&request, &candidates);
     assert!(!report.conflict_detected);
     assert!(report.sides.is_none());
@@ -299,7 +373,11 @@ fn links_cannot_manufacture_a_query_relevant_anchor() {
 #[test]
 fn linked_empty_sources_are_not_treated_as_counterevidence() {
     let (request, mut candidates) = crowded_conflict();
-    candidates.iter_mut().find(|candidate| candidate.memory_id == "opposition").unwrap().content = " \n\t".to_owned();
+    candidates
+        .iter_mut()
+        .find(|candidate| candidate.memory_id == "opposition")
+        .unwrap()
+        .content = " \n\t".to_owned();
     assert!(!evaluate_ask(&request, &candidates).conflict_detected);
 }
 
@@ -313,24 +391,48 @@ fn one_hop_reservation_does_not_propagate_through_a_link_chain() {
     let candidates = [
         candidate("anchor", "Run cargo fmt before release."),
         candidate("support", "Run cargo fmt before release."),
-        candidate("opposition", "Formatting is prohibited by deployment policy."),
+        candidate(
+            "opposition",
+            "Formatting is prohibited by deployment policy.",
+        ),
         candidate("chained", "The production exception requires approval."),
     ];
-    let selected = select_candidates(&request, &tokenize_for_ask(&request.question), &candidates, 2).unwrap();
-    assert_eq!(selected.iter().map(|candidate| candidate.memory_id.as_str()).collect::<Vec<_>>(), ["anchor", "opposition"]);
+    let selected = select_candidates(
+        &request,
+        &tokenize_for_ask(&request.question),
+        &candidates,
+        2,
+    )
+    .unwrap();
+    assert_eq!(
+        selected
+            .iter()
+            .map(|candidate| candidate.memory_id.as_str())
+            .collect::<Vec<_>>(),
+        ["anchor", "opposition"]
+    );
 }
 
 #[test]
 fn a_single_slot_budget_keeps_the_query_anchor() {
     let (request, candidates) = crowded_conflict();
-    let selected = select_candidates(&request, &tokenize_for_ask(&request.question), &candidates, 1).unwrap();
+    let selected = select_candidates(
+        &request,
+        &tokenize_for_ask(&request.question),
+        &candidates,
+        1,
+    )
+    .unwrap();
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].memory_id, "anchor");
 }
 
 #[test]
 fn empty_sources_do_not_displace_actual_spans_at_zero_threshold() {
-    let request = AskRequest { min_confidence: 0.0, ..request() };
+    let request = AskRequest {
+        min_confidence: 0.0,
+        ..request()
+    };
     let candidates = [
         candidate("a-empty", " \n"),
         candidate("b-real", "Unrelated but nonempty evidence."),
@@ -344,9 +446,15 @@ fn shared_conflict_floor_checks_every_confidence_contributor() {
     for weak in 0..4 {
         let mut values = [1.0, 1.0, 1.0, 1.0];
         values[weak] = 0.54;
-        assert_eq!(conflict_score(values[0], values[1], values[2], values[3], 0.55), None);
+        assert_eq!(
+            conflict_score(values[0], values[1], values[2], values[3], 0.55),
+            None
+        );
         values[weak] = 0.55;
-        assert_eq!(conflict_score(values[0], values[1], values[2], values[3], 0.55), Some(0.55));
+        assert_eq!(
+            conflict_score(values[0], values[1], values[2], values[3], 0.55),
+            Some(0.55)
+        );
     }
 }
 
@@ -356,7 +464,10 @@ fn shared_conflict_gate_rejects_non_finite_values() {
         for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             let mut values = [1.0, 1.0, 1.0, 1.0, 0.55];
             values[bad] = invalid;
-            assert_eq!(conflict_score(values[0], values[1], values[2], values[3], values[4]), None);
+            assert_eq!(
+                conflict_score(values[0], values[1], values[2], values[3], values[4]),
+                None
+            );
         }
     }
 }
