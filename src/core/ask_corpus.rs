@@ -168,8 +168,7 @@ fn validity_contains(
     {
         return Err(invalid_validity_error());
     }
-    Ok(from.is_none_or(|from| from <= reference_time)
-        && to.is_none_or(|to| reference_time <= to))
+    Ok(from.is_none_or(|from| from <= reference_time) && to.is_none_or(|to| reference_time <= to))
 }
 
 #[cfg(test)]

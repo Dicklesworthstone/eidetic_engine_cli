@@ -35,7 +35,10 @@ fn fixture() -> (tempfile::TempDir, DbConnection, DbConnection, String) {
         .expect("workspace");
     for (id, content) in [
         (ANCHOR_ID, "Run cargo fmt before release."),
-        (OPPOSITION_ID, "Formatting is prohibited by deployment policy."),
+        (
+            OPPOSITION_ID,
+            "Formatting is prohibited by deployment policy.",
+        ),
     ] {
         reader
             .insert_memory(
@@ -128,7 +131,10 @@ fn concurrent_expiration_and_edge_change_do_not_mix_old_bodies_with_new_links() 
     assert_eq!(corpus.contradictions[0].confidence, 0.9);
     let old = answer(corpus);
     assert!(!old.abstained && old.conflict_detected);
-    assert_eq!(old.sides.as_ref().unwrap()[1].citations[0].memory_id, OPPOSITION_ID);
+    assert_eq!(
+        old.sides.as_ref().unwrap()[1].citations[0].memory_id,
+        OPPOSITION_ID
+    );
 
     let next = load_current_ask_corpus(&reader, &workspace, reference_time()).unwrap();
     assert_eq!(next.candidates.len(), 1);
@@ -218,5 +224,8 @@ fn successful_reads_release_the_snapshot_before_returning_owned_evidence() {
     insert_edge(&reader);
     assert!(corpus.contradictions.is_empty());
     assert!(!answer(corpus).conflict_detected);
-    assert!(answer(load_current_ask_corpus(&reader, &workspace, reference_time()).unwrap()).conflict_detected);
+    assert!(
+        answer(load_current_ask_corpus(&reader, &workspace, reference_time()).unwrap())
+            .conflict_detected
+    );
 }
