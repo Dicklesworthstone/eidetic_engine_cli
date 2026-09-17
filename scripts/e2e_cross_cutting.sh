@@ -174,6 +174,75 @@ assert_jq_file_argjson "$MIGRATION_MANIFEST" \
     '[.allocations[] | select(.status == "planned") | .version] | min > $tail' \
     "migration registry reservations stay ahead of the compiled tail"
 
+step "the embedding fingerprint field set matches its schema version"
+# bd-7hsgy. `descriptor_content_hash` (src/core/index.rs) hashes a fixed field
+# set into the embedding-registry fingerprint, and that hash is compared against
+# values ALREADY PERSISTED in each workspace's registry
+# (`content_hash.eq_ignore_ascii_case(&expected_hash)` and the hash_matches
+# path). Adding, removing or reordering a hashed field changes every fingerprint
+# the code computes while the stored ones stay put, so every existing workspace
+# reads as mismatched. That is not a failed check; it is a silent invalidation
+# of installed state.
+#
+# The field set already carries a version -- EMBEDDING_REGISTRY_FINGERPRINT_SCHEMA
+# -- so the enforceable rule is that the two move together. This check pins both
+# and fails if either drifts without the other.
+#
+# It reads src/core/index.rs rather than editing it: that file is actively owned
+# elsewhere, and a static check needs no stake in it.
+fingerprint_drift="$(
+    python3 - <<'PYEOF'
+import io, re
+
+EXPECTED_SCHEMA = "ee.embedding_registry_fingerprint.v1"
+EXPECTED_FIELDS = [
+    "schema", "provider", "model_id", "model_name", "dimension", "category",
+    "semantic", "ready",
+    "manifest_id", "manifest_version", "manifest_repo", "manifest_revision",
+    "manifest_license", "manifest_dimension", "manifest_file_name",
+    "manifest_file_sha256", "manifest_file_size",
+]
+
+problems = []
+text = io.open("src/core/index.rs", encoding="utf-8").read()
+
+schema = re.search(r'EMBEDDING_REGISTRY_FINGERPRINT_SCHEMA:\s*&str\s*=\s*"([^"]+)"', text)
+if not schema:
+    problems.append("EMBEDDING_REGISTRY_FINGERPRINT_SCHEMA not found")
+elif schema.group(1) != EXPECTED_SCHEMA:
+    problems.append(f"schema changed: {EXPECTED_SCHEMA} -> {schema.group(1)}")
+
+start = text.find("fn descriptor_content_hash(")
+if start < 0:
+    problems.append("descriptor_content_hash not found")
+else:
+    body = text[start:text.index("\n}\n", start)]
+    fields = re.findall(r'hash_fingerprint_field\(\s*&mut hasher,\s*"([^"]+)"', body)
+    if fields != EXPECTED_FIELDS:
+        added = [f for f in fields if f not in EXPECTED_FIELDS]
+        removed = [f for f in EXPECTED_FIELDS if f not in fields]
+        if added:
+            problems.append(f"fields added: {added}")
+        if removed:
+            problems.append(f"fields removed: {removed}")
+        if not added and not removed:
+            problems.append("field ORDER changed; the hash is order-dependent")
+
+# Drift is only a defect when the version did NOT move with it.
+if problems and any(p.startswith("schema changed") for p in problems) and len(problems) > 1:
+    problems = []
+
+print("; ".join(problems))
+PYEOF
+)"
+if [ -z "$fingerprint_drift" ]; then
+    e2e_log_assert_eq "0" "0" "embedding fingerprint field set matches its schema version"
+    _harness_pass "embedding fingerprint field set matches its schema version"
+else
+    e2e_log_assert_eq "1" "0" "embedding fingerprint field set matches its schema version"
+    _harness_fail "embedding fingerprint field set matches its schema version: ${fingerprint_drift}. Every persisted registry fingerprint was computed from the pinned field set; changing it invalidates installed workspaces. Bump EMBEDDING_REGISTRY_FINGERPRINT_SCHEMA in the same change and update this guard's expectation."
+fi
+
 step "the derived mesh node id never becomes a responder principal"
 # bd-mesh-no-stable-node-identity-pt7k5. `build_peer_origin_node_id`
 # (src/mesh/peer.rs) derives a node id from the Tailscale node key. Its own doc
@@ -510,6 +579,111 @@ run_static_command \
     --quiet \
     --output "$LOG_DIR/e2e_cross_cutting_radar.json" \
     "$REPO_ROOT/scripts/e2e_cross_cutting.sh"
+
+step "validity columns are never written from a bookkeeping timestamp"
+# bd-o22r0. `valid_from`, `valid_to` and `superseded_at` are compared LEXICALLY
+# in SQL and are written in the SecondsFormat::Secs `Z` spelling; `created_at`,
+# `updated_at` and `tombstoned_at` use the offset form. 'Z' is 0x5A and '+' is
+# 0x2B, so at the same instant a `Z` value sorts ABOVE a `+00:00` one. Mixing
+# spellings inside one column breaks that column's ordering -- which is how
+# V123's supersession backfill left two live heads in one revision chain.
+#
+# The specific regression this catches is an UPDATE that binds ONE parameter to
+# both a validity column and a bookkeeping column. That shipped twice:
+# expire_memory_valid_to and mark_memory_superseded each wrote `?1` into both
+# `valid_to`/`superseded_at` AND `updated_at`, so every expired or revised
+# memory carried a `Z`-spelled `updated_at` with no import involved. Both are
+# fixed; nothing stopped a third from appearing. This is that guard.
+shared_bind_updates="$(
+    python3 - <<'PYEOF'
+import io, re, sys
+
+VALIDITY = ("valid_from", "valid_to", "superseded_at")
+BOOKKEEPING = ("created_at", "updated_at", "tombstoned_at")
+offenders = []
+text = io.open("src/db/mod.rs", encoding="utf-8", errors="replace").read()
+for match in re.finditer(r'"(UPDATE\s+memories\s+SET\s[^"]{0,400})"', text, re.S):
+    body = " ".join(match.group(1).split())
+    line = text[: match.start()].count("\n") + 1
+    for validity in VALIDITY:
+        assign = re.search(rf"\b{validity}\s*=\s*(\?\d+)", body)
+        if not assign:
+            continue
+        param = assign.group(1)
+        for book in BOOKKEEPING:
+            shared = re.search(rf"\b{book}\s*=\s*{re.escape(param)}\b", body)
+            if shared:
+                offenders.append(
+                    f"src/db/mod.rs:{line} binds {param} to both {validity} and {book}"
+                )
+sys.stdout.write("\n".join(sorted(set(offenders))))
+PYEOF
+)"
+if [ -z "$shared_bind_updates" ]; then
+    e2e_log_assert_eq "0" "0" "validity and bookkeeping timestamps never share a bind"
+    _harness_pass "validity and bookkeeping timestamps never share a bind"
+else
+    e2e_log_assert_eq "$(printf '%s\n' "$shared_bind_updates" | wc -l | tr -d ' ')" "0" \
+        "validity and bookkeeping timestamps never share a bind"
+    _harness_fail "validity and bookkeeping timestamps never share a bind: ${shared_bind_updates}"
+fi
+
+step "validity comparison bounds use the validity canon"
+# bd-o22r0 / bd-60tq7. normalize_validity_timestamp's doc comment states the rule
+# -- "every writer and every comparison bound must use this exact spelling" --
+# and until now that rule lived only in prose. It was broken twice: resume.rs and
+# context.rs both passed a bare to_rfc3339() (`+00:00`, variable fractional
+# digits) as the as_of bound into a reader whose SQL compares it lexically
+# against valid_from/valid_to, stored as SecondsFormat::Secs `Z`. A comparison
+# that mixes the two misorders at the boundary instant.
+#
+# A prose rule is one a future edit breaks silently. This fails the run instead.
+bare_validity_bounds="$(
+    python3 - <<'PYEOF'
+import io, re, glob, sys
+
+# readers whose trailing timestamp argument is compared against a validity column
+READERS = (
+    "list_recent_current_memories_for_retrieval",
+    "list_memories_valid_at",
+    "list_memories_by_tag_valid_at",
+    "list_all_tags_valid_at",
+    "get_tag_counts_valid_at",
+)
+offenders = []
+for path in sorted(glob.glob("src/**/*.rs", recursive=True)):
+    text = io.open(path, encoding="utf-8", errors="replace").read()
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if not any(reader in line for reader in READERS):
+            continue
+        if "fn " in line:  # the definition, not a call
+            continue
+        # Strip line comments BEFORE scanning. The fixed call sites carry a
+        # comment explaining the old defect, and that prose contains the literal
+        # `to_rfc3339()` -- matching it would fail the run on correct code and
+        # invite someone to delete the explanation to get green.
+        window = " ".join(
+            re.sub(r"//.*$", "", lines[offset]) for offset in range(index, min(index + 8, len(lines)))
+        )
+        # a bare to_rfc3339() is the defect; to_rfc3339_opts(...) is the canon
+        for bare in re.finditer(r"to_rfc3339\s*\(\s*\)", window):
+            before = window[max(0, bare.start() - 5) : bare.start()]
+            if before.endswith("_opts"):
+                continue
+            offenders.append(f"{path}:{index + 1} passes a bare to_rfc3339() as a validity bound")
+            break
+sys.stdout.write("\n".join(sorted(set(offenders))))
+PYEOF
+)"
+if [ -z "$bare_validity_bounds" ]; then
+    e2e_log_assert_eq "0" "0" "validity bounds use normalize_validity_timestamp"
+    _harness_pass "validity bounds use normalize_validity_timestamp"
+else
+    e2e_log_assert_eq "$(printf '%s\n' "$bare_validity_bounds" | wc -l | tr -d ' ')" "0" \
+        "validity bounds use normalize_validity_timestamp"
+    _harness_fail "validity bounds use normalize_validity_timestamp: ${bare_validity_bounds}"
+fi
 
 log_event \
     "note" \
