@@ -941,21 +941,21 @@ fn apply_resume_to_envelope(
         // No declared truncation point means this surface never issued a
         // cursor; reject without emptying (there is no page array to empty)
         // so the defensive path stays observable instead of destructive.
-        append_degraded_entry(envelope, cursor_invalid_degraded_entry());
+        report_cursor_rejection(envelope, cursor_invalid_degraded_entry());
         return;
     };
     let current_generation = (ctx.db_generation)();
     match decode_cursor(token, &ctx.mac_key, &ctx.params_hash, current_generation) {
         Err(CursorRejection::Invalid) => {
             empty_truncation_point(envelope, point);
-            append_degraded_entry(envelope, cursor_invalid_degraded_entry());
+            report_cursor_rejection(envelope, cursor_invalid_degraded_entry());
         }
         Err(CursorRejection::Stale {
             cursor_generation,
             current_generation,
         }) => {
             empty_truncation_point(envelope, point);
-            append_degraded_entry(
+            report_cursor_rejection(
                 envelope,
                 cursor_stale_degraded_entry(cursor_generation, current_generation),
             );
@@ -964,7 +964,7 @@ fn apply_resume_to_envelope(
             let target_matches = payload.target_schema == cursor_target_schema(envelope, point);
             if !target_matches || !apply_resume_drop(envelope, point, &payload) {
                 empty_truncation_point(envelope, point);
-                append_degraded_entry(envelope, cursor_invalid_degraded_entry());
+                report_cursor_rejection(envelope, cursor_invalid_degraded_entry());
             }
         }
     }
@@ -1128,6 +1128,46 @@ fn needs_cursor_rejection_promotion(envelope: &JsonValue) -> bool {
                 .and_then(JsonValue::as_array)
                 .is_some_and(|canonical| canonical.iter().any(|existing| existing == entry))
         })
+}
+
+/// Report a cursor rejection at most once.
+///
+/// A response carries exactly ONE cursor, so two entries naming the SAME
+/// rejection code cannot describe two distinct facts. That is the narrow case
+/// where a shared code IS identity, and it does not contradict
+/// [`push_degraded_entry`], whose general rule -- a shared code alone never
+/// establishes identity -- remains right for every other warning class.
+///
+/// Matched on the INCOMING code rather than on "any cursor rejection", so a
+/// `cursor_stale` already on the envelope cannot suppress a `cursor_invalid`;
+/// those are different facts and both must reach the client.
+///
+/// Without this, `ee insights --cursor <bad>` ships the warning twice: the
+/// surface reports its own entry with `sources: ["insights"]` and the governor
+/// appends the generic one. They collapse today only because the generic entry
+/// is a strict field-subset of the richer one, which is incidental -- change a
+/// severity or a message and the duplicate reaches the client.
+fn report_cursor_rejection(envelope: &mut JsonValue, entry: JsonValue) {
+    let code = entry
+        .get("code")
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned);
+    let already_reported = code.is_some_and(|code| {
+        ["/degraded", "/data/degraded"].iter().any(|pointer| {
+            envelope
+                .pointer(pointer)
+                .and_then(JsonValue::as_array)
+                .is_some_and(|entries| {
+                    entries.iter().any(|existing| {
+                        existing.get("code").and_then(JsonValue::as_str) == Some(code.as_str())
+                    })
+                })
+        })
+    });
+    if already_reported {
+        return;
+    }
+    append_degraded_entry(envelope, entry);
 }
 
 /// Mirror report-local cursor rejections into the canonical envelope.
