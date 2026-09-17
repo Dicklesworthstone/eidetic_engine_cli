@@ -95,7 +95,7 @@ impl fmt::Display for PackBinaryError {
                 total,
             } => write!(
                 formatter,
-                "binary pack item offset {index} points outside the frame: offset={offset}, len={len}, total={total}"
+                "binary pack item offset {index} has invalid frame geometry: offset={offset}, len={len}, total={total}"
             ),
             Self::ContentHashMismatch { .. } => {
                 formatter.write_str("binary pack content_hash does not match canonical JSON")
@@ -166,7 +166,8 @@ impl<'a> PackBinaryView<'a> {
     ///
     /// Returns a [`PackBinaryError`] when the frame is truncated, has a bad
     /// magic/version, contains invalid item offsets, or its content hash does
-    /// not match the canonical JSON footer.
+    /// not match the canonical JSON footer. Item ranges must partition the
+    /// item blob in table order, with no gaps, overlap, or unreferenced bytes.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, PackBinaryError> {
         ensure_len(bytes, PACK_BINARY_HEADER_LEN + PACK_BINARY_TRAILER_LEN)?;
         let found_magic = read_magic(bytes);
@@ -210,7 +211,12 @@ impl<'a> PackBinaryView<'a> {
                 count: raw_item_count,
             },
         )?;
-        ensure_len(bytes, blob_start + PACK_BINARY_TRAILER_LEN)?;
+        let minimum_len = blob_start.checked_add(PACK_BINARY_TRAILER_LEN).ok_or(
+            PackBinaryError::ItemCountTooLarge {
+                count: raw_item_count,
+            },
+        )?;
+        ensure_len(bytes, minimum_len)?;
 
         let trailer_offset = bytes.len() - PACK_BINARY_TRAILER_LEN;
         let canonical_json_offset = read_u64(bytes, trailer_offset)?;
@@ -235,7 +241,7 @@ impl<'a> PackBinaryView<'a> {
             canonical_json_len_usize,
             bytes.len(),
         )?;
-        if canonical_json_start < blob_start || canonical_json_end > trailer_offset {
+        if canonical_json_start < blob_start || canonical_json_end != trailer_offset {
             return Err(PackBinaryError::InvalidOffset {
                 index: item_count,
                 offset: canonical_json_offset,
@@ -256,6 +262,7 @@ impl<'a> PackBinaryView<'a> {
         }
 
         let mut entries = Vec::with_capacity(item_count);
+        let mut next_item_offset = blob_start;
         for index in 0..item_count {
             let entry_offset = PACK_BINARY_HEADER_LEN + index * PACK_BINARY_ITEM_TABLE_ENTRY_LEN;
             let raw_offset = read_u64(bytes, entry_offset)?;
@@ -274,7 +281,7 @@ impl<'a> PackBinaryView<'a> {
                 total: bytes.len(),
             })?;
             let end = checked_range_end(index, offset, len, bytes.len())?;
-            if offset < blob_start || end > canonical_json_start {
+            if offset != next_item_offset || end > canonical_json_start {
                 return Err(PackBinaryError::InvalidOffset {
                     index,
                     offset: raw_offset,
@@ -282,7 +289,16 @@ impl<'a> PackBinaryView<'a> {
                     total: bytes.len(),
                 });
             }
+            next_item_offset = end;
             entries.push(PackBinaryItemEntry { offset, len });
+        }
+        if next_item_offset != canonical_json_start {
+            return Err(PackBinaryError::InvalidOffset {
+                index: item_count,
+                offset: next_item_offset as u64,
+                len: 0,
+                total: bytes.len(),
+            });
         }
 
         Ok(Self {
@@ -810,5 +826,79 @@ mod tests {
     fn binary_context_preserves_memory_only_and_empty_packs() {
         assert_binary_matches_batch(1, 0);
         assert_binary_matches_batch(0, 0);
+    }
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    fn frame() -> Vec<u8> {
+        serialize_pack_binary("{}", &[b"alpha", b"bravo"], 0)
+    }
+
+    fn assert_invalid_offset(bytes: &[u8]) {
+        assert!(matches!(
+            PackBinaryView::parse(bytes),
+            Err(PackBinaryError::InvalidOffset { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_aliasing_and_reordered_item_ranges() {
+        let mut bytes = frame();
+        let second = PACK_BINARY_HEADER_LEN + PACK_BINARY_ITEM_TABLE_ENTRY_LEN;
+        let first_offset = read_u64(&bytes, PACK_BINARY_HEADER_LEN).expect("first offset");
+        bytes[second..second + 8].copy_from_slice(&first_offset.to_le_bytes());
+        assert_invalid_offset(&bytes);
+    }
+
+    #[test]
+    fn rejects_unreferenced_bytes_between_items() {
+        let mut bytes = frame();
+        let length = PACK_BINARY_HEADER_LEN + 8;
+        bytes[length..length + 4].copy_from_slice(&4_u32.to_le_bytes());
+        assert_invalid_offset(&bytes);
+    }
+
+    #[test]
+    fn rejects_unreferenced_bytes_before_canonical_json() {
+        let mut bytes = frame();
+        let length = PACK_BINARY_HEADER_LEN + PACK_BINARY_ITEM_TABLE_ENTRY_LEN + 8;
+        bytes[length..length + 4].copy_from_slice(&4_u32.to_le_bytes());
+        assert_invalid_offset(&bytes);
+    }
+
+    #[test]
+    fn rejects_unreferenced_bytes_before_trailer_even_with_valid_json_hash() {
+        let mut bytes = frame();
+        let trailer = bytes.len() - PACK_BINARY_TRAILER_LEN;
+        bytes.insert(trailer, 0);
+        let total = bytes.len() as u64;
+        bytes[16..24].copy_from_slice(&total.to_le_bytes());
+        assert_invalid_offset(&bytes);
+    }
+
+    #[test]
+    fn trailer_size_addition_cannot_overflow_after_valid_table_arithmetic() {
+        let mut bytes = frame();
+        let count = (usize::MAX - PACK_BINARY_HEADER_LEN) / PACK_BINARY_ITEM_TABLE_ENTRY_LEN;
+        bytes[8..16].copy_from_slice(&(count as u64).to_le_bytes());
+        assert!(matches!(
+            PackBinaryView::parse(&bytes),
+            Err(PackBinaryError::ItemCountTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn contiguous_empty_items_and_empty_packs_remain_valid() {
+        for items in [&[][..], &[&b""[..], &b"alpha"[..], &b""[..]][..]] {
+            let bytes = serialize_pack_binary("{}", items, 0);
+            let view = PackBinaryView::parse(&bytes).expect("canonical geometry");
+            assert_eq!(view.item_count(), items.len());
+            for (index, expected) in items.iter().enumerate() {
+                assert_eq!(view.item_slice(index).expect("valid item"), *expected);
+            }
+        }
     }
 }
