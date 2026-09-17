@@ -25,6 +25,7 @@ use std::path::PathBuf;
 
 use ee::core::context::{ContextPackOptions, run_context_pack};
 use ee::core::index::{IndexRebuildOptions, rebuild_index};
+use ee::core::init::{InitOptions, InitStatus, init_workspace};
 use ee::core::memory::{
     GetMemoryOptions, RememberMemoryOptions, get_memory_details, remember_memory,
 };
@@ -44,9 +45,27 @@ fn build_workspace() -> Result<(TempDir, PathBuf, PathBuf, String), String> {
         .path()
         .canonicalize()
         .map_err(|error| format!("canonicalize temp workspace failed: {error}"))?;
-    let database = workspace.join(".ee").join("ee.db");
-    std::fs::create_dir_all(database.parent().expect("db parent"))
-        .map_err(|error| format!("mkdir parent failed: {error}"))?;
+    // `ee init` owns workspace-row creation (91cf7bcbd); create_dir_all is not
+    // enough. Without that row `search_audit_workspace_persisted`
+    // (src/core/search.rs:7320) fails its foreign-key preflight and SUPPRESSES
+    // the retrieval audit rows this file asserts. The bd-g3yh5 rewrite counts
+    // those rows, so a fixture that skips init reports zero and reads as a lib
+    // defect when it is really an unrepresentative workspace.
+    let init = init_workspace(&InitOptions {
+        workspace_path: workspace.clone(),
+        dry_run: false,
+        repair_plan: false,
+        force: false,
+        allow_symlink: false,
+        skip_boilerplate: true,
+    });
+    if !matches!(init.status, InitStatus::Created | InitStatus::AlreadyExists) {
+        return Err(format!(
+            "init_workspace must persist the workspace row: status={:?} errors={:?}",
+            init.status, init.action_errors
+        ));
+    }
+    let database = init.database_path.clone();
     let conn = DbConnection::open_file(&database).map_err(|error| format!("open db: {error}"))?;
     conn.migrate()
         .map_err(|error| format!("migrate: {error}"))?;
