@@ -12158,7 +12158,8 @@ mod tests {
                 11_u32,
             ),
         ] {
-            let hit = published_search_hit(&connection, &index_dir, query, evidence_id)?;
+            let hit =
+                published_search_hit(&connection, &workspace_id, &index_dir, query, evidence_id)?;
             let expected = PublishedSearchHit {
                 doc_id: evidence_id.to_owned(),
                 content: excerpt.to_owned(),
@@ -12480,6 +12481,7 @@ mod tests {
 
         let attached_hit = published_search_hit(
             &connection,
+            &workspace_id,
             &index_dir,
             "Quartz kestrel",
             &first_evidence_id,
@@ -12499,6 +12501,7 @@ mod tests {
         )?;
         let unattached_hit = published_search_hit(
             &connection,
+            &workspace_id,
             &index_dir,
             "Nimbus lantern",
             &second_evidence_id,
@@ -12692,6 +12695,7 @@ mod tests {
 
     fn published_search_hit(
         connection: &DbConnection,
+        workspace_id: &str,
         index_dir: &Path,
         query: &str,
         expected_doc_id: &str,
@@ -12700,9 +12704,15 @@ mod tests {
             crate::search::TwoTierIndex::open(index_dir, crate::search::TwoTierConfig::default())
                 .map_err(|error| error.to_string())?,
         );
+        // Search with the same workspace stack that published the index. Using
+        // the process default here failed coalesced drains with
+        // producer_revision mismatch when registry selection and the process
+        // default diverged (bd-3k1mg / bd-qf3l4).
+        let (stack, _) = workspace_embedder_stack(connection, workspace_id)
+            .map_err(|error| error.to_string())?;
         let searcher = crate::search::TwoTierSearcher::new(
             index,
-            default_search_embedder_stack().fast_arc(),
+            stack.fast_arc(),
             crate::search::TwoTierConfig::default(),
         );
         let query = query.to_owned();
