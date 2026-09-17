@@ -171,6 +171,10 @@ enum PackSlotAcquisition {
         path: PathBuf,
         message: String,
     },
+    /// `--read-only` / `--no-persist` must not create `.ee/pack-slots` locks.
+    /// Concurrent LimitReached otherwise empties the candidate set and forks
+    /// `pack.hash` (bd-reality-core-convergence-1azkt.2).
+    Bypassed,
 }
 
 fn pack_slot_process_gates() -> &'static Mutex<BTreeSet<PathBuf>> {
@@ -3516,10 +3520,14 @@ async fn run_context_pack_with_performance_inner(
     trace.candidate_resolution = candidate_metrics;
     control.check()?;
 
-    let pack_slot_acquisition = try_acquire_pack_slot(
-        &options.workspace_path,
-        options.output_options.resource_profile,
-    );
+    let pack_slot_acquisition = if options.persist_pack {
+        try_acquire_pack_slot(
+            &options.workspace_path,
+            options.output_options.resource_profile,
+        )
+    } else {
+        PackSlotAcquisition::Bypassed
+    };
     let (pack_slot_guard, admission_posture, concurrent_limit_retry_after_ms) =
         match pack_slot_acquisition {
             PackSlotAcquisition::Acquired {
@@ -3560,6 +3568,7 @@ async fn run_context_pack_with_performance_inner(
                 );
                 (None, None, None)
             }
+            PackSlotAcquisition::Bypassed => (None, None, None),
         };
 
     let pack_start = Instant::now();
