@@ -603,3 +603,6 @@ mod governor_surfaces;
 
 #[path = "contracts/governor_truncation_registry.rs"]
 mod governor_truncation_registry;
+
+#[path = "contracts/spawn_deadline_coverage.rs"]
+mod spawn_deadline_coverage;
