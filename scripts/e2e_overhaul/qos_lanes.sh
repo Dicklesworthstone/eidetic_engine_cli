@@ -40,6 +40,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 EE_BINARY="${EE_BINARY:-ee}"
+# shellcheck source=scripts/e2e_overhaul/lib/shared.sh
+source "$SCRIPT_DIR/lib/shared.sh"
 EVENT_LOG="${EE_QOS_LANES_EVENT_LOG:-}"
 TMPDIR_OVERRIDE="${EE_QOS_LANES_TMPDIR:-}"
 FOREGROUND_COUNT="${EE_QOS_LANES_FOREGROUND:-4}"
@@ -153,21 +155,25 @@ PY
 }
 
 trap_cleanup() {
+    local status=$?
     if [ -n "$WORKSPACE" ] && [ -d "$WORKSPACE" ]; then
         emit_event "qos_lanes_setup" "teardown" "passed" 0 "" "tempdir=$WORKSPACE"
-        rm -rf "$WORKSPACE" 2>/dev/null || true
     fi
+    _epic_teardown || return "$status"
+    return "$status"
 }
 trap trap_cleanup EXIT
 
 setup_workspace() {
-    if [ -n "$TMPDIR_OVERRIDE" ]; then
-        WORKSPACE="$(mktemp -d "$TMPDIR_OVERRIDE/ee-qos-lanes.XXXXXX")"
-    else
-        WORKSPACE="$(mktemp -d /tmp/ee-qos-lanes.XXXXXX)"
-    fi
+    EPIC_NAME="qos_lanes"
+    EPIC_SETUP_BASHPID="${BASHPID:-$$}"
+    EPIC_TMP_ROOT="${TMPDIR_OVERRIDE:-${EE_E2E_TMPDIR:-/tmp}}"
+    WORKSPACE="$(mktemp -d "$EPIC_TMP_ROOT/ee-e2e-${EPIC_NAME}.XXXXXX")"
+    EPIC_WORKSPACE="$WORKSPACE"
+    EPIC_RETENTION_MANIFEST="${EE_E2E_RETENTION_MANIFEST:-$WORKSPACE/e2e_retention_manifest.json}"
     EVENT_ROOT="$WORKSPACE/events"
     mkdir -p "$EVENT_ROOT"
+    e2e_log_start "$EPIC_NAME"
     emit_event "qos_lanes_setup" "setup" "passed" 0 "" "tempdir=$WORKSPACE"
 }
 
