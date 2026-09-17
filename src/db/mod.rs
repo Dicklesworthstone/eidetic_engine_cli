@@ -45750,6 +45750,137 @@ mod tests {
     }
 
     #[test]
+    fn v123_mixed_created_at_spellings_leave_two_live_heads_until_v125() -> TestResult {
+        // bd-o22r0. At the same instant, `Z` (0x5A) sorts above `+00:00` (0x2B).
+        // V123's lexical `created_at` backfill therefore treats a Z-spelled
+        // predecessor as newer than its offset-spelled successor and leaves
+        // both live. V124 rewrites `Z` to `.000+00:00`, and `.` (0x2E) still
+        // sorts above `+`, so the damage remains. V125 compares instants via
+        // `julianday` and repairs the chain.
+        //
+        // These UPDATE bodies are the shipped V123/V124/V125 SQL. V123's
+        // ALTER TABLE is not re-run: `migrate()` already applied it.
+        const PRED: &str = "mem_01k00000000000000000000000";
+        const HEAD: &str = "mem_01k00000000000000000000001";
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        const INSTANT_Z: &str = "2026-05-01T00:00:00Z";
+        const INSTANT_OFFSET: &str = "2026-05-01T00:00:00+00:00";
+        const INSTANT_V124: &str = "2026-05-01T00:00:00.000+00:00";
+        const V123_BACKFILL: &str = r#"
+UPDATE memories
+   SET superseded_at = valid_to
+ WHERE valid_to IS NOT NULL
+   AND EXISTS (
+        SELECT 1
+          FROM memories newer
+         WHERE newer.workspace_id = memories.workspace_id
+           AND newer.logical_id = memories.logical_id
+           AND newer.id <> memories.id
+           AND (newer.created_at > memories.created_at
+                OR (newer.created_at = memories.created_at
+                    AND newer.id > memories.id))
+       );
+"#;
+
+        ensure(
+            INSTANT_Z > INSTANT_OFFSET,
+            "Z (0x5A) sorts above +00:00 (0x2B) at the same instant",
+        )?;
+        ensure(
+            INSTANT_V124 > INSTANT_OFFSET,
+            "V124's .000+00:00 still sorts above fraction-less +00:00",
+        )?;
+
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let pred_input = super::CreateMemoryInput {
+            valid_to: Some(INSTANT_Z.to_owned()),
+            ..test_memory_input(WORKSPACE, "Predecessor revision.")
+        };
+        connection.insert_memory_with_timestamps(PRED, &pred_input, INSTANT_Z, INSTANT_Z, PRED)?;
+        connection.insert_memory_with_timestamps(
+            HEAD,
+            &test_memory_input(WORKSPACE, "Successor revision."),
+            INSTANT_OFFSET,
+            INSTANT_OFFSET,
+            PRED,
+        )?;
+
+        connection.execute_raw(V123_BACKFILL)?;
+        let live_after_v123 =
+            connection.list_live_memory_revisions_for_logical_id(WORKSPACE, PRED)?;
+        ensure_equal(
+            &live_after_v123.len(),
+            &2,
+            "after V123 both PRED and HEAD are live",
+        )?;
+
+        connection.execute_raw(super::V124_TIMESTAMP_SPELLING_REPAIR.sql())?;
+        let pred_after_v124 = connection
+            .get_memory(PRED)?
+            .ok_or("predecessor missing after V124")?;
+        ensure_equal(
+            &pred_after_v124.created_at.as_str(),
+            &INSTANT_V124,
+            "V124 rewrites Z created_at to offset form with %f",
+        )?;
+        let head_after_v124 = connection
+            .get_memory(HEAD)?
+            .ok_or("successor missing after V124")?;
+        ensure_equal(
+            &head_after_v124.created_at.as_str(),
+            &INSTANT_OFFSET,
+            "V124 leaves already-canonical offset created_at alone",
+        )?;
+        let live_after_v124 =
+            connection.list_live_memory_revisions_for_logical_id(WORKSPACE, PRED)?;
+        ensure_equal(
+            &live_after_v124.len(),
+            &2,
+            "after V124 both PRED and HEAD are still live",
+        )?;
+
+        connection.execute_raw(super::V125_SUPERSESSION_REDERIVE.sql())?;
+        let live_after_v125 =
+            connection.list_live_memory_revisions_for_logical_id(WORKSPACE, PRED)?;
+        ensure_equal(
+            &live_after_v125.len(),
+            &1,
+            "after V125 exactly one live head",
+        )?;
+        ensure_equal(
+            &live_after_v125[0].id.as_str(),
+            &HEAD,
+            "the greater-id successor is the live head",
+        )?;
+        ensure_equal(
+            &connection.get_memory_superseded_at(PRED)?,
+            &Some(INSTANT_Z.to_owned()),
+            "predecessor is history after V125",
+        )?;
+        ensure_equal(
+            &connection.get_memory_superseded_at(HEAD)?,
+            &None,
+            "successor stays live after V125",
+        )?;
+
+        connection.execute_raw(super::V125_SUPERSESSION_REDERIVE.sql())?;
+        let live_after_rerun =
+            connection.list_live_memory_revisions_for_logical_id(WORKSPACE, PRED)?;
+        ensure_equal(&live_after_rerun.len(), &1, "re-running V125 is idempotent")?;
+        ensure_equal(
+            &live_after_rerun[0].id.as_str(),
+            &HEAD,
+            "idempotent re-run keeps the same head",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn task_episode_get_rejects_incompatible_retrieved_memory_ids_json() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
