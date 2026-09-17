@@ -851,12 +851,12 @@ Unix product on `main` (proof ledger:
 
 | Gap | Bead | Current disposition |
 | --- | --- | --- |
-| Two distinct humans on a real Tailscale tailnet exchange memory; US-4 search/pack works; cursors advance; no deferred sync code | `bd-tc-epic-qzk7o.3.8` (T2.6) | **Criterion mismatch.** Closed on a valid two-host tailnet artifact, explicitly not two humans. Resolve through the §10 decision/proof bead before archive. |
+| Two distinct humans on a real Tailscale tailnet exchange memory; US-4 search/pack works; cursors advance; no deferred sync code | `bd-tc-epic-qzk7o.3.8` (T2.6) | **Resolved 2026-09-17 by approved scope amendment (Branch B, session operator via WildBluff; bead `bd-reality-core-convergence-1azkt.8`).** v1 boundary = two independent tailnet hosts; the closed two-host artifact stands as-is and is not relabeled two-human. Residual risk: distinct-operator ceremony/usability remains unproven; the two-human soak remains a post-v1 follow-up requiring an owner before any roadmap promise. |
 | Frame/session/bootstrap fuzz beyond `tests/property_origin_stream.rs` | `bd-tc-epic-qzk7o.3.9` (T2.7) | Closed with frame/session/bootstrap properties and fuzz, MAC-before-counter proof, RCH host/duration, and commit `acc230aa`. |
 | Source-snapshot publication fence | `bd-d67os.28` then `.6.7` | Both closed; `.6.7` records coalesced intake plus the source-snapshot publication fence. |
 | Windows-host DACL / inbound crash / owner-only key-path | `bd-tc-epic-qzk7o.12` + `.2.4` | Closed with a retained Windows-host DACL and crash/restart artifact. Current cross-platform CI remains a separate release-readiness concern. |
 | Production Entra / Okta / Google IdP soak | `bd-tc-epic-qzk7o.8.8` | Closed under §5's allowed explicit decision: fake IdP is the v1 ceiling; a vendor soak is post-v1 unless that decision changes. |
-| Program closeout | `bd-tc-epic-qzk7o.7.7` (T6.7) | Closed, as are the milestone parents and root epic, despite the unresolved `.3.8` wording mismatch. |
+| Program closeout | `bd-tc-epic-qzk7o.7.7` (T6.7) | Closed, as are the milestone parents and root epic. The `.3.8` wording mismatch was resolved 2026-09-17 by the approved two-host scope amendment (see ledger row above). |
 
 ---
 
@@ -901,7 +901,7 @@ historical inputs to §15 rather than a second, competing close gate.
 Archive this file to `docs/archive/close_the_gap_2026-08.md` and start Part IV
 **in this same path** only when these criteria and §15 are both satisfied:
 
-- `.3.8` has a two-human Tailscale proof artifact.
+- `.3.8` two-human criterion: RESOLVED 2026-09-17 by approved scope amendment — v1 boundary is two independent tailnet hosts (existing `.3.8` artifact, not relabeled); two-human soak is an owned post-v1 follow-up before any roadmap promise.
 - `.12` has a Windows-host soak artifact (or an explicit fail-closed
   product decision recorded in the matrix).
 - `.8.8` has a production IdP soak artifact (or an explicit "fake-IdP is
