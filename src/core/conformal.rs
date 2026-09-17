@@ -158,29 +158,33 @@ pub fn why_conformal_confidence_intervals(
 }
 
 pub fn conformal_score_interval(score: f32, quantile: f32) -> [f32; 2] {
+    // Missing or invalid uncertainty is not zero uncertainty. Keep the full
+    // score domain instead of turning a bad threshold into a point estimate.
+    if !quantile.is_finite() || !(0.0..=1.0).contains(&quantile) {
+        return [0.0, 1.0];
+    }
     let score = clamp_unit_score(score);
-    let quantile = clamp_unit_score(quantile);
     [(score - quantile).max(0.0), (score + quantile).min(1.0)]
 }
 
+/// Return the split-conformal threshold for nonconformity scores in `[0, 1]`.
+/// Invalid observations do not count toward the calibration sample size.
+/// When the requested rank exceeds the observed sample, the threshold is the
+/// upper support bound, not the largest observed residual.
 pub fn split_conformal_quantile(mut scores: Vec<f32>, coverage: f32) -> f32 {
-    scores.retain(|score| score.is_finite());
+    if !coverage.is_finite() || !(0.0..=1.0).contains(&coverage) {
+        return 1.0;
+    }
+    scores.retain(|score| score.is_finite() && (0.0..=1.0).contains(score));
     if scores.is_empty() {
         return 1.0;
     }
-    // Use `total_cmp` instead of `partial_cmp(...).unwrap_or(Equal)` for a
-    // total ordering. The `retain(is_finite)` above already filters NaN
-    // so the two are observationally equivalent today, but defense-in-
-    // depth matters because the quantile lookup at the next line trusts
-    // a total order: a NaN sneaking past the filter (e.g. through a
-    // future caller that bypasses `split_conformal_quantile` and reads
-    // `scores` directly, or a refactor that moves the retain elsewhere)
-    // would silently scramble the rank lookup and yield a non-
-    // deterministic conformal threshold without breaking any test.
     scores.sort_by(|left, right| left.total_cmp(right));
-    let coverage = clamp_unit_score(coverage);
-    let rank = ((scores.len() as f32 + 1.0) * coverage).ceil() as usize;
-    scores[rank.saturating_sub(1).min(scores.len() - 1)]
+    let rank = ((scores.len() as f64 + 1.0) * f64::from(coverage)).ceil() as usize;
+    if rank > scores.len() {
+        return 1.0;
+    }
+    scores[rank.saturating_sub(1)]
 }
 
 fn load_conformal_nonconformity_scores(workspace_path: &Path) -> Vec<f32> {
@@ -231,22 +235,24 @@ fn configure_conformal_calibration_open_no_follow(options: &mut fs::OpenOptions)
 fn configure_conformal_calibration_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn conformal_nonconformity_from_value(value: &Value) -> Option<f32> {
-    number_at(value, &["nonconformityScore", "nonconformity_score"])
-        .or_else(|| {
-            let score = number_at(value, &["score", "fusionScore", "fusion_score"])?;
-            Some(1.0 - score)
-        })
-        .map(clamp_unit_score)
+    let residual_keys = ["nonconformityScore", "nonconformity_score"];
+    if residual_keys.iter().any(|key| value.get(*key).is_some()) {
+        // An explicitly invalid residual must not be replaced by another
+        // field and counted as a valid calibration observation.
+        return number_at(value, &residual_keys);
+    }
+    number_at(value, &["score", "fusionScore", "fusion_score"]).map(|score| 1.0 - score)
 }
 
 fn number_at(value: &Value, keys: &[&str]) -> Option<f32> {
-    keys.iter().find_map(|key| {
-        value
-            .get(*key)
-            .and_then(Value::as_f64)
-            .filter(|number| number.is_finite())
-            .map(|number| number as f32)
-    })
+    let number = keys.iter().find_map(|key| value.get(*key))?.as_f64()?;
+    // Validate before narrowing to f32: a finite JSON f64 can overflow f32.
+    // Clamping raw BM25 scores or invalid residuals would fabricate perfect
+    // calibration samples and unjustifiably narrow the prediction set.
+    if !number.is_finite() || !(0.0..=1.0).contains(&number) {
+        return None;
+    }
+    Some(number as f32)
 }
 
 fn clamp_unit_score(score: f32) -> f32 {
@@ -254,5 +260,125 @@ fn clamp_unit_score(score: f32) -> f32 {
         score.clamp(0.0, 1.0)
     } else {
         0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DEFAULT_CONFORMAL_COVERAGE, conformal_nonconformity_from_value, conformal_score_interval,
+        split_conformal_quantile,
+    };
+    use serde_json::{Value, json};
+
+    #[test]
+    fn calibration_accepts_unit_scores_and_residual_aliases() {
+        for key in ["nonconformityScore", "nonconformity_score"] {
+            for number in [0.0_f32, 0.25, 1.0] {
+                let mut row = json!({});
+                row[key] = json!(number);
+                assert_eq!(conformal_nonconformity_from_value(&row), Some(number));
+            }
+        }
+        for key in ["score", "fusionScore", "fusion_score"] {
+            for number in [0.0_f32, 0.25, 1.0] {
+                let mut row = json!({});
+                row[key] = json!(number);
+                assert_eq!(conformal_nonconformity_from_value(&row), Some(1.0 - number));
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_calibration_numbers_are_not_clamped_into_samples() {
+        for key in [
+            "nonconformityScore",
+            "nonconformity_score",
+            "score",
+            "fusionScore",
+            "fusion_score",
+        ] {
+            for number in [-1e300_f64, -0.01, 1.01, 1e300] {
+                let mut row = json!({});
+                row[key] = json!(number);
+                assert_eq!(
+                    conformal_nonconformity_from_value(&row),
+                    None,
+                    "invalid calibration observation: {row}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_explicit_residual_does_not_fall_back_to_score() {
+        for invalid in [Value::Null, json!("0.5"), json!(false), json!(-0.5)] {
+            for key in ["nonconformityScore", "nonconformity_score"] {
+                let mut row = json!({"score": 0.75});
+                row[key] = invalid.clone();
+                assert_eq!(conformal_nonconformity_from_value(&row), None);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_primary_number_does_not_fall_back_to_alias() {
+        assert_eq!(
+            conformal_nonconformity_from_value(&json!({
+                "score": 12.0,
+                "fusionScore": 0.75
+            })),
+            None
+        );
+        assert_eq!(
+            conformal_nonconformity_from_value(&json!({
+                "nonconformityScore": -1.0,
+                "nonconformity_score": 0.25
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn small_sample_uses_upper_support_bound_for_unobserved_rank() {
+        assert_eq!(
+            split_conformal_quantile(vec![0.125, 0.25, 0.375], DEFAULT_CONFORMAL_COVERAGE),
+            1.0
+        );
+        assert_eq!(split_conformal_quantile(vec![0.125; 100], 1.0), 1.0);
+    }
+
+    #[test]
+    fn quantile_uses_valid_sample_count_and_order_statistic() {
+        let scores = vec![f32::NAN, f32::INFINITY, -2.0, -1.0, 0.25, 0.75, 2.0];
+        assert_eq!(split_conformal_quantile(scores, 0.5), 0.75);
+        assert_eq!(
+            split_conformal_quantile(vec![0.75, 0.25, 0.5, 0.0], 0.5),
+            0.5
+        );
+    }
+
+    #[test]
+    fn empty_or_invalid_calibration_stays_conservative() {
+        assert_eq!(split_conformal_quantile(Vec::new(), 0.95), 1.0);
+        assert_eq!(
+            split_conformal_quantile(vec![-1.0, 2.0, f32::NAN, f32::INFINITY], 0.95),
+            1.0
+        );
+    }
+
+    #[test]
+    fn invalid_coverage_stays_conservative() {
+        for coverage in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.1, 1.1] {
+            assert_eq!(split_conformal_quantile(vec![0.125; 100], coverage), 1.0);
+        }
+    }
+
+    #[test]
+    fn invalid_uncertainty_never_becomes_a_point_interval() {
+        for quantile in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.1, 1.1] {
+            assert_eq!(conformal_score_interval(0.75, quantile), [0.0, 1.0]);
+        }
+        assert_eq!(conformal_score_interval(0.75, 0.125), [0.625, 0.875]);
     }
 }
