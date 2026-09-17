@@ -133,6 +133,10 @@ source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
 DEFAULT_AGENT_BUILD_ROOT="/Volumes/USBNVME16TB/temp_agent_space"
 BEADS_LOCK_WAIT_SECONDS="${EE_BEADS_LOCK_WAIT_SECONDS:-30}"
 BEADS_LOCK_SKIP_CODE=75
+# scripts/closure-lint.sh exits this when its audit baseline lists debt that no
+# longer exists. Kept distinct from 1 so the Verification Drift Guard cannot
+# excuse it as a tracked violation; see closure_lint_or_tracked_drift.
+CLOSURE_LINT_STALE_BASELINE_CODE=3
 VERIFY_BUDGET_FILE="${EE_VERIFY_BUDGET_FILE:-${SCRIPT_DIR}/verify-budget.toml}"
 VERIFY_BUDGET_FAIL_CODE=6
 
@@ -932,6 +936,19 @@ closure_lint_or_tracked_drift() {
     # through to the drift guard, and a passing guard converted a gate that
     # NEVER EXECUTED into a PASS that no counter ever saw.
     if [ "$closure_exit" -eq "$BEADS_LOCK_SKIP_CODE" ]; then
+        return "$closure_exit"
+    fi
+
+    # A STALE AUDIT BASELINE is not a violation and must not be excusable.
+    # closure-lint.sh exits CLOSURE_LINT_STALE_BASELINE_CODE when its baseline
+    # lists debt that no longer exists. The drift guard's job is to excuse
+    # TRACKED violations, and it decides by reading `.count` from the report --
+    # which is ZERO in this case, because every live violation IS baselined. So
+    # routing this through the guard would excuse it every time and make the
+    # linter's stale arm inert. The fix for a stale entry is to delete the line,
+    # not to open a bead, so there is nothing for the guard to find.
+    if [ "$closure_exit" -eq "$CLOSURE_LINT_STALE_BASELINE_CODE" ]; then
+        echo "[-] Closure linter: audit baseline lists debt that no longer exists; delete those lines" >&2
         return "$closure_exit"
     fi
 

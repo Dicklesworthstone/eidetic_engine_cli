@@ -212,6 +212,7 @@ fn closure_gate_status(lint_code: i32, guard_code: i32) -> Output {
             r#"
 set -uo pipefail
 BEADS_LOCK_SKIP_CODE=75
+CLOSURE_LINT_STALE_BASELINE_CODE=3
 with_beads_read_locks() {
     case "$1" in
         *closure-lint.sh)             return "$LINT_CODE" ;;
@@ -274,6 +275,40 @@ fn closure_lint_gate_still_passes_and_still_excuses() {
 /// Before the fix a held beads lock fell through to the drift guard, and a
 /// passing guard converted a gate that NEVER EXECUTED into a PASS that no
 /// counter saw -- invisible to the INCOMPLETE banner and to the exit status.
+/// A STALE audit baseline must not be excusable by the drift guard.
+///
+/// `scripts/closure-lint.sh` exits 3 when its baseline lists debt that no longer
+/// exists. That is bookkeeping to delete, not a violation for a bead to track,
+/// and the guard decides what to excuse by reading `.count` from the report --
+/// which is ZERO in this case, because every live violation IS baselined. So
+/// routing exit 3 through the guard would excuse it on every run and make the
+/// linter's stale arm inert inside the only gate this project has.
+///
+/// Measured before the code was chosen: with the linter at 1 and the guard at 0,
+/// this function returns 0. That is the correct behaviour for a TRACKED
+/// violation and the wrong one for a stale baseline, which is why the two need
+/// different exit codes rather than different messages.
+#[test]
+fn a_stale_closure_lint_baseline_is_not_excusable_by_the_drift_guard() {
+    assert_eq!(
+        closure_gate_code(3, 0),
+        "3",
+        "a stale baseline must fail even when the drift guard passes"
+    );
+    assert_eq!(
+        closure_gate_code(3, 1),
+        "3",
+        "a stale baseline must fail when the drift guard fails too"
+    );
+    // The paired contrast: a plain violation IS still excusable, so this is a
+    // new un-excusable class rather than the end of the excuse path.
+    assert_eq!(
+        closure_gate_code(1, 0),
+        "0",
+        "a tracked violation must still be excused by a passing drift guard"
+    );
+}
+
 #[test]
 fn contended_closure_lint_is_reported_as_contention_not_as_a_pass() {
     let skip_code = "75";
@@ -312,6 +347,7 @@ fn closure_stage_through_run_stage(lint_code: i32, guard_code: i32) -> (String, 
             r#"
 set -uo pipefail
 BEADS_LOCK_SKIP_CODE=75
+CLOSURE_LINT_STALE_BASELINE_CODE=3
 STAGE_RESULTS=""
 STAGE_PASSED=0
 STAGE_SKIPPED_CONTENTION=0

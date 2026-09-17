@@ -156,6 +156,10 @@ BASELINED_VIOLATION_COUNT=0
 # so `set -u` holds on every path, including the ones where the baseline file is
 # absent and apply_audit_baseline returns early.
 STALE_AUDIT_BASELINE_ENTRIES=""
+# Exit code for "the baseline lists debt that no longer exists". Deliberately
+# not 1: see the comment at the reporting site for why a plain failure would be
+# excused by the Verification Drift Guard.
+STALE_AUDIT_BASELINE_EXIT_CODE=3
 CURRENT_BEAD_ID=""
 CURRENT_BEAD_LABELS=""
 CURRENT_BEAD_DESCRIPTION=""
@@ -2032,7 +2036,16 @@ if [ -n "$STALE_AUDIT_BASELINE_ENTRIES" ]; then
         write_report "fail"
         echo "Report written to $REPORT_FILE"
     fi
-    exit 1
+    # A DISTINCT exit code, not 1. verify.sh's closure_lint_or_tracked_drift
+    # lets the Verification Drift Guard excuse a plain exit 1 as "tracked
+    # violations", and the guard reads `.count` from the report -- which is ZERO
+    # here, because every live violation IS baselined. So a stale baseline
+    # reported as exit 1 is excused and the stage passes, which would make this
+    # whole arm inert inside the only gate this project has. Measured before
+    # choosing the code: with the linter at 1 and the guard at 0, the gate
+    # function returns 0. A stale baseline is bookkeeping to delete, not a
+    # violation for a bead to track, so it must not be excusable.
+    exit "$STALE_AUDIT_BASELINE_EXIT_CODE"
 fi
 
 # Output results
