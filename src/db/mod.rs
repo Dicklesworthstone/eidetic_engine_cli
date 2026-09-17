@@ -24171,19 +24171,11 @@ impl DbConnection {
 
     /// List memories that are still temporally valid at `as_of`.
     ///
-    /// STOPGAP for bd-tmv70; this is NOT the fix. `memories.valid_to` carries
-    /// two independent facts -- "a newer revision superseded this row" and
-    /// "the author said this stops being valid at T" -- and one nullable
-    /// column cannot represent both. `list_memories` reads the column as the
-    /// former, so ANY author-set expiry, even a date centuries out, hides the
-    /// memory from `ee memory list` entirely. This reader errs the other way:
-    /// a row whose expiry has not yet arrived is returned.
-    ///
-    /// What it CANNOT do: distinguish a superseded revision from a live row
-    /// that merely carries a future expiry -- a superseded row with a future
-    /// `valid_to` is still returned here. Only splitting the column into
-    /// separate supersession and validity fields fixes that. bd-tmv70 stays
-    /// open for that work and must not be closed by this stopgap.
+    /// Identity (`superseded_at IS NULL`) and applicability (`valid_to`) are
+    /// separate (bd-tmv70 / V123). This reader returns current heads whose
+    /// author expiry has not yet elapsed. A superseded row is excluded even
+    /// when its `valid_to` is still in the future; a live head with a future
+    /// `--valid-to` is included.
     ///
     /// `as_of` is a parameter, never SQL `now`: a wall-clock predicate cannot
     /// express `--as-of` and would make query results non-deterministic.
@@ -26040,9 +26032,9 @@ impl DbConnection {
 
     /// List memory IDs carrying `tag` that are still temporally valid at `as_of`.
     ///
-    /// STOPGAP for bd-tmv70, with exactly the limits described on
-    /// `list_memories_valid_at`: it cannot tell a superseded revision from a
-    /// live row that merely carries a future expiry.
+    /// Identity plus applicability at `as_of` (bd-tmv70 / V123): current heads
+    /// whose author expiry has not yet elapsed. A superseded revision is
+    /// excluded even with a future `valid_to`.
     pub fn list_memories_by_tag_valid_at(
         &self,
         workspace_id: &str,
@@ -45947,6 +45939,82 @@ UPDATE memories
             recent.iter().any(|memory| memory.id == OLDER)
                 && recent.iter().any(|memory| memory.id == NEWER),
             "as_of bound includes both same-instant spellings",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn future_valid_to_live_head_is_listed_and_superseded_revision_is_not() -> TestResult {
+        // bd-tmv70. Identity (`superseded_at`) and author expiry (`valid_to`)
+        // must be distinguishable in one workspace: a live head with a future
+        // --valid-to stays on list/tag surfaces; a superseded sibling does not.
+        const PRED: &str = "mem_01ktmv70000000000000000000";
+        const HEAD: &str = "mem_01ktmv70000000000000000001";
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        const FUTURE: &str = "2099-01-01T00:00:00Z";
+        const SUPERSEDED_AT: &str = "2026-05-01T00:00:00Z";
+
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let pred = super::CreateMemoryInput {
+            tags: vec!["history-tag".to_owned()],
+            valid_to: Some(FUTURE.to_owned()),
+            ..test_memory_input(WORKSPACE, "Superseded revision.")
+        };
+        let head = super::CreateMemoryInput {
+            tags: vec!["live-tag".to_owned()],
+            valid_to: Some(FUTURE.to_owned()),
+            ..test_memory_input(WORKSPACE, "Live head with future valid_to.")
+        };
+        connection.insert_memory_with_timestamps(
+            PRED,
+            &pred,
+            "2026-05-01T00:00:00+00:00",
+            "2026-05-01T00:00:00+00:00",
+            PRED,
+        )?;
+        connection.insert_memory_with_timestamps(
+            HEAD,
+            &head,
+            "2026-05-01T00:00:01+00:00",
+            "2026-05-01T00:00:01+00:00",
+            PRED,
+        )?;
+        ensure(
+            connection.mark_memory_superseded(PRED, SUPERSEDED_AT)?,
+            "predecessor is marked superseded",
+        )?;
+
+        let listed = connection.list_memories(WORKSPACE, None, false)?;
+        ensure_equal(&listed.len(), &1, "identity list returns only the live head")?;
+        ensure_equal(&listed[0].id.as_str(), &HEAD, "listed id is the live head")?;
+        ensure_equal(
+            &listed[0].valid_to.as_deref(),
+            &Some(FUTURE),
+            "future valid_to does not hide the live head",
+        )?;
+
+        let by_live = connection.list_memories_by_tag(WORKSPACE, "live-tag")?;
+        ensure_equal(
+            &by_live.as_slice(),
+            &[HEAD.to_owned()][..],
+            "tag list keeps the live head",
+        )?;
+        let by_history = connection.list_memories_by_tag(WORKSPACE, "history-tag")?;
+        ensure_equal(
+            &by_history.len(),
+            &0,
+            "tag list hides the superseded revision",
+        )?;
+
+        let tags = connection.list_all_tags(WORKSPACE)?;
+        ensure(
+            tags.contains(&"live-tag".to_owned()) && !tags.contains(&"history-tag".to_owned()),
+            "tag inventory keeps live-tag and drops history-tag",
         )?;
 
         connection.close()?;
