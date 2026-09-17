@@ -173,6 +173,46 @@ assert_jq_file_argjson "$MIGRATION_MANIFEST" \
     tail "$migration_compiled_tail" \
     '[.allocations[] | select(.status == "planned") | .version] | min > $tail' \
     "migration registry reservations stay ahead of the compiled tail"
+
+step "path redactors keep one shared prefix set"
+# bd-redactor-prefix-divergence-lsy52. Twenty-one redactors each carried their
+# own hand-copied path-prefix list. They diverged into three incompatible
+# families: /root/ reached exactly one of the twenty-one, so a provenance URI
+# naming /root/.ssh/id_rsa was redacted on one surface and published verbatim by
+# twenty. Every one of the twenty-one had omissions that were live leaks.
+#
+# The lists are now consolidated into crate::util::SENSITIVE_PATH_PREFIXES, but
+# nothing stopped a twenty-second private list appearing tomorrow -- which is
+# exactly how bd-zs76e recurred within an hour of being fixed. This is the guard
+# that fails the same run instead.
+redactor_private_lists="$(
+    python3 - <<'PYEOF'
+import io, re, glob, sys
+
+offenders = []
+for path in sorted(glob.glob("src/**/*.rs", recursive=True)):
+    if path.endswith("util/mod.rs"):
+        continue
+    text = io.open(path, encoding="utf-8", errors="replace").read()
+    if "REDACTED_PATH" not in text:
+        continue
+    for block in re.finditer(r"&\[&str\]\s*=\s*&\[(.*?)\];", text, re.S):
+        items = re.findall(r'"((?:\\.|[^"\\])*)"', block.group(1))
+        prefixes = [i for i in items if i.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", i)]
+        if len(prefixes) >= 3:
+            offenders.append(f"{path} ({len(prefixes)} prefixes)")
+            break
+sys.stdout.write("\n".join(offenders))
+PYEOF
+)"
+if [ -z "$redactor_private_lists" ]; then
+    e2e_log_assert_eq "0" "0" "path redactors share one prefix set"
+    _harness_pass "path redactors share one prefix set"
+else
+    e2e_log_assert_eq "$(printf '%s\n' "$redactor_private_lists" | wc -l | tr -d ' ')" "0" \
+        "path redactors share one prefix set"
+    _harness_fail "path redactors share one prefix set: these files define a private path-prefix list instead of using crate::util::SENSITIVE_PATH_PREFIXES -- $(printf '%s' "$redactor_private_lists" | tr '\n' ' ')"
+fi
 assert_jq_file "$MIGRATION_MANIFEST" \
     '.currentLastCompiledMigration == 121 and .nextPlannedMigration == 122 and (.policy.nonInitiativeCompiledMigrations.versions.V100 | startswith("V100_PACK_EVIDENCE_ITEMS")) and (.policy.nonInitiativeCompiledMigrations.versions.V101 | startswith("V101_ATTEMPT_FAMILY_IMMUTABILITY_REPAIR")) and (.policy.nonInitiativeCompiledMigrations.versions.V121 | startswith("V121_EVIDENCE_FEEDBACK_TARGETS"))' \
     "migration registry pins compiled tail and next planned migration"
