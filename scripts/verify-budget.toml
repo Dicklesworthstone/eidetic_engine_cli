@@ -208,12 +208,27 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Vision Coverage"
-# Re-measured 2026-09-17, 5 samples, local load average 22.97: 4 5 6 5 5.
+# Measured 2026-09-17, 5 samples, local load average 22.97: 4 5 6 5 5.
 # Lowered 10 -> 6, which TIGHTENS this stage's own lines (advisory 15s -> 9s,
 # hard fail 30s -> 18s) while still leaving 3x headroom over the observed max of
 # 6s. This is a real measurement, not room made for a neighbour: the budget
 # file's own rationale forbids retuning a number to create space, and a number
 # nobody has measured is the thing that makes the file fiction.
+#
+# RE-MEASURED 2026-09-17 after bd-wn8xh added the behavioral-evidence scan to
+# this stage (it now reads every tests/**/*.rs and scripts/**/*.sh to find which
+# documented surfaces anything actually invokes). 5 samples, local load average
+# 7.88: 5.36 5.47 5.67 5.84 6.97 -> median 5.67, so p50 stays 6.
+#
+# The number is unchanged but the measurement behind it is NOT the one above:
+# the earlier samples timed a script without the evidence scan, and leaving
+# their rationale to stand for this stage would make the file describe code that
+# no longer exists. Note the two runs are not directly comparable -- the earlier
+# median of 5 was taken at load 22.97 and this one at 7.88, so expect this stage
+# nearer its 9s advisory line under heavy fleet load. It was NOT raised to 7:
+# non-benchmark p50 totals 599 against the 600 ceiling, and spending the last
+# second of headroom in the whole file on a stage whose measured median is 5.67
+# would be taking room the number does not justify.
 expected_seconds_p50 = 6
 regression_factor = 1.5
 
