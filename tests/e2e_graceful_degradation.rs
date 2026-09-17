@@ -1271,3 +1271,215 @@ fn search_validity_window_filters_real_index_results_and_opt_ins_restore_them() 
         ),
     )
 }
+
+/// The scope disclaimer `pack` must carry whenever it reports a degraded
+/// banner, in the two halves bd-pack-doctor-posture-disagreement-nts29 asked
+/// for: the verdict's scope, and a pointer at the surface that owns workspace
+/// health. Matched as substrings so wording can be revised without silently
+/// dropping either half.
+const PACK_SCOPE_DISCLAIMER_FRAGMENTS: [&str; 2] = ["this pack only", "ee doctor"];
+
+fn pack_banner<'a>(pack_json: &'a Value, context: &str) -> Result<&'a Value, String> {
+    pack_json
+        .pointer("/data/pack/advisoryBanner")
+        .ok_or_else(|| format!("{context}: pack output has no /data/pack/advisoryBanner"))
+}
+
+/// The reconciliation rule, applied identically to every observed state.
+///
+/// NOT "the two surfaces must agree". This bead's own root cause establishes
+/// that `pack` reports the retrieval degradations of ONE invocation while
+/// `doctor` reports static workspace health, from disjoint inputs, BY DESIGN.
+/// A must-always-match assertion would encode a requirement ee deliberately
+/// does not meet, and the first legitimate divergence would be "fixed" by
+/// weakening it.
+///
+/// What is owed instead is disclosure: whenever pack renders `degraded`, its
+/// banner must say that the verdict is scoped to that invocation and point at
+/// the surface that does own workspace posture. Then a reader who sees
+/// `doctor: ok` beside `pack: degraded` is told why, instead of concluding one
+/// of them is lying.
+fn ensure_pack_banner_reconciles_with_doctor(
+    pack_json: &Value,
+    doctor_verdict: &str,
+    state: &str,
+) -> TestResult {
+    let banner = pack_banner(pack_json, state)?;
+    let status = banner
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{state}: advisoryBanner has no status"))?;
+    let summary = banner
+        .get("summary")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{state}: advisoryBanner has no summary"))?;
+    let degradation_count = banner
+        .get("degradationCount")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("{state}: advisoryBanner has no degradationCount"))?;
+
+    // Vocabulary invariant, both directions. A `degraded` banner with no
+    // counted degradation, or counted degradations under a `clear` banner,
+    // is the two halves of the same surface disagreeing with each other --
+    // which has to be excluded before any cross-surface claim means anything.
+    ensure(
+        (status == "degraded") == (degradation_count > 0),
+        format!(
+            "{state}: pack banner status and degradationCount contradict each other \
+             (status={status}, degradationCount={degradation_count}, doctor posture={doctor_verdict})"
+        ),
+    )?;
+
+    if status == "degraded" {
+        for fragment in PACK_SCOPE_DISCLAIMER_FRAGMENTS {
+            ensure(
+                summary.contains(fragment),
+                format!(
+                    "{state}: pack reported `degraded` while doctor reported `{doctor_verdict}`, \
+                     and its banner omitted `{fragment}`; an unexplained disagreement between \
+                     these two surfaces is the defect this test exists to prevent. summary={summary:?}"
+                ),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn doctor_posture(doctor_json: &Value, context: &str) -> Result<String, String> {
+    doctor_json
+        .pointer("/data/posture")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{context}: doctor output has no /data/posture"))
+}
+
+/// bd-pack-doctor-posture-disagreement-nts29, acceptance bullet 3: one
+/// workspace evaluated by BOTH surfaces, verdict vocabulary reconciled.
+///
+/// Bullets 1 and 2 are unit-level and already pass. This is the cross-surface
+/// half, and it was the one genuinely missing: the only other `nts29` hits
+/// under `tests/` are recorded run logs, not assertions.
+///
+/// Shaped after `ready_index_posture_is_coherent_across_public_cli_surfaces`
+/// above -- one workspace, no writes between invocations, several public CLI
+/// surfaces -- which is the right shape and had simply never been pointed at
+/// the pack/doctor pair.
+///
+/// STATE B is what keeps this from being a vacuous pass. On a healthy
+/// workspace pack renders `clear`, so the disclosure rule holds with a false
+/// antecedent and asserts nothing. `insert_unindexed_memory` writes a memory
+/// row without an index job; the `memories` insert trigger advances
+/// `workspace_generations` while the published index generation stays put, so
+/// the index is stale deterministically -- no env knob, no model download,
+/// and the same mechanism `stale_index_search_degrades_to_lexical_fallback_
+/// and_recovers_after_rebuild` already relies on. The test asserts the
+/// antecedent actually fired before leaning on it.
+///
+/// Deliberately NOT built on `embed_model_unavailable`, the other obvious way
+/// to make pack degrade: `doctor` reports that same code
+/// (src/core/doctor.rs:2937), so the two surfaces AGREE there and a test built
+/// on it would be green without exercising a disagreement at all.
+#[test]
+fn pack_and_doctor_verdicts_are_reconciled_across_one_workspace() -> TestResult {
+    let artifact_dir = unique_artifact_dir("pack-doctor-posture-reconciliation")?;
+    let workspace = artifact_dir.join("workspace");
+    fs::create_dir_all(&workspace)
+        .map_err(|error| format!("failed to create workspace: {error}"))?;
+
+    let init = run_ee_json(&workspace, ["init"], "nts29 init")?;
+    assert_success(&init, "nts29 init")?;
+    remember(
+        &workspace,
+        "posturecheck quill release checklist requires cargo fmt before tagging",
+    )?;
+    remember(
+        &workspace,
+        "posturecheck quill a prior release failed when clippy was skipped entirely",
+    )?;
+    let rebuild = run_ee_json(&workspace, ["index", "rebuild"], "nts29 rebuild")?;
+    assert_success(&rebuild, "nts29 rebuild")?;
+
+    // STATE A -- healthy workspace, current index. Baseline: whatever the two
+    // surfaces say here, they must already satisfy the rule.
+    let healthy_doctor = run_ee_json(&workspace, ["doctor", "--full"], "nts29 healthy doctor")?;
+    assert_success(&healthy_doctor, "nts29 healthy doctor")?;
+    let healthy_posture = doctor_posture(&healthy_doctor.json, "nts29 healthy doctor")?;
+    let healthy_pack = run_ee_json(
+        &workspace,
+        [
+            "pack",
+            "posturecheck quill release checklist",
+            "--source-mode",
+            "lexical_only",
+            "--max-tokens",
+            "2048",
+        ],
+        "nts29 healthy pack",
+    )?;
+    assert_success(&healthy_pack, "nts29 healthy pack")?;
+    ensure_pack_banner_reconciles_with_doctor(
+        &healthy_pack.json,
+        &healthy_posture,
+        "healthy workspace",
+    )?;
+
+    // STATE B -- a durable memory with no index job. The index is now stale
+    // against the database, which is a REAL retrieval degradation for pack
+    // and a workspace fact doctor evaluates on its own terms.
+    insert_unindexed_memory(
+        &workspace,
+        "posturecheck quill unindexed row forces the published index generation to fall behind",
+    )?;
+
+    let stale_doctor = run_ee_json(&workspace, ["doctor", "--full"], "nts29 stale doctor")?;
+    assert_success(&stale_doctor, "nts29 stale doctor")?;
+    let stale_posture = doctor_posture(&stale_doctor.json, "nts29 stale doctor")?;
+
+    // No `--source-mode` here, unlike STATE A: this is the invocation shape
+    // that `stale_index_search_degrades_to_lexical_fallback_and_recovers_
+    // after_rebuild` already proves surfaces the stale-index degradation.
+    let stale_pack = run_ee_json(
+        &workspace,
+        [
+            "pack",
+            "posturecheck quill release checklist",
+            "--max-tokens",
+            "2048",
+        ],
+        "nts29 stale pack",
+    )?;
+    assert_success(&stale_pack, "nts29 stale pack")?;
+
+    // NON-VACUITY GUARD. Everything below is an implication keyed on this
+    // being `degraded`; if the stale index stops reaching the pack banner the
+    // rule silently stops being tested, so the antecedent is asserted rather
+    // than hoped for. If this line is what fails, the finding is "a stale
+    // index no longer degrades the pack banner", not "the disclosure is
+    // missing" -- and the two verdicts are printed so the reader can tell.
+    let stale_banner = pack_banner(&stale_pack.json, "nts29 stale pack")?;
+    let stale_status = stale_banner
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("<missing>");
+    ensure(
+        stale_status == "degraded",
+        format!(
+            "a stale index must reach the pack advisory banner, or this test's disclosure rule \
+             is never exercised: banner status={stale_status}, doctor posture={stale_posture}, \
+             banner={stale_banner}"
+        ),
+    )?;
+
+    ensure_pack_banner_reconciles_with_doctor(&stale_pack.json, &stale_posture, "stale index")?;
+
+    // The disagreement this bead is named for is ALLOWED, and is exactly what
+    // the disclaimer exists to explain -- so it is recorded, not forbidden.
+    // What is forbidden, and asserted above, is that it happen silently.
+    ensure(
+        !healthy_posture.is_empty() && !stale_posture.is_empty(),
+        format!(
+            "doctor must render a posture in both states: healthy={healthy_posture:?}, \
+             stale={stale_posture:?}"
+        ),
+    )
+}
