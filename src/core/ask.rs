@@ -488,8 +488,9 @@ pub fn score_span(
 ///
 /// Spans whose terms overlap above `CLUSTER_SIMILARITY_THRESHOLD` form a
 /// cluster; the representative is the highest-scoring span in the cluster.
-/// The corroboration multiplier `1 + 0.1·ln(size)` capped at 1.3 is applied
-/// to the representative's score.
+/// The corroboration multiplier `1 + 0.1·ln(distinct memories)` capped at 1.3
+/// is applied to the representative's score. Repeated sentences or repeated
+/// candidate rows from one memory cannot corroborate themselves.
 pub fn cluster_spans(spans: &[AskSpan]) -> Vec<AskSpan> {
     if spans.is_empty() {
         return Vec::new();
@@ -517,7 +518,7 @@ pub fn cluster_spans(spans: &[AskSpan]) -> Vec<AskSpan> {
             continue;
         }
         assigned[seed] = true;
-        let mut cluster_size = 1_usize;
+        let mut supporting_memories = BTreeSet::from([spans[seed].memory_id.as_str()]);
 
         for &other in &order {
             if assigned[other] {
@@ -532,11 +533,12 @@ pub fn cluster_spans(spans: &[AskSpan]) -> Vec<AskSpan> {
             let sim = jaccard_similarity(&term_sets[seed], &term_sets[other]);
             if sim >= CLUSTER_SIMILARITY_THRESHOLD {
                 assigned[other] = true;
-                cluster_size += 1;
+                supporting_memories.insert(spans[other].memory_id.as_str());
             }
         }
 
-        let corroboration = (1.0 + 0.1 * (cluster_size as f32).ln()).min(CORROBORATION_CAP);
+        let corroboration =
+            (1.0 + 0.1 * (supporting_memories.len() as f32).ln()).min(CORROBORATION_CAP);
         let mut rep = spans[seed].clone();
         rep.score = (rep.score * corroboration).clamp(0.0, 1.0);
         representatives.push(rep);
@@ -588,15 +590,31 @@ pub(crate) fn has_negation(text: &str) -> bool {
     })
 }
 
-/// Return true when the top two clusters have opposing polarity.
+/// A conservative lexical topic gate for inferred (not explicitly linked)
+/// contradictions. A negation about a different subject is not opposition.
+/// Require at least two shared content terms and a majority-overlap Jaccard
+/// score. Paraphrased contradictions without that overlap need a stored edge.
+fn same_conflict_topic(left: &[String], right: &[String]) -> bool {
+    let shared = left
+        .iter()
+        .filter(|term| right.binary_search(term).is_ok())
+        .count();
+    shared >= 2 && jaccard_similarity(left, right) >= 0.5
+}
+
+/// Look for supported opposition to the best answer throughout the admitted
+/// clusters, not just at rank two. The caller has already applied the evidence
+/// floor; a weak span must not manufacture a conflict with a strong answer.
 fn detect_contradiction(clusters: &[AskSpan]) -> bool {
-    if clusters.len() < 2 {
+    let Some(anchor) = clusters.first() else {
         return false;
-    }
-    let top_neg = has_negation(&clusters[0].text);
-    let second_neg = has_negation(&clusters[1].text);
-    // Contradiction: one affirms, one negates (XOR on negation presence)
-    top_neg != second_neg
+    };
+    let anchor_terms = tokenize_for_ask(&anchor.text);
+    let anchor_negated = has_negation(&anchor.text);
+    clusters.iter().skip(1).any(|span| {
+        has_negation(&span.text) != anchor_negated
+            && same_conflict_topic(&anchor_terms, &tokenize_for_ask(&span.text))
+    })
 }
 
 /// An explicit edge supplies relational relevance for a paraphrased opposing
@@ -719,6 +737,38 @@ fn compose_answer(
 
     Ok((answer_parts.join(" "), citations))
 }
+
+/// Withhold every answer surface when any selected citation is invalid.
+/// In particular, a valid first conflict side must not escape when the second
+/// side fails validation. This is not an ordinary missing-evidence abstention.
+fn extractiveness_failure_report(request: &AskRequest, candidates_scanned: usize) -> AskReport {
+    AskReport {
+        question: request.question.clone(),
+        abstained: true,
+        answer_text: None,
+        confidence: 0.0,
+        confidence_components: AskConfidenceComponents {
+            top_span_score: 0.0,
+            corroboration: 1.0,
+            contradiction_penalty: 0.0,
+        },
+        citations: Vec::new(),
+        sides: None,
+        nearest_evidence: None,
+        counterfactual_hint: Some(
+            "internal: extractiveness invariant violation; answer withheld".to_owned(),
+        ),
+        semantic_degraded: true,
+        conflict_detected: false,
+        conflict_link: None,
+        extractiveness_violated: true,
+        candidates_scanned,
+    }
+}
+
+#[cfg(test)]
+#[path = "ask_answer_integrity_tests.rs"]
+mod answer_integrity_tests;
 
 // ─── main engine entry point ─────────────────────────────────────────────────
 
@@ -874,50 +924,48 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
                 "linked_opposition",
             )
         } else {
+            // Only disclose the topic that actually conflicts with the best
+            // answer. Other admitted advice must not be relabeled as support
+            // for either side merely because it contains a negation word.
+            let anchor_terms = tokenize_for_ask(&clusters[0].text);
+            let related: Vec<_> = clusters
+                .iter()
+                .filter(|span| same_conflict_topic(&anchor_terms, &tokenize_for_ask(&span.text)))
+                .collect();
             (
-                clusters
+                related
                     .iter()
                     .filter(|s| !has_negation(&s.text))
-                    .cloned()
+                    .map(|s| (**s).clone())
                     .collect(),
-                clusters
+                related
                     .iter()
                     .filter(|s| has_negation(&s.text))
-                    .cloned()
+                    .map(|s| (**s).clone())
                     .collect(),
                 "affirming",
                 "negating",
             )
         };
 
-        let compose_side = |side_spans: &[AskSpan], label: &str| -> AskSide {
-            let mut parts = Vec::new();
-            let mut cites = Vec::new();
-            for (idx, s) in side_spans.iter().take(max_n).enumerate() {
-                parts.push(format!("[{}] {}", idx + 1, s.text));
-                cites.push(AskCitation {
-                    index: idx + 1,
-                    memory_id: s.memory_id.clone(),
-                    byte_start: s.byte_start,
-                    byte_end: s.byte_end,
-                    text: s.text.clone(),
-                    provenance_uri: s.provenance_uri.clone(),
-                    trust_class: s.trust_class.clone(),
-                    confidence: s.memory_confidence,
-                    team_provenance: s.team_provenance.clone(),
-                });
-            }
-            AskSide {
+        let compose_side = |side_spans: &[AskSpan], label: &str| -> Result<AskSide, &'static str> {
+            // Use the same byte-range and source-equality checks as the normal
+            // answer path, including for explicitly linked opposing memories.
+            let (answer_text, citations) = compose_answer(side_spans, max_n, &content_map)?;
+            Ok(AskSide {
                 label: label.to_owned(),
-                answer_text: parts.join(" "),
-                citations: cites,
-            }
+                answer_text,
+                citations,
+            })
         };
 
-        let sides = vec![
+        let sides = match (
             compose_side(&affirming, first_label),
             compose_side(&negating, second_label),
-        ];
+        ) {
+            (Ok(first), Ok(second)) => vec![first, second],
+            _ => return extractiveness_failure_report(request, candidates.len()),
+        };
 
         return AskReport {
             question: request.question.clone(),
@@ -955,31 +1003,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
             extractiveness_violated: false,
             candidates_scanned: candidates.len(),
         },
-        Err(_reason) => {
-            // Extractiveness invariant violated — fall back to abstention.
-            AskReport {
-                question: request.question.clone(),
-                abstained: true,
-                answer_text: None,
-                confidence: 0.0,
-                confidence_components: AskConfidenceComponents {
-                    top_span_score: 0.0,
-                    corroboration: 1.0,
-                    contradiction_penalty: 0.0,
-                },
-                citations: Vec::new(),
-                sides: None,
-                nearest_evidence: None,
-                counterfactual_hint: Some(
-                    "internal: extractiveness invariant violation; answer withheld".to_owned(),
-                ),
-                semantic_degraded: true,
-                conflict_detected: false,
-                conflict_link: None,
-                extractiveness_violated: true,
-                candidates_scanned: candidates.len(),
-            }
-        }
+        Err(_reason) => extractiveness_failure_report(request, candidates.len()),
     }
 }
 
