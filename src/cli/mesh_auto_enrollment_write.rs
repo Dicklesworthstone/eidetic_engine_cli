@@ -6,10 +6,10 @@
 //! as every upsert, revocation and lane-grant invalidation.
 
 use super::*;
-use std::collections::BTreeMap;
 use crate::db::StoredMeshPeer;
 use crate::mesh::auto_enrollment::AutoEnrollmentMaterializationPlan;
 use crate::mesh::foreground_cli::MeshPeerRow;
+use std::collections::BTreeMap;
 
 pub(super) fn materialize(
     connection: &DbConnection,
@@ -19,7 +19,15 @@ pub(super) fn materialize(
     now: &str,
     before_write: impl FnOnce() -> Result<(), DomainError>,
 ) -> Result<(), DomainError> {
-    materialize_with_hooks(connection, expected, discovery, plan, now, before_write, || Ok(()))
+    materialize_with_hooks(
+        connection,
+        expected,
+        discovery,
+        plan,
+        now,
+        before_write,
+        || Ok(()),
+    )
 }
 
 fn materialize_with_hooks(
@@ -38,7 +46,9 @@ fn materialize_with_hooks(
         let current = connection.list_mesh_peers(&expected.workspace_id)?;
         let rows: Vec<_> = current.iter().map(MeshPeerRow::from).collect();
         if security_rows(&expected.peers)? != security_rows(&rows)? {
-            return Err(denied("Mesh peers changed during discovery; enrollment was not applied").into());
+            return Err(
+                denied("Mesh peers changed during discovery; enrollment was not applied").into(),
+            );
         }
         let upserts = auto_enrollment_peer_upserts(
             &expected.workspace_id,
@@ -57,16 +67,27 @@ fn materialize_with_hooks(
         let mut snapshot = expected.clone();
         snapshot.peers = rows;
         let revocations = auto_enrollment_peer_revocations(
-            &expected.workspace_id, &snapshot, &plan.peers_to_revoke, now,
+            &expected.workspace_id,
+            &snapshot,
+            &plan.peers_to_revoke,
+            now,
         )?;
         let refreshed: BTreeSet<_> = upserts.iter().map(|input| input.peer_id.as_str()).collect();
         let manual_ids: BTreeSet<_> = auto_enrollment_existing_peers(&snapshot)?
-            .into_iter().filter(|peer| !peer.is_auto_managed()).map(|peer| peer.peer_id).collect();
+            .into_iter()
+            .filter(|peer| !peer.is_auto_managed())
+            .map(|peer| peer.peer_id)
+            .collect();
         let mut retained_revocations = Vec::new();
         for revocation in revocations {
             if refreshed.contains(revocation.peer_id.as_str()) {
-                let old_row = snapshot.peers.iter().find(|row| row.peer_id == revocation.peer_id)
-                    .ok_or_else(|| denied("Mesh revocation target is missing; enrollment withheld"))?;
+                let old_row = snapshot
+                    .peers
+                    .iter()
+                    .find(|row| row.peer_id == revocation.peer_id)
+                    .ok_or_else(|| {
+                        denied("Mesh revocation target is missing; enrollment withheld")
+                    })?;
                 let old_key = auto_enrollment_node_key_for_row(old_row)?;
                 // Replacing manual management must not disable the SAME opaque
                 // principal immediately after refreshing it. Explicit exclusions,
@@ -75,7 +96,9 @@ fn materialize_with_hooks(
                     || !manual_ids.contains(revocation.peer_id.as_str())
                     || plan.append_denylist_node_keys.contains(&old_key)
                 {
-                    return Err(denied("Mesh enrollment conflicts with an explicit revocation").into());
+                    return Err(
+                        denied("Mesh enrollment conflicts with an explicit revocation").into(),
+                    );
                 }
             } else {
                 retained_revocations.push(revocation);
@@ -96,22 +119,40 @@ fn materialize_with_hooks(
 
 /// Observation timestamps and display labels do not confer authority. Changes
 /// to membership, enabled state, identity, or policy must cause a fresh plan.
-fn security_rows(rows: &[MeshPeerRow]) -> Result<BTreeMap<&str, (&str, bool, Option<&str>)>, DomainError> {
+fn security_rows(
+    rows: &[MeshPeerRow],
+) -> Result<BTreeMap<&str, (&str, bool, Option<&str>)>, DomainError> {
     let mut keys = BTreeMap::new();
     for row in rows {
-        if keys.insert(row.peer_id.as_str(), (
-            row.origin_node_id.as_str(), row.enabled, row.policy_summary_json.as_deref(),
-        )).is_some() {
+        if keys
+            .insert(
+                row.peer_id.as_str(),
+                (
+                    row.origin_node_id.as_str(),
+                    row.enabled,
+                    row.policy_summary_json.as_deref(),
+                ),
+            )
+            .is_some()
+        {
             return Err(denied("Mesh snapshot contains duplicate peer principals"));
         }
     }
     Ok(keys)
 }
 
-fn validate_transport_binding(previous: &StoredMeshPeer, input: &UpsertMeshPeerInput) -> Result<(), DomainError> {
-    let Some(binding) = &previous.transport_identity else { return Ok(()); };
-    let record = enrolled_peer_record_from_policy_summary(input.policy_summary_json.as_deref(), &input.peer_id)?
-        .ok_or_else(|| denied("Mesh enrollment lacks its typed peer identity"))?;
+fn validate_transport_binding(
+    previous: &StoredMeshPeer,
+    input: &UpsertMeshPeerInput,
+) -> Result<(), DomainError> {
+    let Some(binding) = &previous.transport_identity else {
+        return Ok(());
+    };
+    let record = enrolled_peer_record_from_policy_summary(
+        input.policy_summary_json.as_deref(),
+        &input.peer_id,
+    )?
+    .ok_or_else(|| denied("Mesh enrollment lacks its typed peer identity"))?;
     let endpoint = &record.endpoint;
     let same_device = endpoint.tailnet_id == binding.tailnet_id
         && match endpoint.stable_node_id.as_deref() {
@@ -119,7 +160,9 @@ fn validate_transport_binding(previous: &StoredMeshPeer, input: &UpsertMeshPeerI
             None => endpoint.tailscale_node_key == binding.current_node_pubkey,
         };
     if !same_device {
-        return Err(denied("Mesh enrollment conflicts with the authoritative transport identity"));
+        return Err(denied(
+            "Mesh enrollment conflicts with the authoritative transport identity",
+        ));
     }
     Ok(())
 }
@@ -134,13 +177,16 @@ fn denied(message: &str) -> DomainError {
 struct WriteError(DomainError);
 
 impl From<DomainError> for WriteError {
-    fn from(error: DomainError) -> Self { Self(error) }
+    fn from(error: DomainError) -> Self {
+        Self(error)
+    }
 }
 
 impl From<DbError> for WriteError {
     fn from(_error: DbError) -> Self {
         Self(DomainError::Storage {
-            message: "Failed to atomically apply mesh enrollment; peer writes were rolled back".to_owned(),
+            message: "Failed to atomically apply mesh enrollment; peer writes were rolled back"
+                .to_owned(),
             repair: Some("Run ee doctor --json and retry fresh auto-enrollment.".to_owned()),
         })
     }

@@ -1,3 +1,6 @@
+#[path = "mesh_auto_enrollment_write.rs"]
+mod auto_enrollment_write;
+
 #[path = "mesh_peer_identity.rs"]
 mod peer_identity;
 
@@ -3149,54 +3152,22 @@ where
     };
     report.attach_audit_row_id(audit_id.clone());
 
-    if report.materialization.writes_peer_rows {
-        if let Err(error) = persist_auto_enroll_overrides(
-            &workspace_path,
-            &report.materialization.append_denylist_node_keys,
-            &args.include,
-            &args.exclude,
-        ) {
-            return write_domain_error(&error, cli.renderer(), stdout, stderr);
-        }
-        let upserts = match auto_enrollment_peer_upserts(
-            &snapshot.workspace_id,
-            discovery.tailnet_id.as_deref().unwrap_or("tailnet_unknown"),
-            discovery.tailnet_display_name.as_deref(),
-            discovery.self_node_key.as_deref(),
-            &now,
-            &snapshot.peers,
-            &report.materialization.peers_to_upsert,
-        ) {
-            Ok(upserts) => upserts,
-            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
-        };
-        let revocations = match auto_enrollment_peer_revocations(
-            &snapshot.workspace_id,
-            &snapshot,
-            &report.materialization.peers_to_revoke,
-            &now,
-        ) {
-            Ok(revocations) => revocations,
-            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
-        };
-        if let Err(error) = connection.with_transaction(|| {
-            for upsert in &upserts {
-                connection
-                    .upsert_mesh_peer_with_grant_invalidation_in_current_transaction(upsert)?;
-            }
-            for revocation in &revocations {
-                connection
-                    .upsert_mesh_peer_with_grant_invalidation_in_current_transaction(revocation)?;
-            }
-            Ok(())
-        }) {
-            return write_domain_error(
-                &storage_error("Failed to materialize mesh auto-enrollment peers", error),
-                cli.renderer(),
-                stdout,
-                stderr,
-            );
-        }
+    if let Err(error) = auto_enrollment_write::materialize(
+        &connection,
+        &snapshot,
+        &discovery,
+        &report.materialization,
+        &now,
+        || {
+            persist_auto_enroll_overrides(
+                &workspace_path,
+                &report.materialization.append_denylist_node_keys,
+                &args.include,
+                &args.exclude,
+            )
+        },
+    ) {
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
     if let Err(error) = update_materialization_outcome(
