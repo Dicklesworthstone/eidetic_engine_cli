@@ -533,7 +533,7 @@ fn mechanical_boundary_inventory_covers_all_cli_command_paths() -> Result<(), St
 
     let missing = commands
         .iter()
-        .filter(|command| !in_a_table_row(command))
+        .filter(|command| !in_a_table_row(command.as_str()))
         .cloned()
         .collect::<Vec<_>>();
 
