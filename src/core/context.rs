@@ -8343,15 +8343,17 @@ fn compute_pack_hash_components(
             hasher.update(item.section.as_str().as_bytes());
             hasher.update(item.content.as_bytes());
             hasher.update(&item.estimated_tokens.to_le_bytes());
-            hasher.update(&item.relevance.into_inner().to_le_bytes());
-            hasher.update(&item.utility.into_inner().to_le_bytes());
+            hasher.update(&crate::pack::q20_12_le_bytes(item.relevance.into_inner()));
+            hasher.update(&crate::pack::q20_12_le_bytes(item.utility.into_inner()));
             if let Some(proximity_to_seed) = item.proximity_to_seed {
-                hasher.update(&proximity_to_seed.to_le_bytes());
+                hasher.update(&crate::pack::q20_12_le_bytes(proximity_to_seed));
             }
             if let Some(score_breakdown) = item.score_breakdown {
-                hasher.update(&score_breakdown.text_score.to_le_bytes());
-                hasher.update(&score_breakdown.ppr_score.to_le_bytes());
-                hasher.update(&score_breakdown.combined_score.to_le_bytes());
+                hasher.update(&crate::pack::q20_12_le_bytes(score_breakdown.text_score));
+                hasher.update(&crate::pack::q20_12_le_bytes(score_breakdown.ppr_score));
+                hasher.update(&crate::pack::q20_12_le_bytes(
+                    score_breakdown.combined_score,
+                ));
             }
             hash_attempt_family_multiplicity(hasher, item.attempt_family_multiplicity.as_ref());
             hasher.update(item.why.as_bytes());
@@ -8539,7 +8541,7 @@ fn hash_attempt_family_multiplicity(
     hash_labeled_bytes(
         hasher,
         "attempt_family_multiplicity.effective_discount_factor",
-        &snapshot.effective_discount_factor.to_le_bytes(),
+        &crate::pack::q20_12_le_bytes(snapshot.effective_discount_factor),
     );
     hash_labeled_bytes(
         hasher,
@@ -8571,7 +8573,7 @@ fn hash_attempt_family_multiplicity(
         hash_labeled_bytes(
             hasher,
             &format!("{prefix}.member_discount_factor"),
-            &membership.member_discount_factor.to_le_bytes(),
+            &crate::pack::q20_12_le_bytes(membership.member_discount_factor),
         );
         hash_labeled_optional_u64(
             hasher,
@@ -22329,6 +22331,91 @@ pub fn unrelated_context() -> u64 {{
         // Same inputs produce same hash (determinism check).
         let hash_repeat = compute_pack_hash(&request, &base_draft, &base_degraded);
         assert_eq!(hash_base, hash_repeat, "same inputs must produce same hash");
+        Ok(())
+    }
+
+    #[test]
+    fn pack_hash_q20_12_collapses_sub_quantum_score_noise() -> Result<(), String> {
+        use super::compute_pack_hash;
+        use crate::models::{ProvenanceUri, TrustClass, UnitScore};
+        use crate::pack::{
+            ContextRequest, PackDraft, PackDraftItem, PackProvenance, PackSection,
+            PackSelectionAudit, PackSelectionObjective, PackSelectionPhase, PackTrustSignal,
+            TokenBudget, quantize_q20_12,
+        };
+
+        assert_eq!(quantize_q20_12(0.8), quantize_q20_12(0.8 + 1e-7));
+        assert_ne!(quantize_q20_12(0.8), quantize_q20_12(0.81));
+
+        let request = ContextRequest::from_query("q20.12 hash contract")
+            .map_err(|error| error.to_string())?;
+        let mem = MemoryId::from_uuid(uuid::Uuid::from_u128(11));
+        let mut item = PackDraftItem {
+            rank: 1,
+            memory_id: mem,
+            section: PackSection::ProceduralRules,
+            content: "quantize hash inputs".to_owned(),
+            estimated_tokens: 8,
+            relevance: UnitScore::parse(0.8).map_err(|error| error.to_string())?,
+            utility: UnitScore::parse(0.5).map_err(|error| error.to_string())?,
+            proximity_to_seed: None,
+            score_breakdown: None,
+            attempt_family_multiplicity: None,
+            provenance: vec![
+                PackProvenance::new(ProvenanceUri::EeMemory(mem), "self")
+                    .map_err(|error| error.to_string())?,
+            ],
+            why: "adr-0087".to_owned(),
+            diversity_key: None,
+            trust: PackTrustSignal::new(TrustClass::AgentAssertion, None),
+            redactions: Vec::new(),
+            tombstoned_at: None,
+            lifecycle: None,
+            freshness_facets: Vec::new(),
+            selected_in: PackSelectionPhase::StrictMmr,
+        };
+        let draft = |relevance: UnitScore| PackDraft {
+            query: request.query.clone(),
+            budget: TokenBudget::default_context(),
+            used_tokens: 8,
+            items: {
+                item.relevance = relevance;
+                vec![item.clone()]
+            },
+            evidence_items: Vec::new(),
+            omitted: Vec::new(),
+            selection_audit: PackSelectionAudit {
+                profile: request.profile,
+                objective: PackSelectionObjective::MmrRedundancy,
+                algorithm_id: "q20_12_test",
+                algorithm_description: "hash quantization contract",
+                candidate_count: 1,
+                selected_count: 1,
+                omitted_count: 0,
+                budget_limit: TokenBudget::default_context().max_tokens(),
+                budget_used: 8,
+                total_objective_value: 0.0,
+                monotone: true,
+                submodular: true,
+                selected_items: Vec::new(),
+                steps: Vec::new(),
+            },
+            hash: None,
+        };
+        let quiet = UnitScore::parse(0.8).map_err(|error| error.to_string())?;
+        let noisy = UnitScore::parse(0.8001).map_err(|error| error.to_string())?;
+        let shifted = UnitScore::parse(0.81).map_err(|error| error.to_string())?;
+        let hash_quiet = compute_pack_hash(&request, &draft(quiet), &[]);
+        let hash_noisy = compute_pack_hash(&request, &draft(noisy), &[]);
+        let hash_shifted = compute_pack_hash(&request, &draft(shifted), &[]);
+        assert_eq!(
+            hash_quiet, hash_noisy,
+            "sub-quantum relevance noise must not fork pack.hash"
+        );
+        assert_ne!(
+            hash_quiet, hash_shifted,
+            "super-quantum relevance change must fork pack.hash"
+        );
         Ok(())
     }
 

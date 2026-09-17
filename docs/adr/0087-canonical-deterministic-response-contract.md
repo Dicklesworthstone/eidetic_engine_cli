@@ -1,7 +1,8 @@
 # ADR 0087: Canonical Deterministic Response and Pack-Hash Contract
 
-Status: proposed
+Status: accepted
 Date: 2026-08-24
+Updated: 2026-09-17
 Bead: bd-reality-core-convergence-1azkt.1
 Depends-on: ADR 0084 (hotset manifest), ADR 0085 (typed pack entity identity)
 
@@ -179,6 +180,25 @@ than today's five.
 - Implementation is deliberately staged: this ADR is the contract;
   `-azkt.5` implements the verification manifest + pinned runner;
   `-azkt.10` builds the regression oracle; `-azkt.18` closes hermeticity.
+
+### Implementation status (2026-09-17)
+
+Shipped with this bead:
+
+- Pack-hash score inputs (`relevance`, `utility`, `proximity_to_seed`,
+  `score_breakdown.*`, attempt-family discount factors) quantize to Q20.12
+  before hashing. Sub-quantum IEEE-754 noise cannot fork `pack.hash`.
+- Additive `data.pack.snapshotIdentity` on `ee.pack.v2`: `{version: 1, digest,
+  numericDomain: "q20.12", componentDigestsAvailableLocally: false}`. `digest`
+  equals `pack.hash`. Agent-facing JSON item scores remain f32 display copies.
+
+Not yet in the digest tree (still five leaves: request, draft items, degraded,
+rendered text, composite). Staged, not silently claimed as S1–S10:
+
+- S2/S3/S4/S6/S8/S9 named component digests
+- JSON payload score quantization (floats still appear in `items[].scores`)
+- `componentDigestsAvailableLocally: true` and `ee why` mismatch names
+- Property/cross-process harness in `.5` / `.10` / `.18`
 
 ## Rejected alternatives
 

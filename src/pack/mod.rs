@@ -142,6 +142,25 @@ pub(crate) fn revision_hash(parts: &[&str]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
+/// Q20.12 unsigned fixed-point for canonical pack-hash score inputs (ADR 0087).
+///
+/// Decision scores are quantized before they enter thresholds, ties, or the
+/// pack hash so sub-quantum IEEE-754 noise cannot fork `pack.hash`. JSON item
+/// scores remain f32 display copies until payload quantization lands.
+#[must_use]
+pub(crate) fn quantize_q20_12(value: f64) -> u32 {
+    let scaled = (value * 4096.0).round();
+    if !scaled.is_finite() {
+        return 0;
+    }
+    scaled.clamp(0.0, f64::from(u32::MAX)) as u32
+}
+
+#[must_use]
+pub(crate) fn q20_12_le_bytes(value: f32) -> [u8; 4] {
+    quantize_q20_12(f64::from(value)).to_le_bytes()
+}
+
 pub(crate) fn revision_hash_with_prefix(parts: &[&str]) -> String {
     format!("blake3:{}", revision_hash(parts))
 }
