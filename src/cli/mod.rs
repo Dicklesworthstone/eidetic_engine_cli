@@ -43710,47 +43710,13 @@ fn db_inspect_redact_source_uri(value: &str) -> String {
 }
 
 fn db_inspect_redact_source_path_segments(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    let mut cursor = 0;
-    while cursor < value.len() {
-        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
-        else {
-            output.push_str(&value[cursor..]);
-            break;
-        };
-        let start = cursor + relative_index;
-        if !db_inspect_source_path_starts_sensitive_segment(&value[start..]) {
-            output.push_str(&value[cursor..=start]);
-            cursor = start + 1;
-            continue;
-        }
-
-        output.push_str(&value[cursor..start]);
-        output.push_str("[REDACTED_PATH]");
-        cursor = value[start..]
-            .char_indices()
-            .find_map(|(index, c)| db_inspect_source_path_boundary(c).then_some(start + index))
-            .unwrap_or(value.len());
-    }
-    output
-}
-
-fn db_inspect_source_path_starts_sensitive_segment(value: &str) -> bool {
-    const PREFIXES: &[&str] = &[
-        "/Users/",
-        "/Volumes/",
-        "/private/",
-        "/var/",
-        "/tmp/",
-        "/home/",
-        "/data/",
-        "/dp/",
-        "/workspace/",
-        "/repo/",
-        "/etc/",
-    ];
-
-    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+    // bd-redactor-prefix-divergence-lsy52: the last of twenty-one hand-copied
+    // prefix lists. `ee db inspect` prints stored rows, so the value here is
+    // whatever a memory, provenance URI or import source put in the column --
+    // entirely user-controlled. The shared predicate also recognises Windows
+    // drive paths and UNC shares, which this walker could never reach because it
+    // scanned only for '/'. The boundary stays local.
+    crate::util::redact_path_like_segments(value, db_inspect_source_path_boundary)
 }
 
 fn db_inspect_source_path_boundary(c: char) -> bool {
