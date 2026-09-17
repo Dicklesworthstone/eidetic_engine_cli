@@ -108,10 +108,42 @@ fn graph_surfaces_preserve_pre_epic_json_shape_additively() -> TestResult {
             .ok_or_else(|| "baseline surface missing name".to_owned())?;
         let expected = baseline_for_surface(surface)?;
         let actual = current_surface(name, &fixture)?;
-        assert_additive_shape(name, "$", &expected, &actual)?;
+        assert_additive_shape(name, "$", &expected, &actual)
+            .map_err(|error| format!("{error}\n{}", baseline_provenance_note(surface)))?;
     }
 
     Ok(())
+}
+
+/// Where this surface's baseline came from, appended to every shape failure.
+///
+/// Three surfaces borrow a snapshot written by `tests/json_contract_snapshots.rs`
+/// rather than captured from the command they are compared against. That is two
+/// producers, and a borrowed fixture can legitimately declare a field the live
+/// command never emits -- `$.data.degraded[embed_model_unavailable]` is exactly
+/// that: a literal at json_contract_snapshots.rs:1209, emitted live only when
+/// EE_EMBED_MODEL_PATH points at a missing path, which this fixture never sets.
+///
+/// Without this note the failure reads as a REMOVAL, and three panes spent a
+/// cycle hunting for the commit that stopped emitting a code nothing had
+/// stopped emitting. The comparison is unchanged; only the diagnosis is.
+fn baseline_provenance_note(surface: &Value) -> String {
+    let command = surface
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or("<undeclared>");
+    match surface.get("snapshot").and_then(Value::as_str) {
+        Some(snapshot) => format!(
+            "baseline provenance: BORROWED from `tests/snapshots/{snapshot}`, which is written by \
+             another test, not captured from `{command}`. A field present in that fixture and \
+             absent here may never have been emitted by this surface at all -- check whether the \
+             live command can produce it before treating this as a removal."
+        ),
+        None => format!(
+            "baseline provenance: inline in the manifest, declared for `{command}`. If this \
+             surface's output legitimately changed, the manifest entry is what needs updating."
+        ),
+    }
 }
 
 fn baseline_manifest() -> Result<Value, String> {
