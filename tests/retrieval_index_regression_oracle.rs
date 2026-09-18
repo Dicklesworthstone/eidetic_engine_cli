@@ -455,8 +455,56 @@ fn search_record(value: &Value) -> Record {
     record
 }
 
+/// Which entities the pack SELECTED, as `rank:memoryId@selectedIn`, joined in
+/// emitted order.
+///
+/// bd-reality-core-convergence-1azkt.10 bullet 3 names "selected entities"
+/// among the things a probe must record, and `pack.hash` was the only thing
+/// standing in for them. A hash makes a divergence DETECTABLE and leaves it
+/// undiagnosable: two packs that disagree differ, and the hash cannot say which
+/// entity moved or why it was chosen. `selectedIn` is carried because a pack
+/// that selected the same memory for a different reason is a different
+/// selection, and `rank` because order is the pack's whole point.
+///
+/// `(none)` for a pack that selected nothing — a real answer — and `None` only
+/// when there is no `items` array at all, which means the JSON path was
+/// renamed. Collapsing those two would make a renamed surface look like an
+/// empty pack, which is the vacuity this file refuses everywhere else.
+fn render_pack_selection(value: &Value) -> Option<String> {
+    let items = value.pointer("/data/pack/items")?.as_array()?;
+    if items.is_empty() {
+        return Some("(none)".to_owned());
+    }
+    Some(
+        items
+            .iter()
+            .map(|item| {
+                let rank = item
+                    .pointer("/rank")
+                    .map_or_else(|| "<no-rank>".to_owned(), ToString::to_string);
+                let id = item
+                    .pointer("/memoryId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<no-memoryId>");
+                let selected_in = item
+                    .pointer("/selectedIn")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<no-selectedIn>");
+                format!("{rank}:{id}@{selected_in}")
+            })
+            .collect::<Vec<_>>()
+            .join("|"),
+    )
+}
+
 fn pack_record(value: &Value) -> Record {
     let mut record = Record::new();
+    // Recorded, and therefore COMPARED: `diverge` walks every field the
+    // baseline observed, so this participates in agreement rather than sitting
+    // in the evidence unread.
+    if let Some(selection) = render_pack_selection(value) {
+        record.insert("pack.selection".to_owned(), selection);
+    }
     for (name, pointer) in [
         ("pack.hash", "/data/pack/hash"),
         (
@@ -1662,6 +1710,121 @@ mod attestation {
             feature_set(&forward),
             feature_set(&reversed),
             "feature order must not change the candidate identity"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pack_selection {
+    //! bd-reality-core-convergence-1azkt.10, bullet 3: "selected entities".
+    //!
+    //! `pack.hash` made a pack divergence detectable and undiagnosable. These
+    //! arms cover the rendering that names WHICH entity moved, and — because a
+    //! recorded field is only worth something if it is also compared — the
+    //! precondition asserts it lands in `pack_record`, which `diverge` walks in
+    //! full.
+
+    use serde_json::{Value, json};
+
+    use super::{pack_record, render_pack_selection};
+
+    fn pack_with(items: Value) -> Value {
+        json!({"data": {"pack": {"hash": "blake3:deadbeef", "items": items}}})
+    }
+
+    /// POSITIVE: rank, id and the reason it was selected all survive.
+    #[test]
+    fn a_selection_names_the_entity_its_rank_and_why_it_was_chosen() {
+        let value = pack_with(json!([
+            {"rank": 1, "memoryId": "mem_a", "selectedIn": "direct_evidence"},
+            {"rank": 2, "memoryId": "mem_b", "selectedIn": "coverage_fill"}
+        ]));
+        assert_eq!(
+            render_pack_selection(&value).as_deref(),
+            Some("1:mem_a@direct_evidence|2:mem_b@coverage_fill"),
+        );
+    }
+
+    /// NEGATIVE ARM: packs that a hash alone would not tell apart must produce
+    /// DIFFERENT selections, or recording this field buys nothing.
+    ///
+    /// All three mutations below leave `pack.hash` untouched on purpose: the
+    /// point is that the selection discriminates where the hash, held constant,
+    /// does not.
+    #[test]
+    fn selections_that_differ_are_not_reported_as_the_same() {
+        let baseline = pack_with(json!([
+            {"rank": 1, "memoryId": "mem_a", "selectedIn": "direct_evidence"},
+            {"rank": 2, "memoryId": "mem_b", "selectedIn": "coverage_fill"}
+        ]));
+        for (label, variant) in [
+            (
+                "a different entity",
+                pack_with(json!([
+                    {"rank": 1, "memoryId": "mem_a", "selectedIn": "direct_evidence"},
+                    {"rank": 2, "memoryId": "mem_c", "selectedIn": "coverage_fill"}
+                ])),
+            ),
+            (
+                "the same entities in a different order",
+                pack_with(json!([
+                    {"rank": 1, "memoryId": "mem_b", "selectedIn": "coverage_fill"},
+                    {"rank": 2, "memoryId": "mem_a", "selectedIn": "direct_evidence"}
+                ])),
+            ),
+            (
+                "the same entity selected for a different reason",
+                pack_with(json!([
+                    {"rank": 1, "memoryId": "mem_a", "selectedIn": "coverage_fill"},
+                    {"rank": 2, "memoryId": "mem_b", "selectedIn": "coverage_fill"}
+                ])),
+            ),
+        ] {
+            assert_ne!(
+                render_pack_selection(&baseline),
+                render_pack_selection(&variant),
+                "{label} must be a different selection"
+            );
+        }
+    }
+
+    /// CONTROL: an empty pack is a real answer; a missing array is not.
+    #[test]
+    fn an_empty_pack_is_not_the_same_as_a_renamed_path() {
+        assert_eq!(
+            render_pack_selection(&pack_with(json!([]))).as_deref(),
+            Some("(none)"),
+            "a pack that selected nothing is an answer, not an absence"
+        );
+        let renamed = json!({"data": {"pack": {"hash": "blake3:deadbeef"}}});
+        assert_eq!(
+            render_pack_selection(&renamed),
+            None,
+            "a missing items array must not masquerade as an empty pack"
+        );
+    }
+
+    /// PRECONDITION: the field reaches the record, so `diverge` — which walks
+    /// every field the baseline observed — actually compares it.
+    ///
+    /// Without this, the three arms above would pass on a rendering nothing
+    /// consumes.
+    #[test]
+    fn the_selection_is_recorded_so_that_it_is_compared() {
+        let record = pack_record(&pack_with(json!([
+            {"rank": 1, "memoryId": "mem_a", "selectedIn": "direct_evidence"}
+        ])));
+        assert_eq!(
+            record.get("pack.selection").map(String::as_str),
+            Some("1:mem_a@direct_evidence"),
+            "pack_record must carry the selection: {record:?}"
+        );
+        // And a renamed path must not silently insert an empty value, which
+        // would compare equal against another renamed probe.
+        let renamed = pack_record(&json!({"data": {"pack": {"hash": "blake3:x"}}}));
+        assert!(
+            !renamed.contains_key("pack.selection"),
+            "a renamed path must omit the field, not record an empty one: {renamed:?}"
         );
     }
 }
