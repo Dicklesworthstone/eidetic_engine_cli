@@ -83,7 +83,6 @@
 2	src/core/support_bundle.rs
 4	src/core/swarm_next_action.rs
 1	src/core/tailscale_probe.rs
-5	src/core/verify_ledger.rs
 1	src/core/workspace.rs
 4	src/daemon/server.rs
 1	src/db/mod.rs

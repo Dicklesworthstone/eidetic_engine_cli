@@ -2422,6 +2422,53 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "let symbol_evidence = evidence_by_symbol",
         "A symbol absent from the evidence map truly has no recorded evidence; the map was built from the same scan.",
     ),
+    // bd-apvhh burn-down, tranche 5 (2026-09-18): the findings in files that
+    // ALREADY CARRY RULES. Everything before this point was a file with no rule
+    // at all; from here the dominant effect is classify_finding's
+    // first-match-wins, which is the condition that produced bd-epvc1's six
+    // shadowed entries.
+    //
+    // APPENDED AT THE END OF THE LIST, DELIBERATELY, AND THAT IS THE WHOLE
+    // TRANCHE-5 DISCIPLINE. Earlier tranches inserted near the front, which was
+    // harmless while every target file had no other rule. Here it is not: a new
+    // rule placed ahead of an existing one can STEAL findings the existing rule
+    // owns, silently lowering its count and re-aiming a rule nobody reviewed.
+    // At the end, a new rule can only pick up findings that no earlier rule
+    // matches -- which is exactly the set that is currently unclassified. The
+    // ordering makes the safety structural instead of something to re-verify by
+    // hand on every addition.
+    //
+    // src/core/verify_ledger.rs already carried two FILE-SCOPED rules
+    // (NSF-VERIFY-LEDGER-CODES-ABSENT, NSF-VERIFY-LEDGER-CODES-PARSE), so it is
+    // a live instance of that hazard rather than a hypothetical one.
+    allowed_in(
+        "NSF-VERIFY-LEDGER-RECURRENCE-CODES",
+        "src/core/verify_ledger.rs",
+        "classify_rch_verify_recurrence",
+        "let blocker_string = first_line_with_any_code(row.stderr_tail.as_deref(), &error_codes)",
+        "A ledger row whose error-code column is absent or does not parse yields no codes, and the only consumer is first_line_with_any_code over the stdout/stderr tails -- with no codes nothing matches, so the blocker string stays None. The direction is toward claiming LESS about a row than the evidence supports, which is the correct bias for a recurrence classifier that exists to avoid inventing blockers.",
+    ),
+    allowed_in(
+        "NSF-VERIFY-LEDGER-CLOSED-REMEDIATION-REFS",
+        "src/core/verify_ledger.rs",
+        "classify_rch_verify_recurrence",
+        ".filter(|bead| closed_remediation_beads.iter().any(|closed| closed == bead))",
+        "The empty vector means the row's remediation bead is not in the closed set, which the `.filter` on the line this fragment names has just decided. It feeds `recurs_closed_remediation = row.status == \"blocked\" && !closed_remediation_refs.is_empty()`, so an empty list declines to claim a recurrence-after-close. Declining to raise a finding you cannot substantiate is the honest direction here, and the opposite of it -- defaulting to a bead id -- would fabricate the very evidence this report exists to present.",
+    ),
+    allowed_in(
+        "NSF-VERIFY-LEDGER-ERROR-CODES-FROM",
+        "src/core/verify_ledger.rs",
+        "error_codes_from",
+        "codes.sort();",
+        "The shared helper behind the recurrence classifier: a row with no error-code payload produces no codes. Sorting and deduping an empty vector is still an empty vector, and every caller treats \"no codes\" as \"nothing to match against\" rather than as a wildcard.",
+    ),
+    allowed_in(
+        "NSF-VERIFY-LEDGER-COMBINED-TAIL",
+        "src/core/verify_ledger.rs",
+        "combined_tail",
+        "stdout_tail.unwrap_or_default(),",
+        "Two sites, multiplicity 2. An absent stdout or stderr tail contributes an empty string to a two-element join, which renders as a leading or trailing newline rather than as fabricated output. The function's whole job is to concatenate whatever tails exist, and a missing tail genuinely contributes nothing.",
+    ),
 ];
 
 const MANUAL_FINDINGS: &[ManualFinding] = &[];

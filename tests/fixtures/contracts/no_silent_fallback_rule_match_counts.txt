@@ -445,3 +445,21 @@
 1	NSF-CORE-WRITE-OWNER-INTAKE-CONFIG-DEFAULT
 1	NSF-CORE-MODEL-LAST-SEGMENT
 1	NSF-CORE-MODEL-INDEX-METADATA-PATHS
+
+# bd-apvhh burn-down tranche 5: the first file whose findings sit alongside
+# EXISTING rules. From here first-match-wins is the dominant effect, so these
+# four were appended at the END of INVENTORY_RULES rather than inserted near the
+# front: at the end a new rule can only pick up findings no earlier rule matches,
+# which makes "I did not steal anyone's count" structural instead of a promise.
+#
+# Verified with a per-rule delta across ALL 367 pre-existing rules, not just the
+# four added: none moved. That zero was itself proved by temporarily inserting a
+# rule at the FRONT with an existing rule's own fragment -- the check reported
+# NSF-VERIFY-LEDGER-CODES-ABSENT going 1 -> 0, and the probe was removed. Worth
+# recording why the proof mattered: during it the UNCLASSIFIED TOTAL did not
+# move at all, 106 -> 106, so a totals comparison would have shown nothing while
+# a rule was being silently re-aimed.
+1	NSF-VERIFY-LEDGER-RECURRENCE-CODES
+1	NSF-VERIFY-LEDGER-CLOSED-REMEDIATION-REFS
+1	NSF-VERIFY-LEDGER-ERROR-CODES-FROM
+2	NSF-VERIFY-LEDGER-COMBINED-TAIL
