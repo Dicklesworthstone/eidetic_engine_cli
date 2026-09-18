@@ -2702,6 +2702,38 @@ fn installers_agree_on_the_matching_version_rerun_contract() -> TestResult {
         }
     }
 
+    // THE NEGATIVE ARM. Everything above is a presence check, and a
+    // short-circuit bead is a negative-path bead: the defect is that a step is
+    // SKIPPED, so presence assertions pass whether or not acquisition was
+    // correctly skipped too. WIN-PS1-014 requires the rerun to remain
+    // "download/build/lock-free"; ordering the lock proves only the last of
+    // those three. These pin the other two by naming the acquisition calls
+    // each installer would have to make and requiring their ABSENCE from the
+    // branch.
+    for (installer, block, forbidden) in [
+        (
+            "install.sh",
+            unix_block,
+            ["curl", "cargo build", "cargo install"].as_slice(),
+        ),
+        (
+            "install.ps1",
+            windows_block,
+            ["Invoke-DownloadFile", "Invoke-FromSource"].as_slice(),
+        ),
+    ] {
+        for call in forbidden {
+            ensure(
+                !block.contains(call),
+                &format!(
+                    "{installer}: the matching-version short-circuit must stay acquisition-free, \
+                     but the branch contains `{call}`. A rerun that re-downloads or rebuilds is \
+                     not a short-circuit, and no presence assertion above would notice"
+                ),
+            )?;
+        }
+    }
+
     // (1, continued) the branch stays acquisition- and lock-free: the lock is
     // taken only after it.
     let unix_lock = unix
