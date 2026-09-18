@@ -10,9 +10,18 @@ commands start at `src/cli/mod.rs:253`, and diagnostic command-path extraction i
 `--help-json` is a global exit path at `src/cli/mod.rs:164` and is dispatched before subcommands
 at `src/cli/mod.rs:3778`; it is not counted as a command path.
 
+**The denominator is 453 PATHS but 442 SURFACES.** `verify …` and
+`verification …` are one surface under two top-level names — two clap variants
+over a single `VerifyCommand`, dispatching to the same handlers — so 22 of the
+453 extractor paths are 11 commands counted twice. Checked systematically:
+exactly ONE such pair exists, no others share an argument type across top-level
+commands. Coverage below is stated against 453 because that is what the gate
+counts; the honest count of distinct surfaces is 442, and a reader comparing
+this document to the CLI should know which number they are holding.
+
 **Scope, measured rather than asserted (bd-...-igo3a).** The command-path
-extractor returns **453** paths. This document currently covers **301** of
-them; **152** are absent. It previously claimed to cover "the 204 stable
+extractor returns **453** paths. This document currently covers **326** of
+them; **127** are absent. It previously claimed to cover "the 204 stable
 command paths returned by the command-path extractor" — a number typed on
 2026-05-19 that was never re-measured, and which its own Full Command
 Inventory table never matched (that table lists 196 paths, not 204). Both
@@ -36,8 +45,8 @@ E2E audit record for this inventory:
 
 - Command source: `src/cli/mod.rs`
 - CLI command paths returned by the extractor: 453
-- Documented in a table row here: 301
-- Absent: 152
+- Documented in a table row here: 326
+- Absent: 127
 - Unmapped command count: 0
 - Matrix enforcement floor: 24
 - Stdout/stderr contract: this file is static documentation; the companion test only reads source
@@ -54,7 +63,7 @@ number covers both will over-trust the gate.
 
 | tier | what it requires | mechanism | covers |
 | --- | --- | --- | --- |
-| coverage | the path appears, backticked, in some **table row** of this file | `mechanical_boundary_inventory_covers_all_cli_command_paths` | 301 of 453 |
+| coverage | the path appears, backticked, in some **table row** of this file | `mechanical_boundary_inventory_covers_all_cli_command_paths` | 326 of 453 |
 | content | the path appears, backticked, in a **Command Boundary Matrix row** — the twelve columns | the three `command_boundary_matrix_*` assertions | 24 of 453 |
 
 Only the content tier checks a side-effect class, a runtime posture, a degraded
@@ -69,8 +78,8 @@ take a deliberate edit, and the live count moving up on its own must not red the
 build.
 
 The floor exists because of a specific way this document can be repaired
-wrongly. The coverage tier is failing today (152 paths absent). Pasting those
-152 into the Full Command Inventory turns coverage green while content
+wrongly. The coverage tier is failing today (127 paths absent). Pasting those
+127 into the Full Command Inventory turns coverage green while content
 enforcement stays at 24 — trading a true red for a false green, with the 94.7%
 gap now invisible because no assertion mentions it. The floor makes the content
 number a maintained, asserted fact rather than an incidental one, so that
@@ -83,11 +92,11 @@ The floor does not answer it; it only stops the question from disappearing.
 
 ## What is still absent (bd-...-igo3a)
 
-152 of the 453 extractor paths have no row here, spread across 51 families.
+127 of the 453 extractor paths have no row here, spread across 50 families.
 Listed so the remaining work is stated in the artifact instead of being
 re-derived from the CLI a fifth time. Counts are absent-paths-per-family:
 
-`team` 35 · `diag` 25 · `mesh` 24 · `lab` 3 ·
+`team` 35 · `mesh` 24 · `lab` 3 ·
 `maintenance` 3 · `migrate` 3 · `perf` 3 · `reflect` 3 · `shadow` 3 ·
 `swarm` 3 · `backup` 2 · `bootstrap` 2 · `cache` 2 ·
 `health` 2 · `lens` 2 · `mcp` 2 · `proof` 2 · `recorder` 2 ·
@@ -104,8 +113,8 @@ contributing one path each (`artifact relocate`, `ask`, `capture suggest`,
 Retired from this list on 2026-09-17 (bd-...-igo3a): `attest` 3, `config` 3,
 `conflict` 4, `db` 4, `decide` 3, `journal` 4, then `graph` 4, `handoff` 2,
 `learn` 2, `memory` 6, then `verify` 11 and `verification` 11, `curate` 7 and `sandbox` 5, then `bootstrap` 2, `cache` 2, `hook` 9, `lens` 2,
-`proof` 2, `sentinel` 2 and `subscribe` 2 — 90 paths, twenty-one whole
-families, now carrying Full Command Inventory rows. Each disposition was checked against
+`proof` 2, `sentinel` 2, `subscribe` 2 and `diag` 25 — 115 paths, twenty-two
+whole families, now carrying Full Command Inventory rows. Each disposition was checked against
 the module rather than defaulted: `journal distill` reads as synthesis from its
 name and is not (it proposes by threshold and emits an explicit
 `distill_no_candidates` degradation), and the mock-data scan over all six
@@ -465,6 +474,9 @@ ledger and the command-boundary matrix must gain concrete rows before the new pa
 | `conflict list`, `conflict explain`, `conflict cluster`, `conflict resolve` | `src/cli/mod.rs:14602`, `src/cli/conflict.rs` | Ranked contradicting memory pairs, per-memory explanation, and k-truss + Louvain contradiction clusters over persisted memories. `resolve` performs audited mutations and is dry-run by default. | keep mechanical |
 | `db check-integrity`, `db inspect`, `db migrations`, `db reindex` | `src/cli/mod.rs:13763`, `src/db/mod.rs` | Non-mutating database surfaces: integrity check, single-table row inspection, applied/pending migration listing, and a preview of pending derived-index rebuild work. `reindex` previews rather than rebuilds. | keep mechanical |
 | `decide record`, `decide list`, `decide revisit` | `src/cli/mod.rs:15176`, `src/core/decide.rs` | Typed decision memories with revisit scheduling: record writes a durable decision, list reports current heads with optional superseded history, revisit reports decisions due or inside the warning window. | keep mechanical |
+| `diag agentsmd-drift`, `diag artifacts`, `diag build-admission`, `diag contention`, `diag disk-pressure`, `diag host-profile`, `diag pack-latest`, `diag plan-cache`, `diag provenance`, `diag resource-admission`, `diag search`, `diag store-integrity`, `diag toolchain-provenance` | `src/cli/mod.rs:13784`, `src/core/contention.rs`, `src/core/disk_pressure.rs` | READ-ONLY diagnostics over persisted state: drift, retention budgets, contention posture, disk capacity, redacted host topology, the newest persisted pack, plan-cache counters, provenance freshness, per-arm search diagnostics, read-fence state, and observed toolchain provenance. `resource-admission` is declared side-effect-free and `toolchain-provenance` emits without mutating tools. | keep mechanical |
+| `diag advisory-lock`, `diag causal-edge`, `diag curation-candidate`, `diag database-skew`, `diag graph-snapshot`, `diag incident`, `diag memory-validity`, `diag model-registry`, `diag pack-record`, `diag tripwire` | `src/cli/mod.rs:13784` | **These WRITE synthetic state.** Each seeds or skews deterministic fixture data for diagnostic replay — a causal edge, a curation candidate, a graph snapshot, a model-registry entry, a pack record, a tripwire row; `database-skew` copies the workspace database and applies a deliberate skew; `memory-validity` skews temporal validity metadata; `incident` replays a synthetic swarm incident without touching live services; `advisory-lock` acquires a real lock. Seeding is their PURPOSE, which is why they are mechanical rather than `fix backing data` — that disposition is for a command that ANSWERS with fake data, and these create fixtures on request. A reader auditing this repo for mock-data risk needs to know they exist and are deliberate, which is why they are split out rather than folded into the row above. | keep mechanical |
+| `diag write-owner`, `diag write-spool` | `src/cli/mod.rs:13784` | Load-exercising diagnostics: they EXERCISE write-owner queue capacity and write-spool budget accounting to produce busy/backpressure readings, rather than reporting a state they found. Running them applies real pressure to those subsystems. | keep mechanical |
 | `bootstrap apply`, `bootstrap docs` | `src/cli/mod.rs:13646`, `src/core/docs_bootstrap.rs` | `docs` compiles default policy/README docs plus explicit `--include` references into curation candidates; `apply` applies a previously approved bootstrap run THROUGH curation rather than writing memories directly, so the audited review path is not bypassed. | keep mechanical |
 | `cache hotset-manifest`, `cache prewarm` | `src/cli/mod.rs:13675`, `src/cache/hotset.rs` | Explicit cache prewarm report built from a redaction-safe hotset manifest (ADR 0084). Reads and reports; the manifest is the input, not something these synthesize. | keep mechanical |
 | `hook claude-code`, `hook claude-code --install`, `hook claude-code --undo`, `hook codex`, `hook codex --install`, `hook codex --undo`, `hook gemini`, `hook git-readiness`, `hook status` | `src/cli/mod.rs:14965`, `src/hooks/installer.rs` | Ambient harness hook posture. The bare forms and `status` REPORT without writing settings; `--install` and `--undo` are the only mutating paths and are mutually exclusive by clap (`conflicts_with_all`, `src/cli/mod.rs:11959`). `--install`/`--undo` appear as separate extractor paths because they change the command's effect, not merely its output. | keep mechanical |
