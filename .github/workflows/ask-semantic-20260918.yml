@@ -1,0 +1,103 @@
+name: Local semantic ask delivery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/delivery/integrate-ask-semantic-20260918.py'
+      - '.github/workflows/ask-semantic-20260918.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ask-semantic-delivery
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - name: Apply guarded bindings and commit directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git branch --show-current)" = main
+          git fetch origin main
+          git merge --ff-only origin/main
+          python3 scripts/delivery/integrate-ask-semantic-20260918.py
+          files=(src/core/ask.rs src/core/ask_candidates.rs src/core/index.rs src/cli/mod.rs src/core/ask_semantic.rs src/core/ask_semantic_tests.rs src/core/index_ask.rs)
+          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+          git diff --check
+          git diff --stat
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "${files[@]}"
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat(ask): integrate verified cached semantic scoring before candidate admission' -m 'Use one request-local scorer for candidate admission, opposing-evidence reservation and final span evaluation. Load verified cached local models only; no downloads, remote requests, index writes or scope widening. Discard incomplete semantic batches and recompute the entire lexical answer. Preserve native citations, provenance and correlated support. Formatting and source-anchor validation passed; compilation and the 22 new Rust regressions are checked by the following workflow steps, not claimed by this commit.'
+            published=false
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then published=true; break; fi
+              git fetch origin main
+              git merge --no-edit origin/main
+            done
+            test "$published" = true
+          fi
+          git rev-parse HEAD | tee "$RUNNER_TEMP/ask-semantic-source.log"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ask-semantic-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ask-semantic-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+            ask-evidence-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+      - name: Compile production library and CLI
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --locked --lib --bin ee 2>&1 | tee "$RUNNER_TEMP/ask-semantic-check.log"
+      - name: Execute semantic scorer regressions
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --lib core::ask::semantic::tests:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/ask-semantic-tests.log"
+          grep -Eq 'test result: ok\. 19 passed; 0 failed' "$RUNNER_TEMP/ask-semantic-tests.log"
+      - name: Execute cached-model resolution regressions
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --lib core::index::ask_model::tests:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/ask-semantic-model-tests.log"
+          grep -Eq 'test result: ok\. 3 passed; 0 failed' "$RUNNER_TEMP/ask-semantic-model-tests.log"
+      - name: Execute existing ask engine regressions
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --lib core::ask:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/ask-semantic-engine-tests.log"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: local-semantic-ask-verification
+          path: ${{ runner.temp }}/ask-semantic-*.log
+          retention-days: 7
