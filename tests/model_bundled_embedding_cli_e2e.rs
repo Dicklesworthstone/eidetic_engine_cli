@@ -3791,16 +3791,35 @@ fn model_status_posture_and_search_embed_backend_cannot_disagree() -> TestResult
     // `response_data` yields a Map, not a Value, so the active object is
     // fetched with `get` before pointing into it -- the shape every other
     // status assertion in this file uses.
+    //
+    // ONLY `active.semantic` is load-bearing. It is the one posture field the
+    // comparison below needs, and ModelActiveView::data_json emits it
+    // (src/core/model.rs:349) alongside `backend` (:344) and `source` (:351).
+    //
+    // The first version of this test also required `active.mode` with a `?`,
+    // and failed on that `ok_or_else` rather than on its assertion -- a
+    // DIAGNOSTIC field was made able to fail the test, so a green and a
+    // mis-specified field path were not distinguishable from the result line.
+    // There is no `mode` on `active`: bd-7hsgy's report wrote
+    // "active.posture = { mode, semantic, source }" as prose, and the only
+    // `mode` in this payload is modelLifecycle.semanticReadiness.mode. Prose
+    // describing JSON is not a field path; the serializer is.
     let posture_semantic = status_data
         .get("active")
         .and_then(|active| active.pointer("/semantic"))
         .and_then(Value::as_bool)
         .ok_or_else(|| "ee model status: missing active.semantic".to_string())?;
-    let posture_mode = status_data
+    let posture_backend = status_data
         .get("active")
-        .and_then(|active| active.pointer("/mode"))
+        .and_then(|active| active.pointer("/backend"))
         .and_then(Value::as_str)
-        .ok_or_else(|| "ee model status: missing active.mode".to_string())?
+        .unwrap_or("<absent>")
+        .to_owned();
+    let posture_source = status_data
+        .get("active")
+        .and_then(|active| active.pointer("/source"))
+        .and_then(Value::as_str)
+        .unwrap_or("<absent>")
         .to_owned();
 
     let search = run_ee(
@@ -3826,7 +3845,8 @@ fn model_status_posture_and_search_embed_backend_cannot_disagree() -> TestResult
         json!({
             "event": "posture_vs_retrieval",
             "postureSemantic": posture_semantic,
-            "postureMode": posture_mode,
+            "postureBackend": posture_backend,
+            "postureSource": posture_source,
             "embedBackend": embed_backend,
         }),
     )?;
@@ -3838,7 +3858,8 @@ fn model_status_posture_and_search_embed_backend_cannot_disagree() -> TestResult
     Err(format!(
         "posture and retrieval disagree in one workspace (bd-7hsgy): \
          `ee model status` reports active.semantic={posture_semantic} \
-         active.mode={posture_mode}, while `ee search` in the same workspace \
+         active.backend={posture_backend} active.source={posture_source}, \
+         while `ee search` in the same workspace \
          reports embed_backend={embed_backend}. Both surfaces must resolve the \
          embedder the same way; see DEFAULT_SEARCH_EMBEDDER in \
          src/core/index.rs, where inspection must share retrieval's one-time \
