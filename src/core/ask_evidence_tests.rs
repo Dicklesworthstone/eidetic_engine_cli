@@ -340,6 +340,10 @@ fn clean_metadata_and_a_matching_digest_do_not_authorize_secret_text() {
     assert!(corpus.native_sources.is_empty());
     let report = answer(&corpus);
     assert!(report.abstained);
-    assert!(!ask_data_json(&report).to_string().contains("ask-private-canary"));
+    assert!(
+        !ask_data_json(&report)
+            .to_string()
+            .contains("ask-private-canary")
+    );
     assert!(!render_ask_markdown(&report).contains("ask-private-canary"));
 }
