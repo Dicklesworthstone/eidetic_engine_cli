@@ -508,3 +508,30 @@
 1	NSF-CLI-CLAIM-GATE-DEGRADED-REPAIR-JSON
 1	NSF-CLI-CLAIM-GATE-ONLY-DEGRADED-REPAIR
 1	NSF-CLI-EVAL-ASK-NO-SIDES
+
+# src/core/memory.rs and src/core/curate.rs, tranche 5. Appended at the end as
+# always; the per-rule delta across all 378 pre-existing rules showed none moved.
+#
+# SIX OF THESE THIRTEEN OWNED ZERO ON THE FIRST ATTEMPT, and the cause was a
+# repeat of a mistake I had already made and already recorded in tranche 3: I
+# passed four arguments to the five-argument allowed_in, so the fragment was read
+# as the FUNCTION and the reason as the fragment. In Rust that is a compile
+# error, not a silent miss -- but the ownership delta surfaced it first, before
+# any build. A seventh owned zero for a subtler reason: the function was
+# `audited_source_memory_ids_for_rule_candidate` and I had copied
+# `audited_source_memory_ids_for_rule` out of a TRUNCATED console display. A
+# truncated field used as a key is the same class as piping an existence check
+# through `head`.
+1	NSF-CORE-MEMORY-GIT-COMMIT-REF
+1	NSF-CORE-MEMORY-GIT-ROOT
+1	NSF-CORE-MEMORY-GIT-SYMBOL
+1	NSF-CORE-MEMORY-GLOBAL-SCOPE-TAGS
+2	NSF-CORE-MEMORY-BATCH-NO-TYPED-FIELDS
+1	NSF-CORE-MEMORY-BATCH-EMPTY-FIELDS
+1	NSF-CORE-MEMORY-LIST-UNTAGGED
+1	NSF-CURATE-RECIPE-NO-PROPOSED-CONTENT
+1	NSF-CURATE-AUDIT-DETAILS-PARSE
+1	NSF-CURATE-AUDIT-CONTENT-HASH
+1	NSF-CURATE-DERIVATION-REF-HASH
+2	NSF-CURATE-LINK-PAYLOAD-MEMORY-IDS
+1	NSF-CURATE-LINK-PAYLOAD-RELATION

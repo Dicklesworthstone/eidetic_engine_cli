@@ -2594,6 +2594,105 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "let sides = report.sides.as_deref().unwrap_or_default();",
         "An ask report with no recorded sides has none, and the eval actual records an empty slice. The report itself is already in hand here -- the ask has run and returned -- so this is reading an optional field of a successful result, not recovering from a failed one.",
     ),
+    // src/core/memory.rs and src/core/curate.rs. Both carry only FILE-SCOPED
+    // resident rules (7 and 11), so these are appended like the rest.
+    //
+    // A pattern worth naming: almost every site in these two files feeds a
+    // guard within one or two lines -- `if x.is_empty() { return Err(..) }`, a
+    // parser that rejects the empty string, a hash comparison, a match whose
+    // fallback errors. The default exists to reach the check, not to stand in
+    // for a value.
+    allowed_in(
+        "NSF-CORE-MEMORY-GIT-COMMIT-REF",
+        "src/core/memory.rs",
+        "remember_git_capture_commit_input",
+        "\"resolve commit ref\",",
+        "Empty git output yields no first line. The default exists only to reach the guard three lines below -- `if commit_sha.is_empty() { return Err(remember_usage_error(\"git did not resolve commit ref\")) }` -- so a git invocation that produced nothing is reported rather than treated as a commit.",
+    ),
+    allowed_in(
+        "NSF-CORE-MEMORY-GIT-ROOT",
+        "src/core/memory.rs",
+        "remember_git_root",
+        "let root = root.lines().next().unwrap_or_default().trim();",
+        "Same shape and the same immediate guard on the very next line: `if root.is_empty() { return Err(..) }`. An empty rev-parse result becomes a usage error, never a workspace root.",
+    ),
+    allowed_in(
+        "NSF-CORE-MEMORY-GIT-SYMBOL",
+        "src/core/memory.rs",
+        "sanitize_git_capture_symbol",
+        ".split(['(', '<', '{', ':', '='])",
+        "UNREACHABLE and guarded anyway: str::split always yields at least one element, so `.next()` is always Some, and `if symbol.is_empty()` immediately below catches the empty case regardless.",
+    ),
+    allowed_in(
+        "NSF-CORE-MEMORY-GLOBAL-SCOPE-TAGS",
+        "src/core/memory.rs",
+        "remember_tags_with_global_scope",
+        ".filter(|tag| !tag.is_empty())",
+        "A remember call with no tags has no tags. The chain already drops empty entries, so an absent list and a list of blanks collapse to the same empty vector by construction rather than by this default.",
+    ),
+    allowed_in(
+        "NSF-CORE-MEMORY-BATCH-NO-TYPED-FIELDS",
+        "src/core/memory.rs",
+        "remember_batch_typed_field_assignments",
+        "let Some(value) = object.get(\"fields\") else {",
+        "Two sites, multiplicity 2: `fields` absent, and `fields` explicitly null. Both mean the batch line declares no typed field assignments. The MALFORMED case is separated out and reaches neither -- a `fields` value that is neither null nor an object returns RememberBatchLineError with remember_invalid_json.",
+    ),
+    allowed_in(
+        "NSF-CORE-MEMORY-BATCH-EMPTY-FIELDS",
+        "src/core/memory.rs",
+        "remember_batch_typed_field_assignments",
+        "if fields.is_empty() {",
+        "The third case in the same function and a SEPARATE rule rather than a third site of the one above, because the window between them does not overlap and because it is a different input: `fields` present and a valid object, but carrying no entries. Same conclusion -- no typed field assignments -- reached after the object shape has already been validated.",
+    ),
+    allowed_in(
+        "NSF-CORE-MEMORY-LIST-UNTAGGED",
+        "src/core/memory.rs",
+        "list_memories",
+        "let tags = tags_by_memory.get(&m.id).cloned().unwrap_or_default();",
+        "A map miss is an untagged memory. The load failure takes a different path entirely: `match conn.get_memory_tags_batch(&page_ids)` returns MemoryListReport::error on Err, so the batch error is surfaced to the caller rather than degrading into an empty tag map. This function returns a report rather than a Result, which is why it is a `match` and not `?`.",
+    ),
+    allowed_in(
+        "NSF-CURATE-RECIPE-NO-PROPOSED-CONTENT",
+        "src/core/curate.rs",
+        "apply_curation_candidate_with_recipe",
+        "crate::core::plan::recipe_text(",
+        "A candidate with no proposed content produces no recipe text. recipe_text is redact_content over the input, and redacting nothing yields nothing -- no value is invented for the empty case.",
+    ),
+    allowed_in(
+        "NSF-CURATE-AUDIT-DETAILS-PARSE",
+        "src/core/curate.rs",
+        "audited_source_memory_ids_for_rule_candidate",
+        "serde_json::from_str(entry.details.as_deref().unwrap_or_default())",
+        "The default feeds a PARSER THAT REJECTS IT. serde_json::from_str(\"\") is an error, mapped immediately to invalid(\"malformed audit details\")?, so an audit row with no details fails the verification instead of passing it with an empty document.",
+    ),
+    allowed_in(
+        "NSF-CURATE-AUDIT-CONTENT-HASH",
+        "src/core/curate.rs",
+        "audited_source_memory_ids_for_rule_candidate",
+        "!= blake3::hash(",
+        "Absent proposed content hashes as empty, and that hash is COMPARED against the recorded proposedContentHash; a mismatch returns invalid(\"audit does not describe this proposal\"). The empty hash cannot falsely verify a proposal that had content, and when the recorded hash is itself the hash of empty the two agree correctly.",
+    ),
+    allowed_in(
+        "NSF-CURATE-DERIVATION-REF-HASH",
+        "src/core/curate.rs",
+        "audited_source_memory_ids_for_rule_candidate",
+        "reference[\"contentHash\"].as_str().unwrap_or_default(),",
+        "The reference's IDENTITY is validated strictly on the two lines above -- a missing `id` is invalid(\"missing memory ID\"), and a non-memory kind or unparseable MemoryId is invalid(\"invalid memory reference\"). Only the supplementary content hash defaults, and an empty string is not a valid blake3 hash, so it records \"this audit reference carried no content hash\" rather than a value that could falsely match one.",
+    ),
+    allowed_in(
+        "NSF-CURATE-LINK-PAYLOAD-MEMORY-IDS",
+        "src/core/curate.rs",
+        "parse_suggested_link_payload",
+        "let memory_b = parsed",
+        "Two sites, multiplicity 2. Both defaults exist to reach the explicit pair guard below: `if memory_a.is_empty() || memory_b.is_empty() || memory_a == memory_b { return Err(validation_issue(\"link_candidate_pair_invalid\", ..)) }`. A payload missing either id is rejected with a named validation issue and a repair command.",
+    ),
+    allowed_in(
+        "NSF-CURATE-LINK-PAYLOAD-RELATION",
+        "src/core/curate.rs",
+        "parse_suggested_link_payload",
+        "let relation = match relation_raw {",
+        "The empty string reaches a match over the three known relations and falls to the `other` arm, which returns validation_issue(\"link_candidate_relation_invalid\") naming the offending value. An absent relation is refused, never defaulted to `related`.",
+    ),
 ];
 
 const MANUAL_FINDINGS: &[ManualFinding] = &[];
