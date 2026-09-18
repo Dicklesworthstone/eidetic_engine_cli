@@ -14,6 +14,39 @@ use crate::policy::redact_public_replay_text;
 
 use super::super::AskCandidate;
 
+pub(super) fn rule_candidate(
+    projection: &crate::search::RuleIndexProjection,
+) -> Option<(AskCandidate, super::super::AskNativeSource)> {
+    let rule = projection.rule();
+    let id = crate::models::RuleId::from_str(&rule.id).ok()?;
+    let trust = TrustClass::from_str(&rule.trust_class).ok()?;
+    if !projection.is_pack_admissible()
+        || rule.content.trim().is_empty()
+        || rule.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+        || !public_text(&rule.content)
+    {
+        return None;
+    }
+    let entity = crate::pack::PackEntityRef::Rule(id);
+    Some((
+        AskCandidate {
+            memory_id: rule.id.clone(),
+            content: rule.content.clone(),
+            confidence: rule.confidence,
+            trust_class: trust.as_str().to_owned(),
+            provenance_uri: Some(entity.provenance_uri()),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            team_provenance: None,
+        },
+        super::super::AskNativeSource {
+            entity,
+            entity_revision: projection.entity_revision().to_owned(),
+            source_memory_ids: projection.source_memory_ids().to_vec(),
+        },
+    ))
+}
+
 /// Team authority belongs to the workspace database, not an arbitrary alternate
 /// store. A cross-store roster cannot join this evidence snapshot atomically;
 /// withhold that query rather than silently widening or using stale membership.

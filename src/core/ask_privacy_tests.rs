@@ -191,6 +191,7 @@ fn citation_metadata_is_sanitized_without_rewriting_the_body() {
         &AskCorpus {
             candidates: vec![admitted],
             contradictions: vec![],
+            native_sources: BTreeMap::new(),
         },
         0.0,
     );
@@ -213,6 +214,7 @@ fn public_provenance_and_unicode_byte_offsets_are_preserved() {
         &AskCorpus {
             candidates: vec![candidate],
             contradictions: vec![],
+            native_sources: BTreeMap::new(),
         },
         0.55,
     );
@@ -243,8 +245,8 @@ fn malformed_identity_or_vocabulary_never_becomes_public_evidence() {
 
 #[test]
 fn invalid_or_absent_provenance_uses_the_real_memory_identity() {
-    use std::str::FromStr;
     use crate::models::{MemoryId, ProvenanceUri};
+    use std::str::FromStr;
 
     let (_root, db, workspace) = fixture();
     let memory = seed(&db, &workspace, 1, "Run cargo fmt before release.");
@@ -255,7 +257,10 @@ fn invalid_or_absent_provenance_uses_the_real_memory_identity() {
     ] {
         let mut copy = memory.clone();
         copy.provenance_uri = uri;
-        let actual = admission::into_candidate(copy).unwrap().provenance_uri.unwrap();
+        let actual = admission::into_candidate(copy)
+            .unwrap()
+            .provenance_uri
+            .unwrap();
         assert_eq!(actual, format!("ee-mem://{}", memory.id));
         assert_eq!(
             ProvenanceUri::from_str(&actual).unwrap(),
@@ -293,7 +298,10 @@ fn uri_wrappers_cannot_hide_private_paths_in_bodies_or_citation_fields() {
         metadata.provenance_uri = Some(uri.to_owned());
         let admitted = admission::into_candidate(metadata).unwrap();
         assert_eq!(admitted.content, memory.content);
-        assert_eq!(admitted.provenance_uri, Some(format!("ee-mem://{}", memory.id)));
+        assert_eq!(
+            admitted.provenance_uri,
+            Some(format!("ee-mem://{}", memory.id))
+        );
     }
 }
 
@@ -325,6 +333,12 @@ fn file_targets_are_checked_portably_and_relative_citations_survive() {
     ] {
         let mut copy = memory.clone();
         copy.provenance_uri = Some(uri.to_owned());
-        assert_eq!(admission::into_candidate(copy).unwrap().provenance_uri.as_deref(), Some(uri));
+        assert_eq!(
+            admission::into_candidate(copy)
+                .unwrap()
+                .provenance_uri
+                .as_deref(),
+            Some(uri)
+        );
     }
 }

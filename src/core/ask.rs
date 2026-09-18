@@ -10,7 +10,7 @@
 //! rather than silent emission of generated text (enforced at the boundary
 //! in `compose_answer`, never downgraded).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::db::{CreateAuditInput, DbConnection, audit_actions, generate_audit_id};
 use crate::obs::audit_events::query_hash as audit_query_hash;
@@ -33,6 +33,11 @@ mod selection;
 
 #[path = "ask_clustering.rs"]
 mod clustering;
+
+#[path = "ask_native.rs"]
+mod native;
+
+pub use native::AskNativeSource;
 
 // ─── schema constants ───────────────────────────────────────────────────────
 
@@ -92,9 +97,11 @@ pub const DEGRADED_EXTRACTIVENESS: &str = "ask_extractiveness_violated";
 
 // ─── request / candidate types ──────────────────────────────────────────────
 
-/// A single memory candidate with the fields the ask engine needs.
+/// A source candidate with the fields the ask engine needs.
 #[derive(Clone, Debug)]
 pub struct AskCandidate {
+    /// Canonical source ID. The historical field name is retained for memory
+    /// callers; native rules use their real RuleId, never a synthetic MemoryId.
     pub memory_id: String,
     pub content: String,
     pub confidence: f32,
@@ -129,6 +136,8 @@ pub struct AskRequest {
     /// When set, enables fail-closed mode: exit 6 if confidence below this.
     pub require_confidence: Option<f32>,
     pub contradictions: Vec<AskContradiction>,
+    /// Native entity metadata from the same source snapshot as the candidates.
+    pub native_sources: BTreeMap<String, AskNativeSource>,
 }
 
 impl Default for AskRequest {
@@ -139,6 +148,7 @@ impl Default for AskRequest {
             max_evidence: ASK_MAX_EVIDENCE_DEFAULT,
             require_confidence: None,
             contradictions: Vec::new(),
+            native_sources: BTreeMap::new(),
         }
     }
 }
@@ -207,6 +217,8 @@ pub struct AskConfidenceComponents {
 /// The full ask engine report (returned by `evaluate_ask`).
 #[derive(Clone, Debug)]
 pub struct AskReport {
+    /// Metadata only for sources exposed in citations or nearest evidence.
+    pub native_sources: BTreeMap<String, AskNativeSource>,
     pub question: String,
     pub abstained: bool,
     pub answer_text: Option<String>,
@@ -695,6 +707,7 @@ fn compose_answer(
 /// side fails validation. This is not an ordinary missing-evidence abstention.
 fn extractiveness_failure_report(request: &AskRequest, candidates_scanned: usize) -> AskReport {
     AskReport {
+        native_sources: BTreeMap::new(),
         question: request.question.clone(),
         abstained: true,
         answer_text: None,
@@ -730,6 +743,15 @@ mod answer_integrity_tests;
 /// and for emitting the query-miss ledger row on abstention
 /// (`report.abstained == true`).
 pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskReport {
+    if !native::validate_sources(request, candidates) {
+        return extractiveness_failure_report(request, candidates.len());
+    }
+    let mut report = evaluate_ask_inner(request, candidates);
+    native::attach_sources(&mut report, request);
+    report
+}
+
+fn evaluate_ask_inner(request: &AskRequest, candidates: &[AskCandidate]) -> AskReport {
     let question_terms = tokenize_for_ask(&request.question);
     let max_n = request.max_evidence.max(1);
     // Validate the full scoped input and rank before applying the clustering
@@ -793,7 +815,13 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
 
     let (conflict_link, mut clusters) = match explicit_conflict(request, &all_spans) {
         Some((link, sides)) => (Some(link), sides),
-        None => (None, cluster_spans(&all_spans)),
+        None => {
+            let groups = native::support_groups(&all_spans, &request.native_sources);
+            (
+                None,
+                clustering::cluster_spans_with_groups(&all_spans, &groups),
+            )
+        }
     };
 
     let top_span_score = clusters.first().map(|s| s.score).unwrap_or(0.0);
@@ -859,6 +887,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
         };
 
         return AskReport {
+            native_sources: BTreeMap::new(),
             question: request.question.clone(),
             abstained: true,
             answer_text: None,
@@ -932,6 +961,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
         };
 
         return AskReport {
+            native_sources: BTreeMap::new(),
             question: request.question.clone(),
             abstained: false,
             answer_text: None,
@@ -952,6 +982,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
     // Normal path: compose answer from top clusters
     match compose_answer(&clusters, max_n, &content_map) {
         Ok((answer_text, citations)) => AskReport {
+            native_sources: BTreeMap::new(),
             question: request.question.clone(),
             abstained: false,
             answer_text: Some(answer_text),
@@ -1046,20 +1077,27 @@ pub fn record_ask_retrieval_best_effort(
     let query_hash = audit_query_hash(&report.question);
     for citation in citations {
         let audit_id = generate_audit_id();
-        let details = serde_json::json!({
+        let mut details = serde_json::json!({
             "queryHash": &query_hash,
             "rank": citation.index as u32,
             "source": ASK_QUERY_MISS_ORIGIN,
             "trustClass": &citation.trust_class,
-        })
-        .to_string();
+        });
+        native::insert_identity(
+            &mut details,
+            &citation.memory_id,
+            &report.native_sources,
+            false,
+        );
         let input = CreateAuditInput {
             workspace_id: Some(workspace_id.to_owned()),
             actor: None,
             action: audit_actions::SEARCH_RETURNED_MEM.to_owned(),
-            target_type: Some("memory".to_owned()),
+            target_type: Some(
+                native::audit_target(report.native_sources.get(&citation.memory_id)).to_owned(),
+            ),
             target_id: Some(citation.memory_id.clone()),
-            details: Some(details),
+            details: Some(details.to_string()),
         };
         if let Err(error) = connection.insert_audit(&audit_id, &input) {
             tracing::warn!(
@@ -1119,12 +1157,12 @@ pub fn ask_data_json(report: &AskReport) -> serde_json::Value {
             "corroboration": report.confidence_components.corroboration,
             "contradictionPenalty": report.confidence_components.contradiction_penalty,
         },
-        "citations": report.citations.iter().map(citation_to_json).collect::<Vec<_>>(),
+        "citations": report.citations.iter().map(|c| citation_to_json(c, &report.native_sources)).collect::<Vec<_>>(),
         "sides": report.sides.as_ref().map(|sides| {
-            sides.iter().map(side_to_json).collect::<Vec<_>>()
+            sides.iter().map(|s| side_to_json(s, &report.native_sources)).collect::<Vec<_>>()
         }),
         "nearestEvidence": report.nearest_evidence.as_ref().map(|ne| {
-            ne.iter().map(nearest_evidence_to_json).collect::<Vec<_>>()
+            ne.iter().map(|e| nearest_evidence_to_json(e, &report.native_sources)).collect::<Vec<_>>()
         }),
         "counterfactualHint": report.counterfactual_hint,
         "candidatesScanned": report.candidates_scanned,
@@ -1154,7 +1192,10 @@ pub fn ask_data_json(report: &AskReport) -> serde_json::Value {
     obj
 }
 
-fn citation_to_json(c: &AskCitation) -> serde_json::Value {
+fn citation_to_json(
+    c: &AskCitation,
+    sources: &BTreeMap<String, AskNativeSource>,
+) -> serde_json::Value {
     let mut value = serde_json::json!({
         "index": c.index,
         "memoryId": c.memory_id,
@@ -1164,6 +1205,7 @@ fn citation_to_json(c: &AskCitation) -> serde_json::Value {
         "trustClass": c.trust_class,
         "confidence": c.confidence,
     });
+    native::insert_identity(&mut value, &c.memory_id, sources, false);
     if let Some(provenance) = &c.team_provenance
         && let Some(object) = value.as_object_mut()
     {
@@ -1172,21 +1214,26 @@ fn citation_to_json(c: &AskCitation) -> serde_json::Value {
     value
 }
 
-fn side_to_json(s: &AskSide) -> serde_json::Value {
+fn side_to_json(s: &AskSide, sources: &BTreeMap<String, AskNativeSource>) -> serde_json::Value {
     serde_json::json!({
         "label": s.label,
         "answerText": s.answer_text,
-        "citations": s.citations.iter().map(citation_to_json).collect::<Vec<_>>(),
+        "citations": s.citations.iter().map(|c| citation_to_json(c, sources)).collect::<Vec<_>>(),
     })
 }
 
-fn nearest_evidence_to_json(ne: &AskNearestEvidence) -> serde_json::Value {
-    serde_json::json!({
+fn nearest_evidence_to_json(
+    ne: &AskNearestEvidence,
+    sources: &BTreeMap<String, AskNativeSource>,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
         "memoryId": ne.memory_id,
         "span": {"byteStart": ne.byte_start, "byteEnd": ne.byte_end},
         "text": ne.text,
         "score": ne.score,
-    })
+    });
+    native::insert_identity(&mut value, &ne.memory_id, sources, false);
+    value
 }
 
 fn ask_query_assist_json(report: &AskReport) -> Option<serde_json::Value> {
@@ -1209,14 +1256,17 @@ fn ask_query_assist_json(report: &AskReport) -> Option<serde_json::Value> {
         "candidateCount": report.candidates_scanned,
         "droppedBelowFloor": 0,
         "relevanceFloor": serde_json::Value::Null,
-        "reformulations": ask_query_assist_reformulations(&report.question, nearest_evidence),
-        "didYouMean": nearest_evidence.iter().take(3).map(ask_query_assist_did_you_mean_json).collect::<Vec<_>>(),
+        "reformulations": ask_query_assist_reformulations(&report.question, nearest_evidence, &report.native_sources),
+        "didYouMean": nearest_evidence.iter().take(3).map(|e| ask_query_assist_did_you_mean_json(e, &report.native_sources)).collect::<Vec<_>>(),
         "captureTemplate": ask_query_assist_capture_template_json(&report.question),
     }))
 }
 
-fn ask_query_assist_did_you_mean_json(evidence: &AskNearestEvidence) -> serde_json::Value {
-    serde_json::json!({
+fn ask_query_assist_did_you_mean_json(
+    evidence: &AskNearestEvidence,
+    sources: &BTreeMap<String, AskNativeSource>,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
         "memoryId": &evidence.memory_id,
         "score": evidence.score,
         "source": "ask_nearest_evidence",
@@ -1227,12 +1277,15 @@ fn ask_query_assist_did_you_mean_json(evidence: &AskNearestEvidence) -> serde_js
             "byteEnd": evidence.byte_end,
         },
         "why": "Nearest extracted evidence span did not reach the ask confidence threshold.",
-    })
+    });
+    native::insert_identity(&mut value, &evidence.memory_id, sources, false);
+    value
 }
 
 fn ask_query_assist_reformulations(
     question: &str,
     nearest_evidence: &[AskNearestEvidence],
+    sources: &BTreeMap<String, AskNativeSource>,
 ) -> Vec<serde_json::Value> {
     let Some(first) = nearest_evidence.first() else {
         return Vec::new();
@@ -1254,13 +1307,15 @@ fn ask_query_assist_reformulations(
     } else {
         format!("{normalized_question} {}", evidence_terms.join(" "))
     };
-    vec![serde_json::json!({
+    let mut value = serde_json::json!({
         "query": query,
         "strategy": "nearest_evidence_terms",
         "rationale": "Adds terms from the nearest ask evidence span that was below the confidence threshold.",
         "matchedDocId": &first.memory_id,
         "matchedMemoryId": &first.memory_id,
-    })]
+    });
+    native::insert_identity(&mut value, &first.memory_id, sources, true);
+    vec![value]
 }
 
 fn ask_query_assist_capture_template_json(question: &str) -> serde_json::Value {
@@ -1361,7 +1416,12 @@ pub fn render_ask_markdown(report: &AskReport) -> String {
             if !ne.is_empty() {
                 out.push_str("\n**Nearest evidence:**\n");
                 for e in ne {
-                    out.push_str(&format!("- {} (score: {:.2})\n", e.text, e.score));
+                    out.push_str(&format!(
+                        "- {} (score: {:.2}){}\n",
+                        e.text,
+                        e.score,
+                        native::markdown_identity(report, &e.memory_id)
+                    ));
                 }
             }
         }
@@ -1383,7 +1443,12 @@ pub fn render_ask_markdown(report: &AskReport) -> String {
                     side.label, side.answer_text
                 ));
                 for c in &side.citations {
-                    out.push_str(&format!("> [{}] *({})*\n", c.index, c.memory_id));
+                    out.push_str(&format!(
+                        "> [{}] *({})*{}\n",
+                        c.index,
+                        c.memory_id,
+                        native::markdown_identity(report, &c.memory_id)
+                    ));
                 }
             }
         }
@@ -1403,8 +1468,12 @@ pub fn render_ask_markdown(report: &AskReport) -> String {
                 crate::core::memory_scope::TeamProvenance::compact_suffix,
             );
             out.push_str(&format!(
-                "[{}] {} `{}` (conf: {:.2}){suffix}\n",
-                c.index, prov, c.trust_class, c.confidence
+                "[{}] {} `{}` (conf: {:.2}){suffix}{}\n",
+                c.index,
+                prov,
+                c.trust_class,
+                c.confidence,
+                native::markdown_identity(report, &c.memory_id)
             ));
         }
     }
@@ -1645,6 +1714,7 @@ mod tests {
     fn evaluate_ask_abstains_on_empty_corpus() {
         let request = AskRequest {
             question: "what is the database port".into(),
+            native_sources: BTreeMap::new(),
             min_confidence: ASK_MIN_CONFIDENCE_DEFAULT,
             max_evidence: ASK_MAX_EVIDENCE_DEFAULT,
             require_confidence: None,
@@ -1903,6 +1973,7 @@ mod tests {
     fn evaluate_ask_finds_factual_answer() {
         let request = AskRequest {
             question: "what port does the database use".into(),
+            native_sources: BTreeMap::new(),
             min_confidence: 0.01, // very low so we don't abstain in test
             max_evidence: 3,
             require_confidence: None,
@@ -1935,6 +2006,7 @@ mod tests {
     fn ask_data_json_has_required_fields() {
         let report = AskReport {
             question: "test question".into(),
+            native_sources: BTreeMap::new(),
             abstained: false,
             answer_text: Some("[1] the answer".into()),
             confidence: 0.8,
@@ -1984,6 +2056,7 @@ mod tests {
         };
         let report = AskReport {
             question: "who wrote the analysis".into(),
+            native_sources: BTreeMap::new(),
             abstained: false,
             answer_text: Some("[1] teammate analysis".into()),
             confidence: 0.8,
@@ -2031,6 +2104,7 @@ mod tests {
     #[test]
     fn ask_data_json_abstention_includes_query_assist() {
         let report = AskReport {
+            native_sources: BTreeMap::new(),
             question: "where is installer smoke documented".into(),
             abstained: true,
             answer_text: None,
@@ -2080,6 +2154,7 @@ mod tests {
     #[test]
     fn ask_query_miss_audit_details_are_hash_only_and_origin_ask() -> Result<(), String> {
         let report = AskReport {
+            native_sources: BTreeMap::new(),
             question: "where is installer smoke documented".into(),
             abstained: true,
             answer_text: None,
@@ -2128,6 +2203,7 @@ mod tests {
     #[test]
     fn render_markdown_abstention_contains_hint() {
         let report = AskReport {
+            native_sources: BTreeMap::new(),
             question: "does X exist".into(),
             abstained: true,
             answer_text: None,

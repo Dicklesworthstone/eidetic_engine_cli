@@ -20,6 +20,47 @@ implementation (bd-169v0.2/.3).
 
 ## Decision
 
+### Native procedural-rule admission (2026-09-18 amendment)
+
+`ee ask` reads both durable memories and native procedural rules. Rules keep
+their actual `RuleId`; no shadow memory row, invented `MemoryId`, or embedding
+index is involved. The rule body, tags, provenance junctions and entity revision
+come from the same read snapshot as memory evidence and scope metadata.
+
+Only non-tombstoned, non-superseded **candidate or validated** rules are answer
+sources. A question without file context admits global, workspace and project
+rules, not directory/file-pattern rules. The established confidence floor and
+public-evidence privacy policy apply before scoring, hints and composition.
+The rule's own text is quoted byte-for-byte, never its source-memory text.
+
+Workspace/swarm scope remains workspace-local. Global scope admits a rule's
+declared global scope or explicit global/house-rule tags. Verified scope uses
+native trusted classes. Rules have no durable producer field, so self/team
+scope requires a nonempty source-memory lineage with **every** producer in
+scope; incomplete or mixed unauthorized attribution cannot widen access.
+
+Memory citations retain their existing JSON shape. Native rule citations,
+conflict-side citations and nearest-evidence entries instead contain
+`entityKind: "rule"`, `entityId`, `ruleId`, and `entityRevision`, with no
+`memoryId`. Revisions use `RuleIndexProjection`'s canonical `blake3:` digest;
+provenance is `ee://rule/<RuleId>`. Query-assist identities and Markdown source
+labels carry that same kind and revision. Only displayed source metadata is
+returned; derivation input IDs are not copied into the output. The `ee.ask.v1`
+schema now defines memory and native-source identity alternatives.
+
+Corroboration counts **independent provenance groups**, not rows: a rule and
+its source memories count once, and rules sharing a source count once even
+when that source is not itself an answer candidate. Intersecting lineages are
+conservatively one group. Unrelated memories/rules retain the existing lift;
+opposing rules remain separate conflict sides. Ranking and byte offsets are
+deterministic. No thresholds are weakened to make native rules answerable.
+
+Ordinary successful asks append retrieval audits against the real `rule`
+target and include its revision, not a `memory` alias. Abstentions do not count
+as retrievals. `--read-only` suppresses both retrieval and query-miss auditing;
+neither mode implicitly migrates a database. This amendment does not enable
+direct CASS evidence answering or path-specific rule matching.
+
 ### 1. Span model
 
 - Deterministic sentence segmentation with code-fence awareness (memories

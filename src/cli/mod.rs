@@ -50926,6 +50926,7 @@ where
         },
         require_confidence: args.require_confidence,
         contradictions,
+        native_sources: corpus.native_sources,
     };
 
     let report = evaluate_ask(&request, &candidates);

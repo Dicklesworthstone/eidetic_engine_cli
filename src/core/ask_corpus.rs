@@ -4,15 +4,16 @@
 //! scoring, nearest-evidence hints, and incident-link lookup. Memory bodies,
 //! scope metadata and links must describe one coherent database snapshot.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 
 use crate::core::memory_scope::MemoryScopeContext;
 use crate::db::DbConnection;
-use crate::models::{DomainError, MemoryScope};
+use crate::models::{DomainError, MemoryScope, RuleScope, TrustClass};
 
-use super::{AskCandidate, AskContradiction, load_scoped_contradictions};
+use super::{AskCandidate, AskContradiction, AskNativeSource, load_scoped_contradictions};
 
 #[path = "ask_admission.rs"]
 mod admission;
@@ -21,6 +22,7 @@ mod admission;
 pub struct AskCorpus {
     pub candidates: Vec<AskCandidate>,
     pub contradictions: Vec<AskContradiction>,
+    pub native_sources: BTreeMap<String, AskNativeSource>,
 }
 
 /// Load current evidence for one already-resolved workspace.
@@ -129,6 +131,14 @@ fn load_corpus_with_scope_boundary(
         .list_memories(workspace_id, None, false)
         .map_err(|_| corpus_storage_error())?;
     let scope = scope_context()?;
+    // Producer membership can scope a derived rule, but the source memory's
+    // body is not substituted for that rule. Rule lifecycle is independent of
+    // the source memory's validity window.
+    let attributed_memories: BTreeSet<_> = stored
+        .iter()
+        .filter(|memory| memory.workspace_id == workspace_id && scope.memory_in_scope(memory))
+        .map(|memory| memory.id.clone())
+        .collect();
     after_memory_read()?;
     let mut tags = std::collections::BTreeMap::new();
     if scope.scope == MemoryScope::Global {
@@ -162,11 +172,89 @@ fn load_corpus_with_scope_boundary(
         .map(|candidate| candidate.memory_id.as_str())
         .collect();
     let contradictions = load_scoped_contradictions(connection, &ids)?;
+    let native_sources = load_rules(
+        connection,
+        workspace_id,
+        &scope,
+        &attributed_memories,
+        &mut candidates,
+    )?;
     snapshot.finish()?;
     Ok(AskCorpus {
         candidates,
         contradictions,
+        native_sources,
     })
+}
+
+fn load_rules(
+    connection: &DbConnection,
+    workspace_id: &str,
+    scope: &MemoryScopeContext,
+    attributed_memories: &BTreeSet<String>,
+    candidates: &mut Vec<AskCandidate>,
+) -> Result<BTreeMap<String, AskNativeSource>, DomainError> {
+    let rules = connection
+        .list_procedural_rules(workspace_id, None, None, false)
+        .map_err(|_| corpus_storage_error())?;
+    let mut native_sources = BTreeMap::new();
+    if rules.is_empty() {
+        return Ok(native_sources);
+    }
+    let workspace = connection
+        .get_workspace(workspace_id)
+        .map_err(|_| corpus_storage_error())?
+        .ok_or_else(corpus_storage_error)?;
+    let mut tags = connection
+        .list_rule_tags_for_workspace(workspace_id)
+        .map_err(|_| corpus_storage_error())?;
+    let mut sources = connection
+        .list_rule_source_memory_ids_for_workspace(workspace_id)
+        .map_err(|_| corpus_storage_error())?;
+    for rule in rules {
+        // A plain question carries no file or directory context. Do not apply
+        // a path-specific rule universally merely because its words match.
+        if rule.workspace_id != workspace_id
+            || !matches!(
+                RuleScope::from_str(&rule.scope),
+                Ok(RuleScope::Global | RuleScope::Workspace | RuleScope::Project)
+            )
+        {
+            continue;
+        }
+        let rule_tags = tags.remove(&rule.id).unwrap_or_default();
+        let source_ids = sources.remove(&rule.id).unwrap_or_default();
+        let visible = match scope.scope {
+            MemoryScope::Workspace | MemoryScope::Swarm => true,
+            MemoryScope::Global => {
+                rule.scope == RuleScope::Global.as_str()
+                    || crate::models::memory_tags_include_global_scope(&rule_tags)
+            }
+            MemoryScope::Verified => matches!(
+                TrustClass::from_str(&rule.trust_class),
+                Ok(TrustClass::HumanExplicit
+                    | TrustClass::PeerHumanAttested
+                    | TrustClass::AgentValidated)
+            ),
+            // There is no durable producer field on a rule. Require a nonempty
+            // fully-attributed lineage; a single authorized parent cannot
+            // launder another producer's contribution into self/team scope.
+            MemoryScope::SelfOnly | MemoryScope::Team => {
+                !source_ids.is_empty()
+                    && source_ids.iter().all(|id| attributed_memories.contains(id))
+            }
+        };
+        if !visible {
+            continue;
+        }
+        let projection =
+            crate::search::RuleIndexProjection::new(rule, &workspace.path, rule_tags, source_ids);
+        if let Some((candidate, source)) = admission::rule_candidate(&projection) {
+            native_sources.insert(candidate.memory_id.clone(), source);
+            candidates.push(candidate);
+        }
+    }
+    Ok(native_sources)
 }
 
 /// Own only the read transaction that this operation successfully began.
@@ -268,3 +356,7 @@ mod privacy_tests;
 #[cfg(test)]
 #[path = "ask_scope_tests.rs"]
 mod scope_tests;
+
+#[cfg(test)]
+#[path = "ask_native_tests.rs"]
+mod native_tests;

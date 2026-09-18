@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.ask.v1.json",
   "title": "ee.ask.v1",
-  "description": "Deterministic extractive question answering with citations and honest abstention (ADR 0067, bd-169v0.1). Carried under ee.response.v2 data.answer. Every emitted answer sentence byte-equals a cited span of a stored memory — machine-checkable extractiveness invariant.",
+  "description": "Deterministic extractive question answering with citations and honest abstention (ADR 0067). Carried under ee.response.v2 data. Every emitted answer sentence byte-equals its cited stored source. Memories retain memoryId; native procedural rules use typed identity and revision, never a memory alias.",
   "x-ee-status": "shipped:true",
   "x-ee-bead": "bd-169v0.1",
   "type": "object",
@@ -84,7 +84,7 @@
     "candidatesScanned": {
       "type": "integer",
       "minimum": 0,
-      "description": "Number of memory candidates examined by the engine."
+      "description": "Number of admitted memory and native-rule candidates examined by the engine."
     },
     "_semanticDegraded": {
       "type": "boolean",
@@ -93,6 +93,18 @@
     "_conflictDetected": {
       "type": "boolean",
       "description": "True when the top evidence clusters oppose each other. Corresponds to ask_conflicting_evidence in the envelope."
+    },
+    "conflictLink": {
+      "type": "object",
+      "required": ["id", "srcMemoryId", "dstMemoryId", "confidence", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "srcMemoryId": {"type": "string"},
+        "dstMemoryId": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "source": {"type": "string", "enum": ["human", "agent"]}
+      }
     },
     "queryAssist": {
       "$ref": "#/$defs/queryAssist",
@@ -138,6 +150,25 @@
     "full": ["*"]
   },
   "$defs": {
+    "sourceIdentity": {
+      "description": "A native entity is never represented as a memory. Entity and kind-specific IDs must identify the same stored source; the engine validates their equality.",
+      "oneOf": [
+        {
+          "required": ["memoryId"],
+          "not": {"anyOf": [{"required": ["entityKind"]}, {"required": ["entityId"]}, {"required": ["entityRevision"]}, {"required": ["ruleId"]}, {"required": ["evidenceId"]}]}
+        },
+        {
+          "required": ["entityKind", "entityId", "ruleId", "entityRevision"],
+          "properties": {"entityKind": {"const": "rule"}},
+          "not": {"anyOf": [{"required": ["memoryId"]}, {"required": ["evidenceId"]}]}
+        },
+        {
+          "required": ["entityKind", "entityId", "evidenceId", "entityRevision"],
+          "properties": {"entityKind": {"const": "evidence_span"}},
+          "not": {"anyOf": [{"required": ["memoryId"]}, {"required": ["ruleId"]}]}
+        }
+      ]
+    },
     "span": {
       "type": "object",
       "required": ["byteStart", "byteEnd"],
@@ -157,7 +188,8 @@
     },
     "citation": {
       "type": "object",
-      "required": ["index", "memoryId", "span", "text", "trustClass", "confidence"],
+      "required": ["index", "span", "text", "trustClass", "confidence"],
+      "allOf": [{"$ref": "#/$defs/sourceIdentity"}],
       "additionalProperties": false,
       "properties": {
         "index": {
@@ -169,6 +201,11 @@
           "type": "string",
           "description": "ID of the source memory."
         },
+        "entityKind": {"type": "string", "enum": ["rule", "evidence_span"]},
+        "entityId": {"type": "string"},
+        "ruleId": {"type": "string", "pattern": "^rule_"},
+        "evidenceId": {"type": "string", "pattern": "^ev_"},
+        "entityRevision": {"type": "string", "pattern": "^blake3:[0-9a-f]{64}$"},
         "span": {
           "$ref": "#/$defs/span",
           "description": "Byte range in the source memory. text MUST byte-equal content[byteStart:byteEnd]."
@@ -214,7 +251,7 @@
       "properties": {
         "label": {
           "type": "string",
-          "enum": ["affirming", "negating"],
+          "enum": ["affirming", "negating", "query_match", "linked_opposition"],
           "description": "Which side of the conflict this represents."
         },
         "answerText": {
@@ -231,12 +268,18 @@
     },
     "nearestEvidence": {
       "type": "object",
-      "required": ["memoryId", "span", "text", "score"],
+      "required": ["span", "text", "score"],
+      "allOf": [{"$ref": "#/$defs/sourceIdentity"}],
       "additionalProperties": false,
       "properties": {
         "memoryId": {
           "type": "string"
         },
+        "entityKind": {"type": "string", "enum": ["rule", "evidence_span"]},
+        "entityId": {"type": "string"},
+        "ruleId": {"type": "string", "pattern": "^rule_"},
+        "evidenceId": {"type": "string", "pattern": "^ev_"},
+        "entityRevision": {"type": "string", "pattern": "^blake3:[0-9a-f]{64}$"},
         "span": {
           "$ref": "#/$defs/span"
         },

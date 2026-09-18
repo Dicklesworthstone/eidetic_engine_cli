@@ -17,6 +17,27 @@ pub(super) fn cluster_spans(spans: &[AskSpan]) -> Vec<AskSpan> {
 }
 
 fn cluster_with_observer(spans: &[AskSpan], mut on_similarity_check: impl FnMut()) -> Vec<AskSpan> {
+    cluster_with_groups_and_observer(spans, &BTreeMap::new(), &mut on_similarity_check)
+}
+
+pub(super) fn cluster_spans_with_groups(
+    spans: &[AskSpan],
+    groups: &BTreeMap<String, String>,
+) -> Vec<AskSpan> {
+    cluster_with_groups_and_observer(spans, groups, || {})
+}
+
+fn cluster_with_groups_and_observer(
+    spans: &[AskSpan],
+    groups: &BTreeMap<String, String>,
+    mut on_similarity_check: impl FnMut(),
+) -> Vec<AskSpan> {
+    let support_key = |index: usize| {
+        groups
+            .get(&spans[index].memory_id)
+            .map(String::as_str)
+            .unwrap_or(&spans[index].memory_id)
+    };
     let terms: Vec<Vec<String>> = spans
         .iter()
         .map(|span| tokenize_for_ask(&span.text))
@@ -55,7 +76,7 @@ fn cluster_with_observer(spans: &[AskSpan], mut on_similarity_check: impl FnMut(
             }
         }
 
-        let mut supporting_memories = BTreeSet::from([spans[seed].memory_id.as_str()]);
+        let mut supporting_memories = BTreeSet::from([support_key(seed)]);
         // All members are compared to the seed, never to one another. Thus
         // processing this neighborhood in index order instead of score order
         // cannot change membership or accidentally introduce transitive links.
@@ -67,7 +88,7 @@ fn cluster_with_observer(spans: &[AskSpan], mut on_similarity_check: impl FnMut(
             let similarity = intersection as f32 / union as f32;
             if similarity >= CLUSTER_SIMILARITY_THRESHOLD {
                 assigned[other] = true;
-                supporting_memories.insert(spans[other].memory_id.as_str());
+                supporting_memories.insert(support_key(other));
             }
         }
         let corroboration =
