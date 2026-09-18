@@ -174,6 +174,15 @@ enum PackSlotAcquisition {
     /// `--read-only` / `--no-persist` must not create `.ee/pack-slots` locks.
     /// Concurrent LimitReached otherwise empties the candidate set and forks
     /// `pack.hash` (bd-reality-core-convergence-1azkt.2).
+    ///
+    /// The admission posture is DELIBERATELY UNREPORTED on this path, not
+    /// accidentally silent. `degraded[]` is an input to the pack hash
+    /// (`compute_pack_hash_components` folds every entry's code, severity and
+    /// message into the composite hasher), so a load-dependent entry there
+    /// would fork `pack.hash` by how busy the machine was. Restoring the
+    /// signal means a non-hash-bearing channel, not this one: see bd-h2ovu,
+    /// which proposes probing slot availability without acquiring and
+    /// reporting through `PackAssemblySlo::admission`.
     Bypassed,
 }
 
