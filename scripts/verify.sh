@@ -60,7 +60,8 @@ set -euo pipefail
 #   4.5. Bridge Staleness      - advisory signal when CLOSE_THE_GAP_PLAN needs refresh
 #   4.59. Plan Drift Contract  - no-Cargo plan/bead fixture scanner self-test
 #   4.6. Plan Drift Advisory   - advisory plan_doc_section drift hints for Beads triage
-#   4.64. Tracing Field Contract - no-Cargo tracing manifest checker self-test
+#   4.64. Tracing Field Contract - checker self-test AND a baselined audit of
+#         the tree; the self-test alone is what bd-c79fk was filed about
 #   4.65. Contract Drift Radar - advisory schema/docs/taxonomy drift scanner (bd-31nul.5)
 #   4.655. E2E Event Contract Radar Contract - no-Cargo golden report/schema harness
 #   4.66. E2E Event Contract Radar - advisory shell evidence coverage scanner (bd-2ljka.4)
