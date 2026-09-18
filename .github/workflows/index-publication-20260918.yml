@@ -1,0 +1,110 @@
+name: Index publication safety
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/delivery/index-publication-fence.patch'
+      - '.github/workflows/index-publication-20260918.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Apply reviewed publication fencing
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          git apply --check scripts/delivery/index-publication-fence.patch
+          git apply scripts/delivery/index-publication-fence.patch
+          rustfmt --edition 2024 --config skip_children=true src/core/index.rs
+          git diff --check
+          git diff --stat
+      - name: Compile production library
+        run: |
+          status=0
+          cargo check --locked --lib > "$RUNNER_TEMP/index-check.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/index-check.log"
+          exit "$status"
+      - name: Execute real publication fencing regressions
+        run: |
+          status=0
+          cargo test --locked --lib core::index::tests::publication_fence -- --nocapture > "$RUNNER_TEMP/index-fence.log" 2>&1 || status=$?
+          tail -n 140 "$RUNNER_TEMP/index-fence.log"
+          exit "$status"
+      - name: Commit verified production change directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- src/core/index.rs
+          git commit -m 'fix(index): fence stale publishers before recovery and generation replacement' -m 'Recheck the unique current lease under the process-safe database writer fence after embedding. Hold authority through file replacement, job completion and rollback; preserve cancellation during fence admission and reentrant job transactions. All four production publishers and recovery entry points use the fence. Production library check and six new real-store/runtime regressions passed before this commit. Broader generation/job tests are reported separately.'
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              git rev-parse HEAD
+              exit 0
+            fi
+            git fetch origin main
+            git merge --no-edit origin/main
+          done
+          exit 1
+      - name: Verify existing generation commit and rollback regressions
+        run: |
+          status=0
+          cargo test --locked --lib core::index::tests::publish_ -- --nocapture > "$RUNNER_TEMP/index-publication.log" 2>&1 || status=$?
+          tail -n 120 "$RUNNER_TEMP/index-publication.log"
+          exit "$status"
+      - name: Verify existing coalesced job regressions
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          cargo test --locked --lib core::index::tests::coalesced_ -- --nocapture > "$RUNNER_TEMP/index-coalesced.log" 2>&1 || status=$?
+          tail -n 120 "$RUNNER_TEMP/index-coalesced.log"
+          exit "$status"
+      - name: Preserve exact source and verification logs
+        if: ${{ !cancelled() }}
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/index-source-sha.log"
+          git diff -- src/core/index.rs > "$RUNNER_TEMP/index-uncommitted.patch"
+          cp src/core/index.rs "$RUNNER_TEMP/index-verified-source.rs"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: index-publication-verification
+          path: |
+            ${{ runner.temp }}/index-*.log
+            ${{ runner.temp }}/index-*.patch
+            ${{ runner.temp }}/index-verified-source.rs
+          retention-days: 7
