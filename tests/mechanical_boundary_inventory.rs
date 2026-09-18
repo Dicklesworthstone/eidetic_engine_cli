@@ -1600,3 +1600,121 @@ fn command_paths_from_extract_function(source: &str) -> Result<Vec<String>, Stri
     strings.dedup();
     Ok(strings)
 }
+
+/// bd-o74n4: the twelve-column matrix must agree with the effect manifest.
+///
+/// The content tier checked that a command path HAS a row. Nothing checked
+/// that the row says the TRUE thing, so 430 new rows could each contradict
+/// `src/core/effect.rs` and every gate here would stay green. That gap was
+/// not theoretical: reading two rows against the manifest found two wrong.
+/// `install`/`update` named a path the CLI cannot emit and attributed an
+/// atomic-replace write to a command declared `read_only` (f9e82e6da), and
+/// `daemon` declared a writer "unavailable now" while the manifest gives it
+/// three write tables and two workspace files (d66a67bf2).
+///
+/// READS THE BUILT MANIFEST, NOT THE SOURCE, and that is load-bearing.
+/// `daemon` is constructed by `external_io_write` (AuditedMutation) and then
+/// overrides `mutation_contract.side_effect_class` to `Mixed` afterwards
+/// (src/core/effect.rs:1945). Any check that greps the constructor call reads
+/// the wrong class for it. `EffectManifest::build()` cannot be wrong about
+/// this in the way a regex can.
+///
+/// MULTI-PATH ROWS may declare `class=mixed`. That is not an escape hatch: a
+/// row covering `context`, `pack`, `search` and `why` describes four paths
+/// whose declared classes genuinely differ, and `mixed` is the vocabulary's
+/// word for exactly that. A row covering paths that all share one class must
+/// name that class, and a row covering a single path must match it exactly.
+#[test]
+fn matrix_row_classes_agree_with_the_effect_manifest() -> Result<(), String> {
+    use ee::core::effect::EffectManifest;
+
+    let manifest = EffectManifest::build();
+    let commands = command_paths_from_extract_function(CLI_SOURCE)?;
+    let rows = matrix_rows(INVENTORY)?;
+
+    let mut checked_pairs = 0usize;
+    let mut violations: Vec<String> = Vec::new();
+
+    for row in rows.iter().skip(2) {
+        let surface = row_cell(row, 0, "surface")?;
+        let side_effect = row_cell(row, 7, "side-effect")?;
+        let declared = side_effect_class(side_effect)?;
+
+        let covered: Vec<&String> = commands
+            .iter()
+            .filter(|command| {
+                let cell = format!("`{command}`");
+                row.iter().any(|value| value.contains(&cell))
+            })
+            .collect();
+        if covered.is_empty() {
+            continue;
+        }
+
+        let mut manifest_classes: Vec<(&str, &'static str)> = Vec::new();
+        for command in &covered {
+            let effect = manifest.get(command.as_str()).ok_or_else(|| {
+                format!("{surface}: matrix names `{command}`, absent from the effect manifest")
+            })?;
+            manifest_classes.push((
+                command.as_str(),
+                effect.mutation_contract.side_effect_class.as_str(),
+            ));
+            checked_pairs += 1;
+        }
+
+        // `as_str()` already yields the `class=...` token the row carries, so
+        // the two sides are compared in the same vocabulary rather than
+        // through a hand-written translation table. A translation table is
+        // what made my first three attempts at this measurement disagree with
+        // each other.
+        let distinct: std::collections::BTreeSet<&str> =
+            manifest_classes.iter().map(|(_, c)| *c).collect();
+        let declared_token = format!("class={declared}");
+
+        if covered.len() == 1 {
+            let (command, class) = manifest_classes[0];
+            if declared_token != class {
+                violations.push(format!(
+                    "{surface}: row says {declared_token} for `{command}`, manifest says {class}"
+                ));
+            }
+        } else if declared != "mixed" {
+            if distinct.len() > 1 {
+                violations.push(format!(
+                    "{surface}: row says {declared_token} but covers paths of differing declared \
+                     classes {distinct:?}; use class=mixed or split the row"
+                ));
+            } else if let Some(only) = distinct.iter().next()
+                && declared_token != *only
+            {
+                violations.push(format!(
+                    "{surface}: row says {declared_token}, every covered path declares {only}"
+                ));
+            }
+        }
+    }
+
+    // NON-VACUITY. Every branch above is keyed on a row covering at least one
+    // command path; if the surface-cell format drifts, `covered` is empty
+    // everywhere, the loop asserts nothing and this test passes having read
+    // the document and checked none of it. The floor is the content tier's
+    // own declared floor, so the two ratchets cannot silently diverge.
+    if checked_pairs < 26 {
+        return Err(format!(
+            "this gate checked only {checked_pairs} (row, command path) pairs; the content tier \
+             enforces at least 26, so the matcher has stopped finding rows rather than the \
+             matrix having shrunk"
+        ));
+    }
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "matrix rows contradict the effect manifest ({} of {checked_pairs} checked):\n{}",
+            violations.len(),
+            violations.join("\n")
+        ))
+    }
+}
