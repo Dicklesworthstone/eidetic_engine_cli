@@ -57,11 +57,11 @@ struct SourceFinding {
 }
 
 const FOLLOW_UP_BEADS: &[&str] = &[
-    "eidetic_engine_cli-sos5.2",
-    "eidetic_engine_cli-sos5.3",
-    "eidetic_engine_cli-sos5.4",
-    "eidetic_engine_cli-sos5.7",
-    "eidetic_engine_cli-ogy9",
+    "bd-sos5.2",
+    "bd-sos5.3",
+    "bd-sos5.4",
+    "bd-sos5.7",
+    "bd-ogy9",
     // bd-1jpg7: the no-echo ingest guard is disabled whenever
     // apply_join_first_sync_events cannot read its own origin node id.
     //
@@ -534,48 +534,43 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         ".map(redact_lifecycle_metadata_path)",
         "An absent or non-array metadata field yields no paths. The collection is a list of redacted lifecycle paths for reporting; nothing downstream treats an empty list as a claim that no paths exist on disk.",
     ),
-    must_fix(
-        "NSF-CASS-PIPE-READ",
-        "src/cass/process.rs",
-        "read_to_end",
-        "eidetic_engine_cli-sos5.2",
-        "CASS subprocess pipe read errors must become CassError or explicit degradations.",
-    ),
-    must_fix(
-        "NSF-HOOK-INSTALLER-JSON",
-        "src/hooks/installer.rs",
-        "serde_json::to_string",
-        "eidetic_engine_cli-sos5.3",
-        "Hook installer JSON is machine-facing output and must not serialize to an empty string on failure.",
-    ),
+    // RETIRED by bd-epvc1: eight must_fix rules owned ZERO findings while naming
+    // a follow-up bead, so the tracker said someone owned the work and the rule
+    // said someone was watching for it, and neither was true. All eight demanded
+    // fixes that had already landed -- every follow-up bead (bd-sos5.2, .3, .4,
+    // .7, bd-ogy9) is CLOSED, and the fragments they watch are still in their
+    // files but no longer sit near a finding.
+    //
+    // Verified in source rather than inferred from bead status, because closed
+    // is not shipped. NSF-CASS-PIPE-READ demanded that CASS pipe-read errors
+    // become errors; src/cass/process.rs now reads
+    //     limited.read_to_end(&mut buf)?;
+    //     if buf.len() > max_bytes { return Err(.. InvalidData ..); }
+    // The `let _ =` discard the detector looks for is gone, replaced by `?` plus
+    // an explicit overflow error. Genuinely satisfied.
+    //
+    // Retired here, ledger rows retired in the same commit -- a retired rule
+    // with a live row fails the match-count arm, and a row removed without the
+    // rule fails the other direction.
+    //
+    // NSF-CASS-PIPE-READ            bd-sos5.2   closed
+    // NSF-HOOK-INSTALLER-JSON       bd-sos5.3   closed
     must_fix(
         "NSF-OUTPUT-SHADOW-INCUMBENT",
         "src/output/mod.rs",
         "incumbent_outcome.clone().unwrap_or_default()",
-        "eidetic_engine_cli-sos5.4",
+        "bd-sos5.4",
         "Shadow decision output should distinguish missing incumbent evidence from an empty incumbent outcome.",
     ),
-    must_fix(
-        "NSF-CLI-CERTIFICATE-JSON",
-        "src/cli/mod.rs",
-        "serde_json::to_string_pretty",
-        "eidetic_engine_cli-sos5.3",
-        "Certificate JSON handlers bypass the shared renderer and silently erase serialization failures.",
-    ),
+    // RETIRED (bd-epvc1): NSF-CLI-CERTIFICATE-JSON   bd-sos5.3   closed
     must_fix(
         "NSF-CLI-CERTIFICATE-ERROR",
         "src/cli/mod.rs",
         "report.error.clone().unwrap_or_default()",
-        "eidetic_engine_cli-sos5.3",
+        "bd-sos5.3",
         "Certificate error reports should not convert a missing error message into an empty machine string.",
     ),
-    must_fix(
-        "NSF-CLI-DEMO-AUDIT",
-        "src/cli/mod.rs",
-        "latest_demo_audit_by_id",
-        "eidetic_engine_cli-sos5.4",
-        "Demo status output should distinguish missing audit storage from an empty run map.",
-    ),
+    // RETIRED (bd-epvc1): NSF-CLI-DEMO-AUDIT        bd-sos5.4   closed
     allowed(
         "NSF-MODELS-JSONL-BUILDERS",
         "src/models/jsonl.rs",
@@ -586,58 +581,46 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "NSF-CURATE-CERTIFICATE-BUILDER",
         "src/curate/mod.rs",
         "unwrap_or_default()",
-        "eidetic_engine_cli-sos5.4",
+        "bd-sos5.4",
         "Curation risk certificate builders default machine-facing IDs/timestamps to empty values.",
     ),
     must_fix(
         "NSF-MODELS-DECISION-BUILDER",
         "src/models/decision.rs",
         "unwrap_or_default()",
-        "eidetic_engine_cli-sos5.4",
+        "bd-sos5.4",
         "Decision records should distinguish a missing outcome from an empty outcome string.",
     ),
     must_fix(
         "NSF-MODELS-MUTATION-JSON",
         "src/models/mutation.rs",
         "serde_json::to_string",
-        "eidetic_engine_cli-sos5.3",
+        "bd-sos5.3",
         "Mutation reports are machine-facing and must not serialize to empty strings on failure.",
     ),
     must_fix(
         "NSF-MODELS-PROGRESS-BUILDER",
         "src/models/progress.rs",
         "unwrap_or_default()",
-        "eidetic_engine_cli-sos5.4",
+        "bd-sos5.4",
         "Progress records default required operation/message/timestamp fields to empty values.",
     ),
     must_fix(
         "NSF-CORE-BACKUP-IMPORT",
         "src/core/backup.rs",
         "unwrap_or_default()",
-        "eidetic_engine_cli-sos5.4",
+        "bd-sos5.4",
         "Backup import/export records should distinguish absent message, next action, and audit target fields.",
     ),
     must_fix(
         "NSF-CORE-CLAIMS-INPUT",
         "src/core/claims.rs",
         "unwrap_or_default()",
-        "eidetic_engine_cli-sos5.4",
+        "bd-sos5.4",
         "Claim parsing defaults optional statement/artifact collections into machine-facing records and needs an explicit contract.",
     ),
-    must_fix(
-        "NSF-CORE-HANDOFF-JSON",
-        "src/core/handoff.rs",
-        "serde_json::to_string",
-        "eidetic_engine_cli-sos5.3",
-        "Handoff JSON render helpers must not hide serialization failures.",
-    ),
-    must_fix(
-        "NSF-CORE-LAB-JSON",
-        "src/core/lab.rs",
-        "serde_json::to_string",
-        "eidetic_engine_cli-sos5.3",
-        "Lab report JSON helpers must not silently serialize to empty.",
-    ),
+    // RETIRED (bd-epvc1): NSF-CORE-HANDOFF-JSON     bd-sos5.3   closed
+    // RETIRED (bd-epvc1): NSF-CORE-LAB-JSON         bd-sos5.3   closed
     allowed(
         "NSF-CORE-LEGACY-SKIP-DIR",
         "src/core/legacy_import.rs",
@@ -648,23 +631,11 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "NSF-CORE-OUTCOME-WORKSPACE",
         "src/core/outcome.rs",
         "workspace_id.unwrap_or_default()",
-        "eidetic_engine_cli-sos5.4",
+        "bd-sos5.4",
         "Outcome recording should not turn a missing workspace ID into an empty persisted field.",
     ),
-    must_fix(
-        "NSF-CORE-PREFLIGHT-JSON",
-        "src/core/preflight.rs",
-        "serde_json::to_string",
-        "eidetic_engine_cli-sos5.3",
-        "Preflight report JSON helpers must not silently serialize to empty.",
-    ),
-    must_fix(
-        "NSF-CORE-PROCEDURE-JSON",
-        "src/core/procedure.rs",
-        "serde_json::to_string",
-        "eidetic_engine_cli-sos5.3",
-        "Procedure report JSON helpers must not silently serialize to empty.",
-    ),
+    // RETIRED (bd-epvc1): NSF-CORE-PREFLIGHT-JSON   bd-sos5.3   closed
+    // RETIRED (bd-epvc1): NSF-CORE-PROCEDURE-JSON   bd-sos5.3   closed
     allowed(
         "NSF-CASS-IMPORT-OPTIONAL-FIELDS",
         "src/cass/import.rs",
@@ -717,7 +688,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "NSF-CLI-PACK-DIFF-RANK-DEFAULT",
         "src/cli/mod.rs",
         "let old_rank = old_item.rank.unwrap_or_default()",
-        "eidetic_engine_cli-sos5.4",
+        "bd-sos5.4",
         "Pack diff should distinguish a missing ledger rank from rank zero when reporting rank deltas.",
     ),
     allowed(
@@ -838,28 +809,28 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "NSF-CORE-HANDOFF-STALE-ADDED-DEFAULT",
         "src/core/handoff.rs",
         "threshold_field: \"memories_added\"",
-        "eidetic_engine_cli-sos5.4",
+        "bd-sos5.4",
         "Handoff stale-threshold reporting should distinguish unavailable added-memory counts from zero.",
     ),
     must_fix(
         "NSF-CORE-HANDOFF-STALE-EXPIRED-DEFAULT",
         "src/core/handoff.rs",
         "threshold_field: \"any_expired_in_pack\"",
-        "eidetic_engine_cli-sos5.4",
+        "bd-sos5.4",
         "Handoff stale-threshold reporting should distinguish unavailable expired-memory counts from zero.",
     ),
     must_fix(
         "NSF-CORE-HANDOFF-STALE-DRIFT-DEFAULT",
         "src/core/handoff.rs",
         "content_drift_score.unwrap_or_default()",
-        "eidetic_engine_cli-sos5.4",
+        "bd-sos5.4",
         "Handoff stale-threshold reporting should distinguish unavailable content drift from zero drift.",
     ),
     must_fix(
         "NSF-CORE-HANDOFF-STALE-REVISED-DEFAULT",
         "src/core/handoff.rs",
         "threshold_field: \"memories_revised\"",
-        "eidetic_engine_cli-sos5.4",
+        "bd-sos5.4",
         "Handoff stale-threshold reporting should distinguish unavailable revised-memory counts from zero.",
     ),
     allowed(
@@ -944,7 +915,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "NSF-CORE-MEMORY-LINE-SPAN",
         "src/core/memory.rs",
         "extract_line_span(&contents, *span).unwrap_or_default()",
-        "eidetic_engine_cli-sos5.7",
+        "bd-sos5.7",
         "Evidence freshness should report an invalid provenance span instead of hashing an empty source excerpt.",
     ),
     allowed(
@@ -1047,7 +1018,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "NSF-CORE-STATUS-AUDIT-ACCESS",
         "src/core/status.rs",
         "list_audit_entries",
-        "eidetic_engine_cli-sos5.7",
+        "bd-sos5.7",
         "Status memory health should surface audit-log read failures instead of treating all memories as never accessed.",
     ),
     allowed(
