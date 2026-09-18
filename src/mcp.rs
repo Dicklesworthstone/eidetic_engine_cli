@@ -5134,9 +5134,24 @@ mod tests {
             return Err("context degraded response missing result".to_string());
         };
         assert_eq!(result.get("isError").and_then(Value::as_bool), Some(true));
+        // TIGHTENED, not relaxed. This asserted ProcessExitCode::Storage (3)
+        // when it was written on 2026-05-01 (908c9310f). 63418ec04 (2026-08-10,
+        // bd-workspace-miss-init-suggestion-sfjvq) then split a storeless
+        // ADDRESSING miss out of ordinary storage failure -- "pack path gets
+        // ContextPackError::WorkspaceStoreMissing so the context surface maps
+        // to the same identity without message sniffing" -- and pinned BOTH
+        // directions: exit 10 here, while "a directory-shaped ee.db (genuine
+        // storage failure) keeps exit 3 / code storage". This case drives
+        // ee_context at a deliberately nonexistent workspace, so 10 is the
+        // correct and MORE specific answer; 3 is the coarse code the product
+        // stopped emitting for it three months ago.
+        //
+        // The stale expectation survived because `--features mcp --lib` runs in
+        // no job (bd-up1hk): nothing has executed this assertion since the
+        // behaviour changed under it.
         assert_eq!(
             result.get("exitCode").and_then(Value::as_u64),
-            Some(u64::from(ProcessExitCode::Storage as u8))
+            Some(u64::from(ProcessExitCode::WorkspaceStoreMissing as u8))
         );
         assert_eq!(result.get("stderr").and_then(Value::as_str), Some(""));
 
