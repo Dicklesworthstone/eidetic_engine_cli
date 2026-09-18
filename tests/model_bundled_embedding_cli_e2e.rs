@@ -3767,14 +3767,33 @@ fn model_status_posture_and_search_embed_backend_cannot_disagree() -> TestResult
         }),
     )?;
 
-    let init = run_ee(
+    // EE_EMBED_DOWNLOAD=off makes the no-model condition DETERMINISTIC instead
+    // of leaving it to whatever the host happens to have.
+    //
+    // The first version of this test ran without it, on the stated premise that
+    // "a bare workspace with no downloaded model IS the divergence condition".
+    // That was true of the machine in bd-7hsgy's report and false in general:
+    // on a networked worker the first search fetches the model instead, and the
+    // run died before reaching the assertion with
+    //     ee search failed with status Some(130)
+    //     {"code":"cancelled","message":"Deadline exceeded.",
+    //      "cancelClass":"budget_exhausted"}
+    //     stderr: ee is downloading the local embedding model
+    //             potion-multilingual-128M (506.4 MB) once ...
+    // so the 506 MB download exhausted the search's own deadline budget. With
+    // downloads prohibited there is no model, no fetch, and both surfaces must
+    // describe the hash tier -- which is the state the property is about.
+    let offline_env = [("EE_EMBED_DOWNLOAD".to_owned(), "off".to_owned())];
+
+    let init = run_ee_with_env(
         &workspace,
         "act_init",
         &["init", "--workspace", workspace.workspace_arg()?, "--json"],
+        &offline_env,
     )?;
     ensure_success(&init, "ee init")?;
 
-    let status = run_ee(
+    let status = run_ee_with_env(
         &workspace,
         "act_model_status",
         &[
@@ -3784,6 +3803,7 @@ fn model_status_posture_and_search_embed_backend_cannot_disagree() -> TestResult
             "model",
             "status",
         ],
+        &offline_env,
     )?;
     ensure_success(&status, "ee model status")?;
     let status_value = stdout_json(&status, "ee model status")?;
@@ -3822,7 +3842,7 @@ fn model_status_posture_and_search_embed_backend_cannot_disagree() -> TestResult
         .unwrap_or("<absent>")
         .to_owned();
 
-    let search = run_ee(
+    let search = run_ee_with_env(
         &workspace,
         "act_search",
         &[
@@ -3832,6 +3852,7 @@ fn model_status_posture_and_search_embed_backend_cannot_disagree() -> TestResult
             "search",
             "posture retrieval agreement probe",
         ],
+        &offline_env,
     )?;
     ensure_success(&search, "ee search")?;
     let search_value = stdout_json(&search, "ee search")?;
