@@ -1,17 +1,94 @@
-name: Ask delivery (retired)
+name: Native rule answers
 
-# The read-only CLI implementation is on main at
-# a0a93ec56d537ba6288f9392463a63aa33c92eba.
-# Run 35293588723 records its exact-source verification independently.
-# URI privacy repair b7c5b003b5784ea76915720b202e1be9198ce15f passed
-# the production library check, 124 engine tests and 5 real CLI tests.
-# No source writer or automatic delivery trigger remains in this workflow.
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/deliver-ask-corpus-20260917.yml'
   workflow_dispatch:
-permissions: {}
+permissions:
+  contents: read
 jobs:
-  retired:
-    if: ${{ false }}
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli'
     runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
     steps:
-      - run: echo 'This one-time delivery is retired.'
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Apply the exact reviewed native-rule implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat scripts/delivery/ask-native-20260918/part{0,1,2,3,4,5}.b64 | base64 --decode | gzip -dc > "$RUNNER_TEMP/ask-native.patch"
+          echo "d7437a6833437e8c72881208965b34d526720e6382a418b4856b33bbbac173bc  $RUNNER_TEMP/ask-native.patch" | sha256sum --check
+          git apply --check "$RUNNER_TEMP/ask-native.patch"
+          git apply "$RUNNER_TEMP/ask-native.patch"
+          rustfmt --edition 2024 --config skip_children=true src/core/ask.rs src/core/ask_admission.rs src/core/ask_clustering.rs src/core/ask_corpus.rs src/core/ask_privacy_tests.rs src/core/ask_native.rs src/core/ask_native_tests.rs src/cli/mod.rs
+          git diff --check
+          git diff --stat
+      - name: Compile production before publishing
+        run: |
+          status=0
+          cargo check --locked --lib > "$RUNNER_TEMP/ask-native-check.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/ask-native-check.log"
+          exit "$status"
+      - name: Commit native rules directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- src/core/ask.rs src/core/ask_admission.rs src/core/ask_clustering.rs src/core/ask_corpus.rs src/core/ask_privacy_tests.rs src/core/ask_native.rs src/core/ask_native_tests.rs src/cli/mod.rs docs/adr/0067-extractive-ask.md docs/schemas/ee.ask.v1.json
+          git commit -m 'feat(ask): answer from native procedural rules with revision-pinned citations' -m 'Load current candidate/validated rules from the same snapshot as memories and scope metadata. Preserve true rule identities in answers, hints, conflicts, Markdown and retrieval audits. Require complete lineage attribution in self/team scope. Collapse intersecting derivation lineages so rules and their source memories cannot inflate corroboration. Preserve memory-only output and read-only operation. Add eleven real-store regressions and update the native identity schema. Production library check passed; behavioral results follow in this run.'
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              git rev-parse HEAD | tee "$RUNNER_TEMP/ask-native-source.log"
+              exit 0
+            fi
+            git fetch origin main
+            git merge --no-edit origin/main
+          done
+          exit 1
+      - name: Execute ask engine and real-store regressions
+        run: |
+          status=0
+          cargo test --locked --lib core::ask:: -- --nocapture > "$RUNNER_TEMP/ask-native-core.log" 2>&1 || status=$?
+          tail -n 180 "$RUNNER_TEMP/ask-native-core.log"
+          exit "$status"
+      - name: Execute existing public ask and read-only contracts
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          cargo test --locked --test contracts ask_lifecycle -- --nocapture > "$RUNNER_TEMP/ask-native-cli.log" 2>&1 || status=$?
+          tail -n 120 "$RUNNER_TEMP/ask-native-cli.log"
+          exit "$status"
+      - name: Preserve actual compiler and regression results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-rule-answers
+          path: ${{ runner.temp }}/ask-native-*.log
+          retention-days: 7
