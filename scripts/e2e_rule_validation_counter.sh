@@ -234,3 +234,33 @@ require_jq_value "$pack_out" \
 require_jq_value "$pack_out" \
     "any(.data.pack.items[]?; .memoryId == \"$source_memory_id\" and ((.why // \"\") | contains(\"$learn_rule_id\")))" \
     "true" "hydrated pack item attributes the applied procedural rule"
+
+
+log_step "bd-reality-core-convergence-1azkt.14: native rule survives backup and side-path restore"
+backup_out="$(ee_workspace backup create --include-graph-cache=false --redaction none --json)"
+require_jq_value "$backup_out" '.success' "true" "learn-loop backup create succeeds"
+backup_path="$(printf '%s' "$backup_out" | jq -r '.data.backupPath // empty')"
+if [ -n "$backup_path" ]; then
+    record_pass "learn_loop_backup_path_present"
+else
+    record_failure "learn_loop_backup_path_present" "backup create returned no backupPath"
+    exit 1
+fi
+restore_path="$WORKSPACE-restored"
+restore_out="$(ee_workspace backup restore "$backup_path" --side-path "$restore_path" --json)"
+require_jq_value "$restore_out" '.success' "true" "learn-loop backup restore succeeds"
+
+restored_rule="$( "$EE_BIN" --workspace "$restore_path" rule show "$learn_rule_id" --json )"
+require_jq_value "$restored_rule" '.success' "true" "restored native rule show succeeds"
+require_jq_value "$restored_rule" '.data.rule.id // .data.rule.ruleId // empty' "$learn_rule_id"     "restored native rule preserves RuleId"
+require_jq_value "$restored_rule" '(.data.rule.content // "") | contains("zephyr frobnicator fmt gate")' "true"     "restored native rule preserves content"
+
+restored_rebuild="$( "$EE_BIN" --workspace "$restore_path" index rebuild --json )"
+require_jq_value "$restored_rebuild" '.success' "true" "restored rule index rebuild succeeds"
+restored_search="$( "$EE_BIN" --workspace "$restore_path" search "zephyr frobnicator fmt gate" --limit 20 --json )"
+require_jq_value "$restored_search" '.success' "true" "restored rule search succeeds"
+require_jq_value "$restored_search"     "any(.data.results[]?; ((.docId // .memoryId // \"\") == \"$learn_rule_id\") or ((.content // .contentPreview // \"\") | contains(\"zephyr frobnicator fmt gate\")))"     "true" "restored native rule is searchable by its own content"
+
+restored_pack="$( "$EE_BIN" --workspace "$restore_path" pack "zephyr frobnicator fmt gate" --max-tokens 2000 --json )"
+require_jq_value "$restored_pack" '.success' "true" "restored rule pack succeeds"
+require_jq_value "$restored_pack"     "any(.data.pack.items[]?; ((.why // \"\") | contains(\"$learn_rule_id\")))"     "true" "restored pack retains rule attribution"
