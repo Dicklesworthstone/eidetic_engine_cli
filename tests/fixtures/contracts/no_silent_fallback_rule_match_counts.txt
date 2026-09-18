@@ -312,7 +312,10 @@
 1	NSF-RECALL-PROVENANCE-ABSENT
 1	NSF-SEARCH-DEGRADED-REPAIR
 1	NSF-SEARCH-CALIBRATION-METADATA
-1	NSF-SEARCH-CALIBRATION-HASH-COMMENT
+# NSF-SEARCH-CALIBRATION-HASH-COMMENT owned 1 and is RETIRED (bd-hz7nu): the
+# one finding it owned was a COMMENT, counted only because is_high_risk_line
+# tested the raw line. The detector now reads code, the line is no longer a
+# finding, and a rule owning nothing must not keep a row here.
 1	NSF-SEARCH-CALIBRATION-HASH-BYTES
 1	NSF-HANDOFF-ATTEST-HASHES
 1	NSF-HANDOFF-HYPOTHESIS-CODES

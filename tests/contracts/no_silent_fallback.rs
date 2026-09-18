@@ -2240,12 +2240,17 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         ".and_then(|value| value.as_object().cloned())",
         "Calibration metadata insertion starts from an empty object when the hit has none; the calibration fields are then added explicitly.",
     ),
-    allowed(
-        "NSF-SEARCH-CALIBRATION-HASH-COMMENT",
-        "src/core/search.rs",
-        "the recalibrate run is non-mutating in this branch",
-        "This line is a comment documenting the deliberate empty-bytes hash fallback below it.",
-    ),
+    // RETIRED by bd-hz7nu: NSF-SEARCH-CALIBRATION-HASH-COMMENT owned exactly 1
+    // finding, and that "finding" was a COMMENT — its own reason said so:
+    // "This line is a comment documenting the deliberate empty-bytes hash
+    // fallback below it." It existed only because is_high_risk_line tested the
+    // raw line, so the inventory had absorbed a false positive as though it
+    // were debt. The detector now reads code rather than commentary and the
+    // line is no longer a finding, so the rule owns nothing and goes. Retiring
+    // it is not optional bookkeeping: its ledger row declared 1, and leaving it
+    // would fail the match-count arm in the same commit that fixed the
+    // detector. The sibling NSF-SEARCH-CALIBRATION-HASH-BYTES below still owns
+    // the real fallback that comment was describing.
     allowed(
         "NSF-SEARCH-CALIBRATION-HASH-BYTES",
         "src/core/search.rs",
@@ -3257,6 +3262,97 @@ fn no_silent_fallback_guard_rejects_new_unclassified_empty_vec() -> TestResult {
     }
 }
 
+/// bd-hz7nu: the comment split must DISCRIMINATE, proved in both directions.
+///
+/// A detector change that stops finding what it already found is worse than the
+/// bug it fixes, so the positive controls come first and are not negotiable: a
+/// bare statement, a statement with a TRAILING comment, and — the case a naive
+/// `split("//")` loses — a statement on a line that also carries a URL inside a
+/// string literal. Only then the negatives.
+#[test]
+fn code_only_lines_removes_commentary_without_blinding_the_detector() -> TestResult {
+    let mut problems = Vec::new();
+
+    let must_still_fire = [
+        ("bare statement", "    let x = y.unwrap_or_default();"),
+        (
+            "statement with a trailing line comment",
+            "    let x = y.unwrap_or_default(); // explains the default",
+        ),
+        (
+            "statement after a URL in a string literal",
+            "    let u = \"http://host/path\"; let x = y.unwrap_or_default();",
+        ),
+        (
+            "statement after a char literal holding a quote",
+            "    let q = '\"'; let x = y.unwrap_or_default();",
+        ),
+        (
+            "statement with a trailing block comment",
+            "    let x = y.unwrap_or_default(); /* explains the default */",
+        ),
+        ("empty-vector return", "        return Ok(Vec::new());"),
+    ];
+    for (label, line) in must_still_fire {
+        let code = code_only_lines(line);
+        if !is_high_risk_line(&code[0]) {
+            problems.push(format!(
+                "POSITIVE CONTROL FAILED ({label}): the detector no longer sees a real finding in {line:?} -> {:?}",
+                code[0]
+            ));
+        }
+    }
+
+    let must_not_fire = [
+        ("line comment", "    // .unwrap_or_default() is the shape"),
+        (
+            "doc comment quoting the literal",
+            "/// that value with `.ok()...unwrap_or_default()`, which collapsed",
+        ),
+        (
+            "inner doc comment",
+            "//! see `Ok(Vec::new())` for the shape",
+        ),
+        (
+            "single-line block comment",
+            "    /* .unwrap_or_default() explained */",
+        ),
+    ];
+    for (label, line) in must_not_fire {
+        let code = code_only_lines(line);
+        if is_high_risk_line(&code[0]) {
+            problems.push(format!(
+                "NEGATIVE FAILED ({label}): commentary still counted as product code: {line:?} -> {:?}",
+                code[0]
+            ));
+        }
+    }
+
+    // Block-comment state must carry ACROSS lines, which is the half a
+    // per-line predicate cannot do at all.
+    let block = code_only_lines(
+        "let a = 1;\n/* opening\n   .unwrap_or_default() inside a block\n*/\nlet x = y.unwrap_or_default();",
+    );
+    if is_high_risk_line(&block[2]) {
+        problems.push(format!(
+            "NEGATIVE FAILED (block body): {:?} still counted",
+            block[2]
+        ));
+    }
+    if !is_high_risk_line(&block[4]) {
+        problems.push(format!(
+            "POSITIVE CONTROL FAILED (after block close): real finding lost after `*/`: {:?}",
+            block[4]
+        ));
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
 fn classify_finding(finding: &SourceFinding) -> Option<&'static InventoryRule> {
     INVENTORY_RULES.iter().find(|rule| {
         rule.file == finding.file && rule.scopes(finding) && finding.context.contains(rule.fragment)
@@ -3431,9 +3527,13 @@ fn scan_source_findings() -> Result<Vec<SourceFinding>, String> {
         let ignored = ignored_test_module_lines(&source);
         let lines = source.lines().collect::<Vec<_>>();
         let functions = enclosing_functions(&lines);
+        // bd-hz7nu: detect on the CODE, record the ORIGINAL. A doc comment that
+        // quotes a fallback documents one; it does not perform one.
+        let code = code_only_lines(&source);
 
         for (index, line) in lines.iter().enumerate() {
-            if ignored[index] || !is_high_risk_line(line) {
+            let detectable = code.get(index).map_or(*line, String::as_str);
+            if ignored[index] || !is_high_risk_line(detectable) {
                 continue;
             }
             findings.push(SourceFinding {
@@ -3531,6 +3631,166 @@ fn is_high_risk_line(line: &str) -> bool {
         || trimmed.contains("Ok(Vec::new())")
         || (trimmed.starts_with("let _ =") && trimmed.contains("read_to_end"))
         || trimmed.contains("join().unwrap_or_default()")
+}
+
+/// The CODE portion of every line, with comment text removed (bd-hz7nu).
+///
+/// `is_high_risk_line` tests a raw line, so a doc comment QUOTING
+/// `.unwrap_or_default()` was counted as a silent fallback in product code.
+/// Documenting a fallback therefore created fallback debt, which is an
+/// incentive pointed exactly the wrong way in a file whose every rule is a
+/// prose justification. It reddened main once (the bd-1jpg7 fix explained the
+/// construct it removed and pushed src/mesh/team.rs over its baseline) and was
+/// worked around twice — once by contorting the prose, once by admitting
+/// `NSF-SEARCH-CALIBRATION-HASH-COMMENT`, a rule whose only job was to classify
+/// a comment.
+///
+/// WHY THIS IS NOT `starts_with("//")`. That misses `code(); // note`, misses
+/// block comments entirely, and — the direction that actually loses findings —
+/// naively cutting at the first `//` truncates `let u = "http://host";` and
+/// would blind the detector to a real finding later on that line. So this is a
+/// small scanner that tracks string literals, char literals, and block-comment
+/// state across lines, and removes only what the compiler would also ignore.
+///
+/// Only DETECTION uses this. `SourceFinding::text` and `context` keep the
+/// original source, so inventory fragments still match what is written in the
+/// file, including fragments that name a comment.
+fn code_only_lines(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_block = false;
+    // Raw strings carry across lines like block comments, and this codebase is
+    // full of them: src/db/mod.rs alone opens 260 `r#"` SQL literals. Without
+    // this, the scanner desynchronised there and blanked whole regions —
+    // fifteen REAL findings vanished on the first attempt, which the population
+    // delta caught before it could be committed.
+    let mut in_raw: Option<usize> = None;
+
+    for line in source.lines() {
+        let chars = line.chars().collect::<Vec<_>>();
+        let mut code = String::with_capacity(line.len());
+        let mut index = 0;
+        let mut in_string = false;
+
+        while index < chars.len() {
+            let current = chars[index];
+
+            if let Some(hashes) = in_raw {
+                code.push(current);
+                if current == '"'
+                    && (1..=hashes).all(|offset| chars.get(index + offset) == Some(&'#'))
+                {
+                    in_raw = None;
+                    index += hashes + 1;
+                    continue;
+                }
+                index += 1;
+                continue;
+            }
+
+            if in_block {
+                if current == '*' && chars.get(index + 1) == Some(&'/') {
+                    in_block = false;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
+
+            if in_string {
+                code.push(current);
+                if current == '\\' {
+                    if let Some(escaped) = chars.get(index + 1) {
+                        code.push(*escaped);
+                        index += 2;
+                        continue;
+                    }
+                }
+                if current == '"' {
+                    in_string = false;
+                }
+                index += 1;
+                continue;
+            }
+
+            // A raw-string opener: `r"`, `r#"`, `r##"` … and the `br#"` byte
+            // form, whose `b` falls through as ordinary code first. The `r`
+            // must not be the tail of an identifier (`for`, `char`), so the
+            // preceding character is checked.
+            if current == 'r'
+                && index
+                    .checked_sub(1)
+                    .and_then(|previous| chars.get(previous))
+                    .is_none_or(|previous| {
+                        !previous.is_alphanumeric() && *previous != '_' && *previous != '\''
+                    })
+            {
+                let mut hashes = 0;
+                while chars.get(index + 1 + hashes) == Some(&'#') {
+                    hashes += 1;
+                }
+                if chars.get(index + 1 + hashes) == Some(&'"') {
+                    in_raw = Some(hashes);
+                    for offset in 0..=(1 + hashes) {
+                        if let Some(character) = chars.get(index + offset) {
+                            code.push(*character);
+                        }
+                    }
+                    index += hashes + 2;
+                    continue;
+                }
+            }
+
+            if current == '"' {
+                in_string = true;
+                code.push(current);
+                index += 1;
+                continue;
+            }
+
+            // A char literal may contain `"` or `/`; a lifetime may not be
+            // closed at all. Consume `'x'` and `'\x'` as literals and leave a
+            // lifetime tick to fall through as ordinary code.
+            if current == '\'' {
+                let literal = if chars.get(index + 1) == Some(&'\\') {
+                    chars
+                        .get(index + 3)
+                        .is_some_and(|character| *character == '\'')
+                        .then_some(4)
+                } else {
+                    chars
+                        .get(index + 2)
+                        .is_some_and(|character| *character == '\'')
+                        .then_some(3)
+                };
+                if let Some(width) = literal {
+                    for offset in 0..width {
+                        if let Some(character) = chars.get(index + offset) {
+                            code.push(*character);
+                        }
+                    }
+                    index += width;
+                    continue;
+                }
+            }
+
+            if current == '/' && chars.get(index + 1) == Some(&'/') {
+                break;
+            }
+            if current == '/' && chars.get(index + 1) == Some(&'*') {
+                in_block = true;
+                index += 2;
+                continue;
+            }
+
+            code.push(current);
+            index += 1;
+        }
+
+        out.push(code);
+    }
+
+    out
 }
 
 fn context_window(lines: &[&str], index: usize) -> String {
