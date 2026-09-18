@@ -65,7 +65,19 @@ _harness_resolve_ee_bin() {
     if [ -n "$target_dir" ] && [ -x "$target_dir/debug/ee" ]; then
         printf '%s' "$target_dir/debug/ee"; return 0
     fi
-    printf 'ee'
+    # REFUSE. This used to be a bare `printf 'ee'`, which resolved through
+    # PATH to whatever ee happened to be installed. A suite that cannot find
+    # the binary under test then reports the INSTALLED binary's behaviour as
+    # its own result: e2e_field_report_suite.sh emitted five false
+    # assert_fails against a stale 0.14.2 that way, and verify.sh gate
+    # 6.12698a-j has to pin EE_BIN at all ten of its call sites to avoid
+    # reproducing it. A pin at every caller is a workaround that only holds
+    # while every future caller remembers; refusing here is the guarantee.
+    printf 'e2e_harness: cannot locate the ee binary under test.\n' >&2
+    printf '  Set EE_BIN or EE_BINARY, or build one: cargo build --locked --bin ee\n' >&2
+    printf '  Refusing to fall back to PATH -- a suite that silently tests a\n' >&2
+    printf '  different binary reports that binary'"'"'s failures as its own.\n' >&2
+    return 1
 }
 
 _harness_now_ns() { python3 -c 'import time; print(time.time_ns())'; }
@@ -74,7 +86,13 @@ _harness_now_ns() { python3 -c 'import time; print(time.time_ns())'; }
 harness_init() {
     HARNESS_TEST_NAME="${1:?harness_init: test_name required}"
     HARNESS_PASS=0; HARNESS_FAIL=0; HARNESS_STEP=0; HARNESS_DROPS=0; HARNESS_FAILURES=()
-    EE_BIN="$(_harness_resolve_ee_bin)"
+    # The resolver RETURNS non-zero rather than exiting: it runs inside a
+    # command substitution, where `exit` would terminate only the subshell and
+    # let this function carry on with an empty EE_BIN -- the same fail-open in
+    # a new costume (bd-ry56h). The caller is where the refusal has to land.
+    if ! EE_BIN="$(_harness_resolve_ee_bin)"; then
+        exit 2
+    fi
     export EE_BIN
     local run_id="${EE_E2E_RUN_ID:-$(python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))')}"
     LOG_DIR="${LOG_DIR:-$REPO_ROOT/tests/logs/wizard_e2e/${HARNESS_TEST_NAME}.${run_id}.${BASHPID:-$$}}"
