@@ -14,6 +14,21 @@
 # only when its count reaches zero -- an entry at 0 would be indistinguishable
 # from a file nobody has looked at yet.
 #
+# LOWERED AGAIN 2026-09-17 to 140 across 40 files (tranche 2). Three more files
+# left entirely (contradiction_detect, global_store, mcp) and two shrank
+# (decide 5->2, memory_debt 3->1). Verified against the PREVIOUS committed
+# baseline before writing: five rows decreased, zero rows rose, no file gained a
+# row. That check is the point -- regenerating this file from observation is
+# only safe once you have proved the regeneration contains no increase.
+#
+# NOT GIVEN A ROW, DELIBERATELY: src/core/ask_corpus.rs. af22f1611 added two
+# high-risk lines to it, and with no row here the ratchet read 2 against an
+# allowance of 0 and had main red. The repair is the rule
+# NSF-CORE-ASK-CORPUS-PER-RULE-MAPS, not an entry here. Adding a row would have
+# recorded the new debt as accepted, which is exactly the move this ratchet
+# exists to refuse -- a red caused by new debt is not a reason to widen the
+# allowance.
+#
 # A count may only DECREASE. Raising one is new silent-fallback debt; lowering
 # one after a fix is required (a stale entry decays into a permanent allowlist).
 5	src/cli/mesh.rs
@@ -23,11 +38,9 @@
 3	src/core/ask.rs
 1	src/core/conformal.rs
 1	src/core/context.rs
-3	src/core/contradiction_detect.rs
 7	src/core/curate.rs
-5	src/core/decide.rs
+2	src/core/decide.rs
 3	src/core/doctor.rs
-2	src/core/global_store.rs
 2	src/core/graph_diff.rs
 2	src/core/handoff.rs
 4	src/core/index.rs
@@ -35,7 +48,7 @@
 2	src/core/lab.rs
 1	src/core/learn.rs
 8	src/core/memory.rs
-3	src/core/memory_debt.rs
+1	src/core/memory_debt.rs
 5	src/core/model.rs
 1	src/core/outcome.rs
 1	src/core/plan.rs
@@ -50,7 +63,6 @@
 4	src/daemon/server.rs
 1	src/db/mod.rs
 1	src/hooks/installer.rs
-3	src/mcp.rs
 4	src/mesh/foreground_cli.rs
 6	src/mesh/responder_broker.rs
 10	src/mesh/team.rs

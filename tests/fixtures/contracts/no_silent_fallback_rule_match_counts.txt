@@ -375,3 +375,26 @@
 1	NSF-MODELS-MEMORY-NO-TYPED-SIDECAR
 1	NSF-MODELS-RECORDER-SECRET-KEY-SCAN
 1	NSF-SEARCH-RULE-SCOPE-FIRST-SEGMENT
+
+# bd-apvhh burn-down tranche 2: the provable part of the 14 remaining no-rule
+# files. Two rules carry multiplicity 2 because they group adjacent lookups of
+# the same construct in the same function, per ruling C -- the count travels
+# WITH the group, it is not the key.
+#
+# Three of these fragments were re-aimed after measuring. The first attempt at
+# the decide rule absorbed `chosen`, a site deliberately left as debt, and the
+# first mcp fragment absorbed two siblings and left the next rule owning zero.
+# Every count below was observed before it was written down.
+1	NSF-CONTRADICTION-KEEP-UNREACHABLE
+1	NSF-CONTRADICTION-LOSE-UNREACHABLE
+1	NSF-CONTRADICTION-KEEP-REJECT-ONE-UNREACHABLE
+1	NSF-CORE-DECIDE-NO-TYPED-SIDECAR
+1	NSF-CORE-DECIDE-MISSING-LIST-FIELD
+1	NSF-CORE-DECIDE-NO-STORE
+1	NSF-MCP-OPTIONAL-LIST-ABSENT
+1	NSF-MCP-OPTIONAL-LIST-NULL
+1	NSF-MCP-OPTIONAL-LIST-EMPTY-STRING
+1	NSF-CORE-GLOBAL-STORE-NO-DATABASE
+1	NSF-CORE-GLOBAL-STORE-NO-WORKSPACE-ROW
+2	NSF-CORE-MEMORY-DEBT-PER-MEMORY-MAPS
+2	NSF-CORE-ASK-CORPUS-PER-RULE-MAPS

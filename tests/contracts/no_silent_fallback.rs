@@ -205,6 +205,112 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "let first_segment = portable.split('/').next().unwrap_or_default();",
         "UNREACHABLE: str::split always yields at least one element, so `.next()` is always Some -- an empty pattern yields one empty segment rather than no segments. The genuinely absent case is handled earlier and explicitly by `let Some(pattern) = pattern else { return Ok(None) }`.",
     ),
+    // bd-apvhh burn-down, tranche 2 (2026-09-17): the provable part of the 58
+    // findings in the 14 remaining no-rule files.
+    //
+    // THIS POPULATION IS NOT BIASED BENIGN, unlike tranche 1, and the allow
+    // rate here should be read differently. These files carry identity fields,
+    // plan fields and decision fields where an empty string is a FABRICATED
+    // VALUE rather than a preserved absence. What is classified below is only
+    // what was proved; the rest stays as declared debt on purpose.
+    allowed_in(
+        "NSF-CONTRADICTION-KEEP-UNREACHABLE",
+        "src/core/contradiction_detect.rs",
+        "plan_conflict_resolution",
+        "chosen: format!(\"keep {}\", keep.as_deref().unwrap_or_default()),",
+        "UNREACHABLE. `needs_keep` is matches!(request.verb, Supersede | RejectOne), and when it holds the branch either returns InvalidRequest (missing --keep, or a --keep naming neither side) or produces (Some(keep), Some(lose)). The (None, None) else is reached only for the OTHER verbs, and this site sits inside the Supersede match arm, so keep is necessarily Some here and the plan can never say `keep ` with no id. FRAGILE IN A SPECIFIC WAY: the guard and the match arms are two separate lists of the same two verbs. Add a third verb to one and not the other and this default becomes reachable.",
+    ),
+    allowed_in(
+        "NSF-CONTRADICTION-LOSE-UNREACHABLE",
+        "src/core/contradiction_detect.rs",
+        "plan_conflict_resolution",
+        "memory_id: lose.clone().unwrap_or_default(),",
+        "UNREACHABLE by the same needs_keep argument, and this is the site where reachability would matter most: it is the memory_id of a planned ExpireMemory action, so a default here would plan an expiry against the empty id. RejectOne is in needs_keep, so lose is Some whenever this arm runs.",
+    ),
+    allowed_in(
+        "NSF-CONTRADICTION-KEEP-REJECT-ONE-UNREACHABLE",
+        "src/core/contradiction_detect.rs",
+        "plan_conflict_resolution",
+        "\"keep {}; reject the other side\",",
+        "UNREACHABLE, same proof: the RejectOne match arm only runs for a verb that needs_keep already admitted, so keep is Some.",
+    ),
+    allowed_in(
+        "NSF-CORE-DECIDE-NO-TYPED-SIDECAR",
+        "src/core/decide.rs",
+        "decision_fields_from_memory",
+        ".map(|raw| typed_memory_fields_from_json(&kind, raw))",
+        "A decision memory with no typed v2 sidecar has no typed fields, and an empty field map is that. The distinction that makes it safe is two lines down: a sidecar that EXISTS but does not parse is mapped to decide_storage_error and returned with `?`, so malformed and absent take different paths. FRAGMENT CHOSEN FOR REACH, not readability: the obvious fragment (the decide_storage_error message) also lands inside the context window of `chosen = string_field(..).unwrap_or_default()` three lines below, and this rule absorbed that site on the first attempt. `chosen` and `rationale` are deliberately NOT classified here.",
+    ),
+    allowed_in(
+        "NSF-CORE-DECIDE-MISSING-LIST-FIELD",
+        "src/core/decide.rs",
+        "string_list_field",
+        ".filter_map(non_empty_trimmed)",
+        "A list field that is absent, or present but not an array, yields no strings. The helper already drops empty and whitespace-only entries through non_empty_trimmed, so an empty Vec and a Vec of blanks are the same answer by construction rather than by this default.",
+    ),
+    allowed_in(
+        "NSF-CORE-DECIDE-NO-STORE",
+        "src/core/decide.rs",
+        "load_decisions",
+        "if !scope.database_path.exists() {",
+        "A workspace with no decision store has recorded no decisions. Existence is checked before opening, and once the file exists every open or query failure propagates through open_decide_database_read_only(..)? -- so an unreadable store is never reported as a workspace with no decisions.",
+    ),
+    allowed_in(
+        "NSF-MCP-OPTIONAL-LIST-ABSENT",
+        "src/mcp.rs",
+        "optional_string_list",
+        "fn optional_string_list(arguments: &Value, names: &[&str])",
+        "The function is optional_string_list and an omitted argument is its declared input. Malformed input does NOT take this path: a value that is neither a string nor an array returns Err naming the argument. The fragment is the signature line rather than the `else` because the three early returns sit within four lines of each other, so a fragment nearer the body makes this rule absorb the null and empty-string sites too -- which it did on the first attempt, leaving the next rule owning nothing.",
+    ),
+    allowed_in(
+        "NSF-MCP-OPTIONAL-LIST-NULL",
+        "src/mcp.rs",
+        "optional_string_list",
+        "if value.is_null() {",
+        "Explicit JSON null is the caller spelling absence out loud, which is the same answer as omitting the argument. The malformed case still errors.",
+    ),
+    allowed_in(
+        "NSF-MCP-OPTIONAL-LIST-EMPTY-STRING",
+        "src/mcp.rs",
+        "optional_string_list",
+        "if single.is_empty() {",
+        "An empty string in the single-value spelling carries no list entries, so it yields none rather than a list holding one empty string. That is the choice that keeps the two spellings -- string and array -- agreeing on what emptiness means.",
+    ),
+    allowed_in(
+        "NSF-CORE-GLOBAL-STORE-NO-DATABASE",
+        "src/core/global_store.rs",
+        "read_global_store_memories",
+        "if !paths.database_path.exists() {",
+        "No user-global store file means no user-global memories. Checked before opening; once the file exists, open_file_read_only failures become an Err with the reason.",
+    ),
+    allowed_in(
+        "NSF-CORE-GLOBAL-STORE-NO-WORKSPACE-ROW",
+        "src/core/global_store.rs",
+        "read_global_store_memories",
+        "error.message()",
+        "The global workspace row being ABSENT means nothing has been promoted to the global store yet, so there are no memories to list. A resolution ERROR is a different path: it is mapped to \"failed to resolve global workspace row\" and returned with `?` just above. That message line is one line too far above the finding to fall inside its context window, which is why this fragment names the error accessor instead.",
+    ),
+    allowed_in(
+        "NSF-CORE-MEMORY-DEBT-PER-MEMORY-MAPS",
+        "src/core/memory_debt.rs",
+        "build_memory_debt_report",
+        "let memory_signals = signals.get(&memory.id).cloned().unwrap_or_default();",
+        "Two adjacent per-memory map lookups (signals and anchor_state), carried as one group with multiplicity 2 rather than two positional keys, because they are one decision about the same construct in the same loop. Both maps are built over the same `memories` population with their errors already propagated by `?`, and both hold keys only for memories that HAVE signals or anchors -- so a miss is a memory with none, and the default says exactly that. A memory with no recorded contradictions genuinely has zero, which is why the default is not a fabricated measurement here the way an absent whole-report would be.",
+    ),
+    // NOT MINE, AND IT HAD MAIN RED. af22f1611 added these two lines to
+    // src/core/ask_corpus.rs, a product file with NO row in the unclassified
+    // baseline, so the shrink-only ratchet saw 2 against an allowance of 0 and
+    // failed. Classified rather than given a baseline row on purpose: adding a
+    // row would record the debt as accepted, which is the weakening this
+    // ratchet exists to refuse. Flagged to the ask lane in the same breath --
+    // if they disagree with the judgement, replace the rule, do not baseline it.
+    allowed_in(
+        "NSF-CORE-ASK-CORPUS-PER-RULE-MAPS",
+        "src/core/ask_corpus.rs",
+        "load_rules",
+        "let rule_tags = tags.remove(&rule.id).unwrap_or_default();",
+        "Two adjacent per-rule map lookups (tags and source memory ids), carried as one group with multiplicity 2 because they are one decision about the same construct on consecutive lines. Both maps come from list_rule_tags_for_workspace / list_rule_source_memory_ids_for_workspace, whose errors are already propagated by `?` before this loop runs, and both are keyed by rule id over the same workspace -- so a miss is a rule with no tags or no source memories recorded, and the empty default says exactly that. `remove` rather than `get` is safe because rule ids are unique within a workspace, so no rule is visited twice.",
+    ),
     must_fix(
         "NSF-CASS-PIPE-READ",
         "src/cass/process.rs",
