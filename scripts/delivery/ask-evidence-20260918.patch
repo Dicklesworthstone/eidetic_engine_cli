@@ -1,0 +1,96 @@
+diff --git a/src/core/ask_admission.rs b/src/core/ask_admission.rs
+--- a/src/core/ask_admission.rs
++++ b/src/core/ask_admission.rs
+@@ -14,3 +14,6 @@
+ 
+ use super::super::AskCandidate;
+ 
++#[path = "ask_evidence.rs"]
++pub(super) mod evidence;
++
+diff --git a/src/core/ask_corpus.rs b/src/core/ask_corpus.rs
+--- a/src/core/ask_corpus.rs
++++ b/src/core/ask_corpus.rs
+@@ -176,7 +176,7 @@
+         .collect();
+     let contradictions = load_scoped_contradictions(connection, &ids)?;
+-    let native_sources = load_rules(
++    let mut native_sources = load_rules(
+         connection,
+         workspace_id,
+         &scope,
+@@ -184,6 +184,13 @@
+         &mut candidates,
+     )?;
++    admission::evidence::load_candidates(
++        connection,
++        workspace_id,
++        scope.scope,
++        &mut candidates,
++        &mut native_sources,
++    )?;
+     snapshot.finish()?;
+     Ok(AskCorpus {
+         candidates,
+diff --git a/src/core/ask_native.rs b/src/core/ask_native.rs
+--- a/src/core/ask_native.rs
++++ b/src/core/ask_native.rs
+@@ -7,7 +7,7 @@
+ use std::collections::{BTreeMap, BTreeSet};
+ use std::str::FromStr;
+ 
+-use crate::models::{EvidenceId, MemoryId, RuleId};
++use crate::models::{EvidenceId, MemoryId, ProvenanceUri, RuleId, SessionId};
+ use crate::pack::PackEntityRef;
+ 
+ use super::{AskCandidate, AskReport, AskRequest, AskSpan};
+@@ -22,6 +22,16 @@
+     pub source_memory_ids: Vec<String>,
+ }
+ 
++fn evidence_session(provenance: Option<&str>) -> Option<String> {
++    let ProvenanceUri::CassSession { session, span: Some(_) } =
++        ProvenanceUri::from_str(provenance?).ok()?
++    else {
++        return None;
++    };
++    SessionId::from_str(&session).ok().map(|id| id.to_string())
++}
++
+ pub(super) fn validate_sources(request: &AskRequest, candidates: &[AskCandidate]) -> bool {
+     candidates.iter().all(|candidate| {
+         let Some(source) = request.native_sources.get(&candidate.memory_id) else {
+@@ -31,6 +41,9 @@
+         };
+         !matches!(source.entity, PackEntityRef::Memory(_))
+             && source.entity.id_string() == candidate.memory_id
++            && (!matches!(source.entity, PackEntityRef::EvidenceSpan(_))
++                || (candidate.trust_class == "cass_evidence"
++                    && evidence_session(candidate.provenance_uri.as_deref()).is_some()))
+             && source
+                 .entity_revision
+                 .strip_prefix("blake3:")
+@@ -157,6 +170,25 @@
+     }
+     let ids: BTreeSet<_> = spans.iter().map(|span| span.memory_id.as_str()).collect();
+     let mut parents: BTreeMap<String, String> = BTreeMap::new();
++    // Multiple excerpts of one transcript are correlated evidence, not
++    // independent witnesses. SessionId is an internal group key only: no
++    // synthetic MemoryId or session-level citation is emitted.
++    for span in spans {
++        if sources.get(&span.memory_id).is_some_and(|source| {
++            matches!(source.entity, PackEntityRef::EvidenceSpan(_))
++        }) && let Some(session) = evidence_session(span.provenance_uri.as_deref())
++        {
++            let left = root(&mut parents, &span.memory_id);
++            let right = root(&mut parents, &session);
++            if left < right {
++                parents.insert(right, left);
++            } else if right < left {
++                parents.insert(left, right);
++            }
++        }
++    }
+     for (id, source) in sources.iter().filter(|(id, _)| ids.contains(id.as_str())) {
+         for parent in &source.source_memory_ids {
+             let left = root(&mut parents, id);
