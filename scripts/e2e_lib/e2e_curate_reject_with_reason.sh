@@ -93,7 +93,7 @@ assert_jq "$dry_out" '.data.dryRun' "true" "dryRun flag set"
 assert_jq "$dry_out" '.data.plannedDetails.reason' "dry-run preview" \
     "plannedDetails.reason preview present"
 assert_jq "$dry_out" '.data.mutation.persisted' "false" "dry-run does not persist"
-assert_jq "$dry_out" '.data.mutation.auditId // \"absent\"' "absent" \
+assert_jq "$dry_out" '.data.mutation.auditId // "absent"' "absent" \
     "dry-run does not return an audit id"
 
 # ---------------------------------------------------------------------------
@@ -104,7 +104,7 @@ no_reason_out=$(ee_workspace curate reject "$cand_no_reason" \
 assert_jq "$no_reason_out" '.success' "true" "reject without --reason succeeds"
 no_reason_audit=$(printf '%s' "$no_reason_out" | jq -r '.data.mutation.auditId // ""')
 no_reason_show=$(ee_workspace audit show "$no_reason_audit" --json)
-assert_jq "$no_reason_show" '.data.row.details.reason // \"null\"' "null" \
+assert_jq "$no_reason_show" '.data.row.details.reason // "null"' "null" \
     "audit row omits reason when none supplied"
 
 # ---------------------------------------------------------------------------
