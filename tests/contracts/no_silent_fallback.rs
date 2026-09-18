@@ -77,6 +77,12 @@ const FOLLOW_UP_BEADS: &[&str] = &[
     // in auto_admit and service_tag the denylist is the only per-requester
     // exclusion there is.
     "bd-zjcx6",
+    // bd-xwzeh: the OUTBOUND half of bd-zjcx6. The mesh CLI collapses a
+    // discovery-list load error into an empty denylist, which reaches
+    // autodiscover_tailscale_peers, so peers the operator denied are PROBED.
+    // Found in src/cli/mesh.rs -- mesh code that lives outside src/mesh/, which
+    // is why the bd-zjcx6 sweep did not cover it.
+    "bd-xwzeh",
 ];
 
 const INVENTORY_RULES: &[InventoryRule] = &[
@@ -1761,11 +1767,13 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         ".map(affected_command_kinds)",
         "Blocker evidence without affected commands truly affects no command kinds; the empty list is the true result.",
     ),
-    allowed(
+    must_fix_in(
         "NSF-CLI-MESH-WORKSPACE-LISTS",
         "src/cli/mesh.rs",
+        "build_tailscale_autodiscovery_report_from_local",
         "load_workspace_lists(&workspace_path).unwrap_or_default()",
-        "Absent workspace allow/deny lists are a valid empty discovery policy; present malformed lists surface through their own parse path.",
+        "bd-xwzeh",
+        "RECLASSIFIED FROM allowed TO must_fix. The old reason read \"absent workspace allow/deny lists are a valid empty discovery policy; present malformed lists surface through their own parse path\". The first clause is true; THE SECOND IS FALSE AT THIS CALL SITE -- load_node_key_list returns Err for an io error, a TOML parse failure, a non-array `node_keys` or an oversized payload, and `.unwrap_or_default()` swallows exactly that Err, so a present malformed list surfaces nowhere. The rule described the LOADER's behaviour rather than the CALLER's, which is why it read as sound. A wrong `allowed` is worse than an unclassified finding because it has been reviewed and blessed. What the empty set then does: it reaches TailscaleAutodiscoveryConfig and autodiscover_tailscale_peers, where decide_discovery's DiscoveryDecision::Skip is the only thing preventing a probe, so DENIED PEERS GET PROBED -- the outbound half of bd-zjcx6, which fixed the inbound half. The sibling call at src/cli/mesh.rs:5027 already propagates with map_err(discovery_list_domain_error)?, so the correct shape exists in the same file.",
     ),
     allowed(
         "NSF-CLI-MESH-DISCOVERY-MODE-DEFAULT",
@@ -2692,6 +2700,62 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "parse_suggested_link_payload",
         "let relation = match relation_raw {",
         "The empty string reaches a match over the three known relations and falls to the `other` arm, which returns validation_issue(\"link_candidate_relation_invalid\") naming the offending value. An absent relation is refused, never defaulted to `related`.",
+    ),
+    allowed_in(
+        "NSF-CLI-MESH-LANE-GRANT-BINDINGS",
+        "src/cli/mesh.rs",
+        "prepare_lane_grant_preview_for_state",
+        "let bindings = config",
+        "A workspace with no peer-group bindings configured has none, and the preview computes over an empty slice. This reads an Option FIELD of an already-parsed config; no fallible load is involved, so there is no error being merged into the empty case.",
+    ),
+    allowed_in(
+        "NSF-CLI-MESH-PROBE-SELF-IDENTITY",
+        "src/cli/mesh.rs",
+        "build_tailscale_autodiscovery_report_from_local",
+        "let requester_tags = local",
+        "Two sites, multiplicity 2: our own node key and advertised tags, taken from the local tailscale probe report. Both default when `local` is None, which means the local probe did not run -- and that case is already declared downstream, where autodiscover_tailscale_peers returns a degraded report reading \"Tailscale peer list was unavailable because the local probe did not run\". The direction is also safe on the wire: an empty node key cannot appear in any peer's respond-allowlist, so an identity-less probe is refused by the receiver rather than admitted. NOT to be confused with the denylist in the same function, which is bd-xwzeh and is a must_fix.",
+    ),
+    allowed_in(
+        "NSF-CLI-MESH-IMPORT-BINDINGS",
+        "src/cli/mesh.rs",
+        "import_mesh_artifact_with_final_config_check_hook",
+        "let bindings = config.mesh.peer_group_bindings.clone().unwrap_or_default();",
+        "Same config field as the lane-grant preview, same argument: absent bindings are no bindings, read from a config already in hand. An import with no group bindings resolves no peer group, and the decision path that follows denies rather than assumes one -- see the sibling denial record in denied_import_event.",
+    ),
+    allowed_in(
+        "NSF-CLI-MESH-DENIED-EVENT-PRODUCER",
+        "src/cli/mesh.rs",
+        "denied_import_event",
+        "workspace_scope_decision: MeshImportDecisionKind::Deny,",
+        "The default fills a field of a record whose decision is ALREADY Deny with allowed: false. It records which producer was denied; an event carrying no producer id records none. Nothing about the denial depends on this value, so the empty string cannot widen a permission.",
+    ),
+    allowed_in(
+        "NSF-DAEMON-MEMORY-READ-WORKSPACE",
+        "src/daemon/server.rs",
+        "dispatch_memory_read",
+        "let workspace = fs::canonicalize(request.workspace_id.as_deref().unwrap_or_default())",
+        "The default is handed straight to fs::canonicalize, which fails on the empty path, and the failure is mapped to \"Workspace is unavailable\" and returned with `?`. A request with no workspace id is rejected on this very line rather than resolved against some default directory. The comment above states the surrounding contract: authorization has already checked the envelope's workspace and all filesystem input is resolved from it.",
+    ),
+    allowed_in(
+        "NSF-DAEMON-AMBIENT-CONTEXT-TEXT",
+        "src/daemon/server.rs",
+        "dispatch_memory_read",
+        ".pointer(\"/data/ambientContext/text\")",
+        "A response carrying no ambient-context text yields no markdown. This is a rendering field read out of a response that has already succeeded, not a recovery from one that failed.",
+    ),
+    allowed_in(
+        "NSF-DAEMON-SEARCH-RELEVANCE-RANGE",
+        "src/daemon/server.rs",
+        "validate_canonical_search_result",
+        "let relevance = result[\"relevanceScore\"].as_f64().unwrap_or_default();",
+        "UNREACHABLE, and the guard is four lines above: `for field in [\"score\", \"relevanceScore\"]` requires each to be present and numeric via ok_or_else(..)? and then finite. By this line relevanceScore is guaranteed a finite number. Worth stating because the default would otherwise be dangerous rather than merely wrong -- 0.0 sits INSIDE the 0.0..=1.0 range checked on the next line, so a missing score would have validated instead of failing. The required-field loop is what makes that unreachable.",
+    ),
+    allowed_in(
+        "NSF-DAEMON-TXN-BATCH-EMPTY",
+        "src/daemon/server.rs",
+        "execute_daemon_txn_batch",
+        "let Some(first) = entries.first() else {",
+        "An empty batch has no results. Every entry is parsed with parse_daemon_txn_batch_entry(operation)? BEFORE this point, so a batch that is non-empty but malformed returns an error rather than reaching this early return; the empty case is genuinely empty input.",
     ),
 ];
 

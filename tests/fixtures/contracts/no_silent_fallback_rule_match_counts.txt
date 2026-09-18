@@ -535,3 +535,16 @@
 1	NSF-CURATE-DERIVATION-REF-HASH
 2	NSF-CURATE-LINK-PAYLOAD-MEMORY-IDS
 1	NSF-CURATE-LINK-PAYLOAD-RELATION
+
+# src/cli/mesh.rs and src/daemon/server.rs. NSF-CLI-MESH-WORKSPACE-LISTS keeps
+# its count of 1 but changed DISPOSITION from allowed to must_fix (bd-xwzeh) --
+# the ledger tracks reach, not verdict, so that reclassification is invisible
+# here by design. It is recorded in the rule's own reason.
+1	NSF-CLI-MESH-LANE-GRANT-BINDINGS
+2	NSF-CLI-MESH-PROBE-SELF-IDENTITY
+1	NSF-CLI-MESH-IMPORT-BINDINGS
+1	NSF-CLI-MESH-DENIED-EVENT-PRODUCER
+1	NSF-DAEMON-MEMORY-READ-WORKSPACE
+1	NSF-DAEMON-AMBIENT-CONTEXT-TEXT
+1	NSF-DAEMON-SEARCH-RELEVANCE-RANGE
+1	NSF-DAEMON-TXN-BATCH-EMPTY

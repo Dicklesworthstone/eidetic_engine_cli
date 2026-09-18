@@ -59,7 +59,6 @@
 #
 # A count may only DECREASE. Raising one is new silent-fallback debt; lowering
 # one after a fix is required (a stale entry decays into a permanent allowlist).
-5	src/cli/mesh.rs
 2	src/cli/mod.rs
 1	src/core/agentsmd.rs
 1	src/core/ask.rs
@@ -82,7 +81,6 @@
 4	src/core/swarm_next_action.rs
 1	src/core/tailscale_probe.rs
 1	src/core/workspace.rs
-4	src/daemon/server.rs
 1	src/db/mod.rs
 1	src/hooks/installer.rs
 2	src/mesh/foreground_cli.rs
