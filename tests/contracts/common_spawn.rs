@@ -192,24 +192,71 @@ fn output_with_deadline(
         std::thread::sleep(Duration::from_millis(25));
     };
 
+    // Both joins can now fail, and that is the point: a reader that died used to
+    // be indistinguishable from a child that printed nothing.
+    let stdout = join_reader(stdout_reader, "stdout")?;
+    let stderr = join_reader(stderr_reader, "stderr")?;
+
     Ok(Output {
         status,
-        stdout: stdout_reader.join().unwrap_or_default(),
-        stderr: stderr_reader.join().unwrap_or_default(),
+        stdout,
+        stderr,
     })
 }
 
-/// Read a child pipe to end, returning what arrived.
+/// Read a child pipe to end, returning what arrived AND why reading stopped.
 ///
-/// A read error yields what was collected rather than failing the spawn: the
-/// caller's contract is the child's exit status plus its output, and a partial
-/// read is strictly more informative than an error that discards both.
-fn drain(pipe: Option<impl Read>) -> Vec<u8> {
+/// The original contract was right about the bytes and wrong about the error:
+/// "a partial read is strictly more informative than an error that discards
+/// both" argues for keeping what was collected, and says nothing in favour of
+/// throwing the failure away. Those are separable, and this returns both.
+///
+/// Keeping the error is what makes a partial read DISTINGUISHABLE from a child
+/// that simply wrote nothing. Without it the two are byte-identical at the call
+/// site, which is the shape this repository's no-silent-fallback guard exists to
+/// reject (bd-w12xz).
+fn drain(pipe: Option<impl Read>) -> (Vec<u8>, Option<std::io::Error>) {
     let mut buffer = Vec::new();
+    let mut failure = None;
     if let Some(mut pipe) = pipe {
-        let _ = pipe.read_to_end(&mut buffer);
+        if let Err(error) = pipe.read_to_end(&mut buffer) {
+            failure = Some(error);
+        }
     }
-    buffer
+    (buffer, failure)
+}
+
+/// Join one reader thread, naming the pipe in anything that went wrong.
+///
+/// A panicked reader used to arrive at the caller as EMPTY OUTPUT. Consumers
+/// parse that output, so a dead reader thread was reported as a malformed JSON
+/// document from the child: the harness blamed the program under test for its
+/// own defect. A panic here describes this harness, never the child, so it
+/// fails with the pipe named instead of impersonating a silent program.
+///
+/// A read error also fails, and carries the bytes recovered so far in its
+/// message -- so the original rationale holds. Nothing is discarded; the
+/// partial output travels WITH the reason rather than instead of it.
+fn join_reader(
+    reader: std::thread::JoinHandle<(Vec<u8>, Option<std::io::Error>)>,
+    pipe: &str,
+) -> std::io::Result<Vec<u8>> {
+    let (bytes, failure) = reader.join().map_err(|_| {
+        std::io::Error::other(format!(
+            "{pipe} reader thread panicked while draining the child pipe; \
+             this is a defect in the spawn harness, not output from the child"
+        ))
+    })?;
+    match failure {
+        None => Ok(bytes),
+        Some(error) => {
+            let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(200)]).into_owned();
+            Err(std::io::Error::other(format!(
+                "{pipe} read failed after {} byte(s): {error}; recovered prefix: {preview:?}",
+                bytes.len()
+            )))
+        }
+    }
 }
 
 /// A private workspace registry for one spawn.
