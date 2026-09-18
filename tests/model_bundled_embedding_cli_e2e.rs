@@ -3719,3 +3719,129 @@ fn ensure_u64_at_least(actual: u64, floor: u64, field: &str) -> TestResult {
 fn path_string(path: &Path) -> String {
     path.display().to_string()
 }
+
+/// The posture surface and the retrieval surface must not contradict each other.
+///
+/// bd-7hsgy: `ee model status` reported mode=neural_local and semantic=true
+/// while `ee search` in the SAME workspace, seconds later, reported
+/// embed_backend=hash_fallback. Inspection answered from a directory check
+/// while retrieval answered from an actual weight load, so the two disagreed
+/// exactly when the model files were present and the weights did not load.
+/// ddd0e3814 made inspection share retrieval's one-time resolution --
+/// `DEFAULT_SEARCH_EMBEDDER.get_or_init(detect_default_search_embedder)` at
+/// src/core/index.rs:7173, where it had been a non-forcing `.get()` -- and
+/// shipped with no guard of any kind.
+///
+/// A guard is needed because FOUR sibling call sites in that same file
+/// deliberately use the non-forcing `.get()` (:4860, :4892, :6945, :7783),
+/// each with a comment explaining why inspection should not force. A future
+/// reader normalising that rule across the file reverts precisely this fix,
+/// and before this test nothing would have noticed.
+///
+/// THIS ASSERTS AGREEMENT, NOT A CONSTANT. Every existing assertion in this
+/// file pins one surface against what it SHOULD say in a known-good world:
+/// `active.semantic == false`, `embed_backend == "neural_local"`. Both pass
+/// identically before and after ddd0e3814, because pre-fix the two surfaces
+/// agreed whenever the model actually loaded. The property that was broken is
+/// the relationship between them, so that is what is asserted here: the test
+/// passes on a host where the model loads (both surfaces neural) and on one
+/// where it does not (both hash), and fails only when they disagree. That is
+/// why it needs no model fixture and no corruption setup -- a bare workspace
+/// on a machine without a downloaded model IS the divergence condition, which
+/// is how the reporter hit it by simply running the product.
+///
+/// It deliberately does NOT use TEST_WORKSPACE_EMBEDDER_STACK_OVERRIDES. That
+/// hook returns early at the top of `workspace_embedder_descriptors`, so a
+/// test using it would force the inspection answer and never reach the
+/// resolution this exists to pin -- a green proving nothing.
+#[test]
+fn model_status_posture_and_search_embed_backend_cannot_disagree() -> TestResult {
+    let workspace = E2eWorkspace::create("posture-retrieval-agreement")?;
+    workspace.log(
+        "arrange",
+        json!({
+            "event": "workspace_created",
+            "workspace": path_string(&workspace.path),
+            "bead": "bd-7hsgy",
+            "property": "model status posture and search embed_backend agree",
+        }),
+    )?;
+
+    let init = run_ee(
+        &workspace,
+        "act_init",
+        &["init", "--workspace", workspace.workspace_arg()?, "--json"],
+    )?;
+    ensure_success(&init, "ee init")?;
+
+    let status = run_ee(
+        &workspace,
+        "act_model_status",
+        &[
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+            "model",
+            "status",
+        ],
+    )?;
+    ensure_success(&status, "ee model status")?;
+    let status_value = stdout_json(&status, "ee model status")?;
+    let status_data = response_data(&status_value, "ee model status")?;
+    // `response_data` yields a Map, not a Value, so the active object is
+    // fetched with `get` before pointing into it -- the shape every other
+    // status assertion in this file uses.
+    let posture_semantic = status_data
+        .get("active")
+        .and_then(|active| active.pointer("/semantic"))
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "ee model status: missing active.semantic".to_string())?;
+    let posture_mode = status_data
+        .get("active")
+        .and_then(|active| active.pointer("/mode"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "ee model status: missing active.mode".to_string())?
+        .to_owned();
+
+    let search = run_ee(
+        &workspace,
+        "act_search",
+        &[
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+            "search",
+            "posture retrieval agreement probe",
+        ],
+    )?;
+    ensure_success(&search, "ee search")?;
+    let search_value = stdout_json(&search, "ee search")?;
+    let search_data = response_data(&search_value, "ee search")?;
+    // Read it rather than assert a constant: a missing field must fail loudly
+    // instead of letting the comparison below be skipped.
+    let embed_backend = string_member(search_data, "embed_backend")?.to_owned();
+
+    workspace.log(
+        "assert",
+        json!({
+            "event": "posture_vs_retrieval",
+            "postureSemantic": posture_semantic,
+            "postureMode": posture_mode,
+            "embedBackend": embed_backend,
+        }),
+    )?;
+
+    let retrieval_is_semantic = embed_backend != "hash_fallback";
+    if posture_semantic == retrieval_is_semantic {
+        return Ok(());
+    }
+    Err(format!(
+        "posture and retrieval disagree in one workspace (bd-7hsgy): \
+         `ee model status` reports active.semantic={posture_semantic} \
+         active.mode={posture_mode}, while `ee search` in the same workspace \
+         reports embed_backend={embed_backend}. Both surfaces must resolve the \
+         embedder the same way; see DEFAULT_SEARCH_EMBEDDER in \
+         src/core/index.rs, where inspection must share retrieval's one-time \
+         resolution rather than answering from a directory check."
+    ))
+}
