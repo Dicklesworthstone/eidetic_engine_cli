@@ -1,0 +1,502 @@
+diff --git a/docs/adr/0067-extractive-ask.md b/docs/adr/0067-extractive-ask.md
+index 5637042..480d4c8 100644
+--- a/docs/adr/0067-extractive-ask.md
++++ b/docs/adr/0067-extractive-ask.md
+@@ -58,8 +58,30 @@ deterministic. No thresholds are weakened to make native rules answerable.
+ Ordinary successful asks append retrieval audits against the real `rule`
+ target and include its revision, not a `memory` alias. Abstentions do not count
+ as retrievals. `--read-only` suppresses both retrieval and query-miss auditing;
+-neither mode implicitly migrates a database. This amendment does not enable
+-direct CASS evidence answering or path-specific rule matching.
++neither mode implicitly migrates a database. Native transcript admission is
++independent of the rule path applicability described below.
++
++### Path-specific rule answers (2026-09-18)
++
++`ee ask "What must I check?" --path src/lib.rs --read-only` admits matching
++directory and file-pattern rules in addition to ordinary workspace evidence.
++Repeat `--path` to describe multiple task targets. Paths are literal,
++workspace-relative selectors, not file contents or query globs; nonexistent
++files are valid targets. Absolute paths, parent traversal, and existing symlink
++escapes are rejected without disclosing the submitted path in errors.
++
++Rule patterns use recall's existing case-sensitive fnmatch language (`*`
++crosses `/`, `?` and character classes are supported). Directory patterns match
++whole target/ancestor components: `src` includes `src/core/lib.rs` but not
++`src-other/lib.rs`. File patterns match the complete target. Equivalent path
++separators, redundant `.` components, repeated targets, and target ordering
++do not change the answer.
++
++Paths do not widen `--memory-scope`, promote trust, admit retired rules, or
++exclude otherwise eligible memories/transcripts. With no path, path-scoped
++rules remain excluded. Rule scope, pattern, lifecycle, revision, and body are
++read in the same snapshot; later scope updates are visible without rebuilding
++an index. Citations retain the native RuleId and exact stored body offsets.
+ 
+ ### 1. Span model
+ 
+diff --git a/src/cli/mod.rs b/src/cli/mod.rs
+index f5435f9..75dc611 100644
+--- a/src/cli/mod.rs
++++ b/src/cli/mod.rs
+@@ -1745,6 +1745,11 @@ pub struct AskArgs {
+     #[arg(long, value_parser = parse_memory_scope_arg, default_value = "workspace")]
+     pub memory_scope: MemoryScope,
+ 
++    /// Literal workspace-relative task target for directory/file-scoped rules.
++    /// Repeat --path for multiple targets; this never widens --memory-scope.
++    #[arg(long = "path", value_name = "PATH")]
++    pub paths: Vec<String>,
++
+     /// Query without writing retrieval or query-miss audit records.
+     /// Opens the store read-only and never migrates it.
+     #[arg(long)]
+@@ -50909,11 +50914,12 @@ where
+     };
+ 
+     // Resolve temporal eligibility before scoring, hints, and contradiction lookup.
+-    let corpus = match crate::core::ask::load_scoped_ask_corpus(
++    let corpus = match crate::core::ask::load_ask_corpus_for_paths(
+         &connection,
+         &workspace_id,
+         chrono::Utc::now(),
+         args.memory_scope,
++        &args.paths,
+     ) {
+         Ok(corpus) => corpus,
+         Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+diff --git a/src/core/ask.rs b/src/core/ask.rs
+index 7c90682..c623e46 100644
+--- a/src/core/ask.rs
++++ b/src/core/ask.rs
+@@ -26,7 +26,7 @@ pub use store::load_scoped_contradictions;
+ #[path = "ask_corpus.rs"]
+ mod corpus;
+ 
+-pub use corpus::{AskCorpus, load_current_ask_corpus, load_scoped_ask_corpus};
++pub use corpus::{AskCorpus, load_current_ask_corpus, load_scoped_ask_corpus, load_ask_corpus_for_paths};
+ 
+ #[path = "ask_candidates.rs"]
+ mod selection;
+diff --git a/src/core/ask_corpus.rs b/src/core/ask_corpus.rs
+index b26f391..fa5c748 100644
+--- a/src/core/ask_corpus.rs
++++ b/src/core/ask_corpus.rs
+@@ -53,10 +53,24 @@ pub fn load_scoped_ask_corpus(
+     reference_time: DateTime<Utc>,
+     scope: MemoryScope,
+ ) -> Result<AskCorpus, DomainError> {
+-    load_corpus_with_scope_boundary(
++    load_ask_corpus_for_paths(connection, workspace_id, reference_time, scope, &[])
++}
++
++/// Add literal workspace-relative task targets without widening memory scope.
++/// Paths select directory/file rules; ordinary workspace evidence is retained.
++/// No target contents are opened and targets may describe not-yet-created files.
++pub fn load_ask_corpus_for_paths(
++    connection: &DbConnection,
++    workspace_id: &str,
++    reference_time: DateTime<Utc>,
++    scope: MemoryScope,
++    paths: &[String],
++) -> Result<AskCorpus, DomainError> {
++    load_corpus_with_path_boundary(
+         connection,
+         workspace_id,
+         reference_time,
++        paths,
+         || scope_context(connection, workspace_id, scope),
+         || Ok(()),
+     )
+@@ -125,8 +139,22 @@ fn load_corpus_with_scope_boundary(
+     reference_time: DateTime<Utc>,
+     scope_context: impl FnOnce() -> Result<MemoryScopeContext, DomainError>,
+     after_memory_read: impl FnOnce() -> Result<(), DomainError>,
++) -> Result<AskCorpus, DomainError> {
++    load_corpus_with_path_boundary(
++        connection, workspace_id, reference_time, &[], scope_context, after_memory_read,
++    )
++}
++
++fn load_corpus_with_path_boundary(
++    connection: &DbConnection,
++    workspace_id: &str,
++    reference_time: DateTime<Utc>,
++    paths: &[String],
++    scope_context: impl FnOnce() -> Result<MemoryScopeContext, DomainError>,
++    after_memory_read: impl FnOnce() -> Result<(), DomainError>,
+ ) -> Result<AskCorpus, DomainError> {
+     let snapshot = AskReadSnapshot::begin(connection)?;
++    let paths = normalize_ask_targets(connection, workspace_id, paths)?;
+     let stored = connection
+         .list_memories(workspace_id, None, false)
+         .map_err(|_| corpus_storage_error())?;
+@@ -177,6 +205,7 @@ fn load_corpus_with_scope_boundary(
+         workspace_id,
+         &scope,
+         &attributed_memories,
++        &paths,
+         &mut candidates,
+     )?;
+     admission::append_evidence(
+@@ -199,6 +228,7 @@ fn load_rules(
+     workspace_id: &str,
+     scope: &MemoryScopeContext,
+     attributed_memories: &BTreeSet<String>,
++    paths: &[String],
+     candidates: &mut Vec<AskCandidate>,
+ ) -> Result<BTreeMap<String, AskNativeSource>, DomainError> {
+     let rules = connection
+@@ -219,14 +249,7 @@ fn load_rules(
+         .list_rule_source_memory_ids_for_workspace(workspace_id)
+         .map_err(|_| corpus_storage_error())?;
+     for rule in rules {
+-        // A plain question carries no file or directory context. Do not apply
+-        // a path-specific rule universally merely because its words match.
+-        if rule.workspace_id != workspace_id
+-            || !matches!(
+-                RuleScope::from_str(&rule.scope),
+-                Ok(RuleScope::Global | RuleScope::Workspace | RuleScope::Project)
+-            )
+-        {
++        if rule.workspace_id != workspace_id {
+             continue;
+         }
+         let rule_tags = tags.remove(&rule.id).unwrap_or_default();
+@@ -256,6 +279,9 @@ fn load_rules(
+         }
+         let projection =
+             crate::search::RuleIndexProjection::new(rule, &workspace.path, rule_tags, source_ids);
++        if !rule_matches_targets(&projection, paths) {
++            continue;
++        }
+         if let Some((candidate, source)) = admission::rule_candidate(&projection) {
+             native_sources.insert(candidate.memory_id.clone(), source);
+             candidates.push(candidate);
+@@ -264,6 +290,68 @@ fn load_rules(
+     Ok(native_sources)
+ }
+ 
++fn target_usage_error(code: &str) -> DomainError {
++    DomainError::Usage {
++        // Never echo the submitted path or a filesystem diagnostic; either may
++        // disclose a private absolute path through an otherwise safe answer.
++        message: format!("Invalid ee ask --path ({code}); use a literal workspace-relative target without glob characters or parent traversal"),
++        repair: Some("ee ask \"What must I check?\" --path src/lib.rs --read-only --json".to_owned()),
++    }
++}
++
++fn normalize_ask_targets(
++    connection: &DbConnection,
++    workspace_id: &str,
++    paths: &[String],
++) -> Result<Vec<String>, DomainError> {
++    if paths.is_empty() {
++        return Ok(Vec::new());
++    }
++    let workspace = connection.get_workspace(workspace_id)
++        .map_err(|_| corpus_storage_error())?.ok_or_else(corpus_storage_error)?;
++    let mut normalized = BTreeSet::new();
++    for path in paths {
++        if path.trim().starts_with('~')
++            || path.chars().any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
++        {
++            return Err(target_usage_error("non_literal_target"));
++        }
++        // Reuse the rule writer's portable path and symlink-escape contract.
++        // Glob characters are rejected above so every existing target prefix
++        // is inspected, rather than stopping at the first pattern component.
++        let path = crate::search::normalize_rule_scope_pattern(
++            std::path::Path::new(&workspace.path), RuleScope::FilePattern, Some(path),
++        ).map_err(|error| target_usage_error(error.code()))?
++            .ok_or_else(|| target_usage_error("missing_target"))?;
++        normalized.insert(path);
++    }
++    Ok(normalized.into_iter().collect())
++}
++
++fn rule_matches_targets(projection: &crate::search::RuleIndexProjection, paths: &[String]) -> bool {
++    match RuleScope::from_str(&projection.rule().scope) {
++        Ok(RuleScope::Global | RuleScope::Workspace | RuleScope::Project) => true,
++        Ok(scope @ (RuleScope::Directory | RuleScope::FilePattern)) => {
++            let Some(pattern) = projection.normalized_scope_pattern() else {
++                return false;
++            };
++            paths.iter().any(|path| {
++                // Use recall's established case-sensitive fnmatch language.
++                // Directory rules match whole ancestor components, never a
++                // lexical prefix such as `src` matching `src-other`.
++                std::iter::successors(Some(path.as_str()), |&parent| {
++                    if scope == RuleScope::Directory {
++                        parent.rsplit_once('/').map(|(prefix, _)| prefix)
++                    } else {
++                        None
++                    }
++                }).any(|target| crate::core::recall::recall_glob_match(pattern, target))
++            })
++        }
++        Err(_) => false,
++    }
++}
++
+ /// Own only the read transaction that this operation successfully began.
+ /// A failed nested begin must never roll back a caller's existing transaction.
+ /// Errors and unwinding release our snapshot; a failed commit is rolled back
+diff --git a/src/core/ask_native_tests.rs b/src/core/ask_native_tests.rs
+index 9bcc1f2..cabec3f 100644
+--- a/src/core/ask_native_tests.rs
++++ b/src/core/ask_native_tests.rs
+@@ -79,6 +79,135 @@ fn rule(db: &DbConnection, workspace: &str, n: usize, body: &str, sources: &[Str
+     id
+ }
+ 
++fn path_rule(db: &DbConnection, workspace: &str, n: usize, scope: &str, pattern: &str) -> String {
++    let id = rule(db, workspace, n, BODY, &[]);
++    db.execute_raw(&format!(
++        "UPDATE procedural_rules SET scope = '{scope}', scope_pattern = '{pattern}' WHERE id = '{id}'"
++    )).unwrap();
++    id
++}
++
++fn path_corpus(db: &DbConnection, workspace: &str, paths: &[&str]) -> AskCorpus {
++    load_ask_corpus_for_paths(db, workspace, Utc::now(), MemoryScope::Workspace,
++        &paths.iter().map(|path| (*path).to_owned()).collect::<Vec<_>>()).unwrap()
++}
++
++fn source_ids(corpus: &AskCorpus) -> BTreeSet<String> {
++    corpus.candidates.iter().map(|candidate| candidate.memory_id.clone()).collect()
++}
++
++#[test]
++fn path_rules_require_a_matching_target_and_preserve_universal_evidence() {
++    let (_root, db, workspace) = fixture();
++    let universal = rule(&db, &workspace, 1, BODY, &[]);
++    let directory = path_rule(&db, &workspace, 2, "directory", "src");
++    let file = path_rule(&db, &workspace, 3, "file_pattern", "src/*.rs");
++    let excluded = path_rule(&db, &workspace, 4, "directory", "src-other");
++    path_rule(&db, &workspace, 5, "file_pattern", "src/*.toml");
++    let malformed = path_rule(&db, &workspace, 6, "directory", "../outside");
++    let draft = path_rule(&db, &workspace, 7, "directory", "src");
++    db.execute_raw(&format!("UPDATE procedural_rules SET maturity = 'draft' WHERE id = '{draft}'")).unwrap();
++    assert_eq!(source_ids(&path_corpus(&db, &workspace, &[])), BTreeSet::from([universal.clone()]));
++    assert_eq!(source_ids(&path_corpus(&db, &workspace, &["docs/new.md"])), BTreeSet::from([universal.clone()]));
++    let corpus = path_corpus(&db, &workspace, &["src/new/lib.rs"]);
++    assert_eq!(source_ids(&corpus), BTreeSet::from([universal, directory, file]));
++    let output = ask_data_json(&answer(&corpus)).to_string();
++    assert!(!output.contains(&excluded));
++    assert!(!output.contains(&malformed));
++    assert!(!output.contains(&draft));
++}
++
++#[test]
++fn path_rules_normalize_deduplicate_and_match_targets_deterministically() {
++    let (_root, db, workspace) = fixture();
++    let rust = path_rule(&db, &workspace, 1, "file_pattern", "src/[lm]ib.r?");
++    let test = path_rule(&db, &workspace, 2, "directory", "tests");
++    let paths = ["./src//lib.rs", "tests/new/check.rs", r"src\lib.rs", "./tests/new/check.rs"];
++    let corpus = path_corpus(&db, &workspace, &paths);
++    assert_eq!(source_ids(&corpus), BTreeSet::from([rust, test]));
++    let reversed = ["tests/new/check.rs", "src/lib.rs"];
++    assert_eq!(ask_data_json(&answer(&corpus)), ask_data_json(&answer(&path_corpus(&db, &workspace, &reversed))));
++    assert!(path_corpus(&db, &workspace, &["SRC/lib.rs"]).candidates.is_empty());
++}
++
++#[test]
++fn path_rules_keep_verified_and_self_scope_authority() {
++    let (_root, db, workspace) = fixture();
++    let own = memory(&db, &workspace, 10, "Alice", "Historical source.");
++    let other = memory(&db, &workspace, 11, "Bob", "Another source.");
++    let admitted = rule(&db, &workspace, 1, BODY, &[own]);
++    let foreign = rule(&db, &workspace, 2, BODY, &[other]);
++    let unverified = path_rule(&db, &workspace, 3, "directory", "src");
++    for id in [&admitted, &foreign] {
++        db.execute_raw(&format!("UPDATE procedural_rules SET scope = 'directory', scope_pattern = 'src' WHERE id = '{id}'")).unwrap();
++    }
++    db.execute_raw(&format!("UPDATE procedural_rules SET trust_class = 'agent_assertion' WHERE id = '{unverified}'")).unwrap();
++    let verified = load_ask_corpus_for_paths(&db, &workspace, Utc::now(), MemoryScope::Verified, &["src/lib.rs".to_owned()]).unwrap();
++    assert_eq!(verified.native_sources.keys().cloned().collect::<BTreeSet<_>>(), BTreeSet::from([admitted.clone(), foreign.clone()]));
++    let self_only = load_corpus_with_path_boundary(&db, &workspace, Utc::now(), &["src/lib.rs".to_owned()], || {
++        Ok(MemoryScopeContext { scope: MemoryScope::SelfOnly, strict_scope: false,
++            current_agent: Some("Alice".to_owned()), team_members: BTreeSet::new() })
++    }, || Ok(())).unwrap();
++    assert_eq!(self_only.native_sources.keys().cloned().collect::<Vec<_>>(), vec![admitted]);
++    let global = load_ask_corpus_for_paths(&db, &workspace, Utc::now(), MemoryScope::Global, &["src/lib.rs".to_owned()]).unwrap();
++    assert!(global.native_sources.is_empty());
++}
++
++#[test]
++fn path_rules_scope_updates_are_snapshot_consistent_and_need_no_rebuild() {
++    let (root, db, workspace) = fixture();
++    let id = path_rule(&db, &workspace, 1, "directory", "src");
++    let before = path_corpus(&db, &workspace, &["src/lib.rs"]);
++    let writer = DbConnection::open_file(&root.path().join(".ee/ee.db")).unwrap();
++    let pinned = load_corpus_with_path_boundary(&db, &workspace, Utc::now(), &["src/lib.rs".to_owned()], || {
++        scope_context(&db, &workspace, MemoryScope::Workspace)
++    }, || {
++        writer.with_transaction(|| writer.execute_raw(&format!(
++            "UPDATE procedural_rules SET scope_pattern = 'tests' WHERE id = '{id}'"
++        ))).unwrap();
++        Ok(())
++    }).unwrap();
++    assert_eq!(source_ids(&pinned), BTreeSet::from([id.clone()]));
++    assert_eq!(pinned.native_sources[&id].entity_revision, before.native_sources[&id].entity_revision);
++    assert!(path_corpus(&db, &workspace, &["src/lib.rs"]).candidates.is_empty());
++    let moved = path_corpus(&db, &workspace, &["tests/new.rs"]);
++    assert_ne!(moved.native_sources[&id].entity_revision, before.native_sources[&id].entity_revision);
++    db.execute_raw(&format!("UPDATE procedural_rules SET maturity = 'deprecated' WHERE id = '{id}'")).unwrap();
++    assert!(path_corpus(&db, &workspace, &["tests/new.rs"]).candidates.is_empty());
++}
++
++#[test]
++fn path_rules_invalid_targets_fail_without_disclosure_and_release_the_snapshot() {
++    let (root, db, workspace) = fixture();
++    rule(&db, &workspace, 1, BODY, &[]);
++    for path in ["", ".", "../secret", "src/../secret", "/home/private/canary", r"C:\private\canary", "~/private", "src/*.rs", "src/[ab]", "src/\0"] {
++        let error = load_ask_corpus_for_paths(&db, &workspace, Utc::now(), MemoryScope::Workspace, &[path.to_owned()]).unwrap_err();
++        assert!(matches!(error, DomainError::Usage { .. }));
++        assert!(!error.message().contains("canary"));
++        assert!(!error.message().contains(&root.path().to_string_lossy().to_string()));
++        db.begin_read_snapshot().unwrap();
++        db.commit_read_snapshot().unwrap();
++    }
++    assert_eq!(load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap().candidates.len(), 1);
++}
++
++#[cfg(unix)]
++#[test]
++fn path_rules_refuse_existing_symlink_escape_without_reading_target_contents() {
++    use std::os::unix::fs::symlink;
++    let (root, db, workspace) = fixture();
++    let outside = tempfile::tempdir().unwrap();
++    std::fs::write(outside.path().join("secret.rs"), "private-target-canary").unwrap();
++    symlink(outside.path(), root.path().join("alias")).unwrap();
++    path_rule(&db, &workspace, 1, "file_pattern", "*.rs");
++    let error = load_ask_corpus_for_paths(&db, &workspace, Utc::now(), MemoryScope::Workspace, &["alias/secret.rs".to_owned()]).unwrap_err();
++    assert!(matches!(error, DomainError::Usage { .. }));
++    assert!(error.message().contains("symlink_escape"));
++    assert!(!error.message().contains("private-target-canary"));
++    assert!(!error.message().contains(&outside.path().to_string_lossy().to_string()));
++    assert_eq!(path_corpus(&db, &workspace, &["src/new.rs"]).candidates.len(), 1);
++}
++
+ fn request(corpus: &AskCorpus) -> AskRequest {
+     AskRequest {
+         question: QUESTION.to_owned(),
+diff --git a/tests/contracts/ask_native.rs b/tests/contracts/ask_native.rs
+index 5b769b6..4e87431 100644
+--- a/tests/contracts/ask_native.rs
++++ b/tests/contracts/ask_native.rs
+@@ -146,13 +146,13 @@ fn applied_curation_rule_answers_from_its_own_body_and_records_its_own_target()
+             target_memory_id: Some(memory_id.clone()),
+             proposed_content: Some(RULE.to_owned()),
+             proposed_confidence: Some(0.95),
+-            proposed_trust_class: Some("human_explicit".to_owned()),
+-            source_type: "feedback_event".to_owned(),
+-            source_id: None,
++            proposed_trust_class: Some("agent_assertion".to_owned()),
++            source_type: "agent_inference".to_owned(),
++            source_id: Some(memory_id.clone()),
+             reason: "Approved release guidance from reviewed historical evidence.".to_owned(),
+             confidence: 0.95,
+-            status: Some("approved".to_owned()),
+-            created_at: Some("2020-01-01T00:00:00Z".to_owned()),
++            status: Some("pending".to_owned()),
++            created_at: None,
+             ttl_expires_at: None,
+             derivation_source_refs_json: None,
+             derivation_metadata_json: None,
+@@ -160,6 +160,8 @@ fn applied_curation_rule_answers_from_its_own_body_and_records_its_own_target()
+     )
+     .map_err(|error| error.to_string())?;
+     drop(db);
++    let validated = command(&workspace, &["curate", "validate", candidate_id, "--actor", "native-ask-acceptance"])?;
++    assert_eq!(validated["data"]["validation"]["decision"], "approved");
+     let applied = command(
+         &workspace,
+         &[
+@@ -182,6 +184,7 @@ fn applied_curation_rule_answers_from_its_own_body_and_records_its_own_target()
+     let answer = command(&workspace, &["ask", QUESTION])?;
+     assert_eq!(answer["data"]["abstained"], false);
+     check_citation(&answer["data"]["citations"][0], &id, RULE)?;
++    assert_eq!(answer["data"]["citations"][0]["trustClass"], "agent_assertion");
+     assert!(
+         !answer.to_string().contains(&memory_id),
+         "source memory must not replace rule identity"
+@@ -217,6 +220,77 @@ fn applied_curation_rule_answers_from_its_own_body_and_records_its_own_target()
+     Ok(())
+ }
+ 
++#[test]
++fn public_path_rules_select_only_matching_native_sources_without_writes() -> Result<(), String> {
++    let (_root, workspace, database) = super::super::build_empty_workspace()?;
++    let directory = added_rule(&workspace, RULE, &["--scope", "directory", "--scope-pattern", "src"])?;
++    let test_file = added_rule(&workspace, RULE, &["--scope", "file_pattern", "--scope-pattern", "tests/*.rs"])?;
++    let before = std::fs::read(&database).map_err(|error| error.to_string())?;
++    for (path, expected, forbidden) in [("src/new/lib.rs", &directory, &test_file), ("tests/new.rs", &test_file, &directory)] {
++        let data = command(&workspace, &["ask", QUESTION, "--path", path, "--read-only"])?;
++        assert_eq!(data["data"]["abstained"], false);
++        assert_eq!(data["data"]["candidatesScanned"], 1);
++        check_citation(&data["data"]["citations"][0], expected, RULE)?;
++        assert!(!data.to_string().contains(forbidden));
++        assert_eq!(data, command(&workspace, &["ask", QUESTION, "--path", path, "--read-only"])?);
++    }
++    for flags in [vec!["ask", QUESTION, "--read-only"], vec!["ask", QUESTION, "--path", "src-other/lib.rs", "--read-only"]] {
++        let data = command(&workspace, &flags)?;
++        assert_eq!(data["data"]["abstained"], true);
++        assert_eq!(data["data"]["candidatesScanned"], 0);
++        assert!(!data.to_string().contains(&directory));
++        assert!(!data.to_string().contains(&test_file));
++    }
++    let combined = command(&workspace, &["ask", QUESTION, "--path", "src/new/lib.rs", "--path", "tests/new.rs", "--read-only"])?;
++    assert_eq!(combined["data"]["candidatesScanned"], 2);
++    assert_eq!(combined, command(&workspace, &["ask", QUESTION, "--path", "./tests/new.rs", "--path", r"src\new\lib.rs", "--path", "src/new/lib.rs", "--read-only"])?);
++    assert_eq!(std::fs::read(&database).map_err(|error| error.to_string())?, before);
++    let db = DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
++    let stored = db.get_procedural_rule(&directory).map_err(|error| error.to_string())?.ok_or("missing rule")?;
++    assert!(db.list_memories(&stored.workspace_id, None, true).map_err(|error| error.to_string())?.is_empty());
++    Ok(())
++}
++
++#[test]
++fn public_path_rules_follow_scope_changes_and_retirement_without_reindexing() -> Result<(), String> {
++    let (_root, workspace, _database) = super::super::build_empty_workspace()?;
++    let id = added_rule(&workspace, RULE, &["--scope", "directory", "--scope-pattern", "src"])?;
++    let original = command(&workspace, &["ask", QUESTION, "--path", "src/lib.rs", "--read-only"])?;
++    check_citation(&original["data"]["citations"][0], &id, RULE)?;
++    command(&workspace, &["rule", "update", &id, "--scope-pattern", "tests"])?;
++    let stale_target = command(&workspace, &["ask", QUESTION, "--path", "src/lib.rs", "--read-only"])?;
++    assert_eq!(stale_target["data"]["abstained"], true);
++    assert!(!stale_target.to_string().contains(&id));
++    let moved = command(&workspace, &["ask", QUESTION, "--path", "tests/check.rs", "--read-only"])?;
++    check_citation(&moved["data"]["citations"][0], &id, RULE)?;
++    assert_ne!(moved["data"]["citations"][0]["entityRevision"], original["data"]["citations"][0]["entityRevision"]);
++    command(&workspace, &["rule", "mark", &id, "--trigger", "deprecate"])?;
++    let retired = command(&workspace, &["ask", QUESTION, "--path", "tests/check.rs", "--read-only"])?;
++    assert_eq!(retired["data"]["abstained"], true);
++    assert!(!retired.to_string().contains(&id));
++    Ok(())
++}
++
++#[test]
++fn public_path_rules_reject_unsafe_targets_before_optional_auditing() -> Result<(), String> {
++    let (_root, workspace, database) = super::super::build_empty_workspace()?;
++    added_rule(&workspace, RULE, &[])?;
++    let before = std::fs::read(&database).map_err(|error| error.to_string())?;
++    for path in ["../private-canary", "/home/private-canary", r"C:\private-canary", "src/*.rs", ""] {
++        let output = crate::common_spawn::serialized_real_ee_with(|cmd| {
++            cmd.arg("--workspace").arg(&workspace).arg("--json").arg("ask").arg(QUESTION).arg("--path").arg(path);
++        }).map_err(|error| error.to_string())?;
++        assert_eq!(output.status.code(), Some(2));
++        let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
++        assert_eq!(value["schema"], "ee.error.v2");
++        assert_eq!(value["error"]["code"], "usage");
++        assert!(!String::from_utf8_lossy(&output.stdout).contains("private-canary"));
++        assert!(!String::from_utf8_lossy(&output.stderr).contains("private-canary"));
++        assert_eq!(std::fs::read(&database).map_err(|error| error.to_string())?, before);
++    }
++    Ok(())
++}
++
+ #[test]
+ fn native_draft_and_directory_rules_cannot_become_universal_answers() -> Result<(), String> {
+     let (_root, workspace, _database) = super::super::build_empty_workspace()?;

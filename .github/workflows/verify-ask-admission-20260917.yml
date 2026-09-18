@@ -1,17 +1,21 @@
-name: Native rule answer acceptance
+name: Path-scoped native answers
 
 on:
   push:
     branches: [main]
     paths:
-      - 'tests/contracts/ask_native.rs'
+      - scripts/delivery/ask-path-scope.patch
+      - .github/workflows/verify-ask-admission-20260917.yml
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  verify:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 35
+    permissions:
+      contents: write
     env:
       RUSTUP_TOOLCHAIN: nightly
       CARGO_BUILD_JOBS: '2'
@@ -22,7 +26,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: false
+          ref: main
+          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
@@ -34,29 +39,73 @@ jobs:
           key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Record source and parse the new acceptance tests
+      - name: Apply the reviewed path-scoped answer feature
         run: |
-          git rev-parse HEAD | tee "$RUNNER_TEMP/ask-native-source.log"
-          git status --porcelain
-          rustfmt --edition 2024 --config skip_children=true --emit stdout tests/contracts/ask_native.rs > /dev/null
-          git diff --exit-code
-      - name: Execute rule creation, curation, retirement, conflict and existing ask contracts
-        run: |
-          status=0
-          cargo test --locked --test contracts ask_lifecycle -- --nocapture > "$RUNNER_TEMP/ask-native-cli.log" 2>&1 || status=$?
-          tail -n 160 "$RUNNER_TEMP/ask-native-cli.log"
-          exit "$status"
-      - name: Verify the existing memory retrieval audit contract
-        if: ${{ !cancelled() }}
+          set -euo pipefail
+          git rev-parse HEAD
+          echo '6dd7c524de98fdc914328a05fe89c8e10f2352848f75d4f55ca3078871e3864e  scripts/delivery/ask-path-scope.patch' | sha256sum --check
+          git apply --check scripts/delivery/ask-path-scope.patch
+          git apply scripts/delivery/ask-path-scope.patch
+          rustfmt --edition 2024 --config skip_children=true src/core/ask.rs src/core/ask_corpus.rs src/core/ask_native_tests.rs src/cli/mod.rs tests/contracts/ask_native.rs
+          git diff --check
+          git diff --stat
+      - name: Compile production library
         run: |
           status=0
-          cargo test --locked --test contracts ee_ask_writes_returned_mem_rows_for_cited_memories -- --nocapture > "$RUNNER_TEMP/ask-native-audit.log" 2>&1 || status=$?
-          tail -n 80 "$RUNNER_TEMP/ask-native-audit.log"
+          cargo check --locked --lib > "$RUNNER_TEMP/ask-path-check.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/ask-path-check.log"
           exit "$status"
-      - name: Preserve actual acceptance results
+      - name: Execute all ask engine and real-store regressions
+        run: |
+          status=0
+          cargo test --locked --lib core::ask:: -- --test-threads=2 > "$RUNNER_TEMP/ask-path-engine.log" 2>&1 || status=$?
+          tail -n 260 "$RUNNER_TEMP/ask-path-engine.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/ask-path-engine.log" || status=1
+          test "$(grep -c '^test core::ask::corpus::native_tests::path_rules_.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-engine.log")" -eq 6 || status=1
+          exit "$status"
+      - name: Execute public path, lifecycle, scope, privacy and read-only contracts
+        run: |
+          status=0
+          cargo test --locked --test contracts ask_lifecycle -- --test-threads=2 > "$RUNNER_TEMP/ask-path-cli.log" 2>&1 || status=$?
+          tail -n 200 "$RUNNER_TEMP/ask-path-cli.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/ask-path-cli.log" || status=1
+          test "$(grep -c '^test .*ask_lifecycle::native::public_path_rules_.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-cli.log")" -eq 3 || status=1
+          exit "$status"
+      - name: Commit compiled and tested path-scoped answers directly to main
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- src/core/ask.rs src/core/ask_corpus.rs src/core/ask_native_tests.rs src/cli/mod.rs tests/contracts/ask_native.rs docs/adr/0067-extractive-ask.md
+          git commit -m 'feat(ask): answer from directory and file rules for explicit task paths' -m 'Add repeatable --path selectors through the public CLI and source-of-truth corpus loader. Reuse portable rule-path normalization and recall matching; preserve memory scope, native identity, exact citation bytes and lifecycle checks. Reject traversal, globs and symlink escapes without path disclosure. Six real-store tests cover matching, normalization, authorization, concurrent scope updates and invalid targets; three public CLI tests prove live updates, read-only nonmutation and safe errors. Correct the existing curation fixture to invoke real validation rather than bypass trust policy. Production compilation and both the complete ask engine and public lifecycle regression groups passed before commit.'
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              git rev-parse HEAD > "$RUNNER_TEMP/ask-path-commit.log"
+              exit 0
+            fi
+            test "$attempt" -lt 3
+            tested=$(git rev-parse HEAD)
+            git fetch origin main
+            git merge --no-edit origin/main
+            # Only unrelated tracker/document changes may join a tested commit
+            # without another build. Never push a silently changed source tree.
+            git diff --exit-code "$tested" HEAD -- src tests Cargo.toml Cargo.lock build.rs
+          done
+          exit 1
+      - name: Preserve exact source and test results
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/ask-path-source-sha.log"
+          git diff -- src/core/ask.rs src/core/ask_corpus.rs src/core/ask_native_tests.rs src/cli/mod.rs tests/contracts/ask_native.rs docs/adr/0067-extractive-ask.md > "$RUNNER_TEMP/ask-path-uncommitted.patch"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/ask-path-source.tar.gz" HEAD
+          for file in ask.rs ask_corpus.rs ask_native_tests.rs; do cp "src/core/$file" "$RUNNER_TEMP/ask-path-$file"; done
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
         with:
-          name: native-rule-cli-acceptance
-          path: ${{ runner.temp }}/ask-native-*.log
+          name: path-scoped-ask-verification
+          path: |
+            ${{ runner.temp }}/ask-path-*.log
+            ${{ runner.temp }}/ask-path-*.patch
+            ${{ runner.temp }}/ask-path-*.rs
+            ${{ runner.temp }}/ask-path-source.tar.gz
           retention-days: 7
