@@ -96680,6 +96680,97 @@ demos:
         )
     }
 
+    /// bd-mmbzu: a `dry_run_effect: Some(_)` declaration must be TRUE.
+    ///
+    /// Every mutating constructor in the manifest hardcodes
+    /// `dry_run_effect: Some(EffectClass::ReadOnly)`, so the field is a
+    /// constructor default rather than a statement about the command. An
+    /// agent reading the manifest to decide whether it can preview a
+    /// destructive command is told yes for every mutating path, including
+    /// those where Clap rejects `--dry-run` at parse time.
+    ///
+    /// This asks CLAP, which is the only authority on whether the flag
+    /// exists. `--dry-run` is not global — there are ~105 separate
+    /// `pub dry_run` fields across arg structs — so acceptance genuinely
+    /// varies per command and is worth asserting rather than assuming.
+    ///
+    /// THE ERROR KIND IS THE WHOLE TRICK. Parsing `ee remember --dry-run`
+    /// fails, but with `MissingRequiredArgument` — the flag was accepted and
+    /// a positional was absent. Only `UnknownArgument` means the command does
+    /// not take the flag. A test that treated any parse failure as a defect
+    /// would report most of the manifest.
+    ///
+    /// Paths Clap cannot address at all are reported SEPARATELY rather than
+    /// skipped: silently dropping them is how a population shrinks without
+    /// anyone noticing.
+    #[test]
+    fn declared_dry_run_capable_mutating_commands_actually_accept_dry_run() -> TestResult {
+        let manifest = crate::core::effect::EffectManifest::build();
+
+        let mut checked = 0usize;
+        let mut undeclarable: Vec<String> = Vec::new();
+        let mut liars: Vec<String> = Vec::new();
+
+        for effect in manifest.mutating_commands() {
+            if effect.dry_run_effect.is_none() {
+                continue;
+            }
+            checked += 1;
+            let mut argv: Vec<String> = vec!["ee".to_owned()];
+            argv.extend(effect.command_path.split_whitespace().map(str::to_owned));
+            argv.push("--dry-run".to_owned());
+
+            match Cli::try_parse_from(&argv) {
+                Ok(_) => {}
+                Err(error) => match error.kind() {
+                    ErrorKind::UnknownArgument => {
+                        liars.push(effect.command_path.to_owned());
+                    }
+                    ErrorKind::InvalidSubcommand => {
+                        undeclarable.push(effect.command_path.to_owned());
+                    }
+                    // Any other kind means Clap ACCEPTED `--dry-run` and then
+                    // objected to something else, which is not this test's
+                    // subject.
+                    _ => {}
+                },
+            }
+        }
+
+        // Non-vacuity: if the manifest stopped yielding mutating entries, or
+        // every one lost its dry_run_effect, this test would pass having
+        // asserted nothing.
+        ensure(
+            checked >= 100,
+            &format!(
+                "expected at least 100 mutating commands declaring dry_run_effect: Some(_), \
+                 examined {checked}; the population collapsed rather than the defect being fixed"
+            ),
+        )?;
+
+        if liars.is_empty() && undeclarable.is_empty() {
+            return Ok(());
+        }
+
+        // NAMES, never a count. A bare "expected 62, found 59" sends the next
+        // reader to diff two numbers with no idea which three moved.
+        let mut report = format!(
+            "of {checked} mutating commands declaring dry_run_effect: Some(_), \
+             {} do not accept `--dry-run` and {} are not addressable through Clap at all.\n\
+             These declare a dry-run preview the parser refuses:\n  {}",
+            liars.len(),
+            undeclarable.len(),
+            liars.join("\n  ")
+        );
+        if !undeclarable.is_empty() {
+            report.push_str(&format!(
+                "\nThese manifest paths do not resolve to a Clap subcommand:\n  {}",
+                undeclarable.join("\n  ")
+            ));
+        }
+        Err(report)
+    }
+
     #[test]
     fn share_preview_resolves_to_read_only_effect() -> TestResult {
         // `ee share preview` is a dry-run exposure preview that never
