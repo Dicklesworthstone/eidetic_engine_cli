@@ -115,7 +115,6 @@ e2e_overhaul/lint_determinism.sh
 e2e_overhaul/mesh_command_modes.sh
 e2e_overhaul/mi_dedup.sh
 e2e_overhaul/networkx_differential.sh
-e2e_overhaul/ownership_posture.sh
 e2e_overhaul/pack_binary.sh
 e2e_overhaul/perf_explain_latency.sh
 e2e_overhaul/perf_parity.sh
@@ -125,10 +124,6 @@ e2e_overhaul/regression_causality.sh
 e2e_overhaul/singleflight_burst.sh
 e2e_overhaul/submodular_resolution_b.sh
 e2e_overhaul/swarm_incident_drill.sh
-e2e_overhaul/swarm_incident_recovery_actions.sh
-e2e_overhaul/swarm_incidents.sh
-e2e_overhaul/swarm_next_action_profile.sh
-e2e_overhaul/swarm_schemas.sh
 e2e_overhaul/sx1_stream.sh
 e2e_overhaul/sx7_adaptive_budget.sh
 e2e_overhaul/tiered_recall.sh

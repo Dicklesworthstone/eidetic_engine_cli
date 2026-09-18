@@ -438,6 +438,16 @@ expected_seconds_p50 = 5
 regression_factor = 1.5
 
 [[stage]]
+name = "Swarm Fixture Suite E2E (bd-udjrq)"
+# MEASURED: 1.98 2.11 1.99 2.52 2.88 seconds over five runs of
+# ./scripts/e2e_swarm_fixture_suite.sh on a six-agent-loaded machine, p50 2.11.
+# Declared 3, not 2.11, because the hard-fail line is p50*3 and 3 puts it at 9s
+# against a 2.88 worst observed. Five scripts share one stage because the
+# ceiling admits measured seconds and the unmeasured allowance is full at 27.
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
 name = "Graph Determinism E2E (F4.a)"
 expected_seconds_p50 = 7
 regression_factor = 1.5

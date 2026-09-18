@@ -1794,6 +1794,28 @@ if [ "$CI_SMOKE" != "true" ]; then
     # without requiring the heavier no-mock multi-agent harness.
     run_stage "Swarm Next-Action Recommendation Cards E2E (bd-3vwx0.6)" "./scripts/e2e_overhaul/swarm_next_action_recommendation_cards.sh"
 
+    # Gate 6.5.3: the five swarm/ownership fixture suites (bd-udjrq). Each was
+    # committed and invoked by nothing; each was executed for the FIRST time on
+    # 2026-09-18 and passed on its own before being wired here. A suite that has
+    # never run has never been right, so running them came before wiring them.
+    #
+    # One stage for five scripts, not five stages: the budget ceiling admits
+    # measured seconds and the unmeasured allowance is exhausted at 27/27, so
+    # five 0.4s scripts do not each deserve an entry.
+    #
+    # MEASURED, not unmeasured: 1.98 2.11 1.99 2.52 2.88 seconds over five runs
+    # of the driver on a six-agent-loaded machine, p50 2.11. Declared 3 so the
+    # hard-fail line lands at p50*3 = 9s, above the 2.88 worst observed.
+    #
+    # The driver collects EVERY failure and fails once with the full list,
+    # rather than returning on the first -- these suites stayed broken for
+    # years because nothing reported them, and a driver that stops at the first
+    # failure hides the second in the same way.
+    #
+    # Their five orphan_baseline.txt rows are deleted in the same commit: the
+    # audit fails on a stale baseline entry as well as on a new orphan.
+    run_stage "Swarm Fixture Suite E2E (bd-udjrq)" "./scripts/e2e_swarm_fixture_suite.sh"
+
     # Gate 6.6: Graph determinism harness (F4.a). This is separate from the J4
     # epic registry because it tracks the GraphAccretion surfaces while they are
     # landing incrementally.
