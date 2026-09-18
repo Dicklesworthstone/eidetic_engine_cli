@@ -22,7 +22,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::Serialize;
 
@@ -201,6 +201,10 @@ impl Clone for PlanCacheEntry {
 #[derive(Debug)]
 pub struct PlanCache {
     capacity: usize,
+    /// Identity of this publication generation. An in-flight compiler retains
+    /// an Arc so resets cannot reuse its identity (including same-capacity
+    /// resets), and late results cannot repopulate an invalidated cache.
+    publication_epoch: Arc<()>,
     /// bd-25yao: atomic so `next_access_sequence`, hit/miss
     /// bookkeeping, and the LRU touch can all happen through a
     /// shared `&self`. Reads call `fetch_add(1, Relaxed)`; every
@@ -232,6 +236,7 @@ impl PlanCache {
         let capacity = capacity.min(MAX_PLAN_CACHE_ENTRIES);
         Self {
             capacity,
+            publication_epoch: Arc::new(()),
             access_sequence: AtomicU64::new(0),
             entries: BTreeMap::new(),
             hits: AtomicU64::new(0),
@@ -338,6 +343,9 @@ impl PlanCache {
         index_manifest_version: u64,
         search_config_hash: u64,
     ) -> Vec<PlanCacheKey> {
+        // Rotate even when no stored entry is stale: a compiler may still be
+        // working against the generation being invalidated.
+        self.publication_epoch = Arc::new(());
         let stale: Vec<PlanCacheKey> = self
             .entries
             .keys()
@@ -360,6 +368,7 @@ impl PlanCache {
     /// Drop every cached plan. Stats counters are preserved so observers can
     /// distinguish "explicit clear" from "first launch".
     pub fn clear(&mut self) -> usize {
+        self.publication_epoch = Arc::new(());
         let dropped = self.entries.len();
         self.entries.clear();
         if dropped > 0 {
@@ -461,6 +470,10 @@ impl PlanCache {
 /// Look up a compiled plan in the process-wide cache, compiling and inserting
 /// on miss. The `capacity` argument is the resolved runtime cap; changing it
 /// resets the process cache so diagnostics and search behavior agree.
+///
+/// Compilation never holds the cache lock. Concurrent misses may compile more
+/// than once (single-flight belongs to the caller), but publication preserves
+/// an existing winner and never repopulates an invalidated generation.
 pub fn lookup_or_insert_process_plan<F>(
     capacity: usize,
     key: PlanCacheKey,
@@ -513,7 +526,34 @@ where
         };
     }
 
+    let publication_epoch = Arc::clone(&guard.publication_epoch);
+    drop(guard);
+    // Parsing/binding may be slow, call diagnostics, or unwind. None of those
+    // operations may stall unrelated hits or poison the process cache lock.
     let plan = compile();
+
+    let mut guard = cache
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !Arc::ptr_eq(&publication_epoch, &guard.publication_epoch) {
+        // A reset, resize, or invalidation won while compilation was running.
+        // Return this caller's result without changing the newer cache state.
+        return PlanCacheLookup {
+            decision: PlanCacheDecision::Miss,
+            plan_tree_hash: compute_plan_tree_hash(&key, &plan),
+            plan,
+            evicted: Vec::new(),
+        };
+    }
+    if let Some(hit) = guard.get_without_miss_count(&key) {
+        return PlanCacheLookup {
+            decision: PlanCacheDecision::Hit,
+            plan: hit.plan,
+            plan_tree_hash: hit.plan_tree_hash,
+            evicted: Vec::new(),
+        };
+    }
+
     let inserted = guard.insert(key, plan.clone());
     PlanCacheLookup {
         decision: PlanCacheDecision::Miss,
