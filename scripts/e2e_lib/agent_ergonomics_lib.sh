@@ -115,6 +115,40 @@ log_run() {
     return "$rc"
 }
 
+# Compare one jq-extracted value against an expected one.
+#
+# FOUR OUTCOMES, EACH NAMED DIFFERENTLY. The previous form had two:
+#
+#     got="$(printf '%s' "$json" | jq -r "$filter" 2>/dev/null || true)"
+#     if [ "$got" = "$want" ]; then record_pass ...
+#     record_failure "$label" "expected=$want actual=${got:-<empty>}"
+#
+# `2>/dev/null` discarded jq's error, `|| true` discarded its exit, so a
+# filter that did not COMPILE produced got="" and was reported as a value
+# mismatch -- "expected=absent actual=<empty>", which reads as the product
+# returning nothing. Two live instances of exactly that are bd-kyeyw
+# (e2e_curate_reject_with_reason.sh:96 and :107, backslash-escaped quotes
+# inside single quotes). bd-82aq1 is the same defect class in the harness
+# helper; this is its more dangerous sibling, because that one compares
+# against the literal "true" and this one compares against whatever the
+# caller passes.
+#
+# THE EMPTY-WANT REFUSAL IS WHAT CLOSES THE SILENT-PASS HOLE. An empty
+# `want` compares equal to the empty `got` a failed jq produces, so a
+# broken filter plus an empty expectation was a PASS that ran nothing.
+# Enumerated before changing this: 82 call sites across the four files
+# that source this library, 81 literal wants, one from a variable
+# (e2e_harmful_burst_quarantine.sh:144), zero empty. The variable one is
+# guarded at its point of production (:102-105 makes an empty jq result
+# fatal), so nothing in the tree relies on the old tolerance. The hazard
+# was entirely in the 83rd call site, written by someone who never read
+# the bead.
+#
+# It also makes the two-failures-cancelling shape IMPOSSIBLE rather than
+# merely unreached: a want produced by a jq that failed arrives here
+# empty, and an empty want is now refused before any comparison. The
+# helper cannot see how its want was computed, so refusing the empty
+# value is the only place that shape can be stopped.
 assert_jq() {
     local json="${1:-}"
     local filter="${2:?jq filter required}"
@@ -123,8 +157,32 @@ assert_jq() {
 
     log_step "$label"
 
-    local got
-    got="$(printf '%s' "$json" | jq -r "$filter" 2>/dev/null || true)"
+    # A HARNESS ERROR, not an assertion failure. Named distinctly on
+    # purpose: bd-82aq1 exists because four outcomes were indistinguishable,
+    # so this must not read like a product defect.
+    if [ -z "$want" ]; then
+        record_failure "$label" \
+            "HARNESS ERROR: assert_jq called with an empty expected value; an empty want matches the empty output of a failed jq, so this assertion could never have failed. Pass the value you mean, or guard the variable that produced it."
+        e2e_log_note "agent_ergonomics_harness_error label=$label reason=empty_want filter=$filter"
+        return 2
+    fi
+
+    local got rc
+    got="$(printf '%s' "$json" | jq -r "$filter" 2>&1)"
+    rc=$?
+    # jq's exit codes are distinct and were being collapsed: 1 is a false
+    # property, 3 is a filter that did not compile, 4 is no output, 5 is
+    # input that is not JSON. Only a zero exit means the filter ran and
+    # produced the value being compared; anything else is a broken test or
+    # a broken command, and $got holds jq's own error text because stderr
+    # is no longer discarded.
+    if [ "$rc" -ne 0 ]; then
+        record_failure "$label" \
+            "HARNESS ERROR: jq exited $rc for filter [$filter] -- $(printf '%s' "$got" | head -c 400)"
+        e2e_log_note "agent_ergonomics_harness_error label=$label reason=jq_exit_$rc filter=$filter"
+        return 2
+    fi
+
     if [ "$got" = "$want" ]; then
         record_pass "$label"
         e2e_log_assert_eq "$got" "$want" "$label"
