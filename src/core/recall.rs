@@ -1161,6 +1161,19 @@ pub fn recall_for_workspace(
     request: &RecallQueryEcho,
     cursor: Option<&str>,
 ) -> Result<(RecallReport, Vec<RecallDegradedEntry>), crate::models::DomainError> {
+    recall_for_workspace_with_boundary(workspace_path, database_path, request, cursor, || Ok(()))
+}
+
+// The boundary permits a second real connection to commit exactly between
+// cursor generation and evidence reads. Production supplies a no-op, never
+// a timing sleep or a substitute database.
+fn recall_for_workspace_with_boundary(
+    workspace_path: &std::path::Path,
+    database_path: Option<&std::path::Path>,
+    request: &RecallQueryEcho,
+    cursor: Option<&str>,
+    after_generation_read: impl FnOnce() -> Result<(), crate::models::DomainError>,
+) -> Result<(RecallReport, Vec<RecallDegradedEntry>), crate::models::DomainError> {
     use crate::models::DomainError;
     if request.paths.is_empty()
         && request.symbols.is_empty()
@@ -1193,24 +1206,13 @@ pub fn recall_for_workspace(
         message,
         repair: Some("ee doctor --json".to_owned()),
     };
-    let connection = crate::db::DbConnection::open_file(database_path).map_err(|error| {
-        DomainError::Storage {
-            message: format!("Failed to open database: {error}"),
-            repair: Some("ee status --json".to_owned()),
-        }
-    })?;
-    connection.migrate().map_err(|error| DomainError::Storage {
-        message: format!("Failed to migrate database: {error}"),
-        repair: Some("ee migrate run --workspace . --json".to_owned()),
-    })?;
-    let canonical = workspace_path
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
-        &connection,
-        &crate::core::workspace::stable_workspace_id(&canonical),
-        &[workspace_path, canonical.as_path()],
-    )?;
+    let connection =
+        crate::db::DbConnection::open_file_read_only(database_path).map_err(|error| {
+            DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: Some("ee status --json".to_owned()),
+            }
+        })?;
     let mut extra_degraded = Vec::new();
     let diff_paths = if request.diff_ref.is_some() || request.diff_staged {
         match collect_diff_paths_via_git(
@@ -1227,6 +1229,28 @@ pub fn recall_for_workspace(
     } else {
         Vec::new()
     };
+    // Do not pin the database while the optional Git subprocess runs. Once
+    // pinned, schema, workspace binding, cursor generation, anchors, bodies
+    // and tags must all come from this one non-writing snapshot.
+    let snapshot = RecallReadSnapshot::begin(&connection)?;
+    if connection
+        .needs_migration()
+        .map_err(|_| recall_snapshot_error("inspect schema"))?
+    {
+        return Err(DomainError::MigrationRequired {
+            message: "The addressed workspace database requires migration before recall."
+                .to_owned(),
+            repair: Some("ee migrate run --workspace . --json".to_owned()),
+        });
+    }
+    let canonical = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &crate::core::workspace::stable_workspace_id(&canonical),
+        &[workspace_path, canonical.as_path()],
+    )?;
     let mut query = RecallQuery {
         paths: request.paths.clone(),
         symbols: request.symbols.clone(),
@@ -1242,6 +1266,7 @@ pub fn recall_for_workspace(
         .get_workspace_generation(&workspace_id)
         .map_err(|error| storage_error(format!("Failed to read workspace generation: {error}")))?
         .map_or(0, |value| i64::try_from(value).unwrap_or(i64::MAX));
+    after_generation_read()?;
     let mut resume_cursor = None;
     let rejected = match resolve_recall_cursor(cursor, &query, db_generation) {
         RecallCursorResolution::Fresh => false,
@@ -1302,7 +1327,52 @@ pub fn recall_for_workspace(
             None => RecallDegradedEntry::budget_unsatisfiable(report.dropped_count, budget),
         });
     }
+    snapshot.finish()?;
     Ok((report, degraded))
+}
+
+/// Own only the transaction opened here. Cursor rejection, read failure and
+/// unwinding must release it without acquiring the application's writer fence.
+struct RecallReadSnapshot<'a> {
+    connection: &'a crate::db::DbConnection,
+    active: bool,
+}
+
+impl<'a> RecallReadSnapshot<'a> {
+    fn begin(connection: &'a crate::db::DbConnection) -> Result<Self, crate::models::DomainError> {
+        connection
+            .begin_read_snapshot()
+            .map_err(|_| recall_snapshot_error("begin"))?;
+        Ok(Self {
+            connection,
+            active: true,
+        })
+    }
+
+    fn finish(mut self) -> Result<(), crate::models::DomainError> {
+        self.connection
+            .commit_read_snapshot()
+            .map_err(|_| recall_snapshot_error("finish"))?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for RecallReadSnapshot<'_> {
+    fn drop(&mut self) {
+        if self.active && self.connection.rollback_read_snapshot().is_err() {
+            tracing::error!(target: "ee::core::recall", "failed to release recall read snapshot");
+        }
+    }
+}
+
+fn recall_snapshot_error(stage: &str) -> crate::models::DomainError {
+    crate::models::DomainError::Storage {
+        message: format!(
+            "Could not {stage} a coherent recall snapshot; no partial result returned"
+        ),
+        repair: Some("Retry ee recall; use ee doctor --json if the failure persists".to_owned()),
+    }
 }
 
 /// Four-decimal score rounding for stable JSON output, mirroring the
@@ -2484,6 +2554,163 @@ mod tests {
             report.items.is_empty(),
             "tombstoned memories must be excluded at query time"
         );
+    }
+
+    #[test]
+    fn workspace_recall_snapshot_preserves_generation_bodies_tags_and_retirement() {
+        let (temp, writer, workspace_id) = wrapper_test_file_db();
+        let old = format!("mem_{:026}", 80);
+        let new = format!("mem_{:026}", 81);
+        wrapper_insert_memory(
+            &writer,
+            &workspace_id,
+            &old,
+            "Original guidance. anchor:path:src/db/mod.rs anchor:symbol:DbConnection",
+        );
+        let query = RecallQueryEcho {
+            paths: vec!["src/db/mod.rs".to_owned()],
+            symbols: vec!["DbConnection".to_owned()],
+            ..RecallQueryEcho::default()
+        };
+        let before = recall_for_workspace(temp.path(), None, &query, None)
+            .unwrap()
+            .0;
+        assert_eq!(before.items.len(), 1);
+        let pinned = recall_for_workspace_with_boundary(temp.path(), None, &query, None, || {
+            writer.with_transaction(|| {
+                writer.tombstone_memory(&old)?;
+                wrapper_insert_memory(&writer, &workspace_id, &new,
+                    "Replacement guidance. anchor:path:src/db/mod.rs anchor:symbol:DbConnection");
+                writer.set_memory_tags(&new, &["replacement-tag".to_owned()])?;
+                Ok(())
+            }).unwrap();
+            Ok(())
+        })
+        .unwrap()
+        .0;
+        assert_eq!(
+            recall_data_json(&pinned, &query),
+            recall_data_json(&before, &query)
+        );
+        let next = recall_for_workspace(temp.path(), None, &query, None)
+            .unwrap()
+            .0;
+        assert!(next.db_generation > pinned.db_generation);
+        assert_eq!(next.items.len(), 1);
+        assert_eq!(next.items[0].memory_id, new);
+        assert_eq!(next.items[0].tags, ["replacement-tag"]);
+        assert!(
+            next.items[0]
+                .content_preview
+                .starts_with("Replacement guidance.")
+        );
+        assert!(!recall_data_json(&next, &query).to_string().contains(&old));
+    }
+
+    #[test]
+    fn workspace_recall_snapshot_binds_cursor_validation_and_page_to_one_generation() {
+        let (temp, writer, workspace_id) = wrapper_test_file_db();
+        for number in 1..=3 {
+            wrapper_insert_memory(
+                &writer,
+                &workspace_id,
+                &format!("mem_{number:026}"),
+                "Stable guidance. anchor:path:src/db/mod.rs",
+            );
+        }
+        let mut query = RecallQueryEcho {
+            paths: vec!["src/db/mod.rs".to_owned()],
+            ..RecallQueryEcho::default()
+        };
+        let all = recall_for_workspace(temp.path(), None, &query, None)
+            .unwrap()
+            .0;
+        assert_eq!(all.items.len(), 3);
+        query.budget_tokens =
+            Some(u32::try_from(recall_item_token_estimate(&all.items[0])).unwrap());
+        let first = recall_for_workspace(temp.path(), None, &query, None)
+            .unwrap()
+            .0;
+        assert_eq!(first.items.len(), 1);
+        let cursor = first
+            .continuation_cursor
+            .as_deref()
+            .expect("a nonempty budget page must continue");
+        let pinned =
+            recall_for_workspace_with_boundary(temp.path(), None, &query, Some(cursor), || {
+                writer.tombstone_memory(&all.items[1].memory_id).unwrap();
+                Ok(())
+            })
+            .unwrap()
+            .0;
+        assert_eq!(pinned.db_generation, first.db_generation);
+        assert_eq!(pinned.items.len(), 1);
+        assert_eq!(pinned.items[0].memory_id, all.items[1].memory_id);
+        let (fresh, degraded) =
+            recall_for_workspace(temp.path(), None, &query, Some(cursor)).unwrap();
+        assert!(fresh.items.is_empty());
+        assert!(degraded.iter().any(|entry| entry.code == "cursor_stale"));
+    }
+
+    #[test]
+    fn workspace_recall_snapshot_failure_and_unwind_release_the_owned_reader() {
+        let (temp, writer, workspace_id) = wrapper_test_file_db();
+        wrapper_insert_memory(
+            &writer,
+            &workspace_id,
+            &format!("mem_{:026}", 90),
+            "Guidance. anchor:path:src/db/mod.rs",
+        );
+        let query = RecallQueryEcho {
+            paths: vec!["src/db/mod.rs".to_owned()],
+            ..RecallQueryEcho::default()
+        };
+        let failed = recall_for_workspace_with_boundary(temp.path(), None, &query, None, || {
+            Err(crate::models::DomainError::Storage {
+                message: "injected read failure".to_owned(),
+                repair: None,
+            })
+        });
+        assert!(failed.is_err());
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = recall_for_workspace_with_boundary(temp.path(), None, &query, None, || {
+                panic!("controlled recall boundary unwind");
+            });
+        }));
+        assert!(unwind.is_err());
+        wrapper_insert_memory(
+            &writer,
+            &workspace_id,
+            &format!("mem_{:026}", 91),
+            "New guidance. anchor:path:src/db/mod.rs",
+        );
+        let report = recall_for_workspace(temp.path(), None, &query, None)
+            .unwrap()
+            .0;
+        assert_eq!(report.items.len(), 2);
+        assert_eq!(
+            report.db_generation as u64,
+            writer
+                .get_workspace_generation(&workspace_id)
+                .unwrap()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn workspace_recall_snapshot_does_not_rollback_a_transaction_it_did_not_open() {
+        let (db, workspace_id) = wrapper_test_db();
+        db.begin().unwrap();
+        wrapper_insert_memory(
+            &db,
+            &workspace_id,
+            &format!("mem_{:026}", 95),
+            "Caller-owned pending memory.",
+        );
+        assert!(RecallReadSnapshot::begin(&db).is_err());
+        assert!(db.get_memory(&format!("mem_{:026}", 95)).unwrap().is_some());
+        db.rollback().unwrap();
+        assert!(db.get_memory(&format!("mem_{:026}", 95)).unwrap().is_none());
     }
 
     #[test]

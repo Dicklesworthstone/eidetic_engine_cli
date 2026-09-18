@@ -126,6 +126,163 @@ fn seed_recall_workspace() -> Result<tempfile::TempDir, String> {
     )
 }
 
+fn durable_recall_files(
+    directory: &std::path::Path,
+) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>, String> {
+    fn visit(
+        path: &std::path::Path,
+        files: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    ) -> TestResult {
+        for entry in std::fs::read_dir(path).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let kind = entry.file_type().map_err(|error| error.to_string())?;
+            if kind.is_dir() {
+                visit(&entry.path(), files)?;
+            } else if kind.is_file() && !entry.file_name().to_string_lossy().ends_with("-shm") {
+                // Reader coordination is transient. WAL, source DB, audits,
+                // writer-owner epochs, and every other durable file are not.
+                files.insert(
+                    entry.path(),
+                    std::fs::read(entry.path()).map_err(|error| error.to_string())?,
+                );
+            }
+        }
+        Ok(())
+    }
+    let mut files = std::collections::BTreeMap::new();
+    visit(directory, &mut files)?;
+    Ok(files)
+}
+
+#[cfg(unix)]
+#[test]
+fn recall_read_only_remains_available_under_a_real_writer_fence() -> TestResult {
+    let workspace = seed_recall_workspace()?;
+    let database = workspace.path().join(".ee/ee.db");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(database.with_extension("write.lock"))
+        .map_err(|error| error.to_string())?;
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+        .map_err(|error| error.to_string())?;
+    let before = durable_recall_files(workspace.path())?;
+    let workspace_arg = workspace.path().to_str().ok_or("workspace path")?;
+    for selectors in [
+        vec!["--path", "src/db/mod.rs"],
+        vec!["--symbol", "DbConnection"],
+        vec!["--path", "src/**", "--budget-tokens", "20"],
+    ] {
+        let mut args = vec!["recall", "--workspace", workspace_arg, "--json"];
+        args.extend(selectors);
+        let response = parse_response(&run_ee(&args)?, "read-only recall while writer is held")?;
+        assert!(!item_memory_ids(&response).is_empty());
+        assert_eq!(durable_recall_files(workspace.path())?, before);
+    }
+    let rejected = parse_response(
+        &run_ee(&[
+            "recall",
+            "--workspace",
+            workspace_arg,
+            "--json",
+            "--path",
+            "src/**",
+            "--cursor",
+            "invalid-cursor",
+        ])?,
+        "read-only cursor rejection",
+    )?;
+    assert!(item_memory_ids(&rejected).is_empty());
+    assert!(
+        degraded_codes(&rejected)
+            .iter()
+            .any(|code| code == "cursor_invalid")
+    );
+    assert_eq!(durable_recall_files(workspace.path())?, before);
+    drop(lock);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn recall_read_only_accepts_nonwritable_database_without_changing_answers() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let workspace = seed_recall_workspace()?;
+    let database = workspace.path().join(".ee/ee.db");
+    let workspace_arg = workspace.path().to_str().ok_or("workspace path")?;
+    let args = [
+        "recall",
+        "--workspace",
+        workspace_arg,
+        "--json",
+        "--path",
+        "src/**",
+    ];
+    let expected = parse_response(&run_ee(&args)?, "unrestricted recall")?;
+    assert_eq!(item_memory_ids(&expected).len(), 3);
+    let before = durable_recall_files(workspace.path())?;
+    let permissions = std::fs::metadata(&database)
+        .map_err(|error| error.to_string())?
+        .permissions();
+    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o444))
+        .map_err(|error| error.to_string())?;
+    let result = run_ee(&args);
+    std::fs::set_permissions(&database, permissions).map_err(|error| error.to_string())?;
+    let response = parse_response(&result?, "nonwritable recall")?;
+    assert_eq!(response, expected);
+    assert_eq!(durable_recall_files(workspace.path())?, before);
+    Ok(())
+}
+
+#[test]
+fn recall_read_only_refuses_implicit_migration_and_missing_store_creation() -> TestResult {
+    let workspace = seed_recall_workspace()?;
+    let database = workspace.path().join(".ee/ee.db");
+    let db = ee::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    db.execute_raw("DELETE FROM ee_schema_migrations WHERE version = (SELECT MAX(version) FROM ee_schema_migrations)")
+        .map_err(|error| error.to_string())?;
+    assert!(db.needs_migration().map_err(|error| error.to_string())?);
+    db.close().map_err(|error| error.to_string())?;
+    let before = durable_recall_files(workspace.path())?;
+    let output = run_ee(&[
+        "recall",
+        "--workspace",
+        workspace.path().to_str().ok_or("workspace path")?,
+        "--json",
+        "--path",
+        "src/**",
+    ])?;
+    assert_eq!(output.status.code(), Some(8));
+    let response: Value =
+        serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+    assert_eq!(response["schema"], "ee.error.v2");
+    assert_eq!(response["error"]["code"], "migration_required");
+    assert!(
+        output
+            .stdout
+            .windows(b"ee migrate run".len())
+            .any(|window| window == b"ee migrate run")
+    );
+    assert_eq!(durable_recall_files(workspace.path())?, before);
+    let empty = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let missing = run_ee(&[
+        "recall",
+        "--workspace",
+        empty.path().to_str().ok_or("workspace path")?,
+        "--json",
+        "--path",
+        "src/**",
+    ])?;
+    assert!(!missing.status.success());
+    let response: Value =
+        serde_json::from_slice(&missing.stdout).map_err(|error| error.to_string())?;
+    assert_eq!(response["error"]["code"], "workspace_store_missing");
+    assert!(!empty.path().join(".ee").exists());
+    Ok(())
+}
+
 /// Self-contained golden compare/update (same UPDATE_GOLDEN contract as
 /// tests/golden.rs, without pulling that file's test module into this
 /// binary).
