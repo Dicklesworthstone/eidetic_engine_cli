@@ -4525,4 +4525,151 @@ mod tests {
             Some("agent_assertion")
         );
     }
+
+    /// bd-ht6om, discharging bd-tmv70 consequence B.
+    ///
+    /// `verify_ee_memory_provenance_referent` decides whether a provenance
+    /// referent is still live. Before f7a2bfecf its guard read
+    /// `memory.tombstoned_at.is_none() && memory.valid_to.is_none()`; it now
+    /// reads `... && superseded_at.is_none()`. Since V123 those are DIFFERENT
+    /// QUESTIONS: supersession writes `superseded_at` and leaves `valid_to` to
+    /// the author.
+    ///
+    /// NO TEST NAMED THIS PATH, which is what made the defect latent — the fix
+    /// landed and no gate could tell it apart from its absence. This is that
+    /// test.
+    ///
+    /// BOTH ARMS INVERT ACROSS f7a2bfecf, which is the point. Run at
+    /// f3c33e08a (its parent) this test FAILS on both:
+    ///   superseded memory   old guard sees valid_to == None  -> Verified (wrong)
+    ///                       new guard sees superseded_at set -> EvidenceDrift
+    ///   live, future valid_to
+    ///                       old guard sees valid_to.is_some() -> EvidenceDrift (wrong)
+    ///                       new guard sees superseded_at None -> Verified
+    /// A test that only passes after a fix cannot distinguish the fix from its
+    /// absence. This one is red without it.
+    #[test]
+    fn provenance_referent_liveness_keys_on_superseded_at_not_valid_to() -> TestResult {
+        use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+        use crate::models::MemoryId;
+        use std::str::FromStr;
+
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        // Crockford base-32 excludes I, L, O and U, so these ids cannot spell
+        // the bead name: "ht6om" is rejected on its `o`. Same shape as the
+        // ids in db::tests::future_valid_to_live_head_is_listed_and_superseded_revision_is_not.
+        const SUPERSEDED: &str = "mem_01ktmv7000000000000000000a";
+        const LIVE_FUTURE: &str = "mem_01ktmv7000000000000000000b";
+        const FUTURE_VALID_TO: &str = "2099-01-01T00:00:00Z";
+        const SUPERSEDED_AT: &str = "2026-05-01T00:00:00Z";
+
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: "/tmp/bd-ht6om".to_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let memory_input = |content: &str, valid_to: Option<&str>| CreateMemoryInput {
+            workspace_id: WORKSPACE.to_owned(),
+            level: "episodic".to_owned(),
+            kind: "observation".to_owned(),
+            content: content.to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_owned(),
+            trust_subclass: None,
+            tags: Vec::new(),
+            valid_from: None,
+            valid_to: valid_to.map(str::to_owned),
+        };
+
+        connection
+            .insert_memory(SUPERSEDED, &memory_input("Superseded revision.", None))
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                LIVE_FUTURE,
+                &memory_input("Live head with an author expiry.", Some(FUTURE_VALID_TO)),
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .mark_memory_superseded(SUPERSEDED, SUPERSEDED_AT)
+                .map_err(|error| error.to_string())?,
+            "predecessor is marked superseded",
+        )?;
+
+        // PRECONDITIONS. Without these the arms below could pass for the wrong
+        // reason: if supersession also set valid_to, the old and new guards
+        // would agree and neither arm would discriminate.
+        ensure(
+            connection
+                .get_memory_superseded_at(SUPERSEDED)
+                .map_err(|error| error.to_string())?
+                .is_some(),
+            "superseded memory carries superseded_at",
+        )?;
+        let superseded_row = connection
+            .get_memory(SUPERSEDED)
+            .map_err(|error| error.to_string())?
+            .ok_or("superseded memory row exists")?;
+        ensure(
+            superseded_row.valid_to.is_none(),
+            "supersession leaves valid_to unset -- the whole reason the old guard was wrong",
+        )?;
+
+        // THE COUNTERFACTUAL, EXECUTED RATHER THAN ARGUED. f7a2bfecf replaced
+        //     memory.tombstoned_at.is_none() && memory.valid_to.is_none()
+        // with
+        //     memory.tombstoned_at.is_none() && superseded_at.is_none()
+        // Running this test at f7a2bfecf's parent would require a tree with the
+        // OLD guard and the NEW test, which no single commit has. So instead we
+        // evaluate the old predicate here, on the same row ARM 1 is about, and
+        // assert that it gives the WRONG answer.
+        //
+        // This is what makes ARM 1 load-bearing: if this assertion ever fails,
+        // the two predicates have stopped disagreeing on this row and ARM 1 no
+        // longer distinguishes the fix from its absence. The test then tells you
+        // that, instead of passing for a reason that has quietly evaporated.
+        let pre_fix_guard_says_live =
+            superseded_row.tombstoned_at.is_none() && superseded_row.valid_to.is_none();
+        ensure(
+            pre_fix_guard_says_live,
+            "the pre-f7a2bfecf guard calls this superseded row LIVE; ARM 1 asserts the \
+             post-fix guard calls it drifted, so the two disagree and ARM 1 discriminates",
+        )?;
+
+        // ARM 1: a superseded memory must NOT verify as present.
+        let superseded_uri = ProvenanceUri::EeMemory(
+            MemoryId::from_str(SUPERSEDED).map_err(|error| error.to_string())?,
+        );
+        let superseded_report =
+            verify_ee_memory_provenance_referent(&superseded_uri, Some(&connection), SUPERSEDED);
+        ensure_equal(
+            &superseded_report.status,
+            &VerifyProvenanceReferentStatus::EvidenceDrift,
+            "evidence pointing at a superseded revision must report drift, not Verified",
+        )?;
+
+        // ARM 2: a live memory the author gave a future expiry must verify.
+        let live_uri = ProvenanceUri::EeMemory(
+            MemoryId::from_str(LIVE_FUTURE).map_err(|error| error.to_string())?,
+        );
+        let live_report =
+            verify_ee_memory_provenance_referent(&live_uri, Some(&connection), LIVE_FUTURE);
+        ensure_equal(
+            &live_report.status,
+            &VerifyProvenanceReferentStatus::Verified,
+            "a live memory with a future author valid_to must verify as present",
+        )
+    }
 }
