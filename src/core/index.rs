@@ -55,6 +55,9 @@ use frankensearch::{
 };
 use sqlmodel_core::Value as SqlValue;
 
+#[path = "index_storage.rs"]
+mod storage;
+
 #[cfg(unix)]
 #[path = "index_read_lease.rs"]
 mod read_lease;
@@ -5448,7 +5451,25 @@ async fn build_index_generation(
     stack: EmbedderStack,
     documents: Vec<crate::search::IndexableDocument>,
 ) -> Result<BuildStats, IndexRebuildError> {
+    build_index_generation_with_capacity(
+        cx,
+        index_dir,
+        stack,
+        documents,
+        storage::filesystem_capacity,
+    )
+    .await
+}
+
+async fn build_index_generation_with_capacity(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+    stack: EmbedderStack,
+    documents: Vec<crate::search::IndexableDocument>,
+    probe: impl FnOnce(&Path) -> Result<storage::Capacity, IndexRebuildError>,
+) -> Result<BuildStats, IndexRebuildError> {
     index_checkpoint(cx)?;
+    storage::admit(cx, index_dir, &stack, &documents, probe)?;
     if documents.is_empty() {
         build_empty_index(cx, index_dir, stack).await
     } else {

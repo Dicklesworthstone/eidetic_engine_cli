@@ -49,16 +49,27 @@ fn length(value: usize) -> Result<u64, IndexRebuildError> {
 }
 
 impl Estimate {
-    fn from_sizes(source_bytes: u64, documents: u64, dimensions: u64) -> Result<Self, IndexRebuildError> {
+    fn from_sizes(
+        source_bytes: u64,
+        documents: u64,
+        dimensions: u64,
+    ) -> Result<Self, IndexRebuildError> {
         // Budget uncompressed f32 vectors for every selected tier. Four times
         // the source/vector payload allows for backend tables, stored fields
         // and merge scratch; the fixed allowance covers a tiny/empty corpus.
         let vector_bytes = multiply(multiply(documents, dimensions)?, 4)?;
         let required_bytes = add(
-            add(multiply(add(source_bytes, vector_bytes)?, 4)?, FIXED_BUILD_ALLOWANCE)?,
+            add(
+                multiply(add(source_bytes, vector_bytes)?, 4)?,
+                FIXED_BUILD_ALLOWANCE,
+            )?,
             FREE_SPACE_RESERVE,
         )?;
-        Ok(Self { source_bytes, vector_bytes, required_bytes })
+        Ok(Self {
+            source_bytes,
+            vector_bytes,
+            required_bytes,
+        })
     }
 
     fn check(self, capacity: Capacity) -> Result<(), IndexRebuildError> {
@@ -68,7 +79,10 @@ impl Estimate {
                 self.required_bytes, FREE_SPACE_RESERVE, capacity.available_bytes,
             )));
         }
-        if capacity.available_inodes.is_some_and(|available| available < MIN_AVAILABLE_INODES) {
+        if capacity
+            .available_inodes
+            .is_some_and(|available| available < MIN_AVAILABLE_INODES)
+        {
             return Err(IndexRebuildError::Index(format!(
                 "index_storage_inodes_insufficient: generation preflight requires at least {MIN_AVAILABLE_INODES} available inodes; free filesystem entries explicitly or choose a different --index-dir; the active generation was not replaced",
             )));
@@ -83,12 +97,16 @@ struct ByteCount(u64);
 
 impl Write for ByteCount {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0 = self.0.checked_add(bytes.len() as u64)
+        self.0 = self
+            .0
+            .checked_add(bytes.len() as u64)
             .ok_or_else(|| io::Error::other("index metadata size overflow"))?;
         Ok(bytes.len())
     }
 
-    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn estimate(
@@ -98,14 +116,21 @@ fn estimate(
 ) -> Result<Estimate, IndexRebuildError> {
     let dimensions = add(
         length(stack.fast().dimension())?,
-        stack.quality().map(|quality| length(quality.dimension())).transpose()?.unwrap_or(0),
+        stack
+            .quality()
+            .map(|quality| length(quality.dimension()))
+            .transpose()?
+            .unwrap_or(0),
     )?;
     let mut bytes = 0;
     for document in documents {
         index_checkpoint(cx)?;
         bytes = add(bytes, length(document.id.len())?)?;
         bytes = add(bytes, length(document.content.len())?)?;
-        bytes = add(bytes, length(document.title.as_ref().map_or(0, |title| title.len()))?)?;
+        bytes = add(
+            bytes,
+            length(document.title.as_ref().map_or(0, |title| title.len()))?,
+        )?;
         let mut metadata = ByteCount::default();
         serde_json::to_writer(&mut metadata, &document.metadata).map_err(|_| {
             IndexRebuildError::Index(
@@ -140,7 +165,9 @@ fn existing_directory(mut path: &Path) -> Result<&Path, IndexRebuildError> {
             Ok(metadata) if metadata.is_dir() && !metadata.is_symlink() => return Ok(path),
             Ok(_) => return Err(capacity_error()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                path = path.parent().filter(|parent| !parent.as_os_str().is_empty())
+                path = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
                     .unwrap_or_else(|| Path::new("."));
             }
             Err(_) => return Err(capacity_error()),
@@ -158,17 +185,28 @@ pub(super) fn filesystem_capacity(path: &Path) -> Result<Capacity, IndexRebuildE
     #[cfg(unix)]
     {
         let stat = rustix::fs::statvfs(path).map_err(|_| capacity_error())?;
-        let block_size = if stat.f_frsize == 0 { stat.f_bsize } else { stat.f_frsize };
-        let available_bytes = stat.f_bavail.checked_mul(block_size).ok_or_else(capacity_error)?;
+        let block_size = if stat.f_frsize == 0 {
+            stat.f_bsize
+        } else {
+            stat.f_frsize
+        };
+        let available_bytes = stat
+            .f_bavail
+            .checked_mul(block_size)
+            .ok_or_else(capacity_error)?;
         Ok(Capacity {
             available_bytes,
-            available_inodes: (stat.f_files != 0 && stat.f_favail != u64::MAX).then_some(stat.f_favail),
+            available_inodes: (stat.f_files != 0 && stat.f_favail != u64::MAX)
+                .then_some(stat.f_favail),
         })
     }
     #[cfg(windows)]
     {
         fs4::available_space(path)
-            .map(|available_bytes| Capacity { available_bytes, available_inodes: None })
+            .map(|available_bytes| Capacity {
+                available_bytes,
+                available_inodes: None,
+            })
             .map_err(|_| capacity_error())
     }
     #[cfg(not(any(unix, windows)))]
@@ -190,11 +228,35 @@ mod tests {
         let estimate = Estimate::from_sizes(100, 2, 256 + 768).map_err(|e| e.to_string())?;
         assert_eq!(estimate.vector_bytes, 8192);
         assert_eq!(estimate.required_bytes, 4 * (100 + 8192) + 80 * MIB);
-        let exact = Capacity { available_bytes: estimate.required_bytes, available_inodes: Some(128) };
+        let exact = Capacity {
+            available_bytes: estimate.required_bytes,
+            available_inodes: Some(128),
+        };
         assert!(estimate.check(exact).is_ok());
-        assert!(estimate.check(Capacity { available_bytes: exact.available_bytes - 1, ..exact }).is_err());
-        assert!(estimate.check(Capacity { available_inodes: Some(127), ..exact }).is_err());
-        assert!(estimate.check(Capacity { available_inodes: None, ..exact }).is_ok());
+        assert!(
+            estimate
+                .check(Capacity {
+                    available_bytes: exact.available_bytes - 1,
+                    ..exact
+                })
+                .is_err()
+        );
+        assert!(
+            estimate
+                .check(Capacity {
+                    available_inodes: Some(127),
+                    ..exact
+                })
+                .is_err()
+        );
+        assert!(
+            estimate
+                .check(Capacity {
+                    available_inodes: None,
+                    ..exact
+                })
+                .is_ok()
+        );
         Ok(())
     }
 
@@ -203,7 +265,12 @@ mod tests {
         for sizes in [(u64::MAX, 1, 256), (0, u64::MAX, 256), (0, 1, u64::MAX)] {
             assert!(Estimate::from_sizes(sizes.0, sizes.1, sizes.2).is_err());
         }
-        assert_eq!(Estimate::from_sizes(0, 0, 256).expect("empty estimate").required_bytes, 80 * MIB);
+        assert_eq!(
+            Estimate::from_sizes(0, 0, 256)
+                .expect("empty estimate")
+                .required_bytes,
+            80 * MIB
+        );
     }
 
     #[test]
@@ -211,7 +278,10 @@ mod tests {
         let root = tempfile::tempdir().map_err(|e| e.to_string())?;
         let root_path = root.path().canonicalize().map_err(|e| e.to_string())?;
         let destination = root_path.join("absent").join("index");
-        assert_eq!(existing_directory(&destination).map_err(|e| e.to_string())?, root_path);
+        assert_eq!(
+            existing_directory(&destination).map_err(|e| e.to_string())?,
+            root_path
+        );
         let capacity = filesystem_capacity(&root_path).map_err(|e| e.to_string())?;
         assert!(capacity.available_bytes > 0);
         assert!(!root_path.join("absent").exists());
@@ -225,7 +295,8 @@ mod tests {
     fn storage_probe_rejects_symlinked_destinations() -> TestResult {
         let root = tempfile::tempdir().map_err(|e| e.to_string())?;
         let root_path = root.path().canonicalize().map_err(|e| e.to_string())?;
-        std::os::unix::fs::symlink(&root_path, root_path.join("alias")).map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink(&root_path, root_path.join("alias"))
+            .map_err(|e| e.to_string())?;
         assert!(existing_directory(&root_path.join("alias/index")).is_err());
         Ok(())
     }
@@ -239,10 +310,14 @@ mod tests {
             let a = estimate(&cx, &stack, &[plain]).map_err(|e| e.to_string())?;
             let b = estimate(&cx, &stack, &[enriched]).map_err(|e| e.to_string())?;
             assert!(a.source_bytes >= "docCafé{}".len() as u64);
-            assert_eq!(b.source_bytes - a.source_bytes, "Release 日本語".len() as u64);
+            assert_eq!(
+                b.source_bytes - a.source_bytes,
+                "Release 日本語".len() as u64
+            );
             assert_eq!(a.vector_bytes, b.vector_bytes);
             Ok::<(), String>(())
-        }).map_err(|e| e.to_string())?
+        })
+        .map_err(|e| e.to_string())?
     }
 
     #[test]
@@ -250,64 +325,120 @@ mod tests {
         let root = tempfile::tempdir().map_err(|e| e.to_string())?;
         let path = root.path().canonicalize().map_err(|e| e.to_string())?;
         std::fs::create_dir(path.join("active")).map_err(|e| e.to_string())?;
-        std::fs::write(path.join("active/evidence"), "previous generation").map_err(|e| e.to_string())?;
+        std::fs::write(path.join("active/evidence"), "previous generation")
+            .map_err(|e| e.to_string())?;
         crate::core::run_cli_with_cx(Duration::from_secs(5), |cx| async move {
             for (number, capacity) in [
-                Capacity { available_bytes: 0, available_inodes: Some(1000) },
-                Capacity { available_bytes: u64::MAX, available_inodes: Some(0) },
-            ].into_iter().enumerate() {
+                Capacity {
+                    available_bytes: 0,
+                    available_inodes: Some(1000),
+                },
+                Capacity {
+                    available_bytes: u64::MAX,
+                    available_inodes: Some(0),
+                },
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let destination = path.join(format!("staged-{number}"));
                 let result = super::super::build_index_generation_with_capacity(
-                    &cx, &destination, super::super::hash_fallback_embedder_stack(),
-                    vec![IndexableDocument::new("doc", "Run cargo fmt before release.")],
+                    &cx,
+                    &destination,
+                    super::super::hash_fallback_embedder_stack(),
+                    vec![IndexableDocument::new(
+                        "doc",
+                        "Run cargo fmt before release.",
+                    )],
                     |_| Ok(capacity),
-                ).await;
+                )
+                .await;
                 assert!(result.is_err());
-                assert!(!destination.exists(), "admission must precede all tier writes");
-                assert_eq!(std::fs::read(path.join("active/evidence")).map_err(|e| e.to_string())?, b"previous generation");
+                assert!(
+                    !destination.exists(),
+                    "admission must precede all tier writes"
+                );
+                assert_eq!(
+                    std::fs::read(path.join("active/evidence")).map_err(|e| e.to_string())?,
+                    b"previous generation"
+                );
             }
             Ok::<(), String>(())
-        }).map_err(|e| e.to_string())?
+        })
+        .map_err(|e| e.to_string())?
     }
 
     #[test]
     fn storage_probe_failure_and_cancellation_do_not_build_empty_tiers() -> TestResult {
         let root = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let destination = root.path().canonicalize().map_err(|e| e.to_string())?.join("index");
+        let destination = root
+            .path()
+            .canonicalize()
+            .map_err(|e| e.to_string())?
+            .join("index");
         crate::core::run_cli_with_cx(Duration::from_secs(5), |cx| async move {
             let error = super::super::build_index_generation_with_capacity(
-                &cx, &destination, super::super::hash_fallback_embedder_stack(), vec![],
+                &cx,
+                &destination,
+                super::super::hash_fallback_embedder_stack(),
+                vec![],
                 |_| Err(capacity_error()),
-            ).await;
+            )
+            .await;
             assert!(error.is_err());
             assert!(!destination.exists());
             cx.set_cancel_reason(asupersync::CancelReason::user("stop capacity admission"));
             let cancelled = super::super::build_index_generation_with_capacity(
-                &cx, &destination, super::super::hash_fallback_embedder_stack(), vec![],
+                &cx,
+                &destination,
+                super::super::hash_fallback_embedder_stack(),
+                vec![],
                 |_| panic!("cancelled requests must not probe capacity"),
-            ).await;
+            )
+            .await;
             assert!(matches!(cancelled, Err(IndexRebuildError::Cancelled(_))));
             assert!(!destination.exists());
             Ok::<(), String>(())
-        }).map_err(|e| e.to_string())?
+        })
+        .map_err(|e| e.to_string())?
     }
 
     #[test]
     fn storage_admitted_generation_builds_real_tiers() -> TestResult {
         let root = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let destination = root.path().canonicalize().map_err(|e| e.to_string())?.join("index");
+        let destination = root
+            .path()
+            .canonicalize()
+            .map_err(|e| e.to_string())?
+            .join("index");
         crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
             let stats = super::super::build_index_generation_with_capacity(
-                &cx, &destination, super::super::hash_fallback_embedder_stack(),
-                vec![IndexableDocument::new("doc", "Run cargo fmt before release.")],
+                &cx,
+                &destination,
+                super::super::hash_fallback_embedder_stack(),
+                vec![IndexableDocument::new(
+                    "doc",
+                    "Run cargo fmt before release.",
+                )],
                 filesystem_capacity,
-            ).await.map_err(|e| e.to_string())?;
+            )
+            .await
+            .map_err(|e| e.to_string())?;
             assert_eq!(stats.doc_count, 1);
             assert_eq!(stats.error_count, 0);
-            assert!(destination.join(super::super::VECTOR_INDEX_FAST_FILE).is_file());
+            assert!(
+                destination
+                    .join(super::super::VECTOR_INDEX_FAST_FILE)
+                    .is_file()
+            );
             #[cfg(feature = "lexical-bm25")]
-            assert!(destination.join(super::super::LEXICAL_INDEX_SUBDIR).is_dir());
+            assert!(
+                destination
+                    .join(super::super::LEXICAL_INDEX_SUBDIR)
+                    .is_dir()
+            );
             Ok::<(), String>(())
-        }).map_err(|e| e.to_string())?
+        })
+        .map_err(|e| e.to_string())?
     }
 }
