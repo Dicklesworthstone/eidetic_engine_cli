@@ -58,6 +58,19 @@ require_ee_binary() {
         echo "    set EE_BINARY or run: cargo build --release" >&2
         exit 2
     fi
+    # `-x` is the executable BIT, not the executable FORMAT. Measured
+    # 2026-09-18: the shared Cargo target directory held Linux x86-64 ELF
+    # `release/ee`, which passes the check above, so twelve epics that source
+    # this library proceeded and reported "ee init failed (status=125)" with an
+    # empty stderr -- a number that sends a reader looking for an init bug.
+    # Same guard, same reason, as scripts/lib/e2e_harness.sh (80cb630bb).
+    if ! ee_binary_executes_here "$EE_BINARY"; then
+        echo "j3: $EE_BINARY cannot execute on this host ($(uname -s)/$(uname -m))" >&2
+        echo "    file(1): $(file -b "$EE_BINARY" 2>/dev/null || printf 'unavailable')" >&2
+        echo "    refusing -- every step would fail for this one reason." >&2
+        echo "    Build a native binary and pin EE_BINARY to it." >&2
+        exit 2
+    fi
 }
 
 # Report the binary this epic RESOLVED, so the parent's attestation is a
