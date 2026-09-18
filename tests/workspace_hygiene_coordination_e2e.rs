@@ -9,10 +9,7 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
-#[path = "agent_mail_fixture/snapshot_v1.rs"]
-mod agent_mail_snapshot_v1;
-
-use agent_mail_snapshot_v1::{ReservationFixture, declared_snapshot_v1};
+use super::agent_mail_snapshot_v1::{ReservationFixture, declared_snapshot_v1};
 
 type TestResult = Result<(), String>;
 

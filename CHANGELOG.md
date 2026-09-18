@@ -22,6 +22,7 @@ checked-in Beads records. The durable research ledger is
 | 2026-08-29 → 2026-09-11 | **`0.14.5`** portable GNU/Linux binaries, Windows storage I/O, recovery, and runtime resource use. |
 | 2026-09-11 → 2026-09-12 | **`0.15.0`** daemon retrieval, hook context, reranking, Windows doctor, and dependency updates. |
 | 2026-09-12 | **`0.15.2`** complete registry publication, read-only WAL correction and rerank storage-failure handling. |
+| 2026-09-12 → 2026-09-18 | **`0.16.0`** `ee ask` over procedural rules and native CASS evidence, tag backfill, stable mesh device identity, index capacity admission. |
 
 Release surface (as of 2026-09-12):
 
@@ -43,6 +44,7 @@ Release surface (as of 2026-09-12):
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
+| [0.16.0](#0160---2026-09-18) | 2026-09-18 | yes | `ee ask` over procedural rules and native CASS evidence, `ee index backfill-tags`, `ee search --full`, stable mesh device id, index capacity admission |
 | [0.15.2](#0152---2026-09-12) | 2026-09-12 | yes | Registry-only Cargo installation, read-only WAL correction and rerank storage-failure handling |
 | 0.15.1 | 2026-09-12 | withheld | Crate published; superseded by 0.15.2 after runtime qualification exposed a storage regression |
 | [0.15.0](#0150---2026-09-12) | 2026-09-12 | yes | Daemon retrieval, hook context, native reranking, Windows doctor and dependency updates |
@@ -72,7 +74,77 @@ Versions `0.4.0`–`0.12.0` are **real published releases** (or tags). Prefer th
 GitHub Release page for asset lists and the original generated notes until a
 future changelog pass expands those rows into full capability sections.
 
-## [Unreleased]
+## [0.16.0] - 2026-09-18
+
+### `ee ask` answers from rules and session evidence, not just memories
+
+`ee ask` previously answered from stored memories. It now also answers from the
+two other kinds of material a workspace accumulates, and says where each answer
+came from.
+
+- Answer from **native procedural rules**, citing the exact rule revision used.
+  A cited rule that is later curated or superseded does not silently change the
+  provenance of an answer that was already given.
+- Answer from **native CASS evidence** — the coding-agent session transcripts
+  imported into the workspace — with session-aware corroboration. Evidence is
+  admitted before scoring rather than after, so an answer cannot rest on
+  material that failed admission. Sessions sharing one provenance count as a
+  single supporting group instead of inflating agreement.
+- Retain **counterevidence**. Opposing material that a query surfaces is kept
+  through candidate selection instead of being cut by the relevance cap, and is
+  reported alongside supporting evidence.
+- **Read-only operation.** `ee ask` answers from immutable stores and from
+  stores whose writer is held by another process, without acquiring a writer of
+  its own.
+- **Scope by team and tag**, resolved from one snapshot-consistent view of
+  workspace membership, so a single answer cannot mix two roster states.
+- Cache semantic scoring locally within the process, and use it to admit
+  candidates before the contradiction lookup rather than rescoring afterwards.
+- `ee ask` exposes source-of-truth memory scopes through the public CLI.
+
+### Retrieval and packing
+
+- `ee search --full` emits whole memory bodies rather than previews, for
+  callers that intend to read the content instead of ranking it.
+- `ee pack --compact` is shorthand for the lean pack profile.
+- Context deltas are decoded and applied locally against a transactional
+  baseline check, and retain native CASS evidence.
+
+### Tag backfill
+
+- `ee index backfill-tags` derives tags for memories captured before tagging
+  existed. It runs a deterministic planner first, records every mutation to a
+  JSONL log, and applies through an audited path, so a backfill can be reviewed
+  before it is applied and reconstructed after.
+
+### Mesh peer identity
+
+- A peer's **stable device id** is captured at discovery, carried through
+  autodiscovery and enrollment, and persisted on the enrolled peer. A peer that
+  changes address is recognised as the same device instead of re-enrolling as a
+  new one.
+
+### Storage and migrations
+
+- Index generations reserve their destination capacity **before** embedding and
+  tier allocation, create their private generation directories before writing
+  corpus data, and persist staged generations before the job commits. An index
+  build that cannot fit is refused up front rather than part-way through.
+- Migration `V124` repairs stored timestamps whose spelling disagreed with
+  their own column. `V125` re-derives supersession by instant, repairing the
+  lexical result `V123` produced.
+- A lexical fallback now auto-requests an index rebuild through the steward
+  instead of silently serving degraded retrieval.
+
+### Reporting and provenance
+
+- `ee version` reports which franken-stack the binary was linked against.
+- Pack provenance records **which entities** a pack selected, not only its
+  hash, and build attestation covers the build rather than the commit alone.
+- `ee insights` paginates its sections and skips graph I/O for requests that
+  are gated from using it.
+- The workspace primer names memories withheld by redaction instead of omitting
+  them silently, and a `value_only` primer keyword gate is available opt-in.
 
 - `ee pack --use-daemon` reuses warmed daemon retrieval while the client retains
   token budgeting, provenance, deterministic packing and local persistence.
@@ -159,6 +231,8 @@ future changelog pass expands those rows into full capability sections.
   `list`, instead of reporting a missing `--relation` for a link creation that
   was never requested. Listing remains `ee memory link <MEMORY_ID>` with the
   target omitted.
+
+## [0.15.2] - 2026-09-12
 
 - Publish the corrected `eidetic-engine` package at version 0.15.2 and all
   required runtime, storage, ORM, search and graph dependencies.
@@ -1799,7 +1873,8 @@ Closed workstreams behind this changelog:
   workspace hygiene, QoS, flight recorder, mesh/Tailscale optionality, duplicate
   work detection, host profiles, and crowded-checkout ergonomics.
 
-[Unreleased]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.15.2...main
+[Unreleased]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.16.0...main
+[0.16.0]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.15.2...v0.16.0
 [0.15.2]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.15.0...v0.15.2
 [0.15.0]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.14.5...v0.15.0
 [0.14.5]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.14.4...v0.14.5

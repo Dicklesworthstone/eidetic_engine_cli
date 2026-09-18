@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
 const INVENTORY: &str = include_str!("../docs/mechanical-boundary-command-inventory.md");
 const README_SOURCE: &str = include_str!("../README.md");

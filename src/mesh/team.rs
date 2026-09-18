@@ -7149,7 +7149,9 @@ fn apply_join_first_sync_events(
     // the old code accidentally relied on: a node with no `is_self` row has
     // emitted no origin material, so no inbound event can be an echo of ours.
     // That is a deliberate decision recorded on the bead, not an accident of
-    // `unwrap_or_default()`.
+    // `unwrap_or_default()`. The explicit match is therefore kept on purpose and
+    // the lint that would collapse it is silenced here rather than upstream.
+    #[allow(clippy::manual_unwrap_or_default)]
     let own_origin = match resolve_own_origin_node_id(connection)? {
         Some(own_origin) => own_origin,
         None => String::new(),

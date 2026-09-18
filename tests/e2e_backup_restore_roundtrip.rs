@@ -1447,11 +1447,11 @@ fn backup_restore_roundtrips_pack_history_and_query_surfaces() -> TestResult {
         "restored why succeeded",
     )?;
     let restored_db = side_path.join(".ee").join("ee.db");
-    let restored_conn =
-        DbConnection::open_file(&restored_db).map_err(|error| format!("open restored db: {error}"))?;
+    let restored_conn = DbConnection::open_file(&restored_db)
+        .map_err(|error| format!("open restored db: {error}"))?;
     let restored_workspace_id = workspace_id_from_db(&restored_conn, &side_path)?;
     let restored_feedback = restored_conn
-        .list_feedback_events_for_target("memory", &restored_memory_id)
+        .list_feedback_events_for_target("memory", memory_id)
         .map_err(|error| format!("list restored outcome feedback: {error}"))?;
     ensure(
         restored_feedback.iter().any(|event| {
@@ -1469,7 +1469,7 @@ fn backup_restore_roundtrips_pack_history_and_query_surfaces() -> TestResult {
     ensure(
         restored_candidates.iter().any(|candidate| {
             candidate
-                .content
+                .proposed_content
                 .as_deref()
                 .is_some_and(|content| content == "Derived insight: format before release.")
         }),

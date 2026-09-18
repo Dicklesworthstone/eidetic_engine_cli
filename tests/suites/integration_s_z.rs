@@ -1,5 +1,10 @@
 //! Integration modules S–Z. Filter with `cargo test --test integration_s_z <module>::`.
 
+// Shared Agent Mail reservation fixture. Declared once here because the two
+// workspace-hygiene modules below both consume it, and loading one file as a
+// module twice in the same target trips clippy::duplicate_mod.
+#[path = "../agent_mail_fixture/snapshot_v1.rs"]
+mod agent_mail_snapshot_v1;
 #[path = "../sandbox_contracts.rs"]
 mod sandbox_contracts;
 #[path = "../scale_envelope_collectors.rs"]

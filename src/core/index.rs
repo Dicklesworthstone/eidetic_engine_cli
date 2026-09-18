@@ -13359,7 +13359,7 @@ mod tests {
             .find(|document| document.id == first_evidence_id)
             .ok_or_else(|| "pre-attachment snapshot missing first evidence document".to_owned())?;
         ensure(
-            unlinked_first.metadata.get("memory_id").is_none(),
+            !unlinked_first.metadata.contains_key("memory_id"),
             format!(
                 "imported evidence must start unlinked: {:?}",
                 unlinked_first.metadata
@@ -13447,7 +13447,7 @@ mod tests {
             .ok_or_else(|| "post-attachment snapshot missing unattached evidence".to_owned())?;
         ensure(
             attached.metadata.get("memory_id") == Some(&memory_id)
-                && unattached.metadata.get("memory_id").is_none(),
+                && !unattached.metadata.contains_key("memory_id"),
             format!(
                 "source snapshot must refresh only the attached evidence memory_id: attached={:?} unattached={:?}",
                 attached.metadata, unattached.metadata

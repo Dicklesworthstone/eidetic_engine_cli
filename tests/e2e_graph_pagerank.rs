@@ -93,12 +93,7 @@ fn remember(workspace_arg: &str, content: &str) -> Result<String, String> {
         .or_else(|| parsed["data"]["memory_id"].as_str())
         .or_else(|| parsed["data"]["id"].as_str())
         .map(str::to_owned)
-        .ok_or_else(|| {
-            format!(
-                "remember response missing memory id: {}",
-                parsed.to_string()
-            )
-        })
+        .ok_or_else(|| format!("remember response missing memory id: {}", parsed))
 }
 
 fn insert_link(

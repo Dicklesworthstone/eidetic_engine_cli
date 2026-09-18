@@ -22368,7 +22368,7 @@ pub fn unrelated_context() -> u64 {{
         let request = ContextRequest::from_query("q20.12 hash contract")
             .map_err(|error| error.to_string())?;
         let mem = MemoryId::from_uuid(uuid::Uuid::from_u128(11));
-        let mut item = PackDraftItem {
+        let item = PackDraftItem {
             rank: 1,
             memory_id: mem,
             section: PackSection::ProceduralRules,

@@ -30,135 +30,6 @@ pub(crate) fn path_with_canonical_process_temp_prefix(path: &Path) -> PathBuf {
     path_with_canonical_prefix(path, &temp_dir)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{path_with_canonical_prefix, path_with_canonical_process_temp_prefix};
-    use std::path::Path;
-
-    #[test]
-    fn process_temp_child_uses_canonical_temp_prefix() {
-        let temp_dir = std::env::temp_dir();
-        let child = temp_dir.join("ee-temp-prefix-test").join("child");
-        let expected = temp_dir
-            .canonicalize()
-            .unwrap_or_else(|_| temp_dir.clone())
-            .join("ee-temp-prefix-test")
-            .join("child");
-
-        assert_eq!(path_with_canonical_process_temp_prefix(&child), expected);
-    }
-
-    #[test]
-    fn path_outside_prefix_is_unchanged() {
-        let path = Path::new("relative-cache/entry.json");
-        let prefix = std::env::temp_dir();
-
-        assert_eq!(path_with_canonical_prefix(path, &prefix), path);
-    }
-
-    /// Both directions, because either alone is satisfiable by a redactor that
-    /// is simply wrong in the other: one that redacts everything satisfies the
-    /// absolute case, one that redacts nothing satisfies the relative case.
-    ///
-    /// The relative half is a regression pin. An earlier revision treated the
-    /// position immediately after a `file://` scheme as a redaction start, so
-    /// `ee search --json` emitted `file://[REDACTED_PATH]` for
-    /// `file://AGENTS.md#L42` and destroyed a repo-relative citation.
-    #[test]
-    fn file_scheme_redacts_absolute_targets_and_preserves_relative_ones() {
-        fn at_whitespace(ch: char) -> bool {
-            ch.is_whitespace()
-        }
-
-        // Absolute, sensitive: redacted, and the scheme SURVIVES so a reader can
-        // still tell a filesystem location was withheld.
-        assert_eq!(
-            super::redact_path_like_segments(
-                "source=file:///Users/alice/private/x.json tail",
-                at_whitespace,
-            ),
-            "source=file://[REDACTED_PATH] tail",
-        );
-
-        // Repo-relative: preserved whole. Redacting this protects nothing and
-        // destroys the provenance the pack, search and why surfaces exist to
-        // carry.
-        for preserved in [
-            "file://AGENTS.md#L42",
-            "file://docs/adr/0001-runtime.md",
-            "why=file://src/core/search.rs done",
-        ] {
-            assert_eq!(
-                super::redact_path_like_segments(preserved, at_whitespace),
-                preserved,
-                "repo-relative provenance must survive redaction",
-            );
-        }
-
-        // A URI AUTHORITY is not a path root, even when it is spelled like a
-        // sensitive directory. `agent://run/public-feedback` carries the
-        // literal `/run/` at offset 7 and redacted to `agent:/[REDACTED_PATH]`
-        // once `/run/` joined the shared prefix list, destroying a safe,
-        // non-filesystem source id. Pinned here as well as at the surface
-        // (`feedback_health_source_counts_preserve_safe_source_ids`) because
-        // this predicate is shared by every redactor the lsy52 sweep
-        // consolidated, so a regression here is a regression in all of them.
-        for preserved in [
-            "agent://run/public-feedback",
-            "https://run/foo",
-            "ee-export://tmp/fixture",
-        ] {
-            assert_eq!(
-                super::redact_path_like_segments(preserved, at_whitespace),
-                preserved,
-                "a URI authority must not be redacted as a path root",
-            );
-        }
-
-        // The narrowing above is confined to the authority's own slash: a real
-        // sensitive path carried AFTER an authority still redacts, and a bare
-        // `//run/` with no scheme in front of it is untouched by the rule.
-        assert_eq!(
-            super::redact_path_like_segments("agent://host/root/.ssh/id_rsa", at_whitespace),
-            "agent://host[REDACTED_PATH]",
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn canonical_prefix_preserves_symlinked_descendant() {
-        use std::fs;
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir().expect("create isolated filesystem");
-        let canonical_prefix = temp.path().join("canonical-prefix");
-        fs::create_dir(&canonical_prefix).expect("create canonical prefix");
-        let alias_prefix = temp.path().join("alias-prefix");
-        symlink(&canonical_prefix, &alias_prefix).expect("create trusted prefix alias");
-
-        let outside = temp.path().join("outside");
-        fs::create_dir(&outside).expect("create outside directory");
-        fs::write(outside.join("entry.json"), b"outside").expect("create outside entry");
-        let descendant_link = canonical_prefix.join("descendant-link");
-        symlink(&outside, &descendant_link).expect("create untrusted descendant symlink");
-
-        let input = alias_prefix.join("descendant-link").join("entry.json");
-        let normalized = path_with_canonical_prefix(&input, &alias_prefix);
-        let expected = canonical_prefix
-            .canonicalize()
-            .expect("canonicalize trusted prefix")
-            .join("descendant-link")
-            .join("entry.json");
-
-        assert_eq!(normalized, expected);
-        assert_ne!(
-            normalized.canonicalize().expect("resolve full input"),
-            normalized,
-            "normalization must leave descendant symlinks visible to the safety walker"
-        );
-    }
-}
-
 /// Prefixes that mark a filesystem path as sensitive in public output.
 ///
 /// This is the union of the hand-maintained lists that used to live in each
@@ -358,4 +229,133 @@ pub(crate) fn redact_path_like_segments(value: &str, boundary: fn(char) -> bool)
             .unwrap_or(value.len());
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{path_with_canonical_prefix, path_with_canonical_process_temp_prefix};
+    use std::path::Path;
+
+    #[test]
+    fn process_temp_child_uses_canonical_temp_prefix() {
+        let temp_dir = std::env::temp_dir();
+        let child = temp_dir.join("ee-temp-prefix-test").join("child");
+        let expected = temp_dir
+            .canonicalize()
+            .unwrap_or_else(|_| temp_dir.clone())
+            .join("ee-temp-prefix-test")
+            .join("child");
+
+        assert_eq!(path_with_canonical_process_temp_prefix(&child), expected);
+    }
+
+    #[test]
+    fn path_outside_prefix_is_unchanged() {
+        let path = Path::new("relative-cache/entry.json");
+        let prefix = std::env::temp_dir();
+
+        assert_eq!(path_with_canonical_prefix(path, &prefix), path);
+    }
+
+    /// Both directions, because either alone is satisfiable by a redactor that
+    /// is simply wrong in the other: one that redacts everything satisfies the
+    /// absolute case, one that redacts nothing satisfies the relative case.
+    ///
+    /// The relative half is a regression pin. An earlier revision treated the
+    /// position immediately after a `file://` scheme as a redaction start, so
+    /// `ee search --json` emitted `file://[REDACTED_PATH]` for
+    /// `file://AGENTS.md#L42` and destroyed a repo-relative citation.
+    #[test]
+    fn file_scheme_redacts_absolute_targets_and_preserves_relative_ones() {
+        fn at_whitespace(ch: char) -> bool {
+            ch.is_whitespace()
+        }
+
+        // Absolute, sensitive: redacted, and the scheme SURVIVES so a reader can
+        // still tell a filesystem location was withheld.
+        assert_eq!(
+            super::redact_path_like_segments(
+                "source=file:///Users/alice/private/x.json tail",
+                at_whitespace,
+            ),
+            "source=file://[REDACTED_PATH] tail",
+        );
+
+        // Repo-relative: preserved whole. Redacting this protects nothing and
+        // destroys the provenance the pack, search and why surfaces exist to
+        // carry.
+        for preserved in [
+            "file://AGENTS.md#L42",
+            "file://docs/adr/0001-runtime.md",
+            "why=file://src/core/search.rs done",
+        ] {
+            assert_eq!(
+                super::redact_path_like_segments(preserved, at_whitespace),
+                preserved,
+                "repo-relative provenance must survive redaction",
+            );
+        }
+
+        // A URI AUTHORITY is not a path root, even when it is spelled like a
+        // sensitive directory. `agent://run/public-feedback` carries the
+        // literal `/run/` at offset 7 and redacted to `agent:/[REDACTED_PATH]`
+        // once `/run/` joined the shared prefix list, destroying a safe,
+        // non-filesystem source id. Pinned here as well as at the surface
+        // (`feedback_health_source_counts_preserve_safe_source_ids`) because
+        // this predicate is shared by every redactor the lsy52 sweep
+        // consolidated, so a regression here is a regression in all of them.
+        for preserved in [
+            "agent://run/public-feedback",
+            "https://run/foo",
+            "ee-export://tmp/fixture",
+        ] {
+            assert_eq!(
+                super::redact_path_like_segments(preserved, at_whitespace),
+                preserved,
+                "a URI authority must not be redacted as a path root",
+            );
+        }
+
+        // The narrowing above is confined to the authority's own slash: a real
+        // sensitive path carried AFTER an authority still redacts, and a bare
+        // `//run/` with no scheme in front of it is untouched by the rule.
+        assert_eq!(
+            super::redact_path_like_segments("agent://host/root/.ssh/id_rsa", at_whitespace),
+            "agent://host[REDACTED_PATH]",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_prefix_preserves_symlinked_descendant() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("create isolated filesystem");
+        let canonical_prefix = temp.path().join("canonical-prefix");
+        fs::create_dir(&canonical_prefix).expect("create canonical prefix");
+        let alias_prefix = temp.path().join("alias-prefix");
+        symlink(&canonical_prefix, &alias_prefix).expect("create trusted prefix alias");
+
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).expect("create outside directory");
+        fs::write(outside.join("entry.json"), b"outside").expect("create outside entry");
+        let descendant_link = canonical_prefix.join("descendant-link");
+        symlink(&outside, &descendant_link).expect("create untrusted descendant symlink");
+
+        let input = alias_prefix.join("descendant-link").join("entry.json");
+        let normalized = path_with_canonical_prefix(&input, &alias_prefix);
+        let expected = canonical_prefix
+            .canonicalize()
+            .expect("canonicalize trusted prefix")
+            .join("descendant-link")
+            .join("entry.json");
+
+        assert_eq!(normalized, expected);
+        assert_ne!(
+            normalized.canonicalize().expect("resolve full input"),
+            normalized,
+            "normalization must leave descendant symlinks visible to the safety walker"
+        );
+    }
 }

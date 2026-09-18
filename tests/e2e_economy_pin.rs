@@ -96,12 +96,7 @@ fn remember(workspace: &str, content: &str) -> Result<String, String> {
         .or_else(|| parsed["data"]["memory_id"].as_str())
         .or_else(|| parsed["data"]["id"].as_str())
         .map(str::to_owned)
-        .ok_or_else(|| {
-            format!(
-                "remember response missing memory id: {}",
-                parsed.to_string()
-            )
-        })
+        .ok_or_else(|| format!("remember response missing memory id: {}", parsed))
 }
 
 fn run_economy_report(workspace: &str, extra: &[&str]) -> Result<(Output, Value), String> {

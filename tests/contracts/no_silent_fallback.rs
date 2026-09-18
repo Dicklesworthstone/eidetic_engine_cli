@@ -45,6 +45,10 @@ struct ManualFinding {
     reason: &'static str,
 }
 
+// `line` and `text` are carried for the Debug rendering that this check prints
+// when it reports a finding; derived impls do not count as reads for dead-code
+// analysis, so the fields look unused to the compiler.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct SourceFinding {
     file: String,
@@ -3475,7 +3479,7 @@ fn allowlist_ratio_is_reported_and_ratcheted() -> TestResult {
     }
 
     // Printed on every run, so the ratio is visible without reading the source.
-    let percent = if total == 0 { 0 } else { allowed * 100 / total };
+    let percent = (allowed * 100).checked_div(total).unwrap_or(0);
     println!(
         "no_silent_fallback inventory: {allowed} allowed, {must_fix} must_fix ({percent}% allowlist)"
     );

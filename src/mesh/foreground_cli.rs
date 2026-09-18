@@ -1765,6 +1765,12 @@ fn persist_sync_round_events(
     // guard for a sound reason rather than an accidental one: a node with no
     // `is_self` row has produced no origin material, so no inbound event can be
     // an echo of ours. Recorded on the bead as a decision, not an oversight.
+    //
+    // The explicit match is kept on purpose so the `None` arm stays visible to a
+    // reader; `clippy::manual_unwrap_or_default` would collapse it to
+    // `.unwrap_or_default()` and erase exactly the distinction the comment above
+    // is making.
+    #[allow(clippy::manual_unwrap_or_default)]
     let own_origin = match own_origin {
         Some(own_origin) => own_origin,
         None => String::new(),

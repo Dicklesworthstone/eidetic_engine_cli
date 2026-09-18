@@ -13,6 +13,7 @@
 //! shapes, environment tweaks, current_dir, and failure text; only the
 //! admission gate is shared.
 
+#![allow(clippy::expect_used)]
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};

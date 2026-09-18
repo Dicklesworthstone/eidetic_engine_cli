@@ -3288,7 +3288,7 @@ mod tests {
 
         let total = read_write_group_commit_counters(None);
         assert!(
-            total.fsync_count >= a_aliased.fsync_count + b.fsync_count + 1,
+            total.fsync_count > a_aliased.fsync_count + b.fsync_count,
             "aggregate must include both workspaces and the unattributed write; \
              got {} with a={} b={}",
             total.fsync_count,

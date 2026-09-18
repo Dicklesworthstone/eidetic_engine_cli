@@ -78,7 +78,7 @@ fn parse_success(output: &Output, args: &[&str]) -> Result<serde_json::Value, St
         return Err(format!(
             "ee {} did not report success: {}",
             args.join(" "),
-            value.to_string()
+            value
         ));
     }
     Ok(value)
@@ -189,7 +189,7 @@ fn concurrent_searches_keep_the_lexical_arm_and_agree_on_order() -> TestResult {
     if baseline_ids.is_empty() {
         return Err(format!(
             "serial baseline search returned no results: {}",
-            baseline.to_string()
+            baseline
         ));
     }
     // Guard against a vacuous pass: if this field is ever renamed, every
