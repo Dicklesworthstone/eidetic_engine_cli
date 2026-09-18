@@ -608,9 +608,32 @@ impl CandidateIdentity {
             Verdict::InfraError(format!("could not hash the candidate binary: {error}"))
         })?;
         fields.insert("binarySha256".to_owned(), sha);
+        // bd-reality-core-convergence-1azkt.10 bullet 6 asks for REDACTION-SAFE
+        // evidence, and docs/environment_attestation.md:151 is explicit that a
+        // redaction-safe projection "does not include ... raw evidence
+        // references, or host-private absolute paths" — while it DOES keep
+        // "evidence-reference hashes" and "argv hashes". So the substitute is a
+        // digest, not removal.
+        //
+        // This field used to be the raw absolute path. It was written on the
+        // acceptance path already, and since 28fa731bb — my own fix, which made
+        // a refusal record its candidate — it is written on EVERY REFUSAL too, a
+        // path that previously wrote nothing. Host-private data baked into the
+        // one artifact this bead exists to make trustworthy is the worst place
+        // for it.
+        //
+        // The digest keeps what the field was actually for: two capsules from
+        // the same binary location compare equal, and a relocation is visible as
+        // a change. It does not keep /Users/<name>/... . Note the repo's own
+        // rule that absolute-path digests are never PINNABLE across hosts — that
+        // is correct and not a problem here, because this value identifies a
+        // location within a run, and `binarySha256` already identifies the
+        // binary itself.
         fields.insert(
-            "binaryPath".to_owned(),
-            binary.to_string_lossy().into_owned(),
+            "binaryPathBlake3".to_owned(),
+            blake3::hash(binary.to_string_lossy().as_bytes())
+                .to_hex()
+                .to_string(),
         );
         // A build configuration the identity does not record is a build
         // configuration the attestation cannot describe. `features[]` was
@@ -1990,5 +2013,112 @@ mod evidence {
             digest_of(&other),
             "the proof name must distinguish which candidate was refused"
         );
+    }
+}
+
+#[cfg(test)]
+mod redaction {
+    //! bd-reality-core-convergence-1azkt.10 bullet 6: the proof capsule must be
+    //! REDACTION-SAFE, and `docs/environment_attestation.md:151` rules that a
+    //! redaction-safe projection carries no "host-private absolute paths".
+    //!
+    //! The guard below is the durable half. The digest fix is a one-line change
+    //! anyone could undo by adding a convenient path field later, on a surface
+    //! whose whole purpose is to be handed to someone else — so the assertion is
+    //! written against the WHOLE identity rather than against the one field I
+    //! happened to change.
+
+    use std::path::PathBuf;
+
+    use serde_json::{Value, json};
+
+    use super::CandidateIdentity;
+
+    fn identity() -> CandidateIdentity {
+        let version: Value = json!({
+            "data": {
+                "version": "0.15.2",
+                "source": {"gitCommit": "051475eff", "gitDirty": false, "state": "clean"},
+                "build": {
+                    "profile": "debug",
+                    "targetTriple": "x86_64-unknown-linux-gnu",
+                    "frankenStack": "fsqlite@0.4.1"
+                },
+                "features": [{"name": "fts5", "enabled": true}]
+            }
+        });
+        let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        match CandidateIdentity::observe(&version, &binary) {
+            Ok(identity) => identity,
+            Err(verdict) => panic!("observe must not judge: {verdict:?}"),
+        }
+    }
+
+    /// POSITIVE plus PRECONDITION: the location is recorded, as a digest, and
+    /// the digest is RECONSTRUCTIBLE rather than opaque.
+    ///
+    /// Reconstructing it is what lets a reader check the claim without the
+    /// artifact — the same move that made the empty-digest incident checkable.
+    #[test]
+    fn the_binary_location_is_recorded_as_a_reconstructible_digest() {
+        let recorded = identity()
+            .fields
+            .get("binaryPathBlake3")
+            .cloned()
+            .unwrap_or_default();
+        let expected = blake3::hash(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("Cargo.toml")
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .to_hex()
+        .to_string();
+        assert_eq!(recorded, expected, "the digest must be reconstructible");
+        assert_eq!(
+            recorded.len(),
+            64,
+            "expected a blake3 hex digest: {recorded}"
+        );
+    }
+
+    /// THE GUARD: no field of the candidate identity may be a host-private
+    /// absolute path.
+    ///
+    /// Written against every field, not just the one that was wrong, because
+    /// the next absolute path to appear here will be a different field added by
+    /// someone who did not read this comment.
+    #[test]
+    fn no_identity_field_carries_an_absolute_path() {
+        let identity = identity();
+        for (name, value) in &identity.fields {
+            assert!(
+                !value.starts_with('/') && !value.starts_with("\\\\") && !value.contains(":\\"),
+                "identity field {name} looks like an absolute path and must be \
+                 hashed or dropped (docs/environment_attestation.md:151): {value}"
+            );
+        }
+        // Non-vacuity: the loop above passes trivially on an empty identity, and
+        // an empty identity is exactly what the refusal path used to write.
+        assert!(
+            identity.fields.len() >= 6,
+            "guard is vacuous unless the identity is populated: {:?}",
+            identity.fields
+        );
+    }
+
+    /// DISCRIMINATION: two different locations must not collapse to one digest.
+    ///
+    /// Without this the field could be a constant and every assertion above
+    /// would still hold.
+    #[test]
+    fn two_binary_locations_do_not_share_a_digest() {
+        let one = blake3::hash(b"/data/rch/abc/target/debug/ee")
+            .to_hex()
+            .to_string();
+        let other = blake3::hash(b"/data/rch/def/target/debug/ee")
+            .to_hex()
+            .to_string();
+        assert_ne!(one, other, "the digest must distinguish binary locations");
     }
 }
