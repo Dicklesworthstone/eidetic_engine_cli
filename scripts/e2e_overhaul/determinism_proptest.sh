@@ -18,6 +18,8 @@ source "$REPO_ROOT/scripts/lib/e2e_logger.sh"
 
 run_status=0
 cases_sampled=0
+gates_executed=0
+gates_skipped=0
 cases_failed=0
 START_SECONDS="$(python3 -c 'import time; print(time.time())')"
 BUDGET_SECONDS="${EE_DETERMINISM_PROPTEST_BUDGET_SECONDS:-60}"
@@ -50,9 +52,24 @@ run_cargo_gate() {
     shift 2
 
     if [ "${EE_DETERMINISM_PROPTEST_USE_RCH:-0}" != "1" ]; then
-        e2e_log_assert_eq "skipped" "skipped" "$label.remote_required"
+        # bd-r8p6j: this used to be
+        #     e2e_log_assert_eq "skipped" "skipped" "$label.remote_required"
+        # which compares a constant with itself, so it ALWAYS incremented the
+        # pass counter and emitted assert_ok. At the default environment every
+        # gate in this script "passed", nothing executed, and the script exited
+        # 0 in under a second. A skip recorded as a pass is worse than a silent
+        # skip: an orphaned script announces itself in the invocation audit, a
+        # permanently green stage does not.
+        #
+        # A skip is now recorded as a skip, in the only vocabulary this harness
+        # has -- a counter this script owns. It asserts NOTHING, because a gate
+        # that did not run is not evidence about anything. The truth is carried
+        # by the exit status instead, below.
+        gates_skipped=$((gates_skipped + 1))
         return 0
     fi
+
+    gates_executed=$((gates_executed + 1))
 
     cases_sampled=$((cases_sampled + sample_count))
 
@@ -137,6 +154,22 @@ if [ "${EE_PROPTEST_LONG:-0}" = "1" ]; then
         "determinism_proptest_full_property_query_and_pack" \
         0 \
         cargo test --test integration_n_r property_query_and_pack:: -- --nocapture || true
+fi
+
+# bd-r8p6j: NON-VACUITY GUARD. A proptest run that sampled zero cases has
+# proved nothing, and this script has always known it -- emit_proptest_summary
+# reports `cases_sampled: 0` in that case and nothing ever read the number.
+#
+# Refusing here is what stops this script being wired into verify.sh as a
+# permanently green stage. It also fails LOUDLY in the default environment
+# rather than passing quietly, which is the behaviour a reader can act on: the
+# message names the variable that would make it run.
+if [ "$gates_executed" -eq 0 ]; then
+    printf 'determinism_proptest: REFUSING TO PASS. %d cargo gate(s) skipped, 0 executed, %d cases sampled.\n' \
+        "$gates_skipped" "$cases_sampled" >&2
+    printf '  Every gate here requires the remote lane. Set EE_DETERMINISM_PROPTEST_USE_RCH=1 to run them.\n' >&2
+    printf '  Exiting non-zero on purpose: a run that executed nothing must not be reported as a pass (bd-r8p6j).\n' >&2
+    exit 2
 fi
 
 exit "$run_status"

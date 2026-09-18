@@ -18,6 +18,8 @@ disallowed_methods_violations=0
 ui_tests_passed=0
 ui_tests_failed=0
 last_cargo_gate_skipped=0
+gates_executed=0
+gates_skipped=0
 
 run_cargo_gate() {
     local label="$1"
@@ -26,10 +28,19 @@ run_cargo_gate() {
     last_cargo_gate_skipped=0
 
     if [ "${EE_LINT_DETERMINISM_USE_RCH:-0}" != "1" ]; then
+        # bd-r8p6j: this used to also call
+        #     e2e_log_assert_eq "skipped" "skipped" "$label.remote_required"
+        # which compares a constant with itself and so always incremented the
+        # pass counter. This script already knew better -- last_cargo_gate_skipped
+        # exists precisely so a skipped gate is not counted as a passed UI test
+        # (:130) -- and then recorded a passing assertion anyway. The knowledge
+        # was present and the report contradicted it.
         last_cargo_gate_skipped=1
-        e2e_log_assert_eq "skipped" "skipped" "$label.remote_required"
+        gates_skipped=$((gates_skipped + 1))
         return 0
     fi
+
+    gates_executed=$((gates_executed + 1))
 
     if RCH_REQUIRE_REMOTE=1 "$REPO_ROOT/scripts/rch_verify.sh" \
         --bead-id bd-17c65.14.4.4 \
@@ -135,5 +146,17 @@ else
 fi
 
 emit_lint_summary "$EXEMPTIONS_COUNT" "$EXEMPTIONS_WITH_JUSTIFICATION"
+
+# bd-r8p6j: NON-VACUITY GUARD. This script runs clippy --all-targets and two
+# integration targets; none of that completes in one second. When every gate is
+# skipped it previously exited 0 having executed no cargo at all, which would
+# make it a permanently green stage if it were ever wired into verify.sh.
+if [ "$gates_executed" -eq 0 ]; then
+    printf 'lint_determinism: REFUSING TO PASS. %d cargo gate(s) skipped, 0 executed.\n' \
+        "$gates_skipped" >&2
+    printf '  Every gate here requires the remote lane. Set EE_LINT_DETERMINISM_USE_RCH=1 to run them.\n' >&2
+    printf '  Exiting non-zero on purpose: a run that executed nothing must not be reported as a pass (bd-r8p6j).\n' >&2
+    exit 2
+fi
 
 exit "$run_status"
