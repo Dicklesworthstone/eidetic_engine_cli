@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
-use crate::models::{EvidenceId, MemoryId, RuleId};
+use crate::models::{EvidenceId, MemoryId, ProvenanceUri, RuleId};
 use crate::pack::PackEntityRef;
 
 use super::{AskCandidate, AskReport, AskRequest, AskSpan};
@@ -147,31 +147,51 @@ pub(super) fn markdown_identity(report: &AskReport, id: &str) -> String {
 }
 
 /// Rules and their derivation inputs are correlated, not independent votes.
-/// Collapse intersecting lineages, including a shared source that is not itself
-/// in the answer corpus. Root choice and path compression are deterministic.
+/// Excerpts from one CASS session are likewise one source even when they have
+/// different evidence IDs or line windows. Join both kinds of lineage before
+/// counting support, including a shared memory outside the answer corpus.
+/// Root choice and path compression are deterministic.
 pub(super) fn support_groups(
     spans: &[AskSpan],
     sources: &BTreeMap<String, AskNativeSource>,
 ) -> BTreeMap<String, String> {
-    if sources.is_empty() {
-        return BTreeMap::new();
-    }
     let ids: BTreeSet<_> = spans.iter().map(|span| span.memory_id.as_str()).collect();
     let mut parents: BTreeMap<String, String> = BTreeMap::new();
     for (id, source) in sources.iter().filter(|(id, _)| ids.contains(id.as_str())) {
         for parent in &source.source_memory_ids {
-            let left = root(&mut parents, id);
-            let right = root(&mut parents, parent);
-            if left < right {
-                parents.insert(right, left);
-            } else if right < left {
-                parents.insert(left, right);
-            }
+            join(&mut parents, id, parent);
         }
+    }
+    for span in spans {
+        if let Some(uri) = span.provenance_uri.as_deref()
+            && let Ok(ProvenanceUri::CassSession { session, .. }) = ProvenanceUri::from_str(uri)
+        {
+            // This private union key is not an entity or a citation. It cannot
+            // collide with a typed memory/rule/evidence ID, and is never put
+            // into source_memory_ids or public source metadata.
+            join(
+                &mut parents,
+                &span.memory_id,
+                &format!("cass-session:{session}"),
+            );
+        }
+    }
+    if sources.is_empty() && parents.is_empty() {
+        return BTreeMap::new();
     }
     ids.into_iter()
         .map(|id| (id.to_owned(), root(&mut parents, id)))
         .collect()
+}
+
+fn join(parents: &mut BTreeMap<String, String>, left: &str, right: &str) {
+    let left = root(parents, left);
+    let right = root(parents, right);
+    if left < right {
+        parents.insert(right, left);
+    } else if right < left {
+        parents.insert(left, right);
+    }
 }
 
 fn root(parents: &mut BTreeMap<String, String>, id: &str) -> String {
@@ -185,4 +205,103 @@ fn root(parents: &mut BTreeMap<String, String>, id: &str) -> String {
         parents.insert(child, current.clone());
     }
     current
+}
+
+#[cfg(test)]
+mod session_support_tests {
+    use super::*;
+
+    fn span(id: &str, provenance: &str) -> AskSpan {
+        AskSpan {
+            memory_id: id.to_owned(),
+            byte_start: 0,
+            byte_end: 5,
+            text: "Fact.".to_owned(),
+            score: 0.8,
+            trust_class: "cass_evidence".to_owned(),
+            memory_confidence: 0.5,
+            provenance_uri: Some(provenance.to_owned()),
+            team_provenance: None,
+        }
+    }
+
+    fn rule_source(parent: &str) -> AskNativeSource {
+        AskNativeSource {
+            entity: PackEntityRef::Rule(RuleId::from_uuid(uuid::Uuid::from_u128(1))),
+            entity_revision: format!("blake3:{}", "0".repeat(64)),
+            source_memory_ids: vec![parent.to_owned()],
+        }
+    }
+
+    #[test]
+    fn separate_line_windows_in_one_session_are_not_independent_votes() {
+        let spans = vec![
+            span("first", "cass-session://conversation#L1-3"),
+            span("second", "cass-session://conversation#L20-22"),
+            span("third", "cass-session://conversation"),
+        ];
+        let groups = support_groups(&spans, &BTreeMap::new());
+        assert_eq!(groups.get("first"), groups.get("second"));
+        assert_eq!(groups.get("second"), groups.get("third"));
+        assert_eq!(groups.len(), 3);
+    }
+
+    #[test]
+    fn different_sessions_remain_independent() {
+        let spans = vec![
+            span("first", "cass-session://conversation-a#L1"),
+            span("second", "cass-session://conversation-b#L1"),
+        ];
+        let groups = support_groups(&spans, &BTreeMap::new());
+        assert_ne!(groups.get("first"), groups.get("second"));
+    }
+
+    #[test]
+    fn derived_rule_and_shared_session_form_one_transitive_group() {
+        let spans = vec![
+            span("memory", "cass-session://conversation#L1"),
+            span("evidence", "cass-session://conversation#L2"),
+            span("rule", "manual://rule"),
+        ];
+        let sources = BTreeMap::from([("rule".to_owned(), rule_source("memory"))]);
+        let groups = support_groups(&spans, &sources);
+        assert_eq!(groups.get("rule"), groups.get("memory"));
+        assert_eq!(groups.get("rule"), groups.get("evidence"));
+        assert_eq!(groups.len(), 3);
+    }
+
+    #[test]
+    fn support_groups_are_independent_of_span_order() {
+        let mut spans = vec![
+            span("first", "cass-session://conversation#L1"),
+            span("second", "cass-session://conversation#L2"),
+            span("third", "cass-session://another#L1"),
+        ];
+        let before = support_groups(&spans, &BTreeMap::new());
+        spans.reverse();
+        assert_eq!(before, support_groups(&spans, &BTreeMap::new()));
+    }
+
+    #[test]
+    fn absent_native_sources_cannot_join_visible_sessions() {
+        let spans = vec![
+            span("first", "cass-session://conversation-a#L1"),
+            span("second", "cass-session://conversation-b#L1"),
+        ];
+        let mut hidden = rule_source("first");
+        hidden.source_memory_ids.push("second".to_owned());
+        let sources = BTreeMap::from([("hidden-rule".to_owned(), hidden)]);
+        let groups = support_groups(&spans, &sources);
+        assert_ne!(groups.get("first"), groups.get("second"));
+        assert!(!groups.contains_key("hidden-rule"));
+    }
+
+    #[test]
+    fn ordinary_non_cass_sources_keep_the_default_grouping() {
+        let spans = vec![
+            span("first", "manual://note"),
+            span("second", "file://src/lib.rs#L1"),
+        ];
+        assert!(support_groups(&spans, &BTreeMap::new()).is_empty());
+    }
 }
