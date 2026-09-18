@@ -1,0 +1,31 @@
+diff --git a/src/core/ask_evidence_tests.rs b/src/core/ask_evidence_tests.rs
+index a5891f3..8a2bb55 100644
+--- a/src/core/ask_evidence_tests.rs
++++ b/src/core/ask_evidence_tests.rs
+@@ -80,7 +80,7 @@ fn evidence(db: &DbConnection, workspace: &str, session: &str, n: u32, body: &st
+             end_byte: None,
+             role: Some("user".to_owned()),
+             excerpt: body.to_owned(),
+-            content_hash: blake3::hash(body.as_bytes()).to_hex().to_string(),
++            content_hash: format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex()),
+             metadata_json: Some(
+                 serde_json::json!({
+                     "schema": CASS_EVIDENCE_SPAN_SCHEMA_V1,
+@@ -296,7 +296,7 @@ fn admission_is_rechecked_after_hash_revocation_and_repair() {
+     let before = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
+     assert_eq!(before.candidates.len(), 1);
+ 
+-    let bad_hash = "0".repeat(64);
++    let bad_hash = format!("blake3:{}", "0".repeat(64));
+     db.execute_raw(&format!(
+         "UPDATE evidence_spans SET content_hash = '{bad_hash}' WHERE id = '{id}'"
+     ))
+@@ -326,7 +326,7 @@ fn clean_metadata_and_a_matching_digest_do_not_authorize_secret_text() {
+     let session = session(&db, &workspace, 1);
+     let id = evidence(&db, &workspace, &session, 1, BODY);
+     let unsafe_body = "Run cargo fmt before every release tag. password=ask-private-canary";
+-    let hash = blake3::hash(unsafe_body.as_bytes()).to_hex().to_string();
++    let hash = format!("blake3:{}", blake3::hash(unsafe_body.as_bytes()).to_hex());
+     db.execute_raw(&format!(
+         "UPDATE evidence_spans SET excerpt = '{unsafe_body}', content_hash = '{hash}' WHERE id = '{id}'"
+     ))

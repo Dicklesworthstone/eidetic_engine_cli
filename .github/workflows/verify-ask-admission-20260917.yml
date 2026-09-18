@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - scripts/delivery/ask-path-scope.patch
+      - scripts/delivery/ask-native-fixture-hashes.patch
       - .github/workflows/verify-ask-admission-20260917.yml
   workflow_dispatch:
 permissions:
@@ -39,17 +40,21 @@ jobs:
           key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Apply the reviewed path-scoped answer feature
+      - name: Apply path-scoped answers and canonical native evidence fixtures
         run: |
           set -euo pipefail
           git rev-parse HEAD
           echo '6dd7c524de98fdc914328a05fe89c8e10f2352848f75d4f55ca3078871e3864e  scripts/delivery/ask-path-scope.patch' | sha256sum --check
+          echo 'adca0a8687d4f21be8c31720b4bc4d3750285e02a5726c09e367fb1a12178d04  scripts/delivery/ask-native-fixture-hashes.patch' | sha256sum --check
           git apply --check scripts/delivery/ask-path-scope.patch
+          git apply --check scripts/delivery/ask-native-fixture-hashes.patch
           git apply scripts/delivery/ask-path-scope.patch
-          rustfmt --edition 2024 --config skip_children=true src/core/ask.rs src/core/ask_corpus.rs src/core/ask_native_tests.rs src/cli/mod.rs tests/contracts/ask_native.rs
+          git apply scripts/delivery/ask-native-fixture-hashes.patch
+          rustfmt --edition 2024 --config skip_children=true src/core/ask.rs src/core/ask_corpus.rs src/core/ask_native_tests.rs src/core/ask_evidence_tests.rs src/cli/mod.rs tests/contracts/ask_native.rs
           git diff --check
           git diff --stat
       - name: Compile production library
+        id: compile
         run: |
           status=0
           cargo check --locked --lib > "$RUNNER_TEMP/ask-path-check.log" 2>&1 || status=$?
@@ -62,8 +67,10 @@ jobs:
           tail -n 260 "$RUNNER_TEMP/ask-path-engine.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/ask-path-engine.log" || status=1
           test "$(grep -c '^test core::ask::corpus::native_tests::path_rules_.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-engine.log")" -eq 6 || status=1
+          test "$(grep -c '^test core::ask::corpus::evidence_tests::.* \.\.\. ok$' "$RUNNER_TEMP/ask-path-engine.log")" -eq 10 || status=1
           exit "$status"
       - name: Execute public path, lifecycle, scope, privacy and read-only contracts
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
           status=0
           cargo test --locked --test contracts ask_lifecycle -- --test-threads=2 > "$RUNNER_TEMP/ask-path-cli.log" 2>&1 || status=$?
@@ -76,8 +83,8 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- src/core/ask.rs src/core/ask_corpus.rs src/core/ask_native_tests.rs src/cli/mod.rs tests/contracts/ask_native.rs docs/adr/0067-extractive-ask.md
-          git commit -m 'feat(ask): answer from directory and file rules for explicit task paths' -m 'Add repeatable --path selectors through the public CLI and source-of-truth corpus loader. Reuse portable rule-path normalization and recall matching; preserve memory scope, native identity, exact citation bytes and lifecycle checks. Reject traversal, globs and symlink escapes without path disclosure. Six real-store tests cover matching, normalization, authorization, concurrent scope updates and invalid targets; three public CLI tests prove live updates, read-only nonmutation and safe errors. Correct the existing curation fixture to invoke real validation rather than bypass trust policy. Production compilation and both the complete ask engine and public lifecycle regression groups passed before commit.'
+          git add -- src/core/ask.rs src/core/ask_corpus.rs src/core/ask_native_tests.rs src/core/ask_evidence_tests.rs src/cli/mod.rs tests/contracts/ask_native.rs docs/adr/0067-extractive-ask.md
+          git commit -m 'feat(ask): answer from directory and file rules for explicit task paths' -m 'Add repeatable --path selectors through the public CLI and live corpus. Reuse rule-path normalization and recall matching; preserve memory scope, native identity, exact citation bytes and lifecycle checks. Reject unsafe targets without path disclosure. Six real-store and three public CLI tests cover matching, authorization, concurrent scope updates and nonmutation. Correct existing curation fixtures to invoke real validation and transcript fixtures to use the mandatory blake3 hash prefix without relaxing production integrity. Production compilation, the complete ask engine and all public lifecycle regressions passed before commit.'
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
               git rev-parse HEAD > "$RUNNER_TEMP/ask-path-commit.log"
@@ -87,8 +94,6 @@ jobs:
             tested=$(git rev-parse HEAD)
             git fetch origin main
             git merge --no-edit origin/main
-            # Only unrelated tracker/document changes may join a tested commit
-            # without another build. Never push a silently changed source tree.
             git diff --exit-code "$tested" HEAD -- src tests Cargo.toml Cargo.lock build.rs
           done
           exit 1
@@ -96,9 +101,9 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           git rev-parse HEAD > "$RUNNER_TEMP/ask-path-source-sha.log"
-          git diff -- src/core/ask.rs src/core/ask_corpus.rs src/core/ask_native_tests.rs src/cli/mod.rs tests/contracts/ask_native.rs docs/adr/0067-extractive-ask.md > "$RUNNER_TEMP/ask-path-uncommitted.patch"
+          git diff -- src/core/ask.rs src/core/ask_corpus.rs src/core/ask_native_tests.rs src/core/ask_evidence_tests.rs src/cli/mod.rs tests/contracts/ask_native.rs docs/adr/0067-extractive-ask.md > "$RUNNER_TEMP/ask-path-uncommitted.patch"
           git archive --format=tar.gz --output="$RUNNER_TEMP/ask-path-source.tar.gz" HEAD
-          for file in ask.rs ask_corpus.rs ask_native_tests.rs; do cp "src/core/$file" "$RUNNER_TEMP/ask-path-$file"; done
+          for file in ask.rs ask_corpus.rs ask_native_tests.rs ask_evidence_tests.rs; do cp "src/core/$file" "$RUNNER_TEMP/ask-path-$file"; done
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
