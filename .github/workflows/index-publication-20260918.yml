@@ -1,110 +1,18 @@
-name: Atomic index replacement
+name: Index publication delivery (retired)
 
+# Production changes are on main:
+# 0c3cbbe4d84c54617166348a45bfdea13e94c342 - current-owner publication fence
+# b1d8b90a65ff516b80a97f180296ed21acb4e884 - generation durability barriers
+# 65d6a7726e0e27db763726951f24cec1dcdeae12 - native atomic directory exchange
+# Compilation and publication-boundary tests passed before each source commit.
+# Run 35307418086 records the final broader index regression result separately.
+# This retired delivery has no automatic trigger, source writer or ref update.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'scripts/delivery/index-atomic-exchange.patch'
-      - '.github/workflows/index-publication-20260918.yml'
   workflow_dispatch:
-permissions:
-  contents: read
+permissions: {}
 jobs:
-  integrate:
-    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+  retired:
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
-    permissions:
-      contents: write
-    env:
-      RUSTUP_TOOLCHAIN: nightly
-      CARGO_BUILD_JOBS: '2'
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      EE_EMBED_DOWNLOAD: 'off'
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            target
-          key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: |
-            ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Apply the reviewed atomic exchange patch without losing concurrent source
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rev-parse HEAD
-          assembly="$RUNNER_TEMP/index-exchange-assembly"
-          mkdir -p "$assembly/src/core"
-          git show 0c3cbbe4d84c54617166348a45bfdea13e94c342:src/core/index.rs > "$assembly/src/core/index.rs"
-          git -C "$assembly" apply --check "$GITHUB_WORKSPACE/scripts/delivery/index-publication-durability.patch"
-          git -C "$assembly" apply "$GITHUB_WORKSPACE/scripts/delivery/index-publication-durability.patch"
-          cp "$assembly/src/core/index.rs" "$RUNNER_TEMP/index-expected.rs"
-          rustfmt --edition 2024 --config skip_children=true "$RUNNER_TEMP/index-expected.rs"
-          cmp "$RUNNER_TEMP/index-expected.rs" src/core/index.rs
-          git -C "$assembly" apply --check "$GITHUB_WORKSPACE/scripts/delivery/index-atomic-exchange.patch"
-          git -C "$assembly" apply "$GITHUB_WORKSPACE/scripts/delivery/index-atomic-exchange.patch"
-          rustfmt --edition 2024 --config skip_children=true "$assembly/src/core/index.rs"
-          cp "$assembly/src/core/index.rs" src/core/index.rs
-          git diff --check
-          git diff --stat
-      - name: Compile production library
-        run: |
-          status=0
-          cargo check --locked --lib > "$RUNNER_TEMP/index-check.log" 2>&1 || status=$?
-          tail -n 100 "$RUNNER_TEMP/index-check.log"
-          exit "$status"
-      - name: Execute all publication boundary and concurrent reader regressions
-        run: |
-          status=0
-          cargo test --locked --lib core::index::tests::publication_ -- --nocapture > "$RUNNER_TEMP/index-boundaries.log" 2>&1 || status=$?
-          tail -n 160 "$RUNNER_TEMP/index-boundaries.log"
-          exit "$status"
-      - name: Commit verified atomic replacement directly to main
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- src/core/index.rs
-          git commit -m 'fix(index): atomically exchange live generations without a missing-index window' -m 'Use native directory exchange on Linux, Android and Apple platforms for replacement and rollback, preserving the live pathname through durability barriers. Retain displaced data without overwriting an existing destination; unwind safely if retention fails. Unsupported native exchanges fail without a silent two-rename fallback. Four new tests cover every live-name barrier, post-swap failure and unwind, 256 concurrent-reader exchange rounds and no-clobber directory renames. Compilation and the publication test group passed before commit. Full index module results are recorded separately; snapshot-pinned immutable reader handles remain a distinct architecture task.'
-          for attempt in 1 2 3; do
-            if git push origin HEAD:main; then
-              git rev-parse HEAD
-              exit 0
-            fi
-            git fetch origin main
-            git merge --no-edit origin/main
-          done
-          exit 1
-      - name: Execute complete index module regression suite
-        run: |
-          status=0
-          cargo test --locked --lib core::index::tests:: -- --test-threads=2 > "$RUNNER_TEMP/index-module.log" 2>&1 || status=$?
-          tail -n 240 "$RUNNER_TEMP/index-module.log"
-          exit "$status"
-      - name: Preserve exact source and verification logs
-        if: ${{ !cancelled() }}
-        run: |
-          git rev-parse HEAD > "$RUNNER_TEMP/index-source-sha.log"
-          git diff -- src/core/index.rs > "$RUNNER_TEMP/index-uncommitted.patch"
-          cp src/core/index.rs "$RUNNER_TEMP/index-verified-source.rs"
-      - uses: actions/upload-artifact@v4
-        if: ${{ !cancelled() }}
-        with:
-          name: index-exchange-verification
-          path: |
-            ${{ runner.temp }}/index-*.log
-            ${{ runner.temp }}/index-*.patch
-            ${{ runner.temp }}/index-verified-source.rs
-          retention-days: 7
+      - run: echo 'This one-time index publication delivery is retired.'
