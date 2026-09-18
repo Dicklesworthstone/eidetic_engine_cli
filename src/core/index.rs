@@ -440,6 +440,42 @@ impl<'a> IndexPublishLockOwner<'a> {
         index_checkpoint(cx)?;
         Ok(owner)
     }
+
+    /// A pre-build lease is not publication authority after a process pause.
+    /// Keep the process-safe writer fence through replacement, job commit and
+    /// rollback so reclamation cannot race the final ownership check.
+    fn with_publication_fence<T>(
+        &self,
+        publish: impl FnOnce() -> Result<T, IndexRebuildError>,
+    ) -> Result<T, IndexRebuildError> {
+        index_checkpoint(self.cx)?;
+        self.db.with_write_owner_fence(IndexRebuildError::Database, || {
+            index_checkpoint(self.cx)?;
+            let lock_id = AdvisoryLockId::index(self.workspace_id);
+            let rows = self.db.query(
+                "SELECT holder_id, expires_at FROM ee_advisory_locks
+                 WHERE resource_type = ?1 AND resource_id = ?2",
+                &[
+                    SqlValue::Text(lock_id.resource_type().to_owned()),
+                    SqlValue::Text(lock_id.resource_id().to_owned()),
+                ],
+            )?;
+            let owned = rows.len() == 1
+                && rows[0].get(0).and_then(|value| value.as_str())
+                    == Some(self.holder_id.as_str());
+            let unexpired = rows.first()
+                .and_then(|row| row.get(1))
+                .and_then(|value| value.as_str())
+                .and_then(|expiry| chrono::DateTime::parse_from_rfc3339(expiry).ok())
+                .is_some_and(|expiry| expiry > chrono::Utc::now());
+            if !owned || !unexpired {
+                return Err(IndexRebuildError::Index(
+                    "index publication lease expired or changed owner; staged output was not published; retry the index operation".to_owned(),
+                ));
+            }
+            publish()
+        })
+    }
 }
 
 impl Drop for IndexPublishLockOwner<'_> {
@@ -1657,7 +1693,11 @@ pub async fn rebuild_index_with_cx(
         });
     }
 
-    let _recovery_action = recover_interrupted_publish(&index_dir)?;
+    let publish_lock = _publish_lock.as_ref().ok_or_else(|| {
+        IndexRebuildError::Index("index rebuild has no publication lease".to_owned())
+    })?;
+    let _recovery_action =
+        publish_lock.with_publication_fence(|| recover_interrupted_publish(&index_dir))?;
     // bd-qf3l4. `ee init` rebuilds the index for a workspace holding ZERO
     // documents, and this line forced `DEFAULT_SEARCH_EMBEDDER`
     // (`default_search_embedder_stack_with_provenance`, :5631) to pay ~2 GB of
@@ -1692,7 +1732,7 @@ pub async fn rebuild_index_with_cx(
     };
     ensure_active_embedding_registry_record(&db, &workspace_id, &registry_stack)?;
     let build_result = publish_full_index_generation_with_stack(
-        cx,
+        publish_lock,
         &index_dir,
         registry_stack,
         indexable_docs,
@@ -1897,7 +1937,11 @@ async fn reembed_index_with_cx_and_stack(
         explicitly_cancelled: false,
     };
 
-    let _recovery_action = recover_interrupted_publish(&index_dir)?;
+    let publish_lock = _publish_lock.as_ref().ok_or_else(|| {
+        IndexRebuildError::Index("index re-embedding has no publication lease".to_owned())
+    })?;
+    let _recovery_action =
+        publish_lock.with_publication_fence(|| recover_interrupted_publish(&index_dir))?;
     ensure_active_embedding_registry_record(&db, &workspace_id, &stack)?;
     let embedding = reembed_embedding_summary(
         &db,
@@ -1907,7 +1951,7 @@ async fn reembed_index_with_cx_and_stack(
         current_vector_coverage,
     )?;
     let build_result = publish_full_index_generation_with_stack(
-        cx,
+        publish_lock,
         &index_dir,
         stack,
         indexable_docs,
@@ -2571,13 +2615,14 @@ where
         processing_mode.push_str("_staged_full_rebuild");
     }
 
-    let _recovery_action = match recover_interrupted_publish(index_dir) {
-        Ok(action) => action,
-        Err(error) => {
-            finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
-            return Err(error);
-        }
-    };
+    let _recovery_action =
+        match _publish_lock.with_publication_fence(|| recover_interrupted_publish(index_dir)) {
+            Ok(action) => action,
+            Err(error) => {
+                finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
+                return Err(error);
+            }
+        };
     let stack = match workspace_embedder_stack(db, workspace_id) {
         Ok((stack, _)) => stack,
         Err(error) => {
@@ -2589,7 +2634,7 @@ where
         }
     };
     let build_result = publish_full_index_generation_with_stack(
-        cx,
+        &_publish_lock,
         index_dir,
         stack,
         indexable_docs,
@@ -2818,11 +2863,12 @@ where
     // falsely tripped `search_index_stale` on the very next search even
     // though the job had already applied synchronously. (agent-UX item 5)
     let result = async {
-        let _recovery_action = recover_interrupted_publish(index_dir)?;
+        let _recovery_action =
+            _publish_lock.with_publication_fence(|| recover_interrupted_publish(index_dir))?;
         let fallback_to_full = None;
         let (stack, _) = workspace_embedder_stack(db, &job.workspace_id)?;
         let build_result = publish_full_index_generation_with_stack(
-            cx,
+            &_publish_lock,
             index_dir,
             stack,
             indexable_docs,
@@ -2990,7 +3036,7 @@ fn incremental_fallback(
 }
 
 async fn publish_full_index_generation_with_stack<F>(
-    cx: &asupersync::Cx,
+    publish_lock: &IndexPublishLockOwner<'_>,
     index_dir: &Path,
     stack: EmbedderStack,
     indexable_docs: Vec<crate::search::IndexableDocument>,
@@ -3001,6 +3047,7 @@ async fn publish_full_index_generation_with_stack<F>(
 where
     F: FnOnce() -> Result<(), IndexRebuildError>,
 {
+    let cx = publish_lock.cx;
     index_checkpoint(cx)?;
     let staging_dir = create_publish_staging_dir(index_dir)?;
     let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
@@ -3009,14 +3056,16 @@ where
         .map_err(IndexRebuildError::Index)?;
     run_before_index_publish_hook(cx);
     index_checkpoint(cx)?;
-    cx.masked(|| {
-        write_index_metadata(
-            &staging_dir,
-            generation,
-            document_counts,
-            embedder_fingerprint.as_ref(),
-        )?;
-        publish_staged_index_with_commit(index_dir, &staging_dir, commit_tail)
+    publish_lock.with_publication_fence(|| {
+        cx.masked(|| {
+            write_index_metadata(
+                &staging_dir,
+                generation,
+                document_counts,
+                embedder_fingerprint.as_ref(),
+            )?;
+            publish_staged_index_with_commit(index_dir, &staging_dir, commit_tail)
+        })
     })?;
     run_after_index_publish_hook(cx);
     Ok(stats)
@@ -11495,6 +11544,207 @@ mod tests {
             index_publish_lock_retry_delay(100),
             Duration::from_millis(50)
         );
+    }
+
+    #[test]
+    fn publication_fence_allows_owned_lease_and_nested_job_transaction() -> TestResult {
+        let db = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        let cx = asupersync::Cx::for_testing();
+        let owner = IndexPublishLockOwner::acquire(&cx, &db, "wsp_fence")
+            .map_err(|error| error.to_string())?;
+        owner
+            .with_publication_fence(|| {
+                db.with_transaction_error(|| {
+                    db.execute_raw("CREATE TABLE publication_probe (value INTEGER)")?;
+                    db.execute_raw("INSERT INTO publication_probe VALUES (7)")?;
+                    Ok::<_, IndexRebuildError>(())
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        let rows = db
+            .query("SELECT value FROM publication_probe", &[])
+            .map_err(|error| error.to_string())?;
+        ensure(
+            rows.len() == 1,
+            "nested publication transaction must commit",
+        )
+    }
+
+    #[test]
+    fn publication_fence_rejects_expired_missing_and_malformed_expiry() -> TestResult {
+        let db = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        let cx = asupersync::Cx::for_testing();
+        let owner = IndexPublishLockOwner::acquire(&cx, &db, "wsp_fence")
+            .map_err(|error| error.to_string())?;
+        for expiry in ["'2000-01-01T00:00:00Z'", "NULL", "'private-invalid-expiry'"] {
+            db.execute_raw(&format!(
+                "UPDATE ee_advisory_locks SET expires_at = {expiry}"
+            ))
+            .map_err(|error| error.to_string())?;
+            let mut called = false;
+            let result = owner.with_publication_fence(|| {
+                called = true;
+                Ok(())
+            });
+            ensure(
+                result.is_err() && !called,
+                "invalid lease must reject before side effects",
+            )?;
+            ensure(
+                !result
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_default()
+                    .contains("private-invalid-expiry"),
+                "lease errors must not echo metadata",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn publication_fence_rejects_successor_and_stale_drop_preserves_its_lease() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            .join("db.sqlite");
+        let db = DbConnection::open_file(&path).map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        let cx = asupersync::Cx::for_testing();
+        let owner = IndexPublishLockOwner::acquire(&cx, &db, "wsp_fence")
+            .map_err(|error| error.to_string())?;
+        let other = DbConnection::open_file(&path).map_err(|error| error.to_string())?;
+        other
+            .execute_raw("UPDATE ee_advisory_locks SET expires_at = '2000-01-01T00:00:00Z'")
+            .map_err(|error| error.to_string())?;
+        let successor = IndexPublishLockOwner::acquire(&cx, &other, "wsp_fence")
+            .map_err(|error| error.to_string())?;
+        let mut called = false;
+        ensure(
+            owner
+                .with_publication_fence(|| {
+                    called = true;
+                    Ok(())
+                })
+                .is_err(),
+            "superseded owner must be fenced out",
+        )?;
+        ensure(!called, "stale worker must not perform its side effect")?;
+        drop(owner);
+        successor
+            .with_publication_fence(|| Ok(()))
+            .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn publication_fence_releases_writer_after_error_and_unwind() -> TestResult {
+        let db = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        let cx = asupersync::Cx::for_testing();
+        let owner = IndexPublishLockOwner::acquire(&cx, &db, "wsp_fence")
+            .map_err(|error| error.to_string())?;
+        let error: Result<(), _> = owner.with_publication_fence(|| {
+            Err(IndexRebuildError::Index(
+                "injected publication failure".to_owned(),
+            ))
+        });
+        ensure(error.is_err(), "injected error must propagate")?;
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<(), _> = owner.with_publication_fence(|| panic!("injected unwind"));
+        }));
+        ensure(unwind.is_err(), "injected unwind must propagate")?;
+        owner
+            .with_publication_fence(|| db.with_transaction_error(|| Ok::<_, IndexRebuildError>(())))
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_fence_holds_real_os_lock_through_nested_commit() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            .join("db.sqlite");
+        let db = DbConnection::open_file(&path).map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        let cx = asupersync::Cx::for_testing();
+        let owner = IndexPublishLockOwner::acquire(&cx, &db, "wsp_fence")
+            .map_err(|error| error.to_string())?;
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path.with_extension("write.lock"))
+            .map_err(|error| error.to_string())?;
+        owner.with_publication_fence(|| {
+            db.with_transaction_error(|| Ok::<_, IndexRebuildError>(()))?;
+            let result = rustix::fs::flock(&probe, rustix::fs::FlockOperation::NonBlockingLockExclusive);
+            if !matches!(result, Err(error) if error == rustix::io::Errno::WOULDBLOCK || error == rustix::io::Errno::AGAIN) {
+                return Err(IndexRebuildError::Index("writer fence escaped before publication finished".to_owned()));
+            }
+            Ok(())
+        }).map_err(|error| error.to_string())?;
+        rustix::fs::flock(&probe, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+            .map_err(|error| error.to_string())?;
+        rustix::fs::flock(&probe, rustix::fs::FlockOperation::Unlock)
+            .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn publication_fence_blocks_expiry_after_real_build_before_filesystem_replace() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root_path = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let path = root_path.join("db.sqlite");
+        let index_dir = root_path.join("index");
+        write_marker(&index_dir, "previous.txt", "keep the previous generation")?;
+        let before = index_regular_file_snapshot(&index_dir)?;
+        let db = DbConnection::open_file(&path).map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let owner = IndexPublishLockOwner::acquire(&cx, &db, "wsp_fence")
+                .map_err(|error| error.to_string())?;
+            install_before_index_publish_hook(move |_| {
+                let other = DbConnection::open_file(&path).expect("open competing store");
+                other
+                    .execute_raw("UPDATE ee_advisory_locks SET expires_at = '2000-01-01T00:00:00Z'")
+                    .expect("expire pre-build lease at the publication boundary");
+            });
+            let mut committed = false;
+            let result = publish_full_index_generation_with_stack(
+                &owner,
+                &index_dir,
+                hash_fallback_embedder_stack(),
+                Vec::new(),
+                2,
+                IndexDocumentCounts::memory_only(0),
+                || {
+                    committed = true;
+                    Ok(())
+                },
+            )
+            .await;
+            ensure(
+                result.is_err() && !committed,
+                "expired build must not publish or complete a job",
+            )?;
+            ensure(
+                index_regular_file_snapshot(&index_dir)? == before,
+                "expired build must preserve every byte of the active generation",
+            )?;
+            ensure(
+                !index_dir.with_file_name("index.previous").exists(),
+                "expired build must not rename the active generation away",
+            )
+        })
+        .map_err(|error| error.to_string())?
     }
 
     #[test]
