@@ -1998,6 +1998,61 @@ const fn allowed(
 const UNCLASSIFIED_BASELINE_FIXTURE: &str =
     "tests/fixtures/contracts/no_silent_fallback_unclassified_baseline.txt";
 
+const RULE_MATCH_COUNTS_FIXTURE: &str =
+    "tests/fixtures/contracts/no_silent_fallback_rule_match_counts.txt";
+
+/// Declared blast radius per rule: how many findings each one OWNS.
+///
+/// `classify_finding` takes the FIRST rule whose fragment appears in a
+/// finding's +/-4 context window, so a rule's reach is invisible from its text.
+/// A fragment owning 3 sites today and 30 next month has silently become a
+/// different rule (bd-apvhh).
+fn rule_match_counts() -> Result<BTreeMap<String, usize>, String> {
+    let raw = include_str!("../fixtures/contracts/no_silent_fallback_rule_match_counts.txt");
+    let mut declared = BTreeMap::new();
+
+    for (index, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let (count, id) = trimmed.split_once('\t').ok_or_else(|| {
+            format!(
+                "{RULE_MATCH_COUNTS_FIXTURE}:{}: expected `<count>\\t<rule id>`",
+                index + 1
+            )
+        })?;
+        let count = count.trim().parse::<usize>().map_err(|error| {
+            format!(
+                "{RULE_MATCH_COUNTS_FIXTURE}:{}: bad count `{count}`: {error}",
+                index + 1
+            )
+        })?;
+        if declared.insert(id.trim().to_owned(), count).is_some() {
+            return Err(format!(
+                "{RULE_MATCH_COUNTS_FIXTURE}:{}: duplicate rule id `{}`",
+                index + 1,
+                id.trim()
+            ));
+        }
+    }
+
+    Ok(declared)
+}
+
+/// Which findings each rule actually owns, under `classify_finding`'s
+/// first-match-wins semantics.
+fn owned_counts(findings: &[SourceFinding]) -> BTreeMap<String, usize> {
+    let mut owned: BTreeMap<String, usize> = BTreeMap::new();
+    for finding in findings {
+        if let Some(rule) = classify_finding(finding) {
+            *owned.entry(rule.id.to_owned()).or_insert(0) += 1;
+        }
+    }
+    owned
+}
+
 fn unclassified_baseline() -> Result<BTreeMap<String, usize>, String> {
     let raw = include_str!("../fixtures/contracts/no_silent_fallback_unclassified_baseline.txt");
     let mut baseline = BTreeMap::new();
@@ -2072,6 +2127,131 @@ fn unclassified_by_file(findings: &[SourceFinding]) -> BTreeMap<String, usize> {
 /// Paired deliberately. The positive arm alone would pass against a detector
 /// that skipped every file; the negative arm is what proves real product code
 /// is still scanned after the exclusion.
+/// GUARD 1 (bd-apvhh, ruled 2026-09-17): the allowlist ratio must be PRINTED,
+/// not merely true.
+///
+/// 289 of 313 rules are `allowed` — 92%. A gate whose inventory is mostly
+/// "this is fine" is most of the way to not being a gate, and that number
+/// should have raised an alarm long before 179 findings accumulated
+/// unclassified. It could not, because nothing ever stated it.
+///
+/// This asserts the ratio is reported on every run and that it stays inside a
+/// declared ceiling, so the next person to widen the allowlist sees the number
+/// move.
+#[test]
+fn allowlist_ratio_is_reported_and_ratcheted() -> TestResult {
+    let allowed = INVENTORY_RULES
+        .iter()
+        .filter(|rule| rule.disposition == Disposition::Allowed)
+        .count();
+    let must_fix = INVENTORY_RULES
+        .iter()
+        .filter(|rule| rule.disposition == Disposition::MustFix)
+        .count();
+    let total = allowed + must_fix;
+    let mut problems = Vec::new();
+
+    if total == 0 {
+        problems.push("inventory is empty; this check would be vacuous".to_owned());
+    }
+
+    // Printed on every run, so the ratio is visible without reading the source.
+    let percent = if total == 0 { 0 } else { allowed * 100 / total };
+    println!(
+        "no_silent_fallback inventory: {allowed} allowed, {must_fix} must_fix ({percent}% allowlist)"
+    );
+
+    // The allowlist may not GROW without a stated reason per entry.
+    //
+    // A percentage ceiling was the obvious shape and is a weak one: integer
+    // percent barely moves. 289 of 313 is 92%, and so is 300 of 324 — eleven
+    // more exemptions would not register. The per-entry requirement is what
+    // actually costs something to add, because it makes each exemption carry an
+    // argument a reviewer can disagree with.
+    const MIN_REASON_CHARS: usize = 24;
+    for rule in INVENTORY_RULES {
+        if rule.disposition != Disposition::Allowed {
+            continue;
+        }
+        let reason = rule.reason.trim();
+        if reason.len() < MIN_REASON_CHARS {
+            problems.push(format!(
+                "{} is `allowed` with a {}-character reason ({reason:?}). An exemption \
+                 needs an argument, not a label; say why the fallback is safe at that \
+                 site.",
+                rule.id,
+                reason.len()
+            ));
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
+/// GUARD 2 (bd-apvhh, ruled 2026-09-17): every rule declares how many findings
+/// it OWNS, and the gate fails in both directions.
+///
+/// A rule's blast radius is invisible from its text because `classify_finding`
+/// matches a +/-4 context window and takes the first hit. Measured when this
+/// landed: 9 rules own 5 or more sites, the widest owning 15, and 33 rules own
+/// NOTHING because an earlier rule wins every finding they would match.
+///
+/// Growth means a rule silently absorbed sites nobody reviewed. Shrink means
+/// the declaration is stale. Both fail, because one arm alone lets the ledger
+/// decay into decoration.
+#[test]
+fn every_rule_declares_the_number_of_findings_it_owns() -> TestResult {
+    let findings = scan_source_findings()?;
+    let owned = owned_counts(&findings);
+    let declared = rule_match_counts()?;
+    let mut problems = Vec::new();
+
+    for rule in INVENTORY_RULES {
+        let live = owned.get(rule.id).copied().unwrap_or(0);
+        let Some(expected) = declared.get(rule.id).copied() else {
+            problems.push(format!(
+                "{} owns {live} finding(s) but declares no count in \
+                 {RULE_MATCH_COUNTS_FIXTURE}",
+                rule.id
+            ));
+            continue;
+        };
+        if live > expected {
+            problems.push(format!(
+                "{} now owns {live} finding(s), declared {expected}. It absorbed \
+                 {} site(s) nobody reviewed — widen the reason or split the rule.",
+                rule.id,
+                live - expected
+            ));
+        } else if live < expected {
+            problems.push(format!(
+                "{} owns {live} finding(s) but declares {expected}. Lower the row in \
+                 {RULE_MATCH_COUNTS_FIXTURE}; a stale count overstates this rule's reach.",
+                rule.id
+            ));
+        }
+    }
+
+    for id in declared.keys() {
+        if !INVENTORY_RULES.iter().any(|rule| rule.id == id) {
+            problems.push(format!(
+                "{RULE_MATCH_COUNTS_FIXTURE} declares `{id}`, which is no longer an \
+                 inventory rule; drop the row"
+            ));
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
 #[test]
 fn cfg_test_only_files_are_not_scanned_as_product_code() -> TestResult {
     let gated = cfg_test_only_files()?;
