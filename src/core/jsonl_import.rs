@@ -2012,14 +2012,30 @@ fn validate_memories(
                 }
                 Some(root) => {
                     logical_ids.push(root.id.clone());
-                    if record
-                        .valid_to
-                        .as_ref()
-                        .or(record.expires_at.as_ref())
-                        .is_none()
-                        && record.tombstoned_at.is_none()
-                        && !live_heads.insert(root.id.clone())
-                    {
+                    // bd-tmv70, third site. This decides revision HEADSHIP, and
+                    // V123 moved that fact out of `valid_to`: "IDENTITY (which
+                    // row is the current revision?) -> superseded_at, and it
+                    // must ignore valid_to entirely." The archive carries that
+                    // fact as `superseded_by`, which this check never consulted,
+                    // so every post-V123 archive of a revised memory arrived
+                    // looking like a chain of live heads and was REJECTED
+                    // outright -- before derive_supersession_for_memory_ids, the
+                    // post-insert repair meant to resolve it, could ever run.
+                    //
+                    // THIS IS A WIDENING, NOT A TIGHTENING, and the legacy arm
+                    // is why. A PRE-V123 archive encodes supersession in
+                    // `valid_to` because that column carried both facts, so
+                    // keying headship on `superseded_by` alone would reject
+                    // every archive written before the split. Both markers are
+                    // therefore accepted, and a row is history if EITHER says
+                    // so. The gate still refuses the thing it exists to refuse:
+                    // two revisions in one chain that claim headship by
+                    // carrying NO marker at all.
+                    let is_history = record.superseded_by.is_some()
+                        || record.valid_to.is_some()
+                        || record.expires_at.is_some()
+                        || record.tombstoned_at.is_some();
+                    if !is_history && !live_heads.insert(root.id.clone()) {
                         Some("revision chain has more than one live head")
                     } else {
                         None
@@ -2904,6 +2920,130 @@ mod tests {
         records[6]["total_records"] = json!(7);
         records[6]["memory_count"] = json!(3);
         Ok(records)
+    }
+
+    // ---- bd-tmv70 third site: headship comes from superseded_by ------------
+    //
+    // These four are one set. The widening is only defensible if the gate still
+    // refuses what it exists to refuse, so the control is not optional here --
+    // before this change NOTHING in the tree asserted the rejection at all, so
+    // a gate widened into uselessness would have gone unnoticed.
+
+    /// One archive line. `superseded_by` and `valid_to` are the two markers the
+    /// validator now accepts; a row carrying neither claims headship.
+    fn lineage_line(
+        memory_id: &str,
+        logical_id: &str,
+        superseded_by: Option<&str>,
+        valid_to: Option<&str>,
+    ) -> String {
+        let sb = superseded_by.map_or("null".to_owned(), |id| format!("\"{id}\""));
+        let vt = valid_to.map_or("null".to_owned(), |at| format!("\"{at}\""));
+        format!(
+            r#"{{"schema":"ee.export.memory.v1","memory_id":"{memory_id}","logical_id":"{logical_id}","workspace_id":"wsp_01234567890123456789012345","level":"procedural","kind":"rule","content":"chain member","importance":0.8,"confidence":0.9,"utility":0.7,"created_at":"2026-04-30T00:00:00Z","updated_at":null,"expires_at":null,"valid_to":{vt},"source_agent":null,"provenance_uri":null,"superseded_by":{sb},"supersedes":null,"redacted":false,"redaction_reason":null}}"#
+        )
+    }
+
+    const ROOT_ID: &str = "mem_01234567890123456789012345";
+    const REVISION_ID: &str = "mem_01234567890123456789012399";
+
+    /// Does the live-head rule reject this archive?
+    fn refuses_as_multi_headed(lines: &[String]) -> bool {
+        let parsed = parse_jsonl_source(&lines.join("\n"));
+        match validate_memories(&parsed) {
+            Ok(_) => false,
+            Err(issues) => issues
+                .iter()
+                .any(|issue| issue.message.contains("more than one live head")),
+        }
+    }
+
+    #[test]
+    fn a_post_v123_archive_marked_by_superseded_by_is_accepted() {
+        // The shape every archive written since V123 has: supersession lives in
+        // superseded_by, and valid_to is left exactly as the author set it,
+        // which is usually null.
+        let lines = vec![
+            lineage_line(ROOT_ID, ROOT_ID, Some(REVISION_ID), None),
+            lineage_line(REVISION_ID, ROOT_ID, None, None),
+        ];
+        assert!(
+            !refuses_as_multi_headed(&lines),
+            "a chain whose superseded revision names its successor has exactly one head"
+        );
+    }
+
+    #[test]
+    fn a_pre_v123_archive_marked_only_by_valid_to_still_imports() {
+        // The backward-compatibility arm, and the reason this is a WIDENING
+        // rather than a tightening. An archive written before the split encodes
+        // supersession in valid_to and carries no superseded_by at all; keying
+        // headship on superseded_by alone would reject every one of them.
+        let lines = vec![
+            lineage_line(ROOT_ID, ROOT_ID, None, Some("2026-05-01T00:00:00Z")),
+            lineage_line(REVISION_ID, ROOT_ID, None, None),
+        ];
+        assert!(
+            !refuses_as_multi_headed(&lines),
+            "a legacy chain marked only by valid_to must still import"
+        );
+    }
+
+    #[test]
+    fn an_archive_with_two_unmarked_heads_is_still_refused() {
+        // THE CONTROL. The widening admits a new marker; it must not admit the
+        // absence of every marker. If this ever passes, the gate has been
+        // deleted rather than corrected.
+        let lines = vec![
+            lineage_line(ROOT_ID, ROOT_ID, None, None),
+            lineage_line(REVISION_ID, ROOT_ID, None, None),
+        ];
+        assert!(
+            refuses_as_multi_headed(&lines),
+            "two revisions in one chain carrying NO history marker are still two live heads"
+        );
+    }
+
+    #[test]
+    fn the_pre_fix_rule_and_the_fix_disagree_on_a_post_v123_archive() {
+        // THE ARM THAT FAILS WITHOUT THE FIX.
+        //
+        // The post-V123 shape, scored by BOTH rules over the same records. The
+        // pre-fix rule consulted valid_to / expires_at / tombstoned_at only, so
+        // it counted the superseded revision as a second head and rejected the
+        // archive outright -- before derive_supersession_for_memory_ids, the
+        // post-insert repair, could run.
+        let lines = vec![
+            lineage_line(ROOT_ID, ROOT_ID, Some(REVISION_ID), None),
+            lineage_line(REVISION_ID, ROOT_ID, None, None),
+        ];
+        let parsed = parse_jsonl_source(&lines.join("\n"));
+
+        // The pre-fix predicate, verbatim, over the parsed records.
+        let pre_fix_heads = parsed
+            .memories
+            .iter()
+            .filter(|record| {
+                record
+                    .valid_to
+                    .as_ref()
+                    .or(record.expires_at.as_ref())
+                    .is_none()
+                    && record.tombstoned_at.is_none()
+            })
+            .count();
+        assert_eq!(
+            pre_fix_heads, 2,
+            "the defect, executed: the old rule saw TWO heads in a correctly \
+             exported post-V123 chain, because it never looked at superseded_by"
+        );
+
+        // The fix, same records, opposite answer.
+        assert!(
+            !refuses_as_multi_headed(&lines),
+            "the fix must accept this archive; if it refuses, the identity \
+             column is being ignored again"
+        );
     }
 
     #[test]

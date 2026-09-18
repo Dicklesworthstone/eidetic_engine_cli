@@ -1160,11 +1160,58 @@ fn backup_degraded_data_json(
     .collect()
 }
 
+/// Immediate successor of each superseded revision, keyed by the revision it
+/// supersedes (bd-tmv70, third site).
+///
+/// V123 moved revision headship out of `valid_to` and into `superseded_at`,
+/// which `StoredMemory` does not carry across the archive boundary. But
+/// `ExportMemoryRecord` ALREADY has `superseded_by` and nothing ever populated
+/// it, so every archive written since V123 records no supersession at all and
+/// the import lineage validator sees a chain of live heads.
+///
+/// Ordered exactly as V123's own backfill orders a chain -- `(created_at, id)`
+/// -- so the archive agrees with the migration that defined the ordering rather
+/// than inventing a second one.
+///
+/// Scoped to the exported set on purpose. A revision whose successor is not in
+/// this archive is the newest thing the archive knows about, and claiming it is
+/// superseded by a row the importer will never see would be a worse lie than
+/// leaving it as the head.
+fn superseded_by_within_export(
+    memories: &[StoredMemory],
+    logical_ids_by_memory: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut chains: BTreeMap<&str, Vec<&StoredMemory>> = BTreeMap::new();
+    for memory in memories {
+        let root = logical_ids_by_memory
+            .get(&memory.id)
+            .map_or(memory.id.as_str(), String::as_str);
+        chains.entry(root).or_default().push(memory);
+    }
+    let mut superseded_by = BTreeMap::new();
+    for (_, mut chain) in chains {
+        if chain.len() < 2 {
+            continue;
+        }
+        chain.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        for pair in chain.windows(2) {
+            superseded_by.insert(pair[0].id.clone(), pair[1].id.clone());
+        }
+    }
+    superseded_by
+}
+
 struct BackupExportData {
     workspace: ExportWorkspaceRecord,
     workspace_row: crate::db::StoredWorkspace,
     memories: Vec<StoredMemory>,
     logical_ids_by_memory: BTreeMap<String, String>,
+    /// bd-tmv70: see `superseded_by_within_export`.
+    superseded_by_by_memory: BTreeMap<String, String>,
     tags_by_memory: BTreeMap<String, Vec<String>>,
     links: Vec<StoredMemoryLink>,
     audits: Vec<StoredAuditEntry>,
@@ -5659,6 +5706,8 @@ fn load_export_data_in_current_snapshot(
         workspace_builder = workspace_builder.name(name);
     }
 
+    let superseded_by_by_memory = superseded_by_within_export(&memories, &logical_ids_by_memory);
+
     Ok(BackupExportData {
         workspace_row,
         workspace: workspace_builder
@@ -5666,6 +5715,7 @@ fn load_export_data_in_current_snapshot(
             .map_err(export_build_error("build backup workspace record"))?,
         memories,
         logical_ids_by_memory,
+        superseded_by_by_memory,
         tags_by_memory,
         links,
         audits,
@@ -5715,6 +5765,10 @@ fn render_records(
             )
             .map_err(export_build_error("build backup memory record"))?;
             record.logical_id = data.logical_ids_by_memory.get(&memory.id).cloned();
+            // bd-tmv70: write the supersession fact the exporter already knows.
+            // Without this the archive records no headship at all post-V123,
+            // and restore cannot tell a superseded revision from the head.
+            record.superseded_by = data.superseded_by_by_memory.get(&memory.id).cloned();
             exporter
                 .write_memory(record)
                 .map_err(io_error("write backup memory record"))?;
