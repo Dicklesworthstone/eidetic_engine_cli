@@ -82,6 +82,129 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "return Ok(Vec::new());",
         "A caller asking for zero candidates gets zero. This early return sits          AFTER the explicit error returns for InvalidConfidence and          AmbiguousSource, so it cannot mask either: an invalid request errors          before reaching it. An empty result for limit == 0 is the honest answer,          not a swallowed failure.",
     ),
+    // bd-apvhh burn-down, tranche 1 (2026-09-17): the sixteen files that had
+    // NO rule at all and exactly one unclassified finding each. Sequenced first
+    // per the ruling -- a file with no rule is where a group key has the least
+    // prior art to lean on, so each of these was read in source rather than
+    // matched by shape. Every one is function-scoped; none is file-scoped.
+    //
+    // All sixteen came out ALLOWED, which is a result worth distrusting on its
+    // face, so: the population is biased benign by construction. A file whose
+    // whole body contains exactly one high-risk line is usually a contained
+    // helper. The files with ten and seven findings are where a real fallback
+    // is likelier, and they are not in this tranche.
+    allowed_in(
+        "NSF-CACHE-PACK-L2-MISSING-CACHE-DIR",
+        "src/cache/pack_l2.rs",
+        "entry_candidates",
+        "Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),",
+        "A cache root that was never created holds no entries. The arm matches NotFound ONLY; every other io error falls through to the next arm and becomes PackL2CacheError::Io with the path and the operation, so a permission failure or a corrupt directory is never read as an empty cache.",
+    ),
+    allowed_in(
+        "NSF-CORE-CONTENTION-P99-UNREACHABLE-DEFAULT",
+        "src/core/contention.rs",
+        "build_contention_report",
+        "inputs.lock_wait_ms_p99.unwrap_or_default()",
+        "UNREACHABLE, and that is the whole justification. This sits in the write-owner-unavailable branch, where status is WriteOwnerStatus::default() -- queue_depth 0 and max_wait_ms 0. classify_write_lock can only return >= Warm from that status via p99_ms.is_some_and(..), because WRITE_QUEUE_WARM is 1 and the max_wait_ms test is `> 0`. So inside `if posture >= Warm` the Option is necessarily Some and the formatted message cannot print a fabricated `0 ms`. FRAGILE ON PURPOSE: a nonzero field in WriteOwnerStatus::default(), or WRITE_QUEUE_WARM becoming 0, makes the default reachable and turns this into a fabricated measurement.",
+    ),
+    allowed_in(
+        "NSF-CORE-HEALTH-DEBT-COUNTS-DECLARED-DEGRADED",
+        "src/core/health.rs",
+        "health_scorecard_evidence",
+        ".map(|report| &report.summary.class_counts)",
+        "An absent memory-debt report yields empty class counts, and those counts ARE scored (stale_anchor_count feeds the weighted score and is rendered as staleAnchors=N), so on its own this would be a missing input flattering the result. It is honest only because the caller declares the absence: the Err arm of run_memory_debt_doctor pushes HealthScorecardDegradation `health_scorecard_debt_unavailable` at severity warning, carrying the error text and a repair command, and None is produced nowhere else. DELETE THAT PUSH AND THIS BECOMES A SILENT FALLBACK.",
+    ),
+    allowed_in(
+        "NSF-CORE-MEMORY-DRIFT-ROLLBACK-DETAIL",
+        "src/core/memory_drift.rs",
+        "build_memory_drift_report_with_connection",
+        ".map(|error| format!(\"; rollback error: {error}\"))",
+        "The default is the empty SUFFIX appended when the rollback succeeded, not an erased value. `.err()` is Some only when rollback itself failed, so an empty string means there was no second failure to report -- which is what the surrounding message should then say. The commit failure that triggered this path is still returned as DomainError::Storage regardless.",
+    ),
+    allowed_in(
+        "NSF-CORE-ORIENT-UNTAGGED-MEMORY",
+        "src/core/orient.rs",
+        "orient_fast_relevant_content",
+        "tags_by_memory.get(&hit.doc_id).cloned().unwrap_or_default()",
+        "A map miss means the memory has no tags, not that tags failed to load. tags_by_memory comes from get_memory_tags_batch over exactly the hit ids, its error is propagated as orient_fast_relevant_unavailable before this line runs, and the underlying SELECT over memory_tags returns rows only for memories that have tags -- so an untagged memory is absent from the map by construction. Empty preserves that absence.",
+    ),
+    allowed_in(
+        "NSF-CORE-RETRIEVAL-AFFINITY-AS-OF-UNREACHABLE",
+        "src/core/retrieval_affinity.rs",
+        "materialize_retrieval_affinity_snapshot",
+        ".map(|(_, _, _, last_event_at)| last_event_at.as_str())",
+        "UNREACHABLE: `if edges.is_empty() { return Ok(AffinityMaterialization::Cold); }` sits directly above, so the iterator is non-empty and `.max()` is always Some. The empty-edge case has its own honest outcome (Cold) rather than an empty as_of timestamp.",
+    ),
+    allowed_in(
+        "NSF-CORE-SESSION-BUDGET-MISSING-LEDGER",
+        "src/core/session_budget.rs",
+        "load_ledger_rows_with_max_bytes",
+        "Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),",
+        "A ledger file that was never written has no rows. NotFound ONLY; the following arm turns every other io error into SessionBudgetRecordError::io with the path, so an unreadable ledger is not reported as an empty one.",
+    ),
+    allowed_in(
+        "NSF-CORE-TAG-BACKFILL-UNTAGGED-MEMORY",
+        "src/core/tag_backfill.rs",
+        "collect_candidates",
+        "let existing_tags = tags_by_memory.get(&memory.id).cloned().unwrap_or_default();",
+        "Same construction as the orient rule: ids are taken from the exact `stored` population being mapped, get_memory_tags_batch's error is already converted to DomainError::Storage with a repair command, and the batch returns keys only for memories that have tags. A miss is a genuinely untagged memory, which is precisely the population a backfill is looking for.",
+    ),
+    allowed_in(
+        "NSF-CORE-UNSAFE-CLAIM-NO-CANDIDATES",
+        "src/core/unsafe_claim_planner.rs",
+        "recommend_unsafe_claim_alternates",
+        ".map(|candidate| candidate.next_command_actions.clone())",
+        "No candidates means no next-command actions to offer, and an empty action list is the honest rendering of that. The empty case is not left implicit elsewhere either: recommended_action_for(&candidates) decides the recommended action over the same slice.",
+    ),
+    allowed_in(
+        "NSF-GRAPH-EMPTY-WORKSPACE-FILTER",
+        "src/graph/mod.rs",
+        "typed_memory_graph_edges",
+        "if workspace_filter.is_some_and(BTreeSet::is_empty) {",
+        "An explicitly EMPTY workspace filter selects no workspaces, so zero edges is the correct answer rather than a swallowed query failure. is_some_and is load-bearing: None means no filter at all and does NOT take this path, it falls through to the real query whose errors propagate as GraphError.",
+    ),
+    allowed_in(
+        "NSF-MESH-BOOTSTRAP-CAPABILITY-REJECTED",
+        "src/mesh/bootstrap_envelope.rs",
+        "decode_envelope",
+        "let capability_token = probe.capability.as_str().unwrap_or_default();",
+        "FAILS CLOSED, which is the property that matters on a trust boundary. A capability field that is not a JSON string becomes \"\", which equals neither BootstrapCapability::Hello.token() nor Join.token(), so the very next branch returns BootstrapEnvelopeError::UnsupportedCapability and reports the observed value. The default cannot admit a malformed envelope; it can only route it to the rejection it already deserved.",
+    ),
+    allowed_in(
+        "NSF-MESH-HELLO-JSON-STRING-LIST",
+        "src/mesh/hello.rs",
+        "json_string_list",
+        ".filter_map(serde_json::Value::as_str)",
+        "The function's entire contract is to read a list of strings out of JSON and yield what is there. A field that is absent, null, or not an array yields no strings, and an empty Vec<String> is that answer rather than a substitute for one.",
+    ),
+    allowed_in(
+        "NSF-MESH-IDP-METHODS-MOST-RESTRICTIVE",
+        "src/mesh/idp.rs",
+        "classify_oidc_provider",
+        "if methods.iter().any(|method| *method == \"none\") {",
+        "FAILS CLOSED. An absent or non-array token_endpoint_auth_methods yields an empty list, which matches neither the `none` test nor the client_secret tests, so classification falls through to IdpProviderCapability::Unsupported -- the most restrictive of the three outcomes. Absence can never be read as SecretlessPublic, which is the one that would weaken a trust decision.",
+    ),
+    allowed_in(
+        "NSF-MODELS-MEMORY-NO-TYPED-SIDECAR",
+        "src/models/memory.rs",
+        "typed_memory_field_names",
+        ".map(typed_memory_valid_field_names)",
+        "Documented contract, stated in the doc comment directly above: kinds without a v2 typed sidecar return an empty list, and that same vocabulary is published as ee.memory.typed_fields.v2. An empty field list is the published answer for such a kind, not a stand-in for a lookup that failed.",
+    ),
+    allowed_in(
+        "NSF-MODELS-RECORDER-SECRET-KEY-SCAN",
+        "src/models/recorder.rs",
+        "contains_secret_like_marker",
+        ".rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')))",
+        "UNREACHABLE: str::rsplit always yields at least one element, so `.next()` is always Some. Were it ever reachable, the direction is still safe -- \"\" matches none of the api_key/password/token/secret names, so the scan would decline to claim a secret it had not identified rather than assert one.",
+    ),
+    allowed_in(
+        "NSF-SEARCH-RULE-SCOPE-FIRST-SEGMENT",
+        "src/search/mod.rs",
+        "normalize_rule_scope_pattern",
+        "let first_segment = portable.split('/').next().unwrap_or_default();",
+        "UNREACHABLE: str::split always yields at least one element, so `.next()` is always Some -- an empty pattern yields one empty segment rather than no segments. The genuinely absent case is handled earlier and explicitly by `let Some(pattern) = pattern else { return Ok(None) }`.",
+    ),
     must_fix(
         "NSF-CASS-PIPE-READ",
         "src/cass/process.rs",

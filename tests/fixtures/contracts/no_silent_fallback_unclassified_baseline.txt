@@ -7,16 +7,21 @@
 # findings across 5 files were counted unclassified when the gate classified
 # them. Every number here comes from the gate's own semantics.
 #
+# LOWERED 2026-09-17 to 153 across 43 files (bd-apvhh burn-down tranche 1).
+# Sixteen files left this list entirely: each had no inventory rule at all and
+# exactly one finding, each was read in source, and each now carries a
+# function-scoped rule that owns exactly that one site. A file is removed here
+# only when its count reaches zero -- an entry at 0 would be indistinguishable
+# from a file nobody has looked at yet.
+#
 # A count may only DECREASE. Raising one is new silent-fallback debt; lowering
 # one after a fix is required (a stale entry decays into a permanent allowlist).
-1	src/cache/pack_l2.rs
 5	src/cli/mesh.rs
 30	src/cli/mod.rs
 2	src/cli/team.rs
 1	src/core/agentsmd.rs
 3	src/core/ask.rs
 1	src/core/conformal.rs
-1	src/core/contention.rs
 1	src/core/context.rs
 3	src/core/contradiction_detect.rs
 7	src/core/curate.rs
@@ -25,46 +30,32 @@
 2	src/core/global_store.rs
 2	src/core/graph_diff.rs
 2	src/core/handoff.rs
-1	src/core/health.rs
 4	src/core/index.rs
 1	src/core/jsonl_import.rs
 2	src/core/lab.rs
 1	src/core/learn.rs
 8	src/core/memory.rs
 3	src/core/memory_debt.rs
-1	src/core/memory_drift.rs
 5	src/core/model.rs
-1	src/core/orient.rs
 1	src/core/outcome.rs
 1	src/core/plan.rs
 7	src/core/resume.rs
-1	src/core/retrieval_affinity.rs
 3	src/core/search.rs
-1	src/core/session_budget.rs
 2	src/core/support_bundle.rs
 4	src/core/swarm_next_action.rs
-1	src/core/tag_backfill.rs
 1	src/core/tailscale_probe.rs
-1	src/core/unsafe_claim_planner.rs
 5	src/core/verify_ledger.rs
 1	src/core/workspace.rs
 3	src/core/write_owner.rs
 4	src/daemon/server.rs
 1	src/db/mod.rs
-1	src/graph/mod.rs
 1	src/hooks/installer.rs
 3	src/mcp.rs
-1	src/mesh/bootstrap_envelope.rs
 4	src/mesh/foreground_cli.rs
-1	src/mesh/hello.rs
-1	src/mesh/idp.rs
 6	src/mesh/responder_broker.rs
 10	src/mesh/team.rs
-1	src/models/memory.rs
-1	src/models/recorder.rs
 1	src/models/verification.rs
 1	src/output/mod.rs
 1	src/pack/mod.rs
-1	src/search/mod.rs
 1	src/serve.rs
 1	src/steward/mod.rs
