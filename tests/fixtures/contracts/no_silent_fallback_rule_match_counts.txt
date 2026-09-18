@@ -468,3 +468,40 @@
 1	NSF-VERIFY-LEDGER-CLOSED-REMEDIATION-REFS
 1	NSF-VERIFY-LEDGER-ERROR-CODES-FROM
 2	NSF-VERIFY-LEDGER-COMBINED-TAIL
+
+# src/cli/mod.rs -- the densest file in the burn-down and the reason tranche 5
+# exists: 30 findings against 37 RESIDENT rules, all 37 file-scoped, several
+# with fragments as generic as `strings.sort()`, `parse_filters` and
+# `if !path.exists()` in a 98,000-line file.
+#
+# Appended at the END, which is what makes the next line true: a per-rule
+# ownership delta across all 369 pre-existing rules showed NONE of them moved.
+# Appending cannot disturb a resident, because classify_finding takes the first
+# match and residents are all earlier -- the safety is structural, not a promise.
+#
+# TWO OF MINE WERE WRONG AND THE DELTA CAUGHT BOTH, neither by stealing from a
+# resident but by covering fewer of my own sites than I intended:
+#   NSF-CLI-HELP-ARG-OPTIONAL-TEXT owned 2 of 3 -- the fragment sat at L675,
+#     outside L667's context window. Split into a help-text rule and an alias
+#     rule, which is also the better shape since they are different concepts.
+#   NSF-CLI-ORIENT-FAST-JOINED-STRINGS owned 1 of 2 -- the two joins in that
+#     renderer use different chains, one over string values and one reaching for
+#     a `uri` field, so they are two rules and not one group.
+10	NSF-CLI-PACK-LEDGER-ITEM-PROJECTION
+1	NSF-CLI-HELP-ARG-OPTIONAL-TEXT
+2	NSF-CLI-HELP-ARG-ALIASES
+1	NSF-CLI-HELP-COMMAND-ABOUT
+1	NSF-CLI-HOOK-HARNESS-MATCHER-SUFFIX
+1	NSF-CLI-SPLIT-TAGS-ABSENT
+1	NSF-CLI-HOTSET-BEADS-SIGNAL-LINES
+1	NSF-CLI-HOTSET-GIT-STDOUT
+1	NSF-CLI-HOTSET-BV-STDOUT
+1	NSF-CLI-CONTEXT-SHOW-LEDGER-ARRAYS
+1	NSF-CLI-ORIENT-FAST-JOINED-STRINGS
+1	NSF-CLI-ORIENT-FAST-PROVENANCE-URIS
+1	NSF-CLI-PUBLIC-DEGRADATION-VALUES
+1	NSF-CLI-RECALL-FALLBACK-MESSAGE
+1	NSF-CLI-USAGE-ERROR-NO-REPAIR
+1	NSF-CLI-CLAIM-GATE-DEGRADED-REPAIR-JSON
+1	NSF-CLI-CLAIM-GATE-ONLY-DEGRADED-REPAIR
+1	NSF-CLI-EVAL-ASK-NO-SIDES

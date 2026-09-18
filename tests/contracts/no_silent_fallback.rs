@@ -2485,6 +2485,139 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "stdout_tail.unwrap_or_default(),",
         "Two sites, multiplicity 2. An absent stdout or stderr tail contributes an empty string to a two-element join, which renders as a leading or trailing newline rather than as fabricated output. The function's whole job is to concatenate whatever tails exist, and a missing tail genuinely contributes nothing.",
     ),
+    // src/cli/mod.rs, the densest file in the burn-down: 30 unclassified
+    // findings against 37 RESIDENT rules, every one of them FILE-SCOPED, some
+    // with fragments as generic as `strings.sort()`, `parse_filters` and
+    // `if !path.exists()`. Appended at the end for the reason given above, and
+    // here the reason is load-bearing rather than tidy: an insertion ahead of
+    // those residents would contest their findings on a 98,000-line file where
+    // a generic fragment can reach almost anywhere.
+    allowed_in(
+        "NSF-CLI-PACK-LEDGER-ITEM-PROJECTION",
+        "src/cli/mod.rs",
+        "context_delta_item_snapshot_from_pack_ledger",
+        ".cloned()",
+        "Ten optional projection fields of a verified prior-pack ledger item, carried as one group with multiplicity 10. Each is `Option<&serde_json::Value>` cloned into a default, and serde_json::Value's Default is Value::Null -- so absence is PRESERVED as null rather than replaced by a fabricated zero, rank, or empty string. That type-determined distinction is the whole justification, and it is the same one already accepted for the sibling projection in src/cli/context_delta_evidence.rs from_ledger. The REQUIRED field does not take this path: memoryId uses ok_or_else and returns \"verified prior pack item omitted memoryId\" when absent, so a malformed item is an error rather than a snapshot full of nulls. FRAGMENT IS DELIBERATELY GENERIC -- `.cloned()` reaches all ten context windows across a 35-line span, which no single statement fragment can -- and it is safe ONLY because the rule is function-scoped; as a file-scoped rule in this file it would be catastrophic.",
+    ),
+    allowed_in(
+        "NSF-CLI-HELP-ARG-OPTIONAL-TEXT",
+        "src/cli/mod.rs",
+        "cli_help_argument",
+        ".or_else(|| arg.get_help())",
+        "An argument that declares neither long help nor short help has no description, and the introspection surface reports an empty string. get_long_help/get_help are pure accessors over an already-parsed command tree; there is no fallible read here to swallow. SPLIT FROM THE ALIAS RULE AFTER MEASURING: one rule covering all three sites owned only 2, because the fragment I first chose sat at L675, outside the L667 context window. They are also two different concepts, so two rules is the better shape as well as the working one.",
+    ),
+    allowed_in(
+        "NSF-CLI-HELP-ARG-ALIASES",
+        "src/cli/mod.rs",
+        "cli_help_argument",
+        "short_aliases: arg",
+        "Two sites, multiplicity 2: long aliases and short aliases. An argument that declares no aliases has none, and clap's accessors return None for exactly that case rather than for a failure.",
+    ),
+    allowed_in(
+        "NSF-CLI-HELP-COMMAND-ABOUT",
+        "src/cli/mod.rs",
+        "collect_cli_help",
+        "description: command",
+        "A command that declares no `about` has no description, and the help projection says so with an empty string rather than inventing one. Same pure-accessor argument as the argument-level rule.",
+    ),
+    allowed_in(
+        "NSF-CLI-HOOK-HARNESS-MATCHER-SUFFIX",
+        "src/cli/mod.rs",
+        "render_hook_harness_human",
+        ".map(|matcher| format!(\" ({matcher})\"))",
+        "The default is an empty SUFFIX for a snippet with no matcher, not an erased value. The `.map` builds a parenthesised fragment only when a matcher exists, so absence renders as nothing appended.",
+    ),
+    allowed_in(
+        "NSF-CLI-SPLIT-TAGS-ABSENT",
+        "src/cli/mod.rs",
+        "split_tags",
+        ".filter(|tag| !tag.is_empty())",
+        "Splitting an absent tag string yields no tags. The inner chain already drops empty entries, so an absent input and an input of separators produce the same empty vector by construction rather than by this default.",
+    ),
+    allowed_in(
+        "NSF-CLI-HOTSET-BEADS-SIGNAL-LINES",
+        "src/cli/mod.rs",
+        "hotset_stream_beads_signals",
+        ".take(6)",
+        "A bounded projection of at most six signal lines; when the source produced none there are none to take. The bound itself is the interesting part and it is preserved -- an absent source cannot widen the slice.",
+    ),
+    allowed_in(
+        "NSF-CLI-HOTSET-GIT-STDOUT",
+        "src/cli/mod.rs",
+        "collect_hotset_git_source",
+        "for line in stdout.lines().take(HOTSET_GIT_MAX_LINES)",
+        "Reached only inside `match evidence.status { SourceRunStatus::Passed => .. }`, so this is a probe that SUCCEEDED and produced no stdout -- which means no dirty paths, the honest reading. A failed or degraded probe takes a different arm entirely and never reaches this default.",
+    ),
+    allowed_in(
+        "NSF-CLI-HOTSET-BV-STDOUT",
+        "src/cli/mod.rs",
+        "collect_hotset_bv_source",
+        "let stdout = evidence.output.stdout_tail.clone().unwrap_or_default();",
+        "Same shape and the same guard as the git source: only a PASSED probe reaches it, so an empty tail is a successful probe with nothing to say rather than a swallowed failure.",
+    ),
+    allowed_in(
+        "NSF-CLI-CONTEXT-SHOW-LEDGER-ARRAYS",
+        "src/cli/mod.rs",
+        "handle_context_show",
+        "let items_json = crate::db::pack_ledger_core_array(&public_ledger, \"selectedItems\")",
+        "A pack ledger that carries no selectedItems/omittedItems array describes a pack that selected or omitted nothing, and the renderer shows that rather than failing. WORTH KNOWING FOR bd-epvc1: this file already carries NSF-CLI-PACK-REPLAY-SELECTED-ITEMS and NSF-CLI-PACK-REPLAY-OMITTED-ITEMS for the SAME concept, and neither reaches here because their fragments spell the argument `ledger_core_array(value, \"selectedItems\")` while this call site passes `&public_ledger`. A fragment that hardcodes a caller's variable name is one rename away from owning nothing.",
+    ),
+    allowed_in(
+        "NSF-CLI-ORIENT-FAST-JOINED-STRINGS",
+        "src/cli/mod.rs",
+        "render_orient_fast_content_human",
+        ".filter_map(serde_json::Value::as_str)",
+        "A JSON field that is absent, or present but not an array of strings, contributes no members to a comma join, and an empty join is an empty string. This is a human renderer over an already-retrieved payload; nothing here is a fallible read.",
+    ),
+    allowed_in(
+        "NSF-CLI-ORIENT-FAST-PROVENANCE-URIS",
+        "src/cli/mod.rs",
+        "render_orient_fast_content_human",
+        ".filter_map(|entry| entry.get(\"uri\").and_then(serde_json::Value::as_str))",
+        "The provenance join in the same renderer, and a SEPARATE rule rather than a second site of the one above because the two chains differ: this one filter_maps over entries reaching for a `uri` field, the other over plain string values. Grouping them under the first rule's fragment left this site unowned, which the ownership delta caught. An item with no provenance entries, or entries without uris, contributes nothing to the join.",
+    ),
+    allowed_in(
+        "NSF-CLI-PUBLIC-DEGRADATION-VALUES",
+        "src/cli/mod.rs",
+        "public_degradation_values",
+        "let mut projected = serde_json::Value::Array(values.to_vec());",
+        "UNREACHABLE. `projected` is constructed as Value::Array two lines above, and redact_public_projection_strings redacts in place without changing the variant, so `as_array()` is always Some by construction.",
+    ),
+    allowed_in(
+        "NSF-CLI-RECALL-FALLBACK-MESSAGE",
+        "src/cli/mod.rs",
+        "handle_recall",
+        "let entry = daemon_memory_read_fallback(&reason);",
+        "`entry` is built by daemon_memory_read_fallback on the line this fragment names, so its \"message\" field is always present and the default cannot be observed. Note the asymmetry one line below -- `repair` keeps its Option through `.map(str::to_owned)` -- which is the clearer spelling of the same absence.",
+    ),
+    allowed_in(
+        "NSF-CLI-USAGE-ERROR-NO-REPAIR",
+        "src/cli/mod.rs",
+        "usage_parts",
+        "DomainError::Usage { message, repair } =>",
+        "A usage error that carries no repair hint has none, and the empty string is that. The surrounding function panics on any other DomainError variant, so it is a narrow extractor over a matched shape rather than a general error path.",
+    ),
+    allowed_in(
+        "NSF-CLI-CLAIM-GATE-DEGRADED-REPAIR-JSON",
+        "src/cli/mod.rs",
+        "swarm_work_packet_claim_gate_degraded_json",
+        "degradation.repair.clone().unwrap_or_default(),",
+        "A degradation with no repair command aggregates as an empty repair string. The repair field is advisory guidance for an operator; its absence is not a failure to read anything. This is the third spelling of this same concept in this file, after NSF-CLI-DEGRADED-REPAIR-TEXT and NSF-CLI-DEGRADED-LIST-REPAIR-CLONE.",
+    ),
+    allowed_in(
+        "NSF-CLI-CLAIM-GATE-ONLY-DEGRADED-REPAIR",
+        "src/cli/mod.rs",
+        "claim_gate_only_degraded_input",
+        "DegradationAggregationInput::new(source, code, severity, message, repair.unwrap_or_default())",
+        "The fourth spelling. Same justification: an absent repair hint is absent, and every branch above this line supplies its own message and code explicitly, so nothing about the degradation itself is being defaulted.",
+    ),
+    allowed_in(
+        "NSF-CLI-EVAL-ASK-NO-SIDES",
+        "src/cli/mod.rs",
+        "run_eval_ask_queries",
+        "let sides = report.sides.as_deref().unwrap_or_default();",
+        "An ask report with no recorded sides has none, and the eval actual records an empty slice. The report itself is already in hand here -- the ask has run and returned -- so this is reading an optional field of a successful result, not recovering from a failed one.",
+    ),
 ];
 
 const MANUAL_FINDINGS: &[ManualFinding] = &[];
