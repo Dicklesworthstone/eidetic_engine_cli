@@ -1,20 +1,21 @@
 diff --git a/src/core/ask_admission.rs b/src/core/ask_admission.rs
 --- a/src/core/ask_admission.rs
 +++ b/src/core/ask_admission.rs
-@@ -14,6 +14,9 @@
+@@ -13,6 +13,9 @@
+ use crate::policy::redact_public_replay_text;
  
  use super::super::AskCandidate;
- 
++
 +#[path = "ask_evidence.rs"]
 +pub(super) mod evidence;
-+
+ 
  pub(super) fn rule_candidate(
      projection: &crate::search::RuleIndexProjection,
- ) -> Option<(AskCandidate, super::super::AskNativeSource)> {
 diff --git a/src/core/ask_corpus.rs b/src/core/ask_corpus.rs
 --- a/src/core/ask_corpus.rs
 +++ b/src/core/ask_corpus.rs
-@@ -176,7 +176,7 @@
+@@ -172,12 +172,19 @@
+         .map(|candidate| candidate.memory_id.as_str())
          .collect();
      let contradictions = load_scoped_contradictions(connection, &ids)?;
 -    let native_sources = load_rules(
@@ -22,19 +23,18 @@ diff --git a/src/core/ask_corpus.rs b/src/core/ask_corpus.rs
          connection,
          workspace_id,
          &scope,
-@@ -184,6 +184,13 @@
+         &attributed_memories,
          &mut candidates,
-     )?;
++    )?;
 +    admission::evidence::load_candidates(
 +        connection,
 +        workspace_id,
 +        scope.scope,
 +        &mut candidates,
 +        &mut native_sources,
-+    )?;
+     )?;
      snapshot.finish()?;
      Ok(AskCorpus {
-         candidates,
 diff --git a/src/core/ask_native.rs b/src/core/ask_native.rs
 --- a/src/core/ask_native.rs
 +++ b/src/core/ask_native.rs
@@ -47,13 +47,15 @@ diff --git a/src/core/ask_native.rs b/src/core/ask_native.rs
  use crate::pack::PackEntityRef;
  
  use super::{AskCandidate, AskReport, AskRequest, AskSpan};
-@@ -22,6 +22,16 @@
+@@ -22,6 +22,17 @@
      pub source_memory_ids: Vec<String>,
  }
  
 +fn evidence_session(provenance: Option<&str>) -> Option<String> {
-+    let ProvenanceUri::CassSession { session, span: Some(_) } =
-+        ProvenanceUri::from_str(provenance?).ok()?
++    let ProvenanceUri::CassSession {
++        session,
++        span: Some(_),
++    } = ProvenanceUri::from_str(provenance?).ok()?
 +    else {
 +        return None;
 +    };
@@ -63,7 +65,7 @@ diff --git a/src/core/ask_native.rs b/src/core/ask_native.rs
  pub(super) fn validate_sources(request: &AskRequest, candidates: &[AskCandidate]) -> bool {
      candidates.iter().all(|candidate| {
          let Some(source) = request.native_sources.get(&candidate.memory_id) else {
-@@ -31,6 +41,9 @@
+@@ -30,6 +41,9 @@
          };
          !matches!(source.entity, PackEntityRef::Memory(_))
              && source.entity.id_string() == candidate.memory_id
@@ -73,7 +75,7 @@ diff --git a/src/core/ask_native.rs b/src/core/ask_native.rs
              && source
                  .entity_revision
                  .strip_prefix("blake3:")
-@@ -157,6 +170,25 @@
+@@ -158,6 +172,24 @@
      }
      let ids: BTreeSet<_> = spans.iter().map(|span| span.memory_id.as_str()).collect();
      let mut parents: BTreeMap<String, String> = BTreeMap::new();
@@ -81,9 +83,10 @@ diff --git a/src/core/ask_native.rs b/src/core/ask_native.rs
 +    // independent witnesses. SessionId is an internal group key only: no
 +    // synthetic MemoryId or session-level citation is emitted.
 +    for span in spans {
-+        if sources.get(&span.memory_id).is_some_and(|source| {
-+            matches!(source.entity, PackEntityRef::EvidenceSpan(_))
-+        }) && let Some(session) = evidence_session(span.provenance_uri.as_deref())
++        if sources
++            .get(&span.memory_id)
++            .is_some_and(|source| matches!(source.entity, PackEntityRef::EvidenceSpan(_)))
++            && let Some(session) = evidence_session(span.provenance_uri.as_deref())
 +        {
 +            let left = root(&mut parents, &span.memory_id);
 +            let right = root(&mut parents, &session);
@@ -97,3 +100,122 @@ diff --git a/src/core/ask_native.rs b/src/core/ask_native.rs
      for (id, source) in sources.iter().filter(|(id, _)| ids.contains(id.as_str())) {
          for parent in &source.source_memory_ids {
              let left = root(&mut parents, id);
+diff --git a/src/core/ask_evidence.rs b/src/core/ask_evidence.rs
+--- a/src/core/ask_evidence.rs
++++ b/src/core/ask_evidence.rs
+@@ -251,7 +251,8 @@
+         db.insert_memory(&memory, &CreateMemoryInput {
+             workspace_id: workspace.clone(), content: BODY.to_owned(), level: "procedural".to_owned(), kind: "rule".to_owned(),
+             workflow_id: None, confidence: 0.9, utility: 0.5, importance: 0.5, trust_class: "human_explicit".to_owned(),
+-            trust_subclass: None, provenance_uri: None, tags: Vec::new(), valid_from: None, valid_to: None,
++            trust_subclass: None, provenance_uri: None, tags: Vec::new(),
++            valid_from: Some("2000-01-01T00:00:00Z".to_owned()), valid_to: None,
+         }).unwrap();
+         let initial = corpus(&db, &workspace);
+         let baseline = evaluate_ask(&request(&initial), &initial.candidates);
+@@ -262,6 +263,9 @@
+         assert_eq!(evaluate_ask(&request(&linked), &linked.candidates).confidence.to_bits(), baseline.confidence.to_bits());
+         db.execute_raw(&format!("UPDATE memories SET valid_to = '2001-01-01T00:00:00Z' WHERE id = '{memory}'")).unwrap();
+         assert!(corpus(&db, &workspace).candidates.is_empty());
++        db.execute_raw(&format!("UPDATE memories SET valid_to = '1999-01-01T00:00:00Z' WHERE id = '{memory}'")).unwrap();
++        assert!(load_current_ask_corpus(&db, &workspace, Utc::now()).is_err(),
++            "an inverted validity window must remain corruption, not ordinary expiration");
+     }
+ 
+     #[test]
+diff --git a/tests/contracts/ask_lifecycle.rs b/tests/contracts/ask_lifecycle.rs
+--- a/tests/contracts/ask_lifecycle.rs
++++ b/tests/contracts/ask_lifecycle.rs
+@@ -193,3 +193,6 @@
+ 
+ #[path = "ask_native.rs"]
+ mod native;
++
++#[path = "ask_transcript.rs"]
++mod transcript;
+diff --git a/tests/contracts/ask_native.rs b/tests/contracts/ask_native.rs
+--- a/tests/contracts/ask_native.rs
++++ b/tests/contracts/ask_native.rs
+@@ -87,14 +87,16 @@
+     db.insert_curation_candidate(candidate_id, &CreateCurationCandidateInput {
+         workspace_id: workspace_id.clone(), candidate_type: "rule".to_owned(),
+         target_memory_id: Some(memory_id.clone()), proposed_content: Some(RULE.to_owned()),
+-        proposed_confidence: Some(0.95), proposed_trust_class: Some("human_explicit".to_owned()),
+-        source_type: "feedback_event".to_owned(), source_id: None,
++        proposed_confidence: Some(0.95), proposed_trust_class: Some("agent_assertion".to_owned()),
++        source_type: "agent_inference".to_owned(), source_id: Some(memory_id.clone()),
+         reason: "Approved release guidance from reviewed historical evidence.".to_owned(),
+-        confidence: 0.95, status: Some("approved".to_owned()),
+-        created_at: Some("2020-01-01T00:00:00Z".to_owned()), ttl_expires_at: None,
++        confidence: 0.95, status: Some("pending".to_owned()),
++        created_at: None, ttl_expires_at: None,
+         derivation_source_refs_json: None, derivation_metadata_json: None,
+     }).map_err(|error| error.to_string())?;
+     drop(db);
++    let validated = command(&workspace, &["curate", "validate", candidate_id, "--actor", "native-ask-acceptance"])?;
++    assert_eq!(validated["data"]["validation"]["decision"], "approved");
+     let applied = command(&workspace, &["curate", "apply", candidate_id, "--actor", "native-ask-acceptance"])?;
+     assert_eq!(applied["data"]["application"]["decision"], "create_rule");
+     let id = applied["data"]["application"]["changes"].as_array().ok_or("missing apply changes")?
+@@ -103,6 +105,7 @@
+     let answer = command(&workspace, &["ask", QUESTION])?;
+     assert_eq!(answer["data"]["abstained"], false);
+     check_citation(&answer["data"]["citations"][0], &id, RULE)?;
++    assert_eq!(answer["data"]["citations"][0]["trustClass"], "agent_assertion");
+     assert!(!answer.to_string().contains(&memory_id), "source memory must not replace rule identity");
+     let db = DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+     let audits = db.list_audit_by_target("rule", &id, None).map_err(|error| error.to_string())?;
+diff --git a/docs/adr/0067-extractive-ask.md b/docs/adr/0067-extractive-ask.md
+--- a/docs/adr/0067-extractive-ask.md
++++ b/docs/adr/0067-extractive-ask.md
+@@ -58,8 +58,48 @@
+ Ordinary successful asks append retrieval audits against the real `rule`
+ target and include its revision, not a `memory` alias. Abstentions do not count
+ as retrievals. `--read-only` suppresses both retrieval and query-miss auditing;
+-neither mode implicitly migrates a database. This amendment does not enable
+-direct CASS evidence answering or path-specific rule matching.
++neither mode implicitly migrates a database. Path-specific rule matching remains
++separate work; native CASS admission is specified in the next amendment.
++
++### Native CASS evidence admission (2026-09-18 amendment)
++
++`ee ask` also reads persisted CASS excerpts directly, without copying them into
++memories or requiring an embedding index or a running CASS subprocess. It uses
++the same paged, current-snapshot positive-admission visitor as search. The live
++session, producer, role, screening version, security epoch, eligibility flags,
++canonical excerpt hash, and security metadata must all validate. Unsafe public
++text remains excluded before scoring, contradiction detection, and hints.
++
++Only workspace and swarm memory scopes admit raw transcript evidence, within
++the already-selected workspace. An unverified session agent label is not
++self/team authorization, and a linked memory cannot lend its trust or tags to
++an excerpt. A linked excerpt additionally requires its parent memory to have
++passed current lifecycle, scope, and public-evidence admission, preventing
++expired or withheld advice from returning through a second identity.
++
++Citations retain the real `EvidenceId`, `entityKind: "evidence_span"`,
++`entityId`, `evidenceId`, and the canonical `pack_entity_revision()` digest.
++They never carry a synthetic `memoryId`. Provenance uses the native SessionId
++and original line range, not upstream paths or opaque external session names.
++Byte offsets address the stored canonical excerpt, not the source file.
++The excerpt is quoted unchanged. Conflict sides, nearest-evidence hints,
++query-assist identities, Markdown labels and retrieval audits retain that same
++source identity and revision.
++
++Evidence has no learned confidence posterior: its input confidence is the
++explicit neutral prior **0.5**, with the existing `cass_evidence` trust tilt.
++It never borrows a linked memory's confidence or a transcript role's apparent
++human authority. Multiple excerpts of one session are one corroborating
++provenance group; linked memory/rule lineages join that group conservatively.
++Independent sessions can corroborate, and opposition remains separate sides.
++The existing confidence and strict-abstention thresholds are unchanged.
++
++All evidence decisions share the owned ask read snapshot. A storage failure
++withholds the answer rather than returning a partial corpus. Read-only asks
++leave source rows and audits unchanged; ordinary successful asks audit the
++displayed native `evidence` targets and revisions, never surrogate memories.
++This does not fetch uncaptured portions of a transcript or grant raw CASS
++evidence eligibility in the narrower memory scopes.
+ 
+ ### 1. Span model
+ 

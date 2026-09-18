@@ -40,12 +40,12 @@ jobs:
           key: ask-evidence-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             ask-evidence-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
-      - name: Integrate reviewed native evidence admission
+      - name: Integrate reviewed transcript admission and public contracts
         run: |
           git rev-parse HEAD
           git apply --check --recount scripts/delivery/ask-evidence-20260918.patch
           git apply --recount scripts/delivery/ask-evidence-20260918.patch
-          rustfmt --edition 2024 --config skip_children=true src/core/ask_admission.rs src/core/ask_corpus.rs src/core/ask_native.rs src/core/ask_evidence.rs
+          rustfmt --edition 2024 --config skip_children=true src/core/ask_admission.rs src/core/ask_corpus.rs src/core/ask_native.rs src/core/ask_evidence.rs tests/contracts/ask_lifecycle.rs tests/contracts/ask_native.rs tests/contracts/ask_transcript.rs
           git diff --check
           git diff --stat
       - name: Compile production library
@@ -61,12 +61,19 @@ jobs:
           tail -n 140 "$RUNNER_TEMP/evidence-focused.log"
           grep -Eq 'test result: ok\. 9 passed; 0 failed' "$RUNNER_TEMP/evidence-focused.log" || status=1
           exit "$status"
+      - name: Execute new and existing public ask contracts before publication
+        run: |
+          status=0
+          cargo test --locked --test contracts ask_lifecycle -- --nocapture > "$RUNNER_TEMP/evidence-cli.log" 2>&1 || status=$?
+          tail -n 160 "$RUNNER_TEMP/evidence-cli.log"
+          grep -Eq 'test result: ok\. 20 passed; 0 failed' "$RUNNER_TEMP/evidence-cli.log" || status=1
+          exit "$status"
       - name: Commit tested production feature directly to main
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- src/core/ask_admission.rs src/core/ask_corpus.rs src/core/ask_native.rs src/core/ask_evidence.rs
-          git commit -m 'feat(ask): answer directly from live-admitted native CASS evidence' -m 'Load admitted transcript excerpts through bounded source-of-truth pages in the owned ask snapshot. Preserve EvidenceId, revision, exact excerpt offsets and canonical session/line provenance with cass_evidence trust and a neutral prior. Keep narrow memory scopes fail closed, exclude linked excerpts whose parent memory is ineligible, and count a session and its linked derivations as one corroborating lineage. Production compilation and nine real-store regressions passed before this commit; broader regression results follow separately.'
+          git add -- src/core/ask_admission.rs src/core/ask_corpus.rs src/core/ask_native.rs src/core/ask_evidence.rs tests/contracts/ask_lifecycle.rs tests/contracts/ask_native.rs tests/contracts/ask_transcript.rs docs/adr/0067-extractive-ask.md
+          git commit -m 'feat(ask): answer directly from live-admitted native CASS evidence' -m 'Load admitted transcript excerpts through bounded source-of-truth pages in the owned ask snapshot. Preserve EvidenceId, revision, exact excerpt offsets and canonical session/line provenance with cass_evidence trust and a neutral prior. Keep narrow memory scopes fail closed, exclude linked excerpts whose parent memory is ineligible, and count a session and its linked derivations as one corroborating lineage. Nine real-store tests and all twenty lifecycle CLI contracts passed before this commit. Exercise real curation validation with a legitimate agent-assertion source rather than bypassing trust policy in the fixture. Broader engine regression results follow separately.'
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then exit 0; fi
             git fetch origin main
@@ -77,20 +84,13 @@ jobs:
         run: |
           status=0
           cargo test --locked --lib core::ask:: -- --nocapture > "$RUNNER_TEMP/evidence-engine.log" 2>&1 || status=$?
-          tail -n 200 "$RUNNER_TEMP/evidence-engine.log"
-          exit "$status"
-      - name: Execute existing public ask contracts
-        if: ${{ !cancelled() }}
-        run: |
-          status=0
-          cargo test --locked --test contracts ask_lifecycle -- --nocapture > "$RUNNER_TEMP/evidence-cli.log" 2>&1 || status=$?
-          tail -n 140 "$RUNNER_TEMP/evidence-cli.log"
+          tail -n 210 "$RUNNER_TEMP/evidence-engine.log"
           exit "$status"
       - name: Preserve exact source and verification logs
         if: ${{ !cancelled() }}
         run: |
           git rev-parse HEAD > "$RUNNER_TEMP/evidence-source-sha.log"
-          git diff -- src/core/ask_admission.rs src/core/ask_corpus.rs src/core/ask_native.rs src/core/ask_evidence.rs > "$RUNNER_TEMP/evidence-uncommitted.patch"
+          git diff -- src/core/ask_admission.rs src/core/ask_corpus.rs src/core/ask_native.rs src/core/ask_evidence.rs tests/contracts/ask_lifecycle.rs tests/contracts/ask_native.rs tests/contracts/ask_transcript.rs docs/adr/0067-extractive-ask.md > "$RUNNER_TEMP/evidence-uncommitted.patch"
           git archive --format=tar.gz --output="$RUNNER_TEMP/evidence-source.tar.gz" HEAD
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
