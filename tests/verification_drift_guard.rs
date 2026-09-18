@@ -509,13 +509,7 @@ fn excused_stages_are_counted_and_never_reported_as_passed() {
         .lines()
         .find(|line| line.contains("local census="))
         .expect("verification_summary_banner must build a per-status census");
-    for label in [
-        "passed",
-        "advisory",
-        "tracked-red",
-        "did-not-run",
-        "not-applicable",
-    ] {
+    for label in ["advisory", "tracked-red", "did-not-run", "not-applicable"] {
         assert!(
             census_line.contains(label),
             "the summary census must report `{label}`; an excuse you cannot count \
@@ -852,6 +846,14 @@ STAGE_GATED_OFF="$GATED_OFF"
 STAGE_RESULTS=""
 STAGE_SKIPPED_CONTENTION_NAMES="    - Verification Drift Guard (beads lock held)\n"
 STAGE_GATED_OFF_NAMES="    - Performance Benchmarks (--include-bench not set)\n"
+# The excused counters the census reads. This harness runs under `set -u`, so
+# omitting them is not a silent default -- it kills the extracted banner, which
+# is how the bd-...-1azkt.5 census change surfaced here as exit 127 rather than
+# as a wrong number.
+STAGE_ADVISORY=0
+STAGE_ADVISORY_NAMES=""
+STAGE_TRACKED_RED=0
+STAGE_TRACKED_RED_NAMES=""
 eval "$(awk '/^verification_exit_status\(\) /,/^}/' "$VERIFY_SCRIPT")"
 eval "$(awk '/^verification_summary_banner\(\) /,/^}/' "$VERIFY_SCRIPT")"
 verification_summary_banner

@@ -782,24 +782,28 @@ verification_summary_banner() {
     # A census, never a boolean. The excused population has to appear in the
     # same line that claims success, or an excuse nobody counts is an excuse
     # nobody audits (ruled 2026-09-17).
-    local census="${STAGE_PASSED} passed, ${STAGE_ADVISORY} advisory, ${STAGE_TRACKED_RED} tracked-red, ${STAGE_SKIPPED_CONTENTION} did-not-run, ${STAGE_GATED_OFF} not-applicable"
+    # The census EXTENDS the attempted denominator rather than replacing it.
+    # "N/M attempted verification stages passed" is its own contract, asserted
+    # by a_complete_run_exits_zero, and dropping it to make room for the census
+    # would trade one honest number for another instead of reporting both.
+    local census="${STAGE_ADVISORY} advisory, ${STAGE_TRACKED_RED} tracked-red, ${STAGE_SKIPPED_CONTENTION} did-not-run, ${STAGE_GATED_OFF} not-applicable"
 
     if [ "$STAGE_SKIPPED_CONTENTION" -gt 0 ]; then
-        echo "=== INCOMPLETE: ${census} ==="
+        echo "=== INCOMPLETE: ${STAGE_PASSED}/${attempted} attempted stages passed; ${STAGE_SKIPPED_CONTENTION} did NOT run (lock contention); ${census} ==="
         echo ""
         echo "    This run does not establish what these stages check:"
         printf "%b" "$STAGE_SKIPPED_CONTENTION_NAMES"
     elif [ "$STAGE_ADVISORY" -gt 0 ] || [ "$STAGE_TRACKED_RED" -gt 0 ]; then
-        # Deliberately NOT "all stages passed". Stages that did not pass were
-        # excused by declaration, and the headline says so rather than letting
-        # the reader infer a clean run from an exit code.
-        echo "=== ${census} ==="
+        # Stages that did not pass were excused by declaration, and the headline
+        # names them rather than letting a reader infer a clean run from an exit
+        # code.
+        echo "=== ${STAGE_PASSED}/${attempted} attempted verification stages passed; ${census} ==="
         echo ""
         echo "    Excused by declaration -- these did NOT pass:"
         printf "%b" "$STAGE_ADVISORY_NAMES"
         printf "%b" "$STAGE_TRACKED_RED_NAMES"
     else
-        echo "=== ${census} ==="
+        echo "=== ${STAGE_PASSED}/${attempted} attempted verification stages passed; ${census} ==="
     fi
 
     echo ""
