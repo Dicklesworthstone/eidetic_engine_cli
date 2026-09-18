@@ -621,3 +621,53 @@
 1	NSF-CORE-SUPPORT-PACK-REPLAY-ID
 1	NSF-MESH-FOREGROUND-CONTACT-FALLBACK-HELLO
 1	NSF-MESH-FOREGROUND-SYNC-BINDINGS
+
+# THE ANCHOR RULE -- how to pick a fragment that lands first time.
+#
+#   Walk outward from the finding's line. Take the first line that occurs
+#   EXACTLY ONCE inside the enclosing function.
+#
+# Measured before adopting it, because "technique to master" and "tool is wrong"
+# needed separating: across all 594 findings in the tree, 593 have such a line
+# INSIDE the +/-4 window. Exactly one does not
+# (src/models/mutation.rs:511, fn to_json), and that one needs multiplicity or a
+# multi-line fragment. So the window is adequate and a ~17% first-attempt miss
+# rate across tranches 3-5 was entirely technique: I had been choosing fragments
+# by reading the surrounding CODE, while classify_finding matches
+# context_window(lines, index) = index-4 .. index+5. Different texts.
+#
+# The rule was then tested on the nineteen single-finding files: 18 of 18 landed
+# first time, against roughly one-in-six before.
+#
+# WHY IT WORKS, and the part that is not obvious: distinctiveness is scoped to
+# the FUNCTION, not the file. In a short function even `.unwrap_or_default();`
+# occurs once and is a perfectly good anchor; in cli/mod.rs it would be
+# catastrophic. Function-scoped rules are what make the finding's own line
+# usable, which is why the anchor is almost always at distance 0.
+#
+# Distance distribution over the 558 findings owned at the time of measuring:
+#   d=0: 235   d=1: 162   d=2: 53   d=3: 43   d=4: 65   multi-line: 15
+# Note the 65 at d=4: those sit on the window's edge, one line from failing.
+# Prefer d=0. A fragment far from its finding is fragile even when it works.
+#
+# For multiplicity>1 the anchor must lie in EVERY member's window, which is a
+# strictly smaller set -- and when no such line exists, see the note above about
+# a rule that should have been two.
+1	NSF-CORE-AGENTSMD-ABBREVIATION-WORD
+1	NSF-CORE-ASK-NEAREST-EVIDENCE-SAMPLE
+1	NSF-CORE-CONFORMAL-CALIBRATION-SCORES
+1	NSF-CORE-CONTEXT-ZERO-LIMIT
+1	NSF-CORE-JSONL-IMPORT-NO-LINKS
+1	NSF-CORE-LEARN-PROPOSED-CONTENT-HASH
+1	NSF-CORE-MEMORY-DEBT-UNPARSEABLE-AGE
+1	NSF-CORE-OUTCOME-NO-QUARANTINE
+1	NSF-CORE-PLAN-RECIPE-NAME-FIRST-LINE
+1	NSF-CORE-TAILSCALE-CHUNK-SIZE-TOKEN
+1	NSF-CORE-WORKSPACE-RESERVATION-EXPIRY
+1	NSF-DB-PACK-HISTORY-RECOVERY-KEYS
+1	NSF-HOOKS-HARNESS-COMMAND-TEMPLATE
+1	NSF-MESH-RESPONDER-AUDIT-EVENTS-LOCK
+1	NSF-MODELS-VERIFICATION-EXECUTABLE-HASH
+1	NSF-OUTPUT-WHY-DEGRADED-REPAIR
+1	NSF-PACK-CACHED-EMBED-BACKEND
+1	NSF-SERVE-RESPONSE-STATUS-LINE

@@ -59,23 +59,20 @@
 #
 # A count may only DECREASE. Raising one is new silent-fallback debt; lowering
 # one after a fix is required (a stale entry decays into a permanent allowlist).
-1	src/core/agentsmd.rs
-1	src/core/ask.rs
-1	src/core/conformal.rs
-1	src/core/context.rs
-1	src/core/jsonl_import.rs
-1	src/core/learn.rs
-1	src/core/memory_debt.rs
-1	src/core/outcome.rs
-1	src/core/plan.rs
-1	src/core/tailscale_probe.rs
-1	src/core/workspace.rs
-1	src/db/mod.rs
-1	src/hooks/installer.rs
-1	src/mesh/responder_broker.rs
+# THREE REMAIN, and each is here because a verdict was NOT reached, never
+# because one was inconvenient:
+#   src/mesh/team.rs      2  bd-coxn1. The filing concern (an empty
+#                            origin_workspace_id colliding in the mesh cache's
+#                            withdrawal equality) is RULED OUT -- team.rs never
+#                            hands the cache an origin id and
+#                            MeshWithdrawalPurgeInput has no producer outside
+#                            cache.rs. But the trace surfaced a SECOND equality,
+#                            src/mesh/policy.rs:331 and :360, which is
+#                            unresolved. Half a trace is not a classification.
+#   src/steward/mod.rs    1  steward_pack_l2_config defaults the L2 cache ROOT to
+#                            an empty PathBuf while the very next line uses an
+#                            explicit unwrap_or(DEFAULT_MAX_BYTES). That
+#                            asymmetry needs the empty-root direction traced
+#                            before a verdict.
 2	src/mesh/team.rs
-1	src/models/verification.rs
-1	src/output/mod.rs
-1	src/pack/mod.rs
-1	src/serve.rs
 1	src/steward/mod.rs
