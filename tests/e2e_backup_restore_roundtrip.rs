@@ -1446,6 +1446,36 @@ fn backup_restore_roundtrips_pack_history_and_query_surfaces() -> TestResult {
         &Some(true),
         "restored why succeeded",
     )?;
+    let restored_db = side_path.join(".ee").join("ee.db");
+    let restored_conn =
+        DbConnection::open_file(&restored_db).map_err(|error| format!("open restored db: {error}"))?;
+    let restored_workspace_id = workspace_id_from_db(&restored_conn, &side_path)?;
+    let restored_feedback = restored_conn
+        .list_feedback_events_for_target("memory", &restored_memory_id)
+        .map_err(|error| format!("list restored outcome feedback: {error}"))?;
+    ensure(
+        restored_feedback.iter().any(|event| {
+            event.signal == "helpful"
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("caught a clippy regression"))
+        }),
+        format!("restored outcome feedback lost exact durable semantics: {restored_feedback:?}"),
+    )?;
+    let restored_candidates = restored_conn
+        .list_curation_candidates(&restored_workspace_id, None, None, None)
+        .map_err(|error| format!("list restored curation candidates: {error}"))?;
+    ensure(
+        restored_candidates.iter().any(|candidate| {
+            candidate
+                .content
+                .as_deref()
+                .is_some_and(|content| content == "Derived insight: format before release.")
+        }),
+        format!("restored curation lineage lost planted candidate: {restored_candidates:?}"),
+    )?;
+
     let restored_pack = run_ee(&[
         "pack",
         CONTEXT_QUERY,
