@@ -9571,6 +9571,10 @@ pub fn render_version_json(report: &VersionReport) -> String {
             build.field_str("targetTriple", report.build.target_triple);
             build.field_str("targetArch", report.build.target_arch);
             build.field_str("targetOs", report.build.target_os);
+            // bd-reality-core-convergence-1azkt.10: which engine, not just which
+            // source. Null when the build could not read Cargo.lock; the
+            // attestation gate, not a degraded code, is what refuses on it.
+            field_optional_str(build, "frankenStack", report.build.franken_stack);
             build.field_str("timestampPolicy", report.build.build_timestamp_policy);
             build.field_raw("timestamp", "null");
         });
@@ -21154,6 +21158,7 @@ mod tests {
                 git_commit,
                 git_tag,
                 git_dirty,
+                franken_stack: Some("asupersync@9.9.9,frankensearch@9.9.9,fsqlite@9.9.9"),
                 target_triple,
                 target_arch: "x86_64",
                 target_os: "linux",

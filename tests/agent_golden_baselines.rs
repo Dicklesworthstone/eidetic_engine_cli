@@ -645,6 +645,12 @@ fn normalize_version_json_for_golden(text: &str) -> String {
         ("targetTriple", "<scrubbed:targetTriple>"),
         ("targetArch", "<scrubbed:targetArch>"),
         ("targetOs", "<scrubbed:targetOs>"),
+        // Moves whenever a franken-stack sibling is bumped, which is a
+        // dependency event rather than a contract event, so it is scrubbed here
+        // exactly as targetTriple is. This golden pins the response SHAPE; that
+        // the field is POPULATED is asserted by the oracle's attestation gate,
+        // which refuses a candidate whose frankenStack is absent.
+        ("frankenStack", "<scrubbed:frankenStack>"),
     ] {
         if let Some(target) = value.pointer_mut(&format!("/data/build/{field}")) {
             *target = Value::String(sentinel.to_owned());

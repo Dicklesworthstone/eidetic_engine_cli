@@ -229,6 +229,16 @@ pub struct BuildInfo {
     pub git_commit: Option<&'static str>,
     pub git_tag: Option<&'static str>,
     pub git_dirty: Option<bool>,
+    /// Which franken-stack crates this binary was linked against, as
+    /// `asupersync@0.5.0,frankensearch@0.6.0,fsqlite@0.4.1`, read from the
+    /// committed `Cargo.lock` by `build.rs`.
+    ///
+    /// bd-reality-core-convergence-1azkt.10: a commit answers WHICH SOURCE and
+    /// says nothing about WHICH ENGINE. This repository has already produced
+    /// phantom reds from identical source against different sibling pins, so an
+    /// attestation that omits this cannot distinguish an engine change from a
+    /// regression.
+    pub franken_stack: Option<&'static str>,
     pub target_triple: &'static str,
     pub target_arch: &'static str,
     pub target_os: &'static str,
@@ -248,6 +258,7 @@ pub fn build_info() -> BuildInfo {
         git_commit: clean_build_metadata(option_env!("VERGEN_GIT_SHA")),
         git_tag: clean_build_metadata(option_env!("VERGEN_GIT_DESCRIBE")),
         git_dirty: parse_build_bool(option_env!("VERGEN_GIT_DIRTY")),
+        franken_stack: clean_build_metadata(option_env!("EE_FRANKEN_STACK")),
         target_triple: clean_build_metadata(option_env!("EE_BUILD_TARGET")).unwrap_or("unknown"),
         target_arch: std::env::consts::ARCH,
         target_os: std::env::consts::OS,
@@ -1201,6 +1212,65 @@ mod tests {
             &codes(&git_only),
             &vec!["target_triple_unavailable"],
             "the target-triple degradation must fire independently of git metadata",
+        )
+    }
+
+    /// bd-reality-core-convergence-1azkt.10, bullet 2: the binary must be able
+    /// to name WHICH ENGINE it was built against, not only which commit.
+    ///
+    /// Before this stamp existed there was no field at all — twenty spellings
+    /// of "dependency" appeared zero times in the version renderer — so an
+    /// attested candidate could not be distinguished from another built at the
+    /// same commit against different sibling pins. This repository has already
+    /// produced phantom reds from exactly that.
+    #[test]
+    fn franken_stack_pins_are_stamped_from_the_lockfile() -> TestResult {
+        // PRECONDITION: the stamp exists at all. `Cargo.lock` is committed, so
+        // this holds on every host that builds this commit, including a worker
+        // that received the tree without `.git`.
+        let stamped = option_env!("EE_FRANKEN_STACK");
+        let Some(stamped) = stamped.filter(|value| !value.trim().is_empty()) else {
+            return Err(format!(
+                "build.rs must stamp EE_FRANKEN_STACK from Cargo.lock; got {stamped:?}"
+            ));
+        };
+
+        // PRECONDITION ON CONTENT: a non-empty stamp is not enough. Require it
+        // to name every sibling this crate links, or a stamp that silently lost
+        // one would still satisfy the positive claim below.
+        for crate_name in ["asupersync", "frankensearch", "fsqlite"] {
+            ensure(
+                stamped.contains(crate_name),
+                format!("stamped franken-stack {stamped:?} must name {crate_name}"),
+            )?;
+        }
+        ensure(
+            stamped.contains('@'),
+            format!("stamped franken-stack {stamped:?} must carry name@version pairs"),
+        )?;
+
+        // POSITIVE: the stamp reaches the reported provenance intact.
+        ensure_equal(
+            &build_info().franken_stack,
+            &Some(stamped),
+            "franken-stack pins must survive into BuildInfo",
+        )?;
+
+        // NEGATIVE / why the separator is `@` and not `=`. This is not a
+        // stylistic choice: `clean_build_metadata` DISCARDS any value
+        // containing `=`, and a discarded stamp reads downstream as "this build
+        // had no franken-stack information" — indistinguishable from a build
+        // that genuinely had none. If that filter ever stops rejecting `=`,
+        // this assertion fails and the comment above stops being true.
+        ensure_equal(
+            &clean_build_metadata(Some("asupersync=0.5.0")),
+            &None,
+            "an `=` separator would be silently dropped, which is why `@` is used",
+        )?;
+        ensure_equal(
+            &clean_build_metadata(Some("asupersync@0.5.0")),
+            &Some("asupersync@0.5.0"),
+            "the `@` spelling must survive the same filter",
         )
     }
 

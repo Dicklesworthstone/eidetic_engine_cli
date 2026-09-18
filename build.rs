@@ -62,6 +62,17 @@ fn main() {
         }
     }
 
+    // bd-reality-core-convergence-1azkt.10, bullet 2. A binary that can name its
+    // commit still cannot say WHICH ENGINE it was linked against, and this
+    // repository has already produced phantom reds from exactly that gap: two
+    // runs at identical source, different sibling pins, different verdicts.
+    // Cargo.lock is committed, so the answer travels with the source tree and is
+    // the same on every host that builds that commit.
+    println!("cargo:rerun-if-changed=Cargo.lock");
+    if let Some(pins) = franken_stack_pins() {
+        println!("cargo:rustc-env=EE_FRANKEN_STACK={pins}");
+    }
+
     for key in ["VERGEN_GIT_SHA", "VERGEN_GIT_DESCRIBE", "VERGEN_GIT_DIRTY"] {
         // Declared unconditionally, including when the variable is absent:
         // going from unset to set has to invalidate the build, or the first
@@ -74,6 +85,56 @@ fn main() {
             }
         }
     }
+}
+
+/// The franken-stack crate versions this build resolved, as
+/// `asupersync@0.5.0,frankensearch@0.6.0,fsqlite@0.4.1`, or `None` when
+/// `Cargo.lock` is absent or does not name them.
+///
+/// Read from the LOCKFILE, not from `Cargo.toml`, because the lock is what was
+/// actually resolved: a manifest requirement of `0.6` is satisfied by several
+/// versions and only one of them is in this binary.
+///
+/// `@` separates name from version rather than `=`, because
+/// `clean_build_metadata` in `src/core/mod.rs` rejects any value containing
+/// `=`, `/` or `\`, and a rejected stamp would read downstream as "no
+/// franken-stack information" — silently, and indistinguishably from a build
+/// that genuinely had none.
+fn franken_stack_pins() -> Option<String> {
+    const TRACKED: [&str; 3] = ["asupersync", "frankensearch", "fsqlite"];
+
+    let lock = std::fs::read_to_string("Cargo.lock").ok()?;
+    let mut pins: Vec<String> = Vec::new();
+    let mut current: Option<&str> = None;
+
+    for line in lock.lines() {
+        let line = line.trim();
+        if line == "[[package]]" {
+            current = None;
+        } else if let Some(rest) = line.strip_prefix("name = ") {
+            let name = rest.trim_matches('"');
+            current = TRACKED.iter().find(|tracked| **tracked == name).copied();
+        } else if let Some(rest) = line.strip_prefix("version = ") {
+            // `version` always follows `name` inside a `[[package]]` block, so
+            // `current` still names the package this version belongs to.
+            if let Some(name) = current.take() {
+                let version = rest.trim_matches('"');
+                if !version.is_empty() {
+                    pins.push(format!("{name}@{version}"));
+                }
+            }
+        }
+    }
+
+    if pins.is_empty() {
+        // Emit nothing rather than an empty or partial string: a caller cannot
+        // tell "no siblings" from "could not read the lock", and this field is
+        // an attestation input, so the honest answer to "cannot tell" is
+        // silence.
+        return None;
+    }
+    pins.sort();
+    sanitized(&pins.join(",")).map(str::to_owned)
 }
 
 /// Accept a value only if it is safe to put after `=` on a cargo directive
