@@ -6,6 +6,7 @@ changed; this script does not stage, commit, push, switch branches or delete.
 The accompanying main-only delivery job handles formatting and publication.
 """
 from pathlib import Path
+import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -145,27 +146,40 @@ const EE_MODEL_CACHE_SUBDIR: &str = "models";
 
 
 def transform_cli(text):
-    marker = 'fn execute_ask(\n'
-    if text.count(marker) != 1:
-        raise SystemExit('Expected exactly one execute_ask handler')
-    start = text.index(marker)
-    # The function body ends before the next top-level function/item comment.
-    # Exact unique anchors below avoid touching other command handlers.
-    prefix, handler = text[:start], text[start:]
-    handler = replace(handler,
-        'DEGRADED_SEMANTIC, ask_data_json, evaluate_ask, ',
-        'DEGRADED_SEMANTIC, ask_data_json, evaluate_ask_with_local_model, ')
-    handler = replace(handler, '    let report = evaluate_ask(&request, &candidates);\n', '''    let report = match evaluate_ask_with_local_model(
+    old_call = '    let report = evaluate_ask(&request, &candidates);\n'
+    if text.count(old_call) != 1:
+        raise SystemExit('Expected exactly one production ask evaluation call')
+    call_start = text.index(old_call)
+    functions = list(re.finditer(r'(?m)^(?:pub(?:\([^)]*\))?\s+)?fn\s+\w+', text))
+    previous = [match for match in functions if match.start() < call_start]
+    if not previous:
+        raise SystemExit('Cannot locate the top-level ask handler')
+    start = previous[-1].start()
+    end = next((match.start() for match in functions if match.start() > call_start), len(text))
+    handler = text[start:end]
+    contexts = re.findall(
+        r'write_domain_error\(&error,\s*([^,\n]+),\s*stdout,\s*stderr\)',
+        handler[:handler.index(old_call)],
+    )
+    if not contexts or len(set(contexts)) != 1:
+        raise SystemExit('Cannot unambiguously preserve the ask error-rendering context')
+    imported = list(re.finditer(r'\bevaluate_ask(?=\s*,)', handler))
+    if len(imported) != 1:
+        raise SystemExit('Cannot unambiguously locate the ask evaluator import')
+    handler = re.sub(r'\bevaluate_ask(?=\s*,)', 'evaluate_ask_with_local_model', handler, count=1)
+    new_call = '''    let report = match evaluate_ask_with_local_model(
         &connection,
         &workspace_id,
         &request,
         &candidates,
     ) {
         Ok(report) => report,
-        Err(error) => return write_domain_error(&error, context, stdout, stderr),
+        Err(error) => return write_domain_error(&error, RENDER_CONTEXT, stdout, stderr),
     };
-''')
-    return prefix + handler
+'''.replace('RENDER_CONTEXT', contexts[0])
+    handler = replace(handler, old_call, new_call)
+    print(f'Binding semantic evaluation inside {previous[-1].group(0)}')
+    return text[:start] + handler + text[end:]
 
 
 TRANSFORMS = {
@@ -186,7 +200,7 @@ def main():
         'src/core/ask.rs': 'pub use semantic::evaluate_ask_with_local_model;',
         'src/core/ask_candidates.rs': 'pub(super) fn select_candidates_with_scorer',
         'src/core/index.rs': 'pub(crate) use ask_model::local_ask_embedder;',
-        'src/cli/mod.rs': 'let report = match evaluate_ask_with_local_model(',
+        'src/cli/mod.rs': 'evaluate_ask_with_local_model(',
     }
     integrated = [marker in originals[name] for name, marker in markers.items()]
     if any(integrated):
