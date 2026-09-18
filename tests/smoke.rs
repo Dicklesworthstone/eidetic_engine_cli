@@ -4899,14 +4899,50 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
             ));
         }
         if span.search_eligibility != "admitted" {
+            // RECORD WHAT THE CLASSIFIER SAW, do not re-derive its verdict.
+            // The surviving quarantine trigger (src/db/mod.rs:14058) re-derives
+            // a transcript class from the span CONTENT, and which of the three
+            // arms in classify_transcript_record (src/policy/mod.rs:1884) fires
+            // is decided purely by how that text parses: a JSON OBJECT goes to
+            // classify_transcript_object; text that starts with '{' but fails to
+            // parse becomes span_kind "unknown", which is NOT indexable; and
+            // anything else becomes ("message", None), which IS. So the parse
+            // shape of the input separates the arms.
+            //
+            // The test cannot call classify_transcript_record -- it is
+            // pub(crate) and this is an integration target. That is a feature
+            // here: recording the INPUT survives a change to the classifier,
+            // where a re-derived verdict would silently agree with it.
+            //
+            // secret_redaction_status is printed alongside because a "clean"
+            // screening means this stored excerpt is byte-identical to the text
+            // the classifier read (src/db/mod.rs:14028 screens input.excerpt).
+            let parsed = serde_json::from_str::<serde_json::Value>(&span.excerpt);
+            let shape = match &parsed {
+                Ok(value) if value.is_object() => {
+                    let keys = value
+                        .as_object()
+                        .map(|map| map.keys().cloned().collect::<Vec<_>>().join(","))
+                        .unwrap_or_default();
+                    format!("parses as JSON OBJECT with top-level keys [{keys}]")
+                }
+                Ok(value) => format!("parses as JSON but is NOT an object ({value})"),
+                Err(error) => format!("does NOT parse as JSON ({error})"),
+            };
+            let prefix = span.excerpt.chars().take(160).collect::<String>();
             span_violations.push(format!(
                 "span[{index}] search_eligibility is {} not admitted -- quarantine inputs: \
-                 instruction_risk {}, span_kind {}, role {:?}, secret_redaction_status {}",
+                 instruction_risk {}, span_kind {}, role {:?}, secret_redaction_status {}; \
+                 excerpt is {} chars, trimmed_starts_with_brace {}, {}; prefix {:?}",
                 span.search_eligibility,
                 span.instruction_risk,
                 span.span_kind,
                 span.role,
-                span.secret_redaction_status
+                span.secret_redaction_status,
+                span.excerpt.len(),
+                span.excerpt.trim_start().starts_with('{'),
+                shape,
+                prefix
             ));
         }
         if span.cass_span_id.contains(session_arg.as_str()) {

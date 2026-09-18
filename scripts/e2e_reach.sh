@@ -306,6 +306,19 @@ if ee_has_global_tier_cli; then
     )"
     assert_jq "$pack_no_global" '.schema == "ee.response.v2" and .success == true' \
         "--no-global pack still succeeds"
+    # PRECONDITION FIRST. Both clauses of the exclusion assertion below are
+    # satisfied by a pack that selected NOTHING: zero objects carry lane
+    # "global" because there are zero objects, and `.data.pack.text // ""`
+    # supplies the empty string, which contains no phrase at all. Having two
+    # clauses is not a safeguard when both go vacuous in the same world -- the
+    # pair cannot tell "the global tier was excluded" from "everything was
+    # excluded", so a --no-global that wrongly suppressed the WORKSPACE tier too
+    # would read as a pass. So prove the local rule survived first; the negative
+    # then has something to be negative about.
+    assert_jq "$pack_no_global" '
+        ([.. | objects | select(((.uri? // "") == "test://bd-2vq2z.13/workspace-conflict"))] | length) >= 1
+        or ((.data.pack.text // "") | contains("wait for central verify"))
+    ' "precondition: --no-global still selects the workspace-tier rule, so the exclusion below is not an empty pack"
     assert_jq "$pack_no_global" '
         ([.. | objects | select(((.lane? // .provenanceLane? // .memoryLane? // "") == "global"))] | length) == 0
         and ((.data.pack.text // "") | contains("remote RCH verification") | not)
