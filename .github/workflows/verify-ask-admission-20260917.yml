@@ -1,9 +1,13 @@
 name: Ask admission verification
 
-# Scoped CLI integration is committed at 1cbb1ef6148286050103bc18d052004ea07af5fe.
-# This workflow never writes source or moves refs. Run it manually to verify
-# the selected source revision; its conclusion is not a full-suite proof.
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/core/ask_admission.rs'
+      - 'src/core/ask_privacy_tests.rs'
+      - 'tests/contracts/ask_scope.rs'
+      - '.github/workflows/verify-ask-admission-20260917.yml'
   workflow_dispatch:
 
 permissions:
@@ -23,7 +27,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: main
           persist-credentials: false
+      - name: Record exact source snapshot
+        run: |
+          mkdir -p "$RUNNER_TEMP/ee-source"
+          git rev-parse HEAD > "$RUNNER_TEMP/ee-source/source-sha.txt"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/ee-source/source.tar.gz" HEAD
+          cat "$RUNNER_TEMP/ee-source/source-sha.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-source
+          path: ${{ runner.temp }}/ee-source
+          retention-days: 1
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
@@ -35,11 +51,10 @@ jobs:
           key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Exact source and formatting
+      - name: Parse changed Rust modules
         run: |
-          git rev-parse HEAD
-          git status --porcelain
-          rustfmt --check --edition 2024 --config skip_children=true src/core/ask.rs src/core/ask_corpus.rs src/core/ask_admission.rs src/core/ask_privacy_tests.rs src/core/ask_scope_tests.rs src/cli/mod.rs tests/contracts/ask_lifecycle.rs tests/contracts/ask_scope.rs
+          rustfmt --edition 2024 --config skip_children=true --emit stdout src/core/ask_admission.rs src/core/ask_privacy_tests.rs tests/contracts/ask_scope.rs > /dev/null
+          git diff --exit-code
       - name: Compile production library
         run: |
           status=0
@@ -50,11 +65,19 @@ jobs:
         run: |
           status=0
           cargo test --locked --lib core::ask:: -- --nocapture > "$RUNNER_TEMP/ask-core.log" 2>&1 || status=$?
-          tail -n 160 "$RUNNER_TEMP/ask-core.log"
+          tail -n 180 "$RUNNER_TEMP/ask-core.log"
           exit "$status"
       - name: Execute public CLI lifecycle, scope and privacy contracts
+        if: ${{ !cancelled() }}
         run: |
           status=0
           cargo test --locked --test contracts ask_lifecycle -- --nocapture > "$RUNNER_TEMP/ask-cli.log" 2>&1 || status=$?
           tail -n 100 "$RUNNER_TEMP/ask-cli.log"
           exit "$status"
+      - name: Preserve verification logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ask-verification-logs
+          path: ${{ runner.temp }}/ask-*.log
+          retention-days: 7

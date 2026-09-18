@@ -175,7 +175,7 @@ fn citation_metadata_is_sanitized_without_rewriting_the_body() {
     assert_eq!(admitted.content, memory.content);
     assert_eq!(
         admitted.provenance_uri,
-        Some(format!("ee://memory/{}", memory.id))
+        Some(format!("ee-mem://{}", memory.id))
     );
     let team = admitted.team_provenance.as_ref().unwrap();
     assert!(!team.member_display_name.contains("/home/private"));
@@ -233,16 +233,19 @@ fn malformed_identity_or_vocabulary_never_becomes_public_evidence() {
         let mut malformed = memory.clone();
         match field {
             "id" => malformed.id = "private-untyped-identity".to_owned(),
-            "kind" => malformed.kind = "private-kind".to_owned(),
+            "kind" => malformed.kind = "invalid/kind".to_owned(),
             "level" => malformed.level = "private-level".to_owned(),
             _ => malformed.trust_class = "private-trust".to_owned(),
         }
-        assert!(admission::into_candidate(malformed).is_none());
+        assert!(admission::into_candidate(malformed).is_none(), "{field}");
     }
 }
 
 #[test]
 fn invalid_or_absent_provenance_uses_the_real_memory_identity() {
+    use std::str::FromStr;
+    use crate::models::{MemoryId, ProvenanceUri};
+
     let (_root, db, workspace) = fixture();
     let memory = seed(&db, &workspace, 1, "Run cargo fmt before release.");
     for uri in [
@@ -252,9 +255,76 @@ fn invalid_or_absent_provenance_uses_the_real_memory_identity() {
     ] {
         let mut copy = memory.clone();
         copy.provenance_uri = uri;
+        let actual = admission::into_candidate(copy).unwrap().provenance_uri.unwrap();
+        assert_eq!(actual, format!("ee-mem://{}", memory.id));
+        assert_eq!(
+            ProvenanceUri::from_str(&actual).unwrap(),
+            ProvenanceUri::EeMemory(MemoryId::from_str(&memory.id).unwrap())
+        );
+    }
+}
+
+#[test]
+fn custom_kinds_remain_supported_but_cannot_smuggle_credentials() {
+    let (_root, db, workspace) = fixture();
+    let mut memory = seed(&db, &workspace, 1, "Run cargo fmt before release.");
+    memory.kind = "project-release-check".to_owned();
+    assert_eq!(
+        admission::into_candidate(memory.clone()).unwrap().kind,
+        "project-release-check"
+    );
+    memory.kind = "project-AKIAABCDEFGHIJKLMNOP".to_owned();
+    assert!(admission::into_candidate(memory).is_none());
+}
+
+#[test]
+fn uri_wrappers_cannot_hide_private_paths_in_bodies_or_citation_fields() {
+    let (_root, db, workspace) = fixture();
+    let memory = seed(&db, &workspace, 1, "Run cargo fmt before release.");
+    for uri in [
+        "file:///home/private/uri-canary.txt",
+        "file:///ROOT/private/uri-canary.txt",
+        "file:///Users/private/uri-canary.txt",
+    ] {
+        let mut body = memory.clone();
+        body.content = format!("Run cargo fmt before release. See {uri}.");
+        assert!(admission::into_candidate(body).is_none());
+        let mut metadata = memory.clone();
+        metadata.provenance_uri = Some(uri.to_owned());
+        let admitted = admission::into_candidate(metadata).unwrap();
+        assert_eq!(admitted.content, memory.content);
+        assert_eq!(admitted.provenance_uri, Some(format!("ee-mem://{}", memory.id)));
+    }
+}
+
+#[test]
+fn file_targets_are_checked_portably_and_relative_citations_survive() {
+    let (_root, db, workspace) = fixture();
+    let memory = seed(&db, &workspace, 1, "Run cargo fmt before release.");
+    for uri in [
+        "file:///opt/company/internal-notes",
+        "file://Q:/company/internal-notes",
+        "file://Q:\\company\\internal-notes",
+        "file://../internal-notes",
+        "file://..\\internal-notes",
+        "file://~/internal-notes",
+    ] {
+        let mut copy = memory.clone();
+        copy.provenance_uri = Some(uri.to_owned());
         assert_eq!(
             admission::into_candidate(copy).unwrap().provenance_uri,
-            Some(format!("ee://memory/{}", memory.id))
+            Some(format!("ee-mem://{}", memory.id)),
+            "{uri}"
         );
+    }
+    for uri in [
+        "file://AGENTS.md#L42",
+        "file://docs/release.md#L2-5",
+        "manual://run/release-note",
+        "https://example.test/release",
+    ] {
+        let mut copy = memory.clone();
+        copy.provenance_uri = Some(uri.to_owned());
+        assert_eq!(admission::into_candidate(copy).unwrap().provenance_uri.as_deref(), Some(uri));
     }
 }

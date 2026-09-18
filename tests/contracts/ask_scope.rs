@@ -156,6 +156,14 @@ fn public_ask_withholds_private_bodies_and_citation_metadata() -> Result<(), Str
         "2000-01-01T00:00:00Z",
         None,
     )?;
+    let private_uri = seed(
+        &db,
+        &workspace_id,
+        3,
+        "Run cargo fmt before release. See file:///home/private/release-canary.txt.",
+        "2000-01-01T00:00:00Z",
+        None,
+    )?;
     db.execute_raw(&format!("UPDATE memories SET provenance_uri = 'file:///home/private/release-source' WHERE id = '{safe}'"))
         .map_err(|error| error.to_string())?;
     drop(db);
@@ -165,13 +173,14 @@ fn public_ask_withholds_private_bodies_and_citation_metadata() -> Result<(), Str
         assert!(!rendered.contains("ask-cli-canary"));
         assert!(!rendered.contains("/home/private"));
         assert!(!rendered.contains(&private));
+        assert!(!rendered.contains(&private_uri));
         assert_eq!(response["data"]["candidatesScanned"], 1);
     }
     let response = ask(&workspace, "Run cargo fmt before release")?;
     assert_eq!(response["data"]["citations"][0]["memoryId"], safe);
     assert_eq!(
         response["data"]["citations"][0]["provenanceUri"],
-        format!("ee://memory/{safe}")
+        format!("ee-mem://{safe}")
     );
     Ok(())
 }

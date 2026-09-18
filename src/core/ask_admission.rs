@@ -44,6 +44,47 @@ pub(super) fn require_workspace_roster(
     }
 }
 
+// The replay detector's bare-path boundary deliberately skips URI slashes.
+// Use the shared path predicate too: file:///home/... must not become public
+// merely because the slash is preceded by another slash instead of whitespace.
+fn public_text(value: &str) -> bool {
+    !redact_public_replay_text(value).redacted
+        && !value
+            .char_indices()
+            .any(|(index, _)| crate::util::sensitive_path_starts_at(value, index))
+}
+
+fn public_label(value: &str) -> String {
+    if public_text(value) {
+        value.to_owned()
+    } else {
+        "[REDACTED]".to_owned()
+    }
+}
+
+fn public_provenance(value: &str) -> Option<String> {
+    if !public_text(value) {
+        return None;
+    }
+    let uri = ProvenanceUri::from_str(value).ok()?;
+    if let ProvenanceUri::File { path, .. } = &uri {
+        // Check the parsed target, not the URI as a whole. This also covers
+        // absolute roots outside the shared sensitive-prefix inventory and
+        // Windows paths when the CLI is running on Unix.
+        let drive_path = path.as_bytes().get(1) == Some(&b':')
+            && path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
+        if path.starts_with(['/', '\\', '~'])
+            || drive_path
+            || path.split(['/', '\\']).any(|part| part == "..")
+            || !public_text(path)
+        {
+            return None;
+        }
+    }
+    let canonical = uri.to_string();
+    public_text(&canonical).then_some(canonical)
+}
+
 pub(super) fn into_candidate(memory: StoredMemory) -> Option<AskCandidate> {
     let id = MemoryId::from_str(&memory.id).ok()?;
     let level = MemoryLevel::from_str(&memory.level).ok()?;
@@ -52,27 +93,25 @@ pub(super) fn into_candidate(memory: StoredMemory) -> Option<AskCandidate> {
     if memory.tombstoned_at.is_some()
         || memory.content.trim().is_empty()
         || memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
-        || redact_public_replay_text(&memory.content).redacted
+        || !public_text(&memory.content)
+        // Custom kinds are supported. Check their raw spelling before the
+        // kind parser normalizes case and separators in credential prefixes.
+        || !public_text(&memory.kind)
+        || !public_text(kind.as_str())
     {
         return None;
     }
 
-    let fallback = || ProvenanceUri::EeMemory(id).to_string();
     let provenance_uri = memory
         .provenance_uri
         .as_deref()
-        .filter(|uri| !redact_public_replay_text(uri).redacted)
-        .and_then(|uri| ProvenanceUri::from_str(uri).ok())
-        .map(|uri| uri.to_string())
-        .unwrap_or_else(fallback);
+        .and_then(public_provenance)
+        .unwrap_or_else(|| ProvenanceUri::EeMemory(id).to_string());
     let mut team_provenance = team_provenance_from_memory(&memory);
     if let Some(team) = &mut team_provenance {
-        team.member_display_name = redact_public_replay_text(&team.member_display_name).content;
-        team.project_name = team
-            .project_name
-            .as_deref()
-            .map(|name| redact_public_replay_text(name).content);
-        team.produced_at = redact_public_replay_text(&team.produced_at).content;
+        team.member_display_name = public_label(&team.member_display_name);
+        team.project_name = team.project_name.as_deref().map(public_label);
+        team.produced_at = public_label(&team.produced_at);
     }
     Some(AskCandidate {
         memory_id: memory.id,
