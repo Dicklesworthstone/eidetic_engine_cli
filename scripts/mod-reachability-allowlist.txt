@@ -1,0 +1,51 @@
+# Files under src/ and tests/ that no cargo target reaches, and why that is OK.
+# bd-l6h3g. Checked by scripts/lib/mod_reachability.py.
+#
+# FORMAT: <repo-relative path> TAB <reason>
+# An entry with no reason is a FINDING, not an exemption: the gate fails on it,
+# because an exemption nobody can review is a hole.
+#
+# THE GATE FAILS IN THREE DIRECTIONS, not one, so this file cannot rot into
+# fiction the way an unverified anchor column does:
+#   - an unreachable file that is NOT listed here            (new debt)
+#   - an entry here naming a file that no longer exists      (stale entry)
+#   - an entry here naming a file that is now REACHABLE      (obsolete exemption)
+# It prints every hit by name. It never prints only a count, because a clean
+# number from a pattern you wrote yourself is the weakest evidence there is.
+#
+# SCOPE is src/ and tests/ only. fuzz/ is a separate crate with its own
+# Cargo.toml and is in [workspace] exclude; crates/ members are not covered by a
+# root `cargo fmt` without --all. Both are real gaps and neither is this gate's.
+
+# =========================================================================
+# SECTION 1 -- DELIBERATE TEST DATA. Permanent. Each consumer is named and was
+# verified by grep, not inferred from the path containing the word "fixture".
+# =========================================================================
+tests/closure_lint_test_files_fixtures/empty_test.rs	Closure-lint input; named by tests/closure_lint_harness.rs
+tests/closure_lint_test_files_fixtures/glob_match.rs	Closure-lint input; named by tests/closure_lint_harness.rs
+tests/closure_lint_test_files_fixtures/ignored_test.rs	Closure-lint input; named by tests/closure_lint_harness.rs
+tests/closure_lint_test_files_fixtures/real_test_exists.rs	Closure-lint input; named by tests/closure_lint_harness.rs
+tests/fixtures/determinism_lint/known_violations.rs	Deliberate violations; consumed by tests/determinism_lint_catches_known_violations.rs and tests/suites/integration_a_d.rs. Must NOT compile into the tree or the lint has nothing to catch.
+tests/fixtures/panic_helper_radar/expect_fail.rs	Radar input; consumed by scripts/panic-helper-radar.sh and scripts/panic_helper_radar_golden.sh
+tests/fixtures/panic_helper_radar/file_level_allow.rs	Radar input; consumed by scripts/panic-helper-radar.sh and scripts/panic_helper_radar_golden.sh
+tests/fixtures/panic_helper_radar/unwrap_fail.rs	Radar input; consumed by scripts/panic-helper-radar.sh and scripts/panic_helper_radar_golden.sh
+tests/fixtures/closeout_audit/srr6_blocked/tests/mesh_off_no_network.rs	Closeout-audit fixture tree; consumed by tests/closeout_audit_runner_unit.rs
+
+# =========================================================================
+# SECTION 2 -- KNOWN UNDECLARED CODE. bd-l6h3g. THIS SECTION MAY ONLY SHRINK.
+#
+# These are NOT exemptions. They are recorded debt with a named disposition, so
+# that the gate is green on the debt it already knows about and RED on any new
+# undeclared file. Adding a line here to make a new finding pass is the one way
+# to weaken this gate, and it is exactly what the ratchet exists to refuse.
+#
+# Every line names what has to happen for it to be removed.
+# =========================================================================
+src/core/preflight_token.rs	bd-l6h3g item 1. DEAD: 0f68778a0 removed `pub mod preflight_token;` finishing the command-authorization control-plane retirement, and nothing references PreflightToken or preflight_token:: today. 1151 lines, security-adjacent (bypass-token issue/use/reject/revoke). Deletion escalated to the user under AGENTS.md RULE 1; REMOVE THIS LINE WHEN THE FILE IS DELETED OR RE-DECLARED.
+src/core/ask_evidence.rs	bd-l6h3g item 2. LIVE, declaration owed. scripts/delivery/ask-evidence-20260918.patch already specifies `#[path = "ask_evidence.rs"] pub(super) mod evidence;` in src/core/ask_admission.rs; the delivery applied the file and not the declaration. Ask lane owns it. REMOVE THIS LINE WHEN THAT DECLARATION LANDS.
+tests/contracts/ask_transcript.rs	bd-l6h3g item 2. LIVE, declaration owed. Same patch specifies `#[path = "ask_transcript.rs"] mod transcript;` in tests/contracts/ask_lifecycle.rs. REMOVE THIS LINE WHEN THAT DECLARATION LANDS.
+tests/contracts/handoff_export_backup_conformance.rs	bd-l6h3g item 4. UNDECIDED. 454 lines, 3 tests, added 6270648cb 2026-05-23, never declared in tests/contracts.rs or Cargo.toml in its entire history. Reads as forgotten rather than retired (no retirement commit exists), but declaring four-month-old in-process test code needs a compile first. REMOVE THIS LINE WHEN IT IS DECLARED OR RETIRED.
+tests/fixtures/closure_lint/test_assertion_cases/empty_test.rs	bd-l6h3g item 5. ORPHANED DUPLICATE: byte-identical to tests/closure_lint_test_files_fixtures/empty_test.rs, which is the copy closure_lint_harness.rs actually names. Nothing references this directory under any spelling. Present since 3dc3c2f36 (2026-05-15).
+tests/fixtures/closure_lint/test_assertion_cases/glob_match.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/glob_match.rs; byte-identical, unreferenced.
+tests/fixtures/closure_lint/test_assertion_cases/ignored_test.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/ignored_test.rs; byte-identical, unreferenced.
+tests/fixtures/closure_lint/test_assertion_cases/real_test_exists.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/real_test_exists.rs; byte-identical, unreferenced.

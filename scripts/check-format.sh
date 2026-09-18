@@ -159,9 +159,40 @@ self_test() {
     return 0
 }
 
+# bd-l6h3g. Rides here rather than becoming a verify.sh stage, because the
+# verify budget admits zero new stages (non-benchmark p50s total exactly 600
+# against a <=600 ceiling, UNMEASURED_STAGE_ALLOWANCE at its down-only ratchet
+# of 27). It belongs with the format check for a substantive reason, not just a
+# budgetary one: BOTH are questions about the POPULATION a tool examines.
+# `cargo fmt --check` reported this tree clean while two drifted files sat in
+# it, because cargo walks targets and those files were reachable from none.
+# Same blind spot, and the formatter's version of it is the harmless one.
+run_reachability() {
+    local script="${0%/*}/lib/mod_reachability.py"
+    if [ ! -f "$script" ]; then
+        warn "mod_reachability.py not found — skipping reachability, not blocking"
+        return 0
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        warn "python3 not found — skipping reachability, not blocking"
+        return 0
+    fi
+    python3 "$script"
+    local rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1) return 1 ;;
+        # 2 is the script's own "inconclusive": cargo missing, or its controls
+        # disagreed with observed cargo behaviour. It already warned; we do not
+        # convert that into a block.
+        *) return 0 ;;
+    esac
+}
+
 main() {
     case "${1:-}" in
         --self-test) self_test; exit $? ;;
+        --reachability) run_reachability; exit $? ;;
     esac
 
     if ! command -v git >/dev/null 2>&1 || ! git rev-parse --show-toplevel >/dev/null 2>&1; then
@@ -200,15 +231,24 @@ main() {
 
     run_rustfmt_check "${present[@]}"
     local rc=$?
+    local failed=0
     case "$rc" in
-        0) note "${#present[@]} file(s) checked, formatting clean"; exit 0 ;;
+        0) note "${#present[@]} file(s) checked, formatting clean" ;;
         1)
             warn "FORMATTING DRIFT in the files listed above."
             warn "Fix with: rustfmt --edition ${EDITION} <file>   (this script never writes)"
-            exit 1
+            failed=1
             ;;
-        *) exit 0 ;;
+        *) : ;;   # inconclusive; run_rustfmt_check already warned
     esac
+
+    # Runs even when formatting failed: reporting one finding and stopping is
+    # how a check reports one defect and never five.
+    if ! run_reachability; then
+        failed=1
+    fi
+
+    exit "$failed"
 }
 
 main "$@"
