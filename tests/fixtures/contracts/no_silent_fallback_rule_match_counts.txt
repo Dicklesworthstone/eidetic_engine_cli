@@ -415,3 +415,30 @@
 1	NSF-MESH-TEAM-JOIN-ATTEMPT-NONCE-BOOKKEEPING
 2	NSF-CORE-RESUME-SESSION-BOUNDS
 1	NSF-CORE-RESUME-STALENESS-UNTAGGED
+
+# bd-apvhh burn-down tranche 4: the 25 findings in the 7 no-rule files left
+# after tranche 3. This is the EASY REMAINDER by construction -- tranche 3 took
+# the two hardest files first -- so the 15 allows here carry the same sampling
+# bias tranche 1 did, and the two must_fix rules are the exception rather than
+# the refutation.
+#
+# All 17 owned their declared counts on the first attempt, unlike tranche 3.
+# The reason is visible in the fragments: every one names a whole statement or a
+# distinctive method chain rather than a bare combinator.
+1	NSF-MESH-RESPONDER-DISCOVERY-LISTS-SWALLOWED
+1	NSF-MESH-FOREGROUND-SYNC-OWN-ORIGIN-SWALLOWED
+1	NSF-MESH-RESPONDER-ADMISSION-CLOCK
+1	NSF-MESH-RESPONDER-NO-REGISTRATIONS-YET
+1	NSF-MESH-RESPONDER-CHUNK-SIZE-TOKEN
+1	NSF-MESH-RESPONDER-BODY-FETCH-KEY
+1	NSF-MESH-FOREGROUND-COMMAND-MODE-DEFAULT
+1	NSF-CLI-TEAM-ACTIVITY-SINCE-SUFFIX
+1	NSF-CLI-TEAM-JOIN-MISSING-INVITE
+2	NSF-CORE-GRAPH-DIFF-ABSENT-ARRAYS
+1	NSF-CORE-ASK-MISS-EMPTY-RESULTS
+1	NSF-CORE-ASK-ASSIST-EMPTY-EVIDENCE
+1	NSF-CORE-WRITE-OWNER-UNRECORDED-COUNTERS
+1	NSF-CORE-WRITE-OWNER-TELEMETRY-CONFIG-DEFAULT
+1	NSF-CORE-WRITE-OWNER-INTAKE-CONFIG-DEFAULT
+1	NSF-CORE-MODEL-LAST-SEGMENT
+1	NSF-CORE-MODEL-INDEX-METADATA-PATHS

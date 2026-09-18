@@ -72,6 +72,11 @@ const FOLLOW_UP_BEADS: &[&str] = &[
     // that names this bead was checked against the match-count ledger and owns
     // its site.
     "bd-1jpg7",
+    // bd-zjcx6: the mesh responder swallows discovery-list LOAD errors, so a
+    // denylist that exists but cannot be read becomes an empty denylist -- and
+    // in auto_admit and service_tag the denylist is the only per-requester
+    // exclusion there is.
+    "bd-zjcx6",
 ];
 
 const INVENTORY_RULES: &[InventoryRule] = &[
@@ -375,6 +380,137 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "apply_staleness",
         "let surfaced_tags = tags",
         "The default feeds directly into the guard on the next line: `if surfaced_tags.is_empty() { continue; }`. A memory with no tags is skipped rather than evaluated against an assumed tag set, so the empty slice is consumed by an emptiness test and never reaches a staleness decision.",
+    ),
+    // bd-apvhh burn-down, tranche 4 (2026-09-18): the 25 findings in the 7
+    // no-rule files that were left after tranche 3.
+    //
+    // READ THE ALLOW RATE HERE THE WAY YOU READ TRANCHE 1's, NOT TRANCHE 3's.
+    // This is the EASY REMAINDER by construction: tranche 3 deliberately took
+    // the two largest and least tractable files first, so what survives is
+    // pre-selected for being small and self-contained. A high allow rate in a
+    // population chosen for being easy is not evidence about the codebase. The
+    // two must_fix rules below are the exception that proves the sampling was
+    // still worth doing, not a refutation of the bias.
+    must_fix_in(
+        "NSF-MESH-RESPONDER-DISCOVERY-LISTS-SWALLOWED",
+        "src/mesh/responder_broker.rs",
+        "answer_bootstrap_hello",
+        ".and_then(|path| load_workspace_lists(path).ok())",
+        "bd-zjcx6",
+        "FAILS OPEN on the discovery denylist. load_node_key_list is deliberately built to separate the two states: an absent file, a non-regular path, and a NotFound read all return Ok(empty), while an io error, a TOML parse failure, a non-array `node_keys`, and an oversized payload all return Err. `.ok()` merges the second set into the first, so a denylist that EXISTS and cannot be honoured becomes the same empty set as no denylist at all. It reaches decide_respond through ResponderContext and decide_hello_response step 6, where `if input.denylist.contains(requester_node_key)` is the ONLY per-requester exclusion in both AutoAdmit and ServiceTag -- ServiceTag grants on the RESPONDER's own tags, not the requester's. Only Allowlist mode is unaffected, because an empty respond_allowlist denies everyone. Worst detail: the oversized-payload refusal added by bd-3gmzf as hardening returns Err, so through this call site a defence becomes the bypass, and a malformed denylist ends up strictly weaker than no denylist file.",
+    ),
+    must_fix_in(
+        "NSF-MESH-FOREGROUND-SYNC-OWN-ORIGIN-SWALLOWED",
+        "src/mesh/foreground_cli.rs",
+        "persist_sync_round_events",
+        ".find(|member| member.is_self)",
+        "bd-1jpg7",
+        "THE SECOND SITE of bd-1jpg7, in a different file, found because tranche 4 read the whole no-rule population rather than stopping at the first instance. Character for character the same construct as apply_join_first_sync_events: list_all_team_members() with `.ok()` instead of `?`, so a db error and an absent self member both become \"\", and the value is passed straight to ingest_origin_event where it disables the no-echo guard in classify_inbound. The rule for the team.rs site is function-scoped and cannot reach here, which is exactly why a must_fix covering one of two identical sites is not coverage of the defect.",
+    ),
+    allowed_in(
+        "NSF-MESH-RESPONDER-ADMISSION-CLOCK",
+        "src/mesh/responder_broker.rs",
+        "admit_authenticated_capability",
+        ".duration_since(std::time::UNIX_EPOCH)",
+        "duration_since fails only when the system clock predates 1970, in which case every timestamp in the process is wrong rather than this one. The direction is safe regardless: a frozen now_epoch_ms of 0 makes admission MORE restrictive, because backoff_until is computed as now.saturating_add(delay) and tested as `backoff_until > request.now_epoch_ms`, so any backoff once set stays above zero forever and the peer remains backed off. It denies, it cannot admit. The sibling conversions on the same lines choose `.unwrap_or(u64::MAX)` for the same reason -- saturate toward the restrictive end.",
+    ),
+    allowed_in(
+        "NSF-MESH-RESPONDER-NO-REGISTRATIONS-YET",
+        "src/mesh/responder_broker.rs",
+        "apply_control_register",
+        "let mut next = self.durable_registrations.clone().unwrap_or_default();",
+        "durable_registrations is Option<Vec<_>> initialised to None and set to Some only once registrations exist, so None means \"none registered yet\" rather than \"failed to load\". With no existing registrations there is no port to conflict with, which is precisely what the `next.first()` check that follows concludes.",
+    ),
+    allowed_in(
+        "NSF-MESH-RESPONDER-CHUNK-SIZE-TOKEN",
+        "src/mesh/responder_broker.rs",
+        "decode_local_api_chunked_body",
+        "let size_token = size_line.split(';').next().unwrap_or_default().trim();",
+        "UNREACHABLE: str::split always yields at least one element. And the direction is safe even if it were not, because the empty token goes straight into from_str_radix, whose failure is mapped to ResponderBrokerError::WhoIsUnverified -- a malformed chunk header is rejected, not read as a zero-length chunk.",
+    ),
+    allowed_in(
+        "NSF-MESH-RESPONDER-BODY-FETCH-KEY",
+        "src/mesh/responder_broker.rs",
+        "load_body_fetch_response",
+        ".map(|parsed| parsed.body_cache_key.as_str())",
+        "A payload that does not deserialise yields an empty cache key, and the very next statement is `if key.is_empty() || ..`, which rejects it. The default feeds an emptiness guard rather than a lookup.",
+    ),
+    allowed_in(
+        "NSF-MESH-FOREGROUND-COMMAND-MODE-DEFAULT",
+        "src/mesh/foreground_cli.rs",
+        "mesh_enabled_and_mode",
+        ".or_else(|| configured.and_then(|config| config.mesh.command_mode))",
+        "A three-tier configuration read: env var, then workspace config, then the type's Default. Neither earlier tier swallows an error -- a malformed env value fails to parse and falls through to config rather than being coerced -- and the final default is the documented default mode, not a stand-in for a lookup that failed.",
+    ),
+    allowed_in(
+        "NSF-CLI-TEAM-ACTIVITY-SINCE-SUFFIX",
+        "src/cli/team.rs",
+        "handle_team_activity",
+        ".map(|since| format!(\" since {since}\"))",
+        "The default is an empty SUFFIX for a report with no `since` filter, not an erased value. An unfiltered report should say nothing about a filter.",
+    ),
+    allowed_in(
+        "NSF-CLI-TEAM-JOIN-MISSING-INVITE",
+        "src/cli/team.rs",
+        "handle_team_join",
+        "args.invite.clone().unwrap_or_default()",
+        "Immediately guarded: `if invite_code.is_empty() { return write_domain_error(..) }`. A missing invite becomes an empty string only long enough to be rejected with a structured error on the next line.",
+    ),
+    allowed_in(
+        "NSF-CORE-GRAPH-DIFF-ABSENT-ARRAYS",
+        "src/core/graph_diff.rs",
+        "parse_snapshot_graph",
+        ".and_then(serde_json::Value::as_array)",
+        "Two sites, multiplicity 2: nodes and edges. A snapshot that carries no nodes array and no edges array describes a graph with no nodes and no edges, and the diff over two explicit snapshot inputs is entitled to say so. Both lookups already try two spellings (`nodes` and `/graph/nodes`) before defaulting, so a differently-shaped snapshot is accommodated rather than silently emptied.",
+    ),
+    allowed_in(
+        "NSF-CORE-ASK-MISS-EMPTY-RESULTS",
+        "src/core/ask.rs",
+        "record_ask_query_miss_best_effort",
+        "\"empty_results\"",
+        "The default feeds an emptiness test, not a value: `report.nearest_evidence.as_deref().unwrap_or_default().is_empty()` classifies the miss as \"empty_results\". Absent evidence and an empty evidence list are the same miss, and this collapses them deliberately.",
+    ),
+    allowed_in(
+        "NSF-CORE-ASK-ASSIST-EMPTY-EVIDENCE",
+        "src/core/ask.rs",
+        "ask_query_assist_json",
+        "let nearest_evidence = report.nearest_evidence.as_deref().unwrap_or_default();",
+        "Same shape and the same next line: the empty slice is consumed by `if nearest_evidence.is_empty()` to choose a reason string. Note the guard above it, which is the part that matters for honesty: a source-integrity failure returns None BEFORE this point, so a withheld answer is never rendered as missing knowledge.",
+    ),
+    allowed_in(
+        "NSF-CORE-WRITE-OWNER-UNRECORDED-COUNTERS",
+        "src/core/write_owner.rs",
+        "read_write_group_commit_counters",
+        "Some(key) => store.get(&Some(key)).copied().unwrap_or_default(),",
+        "Process-local telemetry counters. A workspace with no recorded group commits has counted zero of them, so the zero is the measurement rather than a substitute for one -- the same reason an absent memory-debt REPORT is not equivalent (there the zero stood in for an unmeasured population; here the population is the events this process has seen).",
+    ),
+    allowed_in(
+        "NSF-CORE-WRITE-OWNER-TELEMETRY-CONFIG-DEFAULT",
+        "src/core/write_owner.rs",
+        "write_group_commit_telemetry",
+        ".map(|config| WriteHotPathConfig::from_write_config(&config.write))",
+        "No workspace path, or a workspace with no write config, yields the documented default hot-path configuration. The value is only used to decide whether group-commit telemetry is enabled, and the disabled case is itself named downstream rather than silent.",
+    ),
+    allowed_in(
+        "NSF-CORE-WRITE-OWNER-INTAKE-CONFIG-DEFAULT",
+        "src/core/write_owner.rs",
+        "run_one_shot_write_intake",
+        ".map(|config| WriteHotPathConfig::from_write_config(&config.write))",
+        "The same default in the intake path, and here the honesty is explicit: `if !config.enabled` produces WriteGroupCommitFallbackReason::Disabled, a named fallback reason carried in the result, so running without group commit is reported rather than assumed.",
+    ),
+    allowed_in(
+        "NSF-CORE-MODEL-LAST-SEGMENT",
+        "src/core/model.rs",
+        "last_segment",
+        ".rsplit('/')",
+        "UNREACHABLE: str::rsplit always yields at least one element, so a path with no separator returns itself. The helper exists to compare embedder identities and an empty segment could only arise from an empty input, which compares equal to another empty input -- the correct answer for two unnamed embedders.",
+    ),
+    allowed_in(
+        "NSF-CORE-MODEL-INDEX-METADATA-PATHS",
+        "src/core/model.rs",
+        "read_model_lifecycle_index_metadata",
+        ".map(redact_lifecycle_metadata_path)",
+        "An absent or non-array metadata field yields no paths. The collection is a list of redacted lifecycle paths for reporting; nothing downstream treats an empty list as a claim that no paths exist on disk.",
     ),
     must_fix(
         "NSF-CASS-PIPE-READ",

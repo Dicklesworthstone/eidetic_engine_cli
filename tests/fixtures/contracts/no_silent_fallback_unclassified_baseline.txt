@@ -44,19 +44,30 @@
 # honest output when the reading did not settle it; classifying them to reach
 # zero would be the weakening.
 #
+# LOWERED AGAIN 2026-09-18 to 111 across 37 files (tranche 4): the last 7
+# no-rule files. Three left entirely (cli/team, graph_diff, write_owner) and
+# four shrank (responder_broker 6->1, model 5->3, foreground_cli 4->2, ask 3->1).
+# Checked against the previous committed baseline: four rows decreased, three
+# rows removed at zero, zero rows rose, no file gained a row.
+#
+# THE ALLOW RATE IN THAT TRANCHE IS BIASED AND THE COMMIT SAYS SO. It was the
+# easy remainder by construction, because tranche 3 deliberately took the two
+# largest files first. It still produced two must_fix rules, both fail-open:
+# bd-zjcx6 (discovery denylist emptied by a swallowed load error) and a SECOND
+# site of bd-1jpg7 in a different file, found only because the whole population
+# was read rather than stopped at the first instance.
+#
 # A count may only DECREASE. Raising one is new silent-fallback debt; lowering
 # one after a fix is required (a stale entry decays into a permanent allowlist).
 5	src/cli/mesh.rs
 30	src/cli/mod.rs
-2	src/cli/team.rs
 1	src/core/agentsmd.rs
-3	src/core/ask.rs
+1	src/core/ask.rs
 1	src/core/conformal.rs
 1	src/core/context.rs
 7	src/core/curate.rs
 2	src/core/decide.rs
 3	src/core/doctor.rs
-2	src/core/graph_diff.rs
 2	src/core/handoff.rs
 4	src/core/index.rs
 1	src/core/jsonl_import.rs
@@ -64,7 +75,7 @@
 1	src/core/learn.rs
 8	src/core/memory.rs
 1	src/core/memory_debt.rs
-5	src/core/model.rs
+3	src/core/model.rs
 1	src/core/outcome.rs
 1	src/core/plan.rs
 4	src/core/resume.rs
@@ -74,12 +85,11 @@
 1	src/core/tailscale_probe.rs
 5	src/core/verify_ledger.rs
 1	src/core/workspace.rs
-3	src/core/write_owner.rs
 4	src/daemon/server.rs
 1	src/db/mod.rs
 1	src/hooks/installer.rs
-4	src/mesh/foreground_cli.rs
-6	src/mesh/responder_broker.rs
+2	src/mesh/foreground_cli.rs
+1	src/mesh/responder_broker.rs
 2	src/mesh/team.rs
 1	src/models/verification.rs
 1	src/output/mod.rs
