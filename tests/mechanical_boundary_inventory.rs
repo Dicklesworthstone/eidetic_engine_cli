@@ -522,18 +522,37 @@ fn mechanical_boundary_inventory_covers_all_cli_command_paths() -> Result<(), St
     // latent hole and changes no verdict today — which is the honest reason to
     // do it now, while it is free, rather than after someone has filled the
     // document with prose to clear the tier.
-    let inventory_rows = INVENTORY
+    // bd-6hp3w: require the path in the row's FIRST CELL, not in any cell.
+    //
+    // The table-row predicate above was still satisfied by a path that some
+    // OTHER command's row merely mentions, because every cell after the first
+    // is prose. That is how it was found: a team row whose description read
+    // "`pause`/`resume` toggle network exchange" made the standalone `resume`
+    // command "documented" by naming it while describing a different one.
+    //
+    // MEASURED before changing it, the same discipline as the change above: at
+    // the parent commit 454 paths satisfied the any-cell predicate and 439
+    // satisfied this one. The gap was real, so the fifteen were given rows --
+    // ten rows, grouped only where boundary facts actually coincide -- and
+    // writing them out is what surfaced `db check-integrity` sitting first in a
+    // row whose lead-in read "Non-mutating database surfaces" while the effect
+    // manifest declares it an append_only_write over `audit_log`.
+    //
+    // BOTH predicates now return 454, so this tightening changes no verdict
+    // today. That is the honest moment to close a hole -- while it is free --
+    // rather than after the two numbers have silently diverged again.
+    let first_cells = INVENTORY
         .lines()
-        .filter(|line| line.trim_start().starts_with('|'))
+        .filter_map(first_cell_of)
         .collect::<Vec<_>>();
-    let in_a_table_row = |command: &str| {
+    let has_a_row_of_its_own = |command: &str| {
         let cell = format!("`{command}`");
-        inventory_rows.iter().any(|row| row.contains(&cell))
+        first_cells.iter().any(|first| first.contains(&cell))
     };
 
     let missing = commands
         .iter()
-        .filter(|command| !in_a_table_row(command.as_str()))
+        .filter(|command| !has_a_row_of_its_own(command.as_str()))
         .cloned()
         .collect::<Vec<_>>();
 
@@ -545,7 +564,10 @@ fn mechanical_boundary_inventory_covers_all_cli_command_paths() -> Result<(), St
     let enforced = matrix_enforced_command_paths(&commands)?;
     assert!(
         missing.is_empty(),
-        "mechanical boundary inventory missing command path(s) from every table row: {missing:?}\n\
+        "mechanical boundary inventory command path(s) with no row of their own: {missing:?}\n\
+         NOTE (bd-6hp3w): a path is covered by the FIRST cell of a row. Naming it in a later \
+         cell of some other command's row documents nothing about its own boundary, so adding \
+         it to a description will not clear this list.\n\
          NOTE (bd-o74n4): clearing this list does NOT raise enforcement. The twelve-column \
          Command Boundary Matrix covers {} of {} command paths; the other {} carry no \
          side-effect class, runtime posture, degraded code, fixture coverage, or schema \
@@ -558,6 +580,52 @@ fn mechanical_boundary_inventory_covers_all_cli_command_paths() -> Result<(), St
         INVENTORY.contains("Unmapped command count: 0"),
         "inventory must record the unmapped command count"
     );
+    Ok(())
+}
+
+/// bd-6hp3w: the coverage predicate must DISCRIMINATE, and be seen to.
+///
+/// `has_a_row_of_its_own` is only stronger than the any-cell predicate it
+/// replaced for as long as `first_cell_of` really returns one cell. If it ever
+/// returns the whole line -- a stray `strip_prefix`, a `split` that becomes a
+/// `splitn(1)` -- the coverage gate reverts to "mentioned anywhere in a row"
+/// and goes on passing, because today every path satisfies BOTH predicates.
+/// The regression would be invisible at exactly the moment it was introduced
+/// and would only surface as a path quietly acquiring coverage from someone
+/// else's prose months later.
+///
+/// So this asserts the discrimination directly, on a row built to contain one
+/// path in its first cell and a different one in a later cell.
+#[test]
+fn first_cell_coverage_predicate_rejects_a_mention_in_a_later_cell() -> Result<(), String> {
+    let row = "| `alpha beta` | `src/cli/mod.rs:1` | see also `gamma delta` | keep mechanical |";
+    let first = first_cell_of(row)
+        .ok_or_else(|| format!("a table row must yield a first cell; none for {row:?}"))?;
+
+    assert!(
+        first.contains("`alpha beta`"),
+        "the first cell must carry the path the row documents; got {first:?}"
+    );
+    assert!(
+        !first.contains("`gamma delta`"),
+        "a path named in a LATER cell must not be visible to the coverage \
+         predicate -- first_cell_of returned {first:?}, which spans more than \
+         one cell, and the coverage gate has silently reverted to bd-6hp3w's \
+         any-cell behaviour"
+    );
+
+    // The negative arm's partner: a line that is not a table row yields no
+    // cell at all, so prose outside the tables cannot confer coverage either.
+    assert_eq!(
+        first_cell_of("`alpha beta` is described in the prose above."),
+        None,
+        "a non-row line must yield no first cell"
+    );
+
+    // And a separator row yields a cell that no backticked path can match,
+    // which is what keeps the `|---|` lines from being a coverage surface.
+    assert_eq!(first_cell_of("| --- | --- |"), Some(" --- "));
+
     Ok(())
 }
 
@@ -1551,6 +1619,19 @@ fn runtime_class(runtime: &str) -> Result<&str, String> {
         .ok_or_else(|| format!("runtime class is empty: {runtime}"))
 }
 
+/// The first cell of a markdown table row, or `None` for a line that is not one.
+///
+/// bd-6hp3w: coverage is about a path HAVING A ROW, and the first cell is what
+/// says so. Every later cell is prose, and a path named in prose was mentioned
+/// while describing a different command.
+fn first_cell_of(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let body = trimmed.strip_prefix('|')?;
+    // `split` rather than `split_once`: a row with a single trailing pipe still
+    // yields its one cell instead of vanishing.
+    body.split('|').next()
+}
+
 fn command_paths_from_extract_function(source: &str) -> Result<Vec<String>, String> {
     let start_marker = "fn extract_command_path(cli: &Cli) -> String {";
     let end_marker = "\n    /// Returns a stable identifier";
@@ -1698,13 +1779,40 @@ fn matrix_row_classes_agree_with_the_effect_manifest() -> Result<(), String> {
     // NON-VACUITY. Every branch above is keyed on a row covering at least one
     // command path; if the surface-cell format drifts, `covered` is empty
     // everywhere, the loop asserts nothing and this test passes having read
-    // the document and checked none of it. The floor is the content tier's
-    // own declared floor, so the two ratchets cannot silently diverge.
-    if checked_pairs < 26 {
+    // the document and checked none of it.
+    //
+    // The floor is DERIVED from the same `- Matrix enforcement floor:` line
+    // the content tier parses, not a literal. An earlier version hardcoded 26
+    // and described it as "the content tier's own floor". That was wrong twice
+    // over: the declared floor is 24, and 26 was simply what this gate
+    // happened to measure the night it was written, so raising the document
+    // floor would have ratcheted the content tier while this guard sat at 26
+    // forever.
+    //
+    // The two tiers count DIFFERENT UNITS and the comparison is still sound.
+    // `matrix_enforced_command_paths` counts command PATHS carrying a row;
+    // this counts (row, path) PAIRS, which is >= that, since a path credited
+    // by two rows contributes two pairs. So pairs >= paths >= declared holds
+    // by construction, and the assertion tracks the ratchet without pretending
+    // to measure the same thing.
+    let declared_floor = INVENTORY
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("- Matrix enforcement floor:")
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        })
+        .ok_or_else(|| {
+            "inventory must declare `- Matrix enforcement floor: <n>`; this gate derives its \
+             non-vacuity floor from the same line the content tier does"
+                .to_owned()
+        })?;
+    if checked_pairs < declared_floor {
         return Err(format!(
-            "this gate checked only {checked_pairs} (row, command path) pairs; the content tier \
-             enforces at least 26, so the matcher has stopped finding rows rather than the \
-             matrix having shrunk"
+            "this gate checked only {checked_pairs} (row, command path) pairs against a declared \
+             matrix enforcement floor of {declared_floor}; every (row, path) pair counts at least \
+             one enforced path, so falling below the floor means the surface-cell matcher has \
+             stopped finding rows rather than the matrix having shrunk"
         ));
     }
 
