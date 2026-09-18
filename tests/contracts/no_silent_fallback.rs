@@ -83,6 +83,10 @@ const FOLLOW_UP_BEADS: &[&str] = &[
     // Found in src/cli/mesh.rs -- mesh code that lives outside src/mesh/, which
     // is why the bd-zjcx6 sweep did not cover it.
     "bd-xwzeh",
+    // bd-8a19j: the same Err-collapsed-into-absence shape at P2 severity --
+    // a workspace config that FAILS VALIDATION yields default search fusion
+    // weights, indistinguishable from having configured none.
+    "bd-8a19j",
 ];
 
 const INVENTORY_RULES: &[InventoryRule] = &[
@@ -2769,6 +2773,133 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "execute_daemon_txn_batch",
         "let Some(first) = entries.first() else {",
         "An empty batch has no results. Every entry is parsed with parse_daemon_txn_batch_entry(operation)? BEFORE this point, so a batch that is non-empty but malformed returns an error rather than reaching this early return; the empty case is genuinely empty input.",
+    ),
+    must_fix_in(
+        "NSF-CORE-SEARCH-FUSION-WEIGHTS-CONFIG",
+        "src/core/search.rs",
+        "resolved_search_fusion_weights",
+        "crate::core::config_surface::merged_workspace_config(workspace_path)",
+        "bd-8a19j",
+        "merged_workspace_config returns Result<MergedConfig, ConfigSurfaceError>, `.map(..)` maps the Ok, and `.unwrap_or_default()` then SWALLOWS THE Err -- so a workspace with no search config and a workspace whose config fails validation produce identical default fusion weights. ConfigSurfaceError's variants are UnknownKey, InvalidPattern, InvalidValue and Environment: errors raised by a config that EXISTS and is wrong. An operator who mistypes a fusion key gets default ranking with no diagnostic. Same shape as bd-zjcx6 and bd-xwzeh at lower severity, and classified the same way on purpose -- consequence should not change the verdict. The correct form is already in the tree at src/core/memory.rs:4112, which propagates the same loader with map_err into DomainError::Configuration.",
+    ),
+    allowed_in(
+        "NSF-CORE-INDEX-RULE-PER-RULE-MAPS",
+        "src/core/index.rs",
+        "rule_documents",
+        "let tags = tags_by_rule.remove(&rule.id).unwrap_or_default();",
+        "Two adjacent per-rule lookups, multiplicity 2, and the same construction already accepted for ask_corpus: both maps come from list_rule_tags_for_workspace / list_rule_source_memory_ids_for_workspace whose errors are propagated by `?` before the loop, and both are keyed by rule id over the same workspace, so a miss is a rule with no tags or no sources.",
+    ),
+    allowed_in(
+        "NSF-CORE-INDEX-EMBEDDER-LOG-DIMENSION",
+        "src/core/index.rs",
+        "active_remote_embedder",
+        "\"remote embedding backend active\"",
+        "A tracing::info! FIELD, not a value any decision reads. An embedder whose settings declare no dimension logs 0. Recorded rather than waved through because a 0 in a log line does read as a measurement -- the mitigation is that this line fires only on Ok(Some(embedder)), so it reports an ACTIVE backend whose dimension is simply unset, and nothing downstream consumes the logged number.",
+    ),
+    allowed_in(
+        "NSF-CORE-INDEX-DEGRADED-CODE-OPTIONAL",
+        "src/core/index.rs",
+        "from_json",
+        ".get(\"degradedCode\")",
+        "A record with no degradedCode has none. Note the deliberate contrast two lines above: requestCount uses `.unwrap_or(1)`, an explicit non-default choice, so this file distinguishes \"absent means empty\" from \"absent means one\" rather than defaulting reflexively.",
+    ),
+    allowed_in(
+        "NSF-CORE-RESUME-DECISION-TOPIC",
+        "src/core/resume.rs",
+        "collect_revisit_decisions",
+        "let topic = typed_fields.as_ref().map_or_else(",
+        "An untyped decision memory with no `Topic:` line has no topic, and the revisit entry renders it empty rather than inventing one. Note the TYPED branch three lines below falls back to the memory content instead, so the two branches disagree deliberately: a typed decision always has something to show, an untyped one without the line has nothing.",
+    ),
+    allowed_in(
+        "NSF-CORE-RESUME-DECISION-CHOSEN",
+        "src/core/resume.rs",
+        "collect_revisit_decisions",
+        "let chosen = typed_fields.as_ref().map_or_else(",
+        "Two sites, multiplicity 2: `chosen` read from an untyped memory's `Chosen:` line and from a typed sidecar field. LEFT AS DEBT IN TRANCHE 3, where the open question was whether an empty `chosen` reads as a decision that chose nothing. Resolved: collect_revisit_decisions builds a REVISIT list, whose purpose is to surface decisions needing another look, so a decision whose choice cannot be read belongs in it and the empty string is not load-bearing for any action. Separated from the topic rule because their context windows do not overlap and because they are different fields.",
+    ),
+    allowed_in(
+        "NSF-CORE-RESUME-ADMISSION-TAGS",
+        "src/core/resume.rs",
+        "build_resume_report",
+        "let memory_tags = tags.get(&memory.id).map(Vec::as_slice).unwrap_or_default();",
+        "ALSO LEFT AS DEBT IN TRANCHE 3, where I could not prove the fail-open direction. Proved now: the empty slice reaches ResumeAdmissionBoundary::admit, which returns None unless scope.memory_in_scope_with_tags holds, and tags matter in exactly one branch -- MemoryScope::Global, where it is memory_tags_include_global_scope(tags). Empty tags make that FALSE, so an untagged memory is EXCLUDED from the resume, not admitted. Under Swarm and Workspace scope the branch returns true regardless of tags, so the empty slice changes nothing. Fail-closed either way. The tags map's own load error is propagated before this point.",
+    ),
+    allowed_in(
+        "NSF-SWARM-AUTHORITY-SNAPSHOT-HASH",
+        "src/core/swarm_next_action.rs",
+        "work_packet_source_authority_snapshot_from_gate",
+        "let hash = blake3::hash(&hash_input).to_hex().to_string();",
+        "serde_json::to_vec over a tuple of plain data references. Serialization of these types cannot fail in practice -- there is no custom Serialize that errors and the writer is a Vec -- so the default is unreachable. Stated rather than assumed because the consequence WOULD be sharp if it were reachable: every failure would hash the same empty byte string, so two different snapshots would share a provenance hash.",
+    ),
+    allowed_in(
+        "NSF-SWARM-AUTHORITY-DROPPED-SECTIONS",
+        "src/core/swarm_next_action.rs",
+        "source_authority_requested_candidate_beads_record",
+        "dropped_sections: (!matches!(state, \"ready\" | \"stale_fallback\"))",
+        "The default is the empty list produced when the state IS ready or stale_fallback -- i.e. nothing was dropped. `.then(..)` builds the list only for the not-ready case, so the empty vector is the true answer rather than a stand-in.",
+    ),
+    allowed_in(
+        "NSF-SWARM-AUTHORITY-CONTRADICTION-ID",
+        "src/core/swarm_next_action.rs",
+        "source_authority_contradictions",
+        "let candidate_id = candidate_evidence",
+        "UNREACHABLE: the enclosing block is entered only when `candidate_evidence.is_some_and(|evidence| evidence.lookup_outcome == \"candidate_contradicted\")`, so candidate_evidence is Some here and the map yields a value. Worth noting because the id is hashed immediately, and a default would have hashed the empty string into a contradiction record.",
+    ),
+    allowed_in(
+        "NSF-SWARM-REPAIR-PLAN-PROVENANCE-HASH",
+        "src/core/swarm_next_action.rs",
+        "swarm_repair_plan_provenance_hash",
+        "let bytes = serde_json::to_vec(&material).unwrap_or_default();",
+        "UNREACHABLE BY TYPE: `material` is a serde_json::Value built by the json! macro, and serializing a Value cannot fail -- its Serialize impl has no error path and the writer is a Vec. If it could, every failure would hash identical empty bytes and distinct plans would share a provenance hash, which is why this is recorded rather than passed over.",
+    ),
+    allowed_in(
+        "NSF-CORE-DOCTOR-INSTALL-PATH-SUFFIX",
+        "src/core/doctor.rs",
+        "ee_install_path_version_summary",
+        ".map(|path| format!(\" at {path}\"))",
+        "Two sites, multiplicity 2: an install entry with no path contributes no \" at <path>\" suffix. The sibling field on the very next line uses `.unwrap_or(\"unknown\")` for a missing version, so this function already distinguishes a field whose absence needs a NAME from one whose absence needs nothing.",
+    ),
+    allowed_in(
+        "NSF-CORE-DOCTOR-ERROR-REPAIR-TEXT",
+        "src/core/doctor.rs",
+        "check_database",
+        "\"{} Read recovery: {}\",",
+        "An error that carries no repair hint contributes no repair text. The diagnostic still names the error itself via error.message(), so the absent hint costs a suggestion rather than the finding.",
+    ),
+    allowed_in(
+        "NSF-CORE-MODEL-DEGRADATION-REPAIR",
+        "src/core/model.rs",
+        "model_degradations_data_json",
+        "entry.repair.unwrap_or_default(),",
+        "A degradation with no repair command aggregates as an empty repair string; the code, severity and message are all supplied explicitly on the lines above. Same reading as the CLI degradation-repair rules.",
+    ),
+    allowed_in(
+        "NSF-CORE-MODEL-INDEX-PROBE-METADATA",
+        "src/core/model.rs",
+        "build_model_lifecycle_report",
+        "let mut index_metadata = index_status",
+        "Two `.ok()` calls collapse here, and they are honest ONLY because the line this fragment names captures the error first: index_probe_error holds the probe failure as a string and is reported separately, so the empty metadata is accompanied by a stated reason rather than standing in for one. Delete that capture and this becomes a silent fallback.",
+    ),
+    allowed_in(
+        "NSF-CORE-MODEL-CONTENT-HASH-PREFIX",
+        "src/core/model.rs",
+        "fetch_bundled_embedding_model",
+        ".and_then(|hash| hash.strip_prefix(\"blake3:\"))",
+        "A registry entry with no content hash, or one not carrying the blake3: prefix, yields an empty hash string. An empty string is not a valid blake3 digest, so it cannot falsely match a computed one -- the failure direction is a comparison that does not hold, not a verification that wrongly passes.",
+    ),
+    allowed_in(
+        "NSF-CORE-SEARCH-ATTRIBUTION-SUFFIX",
+        "src/core/search.rs",
+        "human_summary_with_preview",
+        "let attribution = team_search_attribution_suffix(hit).unwrap_or_default();",
+        "A hit with no team attribution contributes no suffix to the human line. Rendering only; the structured surfaces carry attribution as its own field.",
+    ),
+    allowed_in(
+        "NSF-CORE-SEARCH-PACK-SECTION-DEFAULT",
+        "src/core/search.rs",
+        "search_pack_section",
+        "pack_section_for_level_and_kind(level.unwrap_or_default(), kind.unwrap_or_default())",
+        "A hit with no level or kind matches none of the specific arms and falls to the catch-all `_ => PackSection::Artifacts`, which is the general bucket the match was written to end in. The empty strings route to the default section rather than claiming a specific one such as Failures or Evidence.",
     ),
 ];
 

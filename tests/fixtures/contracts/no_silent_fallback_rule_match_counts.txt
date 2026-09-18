@@ -554,3 +554,39 @@
 1	NSF-DAEMON-AMBIENT-CONTEXT-TEXT
 1	NSF-DAEMON-SEARCH-RELEVANCE-RANGE
 1	NSF-DAEMON-TXN-BATCH-EMPTY
+
+# Six core files: index, resume, swarm_next_action, doctor, model, search.
+# 18 rules, 21 findings, no resident count moved.
+#
+# Two of these resolve sites left as DEBT in tranche 3, where I could not prove
+# the direction and said so rather than guessing:
+#   NSF-CORE-RESUME-ADMISSION-TAGS -- proved fail-closed. Tags reach
+#     ResumeAdmissionBoundary::admit and matter in exactly one branch,
+#     MemoryScope::Global, where empty tags make memory_tags_include_global_scope
+#     false and the memory is EXCLUDED.
+#   NSF-CORE-RESUME-DECISION-CHOSEN -- the list is a REVISIT list, so a decision
+#     whose choice cannot be read belongs in it.
+#
+# Three hash sites are recorded as unreachable rather than waved through, because
+# the consequence would be sharp if they were not: hashing an empty input yields
+# the SAME digest every time, so distinct plans or snapshots would share a
+# provenance hash. NSF-SWARM-REPAIR-PLAN-PROVENANCE-HASH is unreachable by type
+# (serializing a serde_json::Value cannot fail).
+1	NSF-CORE-SEARCH-FUSION-WEIGHTS-CONFIG
+2	NSF-CORE-INDEX-RULE-PER-RULE-MAPS
+1	NSF-CORE-INDEX-EMBEDDER-LOG-DIMENSION
+1	NSF-CORE-INDEX-DEGRADED-CODE-OPTIONAL
+1	NSF-CORE-RESUME-DECISION-TOPIC
+2	NSF-CORE-RESUME-DECISION-CHOSEN
+1	NSF-CORE-RESUME-ADMISSION-TAGS
+1	NSF-SWARM-AUTHORITY-SNAPSHOT-HASH
+1	NSF-SWARM-AUTHORITY-DROPPED-SECTIONS
+1	NSF-SWARM-AUTHORITY-CONTRADICTION-ID
+1	NSF-SWARM-REPAIR-PLAN-PROVENANCE-HASH
+2	NSF-CORE-DOCTOR-INSTALL-PATH-SUFFIX
+1	NSF-CORE-DOCTOR-ERROR-REPAIR-TEXT
+1	NSF-CORE-MODEL-DEGRADATION-REPAIR
+1	NSF-CORE-MODEL-INDEX-PROBE-METADATA
+1	NSF-CORE-MODEL-CONTENT-HASH-PREFIX
+1	NSF-CORE-SEARCH-ATTRIBUTION-SUFFIX
+1	NSF-CORE-SEARCH-PACK-SECTION-DEFAULT
