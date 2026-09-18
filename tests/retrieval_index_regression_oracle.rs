@@ -480,6 +480,29 @@ fn pack_record(value: &Value) -> Record {
 
 // ── Candidate attestation ──────────────────────────────────────────────────
 
+/// The enabled feature names, sorted and comma-joined, or `None` when the
+/// candidate reported no `features` array at all.
+///
+/// Sorted because `features[]` order is a rendering detail and two candidates
+/// that differ only in it are the same build. `None` is reserved for a MISSING
+/// array — a renamed JSON path — and is distinct from `"(none)"`, which is a
+/// real answer meaning a build with every feature off. Collapsing those two
+/// would make a renamed surface indistinguishable from a minimal build, which
+/// is the vacuity this file guards against elsewhere.
+fn feature_set(version_json: &Value) -> Option<String> {
+    let features = version_json.pointer("/data/features")?.as_array()?;
+    let mut enabled: Vec<&str> = features
+        .iter()
+        .filter(|feature| feature.get("enabled").and_then(Value::as_bool) == Some(true))
+        .filter_map(|feature| feature.get("name").and_then(Value::as_str))
+        .collect();
+    if enabled.is_empty() {
+        return Some("(none)".to_owned());
+    }
+    enabled.sort_unstable();
+    Some(enabled.join(","))
+}
+
 #[derive(Debug, Clone)]
 struct CandidateIdentity {
     fields: Record,
@@ -489,9 +512,10 @@ impl CandidateIdentity {
     /// The bead requires an attested candidate: exact commit, dirty state,
     /// target triple, profile, and binary SHA-256. Failure to attest is
     /// `InfraError`, never a product verdict.
-    fn attest(version_json: &Value, binary: &Path) -> Result<Self, Verdict> {
+    fn attest(version_json: &Value, binary: &Path, require: bool) -> Result<Self, Verdict> {
         let mut fields = Record::new();
         for (name, pointer) in [
+            ("frankenStack", "/data/build/frankenStack"),
             ("gitCommit", "/data/source/gitCommit"),
             ("gitDirty", "/data/source/gitDirty"),
             ("sourceState", "/data/source/state"),
@@ -512,16 +536,31 @@ impl CandidateIdentity {
             "binaryPath".to_owned(),
             binary.to_string_lossy().into_owned(),
         );
+        // A build configuration the identity does not record is a build
+        // configuration the attestation cannot describe. `features[]` was
+        // emitted by every candidate and read by none of them, so two builds
+        // from one commit with different feature flags were distinguishable
+        // only by `binarySha256` — an opaque digest that says THAT they differ
+        // and never HOW.
+        fields.insert(
+            "featureSet".to_owned(),
+            feature_set(version_json).unwrap_or_else(|| "<absent>".to_owned()),
+        );
 
         // The 2026-08 reproduction used a binary reporting `gitCommit: null`
         // and `targetTriple: unknown`; the bead exists because that evidence
         // could not be attributed to current source. Refuse to repeat it.
-        if require_attestation() {
-            for name in ["gitCommit", "targetTriple"] {
+        //
+        // `frankenStack` and `featureSet` joined this list when the fields
+        // became available: a commit answers WHICH SOURCE, and a candidate that
+        // cannot also say which engine it linked and which features were on has
+        // attested to a commit rather than to a build.
+        if require {
+            for name in ["gitCommit", "targetTriple", "frankenStack", "featureSet"] {
                 let value = fields.get(name).map_or("<absent>", String::as_str);
                 if value == "<absent>" || value == "unknown" || value == "null" {
                     return Err(Verdict::InfraError(format!(
-                        "candidate is unattested: {name}={value}. ORACLE_REQUIRE_ATTESTATION=1 demands an exact-source candidate; run through scripts/rch_verify.sh with --base <sha> --clean-overlay so the verdict is attributable to current main"
+                        "candidate is unattested: {name}={value}. ORACLE_REQUIRE_ATTESTATION=1 demands an exact-source candidate. The build learns its own provenance only if the harness hands it over, so forward it: RCH_ENV_ALLOWLIST=VERGEN_GIT_SHA,VERGEN_GIT_DIRTY,ORACLE_REQUIRE_ATTESTATION VERGEN_GIT_SHA=<sha> VERGEN_GIT_DIRTY=false ORACLE_REQUIRE_ATTESTATION=1 rch exec --base <sha> --clean-overlay --no-overlay -- cargo test --test integration_n_r -- <this test> --exact --ignored --test-threads=1 --nocapture. VERGEN_GIT_DIRTY=false is honest ONLY under --no-overlay, because an overlaid tree is not the commit it is stamped with. Note --base and --clean-overlay belong to `rch exec`; scripts/rch_verify.sh rejects them (exit 2) and spells the same thing --treeish <sha> --committed-tree, and it sets no VERGEN_* of its own, so the forwarding above is still required there."
                     )));
                 }
             }
@@ -881,7 +920,7 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
             );
         }
     };
-    let identity = match CandidateIdentity::attest(&version, &binary) {
+    let identity = match CandidateIdentity::attest(&version, &binary, require_attestation()) {
         Ok(identity) => identity,
         Err(verdict) => return finish(&verdict, &proof_dir, &mut events),
     };
@@ -1410,5 +1449,219 @@ mod classifier {
                 verdict.class()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod attestation {
+    //! bd-reality-core-convergence-1azkt.10, bullet 2.
+    //!
+    //! An oracle that cannot say which features were on and which siblings it
+    //! linked has attested to a COMMIT, not to a BUILD. These arms cover the
+    //! two fields that closed that gap, and — because `attest` already refused
+    //! on absent fields — they pin WHAT MOVED: a candidate that the old gate
+    //! would have admitted must now be refused, or the new fields are captured
+    //! and never checked, which looks identical from a green run.
+
+    use std::path::PathBuf;
+
+    use serde_json::{Value, json};
+
+    use super::{CandidateIdentity, Verdict, feature_set};
+
+    /// Any real, readable file: `attest` hashes it, and none of these claims
+    /// depend on which file it was.
+    fn candidate_file() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")
+    }
+
+    /// A candidate that satisfies every attestation field.
+    fn attested_version_json() -> Value {
+        json!({
+            "data": {
+                "version": "0.15.2",
+                "source": {
+                    "gitCommit": "051475effb2e248752e77ee5885db1edb36230e4",
+                    "gitDirty": false,
+                    "state": "clean"
+                },
+                "build": {
+                    "profile": "debug",
+                    "targetTriple": "x86_64-unknown-linux-gnu",
+                    "frankenStack": "asupersync@0.5.0,frankensearch@0.6.0,fsqlite@0.4.1"
+                },
+                "features": [
+                    {"name": "fts5", "enabled": true},
+                    {"name": "mcp", "enabled": false},
+                    {"name": "graph", "enabled": true}
+                ]
+            }
+        })
+    }
+
+    fn attest(version: &Value, require: bool) -> Result<CandidateIdentity, Verdict> {
+        CandidateIdentity::attest(version, &candidate_file(), require)
+    }
+
+    /// POSITIVE: a complete candidate attests, and both new fields are recorded
+    /// with the values it reported.
+    #[test]
+    fn a_complete_candidate_records_its_engine_and_its_features() {
+        let identity = match attest(&attested_version_json(), true) {
+            Ok(identity) => identity,
+            Err(verdict) => panic!("a complete candidate must attest: {verdict:?}"),
+        };
+        assert_eq!(
+            identity.fields.get("frankenStack").map(String::as_str),
+            Some("asupersync@0.5.0,frankensearch@0.6.0,fsqlite@0.4.1"),
+            "the linked engine must be part of the candidate identity"
+        );
+        // Enabled only, sorted. `mcp` is present in the payload and disabled,
+        // so its absence here is the filter working rather than a dropped field.
+        assert_eq!(
+            identity.fields.get("featureSet").map(String::as_str),
+            Some("fts5,graph"),
+            "the feature set must be part of the candidate identity"
+        );
+    }
+
+    /// NEGATIVE ARM — and the one that shows the refusal set MOVED.
+    ///
+    /// Both candidates below carry a good `gitCommit` and a good
+    /// `targetTriple`, so both would have been ADMITTED before these fields
+    /// were captured. Each must now be refused, and the message must name the
+    /// field responsible rather than failing generically.
+    #[test]
+    fn a_candidate_that_cannot_name_its_build_inputs_is_now_refused() {
+        for (label, mutate, expected_field) in [
+            (
+                "no engine",
+                Box::new(|version: &mut Value| {
+                    version["data"]["build"]["frankenStack"] = Value::Null;
+                }) as Box<dyn Fn(&mut Value)>,
+                "frankenStack",
+            ),
+            (
+                "no features array",
+                Box::new(|version: &mut Value| {
+                    if let Some(data) = version["data"].as_object_mut() {
+                        data.remove("features");
+                    }
+                }),
+                "featureSet",
+            ),
+        ] {
+            let mut version = attested_version_json();
+            mutate(&mut version);
+
+            // The precondition that makes this an arm about the NEW fields:
+            // everything the OLD gate checked is still intact.
+            assert_eq!(
+                version
+                    .pointer("/data/source/gitCommit")
+                    .and_then(Value::as_str),
+                Some("051475effb2e248752e77ee5885db1edb36230e4"),
+                "{label}: gitCommit must remain valid or this proves nothing new"
+            );
+            assert_eq!(
+                version
+                    .pointer("/data/build/targetTriple")
+                    .and_then(Value::as_str),
+                Some("x86_64-unknown-linux-gnu"),
+                "{label}: targetTriple must remain valid or this proves nothing new"
+            );
+
+            match attest(&version, true) {
+                Ok(identity) => panic!(
+                    "{label}: a candidate missing {expected_field} must be refused, got {:?}",
+                    identity.fields
+                ),
+                Err(Verdict::InfraError(message)) => assert!(
+                    message.contains(expected_field),
+                    "{label}: the refusal must name {expected_field}: {message}"
+                ),
+                Err(other) => panic!("{label}: unattested must be InfraError, got {other:?}"),
+            }
+        }
+    }
+
+    /// CONTROL: the same deficient candidates attest fine when attestation is
+    /// not required, and the missing values are still RECORDED as `<absent>`.
+    ///
+    /// This separates two things a single green run conflates: that the fields
+    /// are captured, and that the gate is what refuses on them.
+    #[test]
+    fn without_attestation_the_same_candidate_is_admitted_and_still_recorded() {
+        let mut version = attested_version_json();
+        version["data"]["build"]["frankenStack"] = Value::Null;
+        if let Some(data) = version["data"].as_object_mut() {
+            data.remove("features");
+        }
+
+        let identity = match attest(&version, false) {
+            Ok(identity) => identity,
+            Err(verdict) => {
+                panic!("without ORACLE_REQUIRE_ATTESTATION nothing may refuse: {verdict:?}")
+            }
+        };
+        assert_eq!(
+            identity.fields.get("frankenStack").map(String::as_str),
+            Some("<absent>"),
+            "an unenforced run must still record that the engine was unknown"
+        );
+        assert_eq!(
+            identity.fields.get("featureSet").map(String::as_str),
+            Some("<absent>"),
+            "an unenforced run must still record that the feature set was unknown"
+        );
+    }
+
+    /// PRECONDITION / NON-VACUITY: `feature_set` must discriminate, and must
+    /// keep "no features" distinct from "no features array".
+    ///
+    /// If it collapsed those, a renamed JSON path would be indistinguishable
+    /// from a minimal build and every assertion above would still pass.
+    #[test]
+    fn the_feature_set_discriminates_and_separates_none_from_absent() {
+        let mut one = attested_version_json();
+        one["data"]["features"] = json!([{"name": "fts5", "enabled": true}]);
+        let mut other = attested_version_json();
+        other["data"]["features"] = json!([{"name": "graph", "enabled": true}]);
+        assert_ne!(
+            feature_set(&one),
+            feature_set(&other),
+            "different enabled features must produce different identities"
+        );
+
+        let mut all_off = attested_version_json();
+        all_off["data"]["features"] = json!([{"name": "fts5", "enabled": false}]);
+        assert_eq!(
+            feature_set(&all_off).as_deref(),
+            Some("(none)"),
+            "a build with every feature off is a real answer, not a missing one"
+        );
+
+        let mut missing = attested_version_json();
+        if let Some(data) = missing["data"].as_object_mut() {
+            data.remove("features");
+        }
+        assert_eq!(
+            feature_set(&missing),
+            None,
+            "a missing array is not the same as an empty one"
+        );
+
+        // Ordering is a rendering detail, not an identity difference.
+        let mut forward = attested_version_json();
+        forward["data"]["features"] =
+            json!([{"name": "a", "enabled": true}, {"name": "b", "enabled": true}]);
+        let mut reversed = attested_version_json();
+        reversed["data"]["features"] =
+            json!([{"name": "b", "enabled": true}, {"name": "a", "enabled": true}]);
+        assert_eq!(
+            feature_set(&forward),
+            feature_set(&reversed),
+            "feature order must not change the candidate identity"
+        );
     }
 }
