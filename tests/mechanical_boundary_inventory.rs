@@ -1489,26 +1489,133 @@ fn matrix_e2e_log_schema_records_required_fields() {
     }
 }
 
+/// Risky mock/stub surfaces the inventory must keep naming, as (surface, file).
+///
+/// KEYED ON (SURFACE, FILE) AND NEVER ON A LINE NUMBER -- bd-apvhh ruling C,
+/// and bd-blj5n is the reason the rule exists.
+///
+/// This assertion used to pin eleven literal `file:line` strings. Eight of them
+/// left the document on 2026-05-23 (fd9914c5f) when the anchors were updated,
+/// so it had been red for roughly four months. Worse than merely stale: it
+/// RATCHETED AGAINST ITS OWN REPAIR. The anchors it demanded were the drifted
+/// positions, so correcting an anchor in the document deleted the exact string
+/// this test required, and any honest fix of the documentation made the test
+/// redder. A drift detector keyed on the thing that drifts cannot be satisfied
+/// and repaired at the same time.
+///
+/// The surface NAME is the durable key. Line numbers move every time the file
+/// above them changes; `src/cli/mod.rs` alone is ~98k lines and grows
+/// continuously. A surface is retired or renamed deliberately, by someone
+/// editing this table on purpose.
+///
+/// Measured 2026-09-18: all thirteen rows below are present. Add a row when a
+/// risky surface is documented; remove one only when the surface itself is
+/// gone, never to make a failure go away.
+const RISKY_SURFACES: &[(&str, &str)] = &[
+    ("Causal trace", "src/core/causal.rs"),
+    ("Causal estimate", "src/core/causal.rs"),
+    ("Procedure verify", "src/core/procedure.rs"),
+    ("Rehearse run/inspect", "src/core/rehearse.rs"),
+    ("Eval output renderers", "src/output/mod.rs"),
+    ("Tripwire list/check", "src/core/tripwire.rs"),
+    ("Preflight show", "src/core/preflight.rs"),
+    ("Preflight run", "src/core/preflight.rs"),
+    ("Situation show/explain", "src/core/situation.rs"),
+    ("Situation compare/link", "src/core/situation.rs"),
+    ("Certificate list/show/verify", "src/core/certificate.rs"),
+    ("Economy reports/plans", "src/core/economy.rs"),
+    ("Memory revise internal", "src/core/memory.rs"),
+];
+
+/// The `## Mock, Sample, Stub, Or Simulated Data Anchors` table rows.
+fn risky_surface_rows(inventory: &str) -> Result<Vec<Vec<String>>, String> {
+    let (_, after) = inventory
+        .split_once("## Mock, Sample, Stub, Or Simulated Data Anchors")
+        .ok_or_else(|| {
+            "inventory must carry a `Mock, Sample, Stub, Or Simulated Data Anchors` section"
+                .to_owned()
+        })?;
+    // Bounded by the next `## ` heading so a later section cannot be read as
+    // risky-surface rows.
+    let section = after.split("\n## ").next().unwrap_or(after);
+    let rows = section
+        .lines()
+        .filter(|line| line.trim_start().starts_with('|'))
+        .map(markdown_row_cells)
+        .filter(|cells| cells.len() >= 2 && !cells[0].is_empty() && !cells[0].starts_with("---"))
+        .collect::<Vec<_>>();
+    if rows.len() < 2 {
+        return Err(format!(
+            "risky-surface section parsed {} row(s); the table must have a header and data rows, \
+             so this is a parser or document problem rather than a passing test",
+            rows.len()
+        ));
+    }
+    Ok(rows)
+}
+
 #[test]
 fn mechanical_boundary_inventory_names_mock_and_stub_surfaces() {
-    for anchor in [
-        "src/core/causal.rs:335",
-        "src/core/causal.rs:892",
-        "src/core/procedure.rs:1174",
-        "src/core/rehearse.rs:364",
-        "src/output/mod.rs:4092",
-        "src/core/tripwire.rs:376",
-        "src/core/preflight.rs:870",
-        "src/core/situation.rs:1926",
-        "src/core/certificate.rs:457",
-        "src/core/economy.rs:735",
-        "src/core/memory.rs:1572",
-    ] {
-        assert!(
-            INVENTORY.contains(anchor),
-            "inventory missing risky surface anchor {anchor}"
-        );
+    let rows = match risky_surface_rows(INVENTORY) {
+        Ok(rows) => rows,
+        Err(error) => panic!("{error}"),
+    };
+
+    let mut missing = Vec::new();
+    for (surface, file) in RISKY_SURFACES {
+        let Some(row) = rows
+            .iter()
+            .find(|cells| cells[0].trim_matches('`').trim() == *surface)
+        else {
+            missing.push(format!(
+                "no risky-surface row named `{surface}`; if the surface was renamed, rename it \
+                 here too, and if it was retired, drop the entry"
+            ));
+            continue;
+        };
+        // The anchor cell must still point at the right module. The LINE inside
+        // it is deliberately not checked -- that is the drift this test used to
+        // encode (bd-blj5n).
+        if !row[1].contains(file) {
+            missing.push(format!(
+                "risky-surface row `{surface}` no longer cites {file}; its anchor cell is {:?}",
+                row[1]
+            ));
+        }
     }
+
+    assert!(
+        missing.is_empty(),
+        "inventory stopped naming risky mock/stub surfaces:\n{}",
+        missing.join("\n")
+    );
+}
+
+#[test]
+fn the_risky_surface_lookup_discriminates_instead_of_always_agreeing() {
+    // A gate that only ever passes against today's document repeats the defect
+    // one level up, so both arms run against fixtures.
+    let rows = risky_surface_rows(INVENTORY).expect("section must parse");
+    assert!(
+        rows.iter()
+            .any(|cells| cells[0].trim_matches('`').trim() == "Causal trace"),
+        "a surface that IS present must be found, or the negative arm below proves nothing"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|cells| cells[0].trim_matches('`').trim() == "Surface That Does Not Exist"),
+        "a surface that is absent must NOT be found"
+    );
+
+    // And the section must be bounded: the following section's rows must not
+    // leak in, or a renamed surface could be 'found' in an unrelated table.
+    assert!(
+        !rows
+            .iter()
+            .any(|cells| cells[1].contains("Immediate Follow-Up")),
+        "risky-surface parsing must stop at the next `## ` heading"
+    );
 }
 
 fn matrix_section(inventory: &str) -> Result<&str, String> {
