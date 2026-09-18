@@ -498,11 +498,37 @@ assert_jq "$evidence_pack_out" ".data.pack.schema == \"ee.pack.v2\"
     "fresh imported evidence is the sole typed pack item with exact content, identity, why, and line provenance"
 repeat_evidence_pack_out="$(ee_json --workspace "$WS" pack \
     "ambient capture must dedupe accepted suggestions" --max-tokens 2000 --json)"
-assert_jq "$repeat_evidence_pack_out" ".success == true
-    and .data.pack.hash == $(printf '%s' "$evidence_pack_out" | jq -c '.data.pack.hash')
-    and .data.pack.items == $(printf '%s' "$evidence_pack_out" | jq -c '.data.pack.items')
-    and .data.pack.budget.usedTokens == $(printf '%s' "$evidence_pack_out" | jq -c '.data.pack.budget.usedTokens')" \
-    "repeating the evidence pack preserves hash, typed item bytes, and truthful token accounting"
+# bd-16imy bullet 4. What follows used to be ONE conjunction that compared run 2
+# to run 1 and to nothing else. That proves STABILITY and cannot prove
+# CORRECTNESS: two runs agreeing says nothing about what they agree ON, so an
+# EMPTY pack repeats as empty and passes, and the WRONG items repeat as the same
+# wrong items and pass. It was recorded UNPROVEN rather than MET for exactly that
+# reason — a criterion that cannot fail is not evidence.
+#
+# The three clauses below give the comparison something to be stable ABOUT. They
+# are asserted against the repeat run INDEPENDENTLY, not against run 1, so they
+# still hold if run 1 was wrong. They use assert_json because it prints the
+# actual value: a failure says `100` or `memory`, not `false`.
+assert_json "$repeat_evidence_pack_out" '.success' 'true' \
+    "repeat pack succeeded"
+assert_json "$repeat_evidence_pack_out" '(.data.pack.items | length) > 0' 'true' \
+    "repeat pack is non-vacuous: an empty pack must not satisfy determinism"
+assert_json "$repeat_evidence_pack_out" '.data.pack.items[0].entityKind' 'evidence_span' \
+    "repeat pack independently returns a typed evidence span, not merely run 1's bytes"
+assert_json "$repeat_evidence_pack_out" '.data.pack.items[0].evidenceSpanId' "$evidence_doc_id" \
+    "repeat pack independently returns the evidence span that search found"
+
+# Stability, split so a drift names WHICH aspect drifted rather than reporting a
+# bare boolean for all three at once.
+assert_json "$repeat_evidence_pack_out" '.data.pack.hash' \
+    "$(printf '%s' "$evidence_pack_out" | jq -r '.data.pack.hash')" \
+    "repeating the evidence pack preserves the pack hash"
+assert_json "$repeat_evidence_pack_out" '.data.pack.budget.usedTokens' \
+    "$(printf '%s' "$evidence_pack_out" | jq -r '.data.pack.budget.usedTokens')" \
+    "repeating the evidence pack preserves truthful token accounting"
+assert_jq "$repeat_evidence_pack_out" \
+    ".data.pack.items == $(printf '%s' "$evidence_pack_out" | jq -c '.data.pack.items')" \
+    "repeating the evidence pack preserves typed item bytes"
 
 ready_generation="$(printf '%s' "$ready_index_out" | jq -r '.data.indexGeneration // empty')"
 assert_nonempty "$ready_generation" "ready index exposes its published generation"
