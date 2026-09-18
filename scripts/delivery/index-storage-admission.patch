@@ -1,0 +1,26 @@
+diff --git a/src/core/index.rs b/src/core/index.rs
+--- a/src/core/index.rs
++++ b/src/core/index.rs
+@@ -55,1 +55,4 @@
+ use sqlmodel_core::Value as SqlValue;
++
++#[path = "index_storage.rs"]
++mod storage;
+@@ -5454,6 +5457,17 @@
+     documents: Vec<crate::search::IndexableDocument>,
+ ) -> Result<BuildStats, IndexRebuildError> {
++    build_index_generation_with_capacity(cx, index_dir, stack, documents, storage::filesystem_capacity).await
++}
++
++async fn build_index_generation_with_capacity(
++    cx: &asupersync::Cx,
++    index_dir: &Path,
++    stack: EmbedderStack,
++    documents: Vec<crate::search::IndexableDocument>,
++    probe: impl FnOnce(&Path) -> Result<storage::Capacity, IndexRebuildError>,
++) -> Result<BuildStats, IndexRebuildError> {
+     index_checkpoint(cx)?;
++    storage::admit(cx, index_dir, &stack, &documents, probe)?;
+     if documents.is_empty() {
+         build_empty_index(cx, index_dir, stack).await
+     } else {
