@@ -1742,6 +1742,33 @@ fn persist_sync_round_events(
     let bindings = workspace_config(std::path::Path::new(&snapshot.workspace_path))
         .and_then(|config| config.mesh.peer_group_bindings)
         .unwrap_or_default();
+    // bd-1jpg7: resolve our own origin id ONCE, before importing anything, and
+    // fail closed if the members table cannot be read.
+    //
+    // This function returns u32 and has no error channel, so it cannot
+    // propagate. `return 0` is the fail-closed answer and is already this
+    // function's idiom for a condition it cannot proceed under -- an empty
+    // database path, a failed open, and a paused team all return 0 above.
+    // What it must not do is what it did before: swallow the db error and
+    // continue with `""`, which compares unequal to every real origin id and
+    // silently disables the no-echo guard in classify_inbound for the whole
+    // batch. Importing nothing is a degradation; importing everything with the
+    // echo refusal switched off is a fail-open.
+    //
+    // Hoisted out of the per-event loop deliberately. It does not depend on the
+    // event, and resolving it here means a db failure refuses the round before
+    // the first import rather than part-way through it.
+    let Ok(own_origin) = crate::mesh::team::resolve_own_origin_node_id(&connection) else {
+        return 0;
+    };
+    // `None` is the not-yet-enrolled case, which keeps the previous unmatched
+    // guard for a sound reason rather than an accidental one: a node with no
+    // `is_self` row has produced no origin material, so no inbound event can be
+    // an echo of ours. Recorded on the bead as a decision, not an oversight.
+    let own_origin = match own_origin {
+        Some(own_origin) => own_origin,
+        None => String::new(),
+    };
     let mut imported = 0_u32;
     for event in events {
         let parsed = serde_json::from_str::<serde_json::Value>(&event.payload_json).ok();
@@ -1761,16 +1788,6 @@ fn persist_sync_round_events(
         )
         .ok();
         if let Some(inbound) = inbound.as_ref() {
-            let own_origin = connection
-                .list_all_team_members()
-                .ok()
-                .and_then(|members| {
-                    members
-                        .into_iter()
-                        .find(|member| member.is_self)
-                        .map(|member| member.origin_node_id)
-                })
-                .unwrap_or_default();
             let verifier = crate::mesh::team::TeamMemberKeyVerifier {
                 connection: &connection,
             };

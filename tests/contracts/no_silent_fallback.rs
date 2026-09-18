@@ -329,16 +329,30 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     // bd-apvhh burn-down, tranche 3 (2026-09-18): src/mesh/team.rs and
     // src/core/resume.rs, the two largest no-rule files, taken deliberately
     // because they are where the answer could come back NOT allowed. It did,
-    // once: NSF-MESH-TEAM-JOIN-SYNC-OWN-ORIGIN-SWALLOWED below is the first
-    // must_fix this burn-down has produced.
-    must_fix_in(
-        "NSF-MESH-TEAM-JOIN-SYNC-OWN-ORIGIN-SWALLOWED",
-        "src/mesh/team.rs",
-        "apply_join_first_sync_events",
-        ".find(|member| member.is_self)",
-        "bd-1jpg7",
-        "FAILS OPEN. apply_join_first_sync_events reads its own origin node id with `.ok()` rather than `?`, so a db error and a genuinely absent self member both become \"\". That value is handed to ingest_origin_event and reaches the no-echo guard in src/mesh/origin_stream.rs classify_inbound: `if event.origin_node_id == own_origin_node_id { Quarantined }`. A real event's origin id is never empty, so \"\" never matches and the guard silently stops refusing events that claim THIS node as their origin. Every other unwrap_or_default in this file sits behind `?` and only ever sees a true absence; this one swallows the error. The function returns u32 and has no error channel, which is the structural reason the `.ok()` is there, so the repair is a signature change or an Option that ingest refuses to classify -- not a different default.",
-    ),
+    // once: NSF-MESH-TEAM-JOIN-SYNC-OWN-ORIGIN-SWALLOWED was the first must_fix
+    // this burn-down produced.
+    //
+    // IT IS NOW FIXED AND RETIRED, together with its twin
+    // NSF-MESH-FOREGROUND-SYNC-OWN-ORIGIN-SWALLOWED further down. Both sites
+    // read the node's own origin id with `.ok()`, collapsing a db error and an
+    // absent self member into `""`, which compares unequal to every real origin
+    // id and silently disabled classify_inbound's no-echo guard. Both now call
+    // `team::resolve_own_origin_node_id`, which returns
+    // `Result<Option<String>, _>` and so cannot express a failure as an empty
+    // string: the db error propagates (team.rs) or refuses the round (
+    // foreground_cli.rs), and the not-yet-enrolled case is an explicit `None`
+    // (bd-1jpg7).
+    //
+    // Their ledger rows went in the same commit. Each rule owned exactly one
+    // finding, and the repair removed the `.unwrap_or_default()` those findings
+    // were detected on, so both would have dropped to owning zero -- which
+    // `every_rule_declares_the_number_of_findings_it_owns` fails on, and which
+    // is the dead-rule state bd-epvc1 is about. Note the file-level staleness
+    // check would NOT have caught this pair on its own: the fragment
+    // `.find(|member| member.is_self)` still appears in both files, in the
+    // replacement helper and in the already-correct
+    // `resolve_self_origin_node_id`. The count ledger is what made the
+    // retirement non-optional.
     allowed_in(
         "NSF-MESH-TEAM-IDENTITY-USER-ID-ROUNDTRIP",
         "src/mesh/team.rs",
@@ -405,14 +419,16 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     // ledger row naming a rule that no longer exists. Removing a must_fix here
     // records a defect CLOSED, not an exemption granted; the argument for the
     // fix lives in bd-zjcx6 and in the comment at the call site.
-    must_fix_in(
-        "NSF-MESH-FOREGROUND-SYNC-OWN-ORIGIN-SWALLOWED",
-        "src/mesh/foreground_cli.rs",
-        "persist_sync_round_events",
-        ".find(|member| member.is_self)",
-        "bd-1jpg7",
-        "THE SECOND SITE of bd-1jpg7, in a different file, found because tranche 4 read the whole no-rule population rather than stopping at the first instance. Character for character the same construct as apply_join_first_sync_events: list_all_team_members() with `.ok()` instead of `?`, so a db error and an absent self member both become \"\", and the value is passed straight to ingest_origin_event where it disables the no-echo guard in classify_inbound. The rule for the team.rs site is function-scoped and cannot reach here, which is exactly why a must_fix covering one of two identical sites is not coverage of the defect.",
-    ),
+    // NSF-MESH-FOREGROUND-SYNC-OWN-ORIGIN-SWALLOWED was here: the SECOND site
+    // of bd-1jpg7, character for character the same construct as the team.rs
+    // one. Both are fixed and both rows are retired; the reasoning is at the
+    // tranche-3 comment above, with its twin. The observation this rule was
+    // written to make still stands and is worth keeping even though the rule is
+    // gone: a must_fix covering one of two identical sites LOOKS like coverage
+    // in the ledger -- one rule, one declared count, every arm green -- while
+    // half the defect goes unwatched. It was found only because tranche 4 read
+    // the whole remaining no-rule population instead of stopping once the class
+    // was known.
     allowed_in(
         "NSF-MESH-RESPONDER-ADMISSION-CLOCK",
         "src/mesh/responder_broker.rs",

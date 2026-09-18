@@ -408,7 +408,11 @@
 # the must_fix owned ZERO, which would have shipped exactly the dead-must_fix
 # defect bd-epvc1 is about, and two group rules owned 1 where they had to own 2
 # because their fragment sat outside the second finding's context window.
-1	NSF-MESH-TEAM-JOIN-SYNC-OWN-ORIGIN-SWALLOWED
+# NSF-MESH-TEAM-JOIN-SYNC-OWN-ORIGIN-SWALLOWED owned 1 and is RETIRED with its
+# twin NSF-MESH-FOREGROUND-SYNC-OWN-ORIGIN-SWALLOWED below: both defects are
+# fixed (bd-1jpg7), the `.unwrap_or_default()` their findings were detected on
+# is gone from both functions, so both rules would now own ZERO -- which this
+# gate fails on, and which is the dead-rule state bd-epvc1 names.
 3	NSF-MESH-TEAM-IDENTITY-USER-ID-ROUNDTRIP
 2	NSF-MESH-TEAM-ACTIVITY-UNATTRIBUTED
 1	NSF-MESH-TEAM-INVITE-AUTH-FLOOR-ABSENT
@@ -429,7 +433,8 @@
 # defect it watched is fixed (bd-zjcx6), so its rule was dropped from
 # INVENTORY_RULES and this row had to go with it -- a ledger row naming a rule
 # that no longer exists fails every_rule_declares_the_number_of_findings_it_owns.
-1	NSF-MESH-FOREGROUND-SYNC-OWN-ORIGIN-SWALLOWED
+# NSF-MESH-FOREGROUND-SYNC-OWN-ORIGIN-SWALLOWED owned 1 and is RETIRED: the
+# second bd-1jpg7 site, fixed in the same commit as its team.rs twin.
 1	NSF-MESH-RESPONDER-ADMISSION-CLOCK
 1	NSF-MESH-RESPONDER-NO-REGISTRATIONS-YET
 1	NSF-MESH-RESPONDER-CHUNK-SIZE-TOKEN

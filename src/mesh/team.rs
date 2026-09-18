@@ -7043,13 +7043,62 @@ fn run_join_first_sync(
         &SyncRoundRequest::new(Vec::new(), 0, 32),
     )
     .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
-    Ok(apply_join_first_sync_events(
+    apply_join_first_sync_events(
         connection,
         workspace_id,
         team_id,
         origin_node_id,
         &sync.events,
-    ))
+    )
+}
+
+/// This node's own origin node id, for the ingest no-echo guard (bd-1jpg7).
+///
+/// THE POINT OF THIS FUNCTION IS THAT IT CANNOT RETURN `""` FOR A FAILURE.
+///
+/// `classify_inbound` refuses an inbound event when
+/// `event.origin_node_id == own_origin_node_id`. A real event's origin id is
+/// never empty, so `""` compares unequal to everything and the guard silently
+/// stops firing for every event in the batch. Both call sites used to build
+/// that value with `.ok()` plus a defaulting unwrap, which collapsed three states
+/// into one string:
+///
+///   db error                     -> ""   guard disabled, and nobody told
+///   no `is_self` row yet         -> ""   guard disabled
+///   `is_self` row with empty id  -> ""   guard disabled
+///
+/// Only the middle one is a legitimate absence. This returns them separately:
+///
+///   `Err(..)`      the members table could not be read. The caller must fail
+///                  closed; it must NOT continue with "no own origin".
+///   `Ok(None)`     no `is_self` row. A node that has not enrolled yet has
+///                  produced no origin material, so there is nothing of ours
+///                  for an inbound event to echo.
+///   `Ok(Some(id))` a real, non-empty origin id.
+///
+/// The empty-id row is reported as an error rather than as `Ok(None)` on
+/// purpose. It is the one stored value that would silently disable the guard,
+/// and `resolve_self_origin_node_id` 280 lines into `foreground_cli.rs`
+/// already refuses it explicitly (`if self_node.is_empty() { return None }`).
+/// That defence is worth having here too, because it survives a future
+/// refactor that reintroduces a default somewhere upstream.
+pub(crate) fn resolve_own_origin_node_id(
+    connection: &DbConnection,
+) -> Result<Option<String>, OriginStreamError> {
+    let members = connection
+        .list_all_team_members()
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let Some(member) = members.into_iter().find(|member| member.is_self) else {
+        return Ok(None);
+    };
+    if member.origin_node_id.is_empty() {
+        return Err(OriginStreamError::Db(
+            "self team member has an empty origin_node_id; refusing to ingest with the \
+             no-echo guard disabled"
+                .to_owned(),
+        ));
+    }
+    Ok(Some(member.origin_node_id))
 }
 
 fn apply_join_first_sync_events(
@@ -7058,18 +7107,22 @@ fn apply_join_first_sync_events(
     team_id: &str,
     origin_node_id: &str,
     events: &[crate::mesh::bootstrap_envelope::SyncRoundEvent],
-) -> u32 {
+) -> Result<u32, OriginStreamError> {
     let producer_peer_id = team_pair_peer_handle(team_id, origin_node_id);
-    let own_origin = connection
-        .list_all_team_members()
-        .ok()
-        .and_then(|members| {
-            members
-                .into_iter()
-                .find(|member| member.is_self)
-                .map(|member| member.origin_node_id)
-        })
-        .unwrap_or_default();
+    // bd-1jpg7: propagate. This function has an error channel (its only caller
+    // already wrapped the return in `Ok(..)`), so a db failure here fails the
+    // sync round instead of disabling the echo guard for the whole batch.
+    //
+    // `None` is the not-yet-enrolled case and keeps the previous behaviour of
+    // an unmatched guard, which is sound for a different reason than the one
+    // the old code accidentally relied on: a node with no `is_self` row has
+    // emitted no origin material, so no inbound event can be an echo of ours.
+    // That is a deliberate decision recorded on the bead, not an accident of
+    // `unwrap_or_default()`.
+    let own_origin = match resolve_own_origin_node_id(connection)? {
+        Some(own_origin) => own_origin,
+        None => String::new(),
+    };
     let now = chrono::Utc::now().to_rfc3339();
     let mut imported = 0_u32;
     for event in events {
@@ -7148,7 +7201,7 @@ fn apply_join_first_sync_events(
             "failed to apply imported teamPortMigrated locators after join first-sync"
         );
     }
-    imported
+    Ok(imported)
 }
 
 /// Persist a granted join as a local `teamJoined` origin event.
@@ -9679,7 +9732,8 @@ mod tests {
                 event_hash: genesis.event_hash.clone(),
                 payload_json: genesis.payload_json.clone(),
             }],
-        );
+        )
+        .expect("join first sync must not fail to resolve our own origin id");
         assert!(
             imported >= 1,
             "first sync must import the origin genesis {}: imported={imported}",
@@ -13985,6 +14039,97 @@ mod tests {
             wrong_peer
                 .to_string()
                 .contains("authenticated session peer")
+        );
+    }
+
+    // ---- bd-1jpg7: own-origin resolution must never answer "" for a failure --
+    //
+    // The three states the old `.ok()...unwrap_or_default()` collapsed are
+    // asserted separately here, because the whole repair is that they stopped
+    // being the same value. Each refusal arm is paired with an arm proving the
+    // benign states still resolve, so a resolver that errored unconditionally
+    // could not pass this set.
+
+    fn insert_member(connection: &DbConnection, is_self: bool, origin_node_id: &str) {
+        connection
+            .insert_team_member(&InsertTeamMemberInput {
+                member_id: format!("mbr_{}_{}", u8::from(is_self), origin_node_id.len()),
+                team_id: "team_ownorigin000000000000001".to_owned(),
+                workspace_id: "wsp_ownorigin00000000000000001".to_owned(),
+                display_name: if is_self { "self" } else { "peer" }.to_owned(),
+                state: "active".to_owned(),
+                is_self,
+                origin_node_id: origin_node_id.to_owned(),
+                bound_via: "test".to_owned(),
+                joined_at: "2026-09-18T00:00:00Z".to_owned(),
+            })
+            .expect("insert member");
+    }
+
+    #[test]
+    fn own_origin_is_none_when_there_is_no_self_member_yet() {
+        let connection = open_db();
+        // A non-self member exists, so `None` is specifically about `is_self`
+        // and not about the table being empty.
+        insert_member(&connection, false, "node_peer000000000000000000000001");
+
+        assert_eq!(
+            resolve_own_origin_node_id(&connection).expect("an absent self member is not an error"),
+            None,
+            "a node that has not enrolled yet must resolve to None, not to an error"
+        );
+    }
+
+    #[test]
+    fn own_origin_is_the_self_members_id_when_one_exists() {
+        // The control. Without it the refusal arms below would be satisfied by
+        // a resolver that never returns Some at all.
+        let connection = open_db();
+        insert_member(&connection, false, "node_peer000000000000000000000001");
+        insert_member(&connection, true, "node_self000000000000000000000001");
+
+        assert_eq!(
+            resolve_own_origin_node_id(&connection).expect("a real self member is not an error"),
+            Some("node_self000000000000000000000001".to_owned()),
+            "the self member's origin id must be returned so the no-echo guard can match it"
+        );
+    }
+
+    #[test]
+    fn a_self_member_with_an_empty_origin_id_is_refused_rather_than_silently_disabling_the_guard() {
+        // THE ARM THAT FAILS WITHOUT THE FIX.
+        //
+        // The other tests call resolve_own_origin_node_id, which the fix
+        // introduced -- against the old code they would not fail, they would
+        // not COMPILE. This one runs the pre-fix expression and the fix against
+        // ONE connection and asserts they disagree.
+        let connection = open_db();
+        insert_member(&connection, true, "");
+
+        // The pre-fix expression from apply_join_first_sync_events, verbatim.
+        let collapsed = connection
+            .list_all_team_members()
+            .ok()
+            .and_then(|members| {
+                members
+                    .into_iter()
+                    .find(|member| member.is_self)
+                    .map(|member| member.origin_node_id)
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            collapsed, "",
+            "the defect, executed: the old expression yields the empty string, and a real \
+             event's origin_node_id is never empty, so classify_inbound's `event.origin_node_id \
+             == own_origin_node_id` can never match and the echo refusal stops firing"
+        );
+
+        // The fix, same connection, opposite answer.
+        assert!(
+            resolve_own_origin_node_id(&connection).is_err(),
+            "an empty stored origin id is the one value that silently disables the no-echo \
+             guard, so it must be refused rather than returned; if this is Ok the fail-open \
+             is back"
         );
     }
 }
