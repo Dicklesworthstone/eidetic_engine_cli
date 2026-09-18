@@ -557,6 +557,34 @@ struct CandidateIdentity {
 }
 
 impl CandidateIdentity {
+    /// Observe the candidate. This never judges it.
+    ///
+    /// bd-0v23w: observation is split from judgement so the identity exists
+    /// BEFORE anything can refuse it. The refusal path used to run with an
+    /// empty event list, and `write_content_addressed_evidence` hashes the
+    /// joined events body, so every refusal wrote a file named
+    /// `af1349b9…` — the BLAKE3 of the empty string. That digest was correct
+    /// and useless: it was a function of nothing, so two refusals of two
+    /// different candidates on two different workers produced byte-identical
+    /// evidence names. A P0 cited one of those files as proof.
+    fn observe(version_json: &Value, binary: &Path) -> Result<Self, Verdict> {
+        Self::attest(version_json, binary, false)
+    }
+
+    /// Why this candidate may not carry a verdict, or `None` if it may.
+    ///
+    /// Separated from `observe` so a caller can record WHAT it saw before
+    /// deciding whether to accept it.
+    fn unattested_reason(&self, require: bool) -> Option<Verdict> {
+        if !require {
+            return None;
+        }
+        match Self::attest_fields(&self.fields) {
+            Ok(()) => None,
+            Err(verdict) => Some(verdict),
+        }
+    }
+
     /// The bead requires an attested candidate: exact commit, dirty state,
     /// target triple, profile, and binary SHA-256. Failure to attest is
     /// `InfraError`, never a product verdict.
@@ -604,6 +632,19 @@ impl CandidateIdentity {
         // cannot also say which engine it linked and which features were on has
         // attested to a commit rather than to a build.
         if require {
+            Self::attest_fields(&fields)?;
+        }
+        Ok(Self { fields })
+    }
+
+    /// Whether a recorded identity is attestable, judged purely from the
+    /// record.
+    ///
+    /// Pure so the SAME judgement can be applied after the identity has already
+    /// been written to evidence — which is what lets a refusal say which
+    /// candidate it refused (bd-0v23w).
+    fn attest_fields(fields: &Record) -> Result<(), Verdict> {
+        {
             for name in ["gitCommit", "targetTriple", "frankenStack", "featureSet"] {
                 let value = fields.get(name).map_or("<absent>", String::as_str);
                 if value == "<absent>" || value == "unknown" || value == "null" {
@@ -618,7 +659,7 @@ impl CandidateIdentity {
                 ));
             }
         }
-        Ok(Self { fields })
+        Ok(())
     }
 }
 
@@ -968,15 +1009,28 @@ fn concurrent_retrieval_over_one_generation_is_classified() -> TestResult {
             );
         }
     };
-    let identity = match CandidateIdentity::attest(&version, &binary, require_attestation()) {
+    // bd-0v23w: OBSERVE, RECORD, then judge — in that order. Judging first left
+    // `events` empty on every refusal, and the content-addressed proof is the
+    // hash of the joined events body, so each refusal wrote a file named for
+    // the BLAKE3 of the empty string. Recording the identity first makes that
+    // digest a function of WHICH candidate was refused.
+    let identity = match CandidateIdentity::observe(&version, &binary) {
         Ok(identity) => identity,
         Err(verdict) => return finish(&verdict, &proof_dir, &mut events),
     };
+    let unattested = identity.unattested_reason(require_attestation());
     events.push(event(
         "attest_candidate",
-        "pass",
+        if unattested.is_some() {
+            "refused"
+        } else {
+            "pass"
+        },
         serde_json::json!({ "identity": &identity.fields }),
     ));
+    if let Some(verdict) = unattested {
+        return finish(&verdict, &proof_dir, &mut events);
+    }
 
     // ── Realistic isolated workspace ────────────────────────────────────────
     let setup = (|| -> Result<(), String> {
@@ -1209,6 +1263,18 @@ fn finish(verdict: &Verdict, proof_dir: &Path, events: &mut Vec<Value>) -> TestR
     let proof = write_content_addressed_evidence(proof_dir, events)
         .unwrap_or_else(|error| PathBuf::from(format!("<evidence unwritable: {error}>")));
     if verdict.is_product_pass() {
+        // bd-0v23w: a pass used to compute this path and discard it. The
+        // artifact was always written — it was simply never named, so no green
+        // run in this oracle's history has ever been citable. Printing it costs
+        // nothing and is the difference between "it passed" and "here is what
+        // passed". Reaches the log only under --nocapture, which this test's
+        // documented invocation already requires.
+        println!(
+            "{}: {}\nevidence: {}",
+            verdict.class(),
+            verdict.detail(),
+            proof.display()
+        );
         return Ok(());
     }
     Err(format!(
@@ -1825,6 +1891,104 @@ mod pack_selection {
         assert!(
             !renamed.contains_key("pack.selection"),
             "a renamed path must omit the field, not record an empty one: {renamed:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod evidence {
+    //! bd-0v23w: a content-addressed name is a claim about content.
+    //!
+    //! The oracle wrote `af1349b9…ee-test-event.jsonl` on every refusal, and a
+    //! P0 cited one of those files as proof. The digest was not wrong — it was
+    //! the correct BLAKE3 of an empty body, because the refusal path ran before
+    //! anything had been recorded. These arms pin the property that makes the
+    //! artifact worth citing: the name is a function of the CONTENT, so two
+    //! refusals of two different candidates cannot share a filename.
+
+    use serde_json::json;
+
+    use super::{event, write_content_addressed_evidence};
+
+    /// The digest of an empty body. Asserted by reconstruction below rather
+    /// than trusted as a literal.
+    const EMPTY_DIGEST: &str = "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262";
+
+    fn digest_of(events: &[serde_json::Value]) -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_content_addressed_evidence(dir.path(), events).expect("write evidence");
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.split('.').next())
+            .expect("digest in filename")
+            .to_owned()
+    }
+
+    /// PRECONDITION: the sentinel really is the hash of nothing.
+    ///
+    /// Hardcoding it without this would make the arms below assert against a
+    /// magic string. Reconstructing it is also what made the original incident
+    /// checkable by a reader with no access to the artifact.
+    #[test]
+    fn the_empty_digest_constant_is_the_hash_of_an_empty_body() {
+        assert_eq!(
+            blake3::hash(b"").to_hex().to_string(),
+            EMPTY_DIGEST,
+            "the sentinel must be reconstructible, not taken on faith"
+        );
+    }
+
+    /// NEGATIVE ARM: an empty event list still produces the empty digest.
+    ///
+    /// This is the behaviour the incident was made of, and it is CORRECT for
+    /// the writer — a hash of nothing is the hash of nothing. Pinning it here
+    /// means the fix has to be "record something before refusing", and can
+    /// never be "make the writer lie about empty input".
+    #[test]
+    fn an_empty_event_list_still_hashes_to_nothing() {
+        assert_eq!(
+            digest_of(&[]),
+            EMPTY_DIGEST,
+            "the writer must not disguise an empty body"
+        );
+    }
+
+    /// POSITIVE: a recorded identity moves the digest off the empty sentinel.
+    #[test]
+    fn a_recorded_identity_makes_the_proof_name_meaningful() {
+        let events = vec![event(
+            "attest_candidate",
+            "refused",
+            json!({"identity": {"gitCommit": "051475eff", "frankenStack": "fsqlite@0.4.1"}}),
+        )];
+        assert_ne!(
+            digest_of(&events),
+            EMPTY_DIGEST,
+            "a refusal that recorded its candidate must not be named for nothing"
+        );
+    }
+
+    /// DISCRIMINATION: two refusals of two DIFFERENT candidates must not share
+    /// a filename.
+    ///
+    /// This is the property whose absence let one digest stand for every
+    /// refusal, across different commits, workers and directories.
+    #[test]
+    fn two_different_candidates_cannot_share_a_proof_name() {
+        let one = vec![event(
+            "attest_candidate",
+            "refused",
+            json!({"identity": {"gitCommit": "051475eff"}}),
+        )];
+        let other = vec![event(
+            "attest_candidate",
+            "refused",
+            json!({"identity": {"gitCommit": "4741a806a"}}),
+        )];
+        assert_ne!(
+            digest_of(&one),
+            digest_of(&other),
+            "the proof name must distinguish which candidate was refused"
         );
     }
 }
