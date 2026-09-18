@@ -4859,17 +4859,73 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
         assistant_evidence,
         "stored evidence assistant phrase",
     )?;
+    // PRINT THE HITS. This was a seven-way `all()` collapsed into a single
+    // boolean, so a failure said only "posture wrong" -- not which predicate, on
+    // which span, with what value. The cause then has to be inferred from the
+    // schema instead of read from the output, which is how bd-tvi3a spent a run
+    // deciding this was an unreachable product state when it is a per-span
+    // quarantine decision (src/db/mod.rs:14055-14065: CassImport is admitted
+    // unless policy_quarantine, which has four independent triggers).
+    //
+    // The ASSERTION IS UNCHANGED -- all seven predicates must still hold for
+    // every span. Only the reporting changed, and it reports EVERY violation
+    // rather than stopping at the first, so one run distinguishes the four
+    // quarantine causes from an upstream_ref_hash mismatch instead of one run
+    // per hypothesis.
+    let mut span_violations: Vec<String> = Vec::new();
+    for (index, span) in spans.iter().enumerate() {
+        if !span.cass_span_id.starts_with("blake3:") {
+            span_violations.push(format!(
+                "span[{index}] cass_span_id is not blake3-prefixed: {}",
+                span.cass_span_id
+            ));
+        }
+        if span.cass_span_id.len() != 71 {
+            span_violations.push(format!(
+                "span[{index}] cass_span_id length is {} not 71",
+                span.cass_span_id.len()
+            ));
+        }
+        if span.upstream_ref_hash.as_deref() != Some(span.cass_span_id.as_str()) {
+            span_violations.push(format!(
+                "span[{index}] upstream_ref_hash {:?} != cass_span_id {}",
+                span.upstream_ref_hash, span.cass_span_id
+            ));
+        }
+        if span.producer_kind != "cass_import" {
+            span_violations.push(format!(
+                "span[{index}] producer_kind is {} not cass_import",
+                span.producer_kind
+            ));
+        }
+        if span.search_eligibility != "admitted" {
+            span_violations.push(format!(
+                "span[{index}] search_eligibility is {} not admitted -- quarantine inputs: \
+                 instruction_risk {}, span_kind {}, role {:?}, secret_redaction_status {}",
+                span.search_eligibility,
+                span.instruction_risk,
+                span.span_kind,
+                span.role,
+                span.secret_redaction_status
+            ));
+        }
+        if span.cass_span_id.contains(session_arg.as_str()) {
+            span_violations.push(format!(
+                "span[{index}] cass_span_id leaks the absolute session path"
+            ));
+        }
+        if span.content_hash.is_empty() {
+            span_violations.push(format!("span[{index}] content_hash is empty"));
+        }
+    }
     ensure(
-        spans.iter().all(|span| {
-            span.cass_span_id.starts_with("blake3:")
-                && span.cass_span_id.len() == 71
-                && span.upstream_ref_hash.as_deref() == Some(span.cass_span_id.as_str())
-                && span.producer_kind == "cass_import"
-                && span.search_eligibility == "admitted"
-                && !span.cass_span_id.contains(session_arg.as_str())
-                && !span.content_hash.is_empty()
-        }),
-        "evidence spans must retain only hashed upstream references with admitted CASS posture",
+        span_violations.is_empty(),
+        format!(
+            "evidence spans must retain only hashed upstream references with admitted CASS posture; {} violation(s) across {} span(s): {}",
+            span_violations.len(),
+            spans.len(),
+            span_violations.join("; ")
+        ),
     )?;
     let stored_session_id = sessions[0].id.clone();
     connection.close().map_err(|e| e.to_string())?;
