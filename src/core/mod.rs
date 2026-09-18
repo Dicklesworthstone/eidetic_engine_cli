@@ -399,29 +399,42 @@ pub struct VersionReport {
     pub degradations: Vec<BuildProvenanceDegradation>,
 }
 
+/// Report what a given build could not say about its own provenance.
+///
+/// Split out of `VersionReport::gather` so the decision can be exercised with a
+/// synthetic `BuildInfo` on both sides. `gather` can only ever see the live
+/// build, so a test written against it alone cannot distinguish a detector that
+/// discriminates from one that always agrees with whatever this host produced.
+#[must_use]
+pub fn build_provenance_degradations(build: &BuildInfo) -> Vec<BuildProvenanceDegradation> {
+    let mut degradations = Vec::new();
+
+    if build.git_commit.is_none() && build.git_tag.is_none() && build.git_dirty.is_none() {
+        degradations.push(BuildProvenanceDegradation::new(
+            "git_metadata_unavailable",
+            "low",
+            "Git source metadata was not provided by the build.",
+            "Build with VERGEN_GIT_SHA, VERGEN_GIT_DESCRIBE, and VERGEN_GIT_DIRTY set.",
+        ));
+    }
+
+    if build.target_triple == "unknown" {
+        degradations.push(BuildProvenanceDegradation::new(
+            "target_triple_unavailable",
+            "low",
+            "Target triple was not provided by the build.",
+            "Build with EE_BUILD_TARGET set to the target triple.",
+        ));
+    }
+
+    degradations
+}
+
 impl VersionReport {
     #[must_use]
     pub fn gather() -> Self {
         let build = build_info();
-        let mut degradations = Vec::new();
-
-        if build.git_commit.is_none() && build.git_tag.is_none() && build.git_dirty.is_none() {
-            degradations.push(BuildProvenanceDegradation::new(
-                "git_metadata_unavailable",
-                "low",
-                "Git source metadata was not provided by the build.",
-                "Build with VERGEN_GIT_SHA, VERGEN_GIT_DESCRIBE, and VERGEN_GIT_DIRTY set.",
-            ));
-        }
-
-        if build.target_triple == "unknown" {
-            degradations.push(BuildProvenanceDegradation::new(
-                "target_triple_unavailable",
-                "low",
-                "Target triple was not provided by the build.",
-                "Build with EE_BUILD_TARGET set to the target triple.",
-            ));
-        }
+        let degradations = build_provenance_degradations(&build);
 
         Self {
             build,
@@ -968,13 +981,13 @@ mod tests {
     use asupersync::{LabConfig, LabRuntime};
 
     use super::{
-        BUILD_TIMESTAMP_POLICY, CLI_BLOCKING_POOL_CEILING, CLI_BLOCKING_POOL_FLOOR, RuntimeProfile,
-        StorelessWorkspaceAssessment, VERSION_PROVENANCE_SCHEMA_V1, VersionReport,
-        build_cli_runtime, build_features, build_info, clean_build_metadata,
-        cli_blocking_pool_threads, db_migration_range, duration_millis_saturating,
-        parse_build_bool, run_cli_future, runtime_status, serialize_or_error,
-        serialize_pretty_or_error, shell_quote_repair_arg, storeless_workspace_candidate_retargets,
-        supported_schemas,
+        BUILD_TIMESTAMP_POLICY, BuildInfo, CLI_BLOCKING_POOL_CEILING, CLI_BLOCKING_POOL_FLOOR,
+        RuntimeProfile, StorelessWorkspaceAssessment, VERSION_PROVENANCE_SCHEMA_V1, VersionReport,
+        build_cli_runtime, build_features, build_info, build_provenance_degradations,
+        clean_build_metadata, cli_blocking_pool_threads, db_migration_range,
+        duration_millis_saturating, parse_build_bool, run_cli_future, runtime_status,
+        serialize_or_error, serialize_pretty_or_error, shell_quote_repair_arg,
+        storeless_workspace_candidate_retargets, supported_schemas,
     };
 
     type TestResult = Result<(), String>;
@@ -1074,6 +1087,120 @@ mod tests {
         ensure(
             info.min_db_migration <= info.max_db_migration,
             "database migration range must be ordered",
+        )
+    }
+
+    /// A `BuildInfo` that says nothing about its own provenance: exactly what
+    /// every build of this binary produced before `build.rs` existed.
+    fn unattested_build() -> BuildInfo {
+        BuildInfo {
+            git_commit: None,
+            git_tag: None,
+            git_dirty: None,
+            target_triple: "unknown",
+            ..build_info()
+        }
+    }
+
+    /// PRECONDITION plus POSITIVE claim for the build script
+    /// (bd-reality-core-convergence-1azkt.10).
+    ///
+    /// `TARGET` is set by cargo for build scripts and for nothing else, so
+    /// `option_env!("EE_BUILD_TARGET")` is `Some` only if a build script put it
+    /// there. Before `build.rs` existed this test could not have passed on any
+    /// host: `target_triple` was `"unknown"` in every build ever produced.
+    #[test]
+    fn build_target_triple_is_stamped_by_the_build_script() -> TestResult {
+        // PRECONDITION: the stamp is present at all. Asserted separately from
+        // its value so that a failure says which half broke.
+        let stamped = option_env!("EE_BUILD_TARGET");
+        ensure(
+            stamped.is_some_and(|value| !value.trim().is_empty()),
+            format!("build.rs must stamp EE_BUILD_TARGET; got {stamped:?}"),
+        )?;
+
+        // PRECONDITION on CONTENT: a non-empty stamp is not enough. Any garbage
+        // string would move `target_triple` off "unknown" and satisfy the
+        // positive claim below without the mechanism working, so require the
+        // stamp to actually name the platform this test is running on.
+        let info = build_info();
+        ensure(
+            info.target_triple.contains(std::env::consts::ARCH),
+            format!(
+                "stamped triple {:?} must name this arch {:?}",
+                info.target_triple,
+                std::env::consts::ARCH
+            ),
+        )?;
+
+        // POSITIVE: the value reaches the reported provenance, and the
+        // degradation it used to raise is gone.
+        ensure(
+            info.target_triple != "unknown",
+            "a stamped build must not report an unknown target triple",
+        )?;
+        ensure(
+            !VersionReport::gather()
+                .degradations
+                .iter()
+                .any(|degradation| degradation.code == "target_triple_unavailable"),
+            "a stamped build must not report target_triple_unavailable",
+        )
+    }
+
+    /// NEGATIVE ARM and CONTROL, through the same function production calls.
+    ///
+    /// The negative arm is the one that matters here: a build WITHOUT the stamp
+    /// must still produce the degradations that
+    /// `tests/fixtures/golden/version/version.golden` has always pinned, or the
+    /// mechanism is not what changed that golden's output. It also proves the
+    /// detector discriminates rather than agreeing with whatever this host
+    /// happens to be.
+    #[test]
+    fn build_provenance_degradations_discriminate_instead_of_always_agreeing() -> TestResult {
+        let codes = |build: &BuildInfo| -> Vec<&'static str> {
+            build_provenance_degradations(build)
+                .iter()
+                .map(|degradation| degradation.code)
+                .collect()
+        };
+
+        // NEGATIVE ARM: unstamped in both dimensions raises both codes.
+        let unattested = codes(&unattested_build());
+        ensure_equal(
+            &unattested,
+            &vec!["git_metadata_unavailable", "target_triple_unavailable"],
+            "an unstamped build must still report both provenance degradations",
+        )?;
+
+        // CONTROL: stamped in both dimensions raises neither. Uses a synthetic
+        // build rather than the live one, so the claim does not depend on
+        // whether this host's build happened to be handed a commit.
+        let attested = BuildInfo {
+            git_commit: Some("0123456789abcdef"),
+            git_tag: Some("v0.0.0-test"),
+            git_dirty: Some(false),
+            target_triple: "x86_64-unknown-linux-gnu",
+            ..build_info()
+        };
+        ensure(
+            codes(&attested).is_empty(),
+            format!(
+                "a fully stamped build must report no degradations: {:?}",
+                codes(&attested)
+            ),
+        )?;
+
+        // The git and target halves are independent inputs, so a detector that
+        // collapsed them into one condition would still pass both claims above.
+        let git_only = BuildInfo {
+            target_triple: "unknown",
+            ..attested
+        };
+        ensure_equal(
+            &codes(&git_only),
+            &vec!["target_triple_unavailable"],
+            "the target-triple degradation must fire independently of git metadata",
         )
     }
 
