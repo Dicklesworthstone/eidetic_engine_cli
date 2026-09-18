@@ -39,7 +39,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["populated", "unestablished"],
-      "description": "The honesty field. A skeleton emitted by .5 sets populated=false and lists what it has not established; only .19 may emit populated=true. Absent this, an empty capsule and a verified one are the same shape.",
+      "description": "The honesty field. A skeleton emitted by .5 sets populated=false and lists what it has not established; only .19 may emit populated=true. Absent this, an empty capsule and a verified one are the same shape. GREEN MUST REQUIRE AN EXPLICIT COMPLETENESS ASSERTION, NOT MERELY THE ABSENCE OF A FAIL. That is what this field exists to carry, and it is the requirement that would have caught every verification failure measured in this repo on 2026-09-17/18: verify.sh's pass line prints unconditionally; a CI Static badge means nothing without checking the run concluded, and 46 of 100 runs were cancelled by the next push; `cargo test --lib --test contracts` never reaches contracts when lib fails, so that target reports nothing; a run can exit 0 having executed zero tests (`0 passed; 484 filtered out`); a marker loop that returns on first mismatch reports one defect and never five. Every one of those greens was the ABSENCE OF A FAILURE rather than the PRESENCE OF A COMPLETED CHECK. So populated=true asserts that every declared stage REACHED a terminal verdict -- not that no stage reported FAIL.",
       "properties": {
         "populated": {
           "type": "boolean",
