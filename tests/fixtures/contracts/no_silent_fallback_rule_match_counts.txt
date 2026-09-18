@@ -590,3 +590,34 @@
 1	NSF-CORE-MODEL-CONTENT-HASH-PREFIX
 1	NSF-CORE-SEARCH-ATTRIBUTION-SUFFIX
 1	NSF-CORE-SEARCH-PACK-SECTION-DEFAULT
+
+# The seven two-finding files (src/mesh/team.rs excepted -- bd-coxn1 debt).
+#
+# THE +/-4 WINDOW IS A PHRASING DISCIPLINE, NOT A TOOL DEFECT. Across tranches 3
+# through 5 about 17% of my rules missed on the first attempt, consistently,
+# because I chose fragments by reading the surrounding CODE while
+# classify_finding matches a computed context_window(lines, index) of index-4 ..
+# index+5. Those are different texts, and picking from the wrong one is guessing.
+# The fix is mechanical: print the finding's window and choose a line from IT.
+# In this batch every window-derived fragment landed first time; the single miss
+# was an argument-ORDER slip (function and fragment transposed in allowed_in),
+# which is a different mistake and one the arity check does not catch because the
+# count is right.
+#
+# AND THE CORRELATE, worth knowing before reaching for a wider fragment: A RULE
+# THAT MISSES ITS WINDOW IS OFTEN A RULE THAT SHOULD HAVE BEEN TWO. It happened
+# on the help-text/alias rules, the two orient joins, resume topic-vs-chosen, and
+# again here on decide chosen-vs-rationale. A fragment that cannot reach both
+# sites is usually telling you the sites are different concepts rather than that
+# you need a longer fragment.
+1	NSF-CLI-PLAN-RECIPE-SAVED-ID
+1	NSF-CLI-ASK-QUESTION-REQUIRED
+1	NSF-CORE-DECIDE-CHOSEN-FIELD
+1	NSF-CORE-DECIDE-RATIONALE-FIELD
+1	NSF-CORE-HANDOFF-TOPOLOGY-POSTURE-SUFFIX
+1	NSF-CORE-HANDOFF-KNOWN-BLOCKERS
+2	NSF-CORE-LAB-SCALE-FIXTURE-INDEX
+1	NSF-CORE-SUPPORT-TRIPWIRE-COUNT
+1	NSF-CORE-SUPPORT-PACK-REPLAY-ID
+1	NSF-MESH-FOREGROUND-CONTACT-FALLBACK-HELLO
+1	NSF-MESH-FOREGROUND-SYNC-BINDINGS

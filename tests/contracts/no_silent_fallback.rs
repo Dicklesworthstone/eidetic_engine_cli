@@ -2901,6 +2901,87 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "pack_section_for_level_and_kind(level.unwrap_or_default(), kind.unwrap_or_default())",
         "A hit with no level or kind matches none of the specific arms and falls to the catch-all `_ => PackSection::Artifacts`, which is the general bucket the match was written to end in. The empty strings route to the default section rather than claiming a specific one such as Failures or Evidence.",
     ),
+    // The seven two-finding files. FRAGMENTS PICKED FROM THE COMPUTED +/-4
+    // WINDOW rather than by reading the surrounding code -- see the note in the
+    // match-count ledger. src/mesh/team.rs is deliberately absent: its two
+    // findings are bd-coxn1 and stay as debt while the trace is unfinished.
+    allowed_in(
+        "NSF-CLI-PLAN-RECIPE-SAVED-ID",
+        "src/cli/mod.rs",
+        "handle_plan_recipe_save",
+        "\"Saved draft recipe {}. Steps were retained without execution.\\n\",",
+        "A human confirmation line rendered from `data` that this command just produced. The branch is reached only after a save, and the machine surface built two lines below from the same `data` carries the recipe object unmodified -- so if an id were ever absent it is visible there rather than hidden by this line.",
+    ),
+    allowed_in(
+        "NSF-CLI-ASK-QUESTION-REQUIRED",
+        "src/cli/mod.rs",
+        "handle_ask",
+        "args.question.clone().unwrap_or_default()",
+        "LEFT AS DEBT IN TRANCHE 5 and resolved here: the default is guarded three lines below by `if question.trim().is_empty()`, which returns DomainError::Usage. An ask with no question is rejected, never sent as an empty query.",
+    ),
+    allowed_in(
+        "NSF-CORE-DECIDE-CHOSEN-FIELD",
+        "src/core/decide.rs",
+        "decision_fields_from_memory",
+        "let chosen = string_field(&fields, \"chosen\").unwrap_or_default();",
+        "LEFT AS DEBT IN TRANCHE 2. A decision memory with no typed sidecar, or a sidecar without `chosen`, has no recorded choice. The empty string is not load-bearing downstream: its only use is `alternatives`, which filters options unequal to it, so an empty chosen simply filters nothing. Resolved on the same reading as the resume revisit list -- a decision whose choice cannot be read is reported as unreadable rather than as a decision that chose nothing.",
+    ),
+    allowed_in(
+        "NSF-CORE-DECIDE-RATIONALE-FIELD",
+        "src/core/decide.rs",
+        "decision_fields_from_memory",
+        "rationale: string_field(&fields, \"rationale\").unwrap_or_default(),",
+        "The same absence one field over, and a SEPARATE rule because the two windows do not overlap. Note the two fields immediately below it, `supersedes` and `revisit_by`, keep their Option -- so this struct distinguishes fields whose absence must stay visible from ones rendered as empty text.",
+    ),
+    allowed_in(
+        "NSF-CORE-HANDOFF-TOPOLOGY-POSTURE-SUFFIX",
+        "src/core/handoff.rs",
+        "add_proof_broker_summary_to_resume",
+        ".and_then(proof_broker_topology_resume_posture)",
+        "An empty SUFFIX appended to a status line when the summary carries no topology-recurrence posture. The `.map` builds \" {posture}\" only when one exists, so absence appends nothing.",
+    ),
+    allowed_in(
+        "NSF-CORE-HANDOFF-KNOWN-BLOCKERS",
+        "src/core/handoff.rs",
+        "proof_broker_topology_resume_posture",
+        "let known_blockers = if known_blockers.is_empty() {",
+        "The default feeds the emptiness test on the line this fragment names, which renders the explicit sentinel \"none\". Absent blocker evidence is reported as \"none\" rather than as an empty field the reader must interpret.",
+    ),
+    allowed_in(
+        "NSF-CORE-LAB-SCALE-FIXTURE-INDEX",
+        "src/core/lab.rs",
+        "scale_fixture_record",
+        "let topic = SCALE_ENVELOPE_TOPICS[topic_index].to_owned();",
+        "Two sites, multiplicity 2. UNREACHABLE: each value is `usize::try_from((ordinal - 1) % CONST.len() as u64)`, and a modulo by a non-zero constant length is always less than that length, so it always fits a usize. Both results are then used only to index the same constant arrays they were derived from, so even a zero would be a valid index rather than an out-of-range one.",
+    ),
+    allowed_in(
+        "NSF-CORE-SUPPORT-TRIPWIRE-COUNT",
+        "src/core/support_bundle.rs",
+        "local_cargo_tripwire_blocking_count",
+        "let explicit_count = process_scan",
+        "A process scan carrying no `count` field contributes no explicit count -- and crucially this does NOT blind the tripwire, because blocking_rows is computed independently from the detectedLocalBuilds array on the lines below, filtering out the informational policy statuses. The two sources are combined, so an absent count still leaves the row-derived count to fire.",
+    ),
+    allowed_in(
+        "NSF-CORE-SUPPORT-PACK-REPLAY-ID",
+        "src/core/support_bundle.rs",
+        "pack_replay_record_summary",
+        "let raw_pack_id = row_text(row, 0).unwrap_or_default();",
+        "A row with no pack id in column 0 yields an empty id, which is then passed to get_pack_record and matched -- an empty id finds no record and takes the not-found arm rather than resolving to some other pack.",
+    ),
+    allowed_in(
+        "NSF-MESH-FOREGROUND-CONTACT-FALLBACK-HELLO",
+        "src/mesh/foreground_cli.rs",
+        "contact_peer",
+        "Err(_) => match exchange_bootstrap_hello(address, self.timeout, {",
+        "The fallback arm after the primary sync failed: a payload that does not deserialise yields a DEFAULT hello, used only to establish whether the peer is reachable. The Ok arm records nothing but `contacted: true` -- no events are imported and no identity is asserted -- and a default hello carries no credential a peer could authenticate, so it cannot gain access it would otherwise be refused.",
+    ),
+    allowed_in(
+        "NSF-MESH-FOREGROUND-SYNC-BINDINGS",
+        "src/mesh/foreground_cli.rs",
+        "persist_sync_round_events",
+        "let bindings = workspace_config(std::path::Path::new(&snapshot.workspace_path))",
+        "A workspace with no peer-group bindings configured has none. Reading an Option field of a config, not a fallible load. Note the comment directly below, added when bd-1jpg7 was fixed in this function: the own-origin id is now resolved once and FAILS CLOSED if the members table cannot be read -- so the genuinely dangerous default in this function is gone and this one is a config absence.",
+    ),
 ];
 
 const MANUAL_FINDINGS: &[ManualFinding] = &[];
