@@ -14133,6 +14133,61 @@ mod tests {
     }
 
     #[test]
+    fn the_pre_fix_expression_and_the_fix_disagree_when_the_members_table_cannot_be_read() {
+        // THE ARM THAT FAILS WITHOUT THE FIX, and bd-1jpg7 had none until now.
+        //
+        // The other tests here call resolve_own_origin_node_id, which the fix
+        // introduced. Against the old code they would not FAIL, they would not
+        // COMPILE, and "it does not build" is not a demonstration that
+        // behaviour changed. This one runs BOTH implementations against one
+        // connection in one process and asserts they disagree.
+        //
+        // It also closes a gap I had recorded on the bead as untestable. The
+        // defect is specifically the DB ERROR path -- a malformed or absent
+        // self member is a legitimate Ok(None), so no arrangement of valid data
+        // can distinguish the fix from the bug. An UNMIGRATED connection can:
+        // team_members does not exist, so list_all_team_members returns Err.
+        // The fault injection was in the test helper the whole time.
+        let connection = DbConnection::open_memory().expect("open");
+        // Deliberately NOT migrated. open_db() migrates; this must not.
+
+        // PRECONDITION, asserted rather than assumed. If a future change made
+        // an unmigrated read succeed, or return an empty list, this test would
+        // silently stop exercising the error path and start passing vacuously.
+        assert!(
+            connection.list_all_team_members().is_err(),
+            "precondition: reading team_members on an unmigrated connection must be an Err, \
+             otherwise the arms below are not being compared on the db-error case at all"
+        );
+
+        // The pre-fix expression from apply_join_first_sync_events, verbatim.
+        let collapsed = connection
+            .list_all_team_members()
+            .ok()
+            .and_then(|members| {
+                members
+                    .into_iter()
+                    .find(|member| member.is_self)
+                    .map(|member| member.origin_node_id)
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            collapsed, "",
+            "the defect, executed: a DB ERROR became the empty string. A real event's \
+             origin_node_id is never empty, so classify_inbound's `event.origin_node_id == \
+             own_origin_node_id` could never match and the echo refusal stopped firing for \
+             the whole batch"
+        );
+
+        // The fix, same connection, opposite answer.
+        assert!(
+            resolve_own_origin_node_id(&connection).is_err(),
+            "the fix must PROPAGATE the db error rather than collapse it; if this is Ok the \
+             fail-open is back"
+        );
+    }
+
+    #[test]
     fn the_schema_forbids_the_empty_origin_id_that_would_disable_the_guard() {
         // WHAT THIS TEST USED TO BE, AND WHY IT CHANGED. It used to insert a
         // self member with origin_node_id = "" and assert that
