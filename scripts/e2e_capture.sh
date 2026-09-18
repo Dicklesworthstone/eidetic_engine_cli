@@ -571,6 +571,18 @@ assert_json "$leak_source_view" "tostring | contains(\"$LEAK_CANARY\")" 'true' \
 leak_search_out="$(ee_json --workspace "$WS" search "staging box keep it out of any summary" --json || true)"
 assert_json "$leak_search_out" '(.data.results // []) | length > 0' 'true' \
     "precondition: line 5's non-secret text is retrievable, so the leak test has results to inspect"
+# length > 0 IS NOT ENOUGH, and this is the weak half of the pair. The index
+# holds 130 session documents alongside the 134 evidence spans, and this is a
+# five-word BM25 query -- a hit on "summary" in any unrelated session satisfies
+# length > 0 while line 5 is absent from the results entirely. The canary
+# assertion below would then be inspecting a result set that never contained the
+# imported span, and would pass for the same reason an empty set passes.
+# So demand line 5's OWN distinctive phrase inside .data.results, exactly as the
+# pack half demands it inside .data.pack.items[]. This is the search-side twin of
+# the "a pack aimed at line 5 actually selects line 5" precondition; without it
+# the two halves were not symmetric and only the pack half was load-bearing.
+assert_json "$leak_search_out" '[.data.results[]?] | tostring | contains("staging box")' 'true' \
+    "precondition: the imported line-5 span is itself among the results, not merely some result"
 assert_json "$leak_search_out" "[.data.results[]?] | tostring | contains(\"$LEAK_CANARY\") | not" 'true' \
     "indexed evidence content must not carry the transcript secret"
 
