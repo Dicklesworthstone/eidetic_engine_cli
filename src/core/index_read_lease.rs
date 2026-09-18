@@ -70,7 +70,9 @@ impl IndexGenerationLease {
                 // redirect subsequent pathname reads outside the leased inode.
                 verify_parent_identity(parent, &directory)?;
                 index_checkpoint(cx)?;
-                return Ok(Self { _directory: directory });
+                return Ok(Self {
+                    _directory: directory,
+                });
             }
             let remaining = max_wait.saturating_sub(started.elapsed());
             if remaining.is_zero() {
@@ -109,21 +111,28 @@ fn try_lease(directory: &File, exclusive: bool) -> Result<bool, IndexRebuildErro
 
 fn verify_parent_identity(parent: &Path, directory: &File) -> Result<(), IndexRebuildError> {
     ensure_index_path_has_no_symlinks(parent, "validate index generation lease")?;
-    let held = directory.metadata().map_err(|error| lease_error("inspect", error))?;
-    let current = std::fs::symlink_metadata(parent)
+    let held = directory
+        .metadata()
         .map_err(|error| lease_error("inspect", error))?;
-    if !held.is_dir() || !current.is_dir()
-        || held.dev() != current.dev() || held.ino() != current.ino()
+    let current =
+        std::fs::symlink_metadata(parent).map_err(|error| lease_error("inspect", error))?;
+    if !held.is_dir()
+        || !current.is_dir()
+        || held.dev() != current.dev()
+        || held.ino() != current.ino()
     {
         return Err(IndexRebuildError::Index(
-            "Index generation parent changed while acquiring its lease; retry the operation".to_owned(),
+            "Index generation parent changed while acquiring its lease; retry the operation"
+                .to_owned(),
         ));
     }
     Ok(())
 }
 
 fn lease_error(action: &str, error: impl std::fmt::Display) -> IndexRebuildError {
-    IndexRebuildError::Index(format!("Could not {action} index generation lease: {error}"))
+    IndexRebuildError::Index(format!(
+        "Could not {action} index generation lease: {error}"
+    ))
 }
 
 #[cfg(test)]
@@ -134,7 +143,11 @@ mod tests {
 
     fn fixture() -> Result<(tempfile::TempDir, PathBuf), String> {
         let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let index = root.path().canonicalize().map_err(|error| error.to_string())?.join("index");
+        let index = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            .join("index");
         Ok((root, index))
     }
 
@@ -152,7 +165,12 @@ mod tests {
         assert!(!try_lease(&writer, true).map_err(|error| error.to_string())?);
         drop(second);
         assert!(try_lease(&writer, true).map_err(|error| error.to_string())?);
-        assert_eq!(std::fs::read_dir(root.path()).map_err(|error| error.to_string())?.count(), 0);
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .map_err(|error| error.to_string())?
+                .count(),
+            0
+        );
         Ok(())
     }
 
@@ -163,16 +181,23 @@ mod tests {
         assert!(try_lease(&held, true).map_err(|error| error.to_string())?);
         crate::core::run_cli_with_cx(Duration::from_secs(5), |cx| async move {
             let busy = IndexGenerationLease::acquire(&cx, &index, false, Duration::ZERO).await;
-            assert!(matches!(busy, Err(IndexRebuildError::Index(message)) if message.contains("busy")));
-            cx.set_cancel_reason(asupersync::CancelReason::user("stop waiting for generation"));
+            assert!(
+                matches!(busy, Err(IndexRebuildError::Index(message)) if message.contains("busy"))
+            );
+            cx.set_cancel_reason(asupersync::CancelReason::user(
+                "stop waiting for generation",
+            ));
             let cancelled = IndexGenerationLease::read(&cx, &index).await;
-            assert!(matches!(cancelled, Err(IndexRebuildError::Cancelled(reason))
-                if reason.message.as_deref() == Some("stop waiting for generation")));
+            assert!(
+                matches!(cancelled, Err(IndexRebuildError::Cancelled(reason))
+                if reason.message.as_deref() == Some("stop waiting for generation"))
+            );
             drop(held);
             let fresh = open_directory(index_parent(&index)).map_err(|error| error.to_string())?;
             assert!(try_lease(&fresh, true).map_err(|error| error.to_string())?);
             Ok::<(), String>(())
-        }).map_err(|error| error.to_string())?
+        })
+        .map_err(|error| error.to_string())?
     }
 
     #[test]
@@ -181,7 +206,8 @@ mod tests {
         let (_other_root, other_index) = fixture()?;
         let held = open_directory(index_parent(&index)).map_err(|error| error.to_string())?;
         assert!(try_lease(&held, false).map_err(|error| error.to_string())?);
-        let unrelated = open_directory(index_parent(&other_index)).map_err(|error| error.to_string())?;
+        let unrelated =
+            open_directory(index_parent(&other_index)).map_err(|error| error.to_string())?;
         assert!(try_lease(&unrelated, true).map_err(|error| error.to_string())?);
         drop(held);
         let unwind = std::panic::catch_unwind(|| {
@@ -203,7 +229,8 @@ mod tests {
         let parent = root.path().join("parent");
         std::fs::create_dir(&parent).map_err(|error| error.to_string())?;
         let held = open_directory(&parent).map_err(|error| error.to_string())?;
-        std::fs::rename(&parent, root.path().join("retained-parent")).map_err(|error| error.to_string())?;
+        std::fs::rename(&parent, root.path().join("retained-parent"))
+            .map_err(|error| error.to_string())?;
         std::fs::create_dir(&parent).map_err(|error| error.to_string())?;
         assert!(verify_parent_identity(&parent, &held).is_err());
         let alias = root.path().join("alias");

@@ -55,6 +55,12 @@ use frankensearch::{
 };
 use sqlmodel_core::Value as SqlValue;
 
+#[cfg(unix)]
+#[path = "index_read_lease.rs"]
+mod read_lease;
+#[cfg(unix)]
+pub(crate) use read_lease::IndexGenerationLease;
+
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 const INDEX_METADATA_FILE: &str = "meta.json";
 pub const INDEX_METADATA_SCHEMA_V2: &str = "ee.index_metadata.v2";
@@ -439,6 +445,21 @@ impl<'a> IndexPublishLockOwner<'a> {
         };
         index_checkpoint(cx)?;
         Ok(owner)
+    }
+
+    /// Drain generation readers before taking the database writer fence. A
+    /// reader may still need its database snapshot, so reversing this order
+    /// can deadlock. Revalidate the SQL owner after the cancellable lease wait.
+    async fn with_generation_fence<T>(
+        &self,
+        index_dir: &Path,
+        publish: impl FnOnce() -> Result<T, IndexRebuildError>,
+    ) -> Result<T, IndexRebuildError> {
+        #[cfg(unix)]
+        let _generation = IndexGenerationLease::publish(self.cx, index_dir).await?;
+        #[cfg(not(unix))]
+        let _ = index_dir;
+        self.with_publication_fence(publish)
     }
 
     /// A pre-build lease is not publication authority after a process pause.
@@ -1696,8 +1717,9 @@ pub async fn rebuild_index_with_cx(
     let publish_lock = _publish_lock.as_ref().ok_or_else(|| {
         IndexRebuildError::Index("index rebuild has no publication lease".to_owned())
     })?;
-    let _recovery_action =
-        publish_lock.with_publication_fence(|| recover_interrupted_publish(&index_dir))?;
+    let _recovery_action = publish_lock
+        .with_generation_fence(&index_dir, || recover_interrupted_publish(&index_dir))
+        .await?;
     // bd-qf3l4. `ee init` rebuilds the index for a workspace holding ZERO
     // documents, and this line forced `DEFAULT_SEARCH_EMBEDDER`
     // (`default_search_embedder_stack_with_provenance`, :5631) to pay ~2 GB of
@@ -1940,8 +1962,9 @@ async fn reembed_index_with_cx_and_stack(
     let publish_lock = _publish_lock.as_ref().ok_or_else(|| {
         IndexRebuildError::Index("index re-embedding has no publication lease".to_owned())
     })?;
-    let _recovery_action =
-        publish_lock.with_publication_fence(|| recover_interrupted_publish(&index_dir))?;
+    let _recovery_action = publish_lock
+        .with_generation_fence(&index_dir, || recover_interrupted_publish(&index_dir))
+        .await?;
     ensure_active_embedding_registry_record(&db, &workspace_id, &stack)?;
     let embedding = reembed_embedding_summary(
         &db,
@@ -2615,14 +2638,16 @@ where
         processing_mode.push_str("_staged_full_rebuild");
     }
 
-    let _recovery_action =
-        match _publish_lock.with_publication_fence(|| recover_interrupted_publish(index_dir)) {
-            Ok(action) => action,
-            Err(error) => {
-                finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
-                return Err(error);
-            }
-        };
+    let _recovery_action = match _publish_lock
+        .with_generation_fence(index_dir, || recover_interrupted_publish(index_dir))
+        .await
+    {
+        Ok(action) => action,
+        Err(error) => {
+            finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
+            return Err(error);
+        }
+    };
     let stack = match workspace_embedder_stack(db, workspace_id) {
         Ok((stack, _)) => stack,
         Err(error) => {
@@ -2863,8 +2888,9 @@ where
     // falsely tripped `search_index_stale` on the very next search even
     // though the job had already applied synchronously. (agent-UX item 5)
     let result = async {
-        let _recovery_action =
-            _publish_lock.with_publication_fence(|| recover_interrupted_publish(index_dir))?;
+        let _recovery_action = _publish_lock
+            .with_generation_fence(index_dir, || recover_interrupted_publish(index_dir))
+            .await?;
         let fallback_to_full = None;
         let (stack, _) = workspace_embedder_stack(db, &job.workspace_id)?;
         let build_result = publish_full_index_generation_with_stack(
@@ -3060,17 +3086,19 @@ where
     sync_index_generation(&staging_dir, || index_checkpoint(cx))?;
     run_before_index_publish_hook(cx);
     index_checkpoint(cx)?;
-    publish_lock.with_publication_fence(|| {
-        cx.masked(|| {
-            write_index_metadata(
-                &staging_dir,
-                generation,
-                document_counts,
-                embedder_fingerprint.as_ref(),
-            )?;
-            publish_staged_index_with_commit(index_dir, &staging_dir, commit_tail)
+    publish_lock
+        .with_generation_fence(index_dir, || {
+            cx.masked(|| {
+                write_index_metadata(
+                    &staging_dir,
+                    generation,
+                    document_counts,
+                    embedder_fingerprint.as_ref(),
+                )?;
+                publish_staged_index_with_commit(index_dir, &staging_dir, commit_tail)
+            })
         })
-    })?;
+        .await?;
     run_after_index_publish_hook(cx);
     Ok(stats)
 }
@@ -12055,6 +12083,109 @@ mod tests {
             )
         })
         .map_err(|error| error.to_string())?
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_generation_lease_covers_commit_rollback_and_release() -> TestResult {
+        use rustix::fs::{FlockOperation, flock};
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let index_dir = parent.join("index");
+        write_marker(&index_dir, "previous.txt", "previous generation")?;
+        let before = index_regular_file_snapshot(&index_dir)?;
+        let db = DbConnection::open_file(&parent.join("db.sqlite"))
+            .map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let owner = IndexPublishLockOwner::acquire(&cx, &db, "wsp_generation_lease")
+                .map_err(|error| error.to_string())?;
+            let probe = std::fs::File::open(&parent).map_err(|error| error.to_string())?;
+            let mut visited = false;
+            let result = publish_full_index_generation_with_stack(
+                &owner,
+                &index_dir,
+                hash_fallback_embedder_stack(),
+                Vec::new(),
+                2,
+                IndexDocumentCounts::memory_only(0),
+                || {
+                    visited = true;
+                    // A nested database commit must not release the separate
+                    // OS generation lease before filesystem rollback finishes.
+                    db.with_transaction_error(|| Ok::<_, IndexRebuildError>(()))?;
+                    assert_eq!(
+                        flock(&probe, FlockOperation::NonBlockingLockShared),
+                        Err(rustix::io::Errno::WOULDBLOCK)
+                    );
+                    Err(IndexRebuildError::Index("injected job failure".to_owned()))
+                },
+            )
+            .await;
+            ensure(
+                visited && result.is_err(),
+                "real publisher must reach the injected commit failure",
+            )?;
+            ensure(
+                index_regular_file_snapshot(&index_dir)? == before,
+                "failed job must restore the exact prior generation",
+            )?;
+            // The owner is still alive: its SQL lease is not the OS reader lease.
+            flock(&probe, FlockOperation::NonBlockingLockExclusive)
+                .map_err(|error| error.to_string())?;
+            flock(&probe, FlockOperation::Unlock).map_err(|error| error.to_string())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_generation_lease_protects_recovery_and_unwind() -> TestResult {
+        use rustix::fs::{FlockOperation, flock};
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let index_dir = parent.join("index");
+        write_marker(&index_dir, "live.txt", "keep")?;
+        let db = DbConnection::open_file(&parent.join("db.sqlite"))
+            .map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        let probe = std::fs::File::open(&parent).map_err(|error| error.to_string())?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let db = &db;
+            let index_dir = &index_dir;
+            let probe = &probe;
+            crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+                let owner = IndexPublishLockOwner::acquire(&cx, &db, "wsp_generation_lease")?;
+                owner
+                    .with_generation_fence(&index_dir, || {
+                        assert_eq!(
+                            flock(&probe, FlockOperation::NonBlockingLockShared),
+                            Err(rustix::io::Errno::WOULDBLOCK)
+                        );
+                        assert!(matches!(
+                            recover_interrupted_publish(&index_dir)?,
+                            IndexPublishRecoveryAction::ActivePresent
+                        ));
+                        Err::<(), IndexRebuildError>(IndexRebuildError::Index(
+                            "injected recovery failure".to_owned(),
+                        ))
+                    })
+                    .await
+            })
+        }));
+        assert!(
+            matches!(result, Ok(Ok(Err(IndexRebuildError::Index(message))))
+            if message == "injected recovery failure")
+        );
+        flock(&probe, FlockOperation::NonBlockingLockExclusive)
+            .map_err(|error| error.to_string())?;
+        flock(&probe, FlockOperation::Unlock).map_err(|error| error.to_string())
     }
 
     #[test]

@@ -326,6 +326,8 @@ const PROCESS_LEXICAL_SEARCHER_CACHE_CAPACITY: usize = 8;
 struct LexicalSearcherCacheKey {
     index_dir: PathBuf,
     index_manifest_version: u64,
+    #[cfg(unix)]
+    directory_identity: (u64, u64),
 }
 #[cfg(feature = "lexical-bm25")]
 struct CachedLexicalSearcher {
@@ -407,6 +409,8 @@ static LEXICAL_RAM_TIER_SEARCH_CONFIG_CACHE: OnceLock<
 struct IndexStatusCacheKey {
     database_path: PathBuf,
     index_dir: PathBuf,
+    #[cfg(unix)]
+    directory_identity: Option<(u64, u64)>,
 }
 
 impl IndexStatusCacheKey {
@@ -418,6 +422,8 @@ impl IndexStatusCacheKey {
         Self {
             database_path,
             index_dir: index_dir.to_path_buf(),
+            #[cfg(unix)]
+            directory_identity: generation_directory_identity(index_dir).ok(),
         }
     }
 }
@@ -7742,6 +7748,23 @@ fn search_checkpoint(cx: &asupersync::Cx) -> Result<(), SearchError> {
     })
 }
 
+#[cfg(unix)]
+async fn pin_search_generation(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+) -> Result<crate::core::index::IndexGenerationLease, SearchError> {
+    crate::core::index::ensure_index_path_has_no_symlinks(index_dir, "pin search generation")
+        .map_err(|error| SearchError::IndexIncompatible(error.to_string()))?;
+    crate::core::index::IndexGenerationLease::read(cx, index_dir)
+        .await
+        .map_err(|error| match error {
+            crate::core::index::IndexRebuildError::Cancelled(reason) => {
+                SearchError::Cancelled(reason)
+            }
+            error => SearchError::Index(error.to_string()),
+        })
+}
+
 fn with_search_root<F, Fut, T>(operation: F) -> Result<T, SearchError>
 where
     F: FnOnce(asupersync::Cx) -> Fut,
@@ -8991,6 +9014,11 @@ async fn run_search_inner_with_performance(
         trace.record_elapsed("search::indexExists", index_exists_start);
         return Err(SearchError::NoIndex);
     }
+    // Metadata, source-mode selection, vector and lexical opens must all see
+    // the same directory contents. Atomic exchange alone protects only one
+    // lookup; the shared lease excludes publication and rollback until collect.
+    #[cfg(unix)]
+    let generation_lease = pin_search_generation(cx, &index_dir).await?;
     if let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&index_dir) {
         trace.record_elapsed("search::indexExists", index_exists_start);
         return Err(index_compatibility_search_error(&index_dir, reason));
@@ -9118,6 +9146,10 @@ async fn run_search_inner_with_performance(
     )
     .await;
     trace.record_elapsed("search::retrieve", retrieve_start);
+    // No local index handles are used after collection. Release before the
+    // optional global lane can reconcile a sibling index under the same parent.
+    #[cfg(unix)]
+    drop(generation_lease);
     search_checkpoint(cx)?;
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -9514,6 +9546,8 @@ async fn run_diag_search_with_cx_and_embedder_policy(
     if !index_dir.exists() {
         return Err(SearchError::NoIndex);
     }
+    #[cfg(unix)]
+    let generation_lease = pin_search_generation(cx, &index_dir).await?;
     if let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&index_dir) {
         return Err(index_compatibility_search_error(&index_dir, reason));
     }
@@ -9573,6 +9607,8 @@ async fn run_diag_search_with_cx_and_embedder_policy(
         fast_embedder_override,
     )
     .await?;
+    #[cfg(unix)]
+    drop(generation_lease);
     apply_live_evidence_visibility_to_diag(options, &mut diag_result, &mut degraded);
 
     let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(diag_result.final_hits);
@@ -10500,6 +10536,8 @@ async fn diag_search_sync(
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
 ) -> Result<DiagSearchSyncResult, SearchError> {
     search_checkpoint(cx)?;
+    #[cfg(unix)]
+    let _generation_lease = pin_search_generation(cx, index_dir).await?;
     let index_dir_owned = index_dir.to_path_buf();
     let query_owned = query.to_string();
     #[allow(clippy::type_complexity)]
@@ -11154,6 +11192,16 @@ async fn global_store_frankensearch_hits(
     if reconcile {
         reconcile_search_index_before_read_with_cx(cx, &global_options).await;
     }
+    #[cfg(unix)]
+    let generation_lease = match pin_search_generation(cx, &paths.index_dir).await {
+        Ok(lease) => lease,
+        Err(error) => {
+            degraded.push(SearchDegradation::global_index_unavailable(
+                &error.to_string(),
+            ));
+            return Vec::new();
+        }
+    };
     let index_status = match cached_index_status_for_search(&global_options, &paths.index_dir, None)
     {
         Ok(status) => status,
@@ -11199,6 +11247,8 @@ async fn global_store_frankensearch_hits(
     )
     .await;
     trace.record_elapsed("search::globalRetrieve", global_search_start);
+    #[cfg(unix)]
+    drop(generation_lease);
     let (raw_hits, retrieval_degraded) = match search_result {
         Ok(result) => result,
         Err(error) => {
@@ -11799,6 +11849,8 @@ async fn search_sync_with_performance(
     trace: &mut SearchPerformanceTrace,
 ) -> Result<(Vec<SearchHit>, Vec<SearchDegradation>), SearchError> {
     search_checkpoint(cx)?;
+    #[cfg(unix)]
+    let _generation_lease = pin_search_generation(cx, index_dir).await?;
     let plan_cache_key =
         search_plan_cache_key(index_dir, query, limit, &config, explain, source_mode);
     let plan_cache_capacity = resolved_query_plan_cache_capacity();
@@ -13209,6 +13261,8 @@ fn open_lexical_searcher(index_dir: &Path) -> Result<Option<Arc<dyn LexicalRead>
     let key = LexicalSearcherCacheKey {
         index_dir: index_dir.to_path_buf(),
         index_manifest_version: index_manifest_version_for_plan_cache(index_dir),
+        #[cfg(unix)]
+        directory_identity: generation_directory_identity(index_dir)?,
     };
     let cache = PROCESS_LEXICAL_SEARCHER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let Ok(mut cached) = cache.lock() else {
@@ -13251,6 +13305,21 @@ fn open_lexical_searcher(index_dir: &Path) -> Result<Option<Arc<dyn LexicalRead>
         },
     );
     Ok(Some(searcher))
+}
+
+/// A rebuild can replace the directory without changing logical generation or
+/// metadata bytes. Such a replacement must never reuse a reader of displaced
+/// Tantivy files alongside the new vector tier. The shared generation lease
+/// protects this identity check and all subsequent opens as one operation.
+#[cfg(unix)]
+fn generation_directory_identity(index_dir: &Path) -> Result<(u64, u64), String> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(index_dir)
+        .map_err(|error| format!("Could not identify the leased index directory: {error}"))?;
+    if !metadata.is_dir() {
+        return Err("Leased index generation is not a physical directory".to_owned());
+    }
+    Ok((metadata.dev(), metadata.ino()))
 }
 
 #[cfg(feature = "lexical-bm25")]
@@ -13443,6 +13512,86 @@ mod tests {
         })
         .map_err(|error| error.to_string())??;
         Ok(index_dir)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_generation_lease_pins_both_arms_through_collection() -> TestResult {
+        use rustix::fs::{FlockOperation, flock};
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let index_dir = parent.join("index");
+        let build_dir = index_dir.clone();
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let docs = vec![IndexableDocument::new(
+                "mem_reader_lease",
+                "Generation leases preserve consistent vector and lexical retrieval.",
+            )];
+            IndexBuilder::new(&build_dir)
+                .with_embedder_stack(EmbedderStack::from_parts(
+                    Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>,
+                    None,
+                ))
+                .add_documents(docs.clone())
+                .build(&cx)
+                .await
+                .map_err(|error| error.to_string())?;
+            #[cfg(feature = "lexical-bm25")]
+            crate::core::index::build_lexical_tier(&cx, &build_dir, &docs)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        })
+        .map_err(|error| error.to_string())??;
+        let before_probe = std::fs::File::open(&parent).map_err(|error| error.to_string())?;
+        let after_probe = std::fs::File::open(&parent).map_err(|error| error.to_string())?;
+        let visits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first = Arc::clone(&visits);
+        install_before_search_collect_hook(move |_| {
+            assert_eq!(
+                flock(&before_probe, FlockOperation::NonBlockingLockExclusive),
+                Err(rustix::io::Errno::WOULDBLOCK)
+            );
+            first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let last = Arc::clone(&visits);
+        install_after_search_collect_hook(move |_, succeeded| {
+            assert!(succeeded, "the positive collection control must succeed");
+            assert_eq!(
+                flock(&after_probe, FlockOperation::NonBlockingLockExclusive),
+                Err(rustix::io::Errno::WOULDBLOCK)
+            );
+            last.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let (hits, _) = search_sync(
+            &index_dir,
+            "consistent vector lexical retrieval",
+            5,
+            TwoTierConfig::default(),
+            false,
+            if cfg!(feature = "lexical-bm25") {
+                SearchSourceMode::Hybrid
+            } else {
+                SearchSourceMode::SemanticOnly
+            },
+            &Deterministic::from_seed(77),
+            Some(Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>),
+        )?;
+        ensure(
+            hits.iter().any(|hit| hit.doc_id == "mem_reader_lease"),
+            "leased real search must still return the exact indexed document",
+        )?;
+        ensure(
+            visits.load(std::sync::atomic::Ordering::SeqCst) == 2,
+            "both real collection boundaries must execute",
+        )?;
+        let publisher = std::fs::File::open(&parent).map_err(|error| error.to_string())?;
+        flock(&publisher, FlockOperation::NonBlockingLockExclusive)
+            .map_err(|error| error.to_string())?;
+        flock(&publisher, FlockOperation::Unlock).map_err(|error| error.to_string())
     }
 
     fn run_collection_cancellation_probe(
@@ -18199,6 +18348,8 @@ mod tests {
         let first_key = LexicalSearcherCacheKey {
             index_dir: index_dir.clone(),
             index_manifest_version: index_manifest_version_for_plan_cache(&index_dir),
+            #[cfg(unix)]
+            directory_identity: generation_directory_identity(&index_dir)?,
         };
         std::fs::write(
             index_dir.join("meta.json"),
@@ -18208,6 +18359,8 @@ mod tests {
         let next_key = LexicalSearcherCacheKey {
             index_dir: index_dir.clone(),
             index_manifest_version: index_manifest_version_for_plan_cache(&index_dir),
+            #[cfg(unix)]
+            directory_identity: generation_directory_identity(&index_dir)?,
         };
         assert_ne!(
             first_key, next_key,
@@ -18255,6 +18408,117 @@ mod tests {
         assert!(
             literal_hit.lexical_score.is_some_and(|score| score > 0.0),
             "literal hit should include a positive lexical score: {literal_hit:?}"
+        );
+        Ok(())
+    }
+
+    #[cfg(all(
+        feature = "lexical-bm25",
+        any(target_os = "linux", target_os = "android", target_vendor = "apple")
+    ))]
+    #[test]
+    fn search_generation_cache_follows_exchange_with_identical_metadata() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let index_dir = parent.join("index");
+        let staging = parent.join("staging");
+        let build_index = index_dir.clone();
+        let build_staging = staging.clone();
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            for (path, id, word) in [
+                (build_index, "mem_previous", "previouscanary"),
+                (build_staging, "mem_current", "currentcanary"),
+            ] {
+                std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+                crate::core::index::build_lexical_tier(
+                    &cx,
+                    &path,
+                    &[IndexableDocument::new(id, word)],
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                std::fs::write(path.join("meta.json"), b"{\"generation\":7}")
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok::<(), String>(())
+        })
+        .map_err(|error| error.to_string())??;
+        let old = open_lexical_searcher(&index_dir)?.ok_or("missing first reader")?;
+        assert!(Arc::ptr_eq(
+            &old,
+            &open_lexical_searcher(&index_dir)?.ok_or("missing cached reader")?
+        ));
+        let options = SearchOptions {
+            workspace_path: parent.clone(),
+            ..source_mode_test_options(SearchSourceMode::LexicalOnly, false)
+        };
+        let status_before = IndexStatusCacheKey::from_search_options(&options, &index_dir);
+        let manifest_before = index_manifest_version_for_plan_cache(&index_dir);
+        rustix::fs::renameat_with(
+            rustix::fs::CWD,
+            &index_dir,
+            rustix::fs::CWD,
+            &staging,
+            rustix::fs::RenameFlags::EXCHANGE,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            manifest_before,
+            index_manifest_version_for_plan_cache(&index_dir)
+        );
+        assert_ne!(
+            status_before,
+            IndexStatusCacheKey::from_search_options(&options, &index_dir)
+        );
+        let current = open_lexical_searcher(&index_dir)?.ok_or("missing replacement reader")?;
+        assert!(
+            !Arc::ptr_eq(&old, &current),
+            "replacement must not reuse displaced Tantivy handles"
+        );
+        for (query, expected) in [
+            ("currentcanary", Some("mem_current")),
+            ("previouscanary", None),
+        ] {
+            let (hits, _) = search_sync(
+                &index_dir,
+                query,
+                5,
+                TwoTierConfig::default(),
+                false,
+                SearchSourceMode::LexicalOnly,
+                &Deterministic::from_seed(78),
+                None,
+            )?;
+            assert_eq!(hits.first().map(|hit| hit.doc_id.as_str()), expected);
+        }
+        // Rollback also invalidates the physical cache identity, even though
+        // all logical generation and metadata bytes remain exactly the same.
+        rustix::fs::renameat_with(
+            rustix::fs::CWD,
+            &index_dir,
+            rustix::fs::CWD,
+            &staging,
+            rustix::fs::RenameFlags::EXCHANGE,
+        )
+        .map_err(|error| error.to_string())?;
+        let restored = open_lexical_searcher(&index_dir)?.ok_or("missing restored reader")?;
+        assert!(!Arc::ptr_eq(&current, &restored));
+        let (hits, _) = search_sync(
+            &index_dir,
+            "previouscanary",
+            5,
+            TwoTierConfig::default(),
+            false,
+            SearchSourceMode::LexicalOnly,
+            &Deterministic::from_seed(78),
+            None,
+        )?;
+        assert_eq!(
+            hits.first().map(|hit| hit.doc_id.as_str()),
+            Some("mem_previous")
         );
         Ok(())
     }
