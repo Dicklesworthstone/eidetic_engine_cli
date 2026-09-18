@@ -274,7 +274,7 @@
     "confidenceIntervals": {
       "schema": "ee.why.conformal_prediction_set.v1",
       "method": "split_conformal_nonconformity",
-      "coverageGuarantee": 0.95,
+      "coverageGuarantee": 0.0,
       "alpha": 0.05,
       "targetMemoryId": "mem_00000000000000000000000001",
       "scoreInterval": [

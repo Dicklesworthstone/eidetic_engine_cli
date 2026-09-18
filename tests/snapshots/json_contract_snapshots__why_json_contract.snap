@@ -105,7 +105,7 @@ expression: why
       "alpha": 0.05,
       "calibrationSampleCount": 0,
       "calibrationStatus": "conservative_insufficient_calibration",
-      "coverageGuarantee": 0.95,
+      "coverageGuarantee": 0.0,
       "method": "split_conformal_nonconformity",
       "nonconformityQuantile": 1.0,
       "predictionSet": [

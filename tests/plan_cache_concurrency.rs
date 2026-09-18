@@ -2,6 +2,8 @@
 //! this binary owns one global cache, so independent test cases must not reset
 //! it underneath one another. Channels coordinate overlap without timing sleeps.
 
+#![allow(clippy::expect_used)]
+
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -9,7 +11,7 @@ use std::time::Duration;
 use ee::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use ee::search::plan_cache::{
     CompiledPlan, EnvVarValueSource, PlanCacheDecision, PlanCacheKey,
-    process_plan_cache_diag_report, lookup_or_insert_process_plan,
+    lookup_or_insert_process_plan, process_plan_cache_diag_report,
     reset_process_plan_cache_for_tests,
 };
 
@@ -61,18 +63,27 @@ fn process_cache_compilation_is_unlocked_and_publication_is_generation_safe() {
     let worker = thread::spawn(move || {
         lookup_or_insert_process_plan(CAPACITY, key(2), || {
             started_tx.send(()).expect("notify compiler entry");
-            release_rx.recv_timeout(DEADLINE).expect("release cold compiler");
+            release_rx
+                .recv_timeout(DEADLINE)
+                .expect("release cold compiler");
             plan("cold")
         })
     });
-    started_rx.recv_timeout(DEADLINE).expect("cold compiler started");
+    started_rx
+        .recv_timeout(DEADLINE)
+        .expect("cold compiler started");
     let hot = lookup_or_insert_process_plan(CAPACITY, key(1), || {
         panic!("warm lookup must not compile")
     });
     assert_eq!(hot.decision, PlanCacheDecision::Hit);
     assert_eq!(cached_keys(CAPACITY), vec![1]);
-    release_tx.send(()).expect("release compiler after warm lookup");
-    assert_eq!(worker.join().expect("cold compiler completed").decision, PlanCacheDecision::Miss);
+    release_tx
+        .send(())
+        .expect("release compiler after warm lookup");
+    assert_eq!(
+        worker.join().expect("cold compiler completed").decision,
+        PlanCacheDecision::Miss
+    );
     assert_eq!(cached_keys(CAPACITY), vec![1, 2]);
 
     // Another caller publishes the same key during compilation. The late
@@ -82,11 +93,15 @@ fn process_cache_compilation_is_unlocked_and_publication_is_generation_safe() {
     let worker = thread::spawn(move || {
         lookup_or_insert_process_plan(CAPACITY, key(3), || {
             started_tx.send(()).expect("notify late compiler entry");
-            release_rx.recv_timeout(DEADLINE).expect("release late compiler");
+            release_rx
+                .recv_timeout(DEADLINE)
+                .expect("release late compiler");
             plan("late")
         })
     });
-    started_rx.recv_timeout(DEADLINE).expect("late compiler started");
+    started_rx
+        .recv_timeout(DEADLINE)
+        .expect("late compiler started");
     let winner = lookup_or_insert_process_plan(CAPACITY, key(3), || plan("winner"));
     release_tx.send(()).expect("release losing compiler");
     let late = worker.join().expect("late compiler completed");

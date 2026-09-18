@@ -481,6 +481,11 @@ path = "tests/pack_quality_contracts.rs"
 name = "perf_compare_golden"
 path = "tests/perf_compare_golden.rs"
 
+# Owns/reset the process-global cache; isolate it from suite-level cache users.
+[[test]]
+name = "plan_cache_concurrency"
+path = "tests/plan_cache_concurrency.rs"
+
 [[test]]
 name = "proof_verify_core"
 path = "tests/proof_verify_core.rs"
