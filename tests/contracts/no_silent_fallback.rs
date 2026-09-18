@@ -2565,6 +2565,9 @@ fn no_silent_fallback_guard_rejects_new_unclassified_renderer_default() -> TestR
         line: 1,
         text: "serde_json::to_string(report).unwrap_or_default()".to_owned(),
         context: "serde_json::to_string(report).unwrap_or_default()".to_owned(),
+        // Module scope: this synthetic finding must not accidentally satisfy a
+        // function-scoped rule, and None cannot match any `Some(fn)` scope.
+        function: None,
     };
 
     if classify_finding(&synthetic).is_none() {
@@ -2581,6 +2584,7 @@ fn no_silent_fallback_guard_rejects_new_unclassified_empty_vec() -> TestResult {
         line: 42,
         text: "return Ok(Vec::new());".to_owned(),
         context: "return Ok(Vec::new());".to_owned(),
+        function: None,
     };
 
     if classify_finding(&synthetic).is_none() {
