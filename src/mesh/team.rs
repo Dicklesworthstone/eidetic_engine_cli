@@ -14081,17 +14081,23 @@ mod tests {
     // benign states still resolve, so a resolver that errored unconditionally
     // could not pass this set.
 
+    /// `member_id` must satisfy the table CHECK: exactly 36 characters, the
+    /// prefix `mbr_`, and 32 LOWERCASE HEX digits after it. My first version of
+    /// this helper built `mbr_{0|1}_{len}` and every test using it died on the
+    /// constraint rather than on its assertion.
     fn insert_member(connection: &DbConnection, is_self: bool, origin_node_id: &str) {
+        let member_id = format!("mbr_{}", if is_self { "a" } else { "b" }.repeat(32));
         connection
             .insert_team_member(&InsertTeamMemberInput {
-                member_id: format!("mbr_{}_{}", u8::from(is_self), origin_node_id.len()),
+                member_id,
                 team_id: "team_ownorigin000000000000001".to_owned(),
                 workspace_id: "wsp_ownorigin00000000000000001".to_owned(),
                 display_name: if is_self { "self" } else { "peer" }.to_owned(),
                 state: "active".to_owned(),
                 is_self,
                 origin_node_id: origin_node_id.to_owned(),
-                bound_via: "test".to_owned(),
+                // CHECK: bound_via IN ('team_genesis','invite_ceremony','member_added_node').
+                bound_via: "invite_ceremony".to_owned(),
                 joined_at: "2026-09-18T00:00:00Z".to_owned(),
             })
             .expect("insert member");
@@ -14127,40 +14133,51 @@ mod tests {
     }
 
     #[test]
-    fn a_self_member_with_an_empty_origin_id_is_refused_rather_than_silently_disabling_the_guard() {
-        // THE ARM THAT FAILS WITHOUT THE FIX.
+    fn the_schema_forbids_the_empty_origin_id_that_would_disable_the_guard() {
+        // WHAT THIS TEST USED TO BE, AND WHY IT CHANGED. It used to insert a
+        // self member with origin_node_id = "" and assert that
+        // resolve_own_origin_node_id refuses it. It could never have worked:
+        // the team_members CHECK requires `origin_node_id GLOB 'node_*'`, so
+        // the database rejects the row before any assertion runs. The test
+        // failed on a constraint, not on the behaviour it claimed to cover.
         //
-        // The other tests call resolve_own_origin_node_id, which the fix
-        // introduced -- against the old code they would not fail, they would
-        // not COMPILE. This one runs the pre-fix expression and the fix against
-        // ONE connection and asserts they disagree.
+        // The honest replacement pins the guarantee that actually holds. An
+        // empty stored origin id is the one value that would silently disable
+        // classify_inbound's no-echo comparison, and the SCHEMA is what makes
+        // it unreachable, so the schema is what this test watches. If that
+        // CHECK is ever relaxed, this fails and points at the Rust guard in
+        // resolve_own_origin_node_id that is currently defence in depth.
         let connection = open_db();
-        insert_member(&connection, true, "");
-
-        // The pre-fix expression from apply_join_first_sync_events, verbatim.
-        let collapsed = connection
-            .list_all_team_members()
-            .ok()
-            .and_then(|members| {
-                members
-                    .into_iter()
-                    .find(|member| member.is_self)
-                    .map(|member| member.origin_node_id)
-            })
-            .unwrap_or_default();
-        assert_eq!(
-            collapsed, "",
-            "the defect, executed: the old expression yields the empty string, and a real \
-             event's origin_node_id is never empty, so classify_inbound's `event.origin_node_id \
-             == own_origin_node_id` can never match and the echo refusal stops firing"
+        let rejected = connection.insert_team_member(&InsertTeamMemberInput {
+            member_id: format!("mbr_{}", "c".repeat(32)),
+            team_id: "team_ownorigin000000000000001".to_owned(),
+            workspace_id: "wsp_ownorigin00000000000000001".to_owned(),
+            display_name: "self".to_owned(),
+            state: "active".to_owned(),
+            is_self: true,
+            origin_node_id: String::new(),
+            // Every OTHER column here is deliberately valid, so the only thing
+            // this row can be rejected for is the empty origin id.
+            bound_via: "invite_ceremony".to_owned(),
+            joined_at: "2026-09-18T00:00:00Z".to_owned(),
+        });
+        let error = rejected
+            .expect_err("the schema must refuse an empty origin_node_id")
+            .to_string();
+        assert!(
+            error.contains("origin_node_id"),
+            "the refusal must name the origin_node_id constraint. A bare `CHECK` match would \
+             pass for a violation of any OTHER column, which is exactly how the first version \
+             of this test hid a bad member_id and a bad bound_via behind the wrong assertion: \
+             {error}"
         );
 
-        // The fix, same connection, opposite answer.
-        assert!(
-            resolve_own_origin_node_id(&connection).is_err(),
-            "an empty stored origin id is the one value that silently disables the no-echo \
-             guard, so it must be refused rather than returned; if this is Ok the fail-open \
-             is back"
+        // And the control, so this is not merely asserting that inserts fail:
+        // the SAME row with a well-formed origin id is accepted.
+        insert_member(&connection, true, "node_self000000000000000000000001");
+        assert_eq!(
+            resolve_own_origin_node_id(&connection).expect("a well-formed self member loads"),
+            Some("node_self000000000000000000000001".to_owned()),
         );
     }
 
