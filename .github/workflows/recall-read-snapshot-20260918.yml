@@ -1,0 +1,113 @@
+name: Read-only anchored recall
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/recall-read-snapshot.b64
+      - .github/workflows/recall-read-snapshot-20260918.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Integrate coherent read-only recall
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          base64 --decode scripts/delivery/recall-read-snapshot.b64 | gzip -d > "$RUNNER_TEMP/recall.patch"
+          echo "543f117d36b4ce571ea4bfc1b7100b157e62f5cc77b4c1d385a74d58425d9d57  $RUNNER_TEMP/recall.patch" | sha256sum --check
+          git apply --check "$RUNNER_TEMP/recall.patch"
+          git apply "$RUNNER_TEMP/recall.patch"
+          rustfmt --edition 2024 --config skip_children=true src/core/recall.rs tests/recall_cli_golden.rs
+          git diff --check
+          git diff --stat
+      - name: Compile production library
+        run: |
+          status=0
+          cargo check --locked --lib > "$RUNNER_TEMP/recall-check.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/recall-check.log"
+          exit "$status"
+      - name: Execute complete recall engine and snapshot regressions
+        run: |
+          status=0
+          cargo test --locked --lib core::recall:: -- --test-threads=2 > "$RUNNER_TEMP/recall-engine.log" 2>&1 || status=$?
+          tail -n 220 "$RUNNER_TEMP/recall-engine.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/recall-engine.log" || status=1
+          test "$(grep -c '^test core::recall::tests::workspace_recall_snapshot_.* \.\.\. ok$' "$RUNNER_TEMP/recall-engine.log")" -eq 4 || status=1
+          exit "$status"
+      - name: Execute real CLI, cursor paging, schema and golden contracts
+        run: |
+          status=0
+          cargo test --locked --test integration_n_r recall_cli_golden:: -- --test-threads=2 > "$RUNNER_TEMP/recall-cli.log" 2>&1 || status=$?
+          tail -n 180 "$RUNNER_TEMP/recall-cli.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/recall-cli.log" || status=1
+          test "$(grep -c '^test recall_cli_golden::recall_read_only_.* \.\.\. ok$' "$RUNNER_TEMP/recall-cli.log")" -eq 3 || status=1
+          exit "$status"
+      - name: Commit the tested read-only retrieval implementation directly to main
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- src/core/recall.rs tests/recall_cli_golden.rs
+          git commit -m 'fix(recall): retrieve anchors through a coherent read-only snapshot' -m 'Make the shared CLI/daemon recall operation truly read-only: no writer fence or implicit migrations. Pin schema, workspace, cursor generation, anchors, bodies and tags together after optional Git selector resolution. Release owned snapshots on errors, rejection and unwind without rolling back a caller transaction. Four real-store tests cover concurrent retirement, generation-bound paging and cleanup; three public CLI tests cover held writer locks, nonwritable files, durable nonmutation and explicit migration. Production compilation plus complete recall engine and CLI/golden groups passed before this commit. Existing ranking, cursor and output contracts remain unchanged.'
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              git rev-parse HEAD > "$RUNNER_TEMP/recall-commit.log"
+              exit 0
+            fi
+            test "$attempt" -lt 3
+            tested=$(git rev-parse HEAD)
+            git fetch origin main
+            git merge --no-edit origin/main
+            # Reject changes to this operation or its storage/runtime inputs.
+            # Independently delivered ask changes can merge without replacement.
+            git diff --exit-code "$tested" HEAD -- src/core/recall.rs src/core/workspace.rs src/db src/models src/output src/search tests/recall_cli_golden.rs tests/suites/integration_n_r.rs Cargo.toml Cargo.lock build.rs
+          done
+          exit 1
+      - name: Preserve source and actual verification logs
+        if: ${{ !cancelled() }}
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/recall-source-sha.log"
+          git diff -- src/core/recall.rs tests/recall_cli_golden.rs > "$RUNNER_TEMP/recall-uncommitted.patch"
+          cp src/core/recall.rs "$RUNNER_TEMP/recall-source.rs"
+          cp tests/recall_cli_golden.rs "$RUNNER_TEMP/recall-cli-source.rs"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/recall-source.tar.gz" HEAD
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: read-only-recall-verification
+          path: |
+            ${{ runner.temp }}/recall-*.log
+            ${{ runner.temp }}/recall-*.patch
+            ${{ runner.temp }}/recall-*.rs
+            ${{ runner.temp }}/recall-source.tar.gz
+          retention-days: 7
