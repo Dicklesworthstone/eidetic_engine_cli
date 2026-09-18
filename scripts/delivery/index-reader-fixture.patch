@@ -1,0 +1,10 @@
+--- a/src/core/search.rs
++++ b/src/core/search.rs
+@@ -18406,5 +18406,6 @@
+         let old = open_lexical_searcher(&index_dir)?.ok_or("missing first reader")?;
+         assert!(Arc::ptr_eq(&old, &open_lexical_searcher(&index_dir)?.ok_or("missing cached reader")?));
+-        let options = SearchOptions { workspace_path: parent.clone(), ..SearchOptions::default() };
++        let options = SearchOptions { workspace_path: parent.clone(),
++            ..source_mode_test_options(SearchSourceMode::LexicalOnly, false) };
+         let status_before = IndexStatusCacheKey::from_search_options(&options, &index_dir);
+         let manifest_before = index_manifest_version_for_plan_cache(&index_dir);

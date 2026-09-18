@@ -1,10 +1,9 @@
 name: Leased index readers
-
 on:
   push:
     branches: [main]
     paths:
-      - scripts/delivery/index-reader-complete-*.b64
+      - scripts/delivery/index-reader-fixture.patch
       - .github/workflows/index-publication-20260918.yml
   workflow_dispatch:
 permissions:
@@ -39,53 +38,44 @@ jobs:
           key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Apply verified literal reader and cache patch
+      - name: Apply verified literal reader and cache bindings
         run: |
           set -euo pipefail
-          git rev-parse HEAD
           cat scripts/delivery/index-reader-complete-0.b64 scripts/delivery/index-reader-complete-1.b64 | tr -d '\n' | base64 --decode | gzip -d > "$RUNNER_TEMP/reader.patch"
           echo "c7948c44fd53245668cc5cc1d5a081ca40c4ba5a5d245fe976f0734c29482c5f  $RUNNER_TEMP/reader.patch" | sha256sum --check
           git apply --check "$RUNNER_TEMP/reader.patch"
           git apply "$RUNNER_TEMP/reader.patch"
           printf '%s\n' 'e0a65fc275866621cd40aab67476dc6ece294dd75f1a61e897c91d5bb8856a21  src/core/index.rs' '74de30ca471c13a9a701eaf2e7446cc00781aff0539cb1a8aee7bc28e4b2f715  src/core/search.rs' | sha256sum --check
+          git apply --check scripts/delivery/index-reader-fixture.patch
+          git apply scripts/delivery/index-reader-fixture.patch
           rustfmt --edition 2024 --config skip_children=true src/core/index.rs src/core/index_read_lease.rs src/core/search.rs
           git diff --check
-          git diff --stat
       - name: Compile production library
         run: |
           status=0
           cargo check --locked --lib > "$RUNNER_TEMP/reader-check.log" 2>&1 || status=$?
           tail -n 100 "$RUNNER_TEMP/reader-check.log"
           exit "$status"
-      - name: Execute real generation lease regressions
+      - name: Execute lease, replacement, publication and cancellation regressions
         run: |
-          status=0
-          cargo test --locked --lib generation_lease -- --nocapture > "$RUNNER_TEMP/reader-boundaries.log" 2>&1 || status=$?
-          tail -n 180 "$RUNNER_TEMP/reader-boundaries.log"
-          exit "$status"
-      - name: Execute identical-metadata generation replacement regression
-        run: |
-          status=0
-          cargo test --locked --lib search_generation_cache -- --nocapture > "$RUNNER_TEMP/reader-cache.log" 2>&1 || status=$?
-          tail -n 100 "$RUNNER_TEMP/reader-cache.log"
-          exit "$status"
-      - name: Verify existing publication and cancellation boundaries
-        run: |
-          status=0
-          cargo test --locked --lib core::index::tests::publication_ -- --nocapture > "$RUNNER_TEMP/reader-publication.log" 2>&1 || status=$?
-          tail -n 100 "$RUNNER_TEMP/reader-publication.log"
-          test "$status" -eq 0
-          status=0
-          cargo test --locked --lib core::search::tests::lab_runtime_cancellation_ -- --nocapture > "$RUNNER_TEMP/reader-cancellation.log" 2>&1 || status=$?
-          tail -n 100 "$RUNNER_TEMP/reader-cancellation.log"
-          exit "$status"
+          set -euo pipefail
+          number=0
+          for filter in generation_lease search_generation_cache core::index::tests::publication_ core::search::tests::lab_runtime_cancellation_; do
+            log="$RUNNER_TEMP/reader-group-$number.log"
+            status=0
+            cargo test --locked --lib "$filter" -- --nocapture > "$log" 2>&1 || status=$?
+            tail -n 180 "$log"
+            test "$status" -eq 0
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$log"
+            number=$((number + 1))
+          done
       - name: Commit tested production integration directly to main
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- src/core/index.rs src/core/index_read_lease.rs src/core/search.rs
-          git commit -m 'fix(search): lease generations and invalidate replaced index readers' -m 'On Unix, hold a shared read-only directory lease across metadata, vectors and lexical collection; publication and recovery take the exclusive lease through commit and rollback before acquiring the database writer fence. Bound waits, preserve cancellation and close on error. Bind lexical-reader and index-status caches to the physical generation directory so identical metadata cannot resurrect a displaced reader. Real hybrid collection, contention, rollback, parent substitution and replacement-with-identical-metadata tests passed before this commit. SQL-pointer immutable generations and non-Unix leases remain separate work.'
+          git commit -m 'fix(search): lease generations and invalidate replaced index readers' -m 'On Unix, hold a shared read-only directory lease across metadata, vectors and lexical collection; publication and recovery take the exclusive lease through commit and rollback before acquiring the database writer fence. Bound waits, preserve cancellation and close on error. Bind lexical-reader and index-status caches to the physical generation directory so identical metadata cannot resurrect a displaced reader. Production compilation and four nonempty regression groups passed before this commit. SQL-pointer immutable generations and non-Unix leases remain separate work.'
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then break; fi
             test "$attempt" -lt 3
@@ -99,7 +89,7 @@ jobs:
           cargo test --locked --lib core::index::tests:: -- --test-threads=2 > "$RUNNER_TEMP/reader-index-module.log" 2>&1 || status=$?
           tail -n 230 "$RUNNER_TEMP/reader-index-module.log"
           exit "$status"
-      - name: Preserve exact code and verification logs
+      - name: Preserve exact source and logs
         if: ${{ !cancelled() }}
         run: |
           git rev-parse HEAD > "$RUNNER_TEMP/reader-final-sha.log"
