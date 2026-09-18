@@ -355,6 +355,9 @@ mod migrate_command_surface;
 #[path = "contracts/backup_import_roundtrip.rs"]
 mod backup_import_roundtrip;
 
+#[path = "contracts/boundary_inventory_anchor_drift.rs"]
+mod boundary_inventory_anchor_drift;
+
 #[path = "contracts/handoff_canonical_schema.rs"]
 mod handoff_canonical_schema;
 
