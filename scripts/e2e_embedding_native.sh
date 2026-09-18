@@ -278,14 +278,52 @@ run_ee_text_env() {
     fi
 }
 
+# These two carried the same collapse as the shared harness assert_jq (fixed
+# at 7a3107d23, bd-82aq1): every non-zero `jq -e` exit printed "jq filter
+# false", and `2>&1` discarded jq's explanation. Only exit 1 says the
+# product's property is false.
+#
+# THESE READ A FILE, so they have a failure mode the string-input helpers
+# cannot produce. Measured directly rather than carried over from that fix:
+#
+#     valid file, property true    rc=0
+#     valid file, property false   rc=1
+#     valid file, filter typo      rc=3
+#     FILE DOES NOT EXIST          rc=2      <-- only possible here
+#     file is not JSON             rc=5
+#     file is empty                rc=4
+#
+# rc=2 matters because these assert against artifacts written earlier in the
+# run: a missing file means the command under test never produced its output,
+# which is a different bug from a filter that disagrees with it, and the old
+# form reported both as the property being false.
+#
+# The pass path, the exit-1 text and the reporters are unchanged, so counters
+# and emitted events are unaffected.
+_assert_jq_file_report() {
+    local rc="$1" label="$2" detail="$3" file="$4" err="$5"
+    case "$rc" in
+        1) record_failure "${label}" "${detail}" ;;
+        2) record_failure "${label}" "HARNESS ERROR -- jq could not read ${file} (missing or unreadable): $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-300)" ;;
+        3) record_failure "${label}" "HARNESS ERROR -- jq filter did not compile: $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-300)" ;;
+        4) record_failure "${label}" "HARNESS ERROR -- no output to test; ${file} yielded nothing" ;;
+        5) record_failure "${label}" "HARNESS ERROR -- ${file} is not JSON: $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-300)" ;;
+        *) record_failure "${label}" "HARNESS ERROR -- jq exited ${rc} on ${file}: $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-300)" ;;
+    esac
+}
+
 assert_jq_file() {
     local file="${1:?file required}"
     local filter="${2:?jq filter required}"
     local label="${3:?label required}"
-    if jq -e "${filter}" "${file}" >/dev/null 2>&1; then
+    local jq_err rc
+    jq_err="$(jq -e "${filter}" "${file}" 2>&1 >/dev/null)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
         record_pass "${label}"
     else
-        record_failure "${label}" "jq filter false: ${filter}; file=${file}"
+        _assert_jq_file_report "$rc" "${label}" \
+            "jq filter false: ${filter}; file=${file}" "${file}" "$jq_err"
     fi
 }
 
@@ -295,10 +333,15 @@ assert_jq_file_arg() {
     local arg_value="${3:-}"
     local filter="${4:?jq filter required}"
     local label="${5:?label required}"
-    if jq -e --arg "${arg_name}" "${arg_value}" "${filter}" "${file}" >/dev/null 2>&1; then
+    local jq_err rc
+    jq_err="$(jq -e --arg "${arg_name}" "${arg_value}" "${filter}" "${file}" 2>&1 >/dev/null)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
         record_pass "${label}"
     else
-        record_failure "${label}" "jq filter false with ${arg_name}=${arg_value}: ${filter}; file=${file}"
+        _assert_jq_file_report "$rc" "${label}" \
+            "jq filter false with ${arg_name}=${arg_value}: ${filter}; file=${file}" \
+            "${file}" "$jq_err"
     fi
 }
 

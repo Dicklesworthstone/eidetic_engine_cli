@@ -68,31 +68,57 @@ assert_search_omits_memory() {
     fi
 }
 
+# These two are local copies of scripts/lib/e2e_harness.sh's assert_jq, and
+# carried the same collapse it did: `jq -e` sets four distinct non-zero exits
+# and all of them printed "jq filter false". Only exit 1 says the product's
+# property is false; 3 means the filter did not compile, 4 means there was no
+# output to test, 5 means the input was not JSON -- those three say the TEST is
+# broken, and reading them as product failures is the defect bd-82aq1 names.
+# Fixed in the shared helper at 7a3107d23; these did not inherit it because
+# they are copies rather than callers.
+#
+# The pass path, the exit-1 text, the "true"/"false" pair given to
+# e2e_log_assert_eq, and the reporters are unchanged, so counters and the event
+# log are unaffected. Neither helper has an explicit return, so both still
+# yield the reporter's status as before.
+_assert_jq_report() {
+    local rc="$1" filter="$2" label="$3" err="$4"
+    case "$rc" in
+        1) _harness_fail "$label: jq filter false [$filter]" ;;
+        3) _harness_fail "$label: HARNESS ERROR -- jq filter did not compile [$filter]: $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-300)" ;;
+        4) _harness_fail "$label: HARNESS ERROR -- no output to test for [$filter]" ;;
+        5) _harness_fail "$label: HARNESS ERROR -- input is not JSON for [$filter]: $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-300)" ;;
+        *) _harness_fail "$label: HARNESS ERROR -- jq exited $rc for [$filter]: $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-300)" ;;
+    esac
+}
+
 assert_jq_arg() {
     local json="$1" arg_name="$2" arg_value="$3" filter="$4" label="$5"
-    local result
-    result="$(printf '%s' "$json" \
-        | jq -e --arg "$arg_name" "$arg_value" "$filter" >/dev/null 2>&1 \
-        && printf true || printf false)"
-    e2e_log_assert_eq "$result" "true" "$label" || true
-    if [ "$result" = "true" ]; then
+    local jq_err rc
+    jq_err="$(printf '%s' "$json" \
+        | jq -e --arg "$arg_name" "$arg_value" "$filter" 2>&1 >/dev/null)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        e2e_log_assert_eq "true" "true" "$label" || true
         _harness_pass "$label"
     else
-        _harness_fail "$label: jq filter false [$filter]"
+        e2e_log_assert_eq "false" "true" "$label" || true
+        _assert_jq_report "$rc" "$filter" "$label" "$jq_err"
     fi
 }
 
 assert_jq_two_args() {
     local json="$1" first_name="$2" first_value="$3" second_name="$4" second_value="$5" filter="$6" label="$7"
-    local result
-    result="$(printf '%s' "$json" \
-        | jq -e --arg "$first_name" "$first_value" --arg "$second_name" "$second_value" "$filter" >/dev/null 2>&1 \
-        && printf true || printf false)"
-    e2e_log_assert_eq "$result" "true" "$label" || true
-    if [ "$result" = "true" ]; then
+    local jq_err rc
+    jq_err="$(printf '%s' "$json" \
+        | jq -e --arg "$first_name" "$first_value" --arg "$second_name" "$second_value" "$filter" 2>&1 >/dev/null)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        e2e_log_assert_eq "true" "true" "$label" || true
         _harness_pass "$label"
     else
-        _harness_fail "$label: jq filter false [$filter]"
+        e2e_log_assert_eq "false" "true" "$label" || true
+        _assert_jq_report "$rc" "$filter" "$label" "$jq_err"
     fi
 }
 
