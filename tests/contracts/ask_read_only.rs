@@ -98,7 +98,9 @@ fn read_only_answers_abstentions_and_strict_failures_leave_durable_state_unchang
                 assert_eq!(value["data"]["abstained"], true);
             }
         } else {
-            assert_eq!(value["success"], false);
+            assert_eq!(value["schema"], "ee.error.v2");
+            assert_eq!(value["error"]["code"], "unsatisfied_degraded_mode");
+            assert!(value.get("data").is_none());
         }
         assert_eq!(durable_files(&workspace)?, before, "{question} {flags:?}");
     }
@@ -214,7 +216,9 @@ fn ask_requires_explicit_migration_instead_of_upgrading_during_a_query() -> Resu
     for flags in [vec!["--read-only"], vec![]] {
         let output = invoke(&workspace, "Run cargo fmt before release", &flags)?;
         assert_eq!(output.status.code(), Some(8));
-        assert_eq!(response(&output)?["success"], false);
+        let value = response(&output)?;
+        assert_eq!(value["schema"], "ee.error.v2");
+        assert_eq!(value["error"]["code"], "migration_required");
         assert!(String::from_utf8_lossy(&output.stdout).contains("migrate"));
         assert_eq!(durable_files(&workspace)?, before);
     }
@@ -230,7 +234,9 @@ fn read_only_ask_never_initializes_a_missing_store() -> Result<(), String> {
         &["--read-only"],
     )?;
     assert!(!output.status.success());
-    assert_eq!(response(&output)?["success"], false);
+    let value = response(&output)?;
+    assert_eq!(value["schema"], "ee.error.v2");
+    assert_eq!(value["error"]["code"], "workspace_store_missing");
     assert!(!root.path().join(".ee").exists());
     Ok(())
 }
