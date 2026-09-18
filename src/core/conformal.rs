@@ -307,9 +307,9 @@ fn clamp_unit_score(score: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_CONFORMAL_COVERAGE, MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES,
-        WhyConformalCandidate, conformal_nonconformity_from_value, conformal_score_interval,
-        read_conformal_calibration, split_conformal_quantile, why_conformal_confidence_intervals,
+        DEFAULT_CONFORMAL_COVERAGE, MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES, WhyConformalCandidate,
+        conformal_nonconformity_from_value, conformal_score_interval, read_conformal_calibration,
+        split_conformal_quantile, why_conformal_confidence_intervals,
     };
     use serde_json::{Value, json};
     use std::io::{self, Cursor, Read};
@@ -545,14 +545,13 @@ mod tests {
 
     #[test]
     fn uncalibrated_prediction_set_does_not_claim_nominal_coverage() {
-        let report = why_conformal_confidence_intervals(
-            None,
-            "target",
-            0.75,
-            [candidate("other", 0.125)],
-        );
+        let report =
+            why_conformal_confidence_intervals(None, "target", 0.75, [candidate("other", 0.125)]);
         assert_eq!(report.coverage_guarantee, 0.0);
-        assert_eq!(report.calibration_status, "conservative_insufficient_calibration");
+        assert_eq!(
+            report.calibration_status,
+            "conservative_insufficient_calibration"
+        );
         assert_eq!(report.score_interval, [0.0, 1.0]);
         assert!(report.prediction_set.iter().all(|entry| entry.included));
     }
@@ -603,7 +602,10 @@ mod tests {
                 assert_eq!(report.coverage_guarantee, 0.0);
                 assert_eq!(report.nonconformity_quantile, 1.0);
                 assert_eq!(report.score_interval, [0.0, 1.0]);
-                assert_eq!(report.calibration_sample_count, MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES);
+                assert_eq!(
+                    report.calibration_sample_count,
+                    MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES
+                );
                 assert!(report.prediction_set.iter().all(|entry| entry.included));
             }
         }

@@ -72,9 +72,8 @@ fn process_cache_compilation_is_unlocked_and_publication_is_generation_safe() {
     started_rx
         .recv_timeout(DEADLINE)
         .expect("cold compiler started");
-    let hot = lookup_or_insert_process_plan(CAPACITY, key(1), || {
-        panic!("warm lookup must not compile")
-    });
+    let hot =
+        lookup_or_insert_process_plan(CAPACITY, key(1), || panic!("warm lookup must not compile"));
     assert_eq!(hot.decision, PlanCacheDecision::Hit);
     assert_eq!(cached_keys(CAPACITY), vec![1]);
     release_tx
@@ -124,7 +123,10 @@ fn process_cache_compilation_is_unlocked_and_publication_is_generation_safe() {
         recompiled = true;
         plan("fresh")
     });
-    assert!(recompiled, "invalidated compilation must not have been cached");
+    assert!(
+        recompiled,
+        "invalidated compilation must not have been cached"
+    );
 
     // A late result must not reset a newer capacity or evict its entries.
     let stale = lookup_or_insert_process_plan(CAPACITY, key(6), || {
