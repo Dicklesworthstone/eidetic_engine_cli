@@ -190,3 +190,6 @@ mod scope;
 
 #[path = "ask_read_only.rs"]
 mod read_only;
+
+#[path = "ask_native.rs"]
+mod native;
