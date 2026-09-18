@@ -1,0 +1,269 @@
+diff --git a/src/core/index.rs b/src/core/index.rs
+--- a/src/core/index.rs
++++ b/src/core/index.rs
+@@ -4124,6 +4124,13 @@
+     sync_directory(staging_dir)?;
+     sync_directory(index_parent(staging_dir))?;
+ 
++    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
++    if path_exists_no_follow(index_dir) {
++        return publish_index_by_exchange(index_dir, staging_dir, sync_directory, |from, to| {
++            rename_index_dir(from, to, "retain atomically displaced index generation")
++        });
++    }
++
+     let retained_dir = if path_exists_no_follow(index_dir) {
+         let retained = allocate_retained_index_dir(index_dir)?;
+         rename_index_dir(index_dir, &retained, "retain previous index generation")?;
+@@ -4190,6 +4197,77 @@
+     }
+ }
+ 
++#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
++fn exchange_index_directories(left: &Path, right: &Path) -> Result<(), IndexRebuildError> {
++    ensure_index_path_has_no_symlinks(left, "exchange index generations")?;
++    ensure_index_path_has_no_symlinks(right, "exchange index generations")?;
++    ensure_index_publish_source_is_directory(left, "exchange index generations")?;
++    ensure_index_publish_source_is_directory(right, "exchange index generations")?;
++    rustix::fs::renameat_with(
++        rustix::fs::CWD, left, rustix::fs::CWD, right, rustix::fs::RenameFlags::EXCHANGE,
++    ).map_err(|error| IndexRebuildError::Index(format!(
++        "Atomic index directory exchange failed; no non-atomic fallback was attempted: {error}"
++    )))
++}
++
++/// Keep the live pathname present throughout replacement. The displaced old
++/// generation moves from the staging name to retention only AFTER the swap.
++#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
++fn publish_index_by_exchange(
++    index_dir: &Path,
++    staging_dir: &Path,
++    sync_directory: &mut impl FnMut(&Path) -> Result<(), IndexRebuildError>,
++    retain: impl FnOnce(&Path, &Path) -> Result<(), IndexRebuildError>,
++) -> Result<Option<PathBuf>, IndexRebuildError> {
++    let retained = allocate_retained_index_dir(index_dir)?;
++    // Persist the old directory while it is STILL live. A directory fsync in
++    // the old retain-then-rename gap would prolong reader-visible absence.
++    sync_directory(index_dir)?;
++    exchange_index_directories(index_dir, staging_dir)?;
++    let mut rollback = IndexExchangeRestoreGuard { index_dir, displaced: staging_dir, armed: true };
++    if let Err(primary_error) = retain(staging_dir, &retained) {
++        if let Err(restore_error) = rollback.restore() {
++            return Err(IndexRebuildError::Index(format!(
++                "index retention failed ({primary_error}); atomic restoration also failed ({restore_error})"
++            )));
++        }
++        return Err(primary_error);
++    }
++    rollback.armed = false;
++    Ok(Some(retained))
++}
++
++#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
++struct IndexExchangeRestoreGuard<'a> {
++    index_dir: &'a Path,
++    displaced: &'a Path,
++    armed: bool,
++}
++
++#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
++impl IndexExchangeRestoreGuard<'_> {
++    fn restore(&mut self) -> Result<(), IndexRebuildError> {
++        if self.armed {
++            self.armed = false;
++            exchange_index_directories(self.index_dir, self.displaced)?;
++            sync_index_directory(index_parent(self.index_dir))?;
++            if index_parent(self.displaced) != index_parent(self.index_dir) {
++                sync_index_directory(index_parent(self.displaced))?;
++            }
++        }
++        Ok(())
++    }
++}
++
++#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
++impl Drop for IndexExchangeRestoreGuard<'_> {
++    fn drop(&mut self) {
++        if let Err(error) = self.restore() {
++            tracing::error!(target: "ee::index", %error, "failed to atomically restore displaced index during unwind");
++        }
++    }
++}
++
+ fn rollback_published_index(
+     index_dir: &Path,
+     staging_dir: &Path,
+@@ -4202,6 +4280,18 @@
+             retained_dir,
+             "restore retained index generation after commit failure",
+         )?;
++    }
++
++    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
++    if !path_exists_no_follow(staging_dir)
++        && path_exists_no_follow(index_dir)
++        && let Some(retained) = retained_dir
++        && path_exists_no_follow(retained)
++    {
++        let rejected = allocate_rejected_index_dir(index_dir)?;
++        exchange_index_directories(index_dir, retained)?;
++        rename_index_dir(retained, &rejected, "quarantine atomically rejected index generation")?;
++        return sync_index_directory(index_parent(index_dir));
+     }
+ 
+     let mut rollback_errors = Vec::new();
+@@ -4946,7 +5036,13 @@
+     ensure_index_path_has_no_symlinks(to, action)?;
+     ensure_index_publish_source_is_directory(from, action)?;
+     ensure_index_publish_target_is_directory_or_missing(to, action)?;
+-    std::fs::rename(from, to).map_err(|e| {
++    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
++    let result = rustix::fs::renameat_with(
++        rustix::fs::CWD, from, rustix::fs::CWD, to, rustix::fs::RenameFlags::NOREPLACE,
++    ).map_err(io::Error::from);
++    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
++    let result = std::fs::rename(from, to);
++    result.map_err(|e| {
+         IndexRebuildError::Index(format!(
+             "Failed to {action} from {} to {}: {e}",
+             from.display(),
+@@ -17552,10 +17648,15 @@
+             checkpoints.borrow_mut().push((directory.to_path_buf(), active.exists(), staged.exists(), path.join("index.previous").exists()));
+             Ok(())
+         }).map_err(|error| error.to_string())?;
++        let retained_barrier = if cfg!(any(target_os = "linux", target_os = "android", target_vendor = "apple")) {
++            (active, true, true, false)
++        } else {
++            (path.clone(), false, true, true)
++        };
+         ensure(checkpoints.into_inner() == vec![
+             (staged, true, true, false),
+             (path.clone(), true, true, false),
+-            (path.clone(), false, true, true),
++            retained_barrier,
+             (path, true, false, true),
+         ], "staging, retention and activation must each cross a durability barrier")
+     }
+@@ -17647,6 +17748,122 @@
+             ensure(!path.join("index.previous").exists(), "unwind must restore retained name")?;
+         }
+         Ok(())
++    }
++
++    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
++    #[test]
++    fn publication_exchange_keeps_live_name_present_at_each_directory_barrier() -> TestResult {
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let path = root.path().canonicalize().map_err(|error| error.to_string())?;
++        let active = path.join("index");
++        let staged = path.join(".index.publish-test");
++        write_marker(&active, "generation", "old")?;
++        write_marker(&staged, "generation", "new")?;
++        let mut observed = Vec::new();
++        publish_staged_index_with_sync(&active, &staged, || Ok(()), |directory| {
++            observed.push(std::fs::read(active.join("generation")).map_err(|error| {
++                IndexRebuildError::Index(format!("reader lost its live generation: {error}"))
++            })?);
++            sync_index_directory(directory)
++        }).map_err(|error| error.to_string())?;
++        ensure(observed == [b"old".to_vec(), b"old".to_vec(), b"old".to_vec(), b"new".to_vec()],
++            "all durability boundaries must keep a complete live generation")?;
++        ensure(read_marker(&path.join("index.previous"), "generation")? == "old",
++            "the displaced old generation must remain retained")
++    }
++
++    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
++    #[test]
++    fn publication_exchange_retention_failure_and_unwind_restore_atomically() -> TestResult {
++        for panic_after_swap in [false, true] {
++            let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++            let path = root.path().canonicalize().map_err(|error| error.to_string())?;
++            let active = path.join("index");
++            let staged = path.join(".index.publish-test");
++            write_marker(&active, "generation", "old")?;
++            write_marker(&staged, "generation", "new")?;
++            let before = index_regular_file_snapshot(&active)?;
++            let attempted = std::cell::Cell::new(false);
++            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++                publish_index_by_exchange(&active, &staged, &mut sync_index_directory, |from, _| {
++                    // This seam runs AFTER a real kernel exchange, not instead
++                    // of it. Both actual directory trees are inspected here.
++                    if read_marker(&active, "generation").ok().as_deref() != Some("new")
++                        || read_marker(from, "generation").ok().as_deref() != Some("old")
++                    {
++                        return Err(IndexRebuildError::Index("kernel exchange did not take place".to_owned()));
++                    }
++                    attempted.set(true);
++                    if panic_after_swap {
++                        panic!("injected retention unwind after atomic exchange");
++                    }
++                    Err(IndexRebuildError::Index("injected retention failure after atomic exchange".to_owned()))
++                })
++            }));
++            ensure(attempted.get(), "test must reach the post-exchange boundary")?;
++            ensure(if panic_after_swap { result.is_err() } else { matches!(result, Ok(Err(_))) },
++                "retention failure must not be acknowledged as a publication")?;
++            ensure(index_regular_file_snapshot(&active)? == before, "atomic rollback must restore old bytes")?;
++            ensure(read_marker(&staged, "generation")? == "new", "failed candidate must remain inspectable")?;
++        }
++        Ok(())
++    }
++
++    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
++    #[test]
++    fn publication_exchange_readers_never_observe_a_missing_generation_during_replacement() -> TestResult {
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let path = root.path().canonicalize().map_err(|error| error.to_string())?;
++        let active = path.join("index");
++        let candidate = path.join("candidate");
++        write_marker(&active, "generation", "old")?;
++        write_marker(&candidate, "generation", "new")?;
++        let ready = std::sync::Barrier::new(2);
++        std::thread::scope(|scope| -> TestResult {
++            let reader = scope.spawn(|| -> Result<usize, String> {
++                let mut failure = None;
++                for _ in 0..256 {
++                    ready.wait();
++                    let result = std::fs::read(active.join("generation"))
++                        .map_err(|error| error.to_string())
++                        .and_then(|body| ensure(body == b"old" || body == b"new", "reader observed a mixed payload"));
++                    if failure.is_none() {
++                        failure = result.err();
++                    }
++                    // Even a failed observation must release the publisher;
++                    // the actual error is returned after the finite schedule.
++                    ready.wait();
++                }
++                failure.map_or(Ok(256), Err)
++            });
++            let mut failure = None;
++            for _ in 0..256 {
++                ready.wait();
++                let result = exchange_index_directories(&active, &candidate).map_err(|error| error.to_string());
++                if failure.is_none() {
++                    failure = result.err();
++                }
++                ready.wait();
++            }
++            let reads = reader.join().map_err(|_| "reader thread panicked".to_owned())??;
++            failure.map_or(Ok(()), Err)?;
++            ensure(reads == 256, "reader must sample every real exchange round")
++        })
++    }
++
++    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
++    #[test]
++    fn publication_exchange_directory_rename_refuses_even_an_empty_existing_target() -> TestResult {
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let path = root.path().canonicalize().map_err(|error| error.to_string())?;
++        let source = path.join("source");
++        let target = path.join("target");
++        write_marker(&source, "generation", "do not move into an existing destination")?;
++        std::fs::create_dir(&target).map_err(|error| error.to_string())?;
++        ensure(rename_index_dir(&source, &target, "test no-clobber retention").is_err(),
++            "an existing empty directory must not be silently overwritten")?;
++        ensure(source.is_dir() && target.is_dir() && !target.join("generation").exists(),
++            "both names and source bytes must be preserved after a collision")
+     }
+ 
+     #[test]
