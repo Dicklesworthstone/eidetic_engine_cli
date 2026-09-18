@@ -163,12 +163,53 @@ assert_contains() {
 }
 
 # assert_jq <json> <jq-bool-filter> <label> — passes when filter yields true.
+#
+# `jq -e` sets four distinct non-zero exits and this helper used to render all
+# of them as one line:
+#
+#     result="$(... jq -e "$filter" >/dev/null 2>&1 && echo true || echo false)"
+#     else _harness_fail "$label: jq filter false [$filter]"
+#
+# so exit 1 (the property is false), exit 3 (the filter does not compile),
+# exit 4 (no output to test) and exit 5 (the output is not JSON) all printed
+# "jq filter false", and `2>&1` threw away jq's own explanation. Only exit 1
+# says anything about the product; the other three say the TEST or the COMMAND
+# is broken, and reading them as product failures is how bd-kyeyw's two
+# uncompilable filters looked like ee returning nothing. bd-82aq1.
+#
+# WHAT IS DELIBERATELY UNCHANGED, because 1,972 call sites depend on it:
+#   - the PASS path, byte for byte;
+#   - the exit-1 text, so the local copies of this pattern in
+#     e2e_typed_fields_decide.sh and e2e_embedding_native.sh stay consistent;
+#   - the return status, which is whatever the reporter returns (0) in every
+#     case. This harness ACCUMULATES and lets harness_summary decide the exit
+#     code; scripts/e2e_read_coalescing.sh runs under `set -euo pipefail` and
+#     would abort mid-suite if a failed assertion started returning non-zero.
+#   - every byte of output going to stderr through the reporters.
+#     scripts/e2e_overhaul/workspace_hygiene.sh:1474 captures this function's
+#     STDOUT into a variable, so anything printed there changes its meaning.
+#   - the "true"/"false" pair handed to e2e_log_assert_eq, which the event log
+#     records.
+# Only the text of the three non-property failures is new.
 assert_jq() {
-    local json="$1" filter="$2" label="${3:-assert_jq}" result
-    result="$(printf '%s' "$json" | jq -e "$filter" >/dev/null 2>&1 && echo true || echo false)"
-    e2e_log_assert_eq "$result" "true" "$label"
-    if [ "$result" = "true" ]; then _harness_pass "$label ($filter)";
-    else _harness_fail "$label: jq filter false [$filter]"; fi
+    local json="$1" filter="$2" label="${3:-assert_jq}" jq_err rc
+    # `2>&1 >/dev/null` captures stderr and discards stdout: jq's diagnostic is
+    # the thing worth keeping, and the boolean is carried by the exit code.
+    jq_err="$(printf '%s' "$json" | jq -e "$filter" 2>&1 >/dev/null)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        e2e_log_assert_eq "true" "true" "$label"
+        _harness_pass "$label ($filter)"
+        return
+    fi
+    e2e_log_assert_eq "false" "true" "$label"
+    case "$rc" in
+        1) _harness_fail "$label: jq filter false [$filter]" ;;
+        3) _harness_fail "$label: HARNESS ERROR -- jq filter did not compile [$filter]: $(printf '%s' "$jq_err" | tr '\n' ' ' | cut -c1-300)" ;;
+        4) _harness_fail "$label: HARNESS ERROR -- no output to test; the command produced nothing for [$filter]" ;;
+        5) _harness_fail "$label: HARNESS ERROR -- input is not JSON for [$filter]: $(printf '%s' "$jq_err" | tr '\n' ' ' | cut -c1-300)" ;;
+        *) _harness_fail "$label: HARNESS ERROR -- jq exited $rc for [$filter]: $(printf '%s' "$jq_err" | tr '\n' ' ' | cut -c1-300)" ;;
+    esac
 }
 
 # assert_exit <expected_code> <label> -- <command...>
