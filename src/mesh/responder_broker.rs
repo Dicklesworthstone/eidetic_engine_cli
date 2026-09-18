@@ -4937,6 +4937,42 @@ mod tests {
     }
 
     #[test]
+    fn the_old_collapsing_expression_and_the_fix_disagree_on_the_same_denylist() {
+        // THE ARM THAT FAILS WITHOUT THE FIX.
+        //
+        // The other tests here exercise resolve_hello_discovery_lists, which
+        // did not exist before bd-zjcx6 -- against the old code they would not
+        // fail, they would not COMPILE, and "it does not build" is not a
+        // demonstration that behaviour changed. This one runs both
+        // implementations against one input in one process and asserts they
+        // disagree, so it fails if resolve_hello_discovery_lists is ever
+        // reimplemented the old way.
+        let workspace = workspace_with_list_file(
+            crate::mesh::discovery_policy::DISCOVERY_DENYLIST_FILE,
+            b"node_keys = this is not toml [",
+        );
+        let path = Some(workspace.path());
+
+        // The call site's expression before bd-zjcx6, character for character.
+        let collapsed: WorkspaceLists = path
+            .and_then(|path| load_workspace_lists(path).ok())
+            .unwrap_or_default();
+        assert!(
+            collapsed.denylist.is_empty(),
+            "the defect, executed: `.ok()` turned an unreadable denylist into an \
+             EMPTY denylist, indistinguishable from no denylist configured"
+        );
+
+        // The fix, same input, opposite answer.
+        assert_eq!(
+            resolve_hello_discovery_lists(path),
+            Err(BOOTSTRAP_DECLINE_LISTS_UNAVAILABLE),
+            "the fix must refuse where the old expression silently admitted; if \
+             this returns Ok the fail-open is back"
+        );
+    }
+
+    #[test]
     fn absent_list_files_are_not_treated_as_a_failure() {
         // The two-state distinction, from the other side: "no denylist" must
         // stay a normal load. Turning this into a decline would break every
