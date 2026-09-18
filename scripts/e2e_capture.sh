@@ -583,8 +583,14 @@ assert_json "$leak_search_out" "[.data.results[]?] | tostring | contains(\"$LEAK
 # negative about.
 leak_targeted_pack_out="$(ee_json --workspace "$WS" pack \
     "deploy key staging box keep it out of any summary" --max-tokens 2000 --json || true)"
+# SCOPED TO items[], NOT the envelope. `ee pack` echoes its own query at
+# .data.pack.query (src/output/mod.rs:2918), and "staging box" is IN that query,
+# so `tostring | contains("staging box")` over the whole response could never
+# fail -- it would have passed on a pack that selected nothing. I wrote that
+# version one commit after fixing the identical defect in the search assertion,
+# which is why the census that found it looked at my own code first.
 assert_json "$leak_targeted_pack_out" \
-    "tostring | contains(\"staging box\")" 'true' \
+    "[.data.pack.items[]?] | tostring | contains(\"staging box\")" 'true' \
     "precondition: a pack aimed at line 5 actually selects line 5's content"
 assert_json "$leak_targeted_pack_out" \
     "tostring | contains(\"$LEAK_CANARY\") | not" 'true' \
