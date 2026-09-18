@@ -3,7 +3,8 @@
 //! `ee ask "<question>"` composes a direct answer FROM EXTRACTED SPANS of
 //! stored memories: retrieval → span segmentation → scoring → clustering →
 //! composition with per-claim citations, an overall confidence, and honest
-//! abstention. Deterministic: same DB + question ⇒ byte-identical answer.
+//! abstention. The pure lexical evaluator is deterministic for fixed inputs.
+//! Local semantic evaluation additionally depends on the verified model.
 //!
 //! Extractiveness invariant: every emitted answer sentence MUST byte-equal
 //! a cited span of a stored memory. Violations trigger an internal error
@@ -39,6 +40,16 @@ mod native;
 
 pub use native::AskNativeSource;
 
+#[path = "ask_semantic.rs"]
+mod semantic;
+
+pub use semantic::evaluate_ask_with_local_model;
+
+// One request-local scoring regime must drive admission and composition.
+// A callback borrows the complete semantic table without adding mutable
+// process-global state or changing the public request/candidate structures.
+type SpanScorer<'a> = &'a dyn Fn(&[String], &str, f32, &str) -> f32;
+
 // ─── schema constants ───────────────────────────────────────────────────────
 
 /// Response data schema identifier carried under `ee.response.v2 data.answer`.
@@ -64,11 +75,9 @@ const ASK_QUERY_MISS_AUDIT_SAMPLE_RATE: f64 = 1.0;
 
 // ─── span scoring weights (ADR §2) ──────────────────────────────────────────
 
-// Retained ADR §2 span-scoring weights; W1/W2 are documented design constants
-// not yet consumed by the current scoring path.
-#[allow(dead_code)]
+// ADR §2 weights when a complete local semantic score table is available.
+// The pure lexical path still redistributes W2 into W1.
 const SPAN_W1_LEXICAL: f32 = 0.45;
-#[allow(dead_code)]
 const SPAN_W2_SEMANTIC: f32 = 0.35;
 const SPAN_W3_TRUST: f32 = 0.20;
 
@@ -743,25 +752,44 @@ mod answer_integrity_tests;
 /// and for emitting the query-miss ledger row on abstention
 /// (`report.abstained == true`).
 pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskReport {
-    if !native::validate_sources(request, candidates) {
+    evaluate_ask_scored(request, candidates, &score_span, true)
+}
+
+fn request_is_valid(request: &AskRequest) -> bool {
+    request.min_confidence.is_finite() && (0.0..=1.0).contains(&request.min_confidence)
+}
+
+fn evaluate_ask_scored(
+    request: &AskRequest,
+    candidates: &[AskCandidate],
+    scorer: SpanScorer<'_>,
+    semantic_degraded: bool,
+) -> AskReport {
+    if !request_is_valid(request) || !native::validate_sources(request, candidates) {
         return extractiveness_failure_report(request, candidates.len());
     }
-    let mut report = evaluate_ask_inner(request, candidates);
+    let mut report = evaluate_ask_inner(request, candidates, scorer, semantic_degraded);
     native::attach_sources(&mut report, request);
     report
 }
 
-fn evaluate_ask_inner(request: &AskRequest, candidates: &[AskCandidate]) -> AskReport {
+fn evaluate_ask_inner(
+    request: &AskRequest,
+    candidates: &[AskCandidate],
+    scorer: SpanScorer<'_>,
+    semantic_degraded: bool,
+) -> AskReport {
     let question_terms = tokenize_for_ask(&request.question);
     let max_n = request.max_evidence.max(1);
     // Validate the full scoped input and rank before applying the clustering
     // budget. A caller's database order must not decide whether an answer exists.
     let candidates_scanned = candidates.len();
-    let selected_candidates = match selection::select_candidates(
+    let selected_candidates = match selection::select_candidates_with_scorer(
         request,
         &question_terms,
         candidates,
         ASK_CANDIDATE_SCAN_CAP,
+        scorer,
     ) {
         Ok(selected) => selected,
         Err(_) => return extractiveness_failure_report(request, candidates_scanned),
@@ -780,7 +808,7 @@ fn evaluate_ask_inner(request: &AskRequest, candidates: &[AskCandidate]) -> AskR
         let span_ranges = segment_spans(&candidate.content);
         for (start, end) in span_ranges {
             let text = candidate.content[start..end].to_owned();
-            let score = score_span(
+            let score = scorer(
                 &question_terms,
                 &text,
                 candidate.confidence,
@@ -897,7 +925,7 @@ fn evaluate_ask_inner(request: &AskRequest, candidates: &[AskCandidate]) -> AskR
             sides: None,
             nearest_evidence: Some(nearest_evidence),
             counterfactual_hint: Some(counterfactual_hint),
-            semantic_degraded: true, // semantic always degraded in current impl
+            semantic_degraded,
             conflict_detected,
             conflict_link: None,
             extractiveness_violated: false,
@@ -971,7 +999,7 @@ fn evaluate_ask_inner(request: &AskRequest, candidates: &[AskCandidate]) -> AskR
             sides: Some(sides),
             nearest_evidence: None,
             counterfactual_hint: None,
-            semantic_degraded: true,
+            semantic_degraded,
             conflict_detected: true,
             conflict_link,
             extractiveness_violated: false,
@@ -992,7 +1020,7 @@ fn evaluate_ask_inner(request: &AskRequest, candidates: &[AskCandidate]) -> AskR
             sides: None,
             nearest_evidence: None,
             counterfactual_hint: None,
-            semantic_degraded: true,
+            semantic_degraded,
             conflict_detected: false,
             conflict_link: None,
             extractiveness_violated: false,

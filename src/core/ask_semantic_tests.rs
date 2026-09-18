@@ -111,7 +111,13 @@ fn a_bad_batch_cannot_publish_a_valid_prefix() {
         let mut table = BTreeMap::from([("earlier", 0.25)]);
         let before = table.clone();
         assert_eq!(
-            append_batch(&mut table, &[ANSWER, DISTRACTOR], &vectors, &[1.0, 0.0], 1.0),
+            append_batch(
+                &mut table,
+                &[ANSWER, DISTRACTOR],
+                &vectors,
+                &[1.0, 0.0],
+                1.0
+            ),
             Err(SemanticFailure::Unavailable)
         );
         assert_eq!(table, before);
@@ -167,7 +173,12 @@ fn semantic_match_survives_the_candidate_cap_before_composition() {
     assert_eq!(report.citations.len(), 1);
     assert_eq!(report.citations[0].memory_id, "z-answer");
     assert_eq!(report.citations[0].text, ANSWER);
-    assert!(evaluate_ask(&request(), &rows).citations.iter().all(|c| c.memory_id != "z-answer"));
+    assert!(
+        evaluate_ask(&request(), &rows)
+            .citations
+            .iter()
+            .all(|c| c.memory_id != "z-answer")
+    );
 }
 
 #[test]
@@ -197,7 +208,10 @@ fn semantic_support_does_not_make_one_session_independent_votes() {
 fn explicit_opposition_is_reserved_for_the_semantic_not_the_lexical_anchor() {
     let mut request = request();
     let mut rows = crowded();
-    rows.push(candidate("z-opposition", "Formatting is prohibited by deployment policy."));
+    rows.push(candidate(
+        "z-opposition",
+        "Formatting is prohibited by deployment policy.",
+    ));
     request.contradictions.push(AskContradiction {
         id: "edge".to_owned(),
         src_memory_id: "z-answer".to_owned(),
@@ -225,7 +239,14 @@ fn inferred_opposition_uses_semantic_scores_for_both_reservation_and_composition
     let report = report(&request, &rows);
     assert!(report.conflict_detected && !report.semantic_degraded);
     assert!(report.conflict_link.is_none());
-    assert!(report.sides.unwrap().iter().flat_map(|side| &side.citations).any(|c| c.text == OPPOSING));
+    assert!(
+        report
+            .sides
+            .unwrap()
+            .iter()
+            .flat_map(|side| &side.citations)
+            .any(|c| c.text == OPPOSING)
+    );
 }
 
 #[test]
@@ -238,18 +259,27 @@ fn native_evidence_keeps_identity_revision_trust_and_exact_utf8_offsets() {
     source.level = "episodic".to_owned();
     source.confidence = 0.5;
     source.trust_class = "cass_evidence".to_owned();
-    let revision = format!("blake3:{}", blake3::hash(source.content.as_bytes()).to_hex());
-    request.native_sources.insert(source.memory_id.clone(), AskNativeSource {
-        entity: PackEntityRef::EvidenceSpan(id),
-        entity_revision: revision.clone(),
-        source_memory_ids: Vec::new(),
-    });
+    let revision = format!(
+        "blake3:{}",
+        blake3::hash(source.content.as_bytes()).to_hex()
+    );
+    request.native_sources.insert(
+        source.memory_id.clone(),
+        AskNativeSource {
+            entity: PackEntityRef::EvidenceSpan(id),
+            entity_revision: revision.clone(),
+            source_memory_ids: Vec::new(),
+        },
+    );
     let report = report(&request, std::slice::from_ref(&source));
     assert!(!report.abstained && !report.semantic_degraded);
     assert_eq!(report.citations.len(), 1);
     let citation = &report.citations[0];
     assert!(citation.byte_start > 0);
-    assert_eq!(source.content.get(citation.byte_start..citation.byte_end), Some(ANSWER));
+    assert_eq!(
+        source.content.get(citation.byte_start..citation.byte_end),
+        Some(ANSWER)
+    );
     let data = ask_data_json(&report);
     assert_eq!(data["citations"][0]["entityRevision"], revision);
     assert_eq!(data["citations"][0]["evidenceId"], source.memory_id);

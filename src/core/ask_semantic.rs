@@ -68,7 +68,9 @@ pub fn evaluate_ask_with_local_model(
         Ok(None) | Err(_) => return Ok(evaluate_ask(request, candidates)),
     };
     let result = crate::core::run_cli_future(async {
-        let cx = caller_cx.or_else(Cx::current).ok_or(SemanticFailure::Unavailable)?;
+        let cx = caller_cx
+            .or_else(Cx::current)
+            .ok_or(SemanticFailure::Unavailable)?;
         SemanticScores::build(&cx, &request.question, candidates, embedder.as_ref()).await
     });
     finish_evaluation(
@@ -167,7 +169,7 @@ impl<'a> SemanticScores<'a> {
         (SPAN_W1_LEXICAL * lexical
             + SPAN_W2_SEMANTIC * similarity
             + SPAN_W3_TRUST * (confidence * trust_tilt(trust)))
-            .clamp(0.0, 1.0)
+        .clamp(0.0, 1.0)
     }
 }
 
@@ -233,7 +235,9 @@ fn cosine(query: &[f32], query_norm: f64, vector: &[f32]) -> Option<f32> {
         .map(|(left, right)| f64::from(*left) * f64::from(*right))
         .sum();
     let similarity = dot / (query_norm.sqrt() * norm.sqrt());
-    similarity.is_finite().then(|| similarity.clamp(0.0, 1.0) as f32)
+    similarity
+        .is_finite()
+        .then(|| similarity.clamp(0.0, 1.0) as f32)
 }
 
 #[cfg(test)]

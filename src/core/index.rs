@@ -5959,6 +5959,11 @@ fn verify_published_tier_counts(
     Ok(())
 }
 
+#[path = "index_ask.rs"]
+mod ask_model;
+
+pub(crate) use ask_model::local_ask_embedder;
+
 const EE_MODEL_CACHE_SUBDIR: &str = "models";
 const EE_MODEL2VEC_REGISTRY_SUBDIR: &str = "model2vec";
 const EMBEDDING_REGISTRY_FINGERPRINT_SCHEMA: &str = "ee.embedding_registry_fingerprint.v1";

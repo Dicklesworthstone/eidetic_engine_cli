@@ -50848,7 +50848,7 @@ where
 {
     use crate::core::ask::{
         ASK_MAX_EVIDENCE_DEFAULT, ASK_MIN_CONFIDENCE_DEFAULT, AskDegradedEntry, AskRequest,
-        ask_data_json, evaluate_ask, record_ask_query_miss_best_effort,
+        ask_data_json, evaluate_ask_with_local_model, record_ask_query_miss_best_effort,
         record_ask_retrieval_best_effort, render_ask_markdown,
     };
 
@@ -50934,7 +50934,11 @@ where
         native_sources: corpus.native_sources,
     };
 
-    let report = evaluate_ask(&request, &candidates);
+    let report =
+        match evaluate_ask_with_local_model(&connection, &workspace_id, &request, &candidates) {
+            Ok(report) => report,
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+        };
     if !args.read_only {
         // Keep ADR 0071 demand and retrieval learning on ordinary asks. An
         // unavailable audit writer must not suppress a valid read-only answer.

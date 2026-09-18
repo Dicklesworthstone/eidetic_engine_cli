@@ -9,8 +9,8 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap};
 
 use super::{
-    AskCandidate, AskContradiction, AskRequest, has_negation, same_conflict_topic, score_span,
-    segment_spans, tokenize_for_ask, trust_tilt,
+    AskCandidate, AskContradiction, AskRequest, SpanScorer, has_negation, same_conflict_topic,
+    score_span, segment_spans, tokenize_for_ask, trust_tilt,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,11 +60,15 @@ fn same_source(left: &AskCandidate, right: &AskCandidate) -> bool {
         && left.team_provenance == right.team_provenance
 }
 
-fn best_span_score(question_terms: &[String], candidate: &AskCandidate) -> f32 {
+fn best_span_score(
+    question_terms: &[String],
+    candidate: &AskCandidate,
+    scorer: SpanScorer<'_>,
+) -> f32 {
     segment_spans(&candidate.content)
         .into_iter()
         .map(|(start, end)| {
-            score_span(
+            scorer(
                 question_terms,
                 &candidate.content[start..end],
                 candidate.confidence,
@@ -86,6 +90,17 @@ pub(super) fn select_candidates<'a>(
     question_terms: &[String],
     candidates: &'a [AskCandidate],
     limit: usize,
+) -> Result<Vec<&'a AskCandidate>, SelectionError> {
+    select_candidates_with_scorer(request, question_terms, candidates, limit, &score_span)
+}
+
+/// Use the same complete scorer for admission and the eventual answer.
+pub(super) fn select_candidates_with_scorer<'a>(
+    request: &AskRequest,
+    question_terms: &[String],
+    candidates: &'a [AskCandidate],
+    limit: usize,
+    scorer: SpanScorer<'_>,
 ) -> Result<Vec<&'a AskCandidate>, SelectionError> {
     let mut unique: BTreeMap<&str, &AskCandidate> = BTreeMap::new();
     let mut invalid_confidence = false;
@@ -119,7 +134,7 @@ pub(super) fn select_candidates<'a>(
         }
         let ranked = RankedCandidate {
             candidate,
-            score: best_span_score(question_terms, candidate),
+            score: best_span_score(question_terms, candidate, scorer),
         };
         if retained.len() < limit {
             retained.push(ranked);
@@ -131,8 +146,8 @@ pub(super) fn select_candidates<'a>(
     }
 
     let mut ranked = retained.into_sorted_vec();
-    if !preserve_linked_opposition(request, question_terms, &unique, &mut ranked) {
-        preserve_inferred_opposition(request, question_terms, &unique, &mut ranked);
+    if !preserve_linked_opposition(request, question_terms, &unique, &mut ranked, scorer) {
+        preserve_inferred_opposition(request, question_terms, &unique, &mut ranked, scorer);
     }
     Ok(ranked.into_iter().map(|entry| entry.candidate).collect())
 }
@@ -196,6 +211,7 @@ fn preserve_linked_opposition<'a>(
     question_terms: &[String],
     unique: &BTreeMap<&str, &'a AskCandidate>,
     ranked: &mut [RankedCandidate<'a>],
+    scorer: SpanScorer<'_>,
 ) -> bool {
     let Some(anchor) = ranked.first().copied() else {
         return false;
@@ -241,7 +257,7 @@ fn preserve_linked_opposition<'a>(
             let last = ranked.len() - 1;
             ranked[last] = RankedCandidate {
                 candidate: other,
-                score: best_span_score(question_terms, other),
+                score: best_span_score(question_terms, other, scorer),
             };
             ranked.sort();
         }
@@ -265,6 +281,7 @@ fn preserve_inferred_opposition<'a>(
     question_terms: &[String],
     unique: &BTreeMap<&str, &'a AskCandidate>,
     ranked: &mut [RankedCandidate<'a>],
+    scorer: SpanScorer<'_>,
 ) {
     if ranked.len() < 2 || unique.len() <= ranked.len() {
         return;
@@ -279,7 +296,7 @@ fn preserve_inferred_opposition<'a>(
         segment_spans(&anchor.candidate.content)
             .into_iter()
             .find(|&(start, end)| {
-                score_span(
+                scorer(
                     question_terms,
                     &anchor.candidate.content[start..end],
                     anchor.candidate.confidence,
@@ -301,7 +318,7 @@ fn preserve_inferred_opposition<'a>(
             if has_negation(text) == anchor_negated {
                 continue;
             }
-            let score = score_span(
+            let score = scorer(
                 question_terms,
                 text,
                 candidate.confidence,
@@ -332,7 +349,7 @@ fn preserve_inferred_opposition<'a>(
     let last = ranked.len() - 1;
     ranked[last] = RankedCandidate {
         candidate: opposition.candidate,
-        score: best_span_score(question_terms, opposition.candidate),
+        score: best_span_score(question_terms, opposition.candidate, scorer),
     };
     ranked.sort();
 }
