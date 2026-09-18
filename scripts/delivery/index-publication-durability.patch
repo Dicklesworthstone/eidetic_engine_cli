@@ -1,0 +1,493 @@
+diff --git a/src/core/index.rs b/src/core/index.rs
+--- a/src/core/index.rs
++++ b/src/core/index.rs
+@@ -3054,6 +3054,10 @@
+     let stats = build_index_generation(cx, &staging_dir, stack, indexable_docs).await?;
+     let stats = validate_built_generation(&staging_dir, stats, document_counts)
+         .map_err(IndexRebuildError::Index)?;
++    // Flush large payloads while cancellation is still available and before
++    // taking the writer fence. Metadata is the recoverability marker; publish
++    // it only after the final lease check below.
++    sync_index_generation(&staging_dir, || index_checkpoint(cx))?;
+     run_before_index_publish_hook(cx);
+     index_checkpoint(cx)?;
+     publish_lock.with_publication_fence(|| {
+@@ -3863,16 +3867,20 @@
+     }
+ 
+     if let Some(retained_dir) = find_latest_recoverable_retained_dir(index_dir)? {
++        sync_index_generation(&retained_dir, || Ok(()))?;
+         rename_index_dir(
+             &retained_dir,
+             index_dir,
+             "restore retained index generation",
+         )?;
++        sync_index_directory(index_parent(index_dir))?;
+         return Ok(IndexPublishRecoveryAction::RetainedGenerationRestored);
+     }
+ 
+     if let Some(staging_dir) = find_complete_staging_dir(index_dir)? {
++        sync_index_generation(&staging_dir, || Ok(()))?;
+         rename_index_dir(&staging_dir, index_dir, "promote staged index generation")?;
++        sync_index_directory(index_parent(index_dir))?;
+         return Ok(IndexPublishRecoveryAction::StagedGenerationPromoted);
+     }
+ 
+@@ -3910,7 +3918,99 @@
+ 
+ #[cfg(test)]
+ fn publish_staged_index(index_dir: &Path, staging_dir: &Path) -> Result<(), IndexRebuildError> {
+-    publish_staged_index_inner(index_dir, staging_dir).map(|_| ())
++    publish_staged_index_with_commit(index_dir, staging_dir, || Ok(()))
++}
++
++/// Iterative postorder keeps each directory entry behind its flushed children
++/// without a recursion-depth dependency on an index backend's directory shape.
++fn sync_index_generation(
++    root: &Path,
++    checkpoint: impl FnMut() -> Result<(), IndexRebuildError>,
++) -> Result<(), IndexRebuildError> {
++    sync_index_generation_with(root, checkpoint, sync_index_entry)
++}
++
++fn sync_index_generation_with(
++    root: &Path,
++    mut checkpoint: impl FnMut() -> Result<(), IndexRebuildError>,
++    mut sync: impl FnMut(&Path, bool) -> Result<(), IndexRebuildError>,
++) -> Result<(), IndexRebuildError> {
++    ensure_index_path_has_no_symlinks(root, "flush staged index generation")?;
++    ensure_index_publish_source_is_directory(root, "flush staged index generation")?;
++    let mut pending = vec![(root.to_path_buf(), false)];
++    while let Some((path, visited)) = pending.pop() {
++        checkpoint()?;
++        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
++            IndexRebuildError::Index(format!("Failed to inspect index durability entry: {error}"))
++        })?;
++        if metadata.file_type().is_dir() {
++            if visited {
++                sync(&path, true)?;
++            } else {
++                let mut children = std::fs::read_dir(&path)
++                    .and_then(|entries| entries.map(|entry| entry.map(|entry| entry.path()))
++                        .collect::<Result<Vec<_>, _>>())
++                    .map_err(|error| IndexRebuildError::Index(format!(
++                        "Failed to enumerate staged index durability entries: {error}"
++                    )))?;
++                children.sort();
++                pending.push((path, true));
++                pending.extend(children.into_iter().rev().map(|path| (path, false)));
++            }
++        } else if metadata.file_type().is_file() && !visited {
++            sync(&path, false)?;
++        } else {
++            return Err(IndexRebuildError::Index(
++                "Refusing to flush an index generation containing a symlink or special entry".to_owned(),
++            ));
++        }
++    }
++    Ok(())
++}
++
++fn sync_index_entry(path: &Path, directory: bool) -> Result<(), IndexRebuildError> {
++    if directory {
++        return sync_index_directory(path);
++    }
++    ensure_index_path_has_no_symlinks(path, "flush index data")?;
++    let mut options = std::fs::OpenOptions::new();
++    options.read(true);
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::OpenOptionsExt;
++        options.custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32);
++    }
++    // FlushFileBuffers requires a writable handle on Windows. These are owned
++    // build artifacts, never source-of-truth memory files.
++    #[cfg(not(unix))]
++    options.write(true);
++    let file = options.open(path).map_err(|error| {
++        IndexRebuildError::Index(format!("Failed to open index data for durability: {error}"))
++    })?;
++    if !file.metadata().map_err(|error| IndexRebuildError::Index(error.to_string()))?.is_file() {
++        return Err(IndexRebuildError::Index("Index durability entry changed type".to_owned()));
++    }
++    file.sync_all().map_err(|error| {
++        IndexRebuildError::Index(format!("Failed to flush index data before publication: {error}"))
++    })
++}
++
++fn sync_index_directory(path: &Path) -> Result<(), IndexRebuildError> {
++    ensure_index_path_has_no_symlinks(path, "flush index directory")?;
++    ensure_index_publish_source_is_directory(path, "flush index directory")?;
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::OpenOptionsExt;
++        std::fs::OpenOptions::new().read(true)
++            .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::DIRECTORY).bits() as i32)
++            .open(path).and_then(|directory| directory.sync_all())
++            .map_err(|error| IndexRebuildError::Index(format!(
++                "Failed to flush index directory before publication: {error}"
++            )))?;
++    }
++    // Preserve the existing non-Unix rename behavior; std does not provide a
++    // portable directory persistence barrier. Only Unix claims directory fsync.
++    Ok(())
+ }
+ 
+ struct PublishedIndexRollbackGuard<'a> {
+@@ -3960,14 +4060,34 @@
+ where
+     F: FnOnce() -> Result<(), IndexRebuildError>,
+ {
+-    let retained_dir = publish_staged_index_inner(index_dir, staging_dir)?;
++    publish_staged_index_with_sync(index_dir, staging_dir, commit_tail, sync_index_directory)
++}
++
++fn publish_staged_index_with_sync<F>(
++    index_dir: &Path,
++    staging_dir: &Path,
++    commit_tail: F,
++    mut sync_directory: impl FnMut(&Path) -> Result<(), IndexRebuildError>,
++) -> Result<(), IndexRebuildError>
++where
++    F: FnOnce() -> Result<(), IndexRebuildError>,
++{
++    let retained_dir = publish_staged_index_inner(index_dir, staging_dir, &mut sync_directory)?;
+     let mut rollback_guard = PublishedIndexRollbackGuard {
+         index_dir,
+         staging_dir,
+         retained_dir,
+         armed: true,
+     };
+-    match commit_tail() {
++    // The rollback guard must already be armed when a post-rename flush fails.
++    let commit_result = sync_directory(index_parent(index_dir))
++        .and_then(|()| {
++            if index_parent(staging_dir) != index_parent(index_dir) {
++                sync_directory(index_parent(staging_dir))?;
++            }
++            commit_tail()
++        });
++    match commit_result {
+         Ok(()) => {
+             rollback_guard.disarm();
+             Ok(())
+@@ -3986,6 +4106,7 @@
+ fn publish_staged_index_inner(
+     index_dir: &Path,
+     staging_dir: &Path,
++    sync_directory: &mut impl FnMut(&Path) -> Result<(), IndexRebuildError>,
+ ) -> Result<Option<PathBuf>, IndexRebuildError> {
+     ensure_index_path_has_no_symlinks(staging_dir, "publish staged index generation")?;
+     ensure_index_path_has_no_symlinks(index_dir, "publish staged index generation")?;
+@@ -3996,6 +4117,12 @@
+             staging_dir.display()
+         )));
+     }
++
++    ensure_index_publish_source_is_directory(staging_dir, "publish staged index generation")?;
++    // Data was flushed before the writer fence. These barriers persist the
++    // newly written metadata and staging name before moving the active name.
++    sync_directory(staging_dir)?;
++    sync_directory(index_parent(staging_dir))?;
+ 
+     let retained_dir = if path_exists_no_follow(index_dir) {
+         let retained = allocate_retained_index_dir(index_dir)?;
+@@ -4005,21 +4132,62 @@
+         None
+     };
+ 
+-    if let Err(error) = rename_index_dir(staging_dir, index_dir, "publish staged index generation")
+-    {
+-        if let Some(retained) = retained_dir.as_deref()
+-            && !path_exists_no_follow(index_dir)
+-        {
+-            if let Err(recovery_error) =
+-                rename_index_dir(&retained, index_dir, "restore previous index generation")
+-            {
+-                tracing::error!(%recovery_error, "failed to restore previous index generation after publish failure");
++    let mut retained_guard = RetainedIndexRestoreGuard {
++        index_dir,
++        retained_dir: retained_dir.as_deref(),
++        armed: retained_dir.is_some(),
++    };
++    let replacement = (|| {
++        if retained_dir.is_some() {
++            sync_directory(index_parent(index_dir))?;
++        }
++        rename_index_dir(staging_dir, index_dir, "publish staged index generation")
++    })();
++    if let Err(primary_error) = replacement {
++        if let Err(restore_error) = retained_guard.restore() {
++            return Err(IndexRebuildError::Index(format!(
++                "index replacement failed ({primary_error}); previous generation restore also failed ({restore_error})"
++            )));
++        }
++        return Err(primary_error);
++    }
++    retained_guard.armed = false;
++    drop(retained_guard);
++    Ok(retained_dir)
++}
++
++/// Before activation the new generation is still at the staging name, so a
++/// failed retention barrier must restore the old name without quarantining it.
++struct RetainedIndexRestoreGuard<'a> {
++    index_dir: &'a Path,
++    retained_dir: Option<&'a Path>,
++    armed: bool,
++}
++
++impl RetainedIndexRestoreGuard<'_> {
++    fn restore(&mut self) -> Result<(), IndexRebuildError> {
++        if self.armed {
++            self.armed = false;
++            if let Some(retained) = self.retained_dir {
++                if path_exists_no_follow(self.index_dir) {
++                    return Err(IndexRebuildError::Index(
++                        "Refusing to overwrite an unexpected active index during restoration".to_owned(),
++                    ));
++                }
++                rename_index_dir(retained, self.index_dir, "restore previous index generation")?;
++                sync_index_directory(index_parent(self.index_dir))?;
+             }
+         }
+-        return Err(error);
+-    }
+-
+-    Ok(retained_dir)
++        Ok(())
++    }
++}
++
++impl Drop for RetainedIndexRestoreGuard<'_> {
++    fn drop(&mut self) {
++        if let Err(error) = self.restore() {
++            tracing::error!(target: "ee::index", %error, "failed to restore index during publication unwind");
++        }
++    }
+ }
+ 
+ fn rollback_published_index(
+@@ -4083,7 +4251,7 @@
+     }
+ 
+     if rollback_errors.is_empty() {
+-        Ok(())
++        sync_index_directory(index_parent(index_dir))
+     } else {
+         Err(IndexRebuildError::Index(rollback_errors.join("; ")))
+     }
+@@ -4218,7 +4386,7 @@
+         IndexRebuildError::Index(format!("Failed to write temporary index metadata: {e}"))
+     })?;
+ 
+-    file.sync_data().map_err(|e| {
++    file.sync_all().map_err(|e| {
+         IndexRebuildError::Index(format!("Failed to sync temporary index metadata: {e}"))
+     })?;
+     drop(file);
+@@ -17284,6 +17452,204 @@
+     }
+ 
+     #[test]
++    fn publication_durability_flushes_every_payload_before_its_directory() -> TestResult {
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let path = root.path().canonicalize().map_err(|error| error.to_string())?;
++        write_marker(&path, "a.fast", "fast vectors")?;
++        write_marker(&path.join("lexical"), "segment", "lexical payload")?;
++        write_marker(&path.join("lexical/nested"), "terms", "term payload")?;
++        let before = index_regular_file_snapshot(&path)?;
++        let mut flushed = Vec::new();
++        sync_index_generation_with(&path, || Ok(()), |entry, directory| {
++            sync_index_entry(entry, directory)?;
++            flushed.push((entry.strip_prefix(&path).unwrap_or(entry).to_path_buf(), directory));
++            Ok(())
++        }).map_err(|error| error.to_string())?;
++        let expected = vec![
++            (PathBuf::from("a.fast"), false),
++            (PathBuf::from("lexical/nested/terms"), false),
++            (PathBuf::from("lexical/nested"), true),
++            (PathBuf::from("lexical/segment"), false),
++            (PathBuf::from("lexical"), true),
++            (PathBuf::new(), true),
++        ];
++        ensure(flushed == expected, format!("unexpected durability order: {flushed:?}"))?;
++        ensure(index_regular_file_snapshot(&path)? == before, "sync must not change payload bytes")
++    }
++
++    #[test]
++    fn publication_durability_stops_on_payload_error_or_cancellation() -> TestResult {
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let path = root.path().canonicalize().map_err(|error| error.to_string())?;
++        write_marker(&path, "a.fast", "fast")?;
++        write_marker(&path, "b.quality", "quality")?;
++        let before = index_regular_file_snapshot(&path)?;
++        let mut seen = Vec::new();
++        let result = sync_index_generation_with(&path, || Ok(()), |entry, directory| {
++            if entry.file_name().is_some_and(|name| name == "b.quality") {
++                return Err(IndexRebuildError::Index("injected payload sync failure".to_owned()));
++            }
++            sync_index_entry(entry, directory)?;
++            seen.push(entry.to_path_buf());
++            Ok(())
++        });
++        ensure(result.is_err() && seen == [path.join("a.fast")], "must stop before marking tree durable")?;
++        let mut checks = 0;
++        let mut syncs = 0;
++        let result = sync_index_generation_with(&path, || {
++            checks += 1;
++            if checks == 2 {
++                Err(IndexRebuildError::Index("injected checkpoint cancellation".to_owned()))
++            } else {
++                Ok(())
++            }
++        }, |entry, directory| {
++            syncs += 1;
++            sync_index_entry(entry, directory)
++        });
++        ensure(result.is_err() && checks == 2 && syncs == 0, "payload flushing must remain cancellable")?;
++        ensure(index_regular_file_snapshot(&path)? == before, "failed sync must preserve payload bytes")
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn publication_durability_refuses_nested_symlinks_and_special_entries() -> TestResult {
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let path = root.path().canonicalize().map_err(|error| error.to_string())?;
++        let linked = path.join("linked");
++        let socket_dir = path.join("socket");
++        let outside = path.join("outside");
++        write_marker(&outside, "private", "private source remains unchanged")?;
++        std::fs::create_dir_all(linked.join("lexical")).map_err(|error| error.to_string())?;
++        std::os::unix::fs::symlink(&outside, linked.join("lexical/escape"))
++            .map_err(|error| error.to_string())?;
++        std::fs::create_dir_all(&socket_dir).map_err(|error| error.to_string())?;
++        let _listener = std::os::unix::net::UnixListener::bind(socket_dir.join("backend.sock"))
++            .map_err(|error| error.to_string())?;
++        for tree in [&linked, &socket_dir] {
++            ensure(sync_index_generation(tree, || Ok(())).is_err(), "non-regular entries must not be followed")?;
++        }
++        ensure(read_marker(&outside, "private")? == "private source remains unchanged", "outside data must not change")
++    }
++
++    #[test]
++    fn publication_durability_orders_directory_barriers_before_commit() -> TestResult {
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let path = root.path().canonicalize().map_err(|error| error.to_string())?;
++        let active = path.join("index");
++        let staged = path.join(".index.publish-test");
++        write_marker(&active, "generation", "old")?;
++        write_marker(&staged, "generation", "new")?;
++        let checkpoints = std::cell::RefCell::new(Vec::new());
++        publish_staged_index_with_sync(&active, &staged, || {
++            let calls = checkpoints.borrow();
++            if calls.len() != 4 || read_marker(&active, "generation").ok().as_deref() != Some("new") {
++                return Err(IndexRebuildError::Index("commit ran before all directory barriers".to_owned()));
++            }
++            Ok(())
++        }, |directory| {
++            sync_index_directory(directory)?;
++            checkpoints.borrow_mut().push((directory.to_path_buf(), active.exists(), staged.exists(), path.join("index.previous").exists()));
++            Ok(())
++        }).map_err(|error| error.to_string())?;
++        ensure(checkpoints.into_inner() == vec![
++            (staged, true, true, false),
++            (path.clone(), true, true, false),
++            (path.clone(), false, true, true),
++            (path, true, false, true),
++        ], "staging, retention and activation must each cross a durability barrier")
++    }
++
++    #[test]
++    fn publication_durability_failure_at_each_barrier_preserves_previous_generation() -> TestResult {
++        for fail_at in 1..=4 {
++            let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++            let path = root.path().canonicalize().map_err(|error| error.to_string())?;
++            let active = path.join("index");
++            let staged = path.join(".index.publish-test");
++            write_marker(&active, "generation", "old")?;
++            write_marker(&staged, "generation", "new")?;
++            let before = index_regular_file_snapshot(&active)?;
++            let mut count = 0;
++            let mut committed = false;
++            let result = publish_staged_index_with_sync(&active, &staged, || {
++                committed = true;
++                Ok(())
++            }, |directory| {
++                count += 1;
++                if count == fail_at {
++                    Err(IndexRebuildError::Index("injected directory sync failure".to_owned()))
++                } else {
++                    sync_index_directory(directory)
++                }
++            });
++            ensure(result.is_err() && !committed, format!("barrier {fail_at} must withhold commit"))?;
++            ensure(index_regular_file_snapshot(&active)? == before, format!("barrier {fail_at} lost old generation"))?;
++            if fail_at == 4 {
++                let rejected = rejected_generation_dirs(&path, "index")?;
++                ensure(rejected.len() == 1 && read_marker(&rejected[0], "generation")? == "new",
++                    "activation sync failure must quarantine new generation")?;
++            } else {
++                ensure(read_marker(&staged, "generation")? == "new", "pre-activation failure must retain staged bytes")?;
++            }
++        }
++        Ok(())
++    }
++
++    #[test]
++    fn publication_durability_new_store_failure_quarantines_uncommitted_generation() -> TestResult {
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let path = root.path().canonicalize().map_err(|error| error.to_string())?;
++        let active = path.join("index");
++        let staged = path.join(".index.publish-test");
++        write_marker(&staged, "generation", "new")?;
++        let mut count = 0;
++        let mut committed = false;
++        let result = publish_staged_index_with_sync(&active, &staged, || {
++            committed = true;
++            Ok(())
++        }, |directory| {
++            count += 1;
++            if count == 3 {
++                Err(IndexRebuildError::Index("injected first activation sync failure".to_owned()))
++            } else {
++                sync_index_directory(directory)
++            }
++        });
++        ensure(result.is_err() && !committed && !active.exists(), "failed first publish must remain absent")?;
++        let rejected = rejected_generation_dirs(&path, "index")?;
++        ensure(rejected.len() == 1 && read_marker(&rejected[0], "generation")? == "new",
++            "failed first publish must retain the rejected output")
++    }
++
++    #[test]
++    fn publication_durability_unwind_at_retention_or_activation_restores_old_bytes() -> TestResult {
++        for fail_at in [3, 4] {
++            let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++            let path = root.path().canonicalize().map_err(|error| error.to_string())?;
++            let active = path.join("index");
++            let staged = path.join(".index.publish-test");
++            write_marker(&active, "generation", "old")?;
++            write_marker(&staged, "generation", "new")?;
++            let before = index_regular_file_snapshot(&active)?;
++            let mut count = 0;
++            let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++                let _ = publish_staged_index_with_sync(&active, &staged, || Ok(()), |directory| {
++                    count += 1;
++                    if count == fail_at {
++                        panic!("injected publication durability unwind");
++                    }
++                    sync_index_directory(directory)
++                });
++            }));
++            ensure(unwind.is_err(), "injected panic must escape after restoring the generation")?;
++            ensure(index_regular_file_snapshot(&active)? == before, "unwind must preserve active bytes")?;
++            ensure(!path.join("index.previous").exists(), "unwind must restore retained name")?;
++        }
++        Ok(())
++    }
++
++    #[test]
+     fn publish_commit_failure_restores_active_and_preserves_staging_generation() -> TestResult {
+         let root = unique_test_dir("publish-commit-rollback");
+         let index_dir = root.join("index");
