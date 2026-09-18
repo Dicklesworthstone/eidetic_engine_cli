@@ -4776,10 +4776,45 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
         import_json["data"]["spansImported"].as_u64().unwrap_or(0) >= 3,
         "real CASS view evidence spans should be imported",
     )?;
+    // THE PUBLIC REPORT REDACTS THE SOURCE PATH; THE STORE RETAINS IT. Both
+    // halves are asserted: the placeholder here, and the real path at "stored
+    // session source path" below, which is what keeps provenance checkable
+    // after redaction.
+    //
+    // src/cass/import.rs:214 runs every session's `source_path` through
+    // `redact_import_report_source_ref` while rendering `data_json()`, and
+    // :273 replaces ANY absolute path at a token boundary with this
+    // placeholder. The product pins that contract in its own unit tests at
+    // :2561-2578. This fixture used to assert the RAW path here, which no host
+    // can satisfy -- a temp path begins with '/' on macOS too -- so it was
+    // structurally unpassable rather than worker-specific (bd-tvi3a).
     ensure_equal(
         &import_json["data"]["sessions"][0]["sourcePath"],
-        &serde_json::json!(session_arg),
-        "import report source path",
+        &serde_json::json!("[REDACTED_PATH]"),
+        "import report source path is redacted",
+    )?;
+
+    // LEAK CHECK. Field equality alone is not the privacy property: it still
+    // holds if some OTHER field carries the absolute path, and `workspacePath`
+    // and `databasePath` in the same payload are deliberately NOT redacted. So
+    // assert the session path appears nowhere in the public report.
+    let public_payload = serde_json::to_string(&import_json["data"])
+        .map_err(|error| format!("import report data must serialise: {error}"))?;
+    ensure(
+        !public_payload.contains(session_arg.as_str()),
+        format!(
+            "absolute session path must not appear anywhere in the public import report; payload: {public_payload}"
+        ),
+    )?;
+    // POSITIVE PARTNER for the leak check. A `!contains` assertion passes
+    // vacuously whenever the haystack is empty or the needle is mis-derived,
+    // so prove the same haystack DOES contain the placeholder -- which also
+    // shows redaction engaged rather than the field merely being absent.
+    ensure(
+        public_payload.contains("[REDACTED_PATH]"),
+        format!(
+            "redaction must have engaged on the public import report; payload: {public_payload}"
+        ),
     )?;
     ensure(database.exists(), "import should create a real database")?;
 
