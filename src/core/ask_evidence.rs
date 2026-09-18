@@ -104,7 +104,10 @@ mod tests {
         AskCorpus, AskRequest, ask_data_json, evaluate_ask, load_current_ask_corpus,
         load_scoped_ask_corpus, render_ask_markdown,
     };
-    use crate::db::{CreateEvidenceSpanInput, CreateMemoryInput, CreateSessionInput, CreateWorkspaceInput, EvidenceProducerKind};
+    use crate::db::{
+        CreateEvidenceSpanInput, CreateMemoryInput, CreateSessionInput, CreateWorkspaceInput,
+        EvidenceProducerKind,
+    };
     use crate::models::WorkspaceId;
     use chrono::Utc;
 
@@ -117,34 +120,69 @@ mod tests {
         let db = DbConnection::open_file(&root.path().join(".ee/ee.db")).unwrap();
         db.migrate().unwrap();
         let workspace = WorkspaceId::from_uuid(uuid::Uuid::from_u128(77001)).to_string();
-        db.insert_workspace(&workspace, &CreateWorkspaceInput {
-            path: root.path().to_string_lossy().into_owned(), name: None,
-        }).unwrap();
+        db.insert_workspace(
+            &workspace,
+            &CreateWorkspaceInput {
+                path: root.path().to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
         (root, db, workspace)
     }
 
     fn session(db: &DbConnection, workspace: &str, number: u128) -> String {
         let id = SessionId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
-        db.insert_session(&id, &CreateSessionInput {
-            workspace_id: workspace.to_owned(), cass_session_id: format!("private-upstream-{number}"),
-            source_path: Some("/home/private/transcript.jsonl".to_owned()),
-            agent_name: Some("Alice".to_owned()), model: None, started_at: None, ended_at: None,
-            message_count: 1, token_count: None, content_hash: format!("blake3:{}", "a".repeat(64)),
-            metadata_json: None,
-        }).unwrap();
+        db.insert_session(
+            &id,
+            &CreateSessionInput {
+                workspace_id: workspace.to_owned(),
+                cass_session_id: format!("private-upstream-{number}"),
+                source_path: Some("/home/private/transcript.jsonl".to_owned()),
+                agent_name: Some("Alice".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 1,
+                token_count: None,
+                content_hash: format!("blake3:{}", "a".repeat(64)),
+                metadata_json: None,
+            },
+        )
+        .unwrap();
         id
     }
 
-    fn evidence(db: &DbConnection, workspace: &str, session: &str, number: u128, body: &str, parent: Option<&str>) -> StoredEvidenceSpan {
+    fn evidence(
+        db: &DbConnection,
+        workspace: &str,
+        session: &str,
+        number: u128,
+        body: &str,
+        parent: Option<&str>,
+    ) -> StoredEvidenceSpan {
         let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
-        db.insert_evidence_span(&id, &CreateEvidenceSpanInput {
-            workspace_id: workspace.to_owned(), session_id: session.to_owned(), memory_id: parent.map(str::to_owned),
-            producer_kind: EvidenceProducerKind::CassImport, cass_span_id: format!("upstream-span-{number}"),
-            span_kind: "message".to_owned(), start_line: 7, end_line: 8,
-            start_byte: None, end_byte: None, role: Some("assistant".to_owned()), excerpt: body.to_owned(),
-            content_hash: format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex()),
-            metadata_json: None, inherited_redaction_classes: Vec::new(),
-        }).unwrap();
+        db.insert_evidence_span(
+            &id,
+            &CreateEvidenceSpanInput {
+                workspace_id: workspace.to_owned(),
+                session_id: session.to_owned(),
+                memory_id: parent.map(str::to_owned),
+                producer_kind: EvidenceProducerKind::CassImport,
+                cass_span_id: format!("upstream-span-{number}"),
+                span_kind: "message".to_owned(),
+                start_line: 7,
+                end_line: 8,
+                start_byte: None,
+                end_byte: None,
+                role: Some("assistant".to_owned()),
+                excerpt: body.to_owned(),
+                content_hash: format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex()),
+                metadata_json: None,
+                inherited_redaction_classes: Vec::new(),
+            },
+        )
+        .unwrap();
         db.get_evidence_span(&id).unwrap().unwrap()
     }
 
@@ -153,15 +191,26 @@ mod tests {
     }
 
     fn request(corpus: &AskCorpus) -> AskRequest {
-        AskRequest { question: QUESTION.to_owned(), native_sources: corpus.native_sources.clone(),
-            contradictions: corpus.contradictions.clone(), ..AskRequest::default() }
+        AskRequest {
+            question: QUESTION.to_owned(),
+            native_sources: corpus.native_sources.clone(),
+            contradictions: corpus.contradictions.clone(),
+            ..AskRequest::default()
+        }
     }
 
     #[test]
     fn native_transcript_answer_preserves_identity_revision_and_utf8_offsets() {
         let (_root, db, workspace) = fixture();
         let session = session(&db, &workspace, 1);
-        let row = evidence(&db, &workspace, &session, 2, "Café notes. Run cargo fmt before release.", None);
+        let row = evidence(
+            &db,
+            &workspace,
+            &session,
+            2,
+            "Café notes. Run cargo fmt before release.",
+            None,
+        );
         let corpus = corpus(&db, &workspace);
         assert_eq!(corpus.candidates.len(), 1);
         let report = evaluate_ask(&request(&corpus), &corpus.candidates);
@@ -177,7 +226,10 @@ mod tests {
         assert_eq!(citation["trustClass"], "cass_evidence");
         assert_eq!(citation["confidence"], 0.5);
         for citation in &report.citations {
-            assert_eq!(row.excerpt.get(citation.byte_start..citation.byte_end), Some(citation.text.as_str()));
+            assert_eq!(
+                row.excerpt.get(citation.byte_start..citation.byte_end),
+                Some(citation.text.as_str())
+            );
         }
         assert!(render_ask_markdown(&report).contains(&row.id));
         assert!(!data.to_string().contains("private-upstream"));
@@ -191,11 +243,40 @@ mod tests {
         let (_root, db, workspace) = fixture();
         let session = session(&db, &workspace, 1);
         let safe = evidence(&db, &workspace, &session, 2, BODY, None);
-        let denied = evidence(&db, &workspace, &session, 3, "Run cargo fmt with denied-canary.", None);
-        let tampered = evidence(&db, &workspace, &session, 4, "Run cargo fmt with tampered-canary.", None);
-        evidence(&db, &workspace, &session, 5, "Run cargo fmt using file:///home/private/private-canary.", None);
-        db.execute_raw(&format!("UPDATE evidence_spans SET search_eligibility = 'denied' WHERE id = '{}'", denied.id)).unwrap();
-        db.execute_raw(&format!("UPDATE evidence_spans SET excerpt = 'tampered-canary cargo fmt' WHERE id = '{}'", tampered.id)).unwrap();
+        let denied = evidence(
+            &db,
+            &workspace,
+            &session,
+            3,
+            "Run cargo fmt with denied-canary.",
+            None,
+        );
+        let tampered = evidence(
+            &db,
+            &workspace,
+            &session,
+            4,
+            "Run cargo fmt with tampered-canary.",
+            None,
+        );
+        evidence(
+            &db,
+            &workspace,
+            &session,
+            5,
+            "Run cargo fmt using file:///home/private/private-canary.",
+            None,
+        );
+        db.execute_raw(&format!(
+            "UPDATE evidence_spans SET search_eligibility = 'denied' WHERE id = '{}'",
+            denied.id
+        ))
+        .unwrap();
+        db.execute_raw(&format!(
+            "UPDATE evidence_spans SET excerpt = 'tampered-canary cargo fmt' WHERE id = '{}'",
+            tampered.id
+        ))
+        .unwrap();
         let corpus = corpus(&db, &workspace);
         assert_eq!(corpus.candidates.len(), 1);
         assert_eq!(corpus.candidates[0].memory_id, safe.id);
@@ -205,7 +286,13 @@ mod tests {
         assert!(report.abstained);
         let output = ask_data_json(&report).to_string();
         assert!(output.contains(&safe.id));
-        for forbidden in ["denied-canary", "tampered-canary", "private-canary", "private-upstream", "/home/private"] {
+        for forbidden in [
+            "denied-canary",
+            "tampered-canary",
+            "private-canary",
+            "private-upstream",
+            "/home/private",
+        ] {
             assert!(!output.contains(forbidden));
             assert!(!render_ask_markdown(&report).contains(forbidden));
         }
@@ -216,12 +303,23 @@ mod tests {
         let (_root, db, workspace) = fixture();
         let session = session(&db, &workspace, 1);
         evidence(&db, &workspace, &session, 2, BODY, None);
-        for scope in [MemoryScope::SelfOnly, MemoryScope::Team, MemoryScope::Verified, MemoryScope::Global] {
+        for scope in [
+            MemoryScope::SelfOnly,
+            MemoryScope::Team,
+            MemoryScope::Verified,
+            MemoryScope::Global,
+        ] {
             let corpus = load_scoped_ask_corpus(&db, &workspace, Utc::now(), scope).unwrap();
             assert!(corpus.candidates.is_empty());
             assert!(corpus.native_sources.is_empty());
         }
-        assert_eq!(load_scoped_ask_corpus(&db, &workspace, Utc::now(), MemoryScope::Swarm).unwrap().candidates.len(), 1);
+        assert_eq!(
+            load_scoped_ask_corpus(&db, &workspace, Utc::now(), MemoryScope::Swarm)
+                .unwrap()
+                .candidates
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -231,36 +329,67 @@ mod tests {
         evidence(&db, &workspace, &first, 2, BODY, None);
         let initial = corpus(&db, &workspace);
         let baseline = evaluate_ask(&request(&initial), &initial.candidates);
-        for number in 3..20 { evidence(&db, &workspace, &first, number, BODY, None); }
+        for number in 3..20 {
+            evidence(&db, &workspace, &first, number, BODY, None);
+        }
         let repeated = corpus(&db, &workspace);
         let report = evaluate_ask(&request(&repeated), &repeated.candidates);
         assert_eq!(report.confidence.to_bits(), baseline.confidence.to_bits());
         let mut reversed = repeated.candidates.clone();
         reversed.reverse();
-        assert_eq!(ask_data_json(&report), ask_data_json(&evaluate_ask(&request(&repeated), &reversed)));
+        assert_eq!(
+            ask_data_json(&report),
+            ask_data_json(&evaluate_ask(&request(&repeated), &reversed))
+        );
         let second = session(&db, &workspace, 21);
         evidence(&db, &workspace, &second, 22, BODY, None);
         let independent = corpus(&db, &workspace);
-        assert!(evaluate_ask(&request(&independent), &independent.candidates).confidence > report.confidence);
+        assert!(
+            evaluate_ask(&request(&independent), &independent.candidates).confidence
+                > report.confidence
+        );
     }
 
     #[test]
     fn linked_excerpts_cannot_resurrect_retired_memories_or_multiply_their_votes() {
         let (_root, db, workspace) = fixture();
         let memory = MemoryId::from_uuid(uuid::Uuid::from_u128(1)).to_string();
-        db.insert_memory(&memory, &CreateMemoryInput {
-            workspace_id: workspace.clone(), content: BODY.to_owned(), level: "procedural".to_owned(), kind: "rule".to_owned(),
-            workflow_id: None, confidence: 0.9, utility: 0.5, importance: 0.5, trust_class: "human_explicit".to_owned(),
-            trust_subclass: None, provenance_uri: None, tags: Vec::new(), valid_from: None, valid_to: None,
-        }).unwrap();
+        db.insert_memory(
+            &memory,
+            &CreateMemoryInput {
+                workspace_id: workspace.clone(),
+                content: BODY.to_owned(),
+                level: "procedural".to_owned(),
+                kind: "rule".to_owned(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.5,
+                importance: 0.5,
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                provenance_uri: None,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .unwrap();
         let initial = corpus(&db, &workspace);
         let baseline = evaluate_ask(&request(&initial), &initial.candidates);
         let session = session(&db, &workspace, 2);
         evidence(&db, &workspace, &session, 3, BODY, Some(&memory));
         let linked = corpus(&db, &workspace);
         assert_eq!(linked.candidates.len(), 2);
-        assert_eq!(evaluate_ask(&request(&linked), &linked.candidates).confidence.to_bits(), baseline.confidence.to_bits());
-        db.execute_raw(&format!("UPDATE memories SET valid_to = '2001-01-01T00:00:00Z' WHERE id = '{memory}'")).unwrap();
+        assert_eq!(
+            evaluate_ask(&request(&linked), &linked.candidates)
+                .confidence
+                .to_bits(),
+            baseline.confidence.to_bits()
+        );
+        db.execute_raw(&format!(
+            "UPDATE memories SET valid_to = '2001-01-01T00:00:00Z' WHERE id = '{memory}'"
+        ))
+        .unwrap();
         assert!(corpus(&db, &workspace).candidates.is_empty());
     }
 
@@ -281,7 +410,8 @@ mod tests {
     #[test]
     fn missing_evidence_storage_fails_closed_and_releases_the_snapshot() {
         let (_root, db, workspace) = fixture();
-        db.execute_raw("ALTER TABLE evidence_spans RENAME TO unavailable_evidence").unwrap();
+        db.execute_raw("ALTER TABLE evidence_spans RENAME TO unavailable_evidence")
+            .unwrap();
         let error = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap_err();
         assert!(!error.message().contains("unavailable_evidence"));
         db.begin_read_snapshot().unwrap();
@@ -293,9 +423,19 @@ mod tests {
         let (_root, db, workspace) = fixture();
         let session = session(&db, &workspace, 1);
         db.with_transaction(|| {
-            for number in 2..530 { evidence(&db, &workspace, &session, number, "Unrelated orchard inventory.", None); }
+            for number in 2..530 {
+                evidence(
+                    &db,
+                    &workspace,
+                    &session,
+                    number,
+                    "Unrelated orchard inventory.",
+                    None,
+                );
+            }
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         let target = evidence(&db, &workspace, &session, 530, BODY, None);
         let corpus = corpus(&db, &workspace);
         assert_eq!(corpus.candidates.len(), 529);
@@ -312,8 +452,11 @@ mod tests {
         let corpus = corpus(&db, &workspace);
         for field in ["trust", "provenance"] {
             let mut candidates = corpus.candidates.clone();
-            if field == "trust" { candidates[0].trust_class = "human_explicit".to_owned(); }
-            else { candidates[0].provenance_uri = Some("manual://not-a-transcript".to_owned()); }
+            if field == "trust" {
+                candidates[0].trust_class = "human_explicit".to_owned();
+            } else {
+                candidates[0].provenance_uri = Some("manual://not-a-transcript".to_owned());
+            }
             let report = evaluate_ask(&request(&corpus), &candidates);
             assert!(report.extractiveness_violated);
             assert!(report.citations.is_empty());
