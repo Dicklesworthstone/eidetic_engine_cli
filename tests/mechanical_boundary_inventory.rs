@@ -447,16 +447,21 @@ const BASELINE_ACTUAL_COMMANDS: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// Terms the baseline ledger records as NOT being command paths.
+///
+/// `db status`, `db check` and `completion` were removed on 2026-09-18
+/// (bd-integration-gm-six-red-concealed-uhp28): each has since become a real
+/// path emitted by `extract_command_path`, so asserting their absence was
+/// asserting a falsehood. This list shrinks as the CLI grows, and an entry
+/// leaving it is a signal to confirm the path gained a row -- all three had
+/// one already, verified by first-cell match before they were dropped here.
 const BASELINE_ABSENT_COMMANDS: &[&str] = &[
     "profile list",
     "profile show",
-    "db status",
     "db migrate",
-    "db check",
     "db backup",
     "restore",
     "export jsonl",
-    "completion",
     "config",
 ];
 
@@ -760,8 +765,20 @@ fn command_boundary_matrix_has_required_columns_and_complete_rows() -> Result<()
                 .any(|allowed| classification.contains(allowed)),
             "matrix row has unsupported classification: {row:?}"
         );
+        // Accepts either bead-id scheme. The assertion's stated intent is
+        // "name an owning bead"; it required the LEGACY `eidetic_engine_cli-`
+        // prefix, so the one row carrying a current `bd-xxxxx` id failed while
+        // naming its owner perfectly well. 48 of 49 rows use the legacy form
+        // and `share` uses the modern one -- requiring the old prefix forever
+        // would force a future row to invent a fake id to pass
+        // (bd-integration-gm-six-red-concealed-uhp28).
+        //
+        // ADR 0011 is still REQUIRED of every row and was not relaxed: it is
+        // the ADR that governs this matrix, and a row citing only its own
+        // feature ADRs is missing the one that makes it a boundary row.
         assert!(
-            owner.contains("eidetic_engine_cli-") && owner.contains("ADR 0011"),
+            (owner.contains("eidetic_engine_cli-") || owner.contains("`bd-"))
+                && owner.contains("ADR 0011"),
             "matrix row must name owning bead and ADR: {row:?}"
         );
         assert!(
@@ -1267,6 +1284,14 @@ fn readme_workflow_parity_matrix_covers_advertised_surfaces() -> Result<(), Stri
 #[test]
 fn readme_pins_swarm_brief_operator_workflow() -> Result<(), String> {
     for required in [
+        // `br ready --json` until 2026-09-18. 08b30bfde deliberately replaced
+        // the bare form with the flagged one below, which suppresses
+        // auto-import and auto-flush side effects during discovery -- a real
+        // improvement the marker then failed to follow, so this assertion had
+        // been red since 2026-08-05 and invisible
+        // (bd-integration-gm-six-red-concealed-uhp28). Quoting the command the
+        // README actually documents, not the one it used to.
+        "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
         "### Swarm brief workflow",
         "ee swarm brief --workspace . --json",
         "ee --fields full swarm brief --workspace . --include-rch --json",
@@ -1281,7 +1306,6 @@ fn readme_pins_swarm_brief_operator_workflow() -> Result<(), String> {
         ".data.degraded[]",
         "rec.resource_pressure.use_rch_for_cargo",
         "rec.work_selection.no_ready_beads",
-        "br ready --json",
         "bv --robot-triage",
         "safeToClaim=true",
         "verdict=safe_to_claim",
@@ -1365,14 +1389,31 @@ fn agent_integration_pins_work_packet_claim_gate_consumer() -> Result<(), String
 
 #[test]
 fn agents_md_pins_claim_gate_stale_binary_stop_condition() -> Result<(), String> {
+    // Compared with whitespace COLLAPSED on both sides. These markers used to
+    // embed the document's line wrapping (`"approved\n   RCH/release-path
+    // rebuild"`), so reflowing a paragraph broke the assertion while the rule
+    // it guards was untouched. Two of the five had rotted that way by
+    // 2026-09-18 and neither was a real regression
+    // (bd-integration-gm-six-red-concealed-uhp28).
+    //
+    // This is not a relaxation: the full wording is still required, in order,
+    // as a contiguous run of words. Only the position of the line breaks stops
+    // being part of the contract, and a line break was never the thing worth
+    // pinning.
+    let collapse = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let agents_collapsed = collapse(AGENTS_SOURCE);
     for required in [
-        "if the installed `ee` rejects `--claim-gate` or\n   `--candidate`",
-        "stale relative\n   to the current source/docs contract",
-        "approved\n   RCH/release-path rebuild",
-        "do not run a BV claim command",
-        "do not rebuild\n   or install `ee` locally with Cargo as a workaround",
+        "if the installed `ee` rejects `--claim-gate` or `--candidate`",
+        "stale relative to the current source/docs contract",
+        "approved RCH/release-path rebuild",
+        // The document says "run no BV claim command". The marker used to read
+        // "do not run a BV claim command", which matched neither literally nor
+        // collapsed -- a genuine wording change, not a wrap. Same rule, and
+        // the marker now quotes the text that exists.
+        "run no BV claim command",
+        "do not rebuild or install `ee` locally with Cargo as a workaround",
     ] {
-        if !AGENTS_SOURCE.contains(required) {
+        if !agents_collapsed.contains(required) {
             return Err(format!(
                 "AGENTS.md missing claim-gate stale-binary stop marker `{required}`"
             ));
