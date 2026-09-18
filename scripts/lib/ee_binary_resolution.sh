@@ -57,6 +57,30 @@ ee_source_version() {
         "$REPO_ROOT/Cargo.toml" | sed -n '1p'
 }
 
+# Refuse a binary that cannot execute on THIS host.
+#
+# `[ -x ]` tests the executable BIT, not the executable FORMAT. Measured on
+# the Mac dev host 2026-09-18: the shared Cargo target directory held
+# `debug/ee` and `release/ee` that were Linux x86-64 ELF, written by an RCH
+# run (the RCH-E327 wrong-platform-artifact class). Both satisfied `-x`.
+# scripts/e2e_session_budget.sh ran against one and reported 15 assert_fails
+# whose single real cause was `exec format error` behind a 126 exit -- which
+# reads as fifteen product defects rather than one environment fault.
+ee_binary_executes_here() {
+    local binary="${1:?ee_binary_executes_here: binary path required}"
+    local status=0
+    "$binary" --version >/dev/null 2>&1 || status=$?
+    # 126 = found but not executable here (foreign architecture or format,
+    # missing interpreter); 127 = not found. Every other status means the
+    # binary RAN, and a non-zero exit from an unsupported flag is not this
+    # helper's concern -- widening the case list would turn a product failure
+    # into an environment excuse.
+    case "$status" in
+        126 | 127) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 # Version reported by a built binary. `ee --version` prints `ee <semver>`.
 ee_binary_version() {
     local binary="${1:?ee_binary_version: binary path required}"
@@ -75,6 +99,16 @@ ee_require_current_binary() {
     if [ ! -x "$binary" ]; then
         printf '%s: ee_binary=%s (missing or not executable)\n' "$label" "$binary" >&2
         printf '%s: refusing to run against a binary that does not exist.\n' "$label" >&2
+        return 1
+    fi
+
+    if ! ee_binary_executes_here "$binary"; then
+        printf '%s: ee_binary=%s (executable bit set, format foreign to %s/%s)\n' \
+            "$label" "$binary" "$(uname -s)" "$(uname -m)" >&2
+        printf '%s: file(1): %s\n' \
+            "$label" "$(file -b "$binary" 2>/dev/null || printf 'unavailable')" >&2
+        printf '%s: refusing: this binary cannot execute on this host, so every\n' "$label" >&2
+        printf '%s: assertion run against it would fail for the same one reason.\n' "$label" >&2
         return 1
     fi
 

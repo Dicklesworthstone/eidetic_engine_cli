@@ -149,3 +149,74 @@ case "$guard_pass_log" in
         exit 1
         ;;
 esac
+
+# ---------------------------------------------------------------------------
+# bd-udjrq: wrong-PLATFORM guard. The staleness arms above all assume the
+# binary runs. Measured on the Mac dev host 2026-09-18, it did not: the shared
+# Cargo target directory held Linux x86-64 ELF `debug/ee` and `release/ee`
+# (the RCH-E327 wrong-platform-artifact class), `[ -x ]` accepted both because
+# the executable BIT was set, and scripts/e2e_session_budget.sh reported 15
+# assert_fails whose single cause was `exec format error` behind exit 126.
+#
+# Both arms are load-bearing. A guard that refuses every binary would also
+# silence those 15 failures, so the acceptance arm is what stops the refusal
+# from becoming a blanket one -- and the stale-binary arm below pins the
+# distinction the guard must NOT collapse: a stale binary RUNS, and is
+# rejected later, by version, with a different message.
+# ---------------------------------------------------------------------------
+
+PLATFORM_BIN_DIR="$SCRATCH_ROOT/platform"
+mkdir -p "$PLATFORM_BIN_DIR"
+
+# A file with the executable bit set and a header no kernel will load. Built
+# from garbage rather than copied from the real ELF so the fixture is invalid
+# on Linux CI too, where a genuine x86-64 ELF would simply run.
+printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000not-a-real-binary' \
+    >"$PLATFORM_BIN_DIR/ee-foreign"
+chmod +x "$PLATFORM_BIN_DIR/ee-foreign"
+
+if [ ! -x "$PLATFORM_BIN_DIR/ee-foreign" ]; then
+    printf 'FAIL fixture setup: ee-foreign is not marked executable, so the\n' >&2
+    printf '     arm below would pass for the wrong reason (-x, not format).\n' >&2
+    exit 1
+fi
+printf 'ok fixture ee-foreign has the executable bit set (refusal must come from format)\n'
+
+platform_verdict() {
+    if ee_binary_executes_here "$1"; then printf 'executes\n'; else printf 'refused\n'; fi
+}
+
+assert_eq "$(platform_verdict "$PLATFORM_BIN_DIR/ee-foreign")" "refused" \
+    "binary with the executable bit but an unloadable format is refused"
+assert_eq "$(platform_verdict "$GUARD_BIN_DIR/ee-current")" "executes" \
+    "current binary still executes (platform guard is not over-broad)"
+assert_eq "$(platform_verdict "$GUARD_BIN_DIR/ee-stale")" "executes" \
+    "a STALE binary executes -- the platform guard must not absorb the version check"
+assert_eq "$(platform_verdict "$GUARD_BIN_DIR/does-not-exist")" "refused" \
+    "missing binary is refused"
+
+# The refusal has to name the real cause. "could not determine both binary and
+# source versions" was the message this case produced before the guard existed,
+# and it sends a reader looking for a version bug instead of a foreign binary.
+platform_log="$(ee_require_current_binary "$PLATFORM_BIN_DIR/ee-foreign" "platform-test" 2>&1 >/dev/null || true)"
+case "$platform_log" in
+    *"format foreign to"*"cannot execute on this host"*)
+        printf 'ok refusal names the format, not a missing version\n'
+        ;;
+    *)
+        printf 'FAIL wrong-platform refusal did not name the format cause\nactual: %s\n' \
+            "$platform_log" >&2
+        exit 1
+        ;;
+esac
+
+# Counterpart: the STALE refusal must still read as a version problem, or the
+# two diagnoses have been merged into one unhelpful message.
+stale_log="$(ee_require_current_binary "$GUARD_BIN_DIR/ee-stale" "platform-test" 2>&1 >/dev/null || true)"
+case "$stale_log" in
+    *"refusing STALE binary"*) printf 'ok stale refusal still reads as a version problem\n' ;;
+    *)
+        printf 'FAIL stale refusal lost its version wording\nactual: %s\n' "$stale_log" >&2
+        exit 1
+        ;;
+esac

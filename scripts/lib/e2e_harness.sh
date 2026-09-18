@@ -36,6 +36,10 @@ export REPO_ROOT
 # shellcheck disable=SC1091
 source "$E2E_HARNESS_DIR/e2e_logger.sh"
 
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+# shellcheck disable=SC1091
+source "$E2E_HARNESS_DIR/ee_binary_resolution.sh"
+
 # ---------------------------------------------------------------------------
 # Counters / state
 # ---------------------------------------------------------------------------
@@ -91,6 +95,23 @@ harness_init() {
     # let this function carry on with an empty EE_BIN -- the same fail-open in
     # a new costume (bd-ry56h). The caller is where the refusal has to land.
     if ! EE_BIN="$(_harness_resolve_ee_bin)"; then
+        exit 2
+    fi
+    # Resolving a path and testing `-x` proves the executable BIT, not the
+    # executable FORMAT. Measured 2026-09-18: the shared Cargo target
+    # directory held Linux x86-64 ELF `debug/ee` written by an RCH run, and
+    # scripts/e2e_session_budget.sh reported 15 assert_fails against it whose
+    # one real cause was `exec format error` behind exit 126. Fifteen false
+    # product defects is a worse outcome than one honest refusal, and the
+    # refusal belongs here for the same reason the PATH fallback's did: a
+    # check every future caller has to remember is not a guarantee.
+    if ! ee_binary_executes_here "$EE_BIN"; then
+        printf 'e2e_harness: %s cannot execute on this host (%s/%s).\n' \
+            "$EE_BIN" "$(uname -s)" "$(uname -m)" >&2
+        printf 'e2e_harness:   file(1): %s\n' \
+            "$(file -b "$EE_BIN" 2>/dev/null || printf 'unavailable')" >&2
+        printf 'e2e_harness: refusing -- every assertion would fail for this one\n' >&2
+        printf 'e2e_harness: reason. Build a native binary and pin EE_BIN to it.\n' >&2
         exit 2
     fi
     export EE_BIN
