@@ -1260,7 +1260,7 @@ fn readme_workflow_parity_matrix_covers_advertised_surfaces() -> Result<(), Stri
         }
     }
 
-    for required in [
+    let required_markers = [
         "ee.workflow_parity.e2e_log.v1",
         "workflow ID",
         "generated command list",
@@ -1271,20 +1271,19 @@ fn readme_workflow_parity_matrix_covers_advertised_surfaces() -> Result<(), Stri
         "stdout and stderr artifact paths",
         "parsed JSON schema or golden status",
         "first-failure diagnosis",
-    ] {
-        assert!(
-            INVENTORY.contains(required),
-            "workflow parity e2e log contract missing required field text: {required}"
-        );
-    }
+    ];
+    ensure_all_markers_present(
+        "workflow parity e2e log contract",
+        INVENTORY,
+        &required_markers,
+    )?;
 
     Ok(())
 }
 
 #[test]
 fn readme_pins_swarm_brief_operator_workflow() -> Result<(), String> {
-    let readme_collapsed = collapse_whitespace(README_SOURCE);
-    for required in [
+    let required_markers = [
         // `br ready --json` until 2026-09-18. 08b30bfde deliberately replaced
         // the bare form with the flagged one below, which suppresses
         // auto-import and auto-flush side effects during discovery -- a real
@@ -1334,19 +1333,12 @@ fn readme_pins_swarm_brief_operator_workflow() -> Result<(), String> {
         "never mutates Beads",
         "never schedules agents",
         "paths_counts_subjects_only_no_content",
-    ] {
-        // Whitespace collapsed on both sides, same treatment and same reason
-        // as the AGENTS.md marker loop: three of these markers embedded the
-        // document's line wrapping, so reflowing a paragraph broke the
-        // assertion while the text it guards was untouched. The wording is
-        // still required in full and in order; only the wrap positions stop
-        // being part of the contract.
-        if !readme_collapsed.contains(&collapse_whitespace(required)) {
-            return Err(format!(
-                "README swarm brief workflow docs missing required marker `{required}`"
-            ));
-        }
-    }
+    ];
+    ensure_all_markers_present(
+        "README.md swarm brief workflow docs",
+        README_SOURCE,
+        &required_markers,
+    )?;
 
     assert_marker_before(
         "README.md",
@@ -1361,7 +1353,7 @@ fn readme_pins_swarm_brief_operator_workflow() -> Result<(), String> {
 
 #[test]
 fn agent_integration_pins_work_packet_claim_gate_consumer() -> Result<(), String> {
-    for required in [
+    let required_markers = [
         "## Work-Packet Claim Gate",
         "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <id> --json",
         "unexpected\nargument",
@@ -1378,13 +1370,12 @@ fn agent_integration_pins_work_packet_claim_gate_consumer() -> Result<(), String
         "mutate git",
         "run Cargo",
         "do not substitute local Cargo proof",
-    ] {
-        if !AGENT_INTEGRATION_SOURCE.contains(required) {
-            return Err(format!(
-                "agent integration docs missing claim-gate marker `{required}`"
-            ));
-        }
-    }
+    ];
+    ensure_all_markers_present(
+        "docs/agent_integration.md claim-gate markers",
+        AGENT_INTEGRATION_SOURCE,
+        &required_markers,
+    )?;
 
     assert_marker_before(
         "docs/agent_integration.md",
@@ -1417,8 +1408,7 @@ fn agents_md_pins_claim_gate_stale_binary_stop_condition() -> Result<(), String>
     // as a contiguous run of words. Only the position of the line breaks stops
     // being part of the contract, and a line break was never the thing worth
     // pinning.
-    let agents_collapsed = collapse_whitespace(AGENTS_SOURCE);
-    for required in [
+    let required_markers = [
         "if the installed `ee` rejects `--claim-gate` or `--candidate`",
         "stale relative to the current source/docs contract",
         "approved RCH/release-path rebuild",
@@ -1428,13 +1418,12 @@ fn agents_md_pins_claim_gate_stale_binary_stop_condition() -> Result<(), String>
         // the marker now quotes the text that exists.
         "run no BV claim command",
         "do not rebuild or install `ee` locally with Cargo as a workaround",
-    ] {
-        if !agents_collapsed.contains(required) {
-            return Err(format!(
-                "AGENTS.md missing claim-gate stale-binary stop marker `{required}`"
-            ));
-        }
-    }
+    ];
+    ensure_all_markers_present(
+        "AGENTS.md claim-gate stale-binary stop markers",
+        AGENTS_SOURCE,
+        &required_markers,
+    )?;
 
     assert_marker_before(
         "AGENTS.md",
@@ -1469,7 +1458,7 @@ fn skill_only_matrix_rows_have_skill_handoff_and_boundary_coverage() -> Result<(
 
 #[test]
 fn matrix_e2e_log_schema_records_required_fields() {
-    for required in [
+    let required_markers = [
         "ee.command_boundary_matrix.e2e_log.v1",
         "generated command list",
         "matrix path and BLAKE3 hash",
@@ -1489,11 +1478,14 @@ fn matrix_e2e_log_schema_records_required_fields() {
         "forbidden filesystem operations checked",
         "stdout and stderr artifact paths",
         "first-failure diagnosis",
-    ] {
-        assert!(
-            INVENTORY.contains(required),
-            "matrix E2E log schema missing required field text: {required}"
-        );
+    ];
+    // This test returns `()`, so the shared helper's Err is surfaced as a
+    // panic here rather than with `?`. The point is the same: one failure
+    // listing every missing marker, not the first one encountered.
+    if let Err(report) =
+        ensure_all_markers_present("matrix E2E log schema", INVENTORY, &required_markers)
+    {
+        panic!("{report}");
     }
 }
 
@@ -1898,4 +1890,44 @@ fn matrix_row_classes_agree_with_the_effect_manifest() -> Result<(), String> {
 /// which were never the thing worth pinning.
 fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Check EVERY marker and report all misses at once.
+///
+/// The three marker loops in this file used to be
+/// `for required in [...] { if !source.contains(required) { return Err(..) } }`
+/// which returns on the FIRST mismatch. Such a loop can report at most one
+/// defect no matter how many exist, so fixing the marker it names tells you
+/// nothing about what is behind it — and twice on 2026-09-18 something was:
+/// `readme_pins_swarm_brief_operator_workflow` named `br ready --json`, and
+/// once that was repaired it named `bv copy-paste claim command`, which had
+/// been wrong since the day it was written
+/// (bd-integration-gm-six-red-concealed-uhp28).
+///
+/// The cost is a dispatch per concealed marker, discovered one at a time. The
+/// deeper problem is that an instrument which can only ever report one answer
+/// is indistinguishable from an instrument that is right.
+///
+/// Whitespace is collapsed on both sides so a phrase is matched by its WORDS
+/// and not by where the document happens to wrap; see [`collapse_whitespace`].
+fn ensure_all_markers_present(
+    source_name: &str,
+    source: &str,
+    markers: &[&str],
+) -> Result<(), String> {
+    let collapsed = collapse_whitespace(source);
+    let missing: Vec<&str> = markers
+        .iter()
+        .copied()
+        .filter(|marker| !collapsed.contains(&collapse_whitespace(marker)))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{source_name} is missing {} of {} required markers (ALL listed, not just the first):\n  `{}`",
+        missing.len(),
+        markers.len(),
+        missing.join("`\n  `")
+    ))
 }
