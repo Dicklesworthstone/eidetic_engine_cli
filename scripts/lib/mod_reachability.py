@@ -32,11 +32,19 @@ SELF-VALIDATION, which is the part these checks usually skip
 
 EXIT CODES
   0  every in-scope file is reachable or allowlisted, and the allowlist is clean
-  1  a real finding: an unreachable file that is not allowlisted, OR an
-     allowlist entry that has rotted (names a missing file, or names a file that
-     is now reachable and no longer needs the entry)
-  2  inconclusive (cargo unavailable, controls disagree) -- callers treat this
-     as "not blocking", never as "clean"
+  1  a real finding: an unreachable file that is not allowlisted, an allowlist
+     entry that has rotted, or a section-2 budget that no longer matches
+  2  ENVIRONMENTALLY inconclusive: cargo missing or timed out. The tree was not
+     examined. Callers may treat this as "not blocking".
+  3  THE INSTRUMENT IS BROKEN: a self-validation control disagreed with observed
+     cargo behaviour. This is NOT interchangeable with 2 and callers must NOT
+     fail open on it.
+
+  2 AND 3 WERE ONE CODE UNTIL THIS WAS FIXED, and the caller mapped that single
+  code to "not blocking". So a resolver whose own controls had failed reported
+  warned-but-green -- a check that cannot tell you it is broken, which is the
+  exact defect this gate exists to find. A distinct code, returned before the
+  excuser, is the only form that survives a caller written to fail open.
 """
 
 from __future__ import annotations
@@ -130,18 +138,38 @@ def tracked_in_scope() -> list[str]:
     )
 
 
-def read_allowlist() -> list[tuple[str, str]]:
-    """(path, reason) pairs. A bare path with no reason is rejected by the gate."""
+SECTION2_MARK = "# @SECTION-2-BEGIN"
+SECTION2_BUDGET = "# @SECTION-2-BUDGET:"
+
+
+def read_allowlist() -> tuple[list[tuple[str, str, bool]], int | None]:
+    """((path, reason, in_section_2) triples, declared section-2 budget).
+
+    The budget is what makes "MAY ONLY SHRINK" mechanical instead of hortatory.
+    A prose promise in a comment is not a ratchet; a declared count that must be
+    edited in the same commit as the entry is.
+    """
     if not ALLOWLIST.is_file():
-        return []
-    entries = []
+        return [], None
+    entries: list[tuple[str, str, bool]] = []
+    budget: int | None = None
+    in_section_2 = False
     for raw in ALLOWLIST.read_text().splitlines():
         line = raw.strip()
+        if line.startswith(SECTION2_BUDGET):
+            try:
+                budget = int(line[len(SECTION2_BUDGET):].strip())
+            except ValueError:
+                budget = None
+            continue
+        if line.startswith(SECTION2_MARK):
+            in_section_2 = True
+            continue
         if not line or line.startswith("#"):
             continue
         path, _, reason = line.partition("\t")
-        entries.append((path.strip(), reason.strip()))
-    return entries
+        entries.append((path.strip(), reason.strip(), in_section_2))
+    return entries, budget
 
 
 def main() -> int:
@@ -163,18 +191,47 @@ def main() -> int:
             "(cargo fmt reports it) but the resolver says otherwise — refusing to emit",
             file=sys.stderr,
         )
-        return 2
+        return 3
     if is_reachable(CONTROL_UNREACHABLE):
         print(
             f"[mod-reachability] CONTROL FAILED: {CONTROL_UNREACHABLE} should be unreachable "
             "(0f68778a0 removed its `pub mod` line) but the resolver says otherwise — refusing to emit",
             file=sys.stderr,
         )
-        return 2
+        return 3
 
-    allow = read_allowlist()
-    allow_paths = {p for p, _ in allow}
+    allow, budget = read_allowlist()
+    allow_paths = {p for p, _, _ in allow}
+    section2 = [p for p, _, s2 in allow if s2]
     findings = 0
+
+    # --- 0. the section-2 ratchet, in BOTH directions ----------------------
+    # Growing is new undeclared-code debt. Shrinking without lowering the
+    # declared budget leaves an allowance nobody is using, which is how a
+    # ratchet stops ratcheting -- the same both-directions argument made for the
+    # anchor budget in bd-d8trk.
+    if budget is None:
+        findings += 1
+        print(
+            f"ALLOWLIST IS MISSING ITS `{SECTION2_BUDGET} <n>` DIRECTIVE.\n"
+            "  Without it, section 2 'may only shrink' is a comment and nothing enforces it."
+        )
+    elif len(section2) != budget:
+        findings += 1
+        direction = "GREW" if len(section2) > budget else "SHRANK"
+        print(f"SECTION-2 RATCHET: declared budget {budget}, actual {len(section2)} — it {direction}.")
+        for p in sorted(section2):
+            print(f"    {p}")
+        if len(section2) > budget:
+            print(
+                "  A new entry in section 2 is new undeclared-code debt. Declare the module\n"
+                "  or fix the file; do NOT raise the budget to make this pass."
+            )
+        else:
+            print(
+                f"  Good news, but finish it: lower `{SECTION2_BUDGET} {len(section2)}` in this\n"
+                "  same commit, or the freed allowance silently absorbs the next new file."
+            )
 
     # --- 1. unreachable and not allowlisted -------------------------------
     unreachable = [f for f in tracked if not is_reachable(f)]
@@ -210,7 +267,7 @@ def main() -> int:
         print("  Remove them, so the allowlist only ever names real exemptions.")
 
     # --- 4. an entry with no reason is not an exemption, it is a hole ------
-    unreasoned = [p for p, reason in allow if not reason]
+    unreasoned = [p for p, reason, _ in allow if not reason]
     if unreasoned:
         findings += len(unreasoned)
         print("ALLOWLIST ENTRIES WITH NO REASON:")

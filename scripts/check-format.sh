@@ -182,10 +182,24 @@ run_reachability() {
     case "$rc" in
         0) return 0 ;;
         1) return 1 ;;
-        # 2 is the script's own "inconclusive": cargo missing, or its controls
-        # disagreed with observed cargo behaviour. It already warned; we do not
-        # convert that into a block.
-        *) return 0 ;;
+        # 2 is ENVIRONMENTAL: cargo missing or timed out, the tree was not
+        # examined. Fail open; it already warned.
+        2) return 0 ;;
+        # 3 is THE INSTRUMENT REPORTING ITSELF BROKEN -- a self-validation
+        # control disagreed with observed cargo behaviour. This must NOT fail
+        # open. An earlier version of this function mapped 2 and 3 to the same
+        # "not blocking" branch, which meant a resolver whose controls had
+        # failed reported warned-but-green: a check that cannot tell you it is
+        # broken. That is the defect this whole gate exists to find, and it was
+        # sitting in the caller.
+        3)
+            warn "reachability self-validation FAILED — the check is broken, not the tree."
+            return 1
+            ;;
+        *)
+            warn "reachability returned unexpected status ${rc} — treating as a failure."
+            return 1
+            ;;
     esac
 }
 

@@ -32,6 +32,16 @@ tests/fixtures/panic_helper_radar/unwrap_fail.rs	Radar input; consumed by script
 tests/fixtures/closeout_audit/srr6_blocked/tests/mesh_off_no_network.rs	Closeout-audit fixture tree; consumed by tests/closeout_audit_runner_unit.rs
 
 # =========================================================================
+# @SECTION-2-BEGIN
+# @SECTION-2-BUDGET: 8
+#
+# THE BUDGET ABOVE IS THE RATCHET, and it is why "may only shrink" is not just a
+# sentence here. The gate fails in BOTH directions: more entries than the budget
+# is new undeclared-code debt, and FEWER entries without lowering the budget in
+# the same commit leaves a freed allowance that would silently absorb the next
+# new file. Raising this number to make a finding pass is the one way to weaken
+# this gate.
+#
 # SECTION 2 -- KNOWN UNDECLARED CODE. bd-l6h3g. THIS SECTION MAY ONLY SHRINK.
 #
 # These are NOT exemptions. They are recorded debt with a named disposition, so
