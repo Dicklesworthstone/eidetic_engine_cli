@@ -62,6 +62,16 @@ const FOLLOW_UP_BEADS: &[&str] = &[
     "eidetic_engine_cli-sos5.4",
     "eidetic_engine_cli-sos5.7",
     "eidetic_engine_cli-ogy9",
+    // bd-1jpg7: the no-echo ingest guard is disabled whenever
+    // apply_join_first_sync_events cannot read its own origin node id.
+    //
+    // Before adding another id here, read bd-epvc1: eight must_fix rules
+    // already name a follow-up bead while owning ZERO findings, so they watch
+    // nothing. A must_fix that is shadowed into silence by an earlier fragment
+    // is worse than no rule, because the bead makes it look tracked. The rule
+    // that names this bead was checked against the match-count ledger and owns
+    // its site.
+    "bd-1jpg7",
 ];
 
 const INVENTORY_RULES: &[InventoryRule] = &[
@@ -310,6 +320,61 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "load_rules",
         "let rule_tags = tags.remove(&rule.id).unwrap_or_default();",
         "Two adjacent per-rule map lookups (tags and source memory ids), carried as one group with multiplicity 2 because they are one decision about the same construct on consecutive lines. Both maps come from list_rule_tags_for_workspace / list_rule_source_memory_ids_for_workspace, whose errors are already propagated by `?` before this loop runs, and both are keyed by rule id over the same workspace -- so a miss is a rule with no tags or no source memories recorded, and the empty default says exactly that. `remove` rather than `get` is safe because rule ids are unique within a workspace, so no rule is visited twice.",
+    ),
+    // bd-apvhh burn-down, tranche 3 (2026-09-18): src/mesh/team.rs and
+    // src/core/resume.rs, the two largest no-rule files, taken deliberately
+    // because they are where the answer could come back NOT allowed. It did,
+    // once: NSF-MESH-TEAM-JOIN-SYNC-OWN-ORIGIN-SWALLOWED below is the first
+    // must_fix this burn-down has produced.
+    must_fix_in(
+        "NSF-MESH-TEAM-JOIN-SYNC-OWN-ORIGIN-SWALLOWED",
+        "src/mesh/team.rs",
+        "apply_join_first_sync_events",
+        ".find(|member| member.is_self)",
+        "bd-1jpg7",
+        "FAILS OPEN. apply_join_first_sync_events reads its own origin node id with `.ok()` rather than `?`, so a db error and a genuinely absent self member both become \"\". That value is handed to ingest_origin_event and reaches the no-echo guard in src/mesh/origin_stream.rs classify_inbound: `if event.origin_node_id == own_origin_node_id { Quarantined }`. A real event's origin id is never empty, so \"\" never matches and the guard silently stops refusing events that claim THIS node as their origin. Every other unwrap_or_default in this file sits behind `?` and only ever sees a true absence; this one swallows the error. The function returns u32 and has no error channel, which is the structural reason the `.ok()` is there, so the repair is a signature change or an Option that ingest refuses to classify -- not a different default.",
+    ),
+    allowed_in(
+        "NSF-MESH-TEAM-IDENTITY-USER-ID-ROUNDTRIP",
+        "src/mesh/team.rs",
+        "revalidate_team_identities",
+        "user_id.unwrap_or_default()",
+        "Three sites in one match, carried with multiplicity 3. The empty string never reaches storage or any comparison: the call site immediately re-lifts it with `(!user_id.is_empty()).then_some(user_id.as_str())`, and upsert_team_member_identity takes Option<&str>, so an absent id is written as SQL NULL rather than as \"\". Readers guard on it too -- the owner lookup does `if let Some(user_id) = recorded.user_id.as_deref()` before comparing, so a NULL id can never collide with another member's. THE ROUND TRIP IS THE WHOLE JUSTIFICATION: delete the `then_some` and \"\" lands in the column, where that equality would match every other member with an empty id. Note the sibling `login` on these same lines uses an explicit \"unknown\" sentinel instead, which is the clearer pattern.",
+    ),
+    allowed_in(
+        "NSF-MESH-TEAM-ACTIVITY-UNATTRIBUTED",
+        "src/mesh/team.rs",
+        "list_team_activity",
+        "let origin_node_id = members",
+        "Two adjacent sites, multiplicity 2: a memory with no team provenance and no producer agent gets an empty display name, which is then used to look up an origin node id. That lookup CANNOT mis-attribute, and the proof is in the schema rather than in this file: team member display_name is `TEXT NOT NULL CHECK (length(trim(display_name)) > 0)`, so no member can carry an empty name and `find(|m| m.display_name == \"\")` matches nothing. The result is an unattributed activity row, which is the honest rendering of a memory whose producer is unknown.",
+    ),
+    allowed_in(
+        "NSF-MESH-TEAM-INVITE-AUTH-FLOOR-ABSENT",
+        "src/mesh/team.rs",
+        "invite_auth_floor",
+        ".unwrap_or_default())",
+        "An absent authorization clock floor becomes \"\", and that is a NO-OP rather than a bypass. All three consumers test `timestamp < floor` to reject events that precede the floor; \"\" is the minimum of the lexicographic order over RFC3339 strings, so `x < \"\"` is false for every non-empty timestamp and nothing is rejected -- which is exactly what \"no floor has been recorded\" should do. It cannot weaken a floor that EXISTS, because a recorded floor is returned intact and db errors propagate through `?`. The diagnostic path at the same file keeps the Option instead, because counting invites below the floor genuinely needs to tell absent from present.",
+    ),
+    allowed_in(
+        "NSF-MESH-TEAM-JOIN-ATTEMPT-NONCE-BOOKKEEPING",
+        "src/mesh/team.rs",
+        "complete_join_first_sync",
+        "joiner_nonce: existing",
+        "Written to the join-attempt row at phase \"first_sync_complete\", i.e. AFTER the handshake has already succeeded, when no prior attempt row exists to copy the nonce from. It is bookkeeping, not a credential: the join proof compares the LIVE protocol messages (`prove.joiner_nonce != hello.joiner_nonce`) and never reads this persisted column, so an empty value here cannot satisfy any verification. Flagged rather than silently accepted: `inviter_nonce` on the very next line keeps its Option, so the two nonce fields of one struct disagree about how to spell absence, and this one loses the distinction in the audit trail.",
+    ),
+    allowed_in(
+        "NSF-CORE-RESUME-SESSION-BOUNDS",
+        "src/core/resume.rs",
+        "group_sessions",
+        "let oldest_at = members",
+        "Two sites, multiplicity 2. A session group is built by grouping memories, so it holds at least one member by construction and first()/last() are Some. Reachability is moot in any case: the only consumer immediately does `newest_at.get(..10).unwrap_or(\"unknown\")`, so even an empty bound renders as the explicit label `inferred-unknown` rather than as a fabricated date.",
+    ),
+    allowed_in(
+        "NSF-CORE-RESUME-STALENESS-UNTAGGED",
+        "src/core/resume.rs",
+        "apply_staleness",
+        "let surfaced_tags = tags",
+        "The default feeds directly into the guard on the next line: `if surfaced_tags.is_empty() { continue; }`. A memory with no tags is skipped rather than evaluated against an assumed tag set, so the empty slice is consumed by an emptiness test and never reaches a staleness decision.",
     ),
     must_fix(
         "NSF-CASS-PIPE-READ",
@@ -2238,6 +2303,37 @@ const fn must_fix(
         id,
         file,
         function: None,
+        fragment,
+        disposition: Disposition::MustFix,
+        follow_up: Some(follow_up),
+        reason,
+    }
+}
+
+/// `must_fix`, scoped to one enclosing function (bd-apvhh tranche 3).
+///
+/// The same argument as `allowed_in`, and it matters MORE here. A file-scoped
+/// must_fix in a 7000-line file either over-reaches (claiming sites nobody
+/// judged) or, if the fragment is narrowed to compensate, drifts out of its
+/// finding's context window and owns nothing at all — and a must_fix owning
+/// nothing is worse than no rule, because it names a follow-up bead and so
+/// looks tracked while watching nothing. bd-epvc1 counts eight of those.
+///
+/// My first attempt at NSF-MESH-TEAM-JOIN-SYNC-OWN-ORIGIN-SWALLOWED was exactly
+/// that failure: `.ok()` was far too broad for the file, and the binding name I
+/// replaced it with sat nine lines above the finding, so the rule owned zero.
+const fn must_fix_in(
+    id: &'static str,
+    file: &'static str,
+    function: &'static str,
+    fragment: &'static str,
+    follow_up: &'static str,
+    reason: &'static str,
+) -> InventoryRule {
+    InventoryRule {
+        id,
+        file,
+        function: Some(function),
         fragment,
         disposition: Disposition::MustFix,
         follow_up: Some(follow_up),

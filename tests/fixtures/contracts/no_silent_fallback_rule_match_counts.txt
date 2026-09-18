@@ -398,3 +398,20 @@
 1	NSF-CORE-GLOBAL-STORE-NO-WORKSPACE-ROW
 2	NSF-CORE-MEMORY-DEBT-PER-MEMORY-MAPS
 2	NSF-CORE-ASK-CORPUS-PER-RULE-MAPS
+
+# bd-apvhh burn-down tranche 3: src/mesh/team.rs and src/core/resume.rs, taken
+# because they are where the answer could come back NOT allowed. It did once,
+# and NSF-MESH-TEAM-JOIN-SYNC-OWN-ORIGIN-SWALLOWED is this burn-down's first
+# must_fix (bd-1jpg7, a fail-open on the no-echo ingest guard).
+#
+# THREE OF THESE SEVEN WERE WRONG ON THE FIRST ATTEMPT and the counts caught it:
+# the must_fix owned ZERO, which would have shipped exactly the dead-must_fix
+# defect bd-epvc1 is about, and two group rules owned 1 where they had to own 2
+# because their fragment sat outside the second finding's context window.
+1	NSF-MESH-TEAM-JOIN-SYNC-OWN-ORIGIN-SWALLOWED
+3	NSF-MESH-TEAM-IDENTITY-USER-ID-ROUNDTRIP
+2	NSF-MESH-TEAM-ACTIVITY-UNATTRIBUTED
+1	NSF-MESH-TEAM-INVITE-AUTH-FLOOR-ABSENT
+1	NSF-MESH-TEAM-JOIN-ATTEMPT-NONCE-BOOKKEEPING
+2	NSF-CORE-RESUME-SESSION-BOUNDS
+1	NSF-CORE-RESUME-STALENESS-UNTAGGED

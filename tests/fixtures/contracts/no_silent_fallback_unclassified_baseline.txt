@@ -29,6 +29,21 @@
 # exists to refuse -- a red caused by new debt is not a reason to widen the
 # allowance.
 #
+# LOWERED AGAIN 2026-09-18 to 129 across 40 files (tranche 3): mesh/team.rs
+# 10 -> 2 and core/resume.rs 7 -> 4, the two largest no-rule files, taken ahead
+# of the easier remainder because they are where the answer could come back NOT
+# allowed. It did: team.rs produced this burn-down's first must_fix (bd-1jpg7).
+# Verified against the previous committed baseline: two rows decreased, zero
+# rose, no file gained a row.
+#
+# THE ROWS THAT DID NOT GO TO ZERO ARE THE POINT. team.rs keeps 2 for bd-coxn1
+# (origin_workspace_id on invite mint/redeem, where I could not finish the
+# trace), and resume.rs keeps 4: one feeding admission.admit whose fail-open
+# direction is unproved, and three `chosen`/`topic` sites that pose the same
+# unresolved question as src/core/decide.rs. Leaving a count above zero is the
+# honest output when the reading did not settle it; classifying them to reach
+# zero would be the weakening.
+#
 # A count may only DECREASE. Raising one is new silent-fallback debt; lowering
 # one after a fix is required (a stale entry decays into a permanent allowlist).
 5	src/cli/mesh.rs
@@ -52,7 +67,7 @@
 5	src/core/model.rs
 1	src/core/outcome.rs
 1	src/core/plan.rs
-7	src/core/resume.rs
+4	src/core/resume.rs
 3	src/core/search.rs
 2	src/core/support_bundle.rs
 4	src/core/swarm_next_action.rs
@@ -65,7 +80,7 @@
 1	src/hooks/installer.rs
 4	src/mesh/foreground_cli.rs
 6	src/mesh/responder_broker.rs
-10	src/mesh/team.rs
+2	src/mesh/team.rs
 1	src/models/verification.rs
 1	src/output/mod.rs
 1	src/pack/mod.rs
