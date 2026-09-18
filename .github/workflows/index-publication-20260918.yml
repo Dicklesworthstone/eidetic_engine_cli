@@ -1,9 +1,9 @@
-name: Leased index readers
+name: Snapshot-compatible index readers
 on:
   push:
     branches: [main]
     paths:
-      - scripts/delivery/index-reader-fixture.patch
+      - scripts/delivery/index-reader-snapshot.b64
       - .github/workflows/index-publication-20260918.yml
   workflow_dispatch:
 permissions:
@@ -12,7 +12,7 @@ jobs:
   integrate:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     permissions:
       contents: write
     env:
@@ -38,30 +38,49 @@ jobs:
           key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Apply verified literal reader and cache bindings
+      - name: Apply verified snapshot selection without losing concurrent edits
         run: |
           set -euo pipefail
+          assembly="$RUNNER_TEMP/snapshot-assembly"
+          mkdir -p "$assembly/src/core"
+          for file in index.rs search.rs; do
+            git show "d836c1983303866671e4a3beb6f19bbc16db120b:src/core/$file" > "$assembly/src/core/$file"
+          done
+          git show d988b8130e2083c848a7d3d69a660069dac400de:src/core/index_read_lease.rs > "$assembly/src/core/index_read_lease.rs"
           cat scripts/delivery/index-reader-complete-0.b64 scripts/delivery/index-reader-complete-1.b64 | tr -d '\n' | base64 --decode | gzip -d > "$RUNNER_TEMP/reader.patch"
           echo "c7948c44fd53245668cc5cc1d5a081ca40c4ba5a5d245fe976f0734c29482c5f  $RUNNER_TEMP/reader.patch" | sha256sum --check
-          git apply --check "$RUNNER_TEMP/reader.patch"
-          git apply "$RUNNER_TEMP/reader.patch"
-          printf '%s\n' 'e0a65fc275866621cd40aab67476dc6ece294dd75f1a61e897c91d5bb8856a21  src/core/index.rs' '74de30ca471c13a9a701eaf2e7446cc00781aff0539cb1a8aee7bc28e4b2f715  src/core/search.rs' | sha256sum --check
-          git apply --check scripts/delivery/index-reader-fixture.patch
-          git apply scripts/delivery/index-reader-fixture.patch
-          rustfmt --edition 2024 --config skip_children=true src/core/index.rs src/core/index_read_lease.rs src/core/search.rs
+          git -C "$assembly" apply --check "$RUNNER_TEMP/reader.patch"
+          git -C "$assembly" apply "$RUNNER_TEMP/reader.patch"
+          git -C "$assembly" apply --check "$GITHUB_WORKSPACE/scripts/delivery/index-reader-fixture.patch"
+          git -C "$assembly" apply "$GITHUB_WORKSPACE/scripts/delivery/index-reader-fixture.patch"
+          for file in index.rs search.rs index_read_lease.rs; do
+            cp "$assembly/src/core/$file" "$RUNNER_TEMP/expected-$file"
+            rustfmt --edition 2024 --config skip_children=true "$RUNNER_TEMP/expected-$file"
+            cmp "$RUNNER_TEMP/expected-$file" "src/core/$file"
+          done
+          base64 --decode scripts/delivery/index-reader-snapshot.b64 | gzip -d > "$RUNNER_TEMP/snapshot.patch"
+          echo "ddc0aba2bbf73bed75cd73356f296aa446e3d4ce245f6d88b4581637bf83d5bc  $RUNNER_TEMP/snapshot.patch" | sha256sum --check
+          git -C "$assembly" apply --check "$RUNNER_TEMP/snapshot.patch"
+          git -C "$assembly" apply "$RUNNER_TEMP/snapshot.patch"
+          (cd "$assembly" && printf '%s\n' 'a2647b7d830e8ec859ab6906009d8f0cd9a4f686579ab7490c5758d757edd672  src/core/index.rs' '9bfee903fc0ae06d4a71f1c6414b10192fb4d7ca2d24826a775480c0bb6486b0  src/core/search.rs' '4c427935b47cc01d59e19b26fc6e687f372caf687158f5d635e1dd5d70efc175  src/core/index_read_lease.rs' | sha256sum --check)
+          for file in index.rs search.rs index_read_lease.rs; do
+            rustfmt --edition 2024 --config skip_children=true "$assembly/src/core/$file"
+            cp "$assembly/src/core/$file" "src/core/$file"
+          done
           git diff --check
+          git diff --stat
       - name: Compile production library
         run: |
           status=0
-          cargo check --locked --lib > "$RUNNER_TEMP/reader-check.log" 2>&1 || status=$?
-          tail -n 100 "$RUNNER_TEMP/reader-check.log"
+          cargo check --locked --lib > "$RUNNER_TEMP/snapshot-check.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/snapshot-check.log"
           exit "$status"
-      - name: Execute lease, replacement, publication and cancellation regressions
+      - name: Execute source-snapshot, lease and replacement regressions
         run: |
           set -euo pipefail
           number=0
-          for filter in generation_lease search_generation_cache core::index::tests::publication_ core::search::tests::lab_runtime_cancellation_; do
-            log="$RUNNER_TEMP/reader-group-$number.log"
+          for filter in snapshot_generation_ generation_lease search_generation_cache; do
+            log="$RUNNER_TEMP/snapshot-group-$number.log"
             status=0
             cargo test --locked --lib "$filter" -- --nocapture > "$log" 2>&1 || status=$?
             tail -n 180 "$log"
@@ -69,40 +88,45 @@ jobs:
             grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$log"
             number=$((number + 1))
           done
-      - name: Commit tested production integration directly to main
+      - name: Commit tested snapshot-compatible retrieval directly to main
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- src/core/index.rs src/core/index_read_lease.rs src/core/search.rs
-          git commit -m 'fix(search): lease generations and invalidate replaced index readers' -m 'On Unix, hold a shared read-only directory lease across metadata, vectors and lexical collection; publication and recovery take the exclusive lease through commit and rollback before acquiring the database writer fence. Bound waits, preserve cancellation and close on error. Bind lexical-reader and index-status caches to the physical generation directory so identical metadata cannot resurrect a displaced reader. Production compilation and four nonempty regression groups passed before this commit. SQL-pointer immutable generations and non-Unix leases remain separate work.'
+          git commit -m 'fix(search): select retained generations compatible with the source snapshot' -m 'On Unix, a known workspace snapshot cannot read an index from its future. Under the reader lease, select the newest validated retained generation no newer than the same connection source generation; never select staging, rejected or incompatible security epochs. Missing compatible retention fails explicitly without moving files or repairing the index. Add real two-connection context retrieval with retirement and replacement, latest-eligible selection and incompatible-retention rejection. Production check plus snapshot, lease and cache regressions passed before commit. Full search and index groups are reported separately.'
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then break; fi
             test "$attempt" -lt 3
             git fetch origin main
             git merge --no-edit origin/main
           done
-          git rev-parse HEAD > "$RUNNER_TEMP/reader-source-sha.log"
-      - name: Execute broader index regressions
+          git rev-parse HEAD > "$RUNNER_TEMP/snapshot-source-sha.log"
+      - name: Execute complete search regression module
         run: |
           status=0
-          cargo test --locked --lib core::index::tests:: -- --test-threads=2 > "$RUNNER_TEMP/reader-index-module.log" 2>&1 || status=$?
-          tail -n 230 "$RUNNER_TEMP/reader-index-module.log"
+          timeout 15m cargo test --locked --lib core::search::tests:: -- --test-threads=2 > "$RUNNER_TEMP/snapshot-search-module.log" 2>&1 || status=$?
+          tail -n 230 "$RUNNER_TEMP/snapshot-search-module.log"
+          exit "$status"
+      - name: Execute complete index regression module
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          timeout 15m cargo test --locked --lib core::index::tests:: -- --test-threads=2 > "$RUNNER_TEMP/snapshot-index-module.log" 2>&1 || status=$?
+          tail -n 230 "$RUNNER_TEMP/snapshot-index-module.log"
           exit "$status"
       - name: Preserve exact source and logs
         if: ${{ !cancelled() }}
         run: |
-          git rev-parse HEAD > "$RUNNER_TEMP/reader-final-sha.log"
-          cp src/core/index.rs "$RUNNER_TEMP/reader-index.rs"
-          cp src/core/search.rs "$RUNNER_TEMP/reader-search.rs"
-          cp src/core/index_read_lease.rs "$RUNNER_TEMP/reader-lease.rs"
-          git diff -- src/core/index.rs src/core/search.rs > "$RUNNER_TEMP/reader-uncommitted.patch"
+          git rev-parse HEAD > "$RUNNER_TEMP/snapshot-final-sha.log"
+          for file in index.rs search.rs index_read_lease.rs; do cp "src/core/$file" "$RUNNER_TEMP/snapshot-$file"; done
+          git diff -- src/core/index.rs src/core/search.rs src/core/index_read_lease.rs > "$RUNNER_TEMP/snapshot-uncommitted.patch"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
-          name: index-reader-verification
+          name: snapshot-reader-verification
           path: |
-            ${{ runner.temp }}/reader-*.log
-            ${{ runner.temp }}/reader-*.rs
-            ${{ runner.temp }}/reader-*.patch
+            ${{ runner.temp }}/snapshot-*.log
+            ${{ runner.temp }}/snapshot-*.rs
+            ${{ runner.temp }}/snapshot-*.patch
           retention-days: 7
