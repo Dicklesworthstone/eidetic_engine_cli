@@ -1529,11 +1529,26 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         &serde_json::json!(1),
         "model status bundled registered count",
     )?;
-    // ADR 0080 registers the bundled embedding model, so a workspace with no
-    // user-installed models still reports one available entry.
+    // REGISTERED IS NOT AVAILABLE, and this row exists to hold that line.
+    // ADR 0080 registers the bundled embedding model, but it registers it as a
+    // DECLARATION: src/core/model.rs:3632 sets
+    // `status: ModelRegistryStatus::Unavailable`, and the doc comment above it
+    // says the index-build path "promotes the row to
+    // ModelRegistryStatus::Available" only with a verified artifact.
+    // `is_bundled_embedding_declaration` (:3649) calls it exactly "the
+    // declared-but-not-downloaded bundled model row created for a fresh
+    // workspace".
+    //
+    // So registeredCount 1 with availableCount 0 is the DOCUMENTED state of a
+    // fresh workspace, and availableCount counts `status == "available"`
+    // (:2557). This assertion said 0 until b8015752b changed it to 1 on the
+    // reasoning that registering the model makes it available -- conflating the
+    // two, and corroborated against a dev Mac whose model cache is populated.
+    // On a worker with no cache it is 0, which is why this row was red on hz3
+    // AND hz4 at two different bases (bd-tvi3a runs, bd-hwye2 row).
     ensure_equal(
         &status_empty_json["data"]["availableCount"],
-        &serde_json::json!(1),
+        &serde_json::json!(0),
         "model status empty available count",
     )?;
     ensure(
@@ -1542,24 +1557,31 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
             .is_some(),
         "model status fastModelId should be present",
     )?;
-    // ADR 0080 registers a bundled embedding model, so this workspace HAS an
-    // available entry — and `model_registry_no_available_entry` fires only when
-    // the registry has entries and none of them is available
-    // (src/core/model.rs:407-412). The old form asserted that code was present,
-    // which cannot hold once availableCount is 1.
+    // The partner of the count above, and it must move WITH it. This degradation
+    // fires exactly when "Model registry has entries but no embedding model is
+    // marked available" (src/core/model.rs:407-412). A fresh workspace has one
+    // registered entry, the bundled DECLARATION, whose status is Unavailable --
+    // so the code SHOULD be present, and asserting its absence (b8015752b) was
+    // the same mistake as availableCount 1, made in the same commit for the same
+    // reason. Fixing one without the other just moves the failure down a line.
     //
-    // Assert that one code's ABSENCE and nothing more. Per AGENTS.md, degraded[]
-    // is populated only when the response was actually affected, so it is a live
-    // report rather than a fixed shape; pinning the whole array would forbid any
-    // other code that legitimately fires here and would break this row for
-    // reasons unrelated to what it tests.
+    // Asserted NON-POSITIONALLY rather than restoring the original
+    // `degradations[0].code ==` form. Presence is the property under test;
+    // pinning index 0 additionally pins ordering and would break this row if
+    // another code legitimately fired first. Per AGENTS.md degraded[] is a live
+    // report, not a fixed shape, so this checks for the one code and nothing
+    // else about the array.
     ensure(
-        !status_empty_json["data"]["degradations"]
+        status_empty_json["data"]["degradations"]
             .as_array()
             .into_iter()
             .flatten()
             .any(|entry| entry["code"] == serde_json::json!("model_registry_no_available_entry")),
-        "model status must not claim no-available-entry while a bundled model is available",
+        format!(
+            "model status must report no-available-entry when the only registered model is the \
+             declared-but-not-downloaded bundled row; degradations: {}",
+            status_empty_json["data"]["degradations"]
+        ),
     )?;
 
     let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
