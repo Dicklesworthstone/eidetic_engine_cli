@@ -15293,6 +15293,97 @@ mod tests {
     }
 
     #[test]
+    fn the_export_chain_order_and_the_database_agree_on_which_revision_is_the_head() -> TestResult {
+        // bd-tmv70, the fourth claim in the form that actually applies.
+        //
+        // There are now TWO independent ways to decide which revision is the
+        // head of a chain: the database's `superseded_at` column, read through
+        // filter_current_memory_ids, and the export's own (created_at, id)
+        // chain ordering, which is what populates `superseded_by`. The export
+        // does NOT read the first to produce the second, so nothing forces them
+        // to agree -- and a disagreement between two answers to "which row is
+        // current" is precisely the bug class this whole bead is about.
+        //
+        // This asserts they agree on a real chain. If a future change reorders
+        // one of them, this fails rather than silently writing an archive whose
+        // idea of the head differs from the store's.
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let workspace_record =
+            load_workspace(&connection, &workspace).map_err(|error| error.message())?;
+        let workspace_id = workspace_record.id.clone();
+        let original_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        let revised_id = MemoryId::from_uuid(Uuid::from_u128(0xfeed)).to_string();
+        connection
+            .with_transaction(|| {
+                connection.mark_memory_superseded(&original_id, "2026-08-09T00:00:00Z")?;
+                connection.insert_memory_revision(
+                    &revised_id,
+                    &original_id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: "Head agreement fixture.".to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.7,
+                        importance: 0.8,
+                        provenance_uri: Some("ee-test://head-agreement".to_owned()),
+                        trust_class: "agent_assertion".to_owned(),
+                        trust_subclass: Some("fixture".to_owned()),
+                        tags: Vec::new(),
+                        valid_from: Some("2026-08-09T00:00:00Z".to_owned()),
+                        valid_to: None,
+                    },
+                )?;
+                Ok(())
+            })
+            .map_err(|error| error.to_string())?;
+
+        let data = load_export_data(&connection, workspace_record).map_err(|e| e.message())?;
+
+        // NON-VACUITY FIRST. Both sets below are trivially equal on a store
+        // with no chains, so the comparison proves nothing unless a real chain
+        // is present and at least one row is genuinely superseded.
+        if !data.superseded_by_by_memory.contains_key(&original_id) {
+            return Err(format!(
+                "precondition: the exported chain must mark {original_id} as superseded, \
+                 otherwise this test compares two empty answers: {:?}",
+                data.superseded_by_by_memory
+            ));
+        }
+
+        // Method A: the database's own answer, from the superseded_at column.
+        let candidate_ids = data
+            .memories
+            .iter()
+            .map(|memory| memory.id.clone())
+            .collect::<Vec<_>>();
+        let database_heads = connection
+            .filter_current_memory_ids(&candidate_ids)
+            .map_err(|error| error.to_string())?;
+
+        // Method B: rows the export's chain ordering left without a successor.
+        let export_heads = data
+            .memories
+            .iter()
+            .map(|memory| memory.id.clone())
+            .filter(|id| !data.superseded_by_by_memory.contains_key(id))
+            .collect::<BTreeSet<_>>();
+
+        if export_heads != database_heads {
+            return Err(format!(
+                "the export's chain ordering and the database disagree about which revisions \
+                 are current. export-only: {:?}; database-only: {:?}",
+                export_heads.difference(&database_heads).collect::<Vec<_>>(),
+                database_heads.difference(&export_heads).collect::<Vec<_>>(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn revised_family_memory_exports_one_ledger_slot_on_current_head() -> TestResult {
         let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
