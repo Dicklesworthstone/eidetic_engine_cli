@@ -237,7 +237,12 @@
 1	NSF-SNA-KNOWN-BLOCKER-CODES
 1	NSF-SNA-CARD-SORT-KEY
 1	NSF-SNA-AFFECTED-COMMAND-KINDS
-1	NSF-CLI-MESH-WORKSPACE-LISTS
+# NSF-CLI-MESH-WORKSPACE-LISTS owned 1 and is RETIRED: the defect is fixed
+# (bd-xwzeh, the outbound half of bd-zjcx6), so the rule left INVENTORY_RULES and
+# this row had to go with it. It is the one worth remembering: it spent months
+# as an `allowed` whose reason described the LOADER's behaviour instead of the
+# CALLER's, so it read as sound while the caller defaulted the loader's Err away
+# and probed peers the operator had denied.
 2	NSF-CLI-MESH-DISCOVERY-MODE-DEFAULT
 3	NSF-CLI-MESH-RESPOND-MODE-DEFAULT
 1	NSF-CLI-MESH-NO-REVOCATIONS
@@ -536,10 +541,11 @@
 2	NSF-CURATE-LINK-PAYLOAD-MEMORY-IDS
 1	NSF-CURATE-LINK-PAYLOAD-RELATION
 
-# src/cli/mesh.rs and src/daemon/server.rs. NSF-CLI-MESH-WORKSPACE-LISTS keeps
-# its count of 1 but changed DISPOSITION from allowed to must_fix (bd-xwzeh) --
-# the ledger tracks reach, not verdict, so that reclassification is invisible
-# here by design. It is recorded in the rule's own reason.
+# src/cli/mesh.rs and src/daemon/server.rs. NSF-CLI-MESH-WORKSPACE-LISTS kept
+# its count of 1 while changing DISPOSITION from allowed to must_fix (bd-xwzeh);
+# the ledger tracks reach, not verdict, so that reclassification was invisible
+# here by design. The rule has since been RETIRED because the defect was fixed,
+# and its row is gone from the list above -- see the note where it used to sit.
 1	NSF-CLI-MESH-LANE-GRANT-BINDINGS
 2	NSF-CLI-MESH-PROBE-SELF-IDENTITY
 1	NSF-CLI-MESH-IMPORT-BINDINGS

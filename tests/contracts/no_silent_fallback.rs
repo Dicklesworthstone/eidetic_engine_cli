@@ -1767,14 +1767,27 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         ".map(affected_command_kinds)",
         "Blocker evidence without affected commands truly affects no command kinds; the empty list is the true result.",
     ),
-    must_fix_in(
-        "NSF-CLI-MESH-WORKSPACE-LISTS",
-        "src/cli/mesh.rs",
-        "build_tailscale_autodiscovery_report_from_local",
-        "load_workspace_lists(&workspace_path).unwrap_or_default()",
-        "bd-xwzeh",
-        "RECLASSIFIED FROM allowed TO must_fix. The old reason read \"absent workspace allow/deny lists are a valid empty discovery policy; present malformed lists surface through their own parse path\". The first clause is true; THE SECOND IS FALSE AT THIS CALL SITE -- load_node_key_list returns Err for an io error, a TOML parse failure, a non-array `node_keys` or an oversized payload, and `.unwrap_or_default()` swallows exactly that Err, so a present malformed list surfaces nowhere. The rule described the LOADER's behaviour rather than the CALLER's, which is why it read as sound. A wrong `allowed` is worse than an unclassified finding because it has been reviewed and blessed. What the empty set then does: it reaches TailscaleAutodiscoveryConfig and autodiscover_tailscale_peers, where decide_discovery's DiscoveryDecision::Skip is the only thing preventing a probe, so DENIED PEERS GET PROBED -- the outbound half of bd-zjcx6, which fixed the inbound half. The sibling call at src/cli/mesh.rs:5027 already propagates with map_err(discovery_list_domain_error)?, so the correct shape exists in the same file.",
-    ),
+    // NSF-CLI-MESH-WORKSPACE-LISTS was here, and its history is the lesson.
+    //
+    // It lived for months as an `allowed` rule whose reason read "absent
+    // workspace allow/deny lists are a valid empty discovery policy; present
+    // malformed lists surface through their own parse path". The first clause
+    // was true. THE SECOND DESCRIBED THE LOADER, NOT THE CALLER: load_node_key_list
+    // does return Err for an io error, a TOML parse failure, a non-array
+    // `node_keys` or an oversized payload -- and the caller defaulted that Err
+    // away, so a present malformed list surfaced nowhere. A wrong `allowed` is
+    // worse than an unclassified finding, because it has been reviewed and
+    // blessed; that one confusion between the loader's behaviour and the
+    // caller's is what kept it blessed.
+    //
+    // AmberWren reclassified it to must_fix; it is now FIXED and retired
+    // (bd-xwzeh). build_tailscale_autodiscovery_report_from_local propagates
+    // both loads and, having no Result to return, refuses by probing NOTHING
+    // and emitting a `discovery_lists_unreadable` degradation -- instead of
+    // probing the tailnet with an empty denylist, which contacted exactly the
+    // peers the operator denied. That was the OUTBOUND half of bd-zjcx6.
+    //
+    // Its ledger row (count 1) went in the same commit.
     allowed(
         "NSF-CLI-MESH-DISCOVERY-MODE-DEFAULT",
         "src/cli/mesh.rs",

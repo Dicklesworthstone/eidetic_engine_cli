@@ -78,7 +78,8 @@ use crate::mesh::responder_broker::{
     responder_control_status_request, submit_responder_control_request,
 };
 use crate::mesh::tailscale_autodiscovery::{
-    TailscaleAutodiscoveryConfig, TailscaleAutodiscoveryReport, TcpBootstrapHelloProbe,
+    DISCOVERY_LISTS_UNREADABLE_CODE, TailscaleAutodiscoveryConfig,
+    TailscaleAutodiscoveryDegradation, TailscaleAutodiscoveryReport, TcpBootstrapHelloProbe,
     autodiscover_tailscale_peers, tailscale_discovery_budget_ms_from_env_value,
     tailscale_peer_probe_timeout_ms_from_env_value,
 };
@@ -2976,20 +2977,74 @@ fn build_tailscale_autodiscovery_report_from_local(
     local: Option<&TailscaleLocalReport>,
 ) -> TailscaleAutodiscoveryReport {
     let workspace_path = cli.resolve_workspace();
-    let policy_state = load_discovery_policy_state(
+    // bd-xwzeh: the OUTBOUND half of bd-zjcx6, and it must fail closed.
+    //
+    // This used to be two stacked swallows -- `load_discovery_policy_state(..).ok()`
+    // and then a defaulting unwrap on `load_workspace_lists` -- which both land
+    // on EMPTY discovery lists. The empty set goes into
+    // TailscaleAutodiscoveryConfig and on to autodiscover_tailscale_peers, where
+    // `decide_discovery` consults the denylist as the ONLY per-peer exclusion.
+    // An empty denylist means a denied node key is never recognised, so the
+    // peers the operator explicitly denied are the ones we go and PROBE. The
+    // module contract is that a denylisted peer is "never probed and never
+    // receives a response"; bd-zjcx6 repaired the response half, this is the
+    // probe half.
+    //
+    // `load_node_key_list` returns Ok(empty) for every benign case -- absent
+    // file, non-regular path, NotFound, no `node_keys` key -- so an Err here
+    // always means a list EXISTS and cannot be honoured, including the
+    // oversized-payload refusal bd-3gmzf added as hardening. Defaulting turned
+    // that hardening into the bypass.
+    //
+    // Shape matched to the already-correct sibling in this file, which does
+    // `load_workspace_lists(workspace_path).map_err(discovery_list_domain_error)?`.
+    // This function returns a report rather than a Result, so it refuses by
+    // probing NOTHING and saying why, instead of probing everything.
+    let policy_state = match load_discovery_policy_state(
         &workspace_path,
         None,
         None,
         local.map(|report| report.self_advertised_tags.as_slice()),
-    )
-    .ok();
+    ) {
+        Ok(state) => Some(state),
+        Err(error) => {
+            return TailscaleAutodiscoveryReport::refused(TailscaleAutodiscoveryDegradation::new(
+                DISCOVERY_LISTS_UNREADABLE_CODE,
+                "error",
+                format!(
+                    "Discovery policy could not be loaded, so no peer was probed: {error}. \
+                     Probing with an empty denylist would contact peers this workspace denies."
+                ),
+                "Fix or remove the offending file under .ee/ (discovery_allowlist.toml, \
+                 discovery_denylist.toml, respond_allowlist.toml), then re-run.",
+            ));
+        }
+    };
     let discovery_mode = policy_state.as_ref().map_or_else(
         || DiscoveryMode::from_env_discovery(|_| {}),
         |state| state.discovery_mode,
     );
-    let lists = policy_state
-        .map(|state| state.lists)
-        .unwrap_or_else(|| load_workspace_lists(&workspace_path).unwrap_or_default());
+    let lists = match policy_state.map(|state| state.lists) {
+        Some(lists) => lists,
+        None => match load_workspace_lists(&workspace_path) {
+            Ok(lists) => lists,
+            Err(error) => {
+                return TailscaleAutodiscoveryReport::refused(
+                    TailscaleAutodiscoveryDegradation::new(
+                        DISCOVERY_LISTS_UNREADABLE_CODE,
+                        "error",
+                        format!(
+                            "Discovery lists exist but could not be honoured, so no peer was \
+                             probed: {error}. Probing with an empty denylist would contact peers \
+                             this workspace denies."
+                        ),
+                        "Fix or remove the offending file under .ee/ (discovery_allowlist.toml, \
+                         discovery_denylist.toml, respond_allowlist.toml), then re-run.",
+                    ),
+                );
+            }
+        },
+    };
     let mut config = TailscaleAutodiscoveryConfig::new(
         snapshot.mesh_enabled,
         &snapshot.workspace_id,
@@ -7868,6 +7923,121 @@ mod tests {
 
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE);
+    }
+
+    /// bd-xwzeh fixture: a workspace whose denylist EXISTS and cannot be parsed.
+    fn workspace_with_unreadable_denylist() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ee = tmp.path().join(".ee");
+        std::fs::create_dir_all(&ee).expect("mkdir .ee");
+        std::fs::write(ee.join(DISCOVERY_DENYLIST_FILE), "node_keys = not toml [")
+            .expect("write malformed denylist");
+        tmp
+    }
+
+    fn autodiscovery_cli_and_snapshot(
+        workspace_path: &std::path::Path,
+    ) -> (Cli, MeshForegroundSnapshot) {
+        let cli = Cli::try_parse_from([
+            "ee",
+            "--workspace",
+            workspace_path.to_str().expect("utf8 workspace path"),
+            "--json",
+        ])
+        .expect("parse cli");
+        let snapshot = MeshForegroundSnapshot {
+            workspace_id: "wsp_test_workspace".to_owned(),
+            workspace_path: workspace_path.display().to_string(),
+            database_path: workspace_path
+                .join(".ee")
+                .join("ee.db")
+                .display()
+                .to_string(),
+            initialized: true,
+            mesh_enabled: true,
+            mode: "cache".to_owned(),
+            storage: MeshStorageCounts::default(),
+            peers: Vec::new(),
+            cursors: Vec::new(),
+            events: Vec::new(),
+            degraded: Vec::new(),
+        };
+        (cli, snapshot)
+    }
+
+    #[test]
+    fn autodiscovery_refuses_to_probe_when_the_denylist_cannot_be_read() {
+        // bd-xwzeh, the OUTBOUND half of bd-zjcx6. The denylist is the only
+        // per-peer exclusion decide_discovery applies, so defaulting it to
+        // empty does not merely lose information -- it probes exactly the peers
+        // the operator denied.
+        let workspace = workspace_with_unreadable_denylist();
+
+        // PRECONDITION, asserted rather than assumed. The fix depends on a
+        // property that lives one directory over, in load_node_key_list: every
+        // benign case is Ok(empty) and only a real failure is Err. If that is
+        // ever softened to Ok(empty), this test must fail rather than pass
+        // vacuously -- the refusal arm below would simply never be taken.
+        assert!(
+            load_workspace_lists(workspace.path()).is_err(),
+            "precondition: a malformed denylist must reach this caller as Err, or the \
+             assertions below prove nothing about the caller"
+        );
+
+        let (cli, snapshot) = autodiscovery_cli_and_snapshot(workspace.path());
+        let report = build_tailscale_autodiscovery_report_from_local(&cli, &snapshot, None);
+
+        assert_eq!(
+            report.probed_peer_count, 0,
+            "nothing may be probed when the denylist cannot be honoured"
+        );
+        assert!(
+            report.ee_capable_peers.is_empty(),
+            "no peer may be reported eligible from a refused discovery round"
+        );
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|item| item.code == DISCOVERY_LISTS_UNREADABLE_CODE),
+            "the refusal must be visible as a degradation rather than a silent empty \
+             report; got {:?}",
+            report.degraded
+        );
+    }
+
+    #[test]
+    fn autodiscovery_does_not_refuse_when_the_lists_are_readable() {
+        // The control. Without it, a function that refused unconditionally
+        // would satisfy the test above while breaking discovery outright.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ee = tmp.path().join(".ee");
+        std::fs::create_dir_all(&ee).expect("mkdir .ee");
+        write_node_key_list(
+            &ee.join(DISCOVERY_DENYLIST_FILE),
+            &std::collections::BTreeSet::from([
+                "nodekey:00000000000000000000000000000000000000000000000000000000000000bb"
+                    .to_owned(),
+            ]),
+        )
+        .expect("write denylist");
+
+        assert!(
+            load_workspace_lists(tmp.path()).is_ok(),
+            "control precondition: a well-formed denylist must load"
+        );
+
+        let (cli, snapshot) = autodiscovery_cli_and_snapshot(tmp.path());
+        let report = build_tailscale_autodiscovery_report_from_local(&cli, &snapshot, None);
+
+        assert!(
+            !report
+                .degraded
+                .iter()
+                .any(|item| item.code == DISCOVERY_LISTS_UNREADABLE_CODE),
+            "a readable denylist must NOT raise the unreadable-lists refusal; got {:?}",
+            report.degraded
+        );
     }
 
     #[test]

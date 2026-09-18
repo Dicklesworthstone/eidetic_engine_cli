@@ -31,6 +31,9 @@ pub const NO_EE_PEERS_ON_TAILNET_CODE: &str = "no_ee_peers_on_tailnet";
 pub const TAILSCALE_PEER_LIST_UNAVAILABLE_CODE: &str = "tailscale_peer_list_unavailable";
 pub const PEER_DISCOVERY_WORKSPACE_MISMATCH_CODE: &str = "peer_discovery_workspace_mismatch";
 pub const PEER_DISCOVERY_BUDGET_EXHAUSTED_CODE: &str = "peer_discovery_budget_exhausted";
+/// The workspace discovery lists exist but could not be honoured, so no peer
+/// was probed (bd-xwzeh).
+pub const DISCOVERY_LISTS_UNREADABLE_CODE: &str = "discovery_lists_unreadable";
 
 pub const DEFAULT_TAILSCALE_PEER_PROBE_TIMEOUT_MS: u64 = 750;
 pub const DEFAULT_TAILSCALE_DISCOVERY_BUDGET_MS: u64 = 5_000;
@@ -97,6 +100,24 @@ impl TailscaleAutodiscoveryReport {
             ee_capable_peers: Vec::new(),
             skipped_peers: Vec::new(),
             degraded: Vec::new(),
+        }
+    }
+
+    /// A report that probed NOTHING, carrying the reason (bd-xwzeh).
+    ///
+    /// The denylist is the only per-peer exclusion `decide_discovery` applies
+    /// on the outbound side, so a caller that cannot load the discovery lists
+    /// must not fall back to an empty set and probe the tailnet: that probes
+    /// exactly the peers the operator denied, and the module contract says a
+    /// denylisted peer is "never probed and never receives a response".
+    ///
+    /// Probing nothing is the safe direction, and the degradation is what stops
+    /// it from being a silent nothing.
+    #[must_use]
+    pub fn refused(degradation: TailscaleAutodiscoveryDegradation) -> Self {
+        Self {
+            degraded: vec![degradation],
+            ..Self::empty()
         }
     }
 }
