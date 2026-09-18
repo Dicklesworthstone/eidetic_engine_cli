@@ -159,6 +159,29 @@ def build_capsule(
     ):
         unestablished.append(missing)
 
+    # manifestHash is NULL ON PURPOSE for a run that did not execute through
+    # scripts/verify.sh, and that is not a gap this emitter should paper over.
+    #
+    # scripts/verify-budget.toml IS the manifest -- it declares stage names,
+    # requirement policy ("advisory" / "tracked_red" + a mandatory owning bead)
+    # and per-stage budgets, verify.sh reads it at :141 and resolves policy at
+    # :662-671, and tests/verification_drift_guard.rs:530 cross-checks it against
+    # verify.sh's own run_stage labels under a local variable literally named
+    # `manifest`.
+    #
+    # But it governs VERIFY.SH RUNS. A `cargo test` dispatched straight at a
+    # worker never consults it, so binding its hash into such a capsule would
+    # assert a relationship that did not exist -- inventing provenance to fill a
+    # required field, which is the defect this emitter was written to refuse.
+    # So the capsule says WHY it is null instead, on every emission, and in doing
+    # so records bd-pnj3s's gap as data rather than as a bead somebody has to
+    # remember.
+    unestablished.append(
+        "manifest.manifestHash: this run did not execute through scripts/verify.sh, "
+        "so no manifest governed it. verify-budget.toml is the manifest for "
+        "verify.sh runs; a directly dispatched remote command is outside it "
+        "(bd-pnj3s)."
+    )
     identity = {
         "source": {"treeish": base, "commit": base, "dirty": bool(dirty)},
         "manifest": {"stageCount": len(results), "manifestHash": None},
