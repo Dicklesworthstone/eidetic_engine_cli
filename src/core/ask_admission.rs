@@ -47,6 +47,86 @@ pub(super) fn rule_candidate(
     ))
 }
 
+/// Imported transcripts are first-class answer sources, not synthetic memories.
+/// Called only inside the corpus owner's read snapshot: bodies, session
+/// admission, revisions and optional derivation links must describe that same
+/// snapshot. Neither a stale search index nor a linked memory grants authority.
+pub(super) fn append_evidence(
+    connection: &DbConnection,
+    workspace_id: &str,
+    scope: crate::models::MemoryScope,
+    candidates: &mut Vec<AskCandidate>,
+    native_sources: &mut std::collections::BTreeMap<String, super::super::AskNativeSource>,
+) -> Result<(), DomainError> {
+    use crate::models::{EvidenceId, MemoryScope};
+
+    // Raw CASS evidence has no authenticated agent membership, global tag or
+    // verification attestation. Inheriting those from a distilled memory would
+    // widen self/team/global/verified scope and launder the transcript's trust.
+    if !matches!(scope, MemoryScope::Workspace | MemoryScope::Swarm) {
+        return Ok(());
+    }
+    connection
+        .visit_search_admitted_evidence_spans_in_current_snapshot(workspace_id, |span| {
+            let Ok(id) = EvidenceId::from_str(&span.id) else {
+                return Ok(());
+            };
+            if span.workspace_id != workspace_id
+                || span.excerpt.trim().is_empty()
+                || span.excerpt == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+                || !public_text(&span.excerpt)
+            {
+                return Ok(());
+            }
+            let Some(session) = connection.get_session(&span.session_id)? else {
+                return Ok(());
+            };
+            if !span.is_direct_pack_admitted_for_session(workspace_id, &session) {
+                return Ok(());
+            }
+            let Some(provenance_uri) = public_provenance(&span.canonical_provenance_uri()) else {
+                return Ok(());
+            };
+            let mut source_memory_ids = Vec::new();
+            if let Some(memory_id) = &span.memory_id {
+                let Ok(memory_id) = MemoryId::from_str(memory_id) else {
+                    return Ok(());
+                };
+                let Some(memory) = connection.get_memory(&memory_id.to_string())? else {
+                    return Ok(());
+                };
+                if memory.workspace_id != workspace_id {
+                    return Ok(());
+                }
+                // Lineage is only for correlated-support accounting. The
+                // memory's body, lifecycle, confidence and trust are not used.
+                source_memory_ids.push(memory_id.to_string());
+            }
+            let source = super::super::AskNativeSource {
+                entity: crate::pack::PackEntityRef::EvidenceSpan(id),
+                entity_revision: span.pack_entity_revision(),
+                source_memory_ids,
+            };
+            let candidate = AskCandidate {
+                memory_id: span.id.clone(),
+                content: span.excerpt.clone(),
+                // Imported excerpts have no calibrated memory confidence.
+                // Use a neutral prior without claiming human verification.
+                confidence: 0.5,
+                trust_class: TrustClass::CassEvidence.as_str().to_owned(),
+                provenance_uri: Some(provenance_uri),
+                level: "episodic".to_owned(),
+                kind: "evidence".to_owned(),
+                team_provenance: None,
+            };
+            native_sources.insert(candidate.memory_id.clone(), source);
+            candidates.push(candidate);
+            Ok(())
+        })
+        .map_err(|_| super::corpus_storage_error())?;
+    Ok(())
+}
+
 /// Team authority belongs to the workspace database, not an arbitrary alternate
 /// store. A cross-store roster cannot join this evidence snapshot atomically;
 /// withhold that query rather than silently widening or using stale membership.

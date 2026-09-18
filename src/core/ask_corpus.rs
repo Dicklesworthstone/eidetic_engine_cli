@@ -172,12 +172,19 @@ fn load_corpus_with_scope_boundary(
         .map(|candidate| candidate.memory_id.as_str())
         .collect();
     let contradictions = load_scoped_contradictions(connection, &ids)?;
-    let native_sources = load_rules(
+    let mut native_sources = load_rules(
         connection,
         workspace_id,
         &scope,
         &attributed_memories,
         &mut candidates,
+    )?;
+    admission::append_evidence(
+        connection,
+        workspace_id,
+        scope.scope,
+        &mut candidates,
+        &mut native_sources,
     )?;
     snapshot.finish()?;
     Ok(AskCorpus {
@@ -360,3 +367,7 @@ mod scope_tests;
 #[cfg(test)]
 #[path = "ask_native_tests.rs"]
 mod native_tests;
+
+#[cfg(test)]
+#[path = "ask_evidence_tests.rs"]
+mod evidence_tests;
