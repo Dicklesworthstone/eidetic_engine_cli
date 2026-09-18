@@ -1,106 +1,19 @@
-name: Index storage reserve validation
+name: Index storage delivery (retired)
+
+# Production changes are committed directly on main:
+# eae73b44fc2dd27da8c68a9dd2b39aa14bf91c9a - preflight capacity admission
+# c81a40b22bc3fba4b614219df34f6fed0d1de59d - private generation creation
+# b27920e12e5b522d7fe4c44a12f9a31fb02666c2 - post-build reserve validation
+# Production compilation and all 10 storage plus 3 privacy regressions passed
+# before the final source commit. Run 35360466250 records the complete index
+# regression group separately; this retirement is not a claim about its result.
+# No automatic trigger, write permission, source edit or ref update remains.
 on:
-  push:
-    branches: [main]
-    paths:
-      - scripts/delivery/index-storage-reserve.patch
-      - .github/workflows/index-storage-20260918.yml
   workflow_dispatch:
-permissions:
-  contents: read
+permissions: {}
 jobs:
-  integrate:
-    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+  retired:
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
-    permissions:
-      contents: write
-    env:
-      RUSTUP_TOOLCHAIN: nightly
-      CARGO_BUILD_JOBS: '2'
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      EE_EMBED_DOWNLOAD: 'off'
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 1
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            target
-          key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: |
-            ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Integrate the post-build reserve check
-        run: |
-          set -euo pipefail
-          git rev-parse HEAD
-          git apply --check scripts/delivery/index-storage-reserve.patch
-          git apply scripts/delivery/index-storage-reserve.patch
-          rustfmt --edition 2024 --config skip_children=true src/core/index.rs src/core/index_storage.rs
-          git diff --check
-          git diff --stat
-      - name: Compile production library
-        run: |
-          status=0
-          cargo check --locked --lib > "$RUNNER_TEMP/reserve-check.log" 2>&1 || status=$?
-          tail -n 100 "$RUNNER_TEMP/reserve-check.log"
-          exit "$status"
-      - name: Execute before-and-after allocation regressions
-        run: |
-          status=0
-          cargo test --locked --lib core::index::storage::tests:: -- --nocapture > "$RUNNER_TEMP/reserve-storage.log" 2>&1 || status=$?
-          tail -n 180 "$RUNNER_TEMP/reserve-storage.log"
-          test "$status" -eq 0
-          grep -Eq 'test result: ok\. 10 passed; 0 failed' "$RUNNER_TEMP/reserve-storage.log"
-      - name: Execute private generation regressions
-        run: |
-          status=0
-          cargo test --locked --lib core::index::private_staging_tests:: -- --nocapture > "$RUNNER_TEMP/reserve-privacy.log" 2>&1 || status=$?
-          tail -n 140 "$RUNNER_TEMP/reserve-privacy.log"
-          test "$status" -eq 0
-          grep -Eq 'test result: ok\. 3 passed; 0 failed' "$RUNNER_TEMP/reserve-privacy.log"
-      - name: Commit tested post-build admission directly to main
-        run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- src/core/index.rs src/core/index_storage.rs
-          git commit -m 'fix(index): recheck actual filesystem reserve after constructing staged tiers' -m 'An initial estimate cannot observe competing disk consumers or backend scratch growth. Check remaining bytes and reported inodes after a real tier build and refuse publication when the reserve is gone or capacity is unavailable. Preserve staged artifacts, the active generation and cancellation; bound ancestor lookup rather than spinning on a missing current directory. Ten storage and three privacy tests plus the production library check passed before commit. The full index group runs separately; this remains point-in-time admission, not a disk quota or reservation.'
-          for attempt in 1 2 3; do
-            if git push origin HEAD:main; then break; fi
-            test "$attempt" -lt 3
-            git fetch origin main
-            git merge --no-edit origin/main
-          done
-          git rev-parse HEAD > "$RUNNER_TEMP/reserve-source-sha.log"
-      - name: Execute complete index regression group
-        run: |
-          status=0
-          timeout 20m cargo test --locked --lib core::index:: -- --test-threads=2 > "$RUNNER_TEMP/reserve-index.log" 2>&1 || status=$?
-          tail -n 260 "$RUNNER_TEMP/reserve-index.log"
-          test "$status" -eq 0
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/reserve-index.log"
-      - name: Preserve exact source and logs
-        if: ${{ !cancelled() }}
-        run: |
-          git rev-parse HEAD > "$RUNNER_TEMP/reserve-final-sha.log"
-          git diff -- src/core/index.rs src/core/index_storage.rs > "$RUNNER_TEMP/reserve-uncommitted.patch"
-          cp src/core/index.rs "$RUNNER_TEMP/reserve-index.rs"
-          cp src/core/index_storage.rs "$RUNNER_TEMP/reserve-storage.rs"
-      - uses: actions/upload-artifact@v4
-        if: ${{ !cancelled() }}
-        with:
-          name: index-storage-reserve-verification
-          path: |
-            ${{ runner.temp }}/reserve-*.log
-            ${{ runner.temp }}/reserve-*.patch
-            ${{ runner.temp }}/reserve-*.rs
-          retention-days: 7
+      - run: echo 'This one-time index storage delivery is retired.'
