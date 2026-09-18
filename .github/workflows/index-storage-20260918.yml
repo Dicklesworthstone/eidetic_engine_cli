@@ -1,9 +1,9 @@
-name: Private index generations
+name: Index storage reserve validation
 on:
   push:
     branches: [main]
     paths:
-      - scripts/delivery/index-private-staging.patch
+      - scripts/delivery/index-storage-reserve.patch
       - .github/workflows/index-storage-20260918.yml
   workflow_dispatch:
 permissions:
@@ -38,62 +38,69 @@ jobs:
           key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Integrate reviewed private staging
+      - name: Integrate the post-build reserve check
         run: |
           set -euo pipefail
           git rev-parse HEAD
-          git apply --check scripts/delivery/index-private-staging.patch
-          git apply scripts/delivery/index-private-staging.patch
-          rustfmt --edition 2024 --config skip_children=true src/core/index.rs
+          git apply --check scripts/delivery/index-storage-reserve.patch
+          git apply scripts/delivery/index-storage-reserve.patch
+          rustfmt --edition 2024 --config skip_children=true src/core/index.rs src/core/index_storage.rs
           git diff --check
           git diff --stat
       - name: Compile production library
         run: |
           status=0
-          cargo check --locked --lib > "$RUNNER_TEMP/privacy-check.log" 2>&1 || status=$?
-          tail -n 100 "$RUNNER_TEMP/privacy-check.log"
+          cargo check --locked --lib > "$RUNNER_TEMP/reserve-check.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/reserve-check.log"
           exit "$status"
-      - name: Execute permissive-umask and publication privacy regressions
+      - name: Execute before-and-after allocation regressions
         run: |
           status=0
-          cargo test --locked --lib core::index::private_staging_tests:: -- --nocapture > "$RUNNER_TEMP/privacy-tests.log" 2>&1 || status=$?
-          tail -n 180 "$RUNNER_TEMP/privacy-tests.log"
+          cargo test --locked --lib core::index::storage::tests:: -- --nocapture > "$RUNNER_TEMP/reserve-storage.log" 2>&1 || status=$?
+          tail -n 180 "$RUNNER_TEMP/reserve-storage.log"
           test "$status" -eq 0
-          grep -Eq 'test result: ok\. 3 passed; 0 failed' "$RUNNER_TEMP/privacy-tests.log"
-      - name: Commit tested private generation creation directly to main
+          grep -Eq 'test result: ok\. 10 passed; 0 failed' "$RUNNER_TEMP/reserve-storage.log"
+      - name: Execute private generation regressions
+        run: |
+          status=0
+          cargo test --locked --lib core::index::private_staging_tests:: -- --nocapture > "$RUNNER_TEMP/reserve-privacy.log" 2>&1 || status=$?
+          tail -n 140 "$RUNNER_TEMP/reserve-privacy.log"
+          test "$status" -eq 0
+          grep -Eq 'test result: ok\. 3 passed; 0 failed' "$RUNNER_TEMP/reserve-privacy.log"
+      - name: Commit tested post-build admission directly to main
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- src/core/index.rs
-          git commit -m 'fix(index): create private generation directories before writing corpus data' -m 'On Unix create every new publication staging directory with owner-only mode 0700 atomically, independent of a permissive umask. Activation, retention and rollback preserve that mode through renames. Do not chmod existing operator parents or legacy generations; preserve symlink refusal and non-Unix behavior. Three regressions passed, including an isolated child under umask 000 and real publication, failed-commit quarantine and retention. Production library check passed before commit; the full index group is reported separately.'
+          git add -- src/core/index.rs src/core/index_storage.rs
+          git commit -m 'fix(index): recheck actual filesystem reserve after constructing staged tiers' -m 'An initial estimate cannot observe competing disk consumers or backend scratch growth. Check remaining bytes and reported inodes after a real tier build and refuse publication when the reserve is gone or capacity is unavailable. Preserve staged artifacts, the active generation and cancellation; bound ancestor lookup rather than spinning on a missing current directory. Ten storage and three privacy tests plus the production library check passed before commit. The full index group runs separately; this remains point-in-time admission, not a disk quota or reservation.'
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then break; fi
             test "$attempt" -lt 3
             git fetch origin main
             git merge --no-edit origin/main
           done
-          git rev-parse HEAD > "$RUNNER_TEMP/privacy-source-sha.log"
+          git rev-parse HEAD > "$RUNNER_TEMP/reserve-source-sha.log"
       - name: Execute complete index regression group
         run: |
           status=0
-          timeout 20m cargo test --locked --lib core::index:: -- --test-threads=2 > "$RUNNER_TEMP/privacy-index.log" 2>&1 || status=$?
-          tail -n 250 "$RUNNER_TEMP/privacy-index.log"
+          timeout 20m cargo test --locked --lib core::index:: -- --test-threads=2 > "$RUNNER_TEMP/reserve-index.log" 2>&1 || status=$?
+          tail -n 260 "$RUNNER_TEMP/reserve-index.log"
           test "$status" -eq 0
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/privacy-index.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/reserve-index.log"
       - name: Preserve exact source and logs
         if: ${{ !cancelled() }}
         run: |
-          git rev-parse HEAD > "$RUNNER_TEMP/privacy-final-sha.log"
-          git diff -- src/core/index.rs > "$RUNNER_TEMP/privacy-uncommitted.patch"
-          cp src/core/index.rs "$RUNNER_TEMP/privacy-index.rs"
-          cp src/core/index_storage.rs "$RUNNER_TEMP/privacy-storage.rs"
+          git rev-parse HEAD > "$RUNNER_TEMP/reserve-final-sha.log"
+          git diff -- src/core/index.rs src/core/index_storage.rs > "$RUNNER_TEMP/reserve-uncommitted.patch"
+          cp src/core/index.rs "$RUNNER_TEMP/reserve-index.rs"
+          cp src/core/index_storage.rs "$RUNNER_TEMP/reserve-storage.rs"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
-          name: index-private-storage-verification
+          name: index-storage-reserve-verification
           path: |
-            ${{ runner.temp }}/privacy-*.log
-            ${{ runner.temp }}/privacy-*.patch
-            ${{ runner.temp }}/privacy-*.rs
+            ${{ runner.temp }}/reserve-*.log
+            ${{ runner.temp }}/reserve-*.patch
+            ${{ runner.temp }}/reserve-*.rs
           retention-days: 7
