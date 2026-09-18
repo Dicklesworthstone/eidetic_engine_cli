@@ -1,4 +1,4 @@
-//! Storage admission before a generation allocates its vector and lexical tiers.
+//! Storage admission before and after a generation allocates its index tiers.
 //!
 //! This is a conservative preflight estimate, not a reservation or a disk quota:
 //! another process can consume capacity after the check. Existing publication
@@ -158,6 +158,32 @@ pub(super) fn admit(
     estimate.check(capacity)
 }
 
+/// Recheck actual free capacity after backend allocation. A preflight estimate
+/// cannot observe concurrent consumers or backend scratch growth; neither a
+/// depleted reserve nor a failed capacity probe may authorize publication.
+pub(super) fn confirm_reserve(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+    probe: impl FnOnce(&Path) -> Result<Capacity, IndexRebuildError>,
+) -> Result<(), IndexRebuildError> {
+    index_checkpoint(cx)?;
+    let capacity = probe(existing_directory(index_dir)?)?;
+    index_checkpoint(cx)?;
+    // Final metadata and unrelated source-of-truth writes still need room.
+    // This is a point-in-time check, not a reservation against other writers.
+    if capacity.available_bytes < FREE_SPACE_RESERVE
+        || capacity
+            .available_inodes
+            .is_some_and(|available| available < 16)
+    {
+        return Err(IndexRebuildError::Index(format!(
+            "index_storage_reserve_exhausted: after staging, publication requires {FREE_SPACE_RESERVE} free bytes and 16 available inodes when reported; only {} free bytes are available; the staged generation was not published; free space explicitly or choose a different --index-dir",
+            capacity.available_bytes,
+        )));
+    }
+    Ok(())
+}
+
 fn existing_directory(mut path: &Path) -> Result<&Path, IndexRebuildError> {
     super::ensure_index_path_has_no_symlinks(path, "inspect index storage capacity")?;
     loop {
@@ -165,10 +191,13 @@ fn existing_directory(mut path: &Path) -> Result<&Path, IndexRebuildError> {
             Ok(metadata) if metadata.is_dir() && !metadata.is_symlink() => return Ok(path),
             Ok(_) => return Err(capacity_error()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                path = path
-                    .parent()
-                    .filter(|parent| !parent.as_os_str().is_empty())
-                    .unwrap_or_else(|| Path::new("."));
+                path = match path.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => parent,
+                    Some(_) if path != Path::new(".") => Path::new("."),
+                    // Do not spin on a missing current directory or switch
+                    // filesystems when the absolute root is unavailable.
+                    _ => return Err(capacity_error()),
+                };
             }
             Err(_) => return Err(capacity_error()),
         }
@@ -177,7 +206,7 @@ fn existing_directory(mut path: &Path) -> Result<&Path, IndexRebuildError> {
 
 fn capacity_error() -> IndexRebuildError {
     IndexRebuildError::Index(
-        "index_storage_capacity_unavailable: cannot inspect the index destination filesystem; check its permissions and mount, or choose a different --index-dir; generation build was not started".to_owned(),
+        "index_storage_capacity_unavailable: cannot inspect the index destination filesystem; check its permissions and mount, or choose a different --index-dir; generation was not published".to_owned(),
     )
 }
 
@@ -285,6 +314,7 @@ mod tests {
         let capacity = filesystem_capacity(&root_path).map_err(|e| e.to_string())?;
         assert!(capacity.available_bytes > 0);
         assert!(!root_path.join("absent").exists());
+        assert!(existing_directory(Path::new("")).is_err());
         std::fs::write(root_path.join("file"), "unchanged").map_err(|e| e.to_string())?;
         assert!(existing_directory(&root_path.join("file")).is_err());
         Ok(())
@@ -437,6 +467,115 @@ mod tests {
                     .join(super::super::LEXICAL_INDEX_SUBDIR)
                     .is_dir()
             );
+            Ok::<(), String>(())
+        })
+        .map_err(|e| e.to_string())?
+    }
+
+    #[test]
+    fn storage_post_build_capacity_loss_preserves_the_active_generation() -> TestResult {
+        let root = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let parent = root.path().canonicalize().map_err(|e| e.to_string())?;
+        let active = parent.join("active");
+        std::fs::create_dir(&active).map_err(|e| e.to_string())?;
+        std::fs::write(active.join("body"), b"previous generation").map_err(|e| e.to_string())?;
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            for failure in 0..3 {
+                let staged = parent.join(format!("staged-{failure}"));
+                let mut calls = 0;
+                let result = super::super::build_index_generation_with_capacity(
+                    &cx,
+                    &staged,
+                    super::super::hash_fallback_embedder_stack(),
+                    vec![IndexableDocument::new(
+                        "doc",
+                        "Run cargo fmt before release.",
+                    )],
+                    |_| {
+                        calls += 1;
+                        if calls == 1 {
+                            return Ok(Capacity {
+                                available_bytes: u64::MAX,
+                                available_inodes: Some(1000),
+                            });
+                        }
+                        match failure {
+                            0 => Ok(Capacity {
+                                available_bytes: 0,
+                                available_inodes: Some(1000),
+                            }),
+                            1 => Ok(Capacity {
+                                available_bytes: u64::MAX,
+                                available_inodes: Some(0),
+                            }),
+                            _ => Err(capacity_error()),
+                        }
+                    },
+                )
+                .await;
+                assert!(result.is_err());
+                assert_eq!(
+                    calls, 2,
+                    "the second probe must observe capacity after tier allocation"
+                );
+                assert!(
+                    staged.join(super::super::VECTOR_INDEX_FAST_FILE).is_file(),
+                    "this must fail after a real build, not at initial admission"
+                );
+                assert_eq!(
+                    std::fs::read(active.join("body")).map_err(|e| e.to_string())?,
+                    b"previous generation"
+                );
+            }
+            Ok::<(), String>(())
+        })
+        .map_err(|e| e.to_string())?
+    }
+
+    #[test]
+    fn storage_post_build_reserve_has_exact_boundaries_and_preserves_cancellation() -> TestResult {
+        let root = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let path = root.path().canonicalize().map_err(|e| e.to_string())?;
+        crate::core::run_cli_with_cx(Duration::from_secs(5), |cx| async move {
+            let exact = Capacity {
+                available_bytes: FREE_SPACE_RESERVE,
+                available_inodes: Some(16),
+            };
+            assert!(confirm_reserve(&cx, &path, |_| Ok(exact)).is_ok());
+            assert!(
+                confirm_reserve(&cx, &path, |_| Ok(Capacity {
+                    available_inodes: None,
+                    ..exact
+                }))
+                .is_ok()
+            );
+            for deficient in [
+                Capacity {
+                    available_bytes: FREE_SPACE_RESERVE - 1,
+                    ..exact
+                },
+                Capacity {
+                    available_inodes: Some(15),
+                    ..exact
+                },
+            ] {
+                let error = confirm_reserve(&cx, &path, |_| Ok(deficient)).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("index_storage_reserve_exhausted")
+                );
+                assert!(
+                    !error
+                        .to_string()
+                        .contains(&path.to_string_lossy().to_string())
+                );
+            }
+            cx.set_cancel_reason(asupersync::CancelReason::user("stop publication admission"));
+            assert!(matches!(
+                confirm_reserve(&cx, &path, |_| panic!("cancelled request probed storage")),
+                Err(IndexRebuildError::Cancelled(_))
+            ));
             Ok::<(), String>(())
         })
         .map_err(|e| e.to_string())?

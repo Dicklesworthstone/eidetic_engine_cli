@@ -5623,15 +5623,17 @@ async fn build_index_generation_with_capacity(
     index_dir: &Path,
     stack: EmbedderStack,
     documents: Vec<crate::search::IndexableDocument>,
-    probe: impl FnOnce(&Path) -> Result<storage::Capacity, IndexRebuildError>,
+    mut probe: impl FnMut(&Path) -> Result<storage::Capacity, IndexRebuildError>,
 ) -> Result<BuildStats, IndexRebuildError> {
     index_checkpoint(cx)?;
-    storage::admit(cx, index_dir, &stack, &documents, probe)?;
-    if documents.is_empty() {
+    storage::admit(cx, index_dir, &stack, &documents, &mut probe)?;
+    let stats = if documents.is_empty() {
         build_empty_index(cx, index_dir, stack).await
     } else {
         build_index(cx, index_dir, stack, documents).await
-    }
+    }?;
+    storage::confirm_reserve(cx, index_dir, probe)?;
+    Ok(stats)
 }
 
 async fn build_empty_index(
