@@ -99,8 +99,39 @@ pub(super) fn from_ledger(item: &Value) -> Result<ContextDeltaItemSnapshot, Stri
         )
         .with_field(
             "trustSubclass",
-            item.get("trustSubclass").cloned().unwrap_or_default(),
+            redacted_trust_subclass(item.get("trustSubclass")),
         ))
+}
+
+/// Project a ledger `trustSubclass` the same way the item path projects it.
+///
+/// bd-rm8wj cause 1. `from_item` redacts this field with
+/// `redact_public_replay_field`; the ledger path used to pass it through raw.
+/// Two projections of the SAME logical item therefore compared unequal, so an
+/// unchanged item reported as MODIFIED in every context delta.
+///
+/// The trigger is narrow and that is why it survived: the redactor is
+/// selective. `project-rule` does not trip it, which is why
+/// `pack_diff_redaction_change.json.golden` carries that value raw and stays
+/// green. `imported_transcript_excerpt` does trip it, which is what the unit
+/// tests use.
+///
+/// Redacting on BOTH sides is safe whichever form the persisted ledger holds,
+/// because `redact_public_replay_field` is idempotent on its own output:
+/// `redact_public_replay_text` returns an existing
+/// `[REDACTED:public_replay_text:<64 hex>]` unchanged with the reason
+/// `public_replay_text_already_redacted`, and the non-hash field path returns
+/// that report directly. So a stored-raw value gets redacted into agreement and
+/// a stored-redacted value passes through untouched. That idempotence is the
+/// reason this is a repair rather than a decision about which side wins.
+pub(super) fn redacted_trust_subclass(raw: Option<&Value>) -> Value {
+    match raw.and_then(Value::as_str) {
+        Some(value) => {
+            json!(crate::policy::redact_public_replay_field("trustSubclass", value).content)
+        }
+        // Absent or explicitly null stays null; only a string is projected.
+        None => raw.cloned().unwrap_or_default(),
+    }
 }
 
 #[cfg(test)]

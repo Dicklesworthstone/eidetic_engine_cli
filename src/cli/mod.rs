@@ -42991,9 +42991,14 @@ fn context_delta_item_snapshot_from_pack_ledger(
             "trustClass",
             item.get("trustClass").cloned().unwrap_or_default(),
         )
+        // bd-rm8wj cause 1: the MEMORY path carried the identical asymmetry to
+        // the evidence path -- the item projection above redacts trustSubclass
+        // and this ledger projection passed it through raw, so an unchanged
+        // item compared as MODIFIED. Fixed in the same commit as its evidence
+        // twin, because fixing one of two identical sites is not a fix.
         .with_field(
             "trustSubclass",
-            item.get("trustSubclass").cloned().unwrap_or_default(),
+            context_delta_evidence::redacted_trust_subclass(item.get("trustSubclass")),
         ))
 }
 
