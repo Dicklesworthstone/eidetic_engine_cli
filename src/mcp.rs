@@ -5165,7 +5165,15 @@ mod tests {
         let Some(error) = parsed.get("error") else {
             return Err("context degraded envelope missing error object".to_string());
         };
-        assert_eq!(error.get("code").and_then(Value::as_str), Some("storage"));
+        // The same staleness as the exitCode assertion above, from the same
+        // commit: 63418ec04 introduced "DomainError::WorkspaceStoreMissing ->
+        // error code workspace_store_missing, process exit code 10". Both the
+        // numeric code and the string moved together, so a test written before
+        // it carries two stale expectations, not one.
+        assert_eq!(
+            error.get("code").and_then(Value::as_str),
+            Some("workspace_store_missing")
+        );
         assert!(
             error
                 .get("message")
