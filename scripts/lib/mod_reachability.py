@@ -90,41 +90,125 @@ def target_roots() -> list[pathlib.Path] | None:
     return [r for r in roots if r.is_file()] or None
 
 
-def children(path: pathlib.Path) -> list[pathlib.Path]:
+CFG_ATTR = re.compile(r"^\s*#\[cfg\((?P<expr>.+)\)\]\s*$")
+PATH_ATTR = re.compile(r'^\s*#\[path\s*=\s*"(?P<target>[^"]+)"\]\s*$')
+OTHER_ATTR = re.compile(r"^\s*#\[")
+MOD_LINE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>\w+)\s*;")
+
+
+def children(path: pathlib.Path) -> list[tuple[pathlib.Path, str | None]]:
+    """(child, cfg_expression_or_None) for every module this file declares.
+
+    bd-waksx. The cfg matters. `src/core/index.rs:61` reads
+
+        #[cfg(unix)]
+        #[path = "index_read_lease.rs"]
+        mod read_lease;
+
+    so that file is reachable on unix and NOT reachable on a windows target.
+    A resolver that follows the `#[path]` and ignores the `#[cfg]` above it
+    answers for one platform and reports a number that reads as universal.
+    This repo ships six platforms through the cross-compile flow, so that is
+    not a hypothetical.
+
+    Scanning line by line rather than with a multi-line regex, because the cfg
+    attribute, the path attribute and the mod line are three separate lines and
+    only their ADJACENCY binds them.
+    """
     try:
-        text = path.read_text(errors="replace")
+        lines = path.read_text(errors="replace").splitlines()
     except OSError:
         return []
     here = path.parent
-    found: list[pathlib.Path] = []
-    # A `#[path = "..."] mod name;` both names the module and redirects it, so
-    # the plain-mod pass below must not also resolve `name` to `name.rs`.
-    redirected: set[str] = set()
-    for match in PATH_MOD.finditer(text):
-        redirected.add(match.group(2))
-        candidate = (here / match.group(1)).resolve()
-        if candidate.is_file():
-            found.append(candidate)
-    for match in PLAIN_MOD.finditer(text):
-        name = match.group(1)
-        if name in redirected:
+    found: list[tuple[pathlib.Path, str | None]] = []
+    pending_cfg: str | None = None
+    pending_path: str | None = None
+
+    for raw in lines:
+        cfg = CFG_ATTR.match(raw)
+        if cfg:
+            # Nested cfgs on one declaration are rare; join rather than drop one.
+            pending_cfg = (
+                cfg.group("expr")
+                if pending_cfg is None
+                else f"{pending_cfg} + {cfg.group('expr')}"
+            )
             continue
-        for candidate in (here / f"{name}.rs", here / name / "mod.rs"):
-            if candidate.is_file():
-                found.append(candidate.resolve())
-                break
+        redirect = PATH_ATTR.match(raw)
+        if redirect:
+            pending_path = redirect.group("target")
+            continue
+        declaration = MOD_LINE.match(raw)
+        if declaration:
+            if pending_path is not None:
+                candidate = (here / pending_path).resolve()
+                if candidate.is_file():
+                    found.append((candidate, pending_cfg))
+            else:
+                name = declaration.group("name")
+                for candidate in (here / f"{name}.rs", here / name / "mod.rs"):
+                    if candidate.is_file():
+                        found.append((candidate.resolve(), pending_cfg))
+                        break
+            pending_cfg = None
+            pending_path = None
+            continue
+        if OTHER_ATTR.match(raw) or not raw.strip():
+            # Another attribute or a blank line does not break the run of
+            # attributes attached to the declaration below.
+            continue
+        # Any other code ends the attribute run.
+        pending_cfg = None
+        pending_path = None
     return found
 
 
-def reachable_set(roots: list[pathlib.Path]) -> set[pathlib.Path]:
-    seen = {r.resolve() for r in roots}
-    stack = list(seen)
-    while stack:
-        for child in children(stack.pop()):
-            if child not in seen:
-                seen.add(child)
-                stack.append(child)
-    return seen
+def reachable_set(
+    roots: list[pathlib.Path],
+) -> tuple[set[pathlib.Path], dict[pathlib.Path, set[str]]]:
+    """(reachable under this host's cfg, {file: cfgs} for cfg-ONLY reachability).
+
+    A file reached by at least one unconditional chain is unconditionally
+    reachable and is absent from the second map. A file every chain to which
+    passes through a cfg is CONDITIONALLY reachable, and the gates are recorded
+    so the report can name them.
+    """
+    unconditional: set[pathlib.Path] = {r.resolve() for r in roots}
+    conditional: dict[pathlib.Path, set[str]] = {}
+    queue: list[tuple[pathlib.Path, bool, tuple[str, ...]]] = [
+        (r, False, ()) for r in unconditional
+    ]
+
+    while queue:
+        node, node_is_conditional, gates = queue.pop()
+        for child, cfg in children(node):
+            child_gates = gates + ((cfg,) if cfg else ())
+            child_is_conditional = node_is_conditional or cfg is not None
+            if not child_is_conditional:
+                if child in unconditional:
+                    continue
+                unconditional.add(child)
+                conditional.pop(child, None)
+                queue.append((child, False, child_gates))
+            else:
+                if child in unconditional:
+                    continue
+                known = conditional.get(child)
+                if known is not None and set(child_gates) <= known:
+                    continue
+                conditional.setdefault(child, set()).update(child_gates)
+                queue.append((child, True, child_gates))
+
+    return unconditional | set(conditional), conditional
+
+
+def host_cfg_label() -> str:
+    """The cfg set this evaluation actually answers for, named in the output."""
+    import platform
+
+    system = platform.system().lower()
+    family = "unix" if system in {"darwin", "linux", "freebsd"} else system
+    return f"target_family={family}, target_os={system}"
 
 
 def tracked_in_scope() -> list[str]:
@@ -178,7 +262,7 @@ def main() -> int:
         print("[mod-reachability] cargo unavailable or timed out — inconclusive, not blocking", file=sys.stderr)
         return 2
 
-    reachable = reachable_set(roots)
+    reachable, cfg_only = reachable_set(roots)
     tracked = tracked_in_scope()
 
     def is_reachable(rel: str) -> bool:
@@ -281,11 +365,35 @@ def main() -> int:
 
     # Print the population, not just a verdict: a green whose denominator is
     # invisible is the failure this gate exists to remove.
+    # bd-waksx: the count MUST carry its scope. A bare "0 unaccounted" reads as
+    # universal and is not -- it answers for the cfg set this host evaluates.
+    # The scope is put inside the same sentence as the number precisely so the
+    # number cannot be quoted without it.
     print(
         f"[mod-reachability] {len(tracked)} tracked .rs under {', '.join(IN_SCOPE)}: "
         f"{len(tracked) - len(unreachable)} reachable, {len(unreachable)} allowlisted, "
-        f"0 unaccounted."
+        f"0 unaccounted UNDER cfg({host_cfg_label()}) -- this is a per-target "
+        f"answer, not a universal one."
     )
+    in_scope_cfg_only = sorted(
+        (path, gates)
+        for path, gates in cfg_only.items()
+        if str(path.relative_to(REPO)).startswith(IN_SCOPE)
+    )
+    if in_scope_cfg_only:
+        print(
+            f"  {len(in_scope_cfg_only)} of those are reached ONLY through a cfg-gated "
+            "declaration, so another target may not compile them at all:"
+        )
+        for path, gates in in_scope_cfg_only:
+            print(f"    {path.relative_to(REPO)}   via #[cfg({' , '.join(sorted(gates))})]")
+        print(
+            "  These are NOT findings here -- they are reachable on this host. They are "
+            "the part of the answer that does not generalise, named so nobody quotes the "
+            "zero as if it did."
+        )
+    else:
+        print("  No file depends on a cfg gate to be reachable, so the zero does generalise.")
     return 0
 
 
