@@ -1,13 +1,16 @@
 diff --git a/src/core/ask_admission.rs b/src/core/ask_admission.rs
 --- a/src/core/ask_admission.rs
 +++ b/src/core/ask_admission.rs
-@@ -14,3 +14,6 @@
+@@ -14,6 +14,9 @@
  
  use super::super::AskCandidate;
  
 +#[path = "ask_evidence.rs"]
 +pub(super) mod evidence;
 +
+ pub(super) fn rule_candidate(
+     projection: &crate::search::RuleIndexProjection,
+ ) -> Option<(AskCandidate, super::super::AskNativeSource)> {
 diff --git a/src/core/ask_corpus.rs b/src/core/ask_corpus.rs
 --- a/src/core/ask_corpus.rs
 +++ b/src/core/ask_corpus.rs
