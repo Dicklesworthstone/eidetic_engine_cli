@@ -11,9 +11,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::{IndexRebuildError, ensure_index_path_has_no_symlinks, index_checkpoint, index_parent};
@@ -32,6 +30,83 @@ pub(crate) struct IndexGenerationLease {
 }
 
 impl IndexGenerationLease {
+    /// An already-pinned database snapshot can predate the live directory even
+    /// after it acquires a reader lease. Use only a committed, validated retained
+    /// generation no newer than that snapshot. Never promote files or inspect
+    /// staging/rejected directories as candidate evidence on a read path.
+    pub(crate) fn index_for_snapshot(
+        &self,
+        cx: &asupersync::Cx,
+        index_dir: &Path,
+        maximum_generation: u64,
+    ) -> Result<PathBuf, IndexRebuildError> {
+        index_checkpoint(cx)?;
+        let parent = index_parent(index_dir);
+        verify_parent_identity(parent, &self._directory)?;
+        ensure_index_path_has_no_symlinks(index_dir, "select snapshot index")?;
+        let current = super::parse_index_metadata(index_dir)
+            .map_err(IndexRebuildError::Index)?
+            .and_then(|metadata| metadata.generation)
+            .ok_or_else(|| {
+                IndexRebuildError::Index(
+                    "Index generation is unavailable for the source snapshot; rebuild the index"
+                        .to_owned(),
+                )
+            })?;
+        if current <= maximum_generation {
+            return Ok(index_dir.to_path_buf());
+        }
+
+        let prefix = format!(
+            "{}{}",
+            super::index_base_name(index_dir)?,
+            super::INDEX_RETAINED_SUFFIX
+        );
+        let mut candidates = Vec::new();
+        let entries = std::fs::read_dir(parent)
+            .map_err(|error| lease_error("inspect retained generations", error))?;
+        for entry in entries {
+            index_checkpoint(cx)?;
+            let entry = entry.map_err(|error| lease_error("inspect retained generation", error))?;
+            let Some(sequence) =
+                super::retained_generation_sequence(&entry.file_name().to_string_lossy(), &prefix)
+            else {
+                continue;
+            };
+            let path = entry.path();
+            ensure_index_path_has_no_symlinks(&path, "select retained snapshot index")?;
+            if !entry
+                .file_type()
+                .map_err(|error| lease_error("inspect retained generation", error))?
+                .is_dir()
+            {
+                continue;
+            }
+            // Cheap metadata admission first; open actual tiers only for the
+            // newest eligible candidates. Corrupt or legacy rows cannot become
+            // an implicit generation-zero fallback.
+            let Some(generation) = super::parse_index_metadata(&path)
+                .ok()
+                .flatten()
+                .and_then(|metadata| metadata.generation)
+                .filter(|generation| *generation <= maximum_generation)
+            else {
+                continue;
+            };
+            candidates.push((generation, sequence, path));
+        }
+        candidates.sort();
+        for (generation, _, path) in candidates.into_iter().rev() {
+            index_checkpoint(cx)?;
+            if super::validated_index_generation(&path).ok() == Some(generation) {
+                return Ok(path);
+            }
+        }
+        Err(IndexRebuildError::Index(
+            "The live index is newer than the source snapshot and no compatible retained generation is available; retry with a fresh snapshot".to_owned(),
+        ))
+    }
+
     pub(crate) async fn read(
         cx: &asupersync::Cx,
         index_dir: &Path,

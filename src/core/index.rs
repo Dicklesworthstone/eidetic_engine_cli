@@ -12188,6 +12188,116 @@ mod tests {
         flock(&probe, FlockOperation::Unlock).map_err(|error| error.to_string())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_generation_selects_latest_eligible_without_mutation() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let live = parent.join("index");
+        let older = parent.join("index.previous");
+        let newer = parent.join("index.previous.001");
+        for (path, generation) in [(&live, 9), (&older, 7), (&newer, 8)] {
+            build_current_test_index(
+                path,
+                generation,
+                vec![test_indexable_doc(
+                    "mem_snapshot",
+                    "snapshot generation evidence",
+                )],
+            )?;
+        }
+        let before = index_regular_file_snapshot(&parent)?;
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let lease = IndexGenerationLease::read(&cx, &live)
+                .await
+                .map_err(|error| error.to_string())?;
+            for (generation, expected) in [(9, &live), (10, &live), (8, &newer), (7, &older)] {
+                assert_eq!(
+                    &lease
+                        .index_for_snapshot(&cx, &live, generation)
+                        .map_err(|error| error.to_string())?,
+                    expected
+                );
+            }
+            assert!(lease.index_for_snapshot(&cx, &live, 6).is_err());
+            assert_eq!(index_regular_file_snapshot(&parent)?, before);
+            Ok::<(), String>(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_generation_rejects_incompatible_retention_and_uncommitted_staging() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let live = parent.join("index");
+        let eligible = parent.join("index.previous");
+        let incompatible = parent.join("index.previous.001");
+        for (path, generation) in [
+            (&live, 9),
+            (&eligible, 7),
+            (&incompatible, 8),
+            (&parent.join(".index.staging-uncommitted"), 8),
+            (&parent.join(".index.rejected-uncommitted"), 8),
+        ] {
+            build_current_test_index(
+                path,
+                generation,
+                vec![test_indexable_doc(
+                    "mem_snapshot",
+                    "snapshot generation evidence",
+                )],
+            )?;
+        }
+        let metadata_path = incompatible.join(INDEX_METADATA_FILE);
+        let mut metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&metadata_path).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        metadata["evidenceSecurityPolicyEpoch"] = serde_json::json!(0);
+        std::fs::write(
+            &metadata_path,
+            serde_json::to_vec(&metadata).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let selected = crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| {
+            let live = &live;
+            async move {
+                let lease = IndexGenerationLease::read(&cx, live).await?;
+                lease.index_for_snapshot(&cx, live, 8)
+            }
+        })
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+        assert_eq!(selected, eligible);
+        // With the only eligible retained generation unavailable, neither a
+        // security-incompatible generation nor a finished staging tree counts.
+        std::fs::rename(&eligible, parent.join("unrelated-retained"))
+            .map_err(|error| error.to_string())?;
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let lease = IndexGenerationLease::read(&cx, &live)
+                .await
+                .map_err(|error| error.to_string())?;
+            let error = lease
+                .index_for_snapshot(&cx, &live, 8)
+                .expect_err("no compatible snapshot generation");
+            assert!(
+                error
+                    .to_string()
+                    .contains("no compatible retained generation")
+            );
+            Ok::<(), String>(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
     #[test]
     fn index_publish_lock_exhaustion_reports_stable_contention() -> TestResult {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;

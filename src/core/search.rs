@@ -8978,14 +8978,25 @@ async fn run_search_inner_with_performance(
         None
     };
     let read_connection = read_connection.or(owned_read_connection.as_ref());
-    if let Some(connection) = read_connection {
-        crate::core::workspace::addressed_workspace_row(
+    let source_generation = if let Some(connection) = read_connection {
+        let workspace = crate::core::workspace::addressed_workspace_row(
             connection,
             &options.workspace_path,
             &options.resolve_database_path(),
         )
         .map_err(|error| SearchError::WorkspaceBinding(Box::new(error)))?;
-    }
+        workspace
+            .map(|workspace| connection.get_workspace_generation(&workspace.id))
+            .transpose()
+            .map_err(|error| {
+                SearchError::Index(format!(
+                    "Failed to read the source snapshot generation: {error}"
+                ))
+            })?
+            .flatten()
+    } else {
+        None
+    };
     let start = Instant::now();
     let mut trace = SearchPerformanceTrace::default();
     let setup_start = Instant::now();
@@ -9019,6 +9030,18 @@ async fn run_search_inner_with_performance(
     // lookup; the shared lease excludes publication and rollback until collect.
     #[cfg(unix)]
     let generation_lease = pin_search_generation(cx, &index_dir).await?;
+    // A shared lease prevents subsequent swaps, but the source snapshot may
+    // have been established BEFORE this publisher committed. Read the newest
+    // valid retained generation the snapshot can actually describe instead.
+    #[cfg(unix)]
+    let index_dir = match source_generation {
+        Some(generation) => generation_lease
+            .index_for_snapshot(cx, &index_dir, generation)
+            .map_err(|error| SearchError::Index(error.to_string()))?,
+        None => index_dir,
+    };
+    #[cfg(not(unix))]
+    let _ = source_generation;
     if let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&index_dir) {
         trace.record_elapsed("search::indexExists", index_exists_start);
         return Err(index_compatibility_search_error(&index_dir, reason));
@@ -13592,6 +13615,179 @@ mod tests {
         flock(&publisher, FlockOperation::NonBlockingLockExclusive)
             .map_err(|error| error.to_string())?;
         flock(&publisher, FlockOperation::Unlock).map_err(|error| error.to_string())
+    }
+
+    #[cfg(all(unix, feature = "lexical-bm25"))]
+    #[test]
+    fn snapshot_generation_context_search_uses_its_database_snapshot() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database = workspace.join("ee.db");
+        let live = workspace.join("index");
+        let retained = workspace.join("index.previous");
+        let workspace_id = "wsp_00000000000000000000000001";
+        let previous_id = "mem_00000000000000000000000001";
+        let current_id = "mem_00000000000000000000000002";
+        let writer = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        writer.migrate().map_err(|error| error.to_string())?;
+        writer
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        writer
+            .insert_memory(
+                previous_id,
+                &test_memory_input(workspace_id, "launchsnapshot previous release protocol"),
+            )
+            .map_err(|error| error.to_string())?;
+        let previous = writer
+            .get_memory(previous_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("previous memory missing")?;
+        let previous_generation = writer
+            .get_workspace_generation(workspace_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("previous generation missing")?;
+        let options = SearchOptions {
+            workspace_path: workspace,
+            database_path: Some(database.clone()),
+            index_dir: Some(live.clone()),
+            query: "launchsnapshot".to_owned(),
+            memory_scope: MemoryScope::Workspace,
+            relevance_floor: Some(0.0),
+            ..source_mode_test_options(SearchSourceMode::LexicalOnly, true)
+        };
+        crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+            async fn build(
+                cx: &asupersync::Cx,
+                path: &Path,
+                memory: &StoredMemory,
+                generation: u64,
+            ) -> TestResult {
+                let documents = vec![crate::search::memory_to_document(memory).into_indexable()];
+                IndexBuilder::new(path)
+                    .with_embedder_stack(EmbedderStack::from_parts(
+                        Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>,
+                        None,
+                    ))
+                    .add_documents(documents.clone())
+                    .build(cx)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                crate::core::index::build_lexical_tier(cx, path, &documents)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                crate::core::index::write_memory_eval_index_metadata_for_generation(
+                    path, generation, 1,
+                )
+                .map_err(|error| error.to_string())
+            }
+            build(&cx, &retained, &previous, previous_generation).await?;
+            let reader =
+                DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+            reader
+                .begin_read_snapshot()
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                reader
+                    .get_workspace_generation(workspace_id)
+                    .map_err(|error| error.to_string())?,
+                Some(previous_generation)
+            );
+            // Deterministic real two-connection interleaving: this commit is
+            // invisible to the existing reader, but the published directory is
+            // current. A pathname lease by itself cannot resolve that mismatch.
+            writer
+                .with_transaction(|| {
+                    writer.tombstone_memory(previous_id)?;
+                    writer.insert_memory(
+                        current_id,
+                        &test_memory_input(workspace_id, "launchsnapshot current release protocol"),
+                    )?;
+                    Ok(())
+                })
+                .map_err(|error| error.to_string())?;
+            let current = writer
+                .get_memory(current_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("current memory missing")?;
+            let current_generation = writer
+                .get_workspace_generation(workspace_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("current generation missing")?;
+            assert!(current_generation > previous_generation);
+            build(&cx, &live, &current, current_generation).await?;
+            let before_live =
+                std::fs::read(live.join("meta.json")).map_err(|error| error.to_string())?;
+            let before_retained =
+                std::fs::read(retained.join("meta.json")).map_err(|error| error.to_string())?;
+            let old = run_context_search_with_preloaded_memories_with_cx(
+                &cx,
+                &options,
+                &reader,
+                None,
+                Deterministic::from_seed(89).shared_child("snapshot"),
+                None,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            assert_eq!(
+                old.report
+                    .results
+                    .iter()
+                    .map(|hit| hit.doc_id.as_str())
+                    .collect::<Vec<_>>(),
+                [previous_id]
+            );
+            assert_eq!(
+                old.preloaded_memories
+                    .get(previous_id)
+                    .map(|memory| &memory.content),
+                Some(&previous.content)
+            );
+            assert!(!old.preloaded_memories.contains_key(current_id));
+            reader
+                .commit_read_snapshot()
+                .map_err(|error| error.to_string())?;
+            let fresh = run_context_search_with_preloaded_memories_with_cx(
+                &cx,
+                &options,
+                &reader,
+                None,
+                Deterministic::from_seed(89).shared_child("snapshot"),
+                None,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            assert_eq!(
+                fresh
+                    .report
+                    .results
+                    .iter()
+                    .map(|hit| hit.doc_id.as_str())
+                    .collect::<Vec<_>>(),
+                [current_id]
+            );
+            assert!(!fresh.preloaded_memories.contains_key(previous_id));
+            assert_eq!(
+                std::fs::read(live.join("meta.json")).map_err(|error| error.to_string())?,
+                before_live
+            );
+            assert_eq!(
+                std::fs::read(retained.join("meta.json")).map_err(|error| error.to_string())?,
+                before_retained
+            );
+            Ok::<(), String>(())
+        })
+        .map_err(|error| error.to_string())?
     }
 
     fn run_collection_cancellation_probe(
