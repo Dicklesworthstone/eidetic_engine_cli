@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "discovery_lists_unreadable",
+  "introduced_by": {
+    "bead": "bd-xwzeh",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh status"
+  ],
+  "severity": "error",
+  "repair_present": true,
+  "trigger": {
+    "description": "The workspace discovery lists exist but cannot be honoured, so no peer is probed. load_node_key_list spells every benign case Ok(empty) -- absent file, non-regular path, NotFound, no node_keys key -- so an error here always means an operator supplied a list that could not be read, parsed or bounded. Probing with an empty denylist would contact exactly the peers the workspace denies, which is the fail-open bd-xwzeh closed.",
+    "setup_commands": [
+      "mkdir -p .ee",
+      "printf 'node_keys = this is not toml [' > .ee/discovery_denylist.toml"
+    ],
+    "invocation": "EE_MESH_ENABLED=1 ee mesh status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "discovery_lists_unreadable",
+    "severity": "error",
+    "message_contains": [
+      "no peer was probed",
+      "empty denylist"
+    ],
+    "repair_contains": ".ee/"
+  }
+}

@@ -731,7 +731,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `tailscale_probe_unavailable` | info | bd-36bbk.1.1 |
 | `tailscale_shields_up` | warning | bd-36bbk.1.1 |
 
-#### Tailscale peer autodiscovery (5)
+#### Tailscale peer autodiscovery (6)
 | Code | Severity | Bead |
 |------|----------|------|
 | `tailscale_peer_probe_timeout` | warning | bd-36bbk.1.2 |
@@ -739,6 +739,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `tailscale_peer_list_unavailable` | warning | bd-36bbk.1.2 |
 | `peer_discovery_workspace_mismatch` | info | bd-36bbk.1.2 |
 | `peer_discovery_budget_exhausted` | warning | bd-36bbk.1.2 |
+| `discovery_lists_unreadable` | error | bd-xwzeh |
 
 #### Mesh hello negotiation (1)
 | Code | Severity | Bead |

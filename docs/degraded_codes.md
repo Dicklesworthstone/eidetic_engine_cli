@@ -12234,6 +12234,39 @@ EE_MESH_ENABLED=1 EE_TAILSCALE_DISCOVERY_BUDGET_MS=500 ee mesh status --workspac
 
 ---
 
+## `discovery_lists_unreadable`
+
+**Severity:** error
+
+**Surfaces:** mesh status
+
+**Introduced by:** bd-xwzeh (epic SRR6.46)
+
+**Trigger.** The workspace discovery lists exist but cannot be honoured, so no peer is probed. `load_node_key_list` spells every benign case `Ok(empty)` — absent file, non-regular path, `NotFound`, a file with no `node_keys` key — so an error reaching the caller always means an operator supplied a list that could not be read, parsed or bounded, including the oversized-payload refusal added as hardening by bd-3gmzf.
+
+Probing anyway with an empty denylist would contact exactly the peers the workspace denies, because the denylist is the only per-peer exclusion `decide_discovery` applies on the outbound side. That was the fail-open bd-xwzeh closed; it is the probe-side counterpart of bd-zjcx6, which closed the response side.
+
+**Setup.**
+
+```bash
+mkdir -p .ee
+printf 'node_keys = this is not toml [' > .ee/discovery_denylist.toml
+```
+
+**Invocation.**
+
+```bash
+EE_MESH_ENABLED=1 ee mesh status --workspace . --json
+```
+
+**Expected emission.** Message contains: `no peer was probed ... empty denylist`
+
+**Repair hint.** Fix or remove the offending file under `.ee/`
+
+**Fixture.** [`tests/fixtures/failure_modes/discovery_lists_unreadable.json`](../tests/fixtures/failure_modes/discovery_lists_unreadable.json)
+
+---
+
 ## `peer_discovery_workspace_mismatch`
 
 **Severity:** info
