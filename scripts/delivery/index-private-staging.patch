@@ -1,0 +1,127 @@
+--- a/src/core/index.rs
++++ b/src/core/index.rs
+@@ -3928,7 +3928,15 @@
+         let candidate = parent.join(format!(
+             ".{base}{INDEX_STAGING_PREFIX}{stamp}-{sequence:03}"
+         ));
+-        match std::fs::create_dir(&candidate) {
++        let mut directory = std::fs::DirBuilder::new();
++        // Index tiers may contain source text. Set privacy at creation rather
++        // than chmodding afterward, which leaves a disclosure window.
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::DirBuilderExt;
++            directory.mode(0o700);
++        }
++        match directory.create(&candidate) {
+             Ok(()) => return Ok(candidate),
+             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+             Err(error) => {
+@@ -3942,6 +3950,107 @@
+     Err(IndexRebuildError::Index(
+         "Failed to allocate a unique index staging directory".to_string(),
+     ))
++}
++
++#[cfg(all(test, unix))]
++mod private_staging_tests {
++    use super::*;
++    use std::os::unix::fs::{PermissionsExt, symlink};
++
++    type TestResult = Result<(), String>;
++
++    fn private(path: &Path) -> TestResult {
++        let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
++        assert!(metadata.is_dir());
++        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
++        Ok(())
++    }
++
++    #[test]
++    fn private_staging_is_owner_only_even_under_a_permissive_umask() -> TestResult {
++        const CHILD: &str = "EE_PRIVATE_INDEX_STAGING_TEST_CHILD";
++        if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new("1")) {
++            // Change umask only in a child process: the shared Rust test process
++            // must not race unrelated filesystem tests over a global setting.
++            let output = std::process::Command::new("sh")
++                .arg("-c")
++                .arg("umask 000; exec \"$1\" --exact \"$2\" --nocapture")
++                .arg("ee-private-index-test")
++                .arg(std::env::current_exe().map_err(|error| error.to_string())?)
++                .arg("core::index::private_staging_tests::private_staging_is_owner_only_even_under_a_permissive_umask")
++                .env(CHILD, "1")
++                .output()
++                .map_err(|error| error.to_string())?;
++            assert!(output.status.success(), "child failed: {} {}",
++                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
++            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
++            return Ok(());
++        }
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let parent = root.path().canonicalize().map_err(|error| error.to_string())?.join("shared");
++        std::fs::create_dir(&parent).map_err(|error| error.to_string())?;
++        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
++            .map_err(|error| error.to_string())?;
++        let first = create_publish_staging_dir(&parent.join("index")).map_err(|error| error.to_string())?;
++        let second = create_publish_staging_dir(&parent.join("index")).map_err(|error| error.to_string())?;
++        assert_ne!(first, second);
++        private(&first)?;
++        private(&second)?;
++        assert_eq!(std::fs::metadata(parent).map_err(|error| error.to_string())?.permissions().mode() & 0o777, 0o755,
++            "the operator's existing parent must not be chmodded");
++        Ok(())
++    }
++
++    #[test]
++    fn private_staging_survives_activation_retention_and_failed_commit() -> TestResult {
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
++        let index = parent.join("index");
++        let first = create_publish_staging_dir(&index).map_err(|error| error.to_string())?;
++        private(&first)?;
++        std::fs::write(first.join("body"), b"first").map_err(|error| error.to_string())?;
++        publish_staged_index(&index, &first).map_err(|error| error.to_string())?;
++        private(&index)?;
++
++        let second = create_publish_staging_dir(&index).map_err(|error| error.to_string())?;
++        std::fs::write(second.join("body"), b"rejected").map_err(|error| error.to_string())?;
++        let error = publish_staged_index_with_commit(&index, &second, || {
++            private(&index).map_err(IndexRebuildError::Index)?;
++            Err(IndexRebuildError::Index("controlled job commit failure".to_owned()))
++        });
++        assert!(error.is_err());
++        assert_eq!(std::fs::read(index.join("body")).map_err(|error| error.to_string())?, b"first");
++        private(&index)?;
++
++        let third = create_publish_staging_dir(&index).map_err(|error| error.to_string())?;
++        std::fs::write(third.join("body"), b"current").map_err(|error| error.to_string())?;
++        publish_staged_index(&index, &third).map_err(|error| error.to_string())?;
++        let mut contents = BTreeSet::new();
++        for entry in std::fs::read_dir(&parent).map_err(|error| error.to_string())? {
++            let entry = entry.map_err(|error| error.to_string())?;
++            private(&entry.path())?;
++            contents.insert(std::fs::read(entry.path().join("body")).map_err(|error| error.to_string())?);
++        }
++        assert_eq!(contents, BTreeSet::from([b"first".to_vec(), b"rejected".to_vec(), b"current".to_vec()]));
++        Ok(())
++    }
++
++    #[test]
++    fn private_staging_does_not_follow_or_modify_an_untrusted_parent() -> TestResult {
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
++        let real = parent.join("real");
++        std::fs::create_dir(&real).map_err(|error| error.to_string())?;
++        std::fs::write(real.join("existing"), b"unchanged").map_err(|error| error.to_string())?;
++        symlink(&real, parent.join("alias")).map_err(|error| error.to_string())?;
++        let before = std::fs::metadata(&real).map_err(|error| error.to_string())?.permissions();
++        assert!(create_publish_staging_dir(&parent.join("alias/index")).is_err());
++        assert_eq!(std::fs::metadata(&real).map_err(|error| error.to_string())?.permissions(), before);
++        assert_eq!(std::fs::read(real.join("existing")).map_err(|error| error.to_string())?, b"unchanged");
++        assert_eq!(std::fs::read_dir(&real).map_err(|error| error.to_string())?.count(), 1);
++        assert!(create_publish_staging_dir(&real.join("existing/index")).is_err());
++        Ok(())
++    }
+ }
+ 
+ #[cfg(test)]
