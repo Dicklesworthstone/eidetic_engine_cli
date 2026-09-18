@@ -873,16 +873,28 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "tags_by_memory",
         "Imported memories without tag records have an explicit empty tag set.",
     ),
+    // SHADOWED-PAIR RE-AIM (bd-epvc1). These two guards sit 3 lines apart, so
+    // the +/-4 window of the SECOND finding reaches back over the FIRST rule's
+    // anchor line, and first-match-wins handed BOTH sites to ...-DISABLED --
+    // which then told a reader that line 5565 returns empty because auto-linking
+    // is off, when at 5565 it is on and the workflow id is absent. The shadowed
+    // rule was never wrong; it was unreachable.
+    //
+    // The repair is never to loosen either reason. It is to anchor each rule on
+    // a line the OTHER finding's window cannot see: backward for the earlier of
+    // an adjacent pair, forward for the later. Six rules in this inventory had
+    // this exact shape; the ledger header states the general form and the one
+    // case (an evenly spaced triple) where a single-line anchor cannot exist.
     allowed(
         "NSF-CORE-MEMORY-AUTO-LINK-DISABLED",
         "src/core/memory.rs",
-        "if !enabled",
+        ") -> Result<Vec<RememberAutoLink>, DomainError> {\nif !enabled {",
         "Disabled remember auto-linking intentionally creates no links before any repository query is attempted.",
     ),
     allowed(
         "NSF-CORE-MEMORY-AUTO-LINK-NO-WORKFLOW",
         "src/core/memory.rs",
-        "let Some(workflow_id) = workflow_id else",
+        "let candidates = connection\n.list_recent_workflow_memories(",
         "Remember auto-linking without a workflow ID has no workflow neighborhood to query; repository errors after a workflow is present still propagate.",
     ),
     allowed(
@@ -934,12 +946,16 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "allow_phrases: config",
         "Missing secret-detector allowlist arrays intentionally mean no configured bypass phrases or regexes.",
     ),
-    allowed(
-        "NSF-CORE-MEMORY-SECRET-ALLOWREGEX",
-        "src/core/memory.rs",
-        "allow_regex: config",
-        "Missing secret-detector allow_regex config intentionally means no configured bypass regexes.",
-    ),
+    // RETIRED by bd-epvc1: NSF-CORE-MEMORY-SECRET-ALLOWREGEX owned zero findings,
+    // shadowed by NSF-CORE-MEMORY-SECRET-ALLOWLISTS one line above it. Unlike the
+    // other five shadowed rules this one is genuinely REDUNDANT rather than
+    // mis-anchored: the absorbing reason is already plural -- "no configured
+    // bypass phrases or regexes" -- so it states the correct verdict for
+    // `allow_regex: config.allow_regex.unwrap_or_default()` as well as for the
+    // phrases line, and both sit in one struct literal whose loader error is
+    // raised by `merged_workspace_config(...).map_err(...)?` above them. Splitting
+    // them back apart would add a rule that says nothing the resident one does
+    // not already say at that site.
     allowed(
         "NSF-CORE-MEMORY-SCOPE-TEAM-MEMBERS",
         "src/core/memory_scope.rs",
@@ -1278,22 +1294,39 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "let Some(data) = load_workspace_insights_graph_data(workspace, database_path)? else",
         "Absent workspace insights graph data is the documented absence protocol for section loaders; storage failures still propagate through the ? operator.",
     ),
+    // SHADOWED-TRIPLE RE-AIM (bd-epvc1), the largest instance of the pattern
+    // described above NSF-CORE-MEMORY-AUTO-LINK-DISABLED. Six insight loaders
+    // open with the same three-guard preamble (no workspace / no database / no
+    // workspace id), each guard 3 lines after the last, so every rule absorbed
+    // the guard BELOW its own: ...-NO-WORKSPACE owned 15 sites including the six
+    // database guards, ...-NO-DATABASE owned the six workspace-id guards, and
+    // ...-NO-WORKSPACE-ID owned nothing. Twelve sites carried a reason that
+    // contradicted them -- at a database guard the workspace is present, at a
+    // workspace-id guard the database is already open.
+    //
+    // The anchors below are chosen against the OTHER TWO windows, not merely
+    // against the line they describe: NO-WORKSPACE reaches back to the signature
+    // (which only the first guard's window contains) and the other two carry the
+    // `};` that closes the preceding guard (which the following guard's window
+    // cannot reach). The middle guard of an evenly spaced triple has NO line of
+    // its own -- every line of its window is shared with a neighbour -- so the
+    // two-line form is what makes it addressable at all.
     allowed(
         "NSF-INSIGHTS-NO-WORKSPACE",
         "src/cli/insights/mod.rs",
-        "let Some(workspace) = workspace else",
+        "workspace: Option<&Path>,\ndatabase_path: Option<&Path>,",
         "An omitted workspace argument yields empty insight sections by documented CLI contract; it is input absence, not a converted failure.",
     ),
     allowed(
         "NSF-INSIGHTS-NO-DATABASE",
         "src/cli/insights/mod.rs",
-        "open_insights_database(Some(workspace), database_path)? else",
+        "};\nlet Some(connection) = open_insights_database(Some(workspace), database_path)? else {",
         "A workspace without an openable insights database returns None by design while real open errors propagate through the ? operator.",
     ),
     allowed(
         "NSF-INSIGHTS-NO-WORKSPACE-ID",
         "src/cli/insights/mod.rs",
-        "insights_workspace_id(&connection, workspace)? else",
+        "};\nlet Some(workspace_id) = insights_workspace_id(&connection, workspace)? else {",
         "An unregistered workspace resolves no workspace id and yields empty sections by design; lookup errors still propagate through the ? operator.",
     ),
     allowed(
@@ -1362,16 +1395,23 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "let counts = link_counts",
         "A memory absent from the link-count map truly has zero links; the map was built from the same loaded link set.",
     ),
-    allowed(
+    // SHADOWED-PAIR RE-AIM (bd-epvc1). Adjacent lines of one struct literal, so
+    // the two windows differ by exactly one line at each end and the anchors have
+    // to be those end lines. Function-scoped because the surviving anchors --
+    // `ids.into_iter()` and `.collect()` -- are ordinary iterator plumbing that
+    // would match far more of this file than the two sites they are aimed at.
+    allowed_in(
         "NSF-INSIGHTS-INCOMING-COUNT",
         "src/cli/insights/mod.rs",
-        "incoming.get(&memory_id).copied().unwrap_or_default()",
+        "top_memory_link_counts",
+        "ids.into_iter()\n.map(|memory_id| {",
         "A memory with no entry in the incoming-link map truly has zero incoming links.",
     ),
-    allowed(
+    allowed_in(
         "NSF-INSIGHTS-OUTGOING-COUNT",
         "src/cli/insights/mod.rs",
-        "outgoing.get(&memory_id).copied().unwrap_or_default()",
+        "top_memory_link_counts",
+        "})\n.collect()",
         "A memory with no entry in the outgoing-link map truly has zero outgoing links.",
     ),
     allowed(
@@ -1536,16 +1576,22 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         ".filter_map(parse_file_reservation)",
         "An Agent Mail snapshot without a reservations array truly has no reservations; snapshot staleness is reported through source freshness.",
     ),
+    // SHADOWED-PAIR RE-AIM (bd-epvc1). Two `.map(...).unwrap_or_default()` chains
+    // 3 lines apart, so ...-HEALTH-LEVEL absorbed the semanticStatus site and put
+    // the wrong field name on it. The health-level anchor now reaches back to the
+    // `agent_mail_health_level_class` call that both of its own sites share; the
+    // semantic-status anchor is the message string below it, which only the
+    // second window reaches.
     allowed(
         "NSF-SWARM-BRIEF-MAIL-HEALTH-LEVEL",
         "src/core/swarm_brief.rs",
-        "format!(\" with healthLevel={level}\")",
+        ".and_then(agent_mail_health_level_class);\nlet health_fragment = health_level",
         "Agent Mail health level is optional narrative detail in degradation messages; the degradation entry itself is always emitted.",
     ),
     allowed(
         "NSF-SWARM-BRIEF-MAIL-SEMANTIC-STATUS",
         "src/core/swarm_brief.rs",
-        "format!(\", semanticStatus={status}\")",
+        "Agent Mail recovery posture is degraded{health_fragment} (mode={mode}, reason={reason}{semantic_fragment})",
         "Agent Mail semantic status is optional narrative detail in degradation messages; the degradation entry itself is always emitted.",
     ),
     allowed(
@@ -1882,12 +1928,15 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "!graph.predecessors(node).unwrap_or_default().is_empty()",
         "Root-finding degree checks treat an absent edge list as zero edges; graph construction failures propagate earlier.",
     ),
-    allowed(
-        "NSF-DOMINANCE-SUCCESSOR-CHECK",
-        "src/graph/dominance.rs",
-        "!graph.successors(node).unwrap_or_default().is_empty()",
-        "Root-finding degree checks treat an absent successor list as zero outgoing edges.",
-    ),
+    // RETIRED by bd-epvc1: NSF-DOMINANCE-SUCCESSOR-CHECK owned zero findings,
+    // shadowed by NSF-DOMINANCE-DEGREE-CHECKS on the line above it. Redundant
+    // rather than mis-anchored, for the same reason as the secret-allowlist
+    // retirement: the absorbing reason is already written in the general form --
+    // "an absent EDGE LIST as zero edges" -- so it covers the successor lookup as
+    // written. `DiGraph::predecessors`/`successors` return `Option<Vec<&str>>`
+    // (fnx-classes 0.3.0 digraph.rs:591), so `None` means the node is not in the
+    // graph and there is no error type at either line to swallow; the loop walks
+    // `graph.nodes_ordered()`, so it is unreachable besides.
     allowed(
         "NSF-DOMINANCE-BFS-PREDECESSORS",
         "src/graph/dominance.rs",

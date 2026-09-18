@@ -88,8 +88,8 @@
 1	NSF-CORE-INIT-CWD
 3	NSF-CORE-INSTALL-OPTIONALS
 1	NSF-CORE-JSONL-IMPORT-TAGS
-3	NSF-CORE-MEMORY-AUTO-LINK-DISABLED
-0	NSF-CORE-MEMORY-AUTO-LINK-NO-WORKFLOW
+2	NSF-CORE-MEMORY-AUTO-LINK-DISABLED
+1	NSF-CORE-MEMORY-AUTO-LINK-NO-WORKFLOW
 1	NSF-CORE-MEMORY-SUGGEST-LINKS-NO-TAGS
 1	NSF-CORE-MEMORY-SUGGEST-LINKS-NO-MATCHES
 10	NSF-CORE-LAB-OPTIONAL-FIELDS
@@ -98,7 +98,6 @@
 1	NSF-CORE-LEGACY-NONUTF8-FILENAME
 1	NSF-CORE-MEMORY-LINE-SPAN
 2	NSF-CORE-MEMORY-SECRET-ALLOWLISTS
-0	NSF-CORE-MEMORY-SECRET-ALLOWREGEX
 0	NSF-CORE-MEMORY-SCOPE-TEAM-MEMBERS
 1	NSF-CORE-MEMORY-SCOPE-AGENT-URI
 0	NSF-CORE-PLAN-RAND-ID
@@ -155,9 +154,9 @@
 1	NSF-POLICY-ENV-PROFILE
 1	NSF-STEWARD-RESOURCE-SUMMARY
 4	NSF-INSIGHTS-GRAPH-DATA-ABSENT
-15	NSF-INSIGHTS-NO-WORKSPACE
-6	NSF-INSIGHTS-NO-DATABASE
-0	NSF-INSIGHTS-NO-WORKSPACE-ID
+8	NSF-INSIGHTS-NO-WORKSPACE
+7	NSF-INSIGHTS-NO-DATABASE
+6	NSF-INSIGHTS-NO-WORKSPACE-ID
 1	NSF-INSIGHTS-NO-RUST-PATHS
 1	NSF-INSIGHTS-OPTIONAL-GRAPH-MEMORIES
 1	NSF-INSIGHTS-NO-LINKS
@@ -169,8 +168,8 @@
 1	NSF-INSIGHTS-TOP-EMPTY-GRAPH
 1	NSF-INSIGHTS-NO-PAGERANK
 1	NSF-INSIGHTS-TOP-LINK-COUNTS
-2	NSF-INSIGHTS-INCOMING-COUNT
-0	NSF-INSIGHTS-OUTGOING-COUNT
+1	NSF-INSIGHTS-INCOMING-COUNT
+1	NSF-INSIGHTS-OUTGOING-COUNT
 2	NSF-INSIGHTS-EMPTY-PROJECTION
 1	NSF-INSIGHTS-FRONTIER-SUCCESSORS
 1	NSF-INSIGHTS-FRONTIER-PREDECESSORS
@@ -198,8 +197,8 @@
 1	NSF-SWARM-BRIEF-ARTIFACT-MODIFIED-MS
 1	NSF-SWARM-BRIEF-INCIDENT-SCENARIOS
 1	NSF-SWARM-BRIEF-MAIL-RESERVATIONS
-3	NSF-SWARM-BRIEF-MAIL-HEALTH-LEVEL
-0	NSF-SWARM-BRIEF-MAIL-SEMANTIC-STATUS
+2	NSF-SWARM-BRIEF-MAIL-HEALTH-LEVEL
+1	NSF-SWARM-BRIEF-MAIL-SEMANTIC-STATUS
 1	NSF-SWARM-BRIEF-RCH-WORKERS
 1	NSF-CURATE-PROMOTION-LEVEL-ARROW
 1	NSF-CURATE-SESSION-SPANS
@@ -258,7 +257,6 @@
 1	NSF-CORE-PLAN-CLOCK-FALLBACK
 1	NSF-DOMINANCE-FRONTIER-ABSENT
 2	NSF-DOMINANCE-DEGREE-CHECKS
-0	NSF-DOMINANCE-SUCCESSOR-CHECK
 1	NSF-DOMINANCE-BFS-PREDECESSORS
 1	NSF-WHY-REVISION-SUCCESSORS
 3	NSF-WHY-DOMINANCE-DOWNGRADE
@@ -653,6 +651,44 @@
 # For multiplicity>1 the anchor must lie in EVERY member's window, which is a
 # strictly smaller set -- and when no such line exists, see the note above about
 # a rule that should have been two.
+#
+# THE ADJACENCY COROLLARY -- why "occurs exactly once in the function" is not
+# enough when two findings are neighbours, and why it produced every one of the
+# six shadowed rules bd-epvc1 found.
+#
+#   Uniqueness inside the function does not imply exclusivity between two
+#   findings in that function. Findings 3 lines apart have windows that overlap
+#   by 6 of 9 lines, so the LATER finding's window reaches back over the EARLIER
+#   rule's anchor, and first-match-wins gives the earlier rule both sites.
+#
+# All six shadowed rules had this shape and no other. In each case the shadowed
+# rule's fragment was its own site's line, the absorber's fragment was the line
+# of the site 1-3 lines above, and the shadowed rule was therefore unreachable
+# rather than wrong. The visible damage is a reason attached to a site it
+# contradicts: ...-AUTO-LINK-DISABLED said "auto-linking is off" at a line where
+# it is on, ...-INSIGHTS-NO-WORKSPACE said "no workspace argument" at a guard
+# that only runs when the workspace IS present.
+#
+#   THE FIX, stated as a rule: anchor each of an adjacent pair against the
+#   OTHER's window, not merely against its own. For findings at a < b, the
+#   earlier rule anchors in [a-4, b-5] and the later in [a+5, b+4]. Both ranges
+#   are non-empty for any a < b, so an adjacent PAIR is always separable with a
+#   single line -- you just have to take it from the correct side.
+#
+# THE ONE CASE WHERE A SINGLE LINE CANNOT WORK is the middle of an evenly spaced
+# TRIPLE. For a < b < c with b-a = c-b = 3, the middle's exclusive range is
+# [a+5, c-5], which is empty: every line of its window is shared with a
+# neighbour. It needs a contiguous multi-line fragment straddling the gap, or
+# ordering plus a two-line fragment that reaches one line further back than the
+# first guard's window ends. The six insights loaders are exactly this case.
+#
+# AND THE REASON THIS WAS INVISIBLE: a shadowed rule costs nothing observable.
+# The site is still classified, the gate is still green, the count ledger still
+# sums to the finding total. Only OWNS ZERO distinguishes it, which is why that
+# column is worth keeping even though no test can be written against it -- a
+# zero here is legitimate for a rule whose defect was fixed, and a symptom for a
+# rule whose neighbour ate its site. The two are told apart by reading, not by
+# assertion.
 1	NSF-CORE-AGENTSMD-ABBREVIATION-WORD
 1	NSF-CORE-ASK-NEAREST-EVIDENCE-SAMPLE
 1	NSF-CORE-CONFORMAL-CALIBRATION-SCORES
