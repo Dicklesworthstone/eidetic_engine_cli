@@ -93,6 +93,20 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     // bd-apvhh: the first two function-scoped group rules (ruled 2026-09-17).
     // Both cover findings that landed after the unclassified baseline was
     // recorded at 8662ae0cb and that had main red.
+    // ADDED at 9370b3cf4 for the site 055d19548 created. That commit fixed
+    // bd-rm8wj by routing BOTH projection paths through one helper, so two
+    // findings at two call sites collapsed into one finding inside
+    // `redacted_trust_subclass` -- the population went 594 -> 593 and the two
+    // projection rules below each lost a site, which is why their ledger counts
+    // move in the same commit as this rule appears. A helper that consolidates
+    // call sites moves the finding rather than removing it.
+    allowed_in(
+        "NSF-CLI-CONTEXT-DELTA-TRUST-SUBCLASS-NULL",
+        "src/cli/context_delta_evidence.rs",
+        "redacted_trust_subclass",
+        "None => raw.cloned().unwrap_or_default(),",
+        "The non-string arm of a trustSubclass projection. `raw` is an Option<&Value>, so the default is Value::Null and absence is PRESERVED: an absent field stays absent and an explicitly-null field stays null, exactly as the line above it states. A present non-string value is carried through unchanged by the `raw.cloned()` rather than replaced. This is the type-determined case -- Option<Value> -> Null preserves absence where Option<String> -> \"\" would erase it -- and it is the same judgement already recorded for the two projection rules that follow.",
+    ),
     allowed_in(
         "NSF-CLI-CONTEXT-DELTA-EVIDENCE-PROJECTION",
         "src/cli/context_delta_evidence.rs",

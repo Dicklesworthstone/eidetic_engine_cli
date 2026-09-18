@@ -358,7 +358,8 @@
 # line. A tenth appearing in that function FAILS this ledger, which is the
 # property per-site keying was meant to buy and is why the check must stay
 # two-directional.
-9	NSF-CLI-CONTEXT-DELTA-EVIDENCE-PROJECTION
+1	NSF-CLI-CONTEXT-DELTA-TRUST-SUBCLASS-NULL
+8	NSF-CLI-CONTEXT-DELTA-EVIDENCE-PROJECTION
 1	NSF-CORE-ASK-CANDIDATES-ZERO-LIMIT
 
 # bd-apvhh burn-down tranche 1: the sixteen no-rule files with exactly one
@@ -493,7 +494,7 @@
 #   NSF-CLI-ORIENT-FAST-JOINED-STRINGS owned 1 of 2 -- the two joins in that
 #     renderer use different chains, one over string values and one reaching for
 #     a `uri` field, so they are two rules and not one group.
-10	NSF-CLI-PACK-LEDGER-ITEM-PROJECTION
+9	NSF-CLI-PACK-LEDGER-ITEM-PROJECTION
 1	NSF-CLI-HELP-ARG-OPTIONAL-TEXT
 2	NSF-CLI-HELP-ARG-ALIASES
 1	NSF-CLI-HELP-COMMAND-ABOUT
