@@ -1,22 +1,15 @@
 name: Ask admission verification
 
+# Manual read-only verification only: no source delivery, ref updates, or
+# automatic source exports. Each job reports results for its checked-out SHA.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'src/core/ask_admission.rs'
-      - 'src/core/ask_privacy_tests.rs'
-      - 'tests/contracts/ask_scope.rs'
-      - '.github/workflows/verify-ask-admission-20260917.yml'
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
     env:
       RUSTUP_TOOLCHAIN: nightly
       CARGO_BUILD_JOBS: '2'
@@ -27,19 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
           persist-credentials: false
-      - name: Record exact source snapshot
-        run: |
-          mkdir -p "$RUNNER_TEMP/ee-source"
-          git rev-parse HEAD > "$RUNNER_TEMP/ee-source/source-sha.txt"
-          git archive --format=tar.gz --output="$RUNNER_TEMP/ee-source/source.tar.gz" HEAD
-          cat "$RUNNER_TEMP/ee-source/source-sha.txt"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: core-source
-          path: ${{ runner.temp }}/ee-source
-          retention-days: 1
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
@@ -51,33 +32,23 @@ jobs:
           key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Parse changed Rust modules
+      - name: Exact source and Rust parsing
         run: |
+          git rev-parse HEAD
+          git status --porcelain
           rustfmt --edition 2024 --config skip_children=true --emit stdout src/core/ask_admission.rs src/core/ask_privacy_tests.rs tests/contracts/ask_scope.rs > /dev/null
-          git diff --exit-code
+          rustfmt --check --edition 2024 --config skip_children=true src/cli/mod.rs src/core/effect.rs tests/contracts/ask_read_only.rs
       - name: Compile production library
-        run: |
-          status=0
-          cargo check --locked --lib > "$RUNNER_TEMP/ask-check.log" 2>&1 || status=$?
-          tail -n 100 "$RUNNER_TEMP/ask-check.log"
-          exit "$status"
+        run: cargo check --locked --lib
+      - name: Execute public lifecycle, scope, privacy and read-only contracts
+        if: ${{ !cancelled() }}
+        run: cargo test --locked --test contracts ask_lifecycle -- --nocapture
+      - name: Execute ordinary ask audit regression
+        if: ${{ !cancelled() }}
+        run: cargo test --locked --test contracts ee_ask_writes_returned_mem_rows_for_cited_memories -- --nocapture
       - name: Execute all ask engine and real-store regressions
-        run: |
-          status=0
-          cargo test --locked --lib core::ask:: -- --nocapture > "$RUNNER_TEMP/ask-core.log" 2>&1 || status=$?
-          tail -n 180 "$RUNNER_TEMP/ask-core.log"
-          exit "$status"
-      - name: Execute public CLI lifecycle, scope and privacy contracts
         if: ${{ !cancelled() }}
-        run: |
-          status=0
-          cargo test --locked --test contracts ask_lifecycle -- --nocapture > "$RUNNER_TEMP/ask-cli.log" 2>&1 || status=$?
-          tail -n 100 "$RUNNER_TEMP/ask-cli.log"
-          exit "$status"
-      - name: Preserve verification logs
+        run: cargo test --locked --lib core::ask:: -- --nocapture
+      - name: Check normalized command effect coverage
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ask-verification-logs
-          path: ${{ runner.temp }}/ask-*.log
-          retention-days: 7
+        run: cargo test --locked --test integration_e_f effect_contracts::effect_manifest_covers_all_normalized_cli_command_paths -- --nocapture
