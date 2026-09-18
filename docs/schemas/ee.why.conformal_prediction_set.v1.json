@@ -27,11 +27,13 @@
       "const": "split_conformal_nonconformity"
     },
     "coverageGuarantee": {
+      "description": "Nominal coverage only when calibrationStatus is calibrated. Zero means no calibrated guarantee; fallback retains the full interval and candidate set. The numeric type is preserved for v1 compatibility.",
       "type": "number",
       "minimum": 0,
       "maximum": 1
     },
     "alpha": {
+      "description": "Requested error level; this is not evidence of successful calibration.",
       "type": "number",
       "minimum": 0,
       "maximum": 1
@@ -61,7 +63,7 @@
     },
     "calibrationStatus": {
       "type": "string",
-      "enum": ["calibrated", "conservative_insufficient_calibration"]
+      "enum": ["calibrated", "conservative_insufficient_calibration", "conservative_invalid_scores"]
     },
     "predictionSet": {
       "type": "array",

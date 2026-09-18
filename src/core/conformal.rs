@@ -44,7 +44,11 @@ pub struct WhyConformalPredictionSetEntry {
 pub struct WhyConformalConfidenceIntervals {
     pub schema: &'static str,
     pub method: &'static str,
+    /// Nominal coverage when calibration is usable; zero means no calibrated
+    /// guarantee. Keep the v1 numeric field rather than fabricate 95% coverage
+    /// for a fallback or change the existing Rust/JSON field type.
     pub coverage_guarantee: f32,
+    /// Requested error level, not evidence that calibration succeeded.
     pub alpha: f32,
     pub target_memory_id: String,
     pub score_interval: [f32; 2],
@@ -64,21 +68,28 @@ pub fn why_conformal_confidence_intervals(
         .map(load_conformal_nonconformity_scores)
         .unwrap_or_default();
     let calibration_sample_count = residuals.len();
-    let (quantile, status) = if calibration_sample_count >= MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES {
-        (
-            split_conformal_quantile(residuals, DEFAULT_CONFORMAL_COVERAGE),
-            "calibrated",
-        )
-    } else {
-        (1.0, "conservative_insufficient_calibration")
-    };
+    let (mut quantile, mut status) =
+        if calibration_sample_count >= MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES {
+            (
+                split_conformal_quantile(residuals, DEFAULT_CONFORMAL_COVERAGE),
+                "calibrated",
+            )
+        } else {
+            (1.0, "conservative_insufficient_calibration")
+        };
 
+    let target_memory_id = target_memory_id.trim();
+    let mut invalid_scores = !is_unit_score(target_score);
     let mut by_memory_id = BTreeMap::<String, WhyConformalCandidate>::new();
     for candidate in candidates {
         let memory_id = candidate.memory_id.trim();
-        if memory_id.is_empty() {
+        // The explicit target score owns both the interval and its entry in
+        // the prediction set. A related/pack-mate duplicate must not override
+        // only the latter and produce contradictory evidence for one identity.
+        if memory_id.is_empty() || memory_id == target_memory_id {
             continue;
         }
+        invalid_scores |= !is_unit_score(candidate.score);
         let candidate = WhyConformalCandidate {
             memory_id: memory_id.to_owned(),
             score: clamp_unit_score(candidate.score),
@@ -96,23 +107,26 @@ pub fn why_conformal_confidence_intervals(
             })
             .or_insert(candidate);
     }
-    by_memory_id
-        .entry(target_memory_id.to_owned())
-        .or_insert_with(|| WhyConformalCandidate {
+    by_memory_id.insert(
+        target_memory_id.to_owned(),
+        WhyConformalCandidate {
             memory_id: target_memory_id.to_owned(),
             score: clamp_unit_score(target_score),
             source: "target".to_owned(),
-        });
+        },
+    );
+
+    // Out-of-domain scores are not calibrated probabilities. Clamping them
+    // is suitable for a finite display value, but cannot justify excluding
+    // candidates or certifying an interval. Preserve the entire set instead.
+    if invalid_scores {
+        quantile = 1.0;
+        status = "conservative_invalid_scores";
+    }
 
     let mut ranked = by_memory_id.into_values().collect::<Vec<_>>();
-    // `total_cmp` gives a total order on f32 even if a NaN sneaks past
-    // `clamp_unit_score`. `partial_cmp(...).unwrap_or(Equal)` would
-    // collapse all NaN scores onto whatever the comparator hit first,
-    // making the resulting `rank` field at line 118 sensitive to
-    // upstream HashMap iteration order. This sort feeds the
-    // deterministic conformal `prediction_set[]` field shape, so a non-
-    // total ordering here is a determinism hazard, not just a ranking
-    // ambiguity.
+    // Use a total order, with identity/source tie-breaks, independently of
+    // upstream iteration order. clamp_unit_score also canonicalizes -0.0.
     ranked.sort_by(|left, right| {
         right
             .score
@@ -140,7 +154,11 @@ pub fn why_conformal_confidence_intervals(
     WhyConformalConfidenceIntervals {
         schema: WHY_CONFORMAL_CONFIDENCE_INTERVALS_SCHEMA_V1,
         method: "split_conformal_nonconformity",
-        coverage_guarantee: DEFAULT_CONFORMAL_COVERAGE,
+        coverage_guarantee: if status == "calibrated" {
+            DEFAULT_CONFORMAL_COVERAGE
+        } else {
+            0.0
+        },
         alpha: 1.0 - DEFAULT_CONFORMAL_COVERAGE,
         target_memory_id: target_memory_id.to_owned(),
         score_interval: conformal_score_interval(target_score, quantile),
@@ -274,11 +292,15 @@ fn number_at(value: &Value, keys: &[&str]) -> Option<f32> {
     Some(number as f32)
 }
 
+fn is_unit_score(score: f32) -> bool {
+    score.is_finite() && (0.0..=1.0).contains(&score)
+}
+
 fn clamp_unit_score(score: f32) -> f32 {
-    if score.is_finite() {
-        score.clamp(0.0, 1.0)
-    } else {
+    if !score.is_finite() || score <= 0.0 {
         0.0
+    } else {
+        score.min(1.0)
     }
 }
 
@@ -286,8 +308,8 @@ fn clamp_unit_score(score: f32) -> f32 {
 mod tests {
     use super::{
         DEFAULT_CONFORMAL_COVERAGE, MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES,
-        conformal_nonconformity_from_value, conformal_score_interval, read_conformal_calibration,
-        split_conformal_quantile,
+        WhyConformalCandidate, conformal_nonconformity_from_value, conformal_score_interval,
+        read_conformal_calibration, split_conformal_quantile, why_conformal_confidence_intervals,
     };
     use serde_json::{Value, json};
     use std::io::{self, Cursor, Read};
@@ -499,5 +521,110 @@ mod tests {
         let error = read_conformal_calibration(reader, budget)
             .expect_err("read errors must not return a calibrated-looking prefix");
         assert_eq!(error.kind(), io::ErrorKind::Other);
+    }
+
+    fn calibrated_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let workspace = temp.path().canonicalize().expect("physical temporary root");
+        std::fs::create_dir_all(workspace.join(".ee/search")).expect("calibration directory");
+        std::fs::write(
+            workspace.join(".ee/search/calibration.jsonl"),
+            "{\"nonconformityScore\":0.25}\n".repeat(MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES),
+        )
+        .expect("calibration fixture");
+        (temp, workspace)
+    }
+
+    fn candidate(memory_id: &str, score: f32) -> WhyConformalCandidate {
+        WhyConformalCandidate {
+            memory_id: memory_id.to_owned(),
+            score,
+            source: "fixture".to_owned(),
+        }
+    }
+
+    #[test]
+    fn uncalibrated_prediction_set_does_not_claim_nominal_coverage() {
+        let report = why_conformal_confidence_intervals(
+            None,
+            "target",
+            0.75,
+            [candidate("other", 0.125)],
+        );
+        assert_eq!(report.coverage_guarantee, 0.0);
+        assert_eq!(report.calibration_status, "conservative_insufficient_calibration");
+        assert_eq!(report.score_interval, [0.0, 1.0]);
+        assert!(report.prediction_set.iter().all(|entry| entry.included));
+    }
+
+    #[test]
+    fn explicit_target_owns_interval_and_prediction_set_despite_duplicate() {
+        let (_temp, workspace) = calibrated_workspace();
+        let candidates = [candidate(" target ", 1.0), candidate("other", 0.875)];
+        let forward = why_conformal_confidence_intervals(
+            Some(&workspace),
+            " target ",
+            0.25,
+            candidates.clone(),
+        );
+        let reverse = why_conformal_confidence_intervals(
+            Some(&workspace),
+            " target ",
+            0.25,
+            candidates.into_iter().rev(),
+        );
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.coverage_guarantee, DEFAULT_CONFORMAL_COVERAGE);
+        assert_eq!(forward.target_memory_id, "target");
+        assert_eq!(forward.score_interval, [0.0, 0.5]);
+        let target = forward
+            .prediction_set
+            .iter()
+            .find(|entry| entry.memory_id == "target")
+            .expect("target entry");
+        assert_eq!(target.score, 0.25);
+        assert_eq!(target.source, "target");
+        assert!(!target.included);
+        assert_eq!(forward.prediction_set.len(), 2);
+    }
+
+    #[test]
+    fn invalid_live_scores_abstain_even_with_sufficient_calibration() {
+        let (_temp, workspace) = calibrated_workspace();
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.1, 1.1] {
+            for (target_score, other_score) in [(invalid, 0.125), (0.75, invalid)] {
+                let report = why_conformal_confidence_intervals(
+                    Some(&workspace),
+                    "target",
+                    target_score,
+                    [candidate("other", other_score)],
+                );
+                assert_eq!(report.calibration_status, "conservative_invalid_scores");
+                assert_eq!(report.coverage_guarantee, 0.0);
+                assert_eq!(report.nonconformity_quantile, 1.0);
+                assert_eq!(report.score_interval, [0.0, 1.0]);
+                assert_eq!(report.calibration_sample_count, MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES);
+                assert!(report.prediction_set.iter().all(|entry| entry.included));
+            }
+        }
+    }
+
+    #[test]
+    fn signed_zero_cannot_change_tied_candidate_order() {
+        let first = why_conformal_confidence_intervals(
+            None,
+            "target",
+            0.75,
+            [candidate("a", -0.0), candidate("b", 0.0)],
+        );
+        let second = why_conformal_confidence_intervals(
+            None,
+            "target",
+            0.75,
+            [candidate("b", -0.0), candidate("a", 0.0)],
+        );
+        assert_eq!(first, second);
+        assert_eq!(first.prediction_set[1].memory_id, "a");
+        assert_eq!(first.prediction_set[1].score.to_bits(), 0.0_f32.to_bits());
     }
 }
