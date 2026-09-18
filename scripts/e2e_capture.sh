@@ -303,12 +303,12 @@ assert_jq "$import_out" '.schema == "ee.response.v2" and .success == true' \
 assert_jq "$import_out" '
     (.data.schema == "ee.import.cass.v1")
     and (.data.sessionsImported == 130)
-    and (.data.spansImported == 133)
+    and (.data.spansImported == 134)
     and (.data.indexJobsQueued == 130)
     and (.data.sessions | length == 130)
     and all(.data.sessions[]; (.sessionId | type == "string" and length > 0)
         and (.indexJobId | type == "string" and length > 0))
-' "fixture cass import stores 130 sessions and 133 evidence spans, crossing both 128-row source-read bounds with exact job counts"
+' "fixture cass import stores 130 sessions and 134 evidence spans, crossing both 128-row source-read bounds with exact job counts"
 spans_imported="$(printf '%s' "$import_out" | jq -r '.data.spansImported // 0')"
 first_session_id="$(printf '%s' "$import_out" | jq -r '.data.sessions[0].sessionId // empty')"
 second_session_id="$(printf '%s' "$import_out" | jq -r '.data.sessions[1].sessionId // empty')"
@@ -333,14 +333,22 @@ assert_zero "$before_import_memories" \
 # could pass when two different documents accidentally satisfy half the proof.
 step "bd-3k1mg: 130 index jobs coalesce into one complete bounded source snapshot"
 stale_index_out="$(ee_json --workspace "$WS" index status --json)"
+# Split from one conjunction so a mismatch NAMES the count that moved. The
+# admitted-count clause in particular is load-bearing for bullet 2: if import
+# admission drops a span, this is where that shows up, and a bare `false` would
+# have hidden which of the two counts disagreed.
+assert_json "$stale_index_out" '.data.health' 'stale' \
+    "atomic CASS import makes the previously ready index stale"
+assert_json "$stale_index_out" '.data.dbSessionCount' '130' \
+    "stale index reports every imported session"
+assert_json "$stale_index_out" '.data.dbEvidenceCount' "$spans_imported" \
+    "stale index evidence count equals the spans the import reported"
+assert_json "$stale_index_out" '.data.dbEvidenceAdmittedCount' "$spans_imported" \
+    "every imported span was admitted; a drop here is an admission filter, not a count bug"
 assert_jq "$stale_index_out" ".schema == \"ee.response.v2\"
     and .success == true
-    and .data.health == \"stale\"
-    and .data.dbSessionCount == 130
-    and .data.dbEvidenceCount == $spans_imported
-    and .data.dbEvidenceAdmittedCount == $spans_imported
     and (.data.dbGeneration > .data.indexGeneration)" \
-    "atomic CASS import makes the previously ready index truthfully stale"
+    "atomic CASS import advances the db generation past the index generation"
 coalesce_out="$(ee_json --workspace "$WS" job run index_coalesce --item-limit 130 --json)"
 assert_jq "$coalesce_out" ".schema == \"ee.response.v2\" and .success == true
     and .data.requestedJob == \"index_coalesce\"
@@ -550,9 +558,21 @@ leak_source_view="$("$CASS_BIN" view "$SESSION_PATH" 2>/dev/null || true)"
 assert_json "$leak_source_view" "tostring | contains(\"$LEAK_CANARY\")" 'true' \
     "precondition: the imported transcript actually carries the secret canary"
 
-leak_search_out="$(ee_json --workspace "$WS" search "$LEAK_CANARY" --json || true)"
-assert_json "$leak_search_out" "tostring | contains(\"$LEAK_CANARY\") | not" 'true' \
-    "imported transcript secret must not be retrievable through search"
+# NEVER QUERY WITH THE CANARY ITSELF. `ee search` echoes its own query back in
+# the envelope -- measured: searching a string that appears nowhere in the corpus
+# returns 0 results and STILL contains that string, at .data.query,
+# .data.queryAssist.captureTemplate.content and .command. An assertion over the
+# whole response therefore fires on the echo, not on a leak, and reports a
+# product defect that does not exist. The first version of this assertion did
+# exactly that.
+#
+# So query line 5's NON-secret text, prove the line is retrievable at all, and
+# inspect only .data.results -- the surface that carries indexed content.
+leak_search_out="$(ee_json --workspace "$WS" search "staging box keep it out of any summary" --json || true)"
+assert_json "$leak_search_out" '(.data.results // []) | length > 0' 'true' \
+    "precondition: line 5's non-secret text is retrievable, so the leak test has results to inspect"
+assert_json "$leak_search_out" "[.data.results[]?] | tostring | contains(\"$LEAK_CANARY\") | not" 'true' \
+    "indexed evidence content must not carry the transcript secret"
 
 # The pack half must be TWO-SIDED or it is weaker than it looks. The pack above
 # was assembled for line 2's phrase, so "does not contain the canary" could mean
