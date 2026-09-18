@@ -1,0 +1,343 @@
+--- a/src/core/index.rs
++++ b/src/core/index.rs
+@@ -55,6 +55,12 @@
+ };
+ use sqlmodel_core::Value as SqlValue;
+ 
++#[cfg(unix)]
++#[path = "index_read_lease.rs"]
++mod read_lease;
++#[cfg(unix)]
++pub(crate) use read_lease::IndexGenerationLease;
++
+ pub const DEFAULT_INDEX_SUBDIR: &str = "index";
+ const INDEX_METADATA_FILE: &str = "meta.json";
+ pub const INDEX_METADATA_SCHEMA_V2: &str = "ee.index_metadata.v2";
+@@ -441,6 +447,21 @@
+         Ok(owner)
+     }
+ 
++    /// Drain generation readers before taking the database writer fence. A
++    /// reader may still need its database snapshot, so reversing this order
++    /// can deadlock. Revalidate the SQL owner after the cancellable lease wait.
++    async fn with_generation_fence<T>(
++        &self,
++        index_dir: &Path,
++        publish: impl FnOnce() -> Result<T, IndexRebuildError>,
++    ) -> Result<T, IndexRebuildError> {
++        #[cfg(unix)]
++        let _generation = IndexGenerationLease::publish(self.cx, index_dir).await?;
++        #[cfg(not(unix))]
++        let _ = index_dir;
++        self.with_publication_fence(publish)
++    }
++
+     /// A pre-build lease is not publication authority after a process pause.
+     /// Keep the process-safe writer fence through replacement, job commit and
+     /// rollback so reclamation cannot race the final ownership check.
+@@ -1697,7 +1718,9 @@
+         IndexRebuildError::Index("index rebuild has no publication lease".to_owned())
+     })?;
+     let _recovery_action =
+-        publish_lock.with_publication_fence(|| recover_interrupted_publish(&index_dir))?;
++        publish_lock
++            .with_generation_fence(&index_dir, || recover_interrupted_publish(&index_dir))
++            .await?;
+     // bd-qf3l4. `ee init` rebuilds the index for a workspace holding ZERO
+     // documents, and this line forced `DEFAULT_SEARCH_EMBEDDER`
+     // (`default_search_embedder_stack_with_provenance`, :5631) to pay ~2 GB of
+@@ -1941,7 +1964,9 @@
+         IndexRebuildError::Index("index re-embedding has no publication lease".to_owned())
+     })?;
+     let _recovery_action =
+-        publish_lock.with_publication_fence(|| recover_interrupted_publish(&index_dir))?;
++        publish_lock
++            .with_generation_fence(&index_dir, || recover_interrupted_publish(&index_dir))
++            .await?;
+     ensure_active_embedding_registry_record(&db, &workspace_id, &stack)?;
+     let embedding = reembed_embedding_summary(
+         &db,
+@@ -2616,7 +2641,10 @@
+     }
+ 
+     let _recovery_action =
+-        match _publish_lock.with_publication_fence(|| recover_interrupted_publish(index_dir)) {
++        match _publish_lock
++            .with_generation_fence(index_dir, || recover_interrupted_publish(index_dir))
++            .await
++        {
+             Ok(action) => action,
+             Err(error) => {
+                 finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
+@@ -2864,7 +2892,9 @@
+     // though the job had already applied synchronously. (agent-UX item 5)
+     let result = async {
+         let _recovery_action =
+-            _publish_lock.with_publication_fence(|| recover_interrupted_publish(index_dir))?;
++            _publish_lock
++                .with_generation_fence(index_dir, || recover_interrupted_publish(index_dir))
++                .await?;
+         let fallback_to_full = None;
+         let (stack, _) = workspace_embedder_stack(db, &job.workspace_id)?;
+         let build_result = publish_full_index_generation_with_stack(
+@@ -3060,7 +3090,7 @@
+     sync_index_generation(&staging_dir, || index_checkpoint(cx))?;
+     run_before_index_publish_hook(cx);
+     index_checkpoint(cx)?;
+-    publish_lock.with_publication_fence(|| {
++    publish_lock.with_generation_fence(index_dir, || {
+         cx.masked(|| {
+             write_index_metadata(
+                 &staging_dir,
+@@ -3070,7 +3100,7 @@
+             )?;
+             publish_staged_index_with_commit(index_dir, &staging_dir, commit_tail)
+         })
+-    })?;
++    }).await?;
+     run_after_index_publish_hook(cx);
+     Ok(stats)
+ }
+@@ -12057,6 +12087,81 @@
+         .map_err(|error| error.to_string())?
+     }
+ 
++    #[cfg(unix)]
++    #[test]
++    fn publication_generation_lease_covers_commit_rollback_and_release() -> TestResult {
++        use rustix::fs::{FlockOperation, flock};
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
++        let index_dir = parent.join("index");
++        write_marker(&index_dir, "previous.txt", "previous generation")?;
++        let before = index_regular_file_snapshot(&index_dir)?;
++        let db = DbConnection::open_file(&parent.join("db.sqlite"))
++            .map_err(|error| error.to_string())?;
++        db.migrate().map_err(|error| error.to_string())?;
++        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
++            let owner = IndexPublishLockOwner::acquire(&cx, &db, "wsp_generation_lease")
++                .map_err(|error| error.to_string())?;
++            let probe = std::fs::File::open(&parent).map_err(|error| error.to_string())?;
++            let mut visited = false;
++            let result = publish_full_index_generation_with_stack(
++                &owner, &index_dir, hash_fallback_embedder_stack(), Vec::new(), 2,
++                IndexDocumentCounts::memory_only(0), || {
++                    visited = true;
++                    // A nested database commit must not release the separate
++                    // OS generation lease before filesystem rollback finishes.
++                    db.with_transaction_error(|| Ok::<_, IndexRebuildError>(()))?;
++                    assert_eq!(flock(&probe, FlockOperation::NonBlockingLockShared),
++                        Err(rustix::io::Errno::WOULDBLOCK));
++                    Err(IndexRebuildError::Index("injected job failure".to_owned()))
++                },
++            ).await;
++            ensure(visited && result.is_err(), "real publisher must reach the injected commit failure")?;
++            ensure(index_regular_file_snapshot(&index_dir)? == before,
++                "failed job must restore the exact prior generation")?;
++            // The owner is still alive: its SQL lease is not the OS reader lease.
++            flock(&probe, FlockOperation::NonBlockingLockExclusive)
++                .map_err(|error| error.to_string())?;
++            flock(&probe, FlockOperation::Unlock).map_err(|error| error.to_string())
++        }).map_err(|error| error.to_string())?
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn publication_generation_lease_protects_recovery_and_unwind() -> TestResult {
++        use rustix::fs::{FlockOperation, flock};
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
++        let index_dir = parent.join("index");
++        write_marker(&index_dir, "live.txt", "keep")?;
++        let db = DbConnection::open_file(&parent.join("db.sqlite"))
++            .map_err(|error| error.to_string())?;
++        db.migrate().map_err(|error| error.to_string())?;
++        let probe = std::fs::File::open(&parent).map_err(|error| error.to_string())?;
++        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            let db = &db;
++            let index_dir = &index_dir;
++            let probe = &probe;
++            crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
++                let owner = IndexPublishLockOwner::acquire(&cx, &db, "wsp_generation_lease")?;
++                owner.with_generation_fence(&index_dir, || {
++                    assert_eq!(flock(&probe, FlockOperation::NonBlockingLockShared),
++                        Err(rustix::io::Errno::WOULDBLOCK));
++                    assert!(matches!(recover_interrupted_publish(&index_dir)?,
++                        IndexPublishRecoveryAction::ActivePresent));
++                    Err::<(), IndexRebuildError>(IndexRebuildError::Index(
++                        "injected recovery failure".to_owned(),
++                    ))
++                }).await
++            })
++        }));
++        assert!(matches!(result, Ok(Ok(Err(IndexRebuildError::Index(message))))
++            if message == "injected recovery failure"));
++        flock(&probe, FlockOperation::NonBlockingLockExclusive)
++            .map_err(|error| error.to_string())?;
++        flock(&probe, FlockOperation::Unlock).map_err(|error| error.to_string())
++    }
++
+     #[test]
+     fn index_publish_lock_exhaustion_reports_stable_contention() -> TestResult {
+         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+--- a/src/core/search.rs
++++ b/src/core/search.rs
+@@ -7742,6 +7742,19 @@
+     })
+ }
+ 
++#[cfg(unix)]
++async fn pin_search_generation(
++    cx: &asupersync::Cx,
++    index_dir: &Path,
++) -> Result<crate::core::index::IndexGenerationLease, SearchError> {
++    crate::core::index::IndexGenerationLease::read(cx, index_dir)
++        .await
++        .map_err(|error| match error {
++            crate::core::index::IndexRebuildError::Cancelled(reason) => SearchError::Cancelled(reason),
++            error => SearchError::Index(error.to_string()),
++        })
++}
++
+ fn with_search_root<F, Fut, T>(operation: F) -> Result<T, SearchError>
+ where
+     F: FnOnce(asupersync::Cx) -> Fut,
+@@ -8991,6 +9004,11 @@
+         trace.record_elapsed("search::indexExists", index_exists_start);
+         return Err(SearchError::NoIndex);
+     }
++    // Metadata, source-mode selection, vector and lexical opens must all see
++    // the same directory contents. Atomic exchange alone protects only one
++    // lookup; the shared lease excludes publication and rollback until collect.
++    #[cfg(unix)]
++    let generation_lease = pin_search_generation(cx, &index_dir).await?;
+     if let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&index_dir) {
+         trace.record_elapsed("search::indexExists", index_exists_start);
+         return Err(index_compatibility_search_error(&index_dir, reason));
+@@ -9118,6 +9136,10 @@
+     )
+     .await;
+     trace.record_elapsed("search::retrieve", retrieve_start);
++    // No local index handles are used after collection. Release before the
++    // optional global lane can reconcile a sibling index under the same parent.
++    #[cfg(unix)]
++    drop(generation_lease);
+     search_checkpoint(cx)?;
+ 
+     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+@@ -9514,6 +9536,8 @@
+     if !index_dir.exists() {
+         return Err(SearchError::NoIndex);
+     }
++    #[cfg(unix)]
++    let generation_lease = pin_search_generation(cx, &index_dir).await?;
+     if let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&index_dir) {
+         return Err(index_compatibility_search_error(&index_dir, reason));
+@@ -9573,6 +9597,8 @@
+         fast_embedder_override,
+     )
+     .await?;
++    #[cfg(unix)]
++    drop(generation_lease);
+     apply_live_evidence_visibility_to_diag(options, &mut diag_result, &mut degraded);
+ 
+     let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(diag_result.final_hits);
+@@ -10500,6 +10526,8 @@
+     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
+ ) -> Result<DiagSearchSyncResult, SearchError> {
+     search_checkpoint(cx)?;
++    #[cfg(unix)]
++    let _generation_lease = pin_search_generation(cx, index_dir).await?;
+     let index_dir_owned = index_dir.to_path_buf();
+     let query_owned = query.to_string();
+     #[allow(clippy::type_complexity)]
+@@ -11154,6 +11182,14 @@
+     if reconcile {
+         reconcile_search_index_before_read_with_cx(cx, &global_options).await;
+     }
++    #[cfg(unix)]
++    let generation_lease = match pin_search_generation(cx, &paths.index_dir).await {
++        Ok(lease) => lease,
++        Err(error) => {
++            degraded.push(SearchDegradation::global_index_unavailable(&error.to_string()));
++            return Vec::new();
++        }
++    };
+     let index_status = match cached_index_status_for_search(&global_options, &paths.index_dir, None)
+     {
+         Ok(status) => status,
+@@ -11199,6 +11235,8 @@
+     )
+     .await;
+     trace.record_elapsed("search::globalRetrieve", global_search_start);
++    #[cfg(unix)]
++    drop(generation_lease);
+     let (raw_hits, retrieval_degraded) = match search_result {
+         Ok(result) => result,
+         Err(error) => {
+@@ -11799,6 +11837,8 @@
+     trace: &mut SearchPerformanceTrace,
+ ) -> Result<(Vec<SearchHit>, Vec<SearchDegradation>), SearchError> {
+     search_checkpoint(cx)?;
++    #[cfg(unix)]
++    let _generation_lease = pin_search_generation(cx, index_dir).await?;
+     let plan_cache_key =
+         search_plan_cache_key(index_dir, query, limit, &config, explain, source_mode);
+@@ -13445,6 +13485,57 @@
+         Ok(index_dir)
+     }
+ 
++    #[cfg(unix)]
++    #[test]
++    fn search_generation_lease_pins_both_arms_through_collection() -> TestResult {
++        use rustix::fs::{FlockOperation, flock};
++        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
++        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
++        let index_dir = parent.join("index");
++        let build_dir = index_dir.clone();
++        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
++            let docs = vec![IndexableDocument::new("mem_reader_lease",
++                "Generation leases preserve consistent vector and lexical retrieval.")];
++            IndexBuilder::new(&build_dir)
++                .with_embedder_stack(EmbedderStack::from_parts(
++                    Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>, None))
++                .add_documents(docs.clone()).build(&cx).await
++                .map_err(|error| error.to_string())?;
++            #[cfg(feature = "lexical-bm25")]
++            crate::core::index::build_lexical_tier(&cx, &build_dir, &docs).await
++                .map_err(|error| error.to_string())?;
++            Ok::<(), String>(())
++        }).map_err(|error| error.to_string())??;
++        let before_probe = std::fs::File::open(&parent).map_err(|error| error.to_string())?;
++        let after_probe = std::fs::File::open(&parent).map_err(|error| error.to_string())?;
++        let visits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
++        let first = Arc::clone(&visits);
++        install_before_search_collect_hook(move |_| {
++            assert_eq!(flock(&before_probe, FlockOperation::NonBlockingLockExclusive),
++                Err(rustix::io::Errno::WOULDBLOCK));
++            first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++        });
++        let last = Arc::clone(&visits);
++        install_after_search_collect_hook(move |_| {
++            assert_eq!(flock(&after_probe, FlockOperation::NonBlockingLockExclusive),
++                Err(rustix::io::Errno::WOULDBLOCK));
++            last.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++        });
++        let (hits, _) = search_sync(&index_dir, "consistent vector lexical retrieval", 5,
++            TwoTierConfig::default(), false,
++            if cfg!(feature = "lexical-bm25") { SearchSourceMode::Hybrid } else { SearchSourceMode::SemanticOnly },
++            &Deterministic::from_seed(77),
++            Some(Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>))?;
++        ensure(hits.iter().any(|hit| hit.doc_id == "mem_reader_lease"),
++            "leased real search must still return the exact indexed document")?;
++        ensure(visits.load(std::sync::atomic::Ordering::SeqCst) == 2,
++            "both real collection boundaries must execute")?;
++        let publisher = std::fs::File::open(&parent).map_err(|error| error.to_string())?;
++        flock(&publisher, FlockOperation::NonBlockingLockExclusive)
++            .map_err(|error| error.to_string())?;
++        flock(&publisher, FlockOperation::Unlock).map_err(|error| error.to_string())
++    }
++
+     fn run_collection_cancellation_probe(
+         index_dir: PathBuf,
+         seed: u64,

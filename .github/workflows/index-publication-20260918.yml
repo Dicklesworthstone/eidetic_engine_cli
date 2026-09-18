@@ -1,18 +1,109 @@
-name: Index publication delivery (retired)
+name: Leased index readers
 
-# Production changes are on main:
-# 0c3cbbe4d84c54617166348a45bfdea13e94c342 - current-owner publication fence
-# b1d8b90a65ff516b80a97f180296ed21acb4e884 - generation durability barriers
-# 65d6a7726e0e27db763726951f24cec1dcdeae12 - native atomic directory exchange
-# Compilation and publication-boundary tests passed before each source commit.
-# Run 35307418086 records the final broader index regression result separately.
-# This retired delivery has no automatic trigger, source writer or ref update.
 on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/index-reader-leases.patch
+      - .github/workflows/index-publication-20260918.yml
   workflow_dispatch:
-permissions: {}
+permissions:
+  contents: read
 jobs:
-  retired:
-    if: ${{ false }}
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
     steps:
-      - run: echo 'This one-time index publication delivery is retired.'
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Apply reviewed reader and publisher bindings
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          git apply --check scripts/delivery/index-reader-leases.patch
+          git apply scripts/delivery/index-reader-leases.patch
+          rustfmt --edition 2024 --config skip_children=true src/core/index.rs src/core/index_read_lease.rs src/core/search.rs
+          git diff --check
+          git diff --stat
+      - name: Compile production library
+        run: |
+          status=0
+          cargo check --locked --lib > "$RUNNER_TEMP/reader-check.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/reader-check.log"
+          exit "$status"
+      - name: Execute real generation lease regressions
+        run: |
+          status=0
+          cargo test --locked --lib generation_lease -- --nocapture > "$RUNNER_TEMP/reader-boundaries.log" 2>&1 || status=$?
+          tail -n 180 "$RUNNER_TEMP/reader-boundaries.log"
+          exit "$status"
+      - name: Verify existing publication and cancellation boundaries
+        run: |
+          status=0
+          cargo test --locked --lib core::index::tests::publication_ -- --nocapture > "$RUNNER_TEMP/reader-publication.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/reader-publication.log"
+          test "$status" -eq 0
+          status=0
+          cargo test --locked --lib core::search::tests::lab_runtime_cancellation_ -- --nocapture > "$RUNNER_TEMP/reader-cancellation.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/reader-cancellation.log"
+          exit "$status"
+      - name: Commit tested production integration directly to main
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- src/core/index.rs src/core/index_read_lease.rs src/core/search.rs
+          git commit -m 'fix(search): lease index generations across metadata and hybrid collection' -m 'On Unix, share a read-only OS directory lease across metadata, vector and lexical reads; every production publisher and recovery holds the exclusive lease through commit and rollback. Acquire before the database writer fence, revalidate SQL publication ownership afterward, and retain bounded cancellable admission without sidecars. Cover real hybrid collection, nested commits, rollback, error cleanup, shared readers, symlinks and parent replacement. The future immutable SQL-pointer architecture and non-Unix reader leases remain separate work. Production check and targeted regression groups passed before commit.'
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then break; fi
+            test "$attempt" -lt 3
+            git fetch origin main
+            git merge --no-edit origin/main
+          done
+          git rev-parse HEAD > "$RUNNER_TEMP/reader-source-sha.log"
+      - name: Execute broader index regressions
+        run: |
+          status=0
+          cargo test --locked --lib core::index::tests:: -- --test-threads=2 > "$RUNNER_TEMP/reader-index-module.log" 2>&1 || status=$?
+          tail -n 230 "$RUNNER_TEMP/reader-index-module.log"
+          exit "$status"
+      - name: Preserve exact code and verification logs
+        if: ${{ !cancelled() }}
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/reader-final-sha.log"
+          cp src/core/index.rs "$RUNNER_TEMP/reader-index.rs"
+          cp src/core/search.rs "$RUNNER_TEMP/reader-search.rs"
+          cp src/core/index_read_lease.rs "$RUNNER_TEMP/reader-lease.rs"
+          git diff -- src/core/index.rs src/core/search.rs > "$RUNNER_TEMP/reader-uncommitted.patch"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: index-reader-verification
+          path: |
+            ${{ runner.temp }}/reader-*.log
+            ${{ runner.temp }}/reader-*.rs
+            ${{ runner.temp }}/reader-*.patch
+          retention-days: 7
