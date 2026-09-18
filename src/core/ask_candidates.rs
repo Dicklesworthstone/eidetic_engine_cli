@@ -275,18 +275,19 @@ fn preserve_inferred_opposition<'a>(
     }
     // Match all_spans' raw-score anchor, including its earliest-byte tie
     // break. The candidate's first sentence need not be its best answer.
-    let Some((start, end)) = segment_spans(&anchor.candidate.content)
-        .into_iter()
-        .find(|&(start, end)| {
-            score_span(
-                question_terms,
-                &anchor.candidate.content[start..end],
-                anchor.candidate.confidence,
-                &anchor.candidate.trust_class,
-            )
-            .total_cmp(&anchor.score)
-                == Ordering::Equal
-        })
+    let Some((start, end)) =
+        segment_spans(&anchor.candidate.content)
+            .into_iter()
+            .find(|&(start, end)| {
+                score_span(
+                    question_terms,
+                    &anchor.candidate.content[start..end],
+                    anchor.candidate.confidence,
+                    &anchor.candidate.trust_class,
+                )
+                .total_cmp(&anchor.score)
+                    == Ordering::Equal
+            })
     else {
         return;
     };
@@ -320,9 +321,10 @@ fn preserve_inferred_opposition<'a>(
     let Some(opposition) = opposition else {
         return;
     };
-    if ranked.iter().any(|entry| {
-        entry.candidate.memory_id == opposition.candidate.memory_id
-    }) {
+    if ranked
+        .iter()
+        .any(|entry| entry.candidate.memory_id == opposition.candidate.memory_id)
+    {
         return;
     }
     // Only the candidate is reserved; its body, byte offsets, trust and
@@ -342,9 +344,7 @@ mod tests;
 #[cfg(test)]
 mod inferred_opposition_tests {
     use super::*;
-    use crate::core::ask::{
-        ASK_CANDIDATE_SCAN_CAP, AskNativeSource, ask_data_json, evaluate_ask,
-    };
+    use crate::core::ask::{ASK_CANDIDATE_SCAN_CAP, AskNativeSource, ask_data_json, evaluate_ask};
     use crate::models::EvidenceId;
     use crate::pack::PackEntityRef;
 
@@ -418,9 +418,12 @@ mod inferred_opposition_tests {
         assert_eq!(report.confidence_components.corroboration, 1.0);
         let sides = report.sides.as_ref().expect("both supported sides");
         assert_eq!(sides.len(), 2);
-        assert!(sides.iter().flat_map(|side| &side.citations).any(|citation| {
-            citation.memory_id == opposing_id && citation.text == OPPOSING
-        }));
+        assert!(
+            sides
+                .iter()
+                .flat_map(|side| &side.citations)
+                .any(|citation| { citation.memory_id == opposing_id && citation.text == OPPOSING })
+        );
         let expected = ask_data_json(&report);
         rows.reverse();
         assert_eq!(ask_data_json(&evaluate_ask(&request, &rows)), expected);
@@ -431,8 +434,7 @@ mod inferred_opposition_tests {
     #[test]
     fn opposing_passage_need_not_be_the_sources_best_scoring_sentence() {
         let mut rows = crowded();
-        rows.last_mut().expect("opposing source").content =
-            format!("{AFFIRMING} {OPPOSING}");
+        rows.last_mut().expect("opposing source").content = format!("{AFFIRMING} {OPPOSING}");
         let report = evaluate_ask(&request(), &rows);
         assert!(report.conflict_detected);
         let citations: Vec<_> = report
@@ -461,8 +463,14 @@ mod inferred_opposition_tests {
     fn opposition_below_the_evidence_floor_does_not_displace_an_answer() {
         let mut request = request();
         request.min_confidence = 1.0;
-        assert!(score_span(&tokenize_for_ask(&request.question), OPPOSING, 1.0, "human_explicit")
-            < request.min_confidence);
+        assert!(
+            score_span(
+                &tokenize_for_ask(&request.question),
+                OPPOSING,
+                1.0,
+                "human_explicit"
+            ) < request.min_confidence
+        );
         let rows = crowded();
         let selected = ids(&request, &rows, 2);
         assert_eq!(selected, ["a-support-00000", "a-support-00001"]);
