@@ -8007,6 +8007,56 @@ mod tests {
     }
 
     #[test]
+    fn the_pre_fix_collapse_and_the_fix_disagree_on_the_same_unreadable_denylist() {
+        // THE ARM THAT FAILS WITHOUT THE FIX (bd-xwzeh).
+        //
+        // The other two tests reference DISCOVERY_LISTS_UNREADABLE_CODE, which
+        // the fix introduced, so against the old code they would not FAIL, they
+        // would not COMPILE, and "it does not build" is not a demonstration
+        // that behaviour changed. This one runs the pre-fix expression and the
+        // fix against ONE workspace and asserts they disagree.
+        let workspace = workspace_with_unreadable_denylist();
+
+        // PRECONDITION, so this cannot pass vacuously if the loader is ever
+        // softened to Ok(empty) one directory over: the same guard bd-zjcx6
+        // carries, for the same reason.
+        assert!(
+            load_workspace_lists(workspace.path()).is_err(),
+            "precondition: a malformed denylist must reach this caller as Err"
+        );
+
+        // The pre-fix expression from build_tailscale_autodiscovery_report_from_local,
+        // both swallows included, verbatim.
+        let collapsed = load_discovery_policy_state(workspace.path(), None, None, None)
+            .ok()
+            .map(|state| state.lists)
+            .unwrap_or_else(|| load_workspace_lists(workspace.path()).unwrap_or_default());
+        assert!(
+            collapsed.denylist.is_empty(),
+            "the defect, executed: BOTH swallows collapse to an EMPTY denylist. decide_discovery \
+             applies the denylist as the only per-peer exclusion on the outbound side, so an \
+             empty one probes exactly the peers this workspace denies"
+        );
+
+        // The fix, same workspace, opposite answer: it refuses instead.
+        let (cli, snapshot) = autodiscovery_cli_and_snapshot(workspace.path());
+        let report = build_tailscale_autodiscovery_report_from_local(&cli, &snapshot, None);
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|item| item.code == DISCOVERY_LISTS_UNREADABLE_CODE),
+            "the fix must refuse the round rather than proceed with the collapsed empty \
+             denylist; if this degradation is absent the fail-open is back: {:?}",
+            report.degraded
+        );
+        assert_eq!(
+            report.probed_peer_count, 0,
+            "and it must have probed nothing while refusing"
+        );
+    }
+
+    #[test]
     fn autodiscovery_does_not_refuse_when_the_lists_are_readable() {
         // The control. Without it, a function that refused unconditionally
         // would satisfy the test above while breaking discovery outright.
