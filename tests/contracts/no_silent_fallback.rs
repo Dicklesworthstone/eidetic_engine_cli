@@ -389,16 +389,22 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     // the two largest and least tractable files first, so what survives is
     // pre-selected for being small and self-contained. A high allow rate in a
     // population chosen for being easy is not evidence about the codebase. The
-    // two must_fix rules below are the exception that proves the sampling was
-    // still worth doing, not a refutation of the bias.
-    must_fix_in(
-        "NSF-MESH-RESPONDER-DISCOVERY-LISTS-SWALLOWED",
-        "src/mesh/responder_broker.rs",
-        "answer_bootstrap_hello",
-        ".and_then(|path| load_workspace_lists(path).ok())",
-        "bd-zjcx6",
-        "FAILS OPEN on the discovery denylist. load_node_key_list is deliberately built to separate the two states: an absent file, a non-regular path, and a NotFound read all return Ok(empty), while an io error, a TOML parse failure, a non-array `node_keys`, and an oversized payload all return Err. `.ok()` merges the second set into the first, so a denylist that EXISTS and cannot be honoured becomes the same empty set as no denylist at all. It reaches decide_respond through ResponderContext and decide_hello_response step 6, where `if input.denylist.contains(requester_node_key)` is the ONLY per-requester exclusion in both AutoAdmit and ServiceTag -- ServiceTag grants on the RESPONDER's own tags, not the requester's. Only Allowlist mode is unaffected, because an empty respond_allowlist denies everyone. Worst detail: the oversized-payload refusal added by bd-3gmzf as hardening returns Err, so through this call site a defence becomes the bypass, and a malformed denylist ends up strictly weaker than no denylist file.",
-    ),
+    // two must_fix rules it produced are the exception that proves the sampling
+    // was still worth doing, not a refutation of the bias.
+    //
+    // ONE OF THOSE TWO IS NOW FIXED AND ITS ROW IS RETIRED:
+    // NSF-MESH-RESPONDER-DISCOVERY-LISTS-SWALLOWED covered
+    // `.and_then(|path| load_workspace_lists(path).ok())` in
+    // answer_bootstrap_hello, where an unreadable discovery denylist collapsed
+    // into an empty one. That call site now declines the exchange instead
+    // (bd-zjcx6), so the fragment is gone from the source and the row would be
+    // stale -- `must_fix_entries_still_describe_real_code` says to drop a row
+    // whose defect is fixed rather than let the gate overstate what is left.
+    // Its match-count ledger line was dropped in the same commit, because
+    // `every_rule_declares_the_number_of_findings_it_owns` also fails on a
+    // ledger row naming a rule that no longer exists. Removing a must_fix here
+    // records a defect CLOSED, not an exemption granted; the argument for the
+    // fix lives in bd-zjcx6 and in the comment at the call site.
     must_fix_in(
         "NSF-MESH-FOREGROUND-SYNC-OWN-ORIGIN-SWALLOWED",
         "src/mesh/foreground_cli.rs",

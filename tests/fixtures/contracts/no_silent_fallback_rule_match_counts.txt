@@ -425,7 +425,10 @@
 # All 17 owned their declared counts on the first attempt, unlike tranche 3.
 # The reason is visible in the fragments: every one names a whole statement or a
 # distinctive method chain rather than a bare combinator.
-1	NSF-MESH-RESPONDER-DISCOVERY-LISTS-SWALLOWED
+# NSF-MESH-RESPONDER-DISCOVERY-LISTS-SWALLOWED owned 1 and is RETIRED: the
+# defect it watched is fixed (bd-zjcx6), so its rule was dropped from
+# INVENTORY_RULES and this row had to go with it -- a ledger row naming a rule
+# that no longer exists fails every_rule_declares_the_number_of_findings_it_owns.
 1	NSF-MESH-FOREGROUND-SYNC-OWN-ORIGIN-SWALLOWED
 1	NSF-MESH-RESPONDER-ADMISSION-CLOCK
 1	NSF-MESH-RESPONDER-NO-REGISTRATIONS-YET

@@ -53,7 +53,9 @@ use crate::mesh::bootstrap_envelope::{
     BootstrapCapability, BootstrapDeclineV1, SYNC_ROUND_SCHEMA_V1, SyncRoundEvent,
     SyncRoundResponse, SyncRoundTip, decode_envelope, encode_envelope, parse_sync_round_request,
 };
-use crate::mesh::discovery_policy::{DiscoveryMode, EE_MESH_SERVICE_TAG, load_workspace_lists};
+use crate::mesh::discovery_policy::{
+    DiscoveryMode, EE_MESH_SERVICE_TAG, WorkspaceLists, load_workspace_lists,
+};
 use crate::mesh::hello::{
     HelloOutcome, ResponderContext, decide_hello_response, parse_hello_request,
 };
@@ -3444,6 +3446,59 @@ async fn write_asupersync_framed(
     Ok(())
 }
 
+/// Decline code sent when the responder's own discovery lists exist but cannot
+/// be honoured.
+///
+/// Deliberately generic. `bootstrap_envelope` states the decline invariant: a
+/// "no" carries a stable code "and nothing about the responder". A code naming
+/// the denylist would tell an unauthenticated stranger that this responder has
+/// one and that it is currently broken, which is a better reconnaissance signal
+/// than the one the fail-open leaked.
+const BOOTSTRAP_DECLINE_LISTS_UNAVAILABLE: &str = "bootstrap_unavailable";
+
+/// Discovery lists for a hello exchange, or the decline code to answer with.
+///
+/// THIS IS THE bd-zjcx6 FIX, AND THE POINT IS THE `Err` ARM.
+///
+/// `load_node_key_list` is deliberately built to separate two states, and
+/// spells every benign one `Ok(empty)`: absent file, non-regular path, a
+/// `NotFound` read, and a file carrying no `node_keys` key. So every `Err` that
+/// reaches here means an operator supplied a list that we failed to read,
+/// parse, or bound. The previous `.and_then(|path| load_workspace_lists(path).ok())`
+/// merged those two states, handing `decide_hello_response` an empty denylist
+/// that is indistinguishable from "no denylist configured".
+///
+/// That is a fail-open, not a cosmetic one: `decide_respond` applies the
+/// denylist as the ONLY per-requester exclusion in both `auto_admit` and
+/// `service_tag` mode -- `service_tag` grants on the RESPONDER's own advertised
+/// tags, never the requester's -- so an emptied denylist admits every peer the
+/// operator explicitly excluded. Only `allowlist` mode is unaffected, because
+/// an empty `respond_allowlist` denies everyone.
+///
+/// The inversion worth keeping in mind: the oversized-payload refusal that
+/// bd-3gmzf added as HARDENING returns `Err`, so through the old call site that
+/// defence became the bypass, and a malformed or oversized denylist left the
+/// responder strictly MORE permissive than having no denylist file at all.
+///
+/// Note what is NOT done here. The loader still returns `Err`; nothing was
+/// softened into `Ok(empty)` to make a gate pass. That would push this same
+/// fail-open one level down and destroy the two-state distinction the loader
+/// exists to preserve.
+fn resolve_hello_discovery_lists(
+    workspace_path: Option<&Path>,
+) -> Result<WorkspaceLists, &'static str> {
+    match workspace_path.map(load_workspace_lists) {
+        Some(Ok(lists)) => Ok(lists),
+        Some(Err(_)) => Err(BOOTSTRAP_DECLINE_LISTS_UNAVAILABLE),
+        // No route, so no workspace and no list files to honour. The loader
+        // spells that same state `Ok(empty)`, so it stays empty here. This arm
+        // is bd-zjcx6-unchanged and is NOT claimed to be safe: if a responder
+        // can serve a hello with zero routes, an empty denylist there is a
+        // separate question from the one this bead fixed.
+        None => Ok(WorkspaceLists::default()),
+    }
+}
+
 async fn write_bootstrap_decline(
     cx: &Cx,
     stream: &mut TcpStream,
@@ -3481,10 +3536,10 @@ async fn answer_bootstrap_hello(
         return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
     };
     let workspace_ids = routes.workspace_ids();
-    let lists = routes
-        .first_workspace_path()
-        .and_then(|path| load_workspace_lists(path).ok())
-        .unwrap_or_default();
+    let lists = match resolve_hello_discovery_lists(routes.first_workspace_path()) {
+        Ok(lists) => lists,
+        Err(code) => return write_bootstrap_decline(cx, stream, io_timeout, code).await,
+    };
     let advertised_tags = vec![EE_MESH_SERVICE_TAG.to_owned()];
     let capabilities = vec!["hello".to_owned()];
     let context = ResponderContext {
@@ -4759,5 +4814,140 @@ mod tests {
             validate_control_request(&unknown),
             Err(ResponderBrokerError::InvalidConfiguration)
         ));
+    }
+
+    // ---- bd-zjcx6: an unreadable denylist must refuse, not empty ------------
+    //
+    // These pair deliberately. The refusal arms are only meaningful next to
+    // arms proving the benign states still load, because a `resolve_*` that
+    // declined unconditionally would satisfy every negative test on its own
+    // while breaking discovery outright.
+
+    /// Write `.ee/<name>` under a fresh tempdir and hand back the workspace.
+    fn workspace_with_list_file(name: &str, body: &[u8]) -> tempfile::TempDir {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let ee_dir = tempdir.path().join(".ee");
+        std::fs::create_dir(&ee_dir).expect("mkdir .ee");
+        std::fs::write(ee_dir.join(name), body).expect("write list file");
+        tempdir
+    }
+
+    #[test]
+    fn a_denylist_that_cannot_be_parsed_declines_instead_of_emptying_the_denylist() {
+        let workspace = workspace_with_list_file(
+            crate::mesh::discovery_policy::DISCOVERY_DENYLIST_FILE,
+            b"node_keys = this is not toml [",
+        );
+
+        // Precondition: the loader really does report this as Err. If the
+        // loader ever softened to Ok(empty), this assert is what catches it --
+        // the fail-open would have moved down a level rather than been fixed.
+        assert!(
+            load_workspace_lists(workspace.path()).is_err(),
+            "precondition: a malformed denylist must reach the caller as Err, \
+             otherwise this test proves nothing about the caller"
+        );
+
+        let outcome = resolve_hello_discovery_lists(Some(workspace.path()));
+        assert_eq!(
+            outcome,
+            Err(BOOTSTRAP_DECLINE_LISTS_UNAVAILABLE),
+            "a denylist that exists and cannot be honoured must decline the \
+             exchange, not hand decide_respond an empty denylist"
+        );
+    }
+
+    #[test]
+    fn an_oversized_denylist_declines_so_the_bd_3gmzf_bound_cannot_invert() {
+        // The sharpest case in bd-zjcx6: the size cap was added as HARDENING
+        // and reports Err, so under the old `.ok()` it EMPTIED the denylist.
+        // A defence that makes the responder more permissive than no defence
+        // at all is the inversion this asserts is gone.
+        let workspace = workspace_with_list_file(
+            crate::mesh::discovery_policy::DISCOVERY_DENYLIST_FILE,
+            &vec![b'x'; crate::mesh::discovery_policy::NODE_KEY_LIST_MAX_BYTES + 1],
+        );
+
+        assert_eq!(
+            resolve_hello_discovery_lists(Some(workspace.path())),
+            Err(BOOTSTRAP_DECLINE_LISTS_UNAVAILABLE),
+            "an over-cap denylist must decline; emptying it would make the \
+             bd-3gmzf bound strictly weaker than having no denylist file"
+        );
+    }
+
+    #[test]
+    fn a_readable_denylist_still_loads_and_still_denies_that_peer() {
+        // The control. Without this, the two refusal tests above would pass
+        // against a function that declines everything.
+        let denied = "nodekey:0000000000000000000000000000000000000000000000000000000000000001";
+        let workspace = workspace_with_list_file(
+            crate::mesh::discovery_policy::DISCOVERY_DENYLIST_FILE,
+            format!("node_keys = [\"{denied}\"]\n").as_bytes(),
+        );
+
+        let lists = resolve_hello_discovery_lists(Some(workspace.path()))
+            .expect("a well-formed denylist must load");
+        assert!(
+            lists.denylist.contains(denied),
+            "the loaded denylist must carry the operator's entry"
+        );
+
+        // And the consequence the bead is actually about: this key is excluded
+        // in auto_admit ONLY because the denylist arrived non-empty.
+        let no_tags: Vec<String> = Vec::new();
+        let empty = std::collections::BTreeSet::new();
+        let decision = crate::mesh::discovery_policy::decide_respond(
+            &crate::mesh::discovery_policy::RespondDecisionInput {
+                mode: DiscoveryMode::AutoAdmit,
+                requester_node_key: denied,
+                requester_advertised_tags: &no_tags,
+                self_advertised_tags: &no_tags,
+                respond_allowlist: &empty,
+                denylist: &lists.denylist,
+            },
+        );
+        assert_eq!(
+            decision,
+            (
+                crate::mesh::discovery_policy::DiscoveryConsent::Denied,
+                crate::mesh::discovery_policy::DiscoveryReason::SkipDenylisted
+            ),
+            "a denylisted peer must be refused in auto_admit"
+        );
+
+        // The same call with the EMPTY denylist the old code produced grants
+        // that peer. This is the fail-open, executed rather than described.
+        let fail_open = crate::mesh::discovery_policy::decide_respond(
+            &crate::mesh::discovery_policy::RespondDecisionInput {
+                mode: DiscoveryMode::AutoAdmit,
+                requester_node_key: denied,
+                requester_advertised_tags: &no_tags,
+                self_advertised_tags: &no_tags,
+                respond_allowlist: &empty,
+                denylist: &empty,
+            },
+        );
+        assert_eq!(
+            fail_open.0,
+            crate::mesh::discovery_policy::DiscoveryConsent::Granted,
+            "sanity: an empty denylist admits the denied peer in auto_admit -- \
+             this is what the swallowed load error used to produce"
+        );
+    }
+
+    #[test]
+    fn absent_list_files_are_not_treated_as_a_failure() {
+        // The two-state distinction, from the other side: "no denylist" must
+        // stay a normal load. Turning this into a decline would break every
+        // workspace that has never written a list file.
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let lists = resolve_hello_discovery_lists(Some(tempdir.path()))
+            .expect("a workspace with no .ee list files must load, not decline");
+        assert!(lists.denylist.is_empty(), "absent denylist means empty");
+
+        // And with no route at all there is no workspace to read.
+        let none = resolve_hello_discovery_lists(None).expect("no route must not decline");
+        assert!(none.denylist.is_empty());
     }
 }
