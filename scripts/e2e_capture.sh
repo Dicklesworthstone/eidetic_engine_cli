@@ -197,7 +197,7 @@ cmd="\${1:-}"
 case "\$cmd" in
   sessions)
     printf '%s' '{"sessions":['
-    printf '%s' '{"path":"$session_path","workspace":"$WS","agent":"codex","started_at":"2026-06-17T13:00:00Z","ended_at":"2026-06-17T13:20:00Z","message_count":4,"token_count":920,"content_hash":"blake3:capture-e2e-session-primary"}'
+    printf '%s' '{"path":"$session_path","workspace":"$WS","agent":"codex","started_at":"2026-06-17T13:00:00Z","ended_at":"2026-06-17T13:20:00Z","message_count":5,"token_count":920,"content_hash":"blake3:capture-e2e-session-primary"}'
     auxiliary_index=1
     while [ "\$auxiliary_index" -le 129 ]; do
       auxiliary_path="$auxiliary_session_prefix-\${auxiliary_index}.jsonl"
@@ -215,8 +215,9 @@ case "\$cmd" in
   {"line":1,"content":"{\"role\":\"user\",\"content\":\"The capture workflow kept reproposing the same lesson after acceptance.\"}","highlighted":false},
   {"line":2,"content":"{\"role\":\"assistant\",\"content\":\"Lesson: ambient capture must dedupe accepted suggestions and route storage through explicit curation accept.\"}","highlighted":true},
   {"line":3,"content":"{\"role\":\"assistant\",\"content\":\"Failure arc: storing silently would violate the no-loop-takeover policy.\"}","highlighted":false},
-  {"line":4,"content":"{\"role\":\"user\",\"content\":\"Fix: require accept/reject commands and audit every accepted capture.\"}","highlighted":false}
-],"total_lines":4}
+  {"line":4,"content":"{\"role\":\"user\",\"content\":\"Fix: require accept/reject commands and audit every accepted capture.\"}","highlighted":false},
+  {"line":5,"content":"{\"role\":\"user\",\"content\":\"Deploy key for the staging box is sk-proj-cassimport-e2e-leakcanary-000000000000000000 so keep it out of any summary.\"}","highlighted":false}
+],"total_lines":5}
 JSON
     else
       case "\$source_path" in
@@ -529,6 +530,50 @@ assert_json "$repeat_evidence_pack_out" '.data.pack.budget.usedTokens' \
 assert_jq "$repeat_evidence_pack_out" \
     ".data.pack.items == $(printf '%s' "$evidence_pack_out" | jq -c '.data.pack.items')" \
     "repeating the evidence pack preserves typed item bytes"
+
+# bd-16imy bullet 2: "denied/redacted material must not leak".
+#
+# This clause was UNREACHABLE, not merely unrun. Every line of this fixture's
+# transcript was benign, so there was no denied material anywhere in the inputs
+# for a leak to carry, and no number of runs could have proven or refuted it.
+# The harness passed, would always pass, and the pass meant nothing. Line 5 of
+# the primary session now carries a secret-shaped canary so the clause has
+# something to be about.
+#
+# THE PRECONDITION BELOW IS LOAD-BEARING. A "must not contain" assertion passes
+# trivially when the string was never present -- which is the same vacuous green
+# this fixture gap already produced once. So first prove the canary ENTERED the
+# pipeline, then prove it did not reach the surfaces it must not reach.
+LEAK_CANARY="sk-proj-cassimport-e2e-leakcanary-000000000000000000"
+
+leak_source_view="$("$CASS_BIN" view "$SESSION_PATH" 2>/dev/null || true)"
+assert_json "$leak_source_view" "tostring | contains(\"$LEAK_CANARY\")" 'true' \
+    "precondition: the imported transcript actually carries the secret canary"
+
+leak_search_out="$(ee_json --workspace "$WS" search "$LEAK_CANARY" --json || true)"
+assert_json "$leak_search_out" "tostring | contains(\"$LEAK_CANARY\") | not" 'true' \
+    "imported transcript secret must not be retrievable through search"
+
+# The pack half must be TWO-SIDED or it is weaker than it looks. The pack above
+# was assembled for line 2's phrase, so "does not contain the canary" could mean
+# the redaction worked OR that line 5 was simply never selected -- and those are
+# indistinguishable from a pass. So pack for line 5's OWN non-secret text, prove
+# selection actually reached that line, and only then assert the secret is
+# absent from it. The positive is what gives the negative something to be
+# negative about.
+leak_targeted_pack_out="$(ee_json --workspace "$WS" pack \
+    "deploy key staging box keep it out of any summary" --max-tokens 2000 --json || true)"
+assert_json "$leak_targeted_pack_out" \
+    "tostring | contains(\"staging box\")" 'true' \
+    "precondition: a pack aimed at line 5 actually selects line 5's content"
+assert_json "$leak_targeted_pack_out" \
+    "tostring | contains(\"$LEAK_CANARY\") | not" 'true' \
+    "a pack that selected line 5 must not carry its secret"
+
+# Kept as a second, broader probe: the line-2 pack must not carry the secret
+# either. Weaker on its own for the reason above, meaningful alongside it.
+assert_json "$evidence_pack_out" "tostring | contains(\"$LEAK_CANARY\") | not" 'true' \
+    "imported transcript secret must not reach a context pack"
 
 ready_generation="$(printf '%s' "$ready_index_out" | jq -r '.data.indexGeneration // empty')"
 assert_nonempty "$ready_generation" "ready index exposes its published generation"
