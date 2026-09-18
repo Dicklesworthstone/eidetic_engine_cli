@@ -1283,6 +1283,7 @@ fn readme_workflow_parity_matrix_covers_advertised_surfaces() -> Result<(), Stri
 
 #[test]
 fn readme_pins_swarm_brief_operator_workflow() -> Result<(), String> {
+    let readme_collapsed = collapse_whitespace(README_SOURCE);
     for required in [
         // `br ready --json` until 2026-09-18. 08b30bfde deliberately replaced
         // the bare form with the flagged one below, which suppresses
@@ -1311,11 +1312,21 @@ fn readme_pins_swarm_brief_operator_workflow() -> Result<(), String> {
         "verdict=safe_to_claim",
         "claimCommandAction",
         "claim-safety gate",
-        "bv copy-paste claim command",
+        // README says "BV copy-paste claim command" (README.md:1136) and
+        // always has: `git log -S 'bv copy-paste claim command' -- README.md`
+        // is EMPTY, so the lowercase form never existed in that file. This
+        // marker was wrong the day it was written and only became visible
+        // when integration_g_m compiled again
+        // (bd-integration-gm-six-red-concealed-uhp28).
+        "BV copy-paste claim command",
         "unexpected argument",
-        "stale relative to the current\n   source/docs contract",
-        "approved\n   RCH/release-path rebuild",
-        "do not run a BV claim command or local Cargo\n   install as a workaround",
+        "stale relative to the current source/docs contract",
+        "approved RCH/release-path rebuild",
+        // README.md:1097-1098 reads "run no BV claim command, and do not use
+        // local Cargo install as a workaround" -- the same rewording AGENTS.md
+        // received. The marker quoted the older phrasing, which matched
+        // neither literally nor with whitespace collapsed.
+        "run no BV claim command, and do not use local Cargo install as a workaround",
         "swarm_brief_summary.json",
         "never claims work",
         "never reserves files",
@@ -1324,7 +1335,13 @@ fn readme_pins_swarm_brief_operator_workflow() -> Result<(), String> {
         "never schedules agents",
         "paths_counts_subjects_only_no_content",
     ] {
-        if !README_SOURCE.contains(required) {
+        // Whitespace collapsed on both sides, same treatment and same reason
+        // as the AGENTS.md marker loop: three of these markers embedded the
+        // document's line wrapping, so reflowing a paragraph broke the
+        // assertion while the text it guards was untouched. The wording is
+        // still required in full and in order; only the wrap positions stop
+        // being part of the contract.
+        if !readme_collapsed.contains(&collapse_whitespace(required)) {
             return Err(format!(
                 "README swarm brief workflow docs missing required marker `{required}`"
             ));
@@ -1400,8 +1417,7 @@ fn agents_md_pins_claim_gate_stale_binary_stop_condition() -> Result<(), String>
     // as a contiguous run of words. Only the position of the line breaks stops
     // being part of the contract, and a line break was never the thing worth
     // pinning.
-    let collapse = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let agents_collapsed = collapse(AGENTS_SOURCE);
+    let agents_collapsed = collapse_whitespace(AGENTS_SOURCE);
     for required in [
         "if the installed `ee` rejects `--claim-gate` or `--candidate`",
         "stale relative to the current source/docs contract",
@@ -1866,4 +1882,20 @@ fn matrix_row_classes_agree_with_the_effect_manifest() -> Result<(), String> {
             violations.join("\n")
         ))
     }
+}
+
+/// Collapse every run of whitespace to a single space.
+///
+/// Used by the AGENTS.md and README marker loops so a required phrase is
+/// matched by its WORDS and not by where the document happens to wrap. Those
+/// markers were written by pasting prose out of the documents, line breaks and
+/// indentation included; reflowing a paragraph then broke assertions whose
+/// subject had not changed at all. Three such markers had rotted that way by
+/// 2026-09-18 (bd-integration-gm-six-red-concealed-uhp28).
+///
+/// It does NOT weaken the checks: the full phrase is still required, in order,
+/// as one contiguous run of words. It removes only the line-break positions,
+/// which were never the thing worth pinning.
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
