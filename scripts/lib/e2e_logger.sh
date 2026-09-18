@@ -352,7 +352,7 @@ _e2e_emit_event() {
         json_args+=("$1" "$2")
         shift 2
     done
-    python3 - "$EE_TEST_LOG_PATH" "$EE_TEST_LOG_SCHEMA" "$(_e2e_now_iso)" "$EE_TEST_LOG_TEST_ID" "$kind" "${json_args[@]}" <<'PYEOF'
+    python3 - "$EE_TEST_LOG_PATH" "$EE_TEST_LOG_SCHEMA" "$(_e2e_now_iso)" "$EE_TEST_LOG_TEST_ID" "$kind" "${json_args[@]+"${json_args[@]}"}" <<'PYEOF'
 import json, sys, os
 log_path = sys.argv[1]
 event = {
@@ -580,7 +580,7 @@ e2e_log_artifact_manifest() {
         "log_path" "${EE_TEST_LOG_PATH:-}" \
         "retention_manifest_path" "${EPIC_RETENTION_MANIFEST:-${EE_E2E_RETENTION_MANIFEST:-}}" \
         "artifact_manifest_hash" "$manifest_hash" \
-        "${remote_attestation_fields[@]}"
+        "${remote_attestation_fields[@]+"${remote_attestation_fields[@]}"}"
 }
 
 # Wrap a command: capture stdout/stderr/exit, emit start+end events, AND
