@@ -1,0 +1,145 @@
+diff --git a/src/cli/mod.rs b/src/cli/mod.rs
+--- a/src/cli/mod.rs
++++ b/src/cli/mod.rs
+@@ -1744,6 +1744,11 @@
+     /// Team scope requires the workspace database, not an alternate store.
+     #[arg(long, value_parser = parse_memory_scope_arg, default_value = "workspace")]
+     pub memory_scope: MemoryScope,
++
++    /// Query without writing retrieval or query-miss audit records.
++    /// Opens the store read-only and never migrates it.
++    #[arg(long)]
++    pub read_only: bool,
+ 
+     /// Database path. Defaults to <workspace>/.ee/ee.db.
+     #[arg(long, value_name = "PATH")]
+@@ -50876,7 +50881,9 @@
+         return write_domain_error(&error, cli.renderer(), stdout, stderr);
+     }
+ 
+-    let connection = match crate::db::DbConnection::open_file(&database_path) {
++    // Evidence acquisition must not require write permission or a writer lease.
++    // The optional audit handle is opened only after the read snapshot finishes.
++    let connection = match crate::db::DbConnection::open_file_read_only(&database_path) {
+         Ok(c) => c,
+         Err(e) => {
+             let error = DomainError::Storage {
+@@ -50887,11 +50894,7 @@
+         }
+     };
+ 
+-    if let Err(e) = connection.migrate() {
+-        let error = DomainError::Storage {
+-            message: format!("Failed to migrate database: {e}"),
+-            repair: Some("ee migrate run --workspace . --json".to_owned()),
+-        };
++    if let Err(error) = ensure_inspection_database_current(&connection, &database_path, "ask") {
+         return write_domain_error(&error, cli.renderer(), stdout, stderr);
+     }
+ 
+@@ -50926,11 +50929,20 @@
+     };
+ 
+     let report = evaluate_ask(&request, &candidates);
+-    record_ask_query_miss_best_effort(&connection, &workspace_id, &report);
+-    // bd-b9dmp. The miss row above feeds ADR 0071's demand half. This feeds the
+-    // retrieval half, which ask fed nothing to: memories it cited as the answer
+-    // read as never_retrieved and were surfaced for disposition review.
+-    record_ask_retrieval_best_effort(&connection, &workspace_id, &report);
++    if !args.read_only {
++        // Keep ADR 0071 demand and retrieval learning on ordinary asks. An
++        // unavailable audit writer must not suppress a valid read-only answer.
++        match crate::db::DbConnection::open_file(&database_path) {
++            Ok(audit_connection) => {
++                record_ask_query_miss_best_effort(&audit_connection, &workspace_id, &report);
++                record_ask_retrieval_best_effort(&audit_connection, &workspace_id, &report);
++            }
++            Err(_) => tracing::warn!(
++                target: "ee::core::ask::audit",
++                "ask audit writer unavailable; evidence evaluation remains valid"
++            ),
++        }
++    }
+ 
+     // Build degradation entries
+     let mut degraded: Vec<serde_json::Value> = Vec::new();
+@@ -68737,6 +68749,7 @@
+                     AnalyzeCommand::Clustering(_) => "analyze clustering".to_string(),
+                 },
+                 Command::AgentDocs(_) => "agent-docs".to_string(),
++                Command::Ask(args) if args.read_only => "ask --read-only".to_string(),
+                 Command::Ask(_) => "ask".to_string(),
+                 Command::Audit(audit) => match audit {
+                     AuditCommand::Timeline(_) => "audit timeline".to_string(),
+ diff --git a/src/core/effect.rs b/src/core/effect.rs
+--- a/src/core/effect.rs
++++ b/src/core/effect.rs
+@@ -1528,8 +1528,8 @@
+                 "Show one journal entry with structured sidecar and redaction report",
+             ),
+             CommandEffect::read_only_db(
+-                "ask",
+-                "Deterministic extractive question answering with citations and honest abstention",
++                "ask --read-only",
++                "Extractive question answering without audit writes or automatic migrations",
+             ),
+             CommandEffect::read_only_db(
+                 "recall",
+@@ -2201,6 +2201,18 @@
+     }
+ 
+     fn append_only_write_commands() -> Vec<CommandEffect> {
++        let mut ask = CommandEffect::append_only_write(
++            "ask",
++            vec!["audit_log"],
++            "audit row id",
++            "Answer from a read-only snapshot, then best-effort append cited retrieval or query-miss audit records",
++        )
++        .with_read_snapshot();
++        // Ask has an explicit read-only mode, not a dry-run argument.
++        ask.dry_run_effect = None;
++        ask.mutation_contract.dry_run_behavior = None;
++        ask.mutation_contract.recovery_behavior =
++            "answers remain available when optional audit writes fail; --read-only suppresses those writes";
+         let diag_pack_record = CommandEffect::append_only_write(
+             "diag pack-record",
+             vec!["pack_records", "audit_log"],
+@@ -2208,6 +2220,7 @@
+             "Append one audited diagnostic pack record without overwriting an existing ID",
+         );
+         vec![
++            ask,
+             diag_pack_record,
+             CommandEffect::append_only_write(
+                 "db check-integrity",
+diff --git a/tests/effect_contracts.rs b/tests/effect_contracts.rs
+--- a/tests/effect_contracts.rs
++++ b/tests/effect_contracts.rs
+@@ -14,7 +14,7 @@
+ const EFFECT_SOURCE: &str = include_str!("../src/core/effect.rs");
+ /// Live count of the normalized command paths `extract_command_path` emits.
+ ///
+-/// Measured, not incremented: 453 at 2026-09-17, by mirroring
++/// Measured, not incremented: 454 after adding `ask --read-only`, by mirroring
+ /// `command_paths_in` over the marker-delimited body of `extract_command_path`
+ /// (`python3` over `src/cli/mod.rs`, same rule the gate uses — a path is
+ /// recovered only from `"literal".to_string()`).
+@@ -24,7 +24,7 @@
+ /// command and increments by one without re-measuring, so every count someone
+ /// else forgot compounds silently. When this fails, re-measure the inventory;
+ /// do not add the delta of your own change to the old number.
+-const NORMALIZED_CLI_COMMAND_COUNT: usize = 453;
++const NORMALIZED_CLI_COMMAND_COUNT: usize = 454;
+ const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
+     "daemon background",
+     "daemon foreground decay_sweep",
+diff --git a/tests/contracts/ask_lifecycle.rs b/tests/contracts/ask_lifecycle.rs
+--- a/tests/contracts/ask_lifecycle.rs
++++ b/tests/contracts/ask_lifecycle.rs
+@@ -187,3 +187,6 @@
+ 
+ #[path = "ask_scope.rs"]
+ mod scope;
++
++#[path = "ask_read_only.rs"]
++mod read_only;

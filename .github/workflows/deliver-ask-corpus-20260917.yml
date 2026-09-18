@@ -1,19 +1,127 @@
-name: Core delivery (retired)
+name: Read-only ask integration
 
-# Production implementations committed directly to main:
-# 39f44ea12703e6b772ba89e1c3f28aebd5a3d171 - stable peer continuity
-# a1027ee095e1685e7ee2b76754e78cfbddc753c3 - atomic enrollment and migration
-# 66e68adc7e648718e145958cbc145af311760180 - planner backfill and current sync
-# Run 35278019544: library check, 14 identity tests, 53 enrollment tests passed.
-# Later exact-source verification: runs 35278739853 and 35279529566.
-# Their verdicts are separate from successful integration and Rustfmt parsing.
-# Retired: no automatic triggers, write permissions, or delivery commands.
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/deliver-ask-corpus-20260917.yml'
   workflow_dispatch:
-permissions: {}
+
+permissions:
+  contents: read
+
 jobs:
-  retired:
-    if: ${{ false }}
+  deliver:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.integrate.outputs.sha }}
     steps:
-      - run: echo 'This temporary source delivery is retired.'
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Apply the reviewed read-only implementation
+        id: integrate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check scripts/delivery/ask-read-only-20260917.patch
+          git apply scripts/delivery/ask-read-only-20260917.patch
+          files=(src/cli/mod.rs src/core/effect.rs tests/effect_contracts.rs tests/contracts/ask_lifecycle.rs tests/contracts/ask_read_only.rs)
+          rustfmt +nightly --edition 2024 --config skip_children=true "${files[@]}"
+          git diff --check
+          git diff --stat
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "${files[@]}"
+          git commit -m 'feat(ask): answer from immutable stores without acquiring a writer' -m 'Add --read-only, acquire evidence through a read-only connection, require explicit schema migration, and keep ordinary retrieval and query-miss learning on a separate best-effort audit writer. Declare default ask as audit-appending and the explicit read-only variant as nonmutating. Register seven real CLI/effect regressions including held writer locks, immutable files, strict failures, migration refusal, unchanged durable bytes and preserved learning audits. Rustfmt and patch checks passed; behavioral results are recorded by verification.'
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            git fetch origin main
+            git merge --no-edit origin/main
+          done
+          exit 1
+
+  verify:
+    needs: deliver
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.deliver.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ needs.deliver.outputs.sha }}
+          restore-keys: |
+            ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Record source and formatting
+        run: |
+          git rev-parse HEAD
+          git status --porcelain
+          rustfmt --check --edition 2024 --config skip_children=true src/cli/mod.rs src/core/effect.rs tests/effect_contracts.rs tests/contracts/ask_lifecycle.rs tests/contracts/ask_read_only.rs
+      - name: Compile the production library
+        run: |
+          status=0
+          cargo check --locked --lib > "$RUNNER_TEMP/ask-read-only-check.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/ask-read-only-check.log"
+          exit "$status"
+      - name: Execute immutable-store and public ask contracts
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          cargo test --locked --test contracts ask_lifecycle -- --nocapture > "$RUNNER_TEMP/ask-read-only-cli.log" 2>&1 || status=$?
+          tail -n 140 "$RUNNER_TEMP/ask-read-only-cli.log"
+          exit "$status"
+      - name: Execute ordinary ask audit regression
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          cargo test --locked --test contracts ee_ask_writes_returned_mem_rows_for_cited_memories -- --nocapture > "$RUNNER_TEMP/ask-read-only-audit.log" 2>&1 || status=$?
+          tail -n 80 "$RUNNER_TEMP/ask-read-only-audit.log"
+          exit "$status"
+      - name: Execute ask engine regressions
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          cargo test --locked --lib core::ask:: -- --nocapture > "$RUNNER_TEMP/ask-read-only-engine.log" 2>&1 || status=$?
+          tail -n 170 "$RUNNER_TEMP/ask-read-only-engine.log"
+          exit "$status"
+      - name: Check normalized command effect coverage
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          cargo test --locked --test integration_e_f effect_contracts::effect_manifest_covers_all_normalized_cli_command_paths -- --nocapture > "$RUNNER_TEMP/ask-read-only-effects.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/ask-read-only-effects.log"
+          exit "$status"
+      - name: Preserve verification logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ask-read-only-verification
+          path: ${{ runner.temp }}/ask-read-only-*.log
+          retention-days: 7
