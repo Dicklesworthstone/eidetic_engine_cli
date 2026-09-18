@@ -10,6 +10,28 @@ commands start at `src/cli/mod.rs:253`, and diagnostic command-path extraction i
 `--help-json` is a global exit path at `src/cli/mod.rs:164` and is dispatched before subcommands
 at `src/cli/mod.rs:3778`; it is not counted as a command path.
 
+**FIRST-CELL COVERAGE IS 439 OF 454, and that is the honest number** (ruled
+2026-09-17). A path is covered when it HAS A ROW, and the row's first cell is
+what says so. Satisfying coverage through a later cell means the path was
+*mentioned* — in another command's row, in a note, in a related-surface column —
+and a mention is not a boundary. This inventory exists to record per-path
+boundary facts: what mutates, what blocks, what persists. A path with no row of
+its own has none of those recorded, whatever some other row names in passing.
+
+The gate currently counts 454 because its predicate accepts a backticked path
+anywhere in a table row (bd-6hp3w). These fifteen satisfy it without a row of
+their own:
+
+`completion` · `db check` · `db status` · `diag environment-attestation` ·
+`index vacuum` · `pack build` · `pack diff` · `pack replay` ·
+`perf budget check` · `perf compare` · `perf explain-latency` ·
+`profile config apply` · `profile config plan` · `show` · `swarm brief`
+
+They are NOT swept into rows to restore 454. Each needs its own boundary facts
+checked against source the way every other row here was written, or a per-path
+justification for living as a sub-path of an existing row. A row written to move
+a counter is worth less than an honest 439.
+
 **The denominator is 454 PATHS but 440 SURFACES.** Fourteen extractor paths
 name an already-counted surface:
 
@@ -53,6 +75,8 @@ E2E audit record for this inventory:
 - Command source: `src/cli/mod.rs`
 - CLI command paths returned by the extractor: 454
 - Documented in a table row here: 454
+- Documented by a row's FIRST cell — i.e. having a row of its own: 439
+- Mentioned only in a later cell of some other row: 15
 - Absent: 0
 - Unmapped command count: 0
 - Matrix enforcement floor: 24
