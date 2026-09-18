@@ -139,7 +139,11 @@ fn native_cass_excerpt_is_answered_and_audited_without_a_memory_alias() {
     record_ask_retrieval_best_effort(&db, &workspace, &report);
     let audits = db.list_audit_by_target("evidence", &id, None).unwrap();
     assert_eq!(audits.len(), 1);
-    assert!(db.list_audit_by_target("memory", &id, None).unwrap().is_empty());
+    assert!(
+        db.list_audit_by_target("memory", &id, None)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -240,7 +244,11 @@ fn tampered_excerpt_is_excluded_before_answering_or_nearest_evidence() {
     assert!(corpus.native_sources.is_empty());
     let report = answer(&corpus);
     assert!(report.abstained);
-    assert!(!ask_data_json(&report).to_string().contains("ask-evidence-secret-canary"));
+    assert!(
+        !ask_data_json(&report)
+            .to_string()
+            .contains("ask-evidence-secret-canary")
+    );
 }
 
 #[test]
@@ -277,4 +285,61 @@ fn unicode_evidence_citations_are_exact_slices_of_the_stored_excerpt() {
             Some(citation.text.as_str())
         );
     }
+}
+
+#[test]
+fn admission_is_rechecked_after_hash_revocation_and_repair() {
+    let (_root, db, workspace) = fixture();
+    let session = session(&db, &workspace, 1);
+    let id = evidence(&db, &workspace, &session, 1, BODY);
+    let stored = db.get_evidence_span(&id).unwrap().unwrap();
+    let before = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
+    assert_eq!(before.candidates.len(), 1);
+
+    let bad_hash = "0".repeat(64);
+    db.execute_raw(&format!(
+        "UPDATE evidence_spans SET content_hash = '{bad_hash}' WHERE id = '{id}'"
+    ))
+    .unwrap();
+    let revoked = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
+    assert!(revoked.candidates.is_empty());
+    assert!(revoked.native_sources.is_empty());
+    assert!(answer(&revoked).abstained);
+
+    // Restoring the original digest must be visible on the next read without
+    // a search-index rebuild or a fresh connection. A prior denial is not a
+    // permanent negative cache, and the first read did not pin its snapshot.
+    let original_hash = stored.content_hash;
+    db.execute_raw(&format!(
+        "UPDATE evidence_spans SET content_hash = '{original_hash}' WHERE id = '{id}'"
+    ))
+    .unwrap();
+    let repaired = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
+    assert_eq!(repaired.candidates.len(), 1);
+    assert_eq!(repaired.candidates[0].memory_id, id);
+    assert_eq!(repaired.native_sources, before.native_sources);
+}
+
+#[test]
+fn clean_metadata_and_a_matching_digest_do_not_authorize_secret_text() {
+    let (_root, db, workspace) = fixture();
+    let session = session(&db, &workspace, 1);
+    let id = evidence(&db, &workspace, &session, 1, BODY);
+    let unsafe_body = "Run cargo fmt before every release tag. password=ask-private-canary";
+    let hash = blake3::hash(unsafe_body.as_bytes()).to_hex().to_string();
+    db.execute_raw(&format!(
+        "UPDATE evidence_spans SET excerpt = '{unsafe_body}', content_hash = '{hash}' WHERE id = '{id}'"
+    ))
+    .unwrap();
+    let stored = db.get_evidence_span(&id).unwrap().unwrap();
+    assert_eq!(stored.excerpt, unsafe_body);
+    assert_eq!(stored.content_hash, hash);
+
+    let corpus = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
+    assert!(corpus.candidates.is_empty());
+    assert!(corpus.native_sources.is_empty());
+    let report = answer(&corpus);
+    assert!(report.abstained);
+    assert!(!ask_data_json(&report).to_string().contains("ask-private-canary"));
+    assert!(!render_ask_markdown(&report).contains("ask-private-canary"));
 }
