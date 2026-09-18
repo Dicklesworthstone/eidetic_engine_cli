@@ -94,6 +94,8 @@ mod rch_runbook_docs_lint;
 mod rch_verify_contract;
 #[path = "../rch_verify_control_plane.rs"]
 mod rch_verify_control_plane;
+#[path = "../rch_verify_path_deps.rs"]
+mod rch_verify_path_deps;
 #[path = "../read_fence_properties.rs"]
 mod read_fence_properties;
 #[path = "../read_pool_concurrency_e2e.rs"]

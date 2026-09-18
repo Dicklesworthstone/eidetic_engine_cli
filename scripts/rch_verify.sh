@@ -2735,9 +2735,44 @@ manifest = "\n".join(
 )
 manifest_hash = "sha256:" + hashlib.sha256(manifest.encode("utf-8")).hexdigest()
 
+def manifest_declares_path_dependencies(manifest_text):
+    """bd-e5h7g: does this Cargo.toml declare a path DEPENDENCY?
+
+    This used to be `"path" in text and "path =" in text`, a substring test over
+    the whole manifest. That conflated two unrelated things: a path DEPENDENCY
+    (`[dependencies] foo = { path = "../foo" }`), which genuinely cannot be
+    materialised from a committed tree alone, and a TARGET path (`[[test]] path =
+    "tests/suites/integration_a_d.rs"`), which names a file inside this very
+    repository and says nothing about external sources. A repo that spells out
+    its cargo targets was refused for a property it did not have, in preflight,
+    before RCH was ever contacted.
+
+    Returns True, False, or None. None means the manifest could not be parsed or
+    the helper could not be loaded, and callers MUST treat it exactly as True.
+    This repair makes a refusing gate more permissive, and more permissive is
+    indistinguishable from weaker unless the widening is confined to cases that
+    are proven; so the gate relaxes only where the ABSENCE of path dependencies
+    is established, never where it is merely unobserved.
+    """
+    helper = os.path.join(project_root, "scripts", "cargo_path_deps.py")
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("ee_cargo_path_deps", helper)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.declares_path_dependencies(manifest_text)
+    except Exception:
+        return None
+
+
 codes = []
 show_cargo = git(["show", f"{commit}:Cargo.toml"])
-if show_cargo.returncode == 0 and "path" in show_cargo.stdout and "path =" in show_cargo.stdout:
+# `is not False` is deliberate: True (path deps present) and None (cannot tell)
+# both keep the old refusal. Only a proven False relaxes it.
+if show_cargo.returncode == 0 and manifest_declares_path_dependencies(show_cargo.stdout) is not False:
     lock_result = git(["show", f"{commit}:franken-stack.lock"])
     if not pinned_franken_stack or lock_result.returncode != 0:
         codes.append("rch_verify_committed_tree_unsupported")
