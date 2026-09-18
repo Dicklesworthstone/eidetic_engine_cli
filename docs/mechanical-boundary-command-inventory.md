@@ -10,27 +10,40 @@ commands start at `src/cli/mod.rs:253`, and diagnostic command-path extraction i
 `--help-json` is a global exit path at `src/cli/mod.rs:164` and is dispatched before subcommands
 at `src/cli/mod.rs:3778`; it is not counted as a command path.
 
-**FIRST-CELL COVERAGE IS 439 OF 454, and that is the honest number** (ruled
-2026-09-17). A path is covered when it HAS A ROW, and the row's first cell is
-what says so. Satisfying coverage through a later cell means the path was
-*mentioned* — in another command's row, in a note, in a related-surface column —
-and a mention is not a boundary. This inventory exists to record per-path
-boundary facts: what mutates, what blocks, what persists. A path with no row of
-its own has none of those recorded, whatever some other row names in passing.
+**FIRST-CELL COVERAGE IS 454 OF 454.** A path is covered when it HAS A ROW, and
+the row's first cell is what says so. Satisfying coverage through a later cell
+means the path was *mentioned* — in another command's row, in a note, in a
+related-surface column — and a mention is not a boundary. This inventory exists
+to record per-path boundary facts: what mutates, what blocks, what persists. A
+path with no row of its own has none of those recorded, whatever some other row
+names in passing.
 
-The gate currently counts 454 because its predicate accepts a backticked path
-anywhere in a table row (bd-6hp3w). These fifteen satisfy it without a row of
-their own:
+First-cell coverage was 439 of 454 when that distinction was ruled on
+2026-09-17. Fifteen paths satisfied the gate's weaker predicate — a backticked
+path anywhere in a table row (bd-6hp3w) — without a row of their own:
 
 `completion` · `db check` · `db status` · `diag environment-attestation` ·
 `index vacuum` · `pack build` · `pack diff` · `pack replay` ·
 `perf budget check` · `perf compare` · `perf explain-latency` ·
 `profile config apply` · `profile config plan` · `show` · `swarm brief`
 
-They are NOT swept into rows to restore 454. Each needs its own boundary facts
-checked against source the way every other row here was written, or a per-path
-justification for living as a sub-path of an existing row. A row written to move
-a counter is worth less than an honest 439.
+They were not swept into rows to move the counter. Each had its boundary facts
+read out of source the way every other row here was written, and they are
+grouped into ten rows only where the facts genuinely coincide — `pack replay`
+with `pack diff` because both read ledgers `pack build` persisted, `profile
+config plan` with `apply` because the pair's asymmetry is itself the boundary
+fact, and `completion`, `index vacuum`, `pack build`, `show` and `swarm brief`
+alone because nothing shares their boundary.
+
+Writing them out found one defect and two facts a mention would never have
+recorded. `index vacuum` is declared `read_only` and has no apply arm at all —
+the name is the only mutating thing about it. `db check` and `db check-integrity`
+carry the same `DbCheckArgs` but different effects. And the pre-existing `db`
+row led with "Non-mutating database surfaces:" over a first cell that began with
+`db check-integrity`, which the effect manifest declares an `append_only_write`
+over `audit_log`; that row has been split. Both predicates now return 454, so
+the weak one has nothing left to hide, which is the argument for fixing
+bd-6hp3w now rather than after the two diverge again.
 
 **The denominator is 454 PATHS but 440 SURFACES.** Fourteen extractor paths
 name an already-counted surface:
@@ -75,8 +88,8 @@ E2E audit record for this inventory:
 - Command source: `src/cli/mod.rs`
 - CLI command paths returned by the extractor: 454
 - Documented in a table row here: 454
-- Documented by a row's FIRST cell — i.e. having a row of its own: 439
-- Mentioned only in a later cell of some other row: 15
+- Documented by a row's FIRST cell — i.e. having a row of its own: 454
+- Mentioned only in a later cell of some other row: 0
 - Absent: 0
 - Unmapped command count: 0
 - Matrix enforcement floor: 24
@@ -508,7 +521,8 @@ ledger and the command-boundary matrix must gain concrete rows before the new pa
 | `attest memory`, `attest pack`, `attest query` | `src/cli/mod.rs:13618`, `src/core/attest.rs` | Attestation bundles over one stored memory, one stored pack, or a query string. The query form is hash-only by construction, so it asserts nothing about retrieved content. | keep mechanical |
 | `config get`, `config set`, `config show` | `src/cli/mod.rs:13754`, `src/config/mod.rs` | Merged config reads with source attribution, and a single-key write into the workspace `.ee/config.toml`. `set` is the only mutating path of the three. | keep mechanical |
 | `conflict list`, `conflict explain`, `conflict cluster`, `conflict resolve` | `src/cli/mod.rs:14602`, `src/cli/conflict.rs` | Ranked contradicting memory pairs, per-memory explanation, and k-truss + Louvain contradiction clusters over persisted memories. `resolve` performs audited mutations and is dry-run by default. | keep mechanical |
-| `db check-integrity`, `db inspect`, `db migrations`, `db reindex` | `src/cli/mod.rs:13763`, `src/db/mod.rs` | Non-mutating database surfaces: integrity check, single-table row inspection, applied/pending migration listing, and a preview of pending derived-index rebuild work. `reindex` previews rather than rebuilds. | keep mechanical |
+| `db inspect`, `db migrations`, `db reindex` | `src/cli/mod.rs:13763`, `src/db/mod.rs` | Non-mutating database surfaces: single-table row inspection, applied/pending migration listing, and a preview of pending derived-index rebuild work. `reindex` previews rather than rebuilds. | keep mechanical |
+| `db check-integrity` | `src/cli/mod.rs` dispatch `DbCommand::CheckIntegrity(`, handler `handle_db_check_integrity` | Full database integrity verification that APPENDS AN AUDIT ROW: declared `append_only_write` over `audit_log`, keyed by audit row id (`src/core/effect.rs`). Split out of the non-mutating `db` row above on 2026-09-17, which had listed it first under the lead-in "Non-mutating database surfaces" — a blanket claim covering a declared writer. The shared `DbCheckArgs` type is what made it read as one surface with `db check`; the effect manifest is what distinguishes them. | keep mechanical |
 | `decide record`, `decide list`, `decide revisit` | `src/cli/mod.rs:15176`, `src/core/decide.rs` | Typed decision memories with revisit scheduling: record writes a durable decision, list reports current heads with optional superseded history, revisit reports decisions due or inside the warning window. | keep mechanical |
 | `history`, `link`, `tag` | `src/cli/mod.rs:14673`, `src/cli/mod.rs:14674`, `src/cli/mod.rs:14675` | **Top-level ALIASES, not distinct surfaces.** `history` is `ee memory history <id>`, `link` is `ee memory link A B --relation X`, `tag` is `ee memory tags <id>`; each dispatches to a handler named `handle_*_alias` and both spellings appear in the extractor. Together with the `verify`/`verification` pair these are 14 of the 454 paths that name an already-counted surface. | keep mechanical |
 | `ask`, `ask --read-only`, `recall`, `similar`, `impact`, `proximity`, `why-not`, `timeline`, `context-show` | `src/cli/mod.rs:15162`, `src/core/ask.rs`, `src/core/recall.rs` | Retrieval and explanation over persisted memory. `ask` is deterministic extractive answering with citations and HONEST ABSTENTION rather than a generated answer; `--read-only` is a distinct extractor path because it changes the effect, not the rendering. `recall` reverse-looks-up from paths, symbols or a git diff; `impact` finds memories attached to a path/symbol/command/env var/schema; `why-not` explains why a memory was NOT selected; `timeline` reconstructs what was known as of an RFC3339 instant; `context-show` retrieves a persisted IMMUTABLE pack by id. | keep mechanical |
@@ -554,6 +568,16 @@ ledger and the command-boundary matrix must gain concrete rows before the new pa
 | `learn cluster`, `learn gaps` | `src/cli/mod.rs:14717`, `src/core/learn.rs` | Deterministic memory clustering for curation coherence, and query-miss demand mined into capture gaps. Both report over stored activity; neither proposes content. | keep mechanical |
 | `memory demote-global`, `memory drift`, `memory level`, `memory outcome-global`, `memory promote-global`, `memory reveal` | `src/cli/mod.rs:14621`, `src/core/memory.rs` | User-global store transitions (ADR 0081) with audited promote/demote, read-only provenance drift reporting, canonical manual level transitions, helpful/harmful feedback with origin backflow, and sealed-memory reveal that requires supplied content to match the stored commitment. | keep mechanical |
 | `journal append`, `journal distill`, `journal list`, `journal show` | `src/cli/mod.rs:14686`, `src/core/journal.rs` | Append-only observation log with JSONL batch input, newest-first listing, and full single-record reads. `distill` proposes curation candidates by threshold over scanned entries and emits an explicit `distill_no_candidates` degradation rather than inventing proposals; it is rule-based, not synthesis, and is dry-run by default. | keep mechanical |
+| `completion` | `src/cli/mod.rs` dispatch `Some(Command::Completion(`, handler `handle_completion` | Shell completion script generation. `handle_completion` takes `_cli` — the workspace is not resolved and no store is opened, which makes this the only path in this table that touches neither the database nor the workspace. Declared `read_only` (not `read_only_db`) in `src/core/effect.rs`, and that distinction is the boundary fact. | keep mechanical |
+| `db status`, `db check` | `src/cli/mod.rs` dispatch `DbCommand::Status(` and `DbCommand::Check(`, handlers `handle_db_status` and `handle_db_check` | Non-mutating database reporting: posture status, and an integrity check that appends nothing. `db check` is NOT `db check-integrity`: both clap variants carry `DbCheckArgs` (`src/cli/mod.rs:2627`, `src/cli/mod.rs:2629`) and the shared args type is the reason they read as one surface, but `db check` is declared `read_only_db` (`src/core/effect.rs`) while `db check-integrity` is declared `append_only_write` over `audit_log` (`src/core/effect.rs`). Same arguments, different boundary. | keep mechanical |
+| `diag environment-attestation` | `src/cli/mod.rs` dispatch `DiagCommand::EnvironmentAttestation(` | Reads recorded environment-attestation diagnostics. Declared `read_only_db` in `src/core/effect.rs`. Inspection only: it reports attestation state, it does not attest. | keep mechanical |
+| `index vacuum` | `src/cli/mod.rs` dispatch `Some(Command::Index(IndexCommand::Vacuum(`, handler `handle_index_vacuum` | PREVIEW ONLY, despite the name. `handle_index_vacuum` builds `IndexVacuumOptions` from workspace/database/index-dir and calls `get_index_vacuum_report`; it reports candidate count, reclaimable bytes, and whether the lock is held. `IndexVacuumArgs` carries no apply, commit, or force flag, so there is no argument that turns this into a mutation — it is declared `read_only` (`src/core/effect.rs`, "Preview reclaimable derived index artifacts without mutation") and the handler has no reclaim arm to reach. | keep mechanical |
+| `pack build` | `src/cli/mod.rs` dispatch `Some(PackCommand::Build(`, handler `handle_pack` | The one writer among the paths in this block. Declared `append_only_write` over `context_packs`, `pack_items`, and `audit_log`, keyed by pack hash (`src/core/effect.rs`), so a re-run at an identical deterministic hash appends no second pack. Bare `pack` with no subcommand reaches the same handler through `legacy_build_args()`, which is why the legacy spelling carries the identical write boundary. `--use-daemon` relocates retrieval only; assembly and persistence remain local to the invoking process. | keep mechanical |
+| `pack replay`, `pack diff` | `src/cli/mod.rs` dispatch `Some(PackCommand::Replay(` and `Some(PackCommand::Diff(` | Readers over ledgers `pack build` already persisted: single-ledger inspection and two-ledger comparison. Both declared `read_only_db` in `src/core/effect.rs`. Neither rebuilds a pack, so neither can change the hash it reports. | keep mechanical |
+| `perf budget check`, `perf compare`, `perf explain-latency` | `src/cli/mod.rs` dispatch `PerfCommand::Budget(PerfBudgetCommand::Check(`, `PerfCommand::Compare(` and `PerfCommand::ExplainLatency(` | Analysis over an already-normalized performance artifact supplied by the caller: budget posture, summary comparison, and per-stage latency explanation. All three are declared `read_only` rather than `read_only_db` (all three in `src/core/effect.rs`) because the artifact is the input — they do not measure, and they do not open the store to find something to measure. | keep mechanical |
+| `profile config plan`, `profile config apply` | `src/cli/mod.rs` dispatch `ProfileCommand::Config(ProfileConfigCommand::Plan(` and `ProfileCommand::Config(ProfileConfigCommand::Apply(` | A plan/apply pair whose asymmetry is the boundary fact. Both build the same `ProfileConfigOptions` and render through the same `write_profile_config_report`, so they are one surface in every respect except the write. `plan` hard-codes `dry_run: true` in the dispatch arm and calls `plan_profile_config`: no argument can make it write, and it is declared `read_only` (`src/core/effect.rs`). `apply` passes `dry_run: args.dry_run` through to `apply_profile_config` and is declared `config_file_write` over `.ee/config.toml`, keyed by workspace config path plus requested profile (`src/core/effect.rs`). Both exit non-zero when the report carries conflicts. | keep mechanical |
+| `show` | `src/cli/mod.rs` dispatch `Some(Command::Show(`, handler `handle_show_alias` | An ID-prefix router with no boundary of its own. `handle_show_alias` inspects the prefix of the supplied id: `mem` builds `MemoryShowArgs` and delegates to `handle_memory_show`, `pack` builds `ContextShowArgs` and delegates to `handle_context_show` (bd-17c65.1.10), and anything else returns a structured `alias_id_prefix_error` naming `ALIAS_SUPPORTED_PREFIXES` rather than guessing a surface. Declared `read_only_db` (`src/core/effect.rs`); its effective boundary is whichever delegate the prefix selects, and the unrecognised-prefix path is an error, not a fallback. | keep mechanical |
+| `swarm brief` | `src/cli/mod.rs` dispatch `Some(Command::Swarm(SwarmCommand::Brief(` | Read-only swarm coordination brief; declared `read_only_db` in `src/core/effect.rs`. Reports coordination state without claiming, reserving, or announcing. The README operator workflow for this path is pinned by `readme_pins_swarm_brief_operator_workflow`. | keep mechanical |
 
 ## Mock, Sample, Stub, Or Simulated Data Anchors
 
