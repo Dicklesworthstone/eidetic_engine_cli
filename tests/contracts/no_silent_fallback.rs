@@ -2606,6 +2606,20 @@ const REQUIRED_SURFACE_FILES: &[&str] = &[
     "src/models/jsonl.rs",
 ];
 
+/// THE `follow_up` BEAD IS PROVENANCE, NOT OWNERSHIP (bd-epvc1, ruled
+/// 2026-09-18). It records WHERE this class of fallback was identified, not who
+/// is scheduled to fix this site. The bead being CLOSED is therefore normal and
+/// means nothing is wrong: bd-sos5.4 for instance closed on a complete,
+/// correctly scoped claim — it converted the JSONL export builders to fallible
+/// ones — and never claimed to have eradicated the class from the tree. The
+/// RULE is what watches the site; the bead is a citation.
+///
+/// So do NOT make this gate assert that a follow-up bead is open. That was
+/// proposed and withdrawn after measurement: all 24 must_fix rules named closed
+/// beads, 16 of them owning 36 live findings, so the assertion would have
+/// reddened main on rules that were working correctly. The defect signal for a
+/// must_fix is OWNS ZERO — a rule watching nothing while a bead reference makes
+/// it look tracked — and that is already enforced by the match-count ledger.
 const fn must_fix(
     id: &'static str,
     file: &'static str,
