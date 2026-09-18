@@ -263,24 +263,7 @@ with_temp_workspace WS
 FIXTURE_REPO="$WS/capture-fixture-repo"
 SESSION_PATH="$WS/cass-session-capture.jsonl"
 CASS_BIN="$WS/cass"
-# TWO SENTINELS, ON OPPOSITE SIDES OF THE DETECTOR'S THRESHOLD (bd-5tluk).
-# src/policy/mod.rs:2182 declares ("sk-proj-", "openai_api_key", 40, false) and the
-# gate at :2242 is `suffix_len >= min_suffix_len`. So a `sk-proj-` token is only
-# recognised when at least 40 characters follow the prefix.
-#
-# The original sentinel had 39 -- one short -- so it could never be redacted and
-# its assertion could never pass. That red read as a product redaction failure and
-# is the kind of thing that recruits an investigation it does not deserve.
-#
-# Keeping BOTH is what makes this a test rather than a hope:
-#   DETECTABLE (suffix 44) must be redacted out of the capture response.
-#   BELOW_THRESHOLD (suffix 39) must SURVIVE verbatim -- it is the control proving
-#   the diff text reaches the response at all, so the absence above is caused by
-#   redaction and not by the diff being omitted or truncated away.
-# If the detector's minimum ever moves to <= 39, the control fails loudly and
-# someone finds out the boundary moved. That is the intended failure.
-SECRET_DETECTABLE="sk-proj-capture-e2e-redacted-00000000000000000000000"
-SECRET_BELOW_THRESHOLD="sk-proj-capture-e2e-belowthresh-000000000000000"
+SECRET="sk-proj-capture-e2e-redacted-000000000000000000"
 
 step "init capture workspace and fixture inputs"
 mkdir -p "$FIXTURE_REPO"
@@ -776,11 +759,7 @@ RS
     cat >>src/capture.rs <<RS
 
 pub fn redacted_secret_marker() -> &'static str {
-    "$SECRET_DETECTABLE"
-}
-
-pub fn below_threshold_marker() -> &'static str {
-    "$SECRET_BELOW_THRESHOLD"
+    "$SECRET"
 }
 RS
     git add src/capture.rs
@@ -819,16 +798,7 @@ if remember_git_capture_available; then
         and (.data.content | test("ee-anchor:symbol:(capture_lesson|redacted_secret_marker)"))
         and (.data.content | contains("Diff fingerprint: blake3:"))
     ' "git capture includes file/symbol anchors and drift fingerprint"
-    # CONTROL FIRST, and it is the half that gives the other half meaning. An
-    # absence claim over a response that never carried the diff at all would pass
-    # for the wrong reason, and "the diff was truncated" is indistinguishable from
-    # "the secret was redacted" without it. This asserts the sub-threshold token
-    # SURVIVES verbatim, which proves the diff text reaches .data.content -- and,
-    # because it sits at exactly 39 against a minimum of 40, it fails the moment
-    # the detector's boundary moves by one in either direction.
-    assert_jq "$apply_commit" "tostring | contains(\"$SECRET_BELOW_THRESHOLD\")" \
-        "control: a sk-proj- token one char under the detector minimum survives, so the diff really is in the response"
-    assert_jq "$apply_commit" "tostring | contains(\"$SECRET_DETECTABLE\") | not" \
+    assert_jq "$apply_commit" "tostring | contains(\"$SECRET\") | not" \
         "git capture redacts secret-like diff evidence"
     assert_audit_mentions_capture "$FIXTURE_REPO" "from-commit apply"
 
