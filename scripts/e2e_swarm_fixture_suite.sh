@@ -15,7 +15,11 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$REPO_ROOT"
+# `|| exit 1`, not a bare cd: this script runs under `set -uo pipefail` with
+# no -e, so a failed cd would leave it resolving every scripts/... path from
+# the wrong directory and reporting all five members "not executable" -- a
+# false report from the one script whose job is not to make false reports.
+cd "$REPO_ROOT" || exit 1
 
 SCRIPTS=(
     e2e_overhaul/ownership_posture.sh
