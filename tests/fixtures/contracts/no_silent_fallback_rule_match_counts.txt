@@ -671,3 +671,17 @@
 1	NSF-OUTPUT-WHY-DEGRADED-REPAIR
 1	NSF-PACK-CACHED-EMBED-BACKEND
 1	NSF-SERVE-RESPONSE-STATUS-LINE
+
+# The last three. Both outstanding traces finished, and neither was a defect --
+# in both the empty value is a SENTINEL the consumer tests for, not a value that
+# flows on unnoticed:
+#   team.rs     join_team_with_code_on_store does
+#               `if granted.origin_workspace_id.is_empty() { parsed... }`, so the
+#               invite code's value is used when the redeem side has none.
+#   steward     steward_pack_l2_cache does
+#               `if config.root.as_os_str().is_empty() { default_root() }`.
+# Worth stating because both looked like the bd-xwzeh shape from the call site
+# alone; only the consumer showed the sentinel.
+1	NSF-MESH-TEAM-INVITE-ORIGIN-WORKSPACE
+1	NSF-MESH-TEAM-REDEEM-ORIGIN-WORKSPACE
+1	NSF-STEWARD-PACK-L2-ROOT-SENTINEL

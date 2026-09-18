@@ -3110,6 +3110,30 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "let response_status_line = rendered.wire.lines().next().unwrap_or_default().to_owned();",
         "The status line recorded for the exchange log is the first line of the rendered wire bytes. An empty wire has no first line, and the response itself is written from `rendered` on the next statement regardless -- so this affects what is logged, never what is sent.",
     ),
+    // THE LAST THREE. Both remaining traces finished; neither turned out to be a
+    // defect, and in both cases the empty value is a SENTINEL the consumer
+    // explicitly tests for rather than a value that silently flows on.
+    allowed_in(
+        "NSF-MESH-TEAM-INVITE-ORIGIN-WORKSPACE",
+        "src/mesh/team.rs",
+        "mint_team_invite_with_store",
+        "let origin_workspace_id = self_workspace_id(connection)?.unwrap_or_default();",
+        "bd-coxn1, RESOLVED. self_workspace_id's db error propagates through `?`, so the default means only \"no team member row is marked is_self yet\" -- the real state of a node that has not registered itself. The empty string is then an EXPLICIT SENTINEL at the consumer: join_team_with_code_on_store passes `if granted.origin_workspace_id.is_empty() { parsed.origin_workspace_id } else { granted.origin_workspace_id }` into enroll_team_pair_peer, so the mint-side value from the invite code is used when the redeem-side value is absent. Two independent sources, non-empty preferred. THE FILING CONCERN WAS ALSO RULED OUT: this value cannot reach the mesh cache's withdrawal equality -- team.rs never hands the cache an origin id and MeshWithdrawalPurgeInput has no producer outside cache.rs. RESIDUAL, named rather than hidden: if BOTH sources are empty the peer enrols with an empty origin id, and the sibling representation in anti_entropy_protocol.rs is Option<String> matched on, which remains the cleaner spelling.",
+    ),
+    allowed_in(
+        "NSF-MESH-TEAM-REDEEM-ORIGIN-WORKSPACE",
+        "src/mesh/team.rs",
+        "redeem_team_invite",
+        "origin_workspace_id: self_workspace_id(connection)?.unwrap_or_default(),",
+        "The redeem-side half of the same pair, and the half the explicit is_empty() check at the consumer is written for -- when this one is empty the invite code's value is substituted. Separate rule rather than a multiplicity-2 group because the two sites are 600 lines apart and play different roles: one supplies the fallback, the other is the value that may need it.",
+    ),
+    allowed_in(
+        "NSF-STEWARD-PACK-L2-ROOT-SENTINEL",
+        "src/steward/mod.rs",
+        "steward_pack_l2_config",
+        ".unwrap_or_default();",
+        "An empty PathBuf is the sentinel for \"no L2 cache root configured\", and the sole consumer tests for it directly: steward_pack_l2_cache does `if config.root.as_os_str().is_empty() { steward_pack_l2_default_root() } else { config.root }`. This is why the line below can use an explicit `unwrap_or(DEFAULT_MAX_BYTES)` while this one defaults to empty -- the byte cap is a constant available at config-build time, the default root is computed and is resolved at use. That asymmetry was what made this worth tracing rather than assuming.",
+    ),
 ];
 
 const MANUAL_FINDINGS: &[ManualFinding] = &[];

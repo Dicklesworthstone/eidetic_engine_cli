@@ -59,20 +59,28 @@
 #
 # A count may only DECREASE. Raising one is new silent-fallback debt; lowering
 # one after a fix is required (a stale entry decays into a permanent allowlist).
-# THREE REMAIN, and each is here because a verdict was NOT reached, never
-# because one was inconvenient:
-#   src/mesh/team.rs      2  bd-coxn1. The filing concern (an empty
-#                            origin_workspace_id colliding in the mesh cache's
-#                            withdrawal equality) is RULED OUT -- team.rs never
-#                            hands the cache an origin id and
-#                            MeshWithdrawalPurgeInput has no producer outside
-#                            cache.rs. But the trace surfaced a SECOND equality,
-#                            src/mesh/policy.rs:331 and :360, which is
-#                            unresolved. Half a trace is not a classification.
-#   src/steward/mod.rs    1  steward_pack_l2_config defaults the L2 cache ROOT to
-#                            an empty PathBuf while the very next line uses an
-#                            explicit unwrap_or(DEFAULT_MAX_BYTES). That
-#                            asymmetry needs the empty-root direction traced
-#                            before a verdict.
-2	src/mesh/team.rs
-1	src/steward/mod.rs
+# THIS LIST IS NOW EMPTY. 169 -> 0 over 2026-09-17/18.
+#
+# WHAT THAT MEANS, precisely, because an empty ratchet invites the wrong reading:
+# every high-risk finding in src/ now carries a REVIEWED VERDICT -- an `allowed`
+# rule stating why absence is preserved at that site, or a `must_fix` naming an
+# open bead. It does NOT mean the tree is free of silent fallbacks. The tranche
+# structure that drove this to zero is keyed on files WITH unclassified
+# findings, so a defect whose siblings live in a zero-finding file was invisible
+# to it by construction; that is how bd-1jpg7's second site and bd-xwzeh both
+# stayed hidden until an idiom sweep scoped by MODULE rather than by path found
+# them. Sweeps and the burn-down are different instruments. See bd-apvhh.
+#
+# THE ARM THAT NOW MATTERS IS THE OTHER ONE. With every row gone, the
+# "count < allowed" stale-entry arm has nothing to check -- but "count > allowed"
+# is at its strictest: allowed is 0 for every file, so ANY new unclassified
+# finding anywhere in src/ fails immediately and by name. That is the end state
+# this ratchet was pointed at, and it is why the list must stay empty rather
+# than reacquiring rows.
+#
+# SO: DO NOT ADD A ROW HERE TO MAKE A NEW FINDING PASS. That is the weakening
+# this file exists to refuse, and with the list empty it is now the only way to
+# weaken it. A new finding gets a rule with a reason, or it gets fixed.
+#
+# A count may only DECREASE. Raising one is new silent-fallback debt; lowering
+# one after a fix is required (a stale entry decays into a permanent allowlist).
