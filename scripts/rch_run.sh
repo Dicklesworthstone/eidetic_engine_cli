@@ -109,6 +109,38 @@ emit_verdict_block() {
     return 0
 }
 
+# What the verdict is actually bound to, from the rch arguments.
+#   $@  the rch arguments, exactly as they will be passed through
+# MEASURED DEFECT, 2026-09-18: this used to print `git rev-parse HEAD` under the
+# label "base" even when --base pinned the run to a different commit. A run at
+# --base 0226dbeafd reported "base: b5ca17108" because a peer pushed mid-run.
+# That is worse than omitting the field: the one thing the verdict block exists
+# to bind was reported wrong, confidently, in the pasteable block. When --base
+# is given, the local checkout is not what was built and must not be named.
+derive_base() {
+    local arg prev=""
+    for arg in "$@"; do
+        if [ "$prev" = "--base" ]; then
+            printf '%s (pinned by --base; local HEAD is NOT what ran)\n' "$arg"
+            return 0
+        fi
+        case "$arg" in
+            --base=*)
+                printf '%s (pinned by --base; local HEAD is NOT what ran)\n' "${arg#--base=}"
+                return 0
+                ;;
+        esac
+        prev="$arg"
+    done
+    if git rev-parse --short HEAD >/dev/null 2>&1; then
+        printf '%s (+%s dirty) UNPINNED: bound to the working tree\n' \
+            "$(git rev-parse --short HEAD)" \
+            "$(git status --porcelain | wc -l | tr -d ' ')"
+    else
+        printf 'not a git repository\n'
+    fi
+}
+
 self_test() {
     local tmp failures=0 got
     tmp="$(mktemp -d)" || { warn "self-test could not make a temp dir"; return 1; }
@@ -145,11 +177,50 @@ self_test() {
         fi
     done
 
+    # derive_base arms. The reporting half is only trustworthy if the base it
+    # prints is the base the run used, so each arm asserts the printed string
+    # rather than asserting that the function merely succeeded.
+    local -a base_cases=(
+        "--base spelled separately|--base|0226dbeafd|--clean-overlay|0226dbeafd"
+        "--base= spelled joined|--base=0226dbeafd|--clean-overlay||0226dbeafd"
+        "a later --base still found|--clean-overlay|--base|0226dbeafd|0226dbeafd"
+    )
+    local bname a1 a2 a3 want_base got_base total=$((${#cases[@]} + ${#base_cases[@]} + 1))
+    for entry in "${base_cases[@]}"; do
+        IFS='|' read -r bname a1 a2 a3 want_base <<< "$entry"
+        got_base="$(derive_base "$a1" "$a2" "$a3")"
+        case "$got_base" in
+            "$want_base "*|"$want_base")
+                say "self-test OK   ${bname}: base=${want_base}" ;;
+            *)
+                warn "SELF-TEST FAIL ${bname}: want base ${want_base}, got '${got_base}'"
+                failures=$((failures + 1)) ;;
+        esac
+    done
+
+    # The negative partner. It asserts the UNPINNED branch's own marker, not
+    # merely the absence of the pinned one: a derive_base that blindly echoed
+    # its first argument would print "--clean-overlay", which also lacks the
+    # string "pinned by --base", and would pass a bare absence check while
+    # being completely wrong. Requiring "UNPINNED" means only the git branch
+    # can satisfy this arm.
+    got_base="$(derive_base --clean-overlay -- cargo test)"
+    case "$got_base" in
+        *"pinned by --base"*)
+            warn "SELF-TEST FAIL unpinned run must not claim a pin: got '${got_base}'"
+            failures=$((failures + 1)) ;;
+        *UNPINNED*)
+            say "self-test OK   unpinned run reports the working tree: ${got_base}" ;;
+        *)
+            warn "SELF-TEST FAIL unpinned run reached neither branch: got '${got_base}'"
+            failures=$((failures + 1)) ;;
+    esac
+
     if [ "$failures" -ne 0 ]; then
-        warn "SELF-TEST FAILED: ${failures} of ${#cases[@]} arms"
+        warn "SELF-TEST FAILED: ${failures} of ${total} arms"
         return 1
     fi
-    say "self-test: ${#cases[@]} of ${#cases[@]} arms passed"
+    say "self-test: ${total} of ${total} arms passed"
     return 0
 }
 
@@ -178,13 +249,9 @@ main() {
         log="${TMPDIR:-/tmp}/rch-run-$(date +%Y%m%dT%H%M%SZ)-$$.log"
     fi
 
-    # Record what the verdict is bound to. An unpinned run is bound to the tree
-    # state, so a dirty count is part of the base, not a footnote.
-    if git rev-parse --short HEAD >/dev/null 2>&1; then
-        base="$(git rev-parse --short HEAD) (+$(git status --porcelain | wc -l | tr -d ' ') dirty)"
-    else
-        base="not a git repository"
-    fi
+    # Record what the verdict is bound to: the --base the run pins to when there
+    # is one, and otherwise the working tree with its dirty count.
+    base="$(derive_base "$@")"
 
     say "running: rch exec $*"
     say "log: $log"
