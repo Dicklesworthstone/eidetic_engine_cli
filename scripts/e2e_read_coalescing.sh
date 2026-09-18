@@ -69,7 +69,12 @@ now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
 emit_event() {
     local kind="${1:?kind required}"
-    local fields_json="${2:-{}}"
+    # NOT `${2:-{}}`: bash closes the expansion at the FIRST `}`, so that form
+    # yields the default `{` plus a literal trailing `}`. With an argument it
+    # appends a stray brace and jq rejects the result; with none it happens to
+    # produce `{}`, which is why it looked correct.
+    local fields_json="${2:-}"
+    [ -n "${fields_json}" ] || fields_json='{}'
     jq -cn \
         --arg schema "ee.test_event.v1" \
         --arg ts "$(now_iso)" \
@@ -177,7 +182,8 @@ assert_jq_file "${burst_file}" '.data.resultHashes.distinctUniqueCount' "${BURST
 assert_jq_file "${burst_file}" '.data.summary.executionCount' "$((1 + BURST_DISTINCT))" "execution count == 1 identical + per-distinct computations"
 
 burst_summary="$(jq -c '.data.summary' "${burst_file}" 2>/dev/null || printf '{}')"
-emit_event "coalescing_observed" "$(jq -cn --arg bead "${BEAD}" --argjson summary "${burst_summary:-{}}" \
+[ -n "${burst_summary}" ] || burst_summary='{}'
+emit_event "coalescing_observed" "$(jq -cn --arg bead "${BEAD}" --argjson summary "${burst_summary}" \
     '{bead_id:$bead,surface:"read_coalescing_e2e",label:"burst_summary",summary:$summary,redaction_status:"local_workspace_artifacts_retained"}')"
 
 # --- Determinism: a second identical burst produces the same coalescing posture.

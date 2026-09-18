@@ -73,7 +73,10 @@ hash_file() {
 
 emit_event() {
     local kind="${1:?kind required}"
-    local fields_json="${2:-{}}"
+    # NOT `${2:-{}}`: bash closes the expansion at the FIRST `}`, so that form
+    # appends a stray brace to any supplied payload and jq rejects it.
+    local fields_json="${2:-}"
+    [ -n "${fields_json}" ] || fields_json='{}'
     jq -cn \
         --arg schema "ee.test_event.v1" \
         --arg ts "$(now_iso)" \
@@ -131,7 +134,10 @@ emit_assert_result() {
 
 log_note() {
     local label="${1:?label required}"
-    local fields_json="${2:-{}}"
+    # NOT `${2:-{}}`: bash closes the expansion at the FIRST `}`, so that form
+    # appends a stray brace to any supplied payload and jq rejects it.
+    local fields_json="${2:-}"
+    [ -n "${fields_json}" ] || fields_json='{}'
     emit_event "note" "$(jq -cn \
         --arg bead "${BEAD_ID}" \
         --arg surface "${SURFACE}" \
