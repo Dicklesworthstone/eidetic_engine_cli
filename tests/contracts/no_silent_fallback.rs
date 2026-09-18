@@ -14,6 +14,22 @@ enum Disposition {
 struct InventoryRule {
     id: &'static str,
     file: &'static str,
+    /// Enclosing function this rule is scoped to, or `None` for file scope.
+    ///
+    /// bd-apvhh, ruled 2026-09-17: the key is (file, enclosing function,
+    /// matched construct) WITH A COUNT, not a per-occurrence identity. Four
+    /// identical `return Ok(Vec::new());` in one function are ONE finding with
+    /// multiplicity four; separating them would require position, and position
+    /// is the thing that drifts — 167 of 177 anchors measured stale for
+    /// bd-d8trk, and bd-blj5n is a test red ~4 months over hardcoded
+    /// file:line.
+    ///
+    /// The function narrows the group. It does NOT replace the construct: a
+    /// rule still matches on its fragment, so two different kinds of silent
+    /// fallback in one function cannot share a slot. Multiplicity within the
+    /// group is carried by the match-count ledger, which fails in BOTH
+    /// directions.
+    function: Option<&'static str>,
     fragment: &'static str,
     disposition: Disposition,
     follow_up: Option<&'static str>,
@@ -35,6 +51,9 @@ struct SourceFinding {
     line: usize,
     text: String,
     context: String,
+    /// Enclosing function, resolved by brace depth. `None` only at module
+    /// scope.
+    function: Option<String>,
 }
 
 const FOLLOW_UP_BEADS: &[&str] = &[
@@ -46,6 +65,23 @@ const FOLLOW_UP_BEADS: &[&str] = &[
 ];
 
 const INVENTORY_RULES: &[InventoryRule] = &[
+    // bd-apvhh: the first two function-scoped group rules (ruled 2026-09-17).
+    // Both cover findings that landed after the unclassified baseline was
+    // recorded at 8662ae0cb and that had main red.
+    allowed_in(
+        "NSF-CLI-CONTEXT-DELTA-EVIDENCE-PROJECTION",
+        "src/cli/context_delta_evidence.rs",
+        "from_ledger",
+        ".unwrap_or_default()",
+        "Optional projection fields of a verified prior-pack evidence item. The          default of a serde_json::Value is Value::Null, so absence is PRESERVED          rather than replaced by a fabricated value -- the distinction that          separates a benign default from a silent fallback. The REQUIRED field          does not take this path: entityRevision uses ok_or_else and errors out          when missing or non-canonical. Nine occurrences in this one function,          carried as multiplicity in the match-count ledger rather than as nine          positional keys; two of them are the identical line `.unwrap_or_default(),`          and nothing but position could separate those.",
+    ),
+    allowed_in(
+        "NSF-CORE-ASK-CANDIDATES-ZERO-LIMIT",
+        "src/core/ask_candidates.rs",
+        "select_candidates",
+        "return Ok(Vec::new());",
+        "A caller asking for zero candidates gets zero. This early return sits          AFTER the explicit error returns for InvalidConfidence and          AmbiguousSource, so it cannot mask either: an invalid request errors          before reaching it. An empty result for limit == 0 is the honest answer,          not a swallowed failure.",
+    ),
     must_fix(
         "NSF-CASS-PIPE-READ",
         "src/cass/process.rs",
@@ -1972,9 +2008,35 @@ const fn must_fix(
     InventoryRule {
         id,
         file,
+        function: None,
         fragment,
         disposition: Disposition::MustFix,
         follow_up: Some(follow_up),
+        reason,
+    }
+}
+
+/// `allowed`, scoped to one enclosing function (bd-apvhh).
+///
+/// Prefer this over `allowed` for new entries. A file-scoped rule classifies
+/// every matching finding anywhere in the file; a function-scoped one cannot
+/// reach outside the function it names, so its blast radius is bounded by
+/// something a reviewer can see. The match-count ledger then carries
+/// multiplicity WITHIN that function and fails in both directions.
+const fn allowed_in(
+    id: &'static str,
+    file: &'static str,
+    function: &'static str,
+    fragment: &'static str,
+    reason: &'static str,
+) -> InventoryRule {
+    InventoryRule {
+        id,
+        file,
+        function: Some(function),
+        fragment,
+        disposition: Disposition::Allowed,
+        follow_up: None,
         reason,
     }
 }
@@ -1988,6 +2050,7 @@ const fn allowed(
     InventoryRule {
         id,
         file,
+        function: None,
         fragment,
         disposition: Disposition::Allowed,
         follow_up: None,
@@ -2528,9 +2591,25 @@ fn no_silent_fallback_guard_rejects_new_unclassified_empty_vec() -> TestResult {
 }
 
 fn classify_finding(finding: &SourceFinding) -> Option<&'static InventoryRule> {
-    INVENTORY_RULES
-        .iter()
-        .find(|rule| rule.file == finding.file && finding.context.contains(rule.fragment))
+    INVENTORY_RULES.iter().find(|rule| {
+        rule.file == finding.file && rule.scopes(finding) && finding.context.contains(rule.fragment)
+    })
+}
+
+impl InventoryRule {
+    /// Whether this rule's function scope admits `finding`.
+    ///
+    /// `None` means file scope, which is how every rule written before
+    /// bd-apvhh behaves and remains valid. A rule that DOES name a function
+    /// only classifies findings inside it, so a group key cannot silently
+    /// absorb an occurrence elsewhere in the file — which is the
+    /// over-exemption that per-site keying exists to prevent.
+    fn scopes(&self, finding: &SourceFinding) -> bool {
+        match self.function {
+            None => true,
+            Some(expected) => finding.function.as_deref() == Some(expected),
+        }
+    }
 }
 
 /// Files under `src/` that are compiled ONLY for tests, because some other file
@@ -2604,6 +2683,68 @@ fn cfg_test_only_files() -> Result<BTreeSet<String>, String> {
     Ok(gated)
 }
 
+/// Enclosing function per source line, resolved by brace depth.
+///
+/// A function stays PENDING until its body brace opens. Without that, a
+/// multi-line signature — `pub fn parse_view_json_summary(` with its `{`
+/// several lines down — is popped before its body starts, because the depth has
+/// not risen yet when the pop condition is tested. Measured while building this:
+/// the naive version left 339 of 597 findings with no resolvable function, 57%,
+/// and this codebase uses long parameter lists heavily. With the pending state,
+/// 0 of 597 are unresolved.
+fn enclosing_functions(lines: &[&str]) -> Vec<Option<String>> {
+    let mut out = vec![None; lines.len()];
+    let mut stack: Vec<(i32, String, bool)> = Vec::new();
+    let mut depth = 0_i32;
+
+    for (index, line) in lines.iter().enumerate() {
+        if let Some(name) = function_name(line) {
+            stack.push((depth, name, false));
+        }
+        out[index] = stack.last().map(|(_, name, _)| name.clone());
+
+        depth += brace_delta(line);
+        if let Some(top) = stack.last_mut() {
+            if !top.2 && depth > top.0 {
+                top.2 = true;
+            }
+        }
+        while stack
+            .last()
+            .is_some_and(|(at, _, opened)| *opened && depth <= *at)
+        {
+            stack.pop();
+            out[index] = stack.last().map(|(_, name, _)| name.clone());
+        }
+    }
+
+    out
+}
+
+/// The function name declared on this line, if any.
+fn function_name(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let mut rest = trimmed;
+    for prefix in [
+        "pub(crate) ",
+        "pub(super) ",
+        "pub ",
+        "const ",
+        "async ",
+        "unsafe ",
+    ] {
+        while let Some(stripped) = rest.strip_prefix(prefix) {
+            rest = stripped;
+        }
+    }
+    let rest = rest.strip_prefix("fn ")?;
+    let name: String = rest
+        .chars()
+        .take_while(|character| character.is_alphanumeric() || *character == '_')
+        .collect();
+    if name.is_empty() { None } else { Some(name) }
+}
+
 fn scan_source_findings() -> Result<Vec<SourceFinding>, String> {
     let mut files = Vec::new();
     collect_rust_files(&repo_path("src"), &mut files)?;
@@ -2622,6 +2763,7 @@ fn scan_source_findings() -> Result<Vec<SourceFinding>, String> {
         }
         let ignored = ignored_test_module_lines(&source);
         let lines = source.lines().collect::<Vec<_>>();
+        let functions = enclosing_functions(&lines);
 
         for (index, line) in lines.iter().enumerate() {
             if ignored[index] || !is_high_risk_line(line) {
@@ -2632,6 +2774,7 @@ fn scan_source_findings() -> Result<Vec<SourceFinding>, String> {
                 line: index + 1,
                 text: line.trim().to_owned(),
                 context: context_window(&lines, index),
+                function: functions.get(index).cloned().flatten(),
             });
         }
     }

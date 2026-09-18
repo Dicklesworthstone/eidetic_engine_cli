@@ -331,3 +331,12 @@
 1	NSF-DB-MIGRATE-COPY-COUNTS
 1	NSF-WORKSPACE-HYGIENE-ACTIVITY
 1	NSF-WORKSPACE-HYGIENE-SYMBOL-EVIDENCE
+
+# bd-apvhh 2026-09-17: the first FUNCTION-SCOPED group rules. The count is
+# multiplicity within one function, not a per-occurrence identity -- nine
+# optional projection fields in from_ledger(), two of which are the identical
+# line. A tenth appearing in that function FAILS this ledger, which is the
+# property per-site keying was meant to buy and is why the check must stay
+# two-directional.
+9	NSF-CLI-CONTEXT-DELTA-EVIDENCE-PROJECTION
+1	NSF-CORE-ASK-CANDIDATES-ZERO-LIMIT
