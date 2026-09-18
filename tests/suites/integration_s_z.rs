@@ -116,8 +116,6 @@ mod usr006_privacy_redaction_backup_scenario;
 mod verification_broker_replay_unit;
 #[path = "../verification_closure_guidance_unit.rs"]
 mod verification_closure_guidance_unit;
-#[path = "../verification_drift_guard.rs"]
-mod verification_drift_guard;
 #[path = "../verification_evidence_parsers.rs"]
 mod verification_evidence_parsers;
 #[path = "../verification_evidence_schema_unit.rs"]

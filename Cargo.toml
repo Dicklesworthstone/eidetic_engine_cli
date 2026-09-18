@@ -513,6 +513,16 @@ path = "tests/conformance/query_v1_matrix.rs"
 name = "witness_retention_e2e"
 path = "tests/contracts/witness_retention_e2e.rs"
 
+# Split out of `integration_s_z` (bd-ry56h). This file has zero `ee::`
+# references, zero `CARGO_BIN_EXE` uses and imports only `std` -- it drives
+# `scripts/verification-drift-guard.sh` as a subprocess and reads files. It
+# does not need to be linked alongside the 81 other test files in that shard.
+# Registered directly as a root-file target, the shape `e2e_graceful_degradation`
+# already uses, rather than as a new `tests/suites/` file.
+[[test]]
+name = "verification_drift_guard"
+path = "tests/verification_drift_guard.rs"
+
 # Lint Policy (EE-002)
 # CI runs: cargo clippy --all-targets -- -D warnings
 # See AGENTS.md for rationale.
