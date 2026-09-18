@@ -107,7 +107,11 @@
         "cargo": { "type": "string" },
         "channel": { "type": "string" },
         "target": { "type": "string" },
-        "features": { "type": "array", "items": { "type": "string" } }
+        "features": { "type": "array", "items": { "type": "string" } },
+        "evaluatedUnderCfg": {
+          "type": ["string", "null"],
+          "description": "The cfg set this capsule's answers are scoped to, e.g. `target_family=unix, target_os=darwin`. A reachability or coverage claim is a PER-TARGET answer: src/core/index.rs gates index_read_lease.rs on #[cfg(unix)] and src/mcp.rs on #[cfg(feature = \"mcp\")], so a count taken on one host does not generalise to the six platforms this repo ships (bd-waksx). A number without its cfg scope reads as universal and is not."
+        }
       }
     },
     "manifest": {
@@ -188,7 +192,35 @@
             "minimum": 1,
             "description": "Retry count. Retained so a stage that passed on attempt 4 is not reported identically to one that passed first time."
           },
-          "reason": { "type": ["string", "null"] }
+          "reason": { "type": ["string", "null"] },
+          "target": {
+            "type": ["string", "null"],
+            "description": "Which test binary or target produced this result, from cargo's `Running ... (path)` line. Without it a summary cannot be attributed: a nested child binary and the intended target emit textually identical lines, and a log holding several targets grades to whichever one a reader takes last (bd-6g6s2)."
+          },
+          "announced": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "description": "The denominator libtest announced before running, from `running N tests`. REQUIRED TO MAKE `executed` MEAN ANYTHING: a passed/failed pair without its announcement is two numbers, not a proportion, and cannot show that a summary belongs to the run it is quoted under."
+          },
+          "executed": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "description": "passed + failed + ignored actually observed. `executed == 0` with status PASS is the vacuous green this repo has now produced twice -- a filter matching no test reports `ok` and exits 0. A capsule that cannot record zero cannot refuse it."
+          },
+          "filteredOut": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "description": "Tests the filter excluded. Load-bearing for feature-gated targets: `--features mcp --lib` selecting 59 of 10112 is what proves the feature was applied rather than the filter matching nothing."
+          },
+          "workerHost": {
+            "type": ["string", "null"],
+            "description": "The machine that produced this result. A verdict without a host is not reproducible, only reported -- and this field was omitted by hand from three certifications on 2026-09-18 before anything recorded it mechanically."
+          },
+          "noVerdictCause": {
+            "type": ["string", "null"],
+            "enum": [null, "CANCELLED", "TIMEOUT", "INFRA_ERROR", "NOT_RUN"],
+            "description": "Why a stage produced NO verdict, as distinct from failing. Cancellation by a superseding push, a timeout attributable to a layer, an admission refusal, or a stage a degraded fleet never reached are all NOT-FAILURE and NOT-SUCCESS. The absence of this third state is why every gate in this repo has had to lie in one direction or the other."
+          }
         }
       }
     },
