@@ -1,12 +1,17 @@
-diff --git a/src/core/index.rs b/src/core/index.rs
 --- a/src/core/index.rs
 +++ b/src/core/index.rs
-@@ -55,1 +55,4 @@
+@@ -54,6 +54,9 @@
+     Embedder as _, Model2VecEmbedder, ModelCategory, ModelTier, SearchError, VectorIndex,
+ };
  use sqlmodel_core::Value as SqlValue;
 +
 +#[path = "index_storage.rs"]
 +mod storage;
-@@ -5454,6 +5457,17 @@
+ 
+ #[cfg(unix)]
+ #[path = "index_read_lease.rs"]
+@@ -5448,7 +5451,18 @@
+     stack: EmbedderStack,
      documents: Vec<crate::search::IndexableDocument>,
  ) -> Result<BuildStats, IndexRebuildError> {
 +    build_index_generation_with_capacity(cx, index_dir, stack, documents, storage::filesystem_capacity).await
