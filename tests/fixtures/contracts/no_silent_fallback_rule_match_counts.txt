@@ -10,8 +10,22 @@
 #   - a rule owning FEWER is stale and the number must come down.
 # One arm without the other is how a ledger decays into decoration.
 #
-# A count of 0 is a rule that classifies NOTHING: an earlier rule wins every
-# finding it would match. Those are dead weight, not coverage.
+# A count of 0 is a rule that classifies NOTHING. Those are dead weight, not
+# coverage -- but "owns zero" is TWO defects and this line originally named only
+# the first (bd-epvc1, measured 2026-09-17: 33 of 331 rules own zero):
+#   - SHADOWED (6): the fragment really does match findings and an EARLIER rule
+#     wins them. Check whether the absorber's reason covers what it absorbed.
+#   - DEAD FRAGMENT (27): the fragment matches no finding at all, shadowed or
+#     not. Eight of those are must_fix rules, each naming a follow-up bead while
+#     watching nothing, which is the actionable half.
+#
+# WHAT A GREEN HERE DOES NOT MEAN. Both arms fire when a count MOVES. Neither
+# can fire on shadowing that ALREADY EXISTED when these numbers were recorded,
+# because they were recorded from current behaviour -- an absorbing rule's count
+# was written down with the absorption already inside it. So this ledger
+# certifies today's shadowing as correct and guards only tomorrow's. It is a
+# ratchet pinned to the day it was taken. That is a bound on the green, not a
+# reason to distrust the arms; the pre-existing shadowing is bd-epvc1's job.
 #
 # Recorded 2026-09-17 against the detector at that commit. Regenerate by
 # reading the gate, never by hand-adjusting a number to make it pass.
