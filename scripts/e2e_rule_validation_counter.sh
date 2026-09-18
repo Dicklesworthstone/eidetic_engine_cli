@@ -252,8 +252,18 @@ require_jq_value "$restore_out" '.success' "true" "learn-loop backup restore suc
 
 restored_rule="$( "$EE_BIN" --workspace "$restore_path" rule show "$learn_rule_id" --json )"
 require_jq_value "$restored_rule" '.success' "true" "restored native rule show succeeds"
-require_jq_value "$restored_rule" '.data.rule.id // .data.rule.ruleId // empty' "$learn_rule_id"     "restored native rule preserves RuleId"
-require_jq_value "$restored_rule" '(.data.rule.content // "") | contains("zephyr frobnicator fmt gate")' "true"     "restored native rule preserves content"
+require_jq_value "$restored_rule" '.data.rule.id // .data.rule.ruleId // empty' "$learn_rule_id" \
+    "restored native rule preserves RuleId"
+require_jq_value "$restored_rule" '(.data.rule.content // "") | contains("zephyr frobnicator fmt gate")' "true" \
+    "restored native rule preserves content"
+require_jq_value "$restored_rule" \
+    "any(.data.rule.sourceMemoryIds[]?; . == \"$source_memory_id\")" \
+    "true" "restored native rule preserves source-memory linkage"
+require_jq_value "$restored_rule" \
+    "any(.data.rule.tags[]?; . == \"release\")" \
+    "true" "restored native rule preserves tags"
+require_jq_value "$restored_rule" '.data.rule.maturity // empty' "candidate" \
+    "restored native rule preserves maturity"
 
 restored_rebuild="$( "$EE_BIN" --workspace "$restore_path" index rebuild --json )"
 require_jq_value "$restored_rebuild" '.success' "true" "restored rule index rebuild succeeds"
