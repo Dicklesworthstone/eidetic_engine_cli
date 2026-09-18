@@ -1865,6 +1865,7 @@ else
     record_gated_off "Agent Ergonomics E2E (F1-F5)" "ci-smoke"
     record_gated_off "Overhaul Integration E2E (J4)" "ci-smoke"
     record_gated_off "Swarm Next-Action Recommendation Cards E2E (bd-3vwx0.6)" "ci-smoke"
+    record_gated_off "Swarm Fixture Suite E2E (bd-udjrq)" "ci-smoke"
     record_gated_off "Graph Determinism E2E (F4.a)" "ci-smoke"
     record_gated_off "Fake Tailscale Harness E2E (SRR6.46.10)" "ci-smoke"
     record_gated_off "Fake OIDC IdP Harness E2E (T7.7)" "ci-smoke"
