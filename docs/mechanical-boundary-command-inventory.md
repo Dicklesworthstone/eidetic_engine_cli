@@ -10,18 +10,25 @@ commands start at `src/cli/mod.rs:253`, and diagnostic command-path extraction i
 `--help-json` is a global exit path at `src/cli/mod.rs:164` and is dispatched before subcommands
 at `src/cli/mod.rs:3778`; it is not counted as a command path.
 
-**The denominator is 453 PATHS but 442 SURFACES.** `verify …` and
-`verification …` are one surface under two top-level names — two clap variants
-over a single `VerifyCommand`, dispatching to the same handlers — so 22 of the
-453 extractor paths are 11 commands counted twice. Checked systematically:
-exactly ONE such pair exists, no others share an argument type across top-level
-commands. Coverage below is stated against 453 because that is what the gate
-counts; the honest count of distinct surfaces is 442, and a reader comparing
-this document to the CLI should know which number they are holding.
+**The denominator is 454 PATHS but 440 SURFACES.** Fourteen extractor paths
+name an already-counted surface:
+
+- `verify …` and `verification …` are one surface under two top-level names —
+  two clap variants over a single `VerifyCommand`, dispatching to the same
+  handlers. That is 22 paths for 11 commands.
+- `history`, `link` and `tag` are declared top-level aliases for
+  `memory history`, `memory link` and `memory tags`, each dispatching to a
+  `handle_*_alias` function, and BOTH spellings appear in the extractor.
+
+Checked systematically in both cases: exactly one shared-argument-type pair
+exists, and the three aliases each have their canonical form present. Coverage
+is stated against 454 because that is what the gate counts; the honest count of
+distinct surfaces is 440, and a reader comparing this document to the CLI should
+know which number they are holding.
 
 **Scope, measured rather than asserted (bd-...-igo3a).** The command-path
-extractor returns **453** paths. This document currently covers **385** of
-them; **68** are absent. It previously claimed to cover "the 204 stable
+extractor returns **454** paths. This document currently covers **all 454** of
+them; **0** are absent. It previously claimed to cover "the 204 stable
 command paths returned by the command-path extractor" — a number typed on
 2026-05-19 that was never re-measured, and which its own Full Command
 Inventory table never matched (that table lists 196 paths, not 204). Both
@@ -44,9 +51,9 @@ command.
 E2E audit record for this inventory:
 
 - Command source: `src/cli/mod.rs`
-- CLI command paths returned by the extractor: 453
-- Documented in a table row here: 385
-- Absent: 68
+- CLI command paths returned by the extractor: 454
+- Documented in a table row here: 454
+- Absent: 0
 - Unmapped command count: 0
 - Matrix enforcement floor: 24
 - Stdout/stderr contract: this file is static documentation; the companion test only reads source
@@ -63,8 +70,8 @@ number covers both will over-trust the gate.
 
 | tier | what it requires | mechanism | covers |
 | --- | --- | --- | --- |
-| coverage | the path appears, backticked, in some **table row** of this file | `mechanical_boundary_inventory_covers_all_cli_command_paths` | 385 of 453 |
-| content | the path appears, backticked, in a **Command Boundary Matrix row** — the twelve columns | the three `command_boundary_matrix_*` assertions | 24 of 453 |
+| coverage | the path appears, backticked, in some **table row** of this file | `mechanical_boundary_inventory_covers_all_cli_command_paths` | 454 of 454 |
+| content | the path appears, backticked, in a **Command Boundary Matrix row** — the twelve columns | the three `command_boundary_matrix_*` assertions | 24 of 454 |
 
 Only the content tier checks a side-effect class, a runtime posture, a degraded
 code, fixture coverage, or a schema expectation. Everything outside those 24
@@ -92,7 +99,12 @@ The floor does not answer it; it only stops the question from disappearing.
 
 ## What is still absent (bd-...-igo3a)
 
-68 of the 453 extractor paths have no row here, spread across 48 families.
+0 of the 454 extractor paths have no row here. The coverage tier is COMPLETE.
+
+This section is retained rather than deleted because it is the place a future
+absence gets recorded, and because its rule still governs: naming a command here
+does NOT document it — the coverage assertion requires a table ROW, and this is
+deliberately not a table.
 Listed so the remaining work is stated in the artifact instead of being
 re-derived from the CLI a fifth time. Counts are absent-paths-per-family:
 
@@ -141,7 +153,7 @@ tracks it.
 Each row still owed needs three things that cannot be generated: a real
 handler/core anchor, an honest description of the current source shape, and a
 disposition from the legend above. The effect manifest (`src/core/effect.rs`)
-now carries a reviewed declaration for all 453 paths and is the right input
+now carries a reviewed declaration for all 454 paths and is the right input
 for the first two columns; the disposition is a judgement and should not be
 defaulted in bulk, because that column currently carries real findings
 ("split; degrade/unavailable until evidence-backed", "fix backing data where
@@ -474,6 +486,17 @@ ledger and the command-boundary matrix must gain concrete rows before the new pa
 | `conflict list`, `conflict explain`, `conflict cluster`, `conflict resolve` | `src/cli/mod.rs:14602`, `src/cli/conflict.rs` | Ranked contradicting memory pairs, per-memory explanation, and k-truss + Louvain contradiction clusters over persisted memories. `resolve` performs audited mutations and is dry-run by default. | keep mechanical |
 | `db check-integrity`, `db inspect`, `db migrations`, `db reindex` | `src/cli/mod.rs:13763`, `src/db/mod.rs` | Non-mutating database surfaces: integrity check, single-table row inspection, applied/pending migration listing, and a preview of pending derived-index rebuild work. `reindex` previews rather than rebuilds. | keep mechanical |
 | `decide record`, `decide list`, `decide revisit` | `src/cli/mod.rs:15176`, `src/core/decide.rs` | Typed decision memories with revisit scheduling: record writes a durable decision, list reports current heads with optional superseded history, revisit reports decisions due or inside the warning window. | keep mechanical |
+| `history`, `link`, `tag` | `src/cli/mod.rs:14673`, `src/cli/mod.rs:14674`, `src/cli/mod.rs:14675` | **Top-level ALIASES, not distinct surfaces.** `history` is `ee memory history <id>`, `link` is `ee memory link A B --relation X`, `tag` is `ee memory tags <id>`; each dispatches to a handler named `handle_*_alias` and both spellings appear in the extractor. Together with the `verify`/`verification` pair these are 14 of the 454 paths that name an already-counted surface. | keep mechanical |
+| `ask`, `ask --read-only`, `recall`, `similar`, `impact`, `proximity`, `why-not`, `timeline`, `context-show` | `src/cli/mod.rs:15162`, `src/core/ask.rs`, `src/core/recall.rs` | Retrieval and explanation over persisted memory. `ask` is deterministic extractive answering with citations and HONEST ABSTENTION rather than a generated answer; `--read-only` is a distinct extractor path because it changes the effect, not the rendering. `recall` reverse-looks-up from paths, symbols or a git diff; `impact` finds memories attached to a path/symbol/command/env var/schema; `why-not` explains why a memory was NOT selected; `timeline` reconstructs what was known as of an RFC3339 instant; `context-show` retrieves a persisted IMMUTABLE pack by id. | keep mechanical |
+| `orient`, `primer`, `insights`, `resume`, `swarm next-action`, `swarm repair-plan`, `swarm work-packet` | `src/cli/mod.rs:15162`, `src/core/primer.rs`, `src/core/swarm_brief.rs` | Read-only agent orientation bundles. `orient` and `insights` are declared read-only; `primer` is a deterministic CACHED workspace charter (ADR 0065); `resume` reports recent sessions, open decisions, queued work and staleness flags; the three `swarm` paths are a coordination snapshot and preflight recommendations. All report; none mutate. | keep mechanical |
+| `note`, `focus suggest`, `capture suggest`, `situation adopt`, `plan recipe save`, `rule provenance`, `trust report`, `regress explain` | `src/cli/mod.rs:15162`, `src/core/trust_report.rs`, `src/policy/trust_decay.rs` | Capture and curation helpers. `capture suggest` proposes high-value memories from session evidence **without storing them**, so it is a proposal surface rather than a write; `note` is the shorthand that DOES store an inferred memory; `plan recipe save` and `situation adopt` persist; `rule provenance`, `trust report` and `regress explain` report over existing artifacts. The suggest/store split is the boundary here. | keep mechanical |
+| `search`, `search --all-workspaces`, `search --recalibrate-now`, `index backfill-tags`, `model fetch`, `preflight check` | `src/cli/mod.rs:15162`, `src/search/mod.rs` | Search and index surfaces. The two `search` flag variants are separate extractor paths because each changes the effect: `--all-workspaces` widens the corpus beyond the current workspace, and `--recalibrate-now` forces recalibration rather than deferring it. `index backfill-tags` and `model fetch` mutate derived state; `preflight check` assesses risk without executing anything. | keep mechanical |
+| `lab generate-workload`, `lab promote-workload`, `lab swarm replay`, `shadow demote`, `shadow promote`, `shadow run` | `src/cli/mod.rs:15162`, `src/core/lab.rs` | Counterfactual and shadow evaluation. `lab` captures, replays and promotes counterfactual task episodes; `shadow run` executes shadowable policy evaluators **offline and side-effect-free**, with `promote`/`demote` moving an evaluator between shadow and live. The side-effect-free declaration is what makes `shadow run` safe to invoke during triage. | keep mechanical |
+| `maintenance graph-snapshot-prune`, `maintenance graph-witnesses-prune`, `maintenance wal-checkpoint`, `migrate run`, `migrate shard-fanout`, `migrate status`, `workspace hygiene` | `src/cli/mod.rs:15162`, `src/db/mod.rs` | Explicit maintenance and schema migration, run WITHOUT a daemon. The two prune jobs and `wal-checkpoint` reclaim derived state; `migrate status` reports the current schema position while `migrate run` applies pending migrations; `workspace hygiene` resolves workspace identity issues. `migrate run` and the prune jobs are the durable-write paths in this row. | keep mechanical |
+| `perf live`, `perf prompt-budget`, `perf snapshot`, `session-budget plan`, `health scorecard`, `health scorecard --record-snapshot` | `src/cli/mod.rs:15162`, `src/core/perf_live.rs`, `src/models/perf_artifact.rs` | Performance and budget reporting. `perf` compares normalized artifacts **without mutating state**, and `health scorecard` reports a verdict — but `--record-snapshot` is a separate extractor path precisely because it PERSISTS the scorecard rather than only printing it. A reader must not assume the flagged form is merely more verbose. | keep mechanical |
+| `reflect ingest`, `reflect propose`, `reflect request-ledger diagnostics`, `coordination evidence ingest`, `recorder flight append`, `recorder flight replay` | `src/cli/mod.rs:15162`, `src/core/recorder.rs` | External-handshake and activity evidence. `reflect` creates and inspects external reflection request handshakes; `coordination evidence ingest` persists redaction-safe coordination fallback evidence; `recorder flight append`/`replay` record and replay agent activity. All persist evidence, so redaction posture rather than output shape is the property to check. | keep mechanical |
+| `backup keys export`, `backup keys import`, `export agentsmd`, `import agentsmd`, `artifact relocate`, `workflow create`, `review session --propose`, `review workspace` | `src/cli/mod.rs:15162`, `src/core/backup.rs`, `src/core/agentsmd.rs` | Import/export and lifecycle. `backup keys export`/`import` move KEY MATERIAL and are the sensitive pair in this row; `export agentsmd`/`import agentsmd` round-trip the AGENTS.md managed block; `artifact relocate` moves artifact storage; `review session --propose` is a separate path from `review session` because proposing writes candidates. | keep mechanical |
+| `serve`, `mcp serve-stdio`, `mcp validate`, `diagnose-error` | `src/cli/mod.rs:15162`, `src/serve.rs`, `src/mcp.rs` | Optional adapters and error recall. `serve` REPORTS localhost HTTP/SSE adapter availability rather than serving; `mcp validate` inspects the optional MCP adapter manifest, while **`mcp serve-stdio` runs the adapter and is long-running**; `diagnose-error` matches a tool error against the fingerprint recall store. Both adapters are feature-gated, so absence is a build-time capability gap rather than a failure. | keep mechanical |
 | `mesh init`, `mesh peers`, `mesh status`, `mesh ledger`, `mesh peer list`, `mesh peer show`, `mesh peer unknown-attempt`, `mesh hello-responder status` | `src/cli/mod.rs:15162`, `src/cli/mesh.rs`, `src/mesh/team.rs` | Read-only mesh inspection. `init` inspects foreground readiness WITHOUT starting a daemon; `peers` reads configured peers and anti-entropy cursors from local storage; `ledger` inspects receiver-local import decisions WITHOUT printing event bodies, which is a redaction property rather than a formatting one; `unknown-attempt` classifies a network-reachable node that was never enrolled. | keep mechanical |
 | `mesh disable`, `mesh reenable` | `src/cli/mod.rs:15162`, `src/cli/mesh.rs` | Containment. `disable` immediately contains mesh activity **without deleting local truth** — containment is not deletion, and a reader must not treat it as one. `reenable` requires an explicit containment review rather than simply undoing the flag. | keep mechanical |
 | `mesh peer add`, `mesh peer rotate`, `mesh peer revoke`, `mesh auto-enroll`, `mesh discovery-policy` | `src/cli/mod.rs:15162`, `src/cli/mesh.rs`, `src/mesh/discovery_policy.rs` | Peer lifecycle, and the consent model differs across it. `peer add` enrolls after an explicit capability handshake and HUMAN CONSENT, one peer at a time. `auto-enroll` materializes peers from fresh Tailscale autodiscovery — zero-touch per peer, but not consent-free: it is policy-driven with `--include`/`--exclude` denylists, `--dry-run`, and `--explain` for the per-peer decision tree. Consent moved to the policy, it was not removed. `discovery-policy` both inspects AND updates that policy, so it is the mutating path behind auto-enroll's decisions. | keep mechanical |
@@ -501,7 +524,7 @@ ledger and the command-boundary matrix must gain concrete rows before the new pa
 | `curate auto-promote`, `curate doctor`, `curate propose-derived`, `curate retire`, `curate show`, `curate tombstone`, `curate untombstone` | `src/cli/mod.rs:15028`, `src/core/curate.rs` | The remainder of the review queue beyond the accept/reject/apply row above. `auto-promote` is threshold-driven, not a judgement: it reports its effective thresholds (`CurateAutoPromoteThresholds`, `src/core/curate.rs:1011`) specifically so an operator can audit why a memory was or was not proposed. `doctor` diagnoses memory-debt queues from persisted state. `tombstone` writes an audit record WITHOUT deleting the row, and `untombstone` restores one, both audited. | keep mechanical |
 | `sandbox apply`, `sandbox curate`, `sandbox diff`, `sandbox import`, `sandbox remember` | `src/cli/mod.rs:14603`, `src/cli/sandbox.rs`, `src/core/sandbox.rs` | A proposal overlay over the durable store. Four of the five write NOTHING durable — `remember`, `import` and `curate` propose into the overlay and `diff` shows baseline-vs-overlay. `apply` is the only durable path, and it promotes the session's additive proposals through the normal audited remember route rather than a private write. That split is the boundary worth checking if this family is ever revisited. | keep mechanical |
 | `verify broker lookup`, `verify closeout capsule`, `verify closure-guidance`, `verify ingest`, `verify proofs`, `verify provenance`, `verify rch blockers`, `verify rch ingest`, `verify rch runs`, `verify rch topology-audit`, `verify record` | `src/cli/mod.rs:15310`, `src/models/verification.rs`, `src/core/verify.rs`, `src/core/verify_ledger.rs` | Durable verification-evidence ingestion, proof/provenance ledger reads, closure guidance, and RCH run/blocker/topology reports over persisted records. **This surface is exposed twice** — see the `verification …` row below. | keep mechanical |
-| `verification broker lookup`, `verification closeout capsule`, `verification closure-guidance`, `verification ingest`, `verification proofs`, `verification provenance`, `verification rch blockers`, `verification rch ingest`, `verification rch runs`, `verification rch topology-audit`, `verification record` | `src/cli/mod.rs:15343`, `src/models/verification.rs`, `src/core/verify.rs`, `src/core/verify_ledger.rs` | The SAME surface as `verify …` under a second top-level name: `Verify(VerifyCommand)` and `Verification(VerifyCommand)` (`src/cli/mod.rs:1361-1365`) are two clap variants over one argument type, and both dispatch to the same handlers — `verify record` and `verification record` both call `handle_verification_ingest`. Neither is a clap `alias`, and neither emits the `deprecated_alias` degraded entry that marks `ee context` as the non-canonical spelling of `ee pack`, so nothing tells a consumer which of the two is canonical. 22 of the 453 extractor paths are these 11 commands counted twice. | keep mechanical; resolve the duplicate spelling |
+| `verification broker lookup`, `verification closeout capsule`, `verification closure-guidance`, `verification ingest`, `verification proofs`, `verification provenance`, `verification rch blockers`, `verification rch ingest`, `verification rch runs`, `verification rch topology-audit`, `verification record` | `src/cli/mod.rs:15343`, `src/models/verification.rs`, `src/core/verify.rs`, `src/core/verify_ledger.rs` | The SAME surface as `verify …` under a second top-level name: `Verify(VerifyCommand)` and `Verification(VerifyCommand)` (`src/cli/mod.rs:1361-1365`) are two clap variants over one argument type, and both dispatch to the same handlers — `verify record` and `verification record` both call `handle_verification_ingest`. Neither is a clap `alias`, and neither emits the `deprecated_alias` degraded entry that marks `ee context` as the non-canonical spelling of `ee pack`, so nothing tells a consumer which of the two is canonical. 22 of the 454 extractor paths are these 11 commands counted twice. | keep mechanical; resolve the duplicate spelling |
 | `graph centrality`, `graph diff`, `graph snapshot refresh`, `graph suggest-links` | `src/cli/mod.rs:14745`, `src/graph/mod.rs`, `src/core/suggest_links.rs` | Reads of persisted memory-link snapshots: stored centrality scores, add/remove and community deltas between two snapshots, and snapshot refresh. `suggest-links` predicts missing links but is deterministic, not a model: Jaccard over token sets with a blended batch-normalized score in [0, 1] and an explicit `min_score` cut (ADR 0066). | keep mechanical |
 | `handoff completion-audit`, `handoff rotate-key` | `src/cli/mod.rs:14173`, `src/core/completion_audit.rs`, `src/core/handoff.rs` | `completion-audit` reads as a judgement call and is not one: it extracts a checklist from the objective text, builds the evidence bundle from persisted verification records, and derives `CompletionVerdict` from those, emitting `ee.completion_audit.report.v2`. The checklist extraction is heuristic text parsing, so the verdict is only as good as the objective's wording. `rotate-key` re-MACs a capsule under fresh workspace key material. | keep mechanical |
 | `learn cluster`, `learn gaps` | `src/cli/mod.rs:14717`, `src/core/learn.rs` | Deterministic memory clustering for curation coherence, and query-miss demand mined into capture gaps. Both report over stored activity; neither proposes content. | keep mechanical |
