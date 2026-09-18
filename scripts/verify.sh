@@ -1223,6 +1223,28 @@ run_stage "E2E Invocation Audit" "./scripts/e2e_invocation_audit.sh"
 # would trade one red for another.
 run_stage "Repo Hygiene E2E (bd-udjrq)" "./scripts/e2e_repo_hygiene.sh"
 
+# Gate 0.846: read-coalescing E2E (bd-udjrq). Orphaned since it was written,
+# and until e484da9a0 it could not have passed anywhere: `${2:-{}}` in its own
+# emit_event appended a stray brace to every payload, so jq rejected the first
+# event and the script exited 2 in under a second having asserted nothing.
+# Fixed, it runs 20 assertions and writes 25 valid JSONL records.
+#
+# EE_BIN/EE_BINARY pinned, as gate 6.12698a-j requires of every suite that
+# resolves a binary: unpinned, the harness now REFUSES (817412148) rather than
+# silently testing whatever ee is on PATH, so an unpinned call site here would
+# be a hard failure instead of a false pass.
+#
+# MEASURED, not unmeasured: 2.30 2.30 2.34 2.58 2.73 seconds over five runs,
+# p50 2.34. Declared 3 so the hard-fail line lands at p50*3 = 9s. The
+# unmeasured allowance is exhausted at 27/27, so a new stage must carry a real
+# number; the budget for it comes from re-measuring Forbidden Dependencies
+# from an over-declared 10 down to 2, not from raising the 600s ceiling.
+#
+# Its orphan_baseline.txt row is deleted in the same commit, for the same
+# reason the Repo Hygiene row was: the audit fails on a stale baseline entry
+# as well as on a new orphan.
+run_stage "Read Coalescing E2E (bd-udjrq)" "EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_read_coalescing.sh"
+
 # Gate 0.85: ee binary resolution + staleness contract (bd-smxdr). This
 # no-Cargo test proves the shared resolver refuses a stale or missing binary
 # BEFORE any e2e stage runs against one. It had existed unwired since May, so

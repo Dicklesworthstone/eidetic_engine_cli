@@ -61,7 +61,17 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Forbidden Dependencies"
-expected_seconds_p50 = 10
+# RE-MEASURED from 10 to 2 (bd-udjrq): 0.98 0.32 0.43 seconds over three runs
+# of ./scripts/check-forbidden-deps.sh on a six-agent-loaded machine, median
+# 0.43. Ten was over-declared by ~23x and was holding budget the ceiling had
+# no other way to release.
+#
+# Declared 2, not 1 and not the observed median, for the reason the Repo
+# Hygiene entry below gives: the hard-fail line is p50*3, so 2 puts it at 6s
+# -- roughly 6x the slowest observed run, including the cold first one. This
+# tightens the stage (30s -> 6s) and that is the real cost of the 8 seconds
+# it frees; 6s is still ample for a grep over the dependency tree.
+expected_seconds_p50 = 2
 regression_factor = 1.5
 
 [[stage]]
@@ -648,3 +658,12 @@ expected_seconds_p50_unmeasured = true
 [[stage]]
 name = "Similar Scope E2E (first execution)"
 expected_seconds_p50_unmeasured = true
+
+[[stage]]
+name = "Read Coalescing E2E (bd-udjrq)"
+# MEASURED: 2.30 2.30 2.34 2.58 2.73 seconds over five runs, p50 2.34.
+# Declared 3 so the hard-fail line is p50*3 = 9s. Funded by re-measuring
+# Forbidden Dependencies from an over-declared 10 to 2, not by raising the
+# 600s ceiling.
+expected_seconds_p50 = 3
+regression_factor = 1.5

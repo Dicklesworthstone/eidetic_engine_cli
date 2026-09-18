@@ -71,7 +71,6 @@ e2e_mesh_cache_retention.sh
 e2e_mesh_emergency_disable.sh
 e2e_mesh_remote_evidence.sh
 e2e_mesh_surrogate_audit.sh
-e2e_read_coalescing.sh
 e2e_sandbox.sh
 e2e_session_budget.sh
 
