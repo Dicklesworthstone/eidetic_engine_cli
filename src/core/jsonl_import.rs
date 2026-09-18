@@ -2246,9 +2246,23 @@ fn prepare_memory(
             trust_class: trust_class.as_str().to_owned(),
             trust_subclass,
             tags,
+            // bd-rm8wj cause 5. An ABSENT valid_from used to be left as None
+            // here, and `insert_memory` then defaulted it to `created_at`
+            // VERBATIM -- a ROW-spelled value (`...+00:00`, full precision)
+            // written into a VALIDITY column whose canon is `Z` at seconds
+            // precision. That is precisely the mixing that
+            // `normalize_imported_timestamp` exists to prevent: valid_from is
+            // compared LEXICALLY in SQL, `Z` (0x5A) sorts above `+` (0x2B), so
+            // two rows at the same instant order by SPELLING, which is how a
+            // supersession backfill can leave two live heads in one chain.
+            //
+            // Supplying the default HERE, normalized, keeps the column single
+            // spelled without changing what the value means: it is still the
+            // creation instant, just written in the validity canon.
             valid_from: memory
                 .valid_from
                 .as_deref()
+                .or(Some(memory.created_at.as_str()))
                 .map(|raw| normalize_imported_timestamp(raw, TimestampClass::Validity)),
             valid_to: memory
                 .valid_to
