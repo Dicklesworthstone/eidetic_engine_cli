@@ -20,8 +20,8 @@ counts; the honest count of distinct surfaces is 442, and a reader comparing
 this document to the CLI should know which number they are holding.
 
 **Scope, measured rather than asserted (bd-...-igo3a).** The command-path
-extractor returns **453** paths. This document currently covers **361** of
-them; **92** are absent. It previously claimed to cover "the 204 stable
+extractor returns **453** paths. This document currently covers **385** of
+them; **68** are absent. It previously claimed to cover "the 204 stable
 command paths returned by the command-path extractor" — a number typed on
 2026-05-19 that was never re-measured, and which its own Full Command
 Inventory table never matched (that table lists 196 paths, not 204). Both
@@ -45,8 +45,8 @@ E2E audit record for this inventory:
 
 - Command source: `src/cli/mod.rs`
 - CLI command paths returned by the extractor: 453
-- Documented in a table row here: 361
-- Absent: 92
+- Documented in a table row here: 385
+- Absent: 68
 - Unmapped command count: 0
 - Matrix enforcement floor: 24
 - Stdout/stderr contract: this file is static documentation; the companion test only reads source
@@ -63,7 +63,7 @@ number covers both will over-trust the gate.
 
 | tier | what it requires | mechanism | covers |
 | --- | --- | --- | --- |
-| coverage | the path appears, backticked, in some **table row** of this file | `mechanical_boundary_inventory_covers_all_cli_command_paths` | 361 of 453 |
+| coverage | the path appears, backticked, in some **table row** of this file | `mechanical_boundary_inventory_covers_all_cli_command_paths` | 385 of 453 |
 | content | the path appears, backticked, in a **Command Boundary Matrix row** — the twelve columns | the three `command_boundary_matrix_*` assertions | 24 of 453 |
 
 Only the content tier checks a side-effect class, a runtime posture, a degraded
@@ -78,8 +78,8 @@ take a deliberate edit, and the live count moving up on its own must not red the
 build.
 
 The floor exists because of a specific way this document can be repaired
-wrongly. The coverage tier is failing today (92 paths absent). Pasting those
-92 into the Full Command Inventory turns coverage green while content
+wrongly. The coverage tier is failing today (68 paths absent). Pasting those
+68 into the Full Command Inventory turns coverage green while content
 enforcement stays at 24 — trading a true red for a false green, with the 94.7%
 gap now invisible because no assertion mentions it. The floor makes the content
 number a maintained, asserted fact rather than an incidental one, so that
@@ -92,11 +92,11 @@ The floor does not answer it; it only stops the question from disappearing.
 
 ## What is still absent (bd-...-igo3a)
 
-92 of the 453 extractor paths have no row here, spread across 49 families.
+68 of the 453 extractor paths have no row here, spread across 48 families.
 Listed so the remaining work is stated in the artifact instead of being
 re-derived from the CLI a fifth time. Counts are absent-paths-per-family:
 
-`mesh` 24 · `lab` 3 ·
+`lab` 3 ·
 `maintenance` 3 · `migrate` 3 · `perf` 3 · `reflect` 3 · `shadow` 3 ·
 `swarm` 3 · `backup` 2 · `bootstrap` 2 · `cache` 2 ·
 `health` 2 · `lens` 2 · `mcp` 2 · `proof` 2 · `recorder` 2 ·
@@ -113,7 +113,7 @@ contributing one path each (`artifact relocate`, `ask`, `capture suggest`,
 Retired from this list on 2026-09-17 (bd-...-igo3a): `attest` 3, `config` 3,
 `conflict` 4, `db` 4, `decide` 3, `journal` 4, then `graph` 4, `handoff` 2,
 `learn` 2, `memory` 6, then `verify` 11 and `verification` 11, `curate` 7 and `sandbox` 5, then `bootstrap` 2, `cache` 2, `hook` 9, `lens` 2,
-`proof` 2, `sentinel` 2, `subscribe` 2 `diag` 25 and `team` 35 — 150 paths, twenty-three
+`proof` 2, `sentinel` 2, `subscribe` 2 `diag` 25, `team` 35 and `mesh` 24 — 174 paths, twenty-four
 whole families, now carrying Full Command Inventory rows. Each disposition was checked against
 the module rather than defaulted: `journal distill` reads as synthesis from its
 name and is not (it proposes by threshold and emits an explicit
@@ -474,6 +474,12 @@ ledger and the command-boundary matrix must gain concrete rows before the new pa
 | `conflict list`, `conflict explain`, `conflict cluster`, `conflict resolve` | `src/cli/mod.rs:14602`, `src/cli/conflict.rs` | Ranked contradicting memory pairs, per-memory explanation, and k-truss + Louvain contradiction clusters over persisted memories. `resolve` performs audited mutations and is dry-run by default. | keep mechanical |
 | `db check-integrity`, `db inspect`, `db migrations`, `db reindex` | `src/cli/mod.rs:13763`, `src/db/mod.rs` | Non-mutating database surfaces: integrity check, single-table row inspection, applied/pending migration listing, and a preview of pending derived-index rebuild work. `reindex` previews rather than rebuilds. | keep mechanical |
 | `decide record`, `decide list`, `decide revisit` | `src/cli/mod.rs:15176`, `src/core/decide.rs` | Typed decision memories with revisit scheduling: record writes a durable decision, list reports current heads with optional superseded history, revisit reports decisions due or inside the warning window. | keep mechanical |
+| `mesh init`, `mesh peers`, `mesh status`, `mesh ledger`, `mesh peer list`, `mesh peer show`, `mesh peer unknown-attempt`, `mesh hello-responder status` | `src/cli/mod.rs:15162`, `src/cli/mesh.rs`, `src/mesh/team.rs` | Read-only mesh inspection. `init` inspects foreground readiness WITHOUT starting a daemon; `peers` reads configured peers and anti-entropy cursors from local storage; `ledger` inspects receiver-local import decisions WITHOUT printing event bodies, which is a redaction property rather than a formatting one; `unknown-attempt` classifies a network-reachable node that was never enrolled. | keep mechanical |
+| `mesh disable`, `mesh reenable` | `src/cli/mod.rs:15162`, `src/cli/mesh.rs` | Containment. `disable` immediately contains mesh activity **without deleting local truth** — containment is not deletion, and a reader must not treat it as one. `reenable` requires an explicit containment review rather than simply undoing the flag. | keep mechanical |
+| `mesh peer add`, `mesh peer rotate`, `mesh peer revoke`, `mesh auto-enroll`, `mesh discovery-policy` | `src/cli/mod.rs:15162`, `src/cli/mesh.rs`, `src/mesh/discovery_policy.rs` | Peer lifecycle, and the consent model differs across it. `peer add` enrolls after an explicit capability handshake and HUMAN CONSENT, one peer at a time. `auto-enroll` materializes peers from fresh Tailscale autodiscovery — zero-touch per peer, but not consent-free: it is policy-driven with `--include`/`--exclude` denylists, `--dry-run`, and `--explain` for the per-peer decision tree. Consent moved to the policy, it was not removed. `discovery-policy` both inspects AND updates that policy, so it is the mutating path behind auto-enroll's decisions. | keep mechanical |
+| `mesh preview-grant`, `mesh grant`, `mesh revoke-lane` | `src/cli/mod.rs:15162`, `src/cli/mesh.rs` | Lane authorization, and the three form one protocol. `preview-grant` shows the effect of granting a lane WITHOUT mutating policy; `grant` requires an authenticated, REVISION-PINNED preview, so a stale preview cannot authorize a grant; `revoke-lane` revokes a lane and invalidates every preview from the prior generation. Previews are therefore generation-scoped, which is the property that makes the pin meaningful. | keep mechanical |
+| `mesh export`, `mesh import`, `mesh sync` | `src/cli/mod.rs:15162`, `src/cli/mesh.rs` | Data movement. `export` emits policy-filtered foreground rows for an ENROLLED peer; `import` reads a mesh JSON artifact from a LOCAL FILE, not from a peer; `sync` runs one foreground cycle without background daemon mode. Only `sync` contacts a peer. | keep mechanical |
+| `mesh hello-responder register`, `mesh hello-responder run`, `mesh hello-responder unregister` | `src/cli/mod.rs:15162`, `src/cli/mesh.rs` | The hello responder lifecycle. **`run` owns the real Tailscale responder listener in this foreground process** — it is long-running and network-serving, not a report, and is the one path in the mesh family that holds a socket. `register` and `unregister` add and remove exact team routes with the user-scoped owner over the same-EUID control path. | keep mechanical |
 | `team create`, `team status`, `team activity`, `team doctor`, `team leave`, `team pause`, `team resume`, `team steward run-once` | `src/cli/mod.rs:15163`, `src/cli/team.rs`, `src/mesh/team.rs` | Local team lifecycle over the origin event stream (ADR 0086). `create` writes a local genesis; `status` and `activity` read recorded events; `doctor` is declared read-only; `leave` is self-removal; the pause and resume pair toggles network exchange WITHOUT leaving; `steward run-once` is a foreground pass. None of these reach the network except by toggling whether it is used. | keep mechanical |
 | `team join`, `team sync`, `team fetch body` | `src/cli/mod.rs:15163`, `src/cli/team.rs`, `src/mesh/team.rs` | **The network-touching subset, and the line runs between them.** `join` proves an invite over LIVE TCP and `sync` runs one mesh exchange cycle — both require a reachable peer. `fetch body` does NOT: it reads from the local hardened cache, so it is a local read despite the verb. A reader auditing which team commands can contact a peer needs exactly this split. | keep mechanical |
 | `team invite`, `team revoke`, `team credentials backup`, `team credentials restore`, `team members rotate-key` | `src/cli/mod.rs:15163`, `src/cli/team.rs` | Key and invite material. `invite` mints a single-use invite and `revoke` cancels a pending one; `credentials backup` writes an ENCRYPTED backup under the workspace keys tree and `restore` reads pair keys and signing seeds back; `members rotate-key` rotates the local signing key. Every path here moves secret material, so redaction and key-tree placement are the properties to check, not output shape. | keep mechanical |
