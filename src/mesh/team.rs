@@ -2842,6 +2842,37 @@ pub fn enroll_team_pair_peer(
     {
         return Ok(peer_id);
     }
+    // bd-coxn1: refuse to STORE a peer whose origin workspace id is empty.
+    //
+    // This is a misattribution fix, not a fail-open fix. An empty
+    // origin_workspace_id does not bypass anything -- it is refused later, by
+    // validate_frame_identity, which rejects an empty value for every
+    // SessionBinding field. The problem is WHERE it is refused. The empty value
+    // reaches there as SessionBinding.responder_workspace_id via
+    // foreground_cli::live_team_initiator_config, so the operator sees
+    // `responder_workspace_id must contain 1..=N bytes` on every session with
+    // this peer, forever, while the cause is this enrollment -- written in
+    // another module, possibly days earlier, from an invite minted or redeemed
+    // before this node had a self team-member row (mint_team_invite_with_store
+    // and redeem_team_invite both default that id to "").
+    //
+    // A peer stored with an empty origin workspace id can never hold a session,
+    // so declining to store it loses no working capability; it moves the
+    // failure to the point where the cause can be named.
+    //
+    // Deliberately placed AFTER persist_team_member above. That call's caller
+    // comments that "a missing workspace row must not drop the membership
+    // persist", and that still holds: membership is already written, and the
+    // sole join-path caller takes this result as `let _ =`, so refusing here
+    // cannot abort a join that is already on the wire.
+    if origin_workspace_id.is_empty() {
+        return Err(OriginStreamError::Db(format!(
+            "refusing to enroll mesh peer {peer_id} with an empty origin_workspace_id: the \
+             invite was minted or redeemed before this node had a self team member, and such a \
+             peer can never open a session (its SessionBinding would fail frame-identity \
+             validation). Re-enroll this peer once local team membership exists."
+        )));
+    }
     let locator = if endpoint.contains(':') {
         endpoint.to_owned()
     } else {
@@ -14130,6 +14161,95 @@ mod tests {
             "an empty stored origin id is the one value that silently disables the no-echo \
              guard, so it must be refused rather than returned; if this is Ok the fail-open \
              is back"
+        );
+    }
+
+    // ---- bd-coxn1: refuse the poison enrollment where the cause is nameable --
+
+    #[test]
+    fn enrolling_a_peer_with_an_empty_origin_workspace_id_is_refused_and_says_why() {
+        // THIS IS NOT A FAIL-OPEN TEST, and the distinction is the whole bead.
+        // An empty origin_workspace_id is ALREADY refused downstream, by
+        // validate_frame_identity, which rejects an empty value for every
+        // SessionBinding field. What was wrong was WHERE: the operator saw
+        // `responder_workspace_id must contain 1..=N bytes` on every session
+        // with the peer, while the cause was this enrollment. This asserts the
+        // refusal happens here, with a message that names it.
+        let root = tempfile::tempdir().unwrap();
+        let ee = root.path().join(".ee");
+        std::fs::create_dir_all(&ee).expect("ee");
+        let connection = crate::db::DbConnection::open_file(ee.join("ee.db")).expect("open");
+        connection.migrate().expect("migrate");
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: root.path().display().to_string(),
+                    name: Some("coxn1".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let created = create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Priya",
+            "2026-09-18T00:00:00Z",
+        )
+        .expect("create");
+
+        let refused = enroll_team_pair_peer(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &created.team.team_id,
+            "node_emptyorigin00000000000001",
+            "Analysts",
+            "127.0.0.1",
+            41888,
+            "2026-09-18T04:00:00Z",
+            "",
+        )
+        .expect_err("an empty origin workspace id must be refused at enroll");
+        let message = refused.to_string();
+        assert!(
+            message.contains("empty origin_workspace_id"),
+            "the refusal must name the field that is empty, so the operator is not sent to \
+             frame validation to find out: {message}"
+        );
+        assert!(
+            message.contains("Re-enroll"),
+            "the refusal must say what to do about it: {message}"
+        );
+
+        // THE PLACEMENT PROPERTY. The refusal sits AFTER persist_team_member on
+        // purpose, because the join-path caller comments that a missing
+        // workspace row must not drop the membership persist. If someone moves
+        // this check to the top of the function, this assertion fails.
+        let members = connection.list_all_team_members().expect("members");
+        assert!(
+            members
+                .iter()
+                .any(|member| member.origin_node_id == "node_emptyorigin00000000000001"),
+            "membership must still have been persisted before the enrollment was refused: \
+             {members:?}"
+        );
+
+        // THE CONTROL. Without it, a function that refused every enrollment
+        // would satisfy the assertions above.
+        let handle = enroll_team_pair_peer(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &created.team.team_id,
+            "node_realorigin000000000000001",
+            "Analysts",
+            "127.0.0.1",
+            41888,
+            "2026-09-18T04:00:00Z",
+            "wsp_joinworkspace0000000000001",
+        )
+        .expect("a real origin workspace id must still enroll");
+        assert!(
+            !handle.is_empty(),
+            "a well-formed enrollment must still return its peer handle"
         );
     }
 }
