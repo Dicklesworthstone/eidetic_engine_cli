@@ -59,7 +59,10 @@ fn durable_files(directory: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, String>
             if kind.is_dir() {
                 visit(&path, files)?;
             } else if kind.is_file() && !entry.file_name().to_string_lossy().ends_with("-shm") {
-                files.insert(path.clone(), fs::read(&path).map_err(|error| error.to_string())?);
+                files.insert(
+                    path.clone(),
+                    fs::read(&path).map_err(|error| error.to_string())?,
+                );
             }
         }
         Ok(())
@@ -70,7 +73,8 @@ fn durable_files(directory: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, String>
 }
 
 #[test]
-fn read_only_answers_abstentions_and_strict_failures_leave_durable_state_unchanged() -> Result<(), String> {
+fn read_only_answers_abstentions_and_strict_failures_leave_durable_state_unchanged()
+-> Result<(), String> {
     let (_root, workspace, _database, _workspace_id, id) = seed_workspace()?;
     let before = durable_files(&workspace)?;
     for (question, flags, exit) in [
@@ -118,11 +122,30 @@ fn ordinary_ask_keeps_learning_audits_and_matches_read_only_answers() -> Result<
         assert_eq!(response(&read_only)?, response(&ordinary)?);
     }
     let db = DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
-    let after = db.list_audit_entries(Some(&workspace_id), None).map_err(|error| error.to_string())?;
-    let added: Vec<_> = after.iter().filter(|row| !before.iter().any(|old| old.id == row.id)).collect();
-    assert!(added.iter().any(|row| row.action == audit_actions::SEARCH_RETURNED_MEM && row.target_id.as_deref() == Some(id.as_str())));
-    assert!(added.iter().any(|row| row.action == audit_actions::SEARCH_MISS_RECORDED));
-    assert!(added.iter().all(|row| row.action == audit_actions::SEARCH_RETURNED_MEM || row.action == audit_actions::SEARCH_MISS_RECORDED));
+    let after = db
+        .list_audit_entries(Some(&workspace_id), None)
+        .map_err(|error| error.to_string())?;
+    let added: Vec<_> = after
+        .iter()
+        .filter(|row| !before.iter().any(|old| old.id == row.id))
+        .collect();
+    assert!(
+        added
+            .iter()
+            .any(|row| row.action == audit_actions::SEARCH_RETURNED_MEM
+                && row.target_id.as_deref() == Some(id.as_str()))
+    );
+    assert!(
+        added
+            .iter()
+            .any(|row| row.action == audit_actions::SEARCH_MISS_RECORDED)
+    );
+    assert!(
+        added
+            .iter()
+            .all(|row| row.action == audit_actions::SEARCH_RETURNED_MEM
+                || row.action == audit_actions::SEARCH_MISS_RECORDED)
+    );
     Ok(())
 }
 
@@ -131,15 +154,23 @@ fn ordinary_ask_keeps_learning_audits_and_matches_read_only_answers() -> Result<
 fn read_only_ask_succeeds_while_another_process_owns_the_writer_fence() -> Result<(), String> {
     let (_root, workspace, database, _workspace_id, id) = seed_workspace()?;
     let lock = fs::OpenOptions::new()
-        .read(true).write(true).create(true).truncate(false)
-        .open(database.with_extension("write.lock")).map_err(|error| error.to_string())?;
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(database.with_extension("write.lock"))
+        .map_err(|error| error.to_string())?;
     rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
         .map_err(|error| error.to_string())?;
     let before = durable_files(&workspace)?;
     // The parent retains the real flock until after the child exits. No mock
     // store, timing race or sleep can let a writable implementation pass.
     let output = invoke(&workspace, "Run cargo fmt before release", &["--read-only"])?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(response(&output)?["data"]["citations"][0]["memoryId"], id);
     assert_eq!(durable_files(&workspace)?, before);
     drop(lock);
@@ -152,13 +183,20 @@ fn read_only_ask_accepts_a_nonwritable_database_file() -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
     let (_root, workspace, database, _workspace_id, id) = seed_workspace()?;
-    let original = fs::metadata(&database).map_err(|error| error.to_string())?.permissions();
-    fs::set_permissions(&database, fs::Permissions::from_mode(0o444)).map_err(|error| error.to_string())?;
+    let original = fs::metadata(&database)
+        .map_err(|error| error.to_string())?
+        .permissions();
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o444))
+        .map_err(|error| error.to_string())?;
     let before = durable_files(&workspace)?;
     let result = invoke(&workspace, "Run cargo fmt before release", &["--read-only"]);
     fs::set_permissions(&database, original).map_err(|error| error.to_string())?;
     let output = result?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(response(&output)?["data"]["citations"][0]["memoryId"], id);
     assert_eq!(durable_files(&workspace)?, before);
     Ok(())
@@ -186,7 +224,11 @@ fn ask_requires_explicit_migration_instead_of_upgrading_during_a_query() -> Resu
 #[test]
 fn read_only_ask_never_initializes_a_missing_store() -> Result<(), String> {
     let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let output = invoke(root.path(), "Run cargo fmt before release", &["--read-only"])?;
+    let output = invoke(
+        root.path(),
+        "Run cargo fmt before release",
+        &["--read-only"],
+    )?;
     assert!(!output.status.success());
     assert_eq!(response(&output)?["success"], false);
     assert!(!root.path().join(".ee").exists());
@@ -212,7 +254,10 @@ fn read_only_flag_and_effect_manifest_agree_on_actual_audit_behavior() -> Result
         assert!(effect.mutation_contract.dry_run_behavior.is_none());
         if expected == "ask" {
             assert_eq!(effect.default_effect, EffectClass::DurableMemoryWrite);
-            assert_eq!(effect.mutation_contract.side_effect_class, SideEffectClass::AppendOnly);
+            assert_eq!(
+                effect.mutation_contract.side_effect_class,
+                SideEffectClass::AppendOnly
+            );
             assert_eq!(effect.write_surfaces.db_tables, ["audit_log"]);
             assert!(effect.requires_audit);
         } else {

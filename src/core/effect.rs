@@ -1528,8 +1528,8 @@ impl EffectManifest {
                 "Show one journal entry with structured sidecar and redaction report",
             ),
             CommandEffect::read_only_db(
-                "ask",
-                "Deterministic extractive question answering with citations and honest abstention",
+                "ask --read-only",
+                "Extractive question answering without audit writes or automatic migrations",
             ),
             CommandEffect::read_only_db(
                 "recall",
@@ -2201,6 +2201,17 @@ impl EffectManifest {
     }
 
     fn append_only_write_commands() -> Vec<CommandEffect> {
+        let mut ask = CommandEffect::append_only_write(
+            "ask",
+            vec!["audit_log"],
+            "audit row id",
+            "Answer from a read-only snapshot, then best-effort append cited retrieval or query-miss audit records",
+        )
+        .with_read_snapshot();
+        // Ask has an explicit read-only mode, not a dry-run argument.
+        ask.dry_run_effect = None;
+        ask.mutation_contract.dry_run_behavior = None;
+        ask.mutation_contract.recovery_behavior = "answers remain available when optional audit writes fail; --read-only suppresses those writes";
         let diag_pack_record = CommandEffect::append_only_write(
             "diag pack-record",
             vec!["pack_records", "audit_log"],
@@ -2208,6 +2219,7 @@ impl EffectManifest {
             "Append one audited diagnostic pack record without overwriting an existing ID",
         );
         vec![
+            ask,
             diag_pack_record,
             CommandEffect::append_only_write(
                 "db check-integrity",

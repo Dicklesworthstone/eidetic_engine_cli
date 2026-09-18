@@ -187,3 +187,6 @@ fn public_ask_does_not_reveal_retired_advice_in_abstention_hints() -> Result<(),
 
 #[path = "ask_scope.rs"]
 mod scope;
+
+#[path = "ask_read_only.rs"]
+mod read_only;

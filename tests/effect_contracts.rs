@@ -14,7 +14,7 @@ const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
 const EFFECT_SOURCE: &str = include_str!("../src/core/effect.rs");
 /// Live count of the normalized command paths `extract_command_path` emits.
 ///
-/// Measured, not incremented: 453 at 2026-09-17, by mirroring
+/// Measured, not incremented: 454 after adding `ask --read-only`, by mirroring
 /// `command_paths_in` over the marker-delimited body of `extract_command_path`
 /// (`python3` over `src/cli/mod.rs`, same rule the gate uses — a path is
 /// recovered only from `"literal".to_string()`).
@@ -24,7 +24,7 @@ const EFFECT_SOURCE: &str = include_str!("../src/core/effect.rs");
 /// command and increments by one without re-measuring, so every count someone
 /// else forgot compounds silently. When this fails, re-measure the inventory;
 /// do not add the delta of your own change to the old number.
-const NORMALIZED_CLI_COMMAND_COUNT: usize = 453;
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 454;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",

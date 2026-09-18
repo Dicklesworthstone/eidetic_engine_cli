@@ -1745,6 +1745,11 @@ pub struct AskArgs {
     #[arg(long, value_parser = parse_memory_scope_arg, default_value = "workspace")]
     pub memory_scope: MemoryScope,
 
+    /// Query without writing retrieval or query-miss audit records.
+    /// Opens the store read-only and never migrates it.
+    #[arg(long)]
+    pub read_only: bool,
+
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<std::path::PathBuf>,
@@ -50876,7 +50881,9 @@ where
         return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
-    let connection = match crate::db::DbConnection::open_file(&database_path) {
+    // Evidence acquisition must not require write permission or a writer lease.
+    // The optional audit handle is opened only after the read snapshot finishes.
+    let connection = match crate::db::DbConnection::open_file_read_only(&database_path) {
         Ok(c) => c,
         Err(e) => {
             let error = DomainError::Storage {
@@ -50887,11 +50894,7 @@ where
         }
     };
 
-    if let Err(e) = connection.migrate() {
-        let error = DomainError::Storage {
-            message: format!("Failed to migrate database: {e}"),
-            repair: Some("ee migrate run --workspace . --json".to_owned()),
-        };
+    if let Err(error) = ensure_inspection_database_current(&connection, &database_path, "ask") {
         return write_domain_error(&error, cli.renderer(), stdout, stderr);
     }
 
@@ -50926,11 +50929,20 @@ where
     };
 
     let report = evaluate_ask(&request, &candidates);
-    record_ask_query_miss_best_effort(&connection, &workspace_id, &report);
-    // bd-b9dmp. The miss row above feeds ADR 0071's demand half. This feeds the
-    // retrieval half, which ask fed nothing to: memories it cited as the answer
-    // read as never_retrieved and were surfaced for disposition review.
-    record_ask_retrieval_best_effort(&connection, &workspace_id, &report);
+    if !args.read_only {
+        // Keep ADR 0071 demand and retrieval learning on ordinary asks. An
+        // unavailable audit writer must not suppress a valid read-only answer.
+        match crate::db::DbConnection::open_file(&database_path) {
+            Ok(audit_connection) => {
+                record_ask_query_miss_best_effort(&audit_connection, &workspace_id, &report);
+                record_ask_retrieval_best_effort(&audit_connection, &workspace_id, &report);
+            }
+            Err(_) => tracing::warn!(
+                target: "ee::core::ask::audit",
+                "ask audit writer unavailable; evidence evaluation remains valid"
+            ),
+        }
+    }
 
     // Build degradation entries
     let mut degraded: Vec<serde_json::Value> = Vec::new();
@@ -68737,6 +68749,7 @@ impl NormalizedInvocation {
                     AnalyzeCommand::Clustering(_) => "analyze clustering".to_string(),
                 },
                 Command::AgentDocs(_) => "agent-docs".to_string(),
+                Command::Ask(args) if args.read_only => "ask --read-only".to_string(),
                 Command::Ask(_) => "ask".to_string(),
                 Command::Audit(audit) => match audit {
                     AuditCommand::Timeline(_) => "audit timeline".to_string(),
