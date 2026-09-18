@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - scripts/delivery/index-reader-leases.patch
+      - scripts/delivery/index-reader-complete-*.b64
       - .github/workflows/index-publication-20260918.yml
   workflow_dispatch:
 permissions:
@@ -13,7 +13,7 @@ jobs:
   integrate:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
     permissions:
       contents: write
     env:
@@ -39,12 +39,15 @@ jobs:
           key: ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Apply reviewed reader and publisher bindings
+      - name: Apply verified literal reader and cache patch
         run: |
           set -euo pipefail
           git rev-parse HEAD
-          git apply --check scripts/delivery/index-reader-leases.patch
-          git apply scripts/delivery/index-reader-leases.patch
+          cat scripts/delivery/index-reader-complete-0.b64 scripts/delivery/index-reader-complete-1.b64 | tr -d '\n' | base64 --decode | gzip -d > "$RUNNER_TEMP/reader.patch"
+          echo "c7948c44fd53245668cc5cc1d5a081ca40c4ba5a5d245fe976f0734c29482c5f  $RUNNER_TEMP/reader.patch" | sha256sum --check
+          git apply --check "$RUNNER_TEMP/reader.patch"
+          git apply "$RUNNER_TEMP/reader.patch"
+          printf '%s\n' 'e0a65fc275866621cd40aab67476dc6ece294dd75f1a61e897c91d5bb8856a21  src/core/index.rs' '74de30ca471c13a9a701eaf2e7446cc00781aff0539cb1a8aee7bc28e4b2f715  src/core/search.rs' | sha256sum --check
           rustfmt --edition 2024 --config skip_children=true src/core/index.rs src/core/index_read_lease.rs src/core/search.rs
           git diff --check
           git diff --stat
@@ -59,6 +62,12 @@ jobs:
           status=0
           cargo test --locked --lib generation_lease -- --nocapture > "$RUNNER_TEMP/reader-boundaries.log" 2>&1 || status=$?
           tail -n 180 "$RUNNER_TEMP/reader-boundaries.log"
+          exit "$status"
+      - name: Execute identical-metadata generation replacement regression
+        run: |
+          status=0
+          cargo test --locked --lib search_generation_cache -- --nocapture > "$RUNNER_TEMP/reader-cache.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/reader-cache.log"
           exit "$status"
       - name: Verify existing publication and cancellation boundaries
         run: |
@@ -76,7 +85,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- src/core/index.rs src/core/index_read_lease.rs src/core/search.rs
-          git commit -m 'fix(search): lease index generations across metadata and hybrid collection' -m 'On Unix, share a read-only OS directory lease across metadata, vector and lexical reads; every production publisher and recovery holds the exclusive lease through commit and rollback. Acquire before the database writer fence, revalidate SQL publication ownership afterward, and retain bounded cancellable admission without sidecars. Cover real hybrid collection, nested commits, rollback, error cleanup, shared readers, symlinks and parent replacement. The future immutable SQL-pointer architecture and non-Unix reader leases remain separate work. Production check and targeted regression groups passed before commit.'
+          git commit -m 'fix(search): lease generations and invalidate replaced index readers' -m 'On Unix, hold a shared read-only directory lease across metadata, vectors and lexical collection; publication and recovery take the exclusive lease through commit and rollback before acquiring the database writer fence. Bound waits, preserve cancellation and close on error. Bind lexical-reader and index-status caches to the physical generation directory so identical metadata cannot resurrect a displaced reader. Real hybrid collection, contention, rollback, parent substitution and replacement-with-identical-metadata tests passed before this commit. SQL-pointer immutable generations and non-Unix leases remain separate work.'
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then break; fi
             test "$attempt" -lt 3
