@@ -431,9 +431,52 @@ evidence_pack_out="$(ee_json --workspace "$WS" pack \
     "ambient capture must dedupe accepted suggestions" --max-tokens 2000 --json)"
 assert_jq "$evidence_pack_out" '.schema == "ee.response.v2" and .success == true' \
     "pack for imported transcript phrase succeeds"
+# CARDINALITY RE-AIMED (bd-16imy, 2026-09-18). This block previously asserted
+# `items | length == 1`, `quality.itemCount == 1`, `selectionAudit.selectedCount
+# == 1` and `provenanceFooter.evidenceCount == 1`. Those were written at
+# 2c6c0f04c when the fixture imported TWO sessions. 37280dda4 -- itself a
+# bd-16imy commit -- then grew the fixture to 130 sessions / 133 spans to cross
+# the 128-row bound, updated `sessionsImported == 2` to `== 130`, and left these
+# four behind. The first execution of this harness against a current binary
+# reported 100 for all four.
+#
+# ABSOLUTE CARDINALITY IS NOT FIXTURE-DERIVABLE HERE and that is why none of the
+# replacements is a number taken from a run. The observed 100 is neither a
+# budget outcome (usedTokens 1434 of maxTokens 2000, omittedCount 0) nor a cap
+# in source; it is candidateCount, an emergent property of retrieval relevance
+# over a 133-span corpus. An `== 100` clause would encode one run's retrieval
+# behaviour as a contract.
+#
+# So the replacements assert only what the FIXTURE declares or what the payload
+# must say about itself:
+#   >= 1 and <= 133   133 is `spansImported == 133`, asserted by step 2 above.
+#                     A pack cannot contain more imported spans than were
+#                     imported. Fails at 0 and fails above the corpus.
+#   all(... evidence_span)  a KIND invariant: no memory item may leak into an
+#                     evidence pack. Independent of how many are returned.
+#   itemCount/selectedCount/evidenceCount == (items | length)
+#                     the reported counts must match the array they describe.
+#                     This is internal consistency, NOT cardinality, and it is
+#                     the one place a self-referential comparison is legitimate:
+#                     it is checking the payload against ITSELF ON PURPOSE.
+#
+# EACH WAS EXERCISED IN BOTH DIRECTIONS against the captured payload before
+# being trusted: bound fails at 0 items and at 200; kind fails when one item's
+# entityKind is changed to "memory"; consistency fails when itemCount is lied
+# about and when items are dropped without fixing the counts. A clause that was
+# only ever seen to pass is indistinguishable from one that was deleted.
+#
+# THIS STEP STILL FAILS, AND THAT IS CORRECT. After the re-aim every clause
+# passes except the provenance URI, which is a real product defect: search
+# renders this span `#L2-2` (db/mod.rs:13733, unconditional) and pack renders it
+# `#L2` (pack/mod.rs:5986 and models/provenance.rs:129, which collapse
+# start==end). Filed as bd-4hr1v. The assertion below is RIGHT to fail and must
+# not be relaxed to accommodate it.
 assert_jq "$evidence_pack_out" ".data.pack.schema == \"ee.pack.v2\"
     and (.data.pack.items | type == \"array\")
-    and (.data.pack.items | length == 1)
+    and (.data.pack.items | length) >= 1
+    and (.data.pack.items | length) <= 133
+    and all(.data.pack.items[]; .entityKind == \"evidence_span\")
     and .data.pack.items[0].entityKind == \"evidence_span\"
     and .data.pack.items[0].evidenceSpanId == \"$evidence_doc_id\"
     and (.data.pack.items[0] | has(\"memoryId\") | not)
@@ -446,9 +489,9 @@ assert_jq "$evidence_pack_out" ".data.pack.schema == \"ee.pack.v2\"
     and (.data.pack.items[0].why | contains(\"$evidence_doc_id\"))
     and any(.data.pack.items[0].provenance[]?; .uri == \"$exact_evidence_uri\")
     and .data.pack.items[0].sourceIndex == 1
-    and .data.pack.quality.itemCount == 1
-    and .data.pack.selectionAudit.selectedCount == 1
-    and .data.pack.provenanceFooter.evidenceCount == 1
+    and .data.pack.quality.itemCount == (.data.pack.items | length)
+    and .data.pack.selectionAudit.selectedCount == (.data.pack.items | length)
+    and .data.pack.provenanceFooter.evidenceCount == (.data.pack.items | length)
     and all((.degraded // [])[]?;
         .code != \"context_evidence_hit_unhydrated\"
         and .code != \"context_pack_persist_failed\")" \
