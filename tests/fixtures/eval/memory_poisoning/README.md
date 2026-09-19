@@ -38,3 +38,34 @@ dangerous commands remain usable. This is not comprehensive injection detection.
 
 Generated run artifacts belong under
 `target/ee-e2e/usr_import_poisoned_memory_guard/<run-id>/`.
+
+## Writing `expected_query_match`: the analyzer does not stem, and one case is unexplained
+
+`expected_query_match` DECLARES the retrieval workload — `tests/eval_run_happy_path.rs`
+builds the executed query set as the union across memories, so a query whose
+terms are absent from the indexed surface retrieves nothing and fails with
+`executed an empty retrieval for "<query>"`.
+
+The indexed surface is **content + tags (as both title and tags) + level +
+kind**, and **the analyzer does not stem**: a corpus saying `memory` does not
+match a query saying `memories`. Three of the four empty retrievals recorded on
+2026-09-16 were plural-form queries against singular corpus text.
+
+**Anchor new queries on terms that appear VERBATIM in the memory they should
+retrieve.** That holds under any tokenization and does not depend on a model of
+the analyzer.
+
+**UNEXPLAINED, and worth knowing before you trust a mental model of the
+tokenizer:** `"instruction-like content"` retrieved EMPTY against
+`mem_00000000000000000000000402`, yet the word `instruction` appears verbatim in
+sibling memory `...403` ("the highest priority instruction"), and the query
+`"role markup"` — written as two words — *does* retrieve `...403`, whose only
+source of those terms is the hyphenated tag `role-markup`. A model where hyphens
+split into tokens predicts `instruction-like` should have matched. It did not.
+
+That contradiction is unresolved. It was worked around in `38e541973` by
+replacing the query with `"ignore previous instructions"`, whose three terms are
+all verbatim in the target memory, rather than by guessing the rule. If you are
+about to reason about hyphens, stemming, or token boundaries here, measure it
+first — this is the one place in these fixtures where the obvious model is known
+to be wrong.
