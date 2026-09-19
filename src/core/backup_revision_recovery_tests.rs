@@ -181,9 +181,9 @@ fn backup_revision_recovery_preserves_history_expiry_and_published_index() -> Te
             Some("2099-01-01T00:00:00Z")
         );
         assert_eq!(
-            db.filter_current_memory_ids(&[restored_prior, restored_head.clone()])
+            db.filter_current_memory_ids(&[restored_prior.clone(), restored_head.clone()])
                 .map_err(|e| e.to_string())?,
-            BTreeSet::from([restored_head])
+            BTreeSet::from([restored_head.clone()])
         );
         assert_eq!(
             db.list_memories(&workspace_id, None, true)
@@ -194,14 +194,56 @@ fn backup_revision_recovery_preserves_history_expiry_and_published_index() -> Te
         db.close().map_err(|e| e.to_string())?;
         let status =
             crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
-                workspace_path: side_path,
-                database_path: Some(PathBuf::from(result.restored_database_path)),
+                workspace_path: side_path.clone(),
+                database_path: Some(PathBuf::from(&result.restored_database_path)),
                 index_dir: None,
             })
             .map_err(|e| e.to_string())?;
         assert_eq!(status.health, crate::core::index::IndexHealth::Ready);
         assert_eq!(status.db_generation, status.index_generation);
-        assert_eq!(status.index_document_count, Some(1));
+        // Historical search requires both physical versions in the index.
+        // One current DB head is not a one-document index. Prove the public
+        // temporal behavior instead of discarding history to satisfy a count.
+        assert_eq!(status.index_document_count, Some(2));
+        for (reference, expected) in [
+            ("2026-07-01T00:00:00Z", restored_head.as_str()),
+            ("2026-05-15T00:00:00Z", restored_prior.as_str()),
+            ("2026-06-01T00:00:00Z", restored_head.as_str()),
+        ] {
+            let search = crate::core::search::run_search_unaudited(
+                &crate::core::search::SearchOptions {
+                    workspace_path: side_path.clone(),
+                    database_path: Some(PathBuf::from(&result.restored_database_path)),
+                    index_dir: None,
+                    query: "release builds manifest".to_owned(),
+                    limit: 10,
+                    speed: crate::search::SpeedMode::Default,
+                    explain: false,
+                    as_of: Some(
+                        chrono::DateTime::parse_from_rfc3339(reference)
+                            .map_err(|e| e.to_string())?
+                            .with_timezone(&Utc),
+                    ),
+                    include_tombstoned: false,
+                    include_expired: false,
+                    include_future: false,
+                    include_stale: false,
+                    relevance_floor: Some(0.0),
+                    dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                    source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                    strict_source_mode: true,
+                    memory_scope: crate::models::MemoryScope::Workspace,
+                    strict_scope: false,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            assert_eq!(
+                search.results.iter().map(|hit| hit.doc_id.as_str()).collect::<Vec<_>>(),
+                vec![expected],
+                "{redaction:?} at {reference}: {:?}",
+                search.degraded,
+            );
+        }
     }
     Ok(())
 }

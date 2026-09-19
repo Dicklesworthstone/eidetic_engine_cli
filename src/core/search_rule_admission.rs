@@ -1,9 +1,14 @@
-//! Native procedural-rule retrieval from the pinned source of truth.
+//! Native memory revision and procedural-rule admission from source truth.
 //!
 //! The index supplies candidate IDs and scores, never rule authority or bodies.
 //! Semantic hits have no body to display, and old lexical hits may outlive a
 //! tombstone, supersession, workspace move or rule revision. Search intentionally
 //! includes draft/deprecated rules for inspection; pack admission is stricter.
+//! Memory revisions share this pre-ranking admission point so superseded
+//! candidates cannot affect relevance floors, duplicate suppression or hints.
+
+#[path = "search_revision_admission.rs"]
+pub(super) mod memory_revisions;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
@@ -83,8 +88,8 @@ fn canonical_metadata(projection: &RuleIndexProjection) -> serde_json::Value {
     serde_json::Value::Object(metadata)
 }
 
-/// Hydrate native rules before calibration, floor admission and query hints.
-/// A failed source lookup withholds only rules; unrelated hits remain usable.
+/// Admit memory revisions and hydrate rules before calibration and query hints.
+/// Failed authority lookups withhold the affected native entity type only.
 /// Never creates a database or repairs the index. Candidate IDs bound the work.
 pub(super) fn admit_hits(
     options: &SearchOptions,
@@ -92,6 +97,7 @@ pub(super) fn admit_hits(
     degraded: &mut Vec<SearchDegradation>,
     read_connection: Option<&DbConnection>,
 ) -> Vec<SearchHit> {
+    let hits = memory_revisions::admit_hits(options, hits, degraded, read_connection);
     let ids: BTreeSet<&str> = hits
         .iter()
         .filter(|hit| is_rule_hit(hit))
