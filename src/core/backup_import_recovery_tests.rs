@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 type TestResult = Result<(), String>;
-const QUERY: &str = "limit=7&since=2026-09-01T00:00:00Z";
 const TIME: &str = "2026-09-01T01:00:00Z";
 
 fn seed(db: &DbConnection, workspace: &str, path: &Path) -> Result<(), crate::db::DbError> {
@@ -16,12 +15,12 @@ fn seed(db: &DbConnection, workspace: &str, path: &Path) -> Result<(), crate::db
         db.insert_import_ledger_for_recovery(&StoredImportLedger {
             id: format!("imp_{n:026}"),
             workspace_id: workspace.to_owned(),
-            source_kind: if n == 0 { "cass" } else { "jsonl" }.to_owned(),
-            source_id: if n == 0 {
-                format!("cass://sessions?workspace={}&{QUERY}", path.display())
-            } else {
-                format!("portable-source-{n}")
-            },
+            source_kind: "cass".to_owned(),
+            source_id: format!(
+                "cass://sessions?workspace={}&limit={}&since=2026-09-01T00:00:00Z",
+                path.display(),
+                n + 7
+            ),
             status: status.to_owned(),
             cursor_json: Some(r#"{"offset":42,"lastSession":"source-session"}"#.to_owned()),
             imported_session_count: 3,
@@ -277,8 +276,14 @@ fn import_history_survives_two_relocations_without_replaying_progress() -> TestR
             );
             let mut expected = original_imports.clone();
             for row in &mut expected {
-                if row.source_kind == "cass" {
-                    row.source_id = format!("cass://sessions?workspace={}&{QUERY}", side.display());
+                let query = row
+                    .source_id
+                    .rsplit_once("&limit=")
+                    .ok_or("missing captured CASS query")?
+                    .1;
+                row.source_id =
+                    format!("cass://sessions?workspace={}&limit={query}", side.display());
+                if row.status == "running" {
                     row.status = "pending".to_owned();
                     row.started_at = None;
                     row.completed_at = None;

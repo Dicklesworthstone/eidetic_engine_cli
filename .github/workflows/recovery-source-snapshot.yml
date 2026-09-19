@@ -1,0 +1,27 @@
+name: Recovery working-source snapshot
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/recovery-source-snapshot.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Capture exact source for recovery debugging
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/source-sha.txt"
+          git archive HEAD | gzip > "$RUNNER_TEMP/source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recovery-working-source
+          path: |
+            ${{ runner.temp }}/source-sha.txt
+            ${{ runner.temp }}/source.tar.gz
+          retention-days: 3

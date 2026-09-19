@@ -45,7 +45,7 @@ fn seed(db: &DbConnection, workspace: &str) -> Result<(), crate::db::DbError> {
         })?;
     }
     db.insert_task_episode_with_created_at(
-        "episode-operational",
+        "ep_000000000000000000000000001",
         &CreateTaskEpisodeInput {
             workspace_id: Some(workspace.to_owned()),
             session_id: None,
@@ -71,7 +71,7 @@ fn seed(db: &DbConnection, workspace: &str) -> Result<(), crate::db::DbError> {
         source_kind: "file".to_owned(),
         artifact_type: "build_log".to_owned(),
         original_path: Some("build.log".to_owned()),
-        canonical_path: None,
+        canonical_path: Some("/recorded/Orbitgate/build.log".to_owned()),
         external_ref: None,
         content_hash: hash_bytes(b"original build log"),
         media_type: "text/plain".to_owned(),

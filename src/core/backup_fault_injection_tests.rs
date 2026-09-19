@@ -11,11 +11,17 @@ pub(super) fn inject_history_corruption(
     table: &str,
     sql: &str,
 ) -> Result<(), DomainError> {
-    let trigger = match table {
-        "recorder_events" => "recorder_events_no_update",
-        "audit_log" => "audit_log_no_update",
+    let (trigger, control) = match table {
+        "recorder_events" => (
+            "recorder_events_no_update",
+            "UPDATE recorder_events SET event_id = event_id",
+        ),
+        "audit_log" => ("audit_log_no_update", "UPDATE audit_log SET id = id"),
         _ => return db.execute_raw(sql).map_err(work_history_error),
     };
+    if db.count_table_rows(table).map_err(work_history_error)? == 0 {
+        return Err(work_history_error("append-only control requires an existing row"));
+    }
     let create = format!("CREATE TRIGGER {trigger}\n");
     let (_, definition) = crate::db::V036_APPEND_ONLY_TRIGGERS
         .sql()
@@ -25,10 +31,10 @@ pub(super) fn inject_history_corruption(
         .split_once("\nEND;")
         .ok_or_else(|| work_history_error("incomplete compiled append-only trigger"))?;
     let definition = format!("{create}{body}\nEND;");
-    require_append_only_refusal(db, sql)?;
-    // Only called on disposable test databases. DDL and mutation are one
-    // transaction: on failure rollback also reinstates the trigger. Do not
-    // disable foreign keys, change row counts, or relax production policy.
+    // The injected mutation can invalidate its own WHERE predicate. Use an
+    // independent, guaranteed-matching no-op to check trigger enforcement on
+    // both sides, rather than mistaking a zero-row UPDATE for a broken guard.
+    require_append_only_refusal(db, control)?;
     db.with_transaction(|| {
         db.execute_raw(&format!("DROP TRIGGER {trigger}"))?;
         db.execute_raw(sql)?;
@@ -36,7 +42,7 @@ pub(super) fn inject_history_corruption(
         Ok(())
     })
     .map_err(work_history_error)?;
-    require_append_only_refusal(db, sql)
+    require_append_only_refusal(db, control)
 }
 
 fn require_append_only_refusal(db: &DbConnection, sql: &str) -> Result<(), DomainError> {
@@ -58,10 +64,11 @@ fn audit_corruption_reinstates_the_original_append_only_guard() -> Result<(), St
         .get_audit(id)
         .map_err(|e| e.to_string())?
         .ok_or("missing fixture audit")?;
+    assert_eq!(original.action, "memory.create");
     inject_history_corruption(
         &db,
         "audit_log",
-        "UPDATE audit_log SET action = 'changed-history' WHERE id = 'audit_00000000000000000000000001'",
+        "UPDATE audit_log SET action = 'changed-history' WHERE action = 'memory.create'",
     )
     .map_err(|e| e.message())?;
     let changed = db
