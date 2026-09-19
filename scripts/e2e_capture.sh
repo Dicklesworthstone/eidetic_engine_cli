@@ -789,7 +789,14 @@ if remember_git_capture_available; then
         "remember --from-commit --apply succeeds"
     assert_jq "$apply_commit" '
         ((.data.persisted // false) == true)
-        and ((.data.dry_run // true) == false)
+        # NOT `(.data.dry_run // true) == false` (bd-o8e1n). The jq alternative
+        # operator `//` fires on `false` as well as null, so a literal false --
+        # the value this clause exists to assert -- was replaced by the `true`
+        # default before the comparison. That form is unsatisfiable for every
+        # input (false, true, null and absent all yield true), and its permanent
+        # red read as a product defect. Compare directly: an absent field is null,
+        # `null == false` is false, and the clause fails as it should.
+        and (.data.dry_run == false)
         and ((.data.content // .data.memory.content // "") | test("capture: redact secret-bearing diff evidence|redact secret"; "i"))
     ' "git capture derives memory text from commit message"
     assert_jq "$apply_commit" '
