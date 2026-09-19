@@ -386,6 +386,19 @@ jobs:
           cd dist
           LOCK_BLAKE3="$(b3sum ../Cargo.lock | awk '{print $1}')"
           export LOCK_BLAKE3
+          # bd-reality-core-convergence-1azkt.18: resolvedDependencies carried
+          # exactly two entries (the repo commit and Cargo.lock), so
+          # franken-stack.lock and the toolchain that compiled the binary were
+          # not bound into the signed document at all. Both are cheap to
+          # capture here and neither needs the build steps touched.
+          FRANKEN_LOCK_BLAKE3="$(b3sum ../franken-stack.lock | awk '{print $1}')"
+          export FRANKEN_LOCK_BLAKE3
+          # `rustc -vV` is the resolved toolchain, not the requested one:
+          # pinning dtolnay/rust-toolchain by digest makes the ACTION
+          # reproducible, but the nightly it installs still floats by date.
+          # This records which nightly actually compiled the artifact.
+          RUSTC_VERBOSE="$(rustc -vV)"
+          export RUSTC_VERBOSE
           python3 - <<'PY'
           import datetime
           import hashlib
@@ -464,6 +477,23 @@ jobs:
                   f"{featured}"
               )
           created_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+          # `rustc -vV` emits `key: value` lines after a free-form first line.
+          # Fail closed rather than attest a null toolchain: an absent field
+          # prompts a question, but a signed null reads as "there was no
+          # toolchain", which is worse than refusing to sign.
+          rustc_fields = dict(
+              line.split(": ", 1)
+              for line in os.environ["RUSTC_VERBOSE"].splitlines()
+              if ": " in line
+          )
+          for required in ("release", "commit-hash"):
+              if not rustc_fields.get(required):
+                  sys.exit(
+                      f"provenance guard: `rustc -vV` did not report {required!r}; "
+                      "refusing to sign provenance that cannot name the toolchain "
+                      "that built this artifact."
+                  )
           provenance = {
               "_type": "https://in-toto.io/Statement/v1",
               "predicateType": "https://slsa.dev/provenance/v1",
@@ -490,6 +520,12 @@ jobs:
                           "runnerImage": os.environ["EE_RELEASE_RUNNER_IMAGE"],
                           "cross": cross,
                           "glibcBaseline": glibc or None,
+                          # The toolchain that actually compiled this binary,
+                          # parsed from `rustc -vV` rather than from the
+                          # toolchain we ASKED for. `nightly` names a moving
+                          # target; these two fields name the one that ran.
+                          "rustcRelease": rustc_fields.get("release"),
+                          "rustcCommitHash": rustc_fields.get("commit-hash"),
                       },
                       "resolvedDependencies": [
                           {
@@ -502,6 +538,12 @@ jobs:
                               "uri": "file://Cargo.lock",
                               "digest": {
                                   "blake3": os.environ["LOCK_BLAKE3"],
+                              },
+                          },
+                          {
+                              "uri": "file://franken-stack.lock",
+                              "digest": {
+                                  "blake3": os.environ["FRANKEN_LOCK_BLAKE3"],
                               },
                           },
                       ],
