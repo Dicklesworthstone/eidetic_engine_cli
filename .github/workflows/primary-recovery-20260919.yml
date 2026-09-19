@@ -1,0 +1,167 @@
+name: Publish recovery source increments and verify
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/primary-publication-20260919.patch.xz.b64
+      - .github/workflows/primary-recovery-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: recovery-primary-source-delivery
+  cancel-in-progress: false
+jobs:
+  publish-source:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.publish.outputs.source }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Publish three coherent source increments
+        id: publish
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          base=$(git rev-parse HEAD)
+          deliver() {
+            local title=$1
+            shift
+            rustfmt --edition 2024 --config skip_children=true "$@"
+            git diff --check
+            git add -- "$@"
+            if ! git diff --cached --quiet; then
+              git commit -m "$title" -m 'Integrated production implementation and regression tests. Patch integrity, application checks and Rust formatting passed. Compilation and runtime verification are pending in the separate verification job; this commit makes no passing-test claim.'
+              for attempt in 1 2 3 4; do
+                if git push origin HEAD:main; then break; fi
+                test "$attempt" -lt 4
+                git fetch origin main
+                git diff --exit-code "$base" origin/main -- "$@"
+                git merge --no-edit origin/main
+                base=$(git rev-parse origin/main)
+              done
+            fi
+            base=$(git rev-parse HEAD)
+          }
+          decode() {
+            base64 --decode "scripts/delivery/$1.patch.xz.b64" | xz --decompress > "$RUNNER_TEMP/$1.patch"
+            echo "$2  $RUNNER_TEMP/$1.patch" | sha256sum --check
+          }
+          decode lifecycle-recovery-20260919 96e7ac65be20ddcb496bee849fa474fe24f16391be7161bc3b9a296b5c94976d
+          if ! test -f src/core/backup_lifecycle_recovery.rs; then
+            test "$(git rev-parse HEAD:src/core/backup_history_recovery.rs)" = 1d31dcaf36922648e08bc03132372b5676b7b800
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/lifecycle-recovery-20260919.patch"
+            git apply "$RUNNER_TEMP/lifecycle-recovery-20260919.patch"
+          else
+            grep -Fq 'self.lifecycle.verify_connection(db)' src/core/backup_history_recovery.rs
+          fi
+          fixture=scripts/delivery/recovery-policy-fixture-20260919.patch
+          echo "94e140f4d18a529821df690e36ece7f713905a48a7ec6793e1e258da331dbe60  $fixture" | sha256sum --check
+          if ! grep -Fq 'fn migration_defaults_cannot_substitute_for_missing_captured_policy_history()' src/core/backup_recovery.rs; then
+            test "$(git rev-parse HEAD:src/core/backup_recovery.rs)" = a5e69be8cab3a630fc1af818cc09eff8a4960326
+            git apply --check --whitespace=error-all "$fixture"
+            git apply "$fixture"
+          fi
+          deliver 'fix(backup): bind restored curation decisions and procedure lifecycle to admitted history' src/core/backup_history_recovery.rs src/core/backup_lifecycle_recovery.rs src/core/backup_lifecycle_recovery_tests.rs src/core/backup_recovery.rs
+          decode maintenance-recovery-20260919 b96ed34ad7d6602cd57ff3fc552a0670e541e17c114c9ce63239390f654b5f58
+          if ! test -f src/core/backup_maintenance_recovery.rs; then
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/maintenance-recovery-20260919.patch"
+            git apply "$RUNNER_TEMP/maintenance-recovery-20260919.patch"
+          else
+            grep -Fq 'self.maintenance.verify_connection(db)' src/core/backup_history_recovery.rs
+          fi
+          deliver 'fix(backup): verify recovered maintenance constraints and consumed reflection state' src/core/backup_history_recovery.rs src/core/backup_maintenance_recovery.rs src/core/backup_maintenance_recovery_tests.rs
+          decode primary-publication-20260919 138a1c594bdaeba9543750f13b45525a366972f33ada9c2aa72192ff12633015
+          if ! test -f src/core/backup_primary_publication_tests.rs; then
+            test "$(git rev-parse HEAD:src/core/backup.rs)" = 51fb0e5cdc4246a9809078dccbee8844d3bbe8c0
+            test "$(git rev-parse HEAD:src/core/jsonl_recovery.rs)" = 1edd79996f39bf119e31098d9ffe383248a51dca
+            test "$(git rev-parse HEAD:src/core/backup_revision_recovery_tests.rs)" = 43f5c6cfed8df66679edd94840206af05f3e739e
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/primary-publication-20260919.patch"
+            git apply "$RUNNER_TEMP/primary-publication-20260919.patch"
+          else
+            grep -Fq 'expected_records.verify_database(&restored_database_path)' src/core/backup.rs
+          fi
+          deliver 'fix(backup): revalidate immutable primary records at final store publication' src/core/backup.rs src/core/jsonl_recovery.rs src/core/backup_revision_recovery_tests.rs src/core/backup_primary_publication_tests.rs
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > "$RUNNER_TEMP/recovery-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/recovery-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: published-recovery-source
+          path: |
+            ${{ runner.temp }}/recovery-source-sha.log
+            ${{ runner.temp }}/recovery-source.tar.gz
+          retention-days: 7
+  verify:
+    needs: publish-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.publish-source.outputs.source }}
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            contradiction-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Compile all targets
+        run: |
+          set -euo pipefail
+          timeout 25m cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/recovery-check.log"
+      - name: Execute primary, lifecycle and maintenance regressions
+        run: |
+          set -euo pipefail
+          run_group() {
+            local filter=$1 count=$2 label=$3
+            timeout 20m cargo test --locked --lib "$filter" -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-$label.log"
+            grep -Fq "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/recovery-$label.log"
+          }
+          run_group core::backup::recovery::history::lifecycle::tests 12 lifecycle
+          run_group core::backup::recovery::history::maintenance::tests 10 maintenance
+          run_group core::backup::recovery::tests 15 inventory
+          run_group core::backup::revision_recovery_tests 11 primary
+          for filter in default_backup_restores_curation_history_and_applies_review default_backup_restores_procedures_and_live_retirement default_backup_restores_maintenance_and_live_consumers; do
+            run_group "core::backup::tests::$filter" 1 "$filter"
+          done
+          timeout 15m cargo test --locked --lib core::jsonl_import::recovery::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-jsonl.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recovery-jsonl.log"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: primary-lifecycle-maintenance-results
+          path: ${{ runner.temp }}/recovery-*.log
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
