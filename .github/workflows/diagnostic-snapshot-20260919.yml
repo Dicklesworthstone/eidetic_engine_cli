@@ -1,4 +1,4 @@
-name: Diagnostic search source snapshots
+name: Native rule and diagnostic source admission
 on:
   push:
     branches: [main]
@@ -32,51 +32,51 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
-      - name: Apply reviewed source-snapshot implementation
+      - name: Apply reviewed native rule retrieval increment
         run: |
           set -euo pipefail
-          git rev-parse HEAD > "$RUNNER_TEMP/diagnostic-base-sha.log"
-          if ! git ls-files --error-unmatch src/core/search_diagnostic_snapshot.rs >/dev/null 2>&1; then
-            test "$(git rev-parse HEAD:src/core/search.rs)" = 1a204d4c2bde969c5f037b9777248d224a12bcdc
-            for part in implementation refinement; do
-              base64 --decode "scripts/delivery/diagnostic-snapshot-20260919/$part.patch.xz.b64" | xz --decompress > "$RUNNER_TEMP/diagnostic-$part.patch"
-            done
-            echo "1c89246f8bd8f856b2e1e576138166f0bfdcc94eb67940842befb65c1da9dd17  $RUNNER_TEMP/diagnostic-implementation.patch" | sha256sum --check
-            echo "2e13891b68aa9dfbd3e53c2d289983da52bbde5311ff1de87512ed6cea584bef  $RUNNER_TEMP/diagnostic-refinement.patch" | sha256sum --check
-            for part in implementation refinement; do
-              git apply --check --whitespace=error-all "$RUNNER_TEMP/diagnostic-$part.patch"
-              git apply "$RUNNER_TEMP/diagnostic-$part.patch"
-            done
-            rustfmt --edition 2024 --config skip_children=true src/core/search.rs src/core/search_diagnostic_snapshot.rs
+          git rev-parse HEAD > "$RUNNER_TEMP/rules-base.log"
+          if ! git ls-files --error-unmatch src/core/search_rule_admission.rs >/dev/null 2>&1; then
+            test "$(git rev-parse HEAD:src/core/search.rs)" = ac53aafb26ff6097b5f51c7809d83d27b3f35789
+            test "$(git rev-parse HEAD:src/core/search_diagnostic_snapshot.rs)" = a4d3c4c61bbc1e44e11bbb47cd32b48b9911a843
+            test "$(git rev-parse HEAD:docs/degraded_codes.md)" = 84bfb91980471745e7ec3aa4e585df5aff2a21fa
+            test "$(git rev-parse HEAD:docs/degraded_code_taxonomy.md)" = c0dee9013db63c30a33f9d59a2c63c657566f78b
+            base64 --decode scripts/delivery/diagnostic-snapshot-20260919/native-rules.patch.xz.b64 | xz --decompress > "$RUNNER_TEMP/rules.patch"
+            echo "2f34bda5ab63056758396bc17cbf768da4a50a2ecf78ba1825884632525666e1  $RUNNER_TEMP/rules.patch" | sha256sum --check
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/rules.patch"
+            git apply "$RUNNER_TEMP/rules.patch"
+            rustfmt --edition 2024 --config skip_children=true src/core/search.rs src/core/search_rule_admission.rs src/core/search_diagnostic_snapshot.rs
             git diff --check
           fi
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: cache
         with:
           path: |
             ~/.cargo/registry
             target
-          key: diagnostic-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: rule-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
+            rule-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             diagnostic-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             snapshot-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-            ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Compile all targets before source publication
-        run: |
-          status=0
-          cargo check --locked --all-targets > "$RUNNER_TEMP/diagnostic-check.log" 2>&1 || status=$?
-          tail -n 120 "$RUNNER_TEMP/diagnostic-check.log"
-          exit "$status"
-      - name: Commit checked source directly to main
+      - name: Compile all targets and execute native rule regressions before publication
         run: |
           set -euo pipefail
-          paths=(src/core/search.rs src/core/search_diagnostic_snapshot.rs)
-          base=$(cat "$RUNNER_TEMP/diagnostic-base-sha.log")
+          cargo check --locked --all-targets > "$RUNNER_TEMP/rules-check.log" 2>&1 || { tail -n 100 "$RUNNER_TEMP/rules-check.log"; exit 1; }
+          cargo test --locked --lib core::search::rule_admission::tests -- --test-threads=2 > "$RUNNER_TEMP/rules-native.log" 2>&1 || { tail -n 120 "$RUNNER_TEMP/rules-native.log"; exit 1; }
+          tail -n 100 "$RUNNER_TEMP/rules-native.log"
+          grep -Fq 'test result: ok. 6 passed; 0 failed;' "$RUNNER_TEMP/rules-native.log"
+      - name: Commit checked functional source directly to main
+        run: |
+          set -euo pipefail
+          paths=(src/core/search.rs src/core/search_rule_admission.rs src/core/search_diagnostic_snapshot.rs docs/degraded_codes.md docs/degraded_code_taxonomy.md tests/fixtures/failure_modes/rule_live_admission_filtered.json)
+          base=$(cat "$RUNNER_TEMP/rules-base.log")
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- "${paths[@]}"
           if ! git diff --cached --quiet; then
-            git commit -m 'feat(search): bind diagnostics and every retrieval arm to source snapshots' -m 'Pin one read-only database snapshot across index selection, memory/evidence admission, calibration, scope, and query assistance. Recover diagnostic reads from compatible retained generations. Apply live lifecycle, seal, workspace, global-tag and mesh-denial admission to raw and fused diagnostics without relevance-filtering raw evidence. Hydrate evidence from canonical source text. Bind global scope to live local tags or separately admitted global-store rows, never an index lane marker. Add ten real-store/backend tests. cargo check --all-targets passed before publication; runtime results are reported separately.'
+            git commit -m 'feat(search): hydrate and admit native procedural rules from source truth' -m 'Give semantic-only and source-less rules canonical body, native provenance, lifecycle and revision metadata without fabricating memory identities. Reject revoked, foreign, stale-revision and unverified rule authority before calibration and query hints. Preserve draft/deprecated inspection, not pack promotion. Repair invalid fixture IDs in the preceding diagnostic suite without weakening assertions. All-target compilation and six real-store rule regressions passed before publication; diagnostic runtime results follow separately.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
@@ -84,33 +84,30 @@ jobs:
               git diff --exit-code "$base" origin/main -- "${paths[@]}"
               git merge --no-edit origin/main
               base=$(git rev-parse origin/main)
-              cargo check --locked --all-targets > "$RUNNER_TEMP/diagnostic-merge-check.log" 2>&1
+              cargo check --locked --all-targets > "$RUNNER_TEMP/rules-merge-check.log" 2>&1
             done
           fi
-          git rev-parse HEAD > "$RUNNER_TEMP/diagnostic-source-sha.log"
-          git archive HEAD | gzip > "$RUNNER_TEMP/diagnostic-source.tar.gz"
+          git rev-parse HEAD > "$RUNNER_TEMP/rules-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/rules-source.tar.gz"
       - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
         with:
-          name: diagnostic-snapshot-source
+          name: native-rule-source-and-checks
           path: |
-            ${{ runner.temp }}/diagnostic-source-sha.log
-            ${{ runner.temp }}/diagnostic-source.tar.gz
+            ${{ runner.temp }}/rules-*.log
+            ${{ runner.temp }}/rules-source.tar.gz
           retention-days: 7
-      - name: Compile and execute diagnostic and recovery regressions
+      - name: Execute diagnostic and recovery regression groups
         run: |
           set -uo pipefail
-          status=0
-          cargo test --locked --lib --no-run > "$RUNNER_TEMP/diagnostic-test-build.log" 2>&1 || status=$?
-          tail -n 100 "$RUNNER_TEMP/diagnostic-test-build.log"
-          if test "$status" -ne 0; then exit "$status"; fi
           failed=0
           run_group() {
             local name="$1" filter="$2" expected="$3" status=0
-            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/diagnostic-$name.log" 2>&1 || status=$?
-            tail -n 100 "$RUNNER_TEMP/diagnostic-$name.log"
-            if test "$status" -ne 0 || ! grep -Eq "test result: ok\. $expected passed; 0 failed;" "$RUNNER_TEMP/diagnostic-$name.log"; then failed=1; fi
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/rules-$name.log" 2>&1 || status=$?
+            tail -n 100 "$RUNNER_TEMP/rules-$name.log"
+            if test "$status" -ne 0 || ! grep -Eq "test result: ok\. $expected passed; 0 failed;" "$RUNNER_TEMP/rules-$name.log"; then failed=1; fi
           }
-          run_group admission 'core::search::diagnostic_snapshot::tests' 10
+          run_group diagnostic 'core::search::diagnostic_snapshot::tests' 10
           run_group existing 'core::search::tests::diag_search_' '[1-9][0-9]*'
           run_group evidence 'core::search::tests::live_evidence_admission_filters' '[1-9][0-9]*'
           run_group recovery 'core::index::read_lease::snapshot_recovery_tests' 8
@@ -118,21 +115,28 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
-          name: diagnostic-snapshot-test-results
-          path: ${{ runner.temp }}/diagnostic-*.log
+          name: native-rule-runtime-results
+          path: ${{ runner.temp }}/rules-*.log
           retention-days: 7
       - name: Check Clippy and formatting
         if: ${{ !cancelled() }}
         run: |
           failed=0
-          cargo clippy --locked --all-targets -- -D warnings > "$RUNNER_TEMP/diagnostic-clippy.log" 2>&1 || failed=1
-          tail -n 100 "$RUNNER_TEMP/diagnostic-clippy.log"
-          cargo fmt --check > "$RUNNER_TEMP/diagnostic-format.log" 2>&1 || failed=1
-          tail -n 80 "$RUNNER_TEMP/diagnostic-format.log"
+          cargo clippy --locked --all-targets -- -D warnings > "$RUNNER_TEMP/rules-clippy.log" 2>&1 || failed=1
+          cargo fmt --check > "$RUNNER_TEMP/rules-format.log" 2>&1 || failed=1
+          tail -n 80 "$RUNNER_TEMP/rules-clippy.log"
+          tail -n 80 "$RUNNER_TEMP/rules-format.log"
           exit "$failed"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
-          name: diagnostic-snapshot-verification
-          path: ${{ runner.temp }}/diagnostic-*.log
+          name: native-rule-verification
+          path: ${{ runner.temp }}/rules-*.log
           retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
