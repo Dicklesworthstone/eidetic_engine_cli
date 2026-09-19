@@ -9173,6 +9173,19 @@ fn walking_skeleton_durability_scenario() -> TestResult {
 
     let start = Instant::now();
 
+    // PER-STEP TIMING, so a red budget can be READ instead of only reported.
+    //
+    // A whole-scenario wall-clock bound cannot tell a code regression from a
+    // busy worker, which is why this assertion has been red at 437s and 740s
+    // without anyone learning anything (bd-x63yk). A breakdown can tell them
+    // apart: slowness spread evenly across every step is load, while one step
+    // dominating is a regression with an address.
+    //
+    // The THRESHOLD IS DELIBERATELY UNTOUCHED. Raising it would weaken an
+    // assertion to make a gate pass; this only makes its failure legible.
+    let mut steps: Vec<(&'static str, u64)> = Vec::new();
+    let mut mark = Instant::now();
+
     // Step 1: Initialize workspace
     let init = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "init"])?;
     let init_stdout = String::from_utf8_lossy(&init.stdout);
@@ -9190,6 +9203,9 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         "init schema",
     )?;
     ensure_no_ansi(&init_stdout, "init stdout")?;
+
+    steps.push(("init", mark.elapsed().as_millis() as u64));
+    mark = Instant::now();
 
     // Step 2: Remember first memory (procedural rule)
     let remember1 = run_ee(&[
@@ -9229,6 +9245,9 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         .to_string();
     ensure_no_ansi(&remember1_stdout, "remember1 stdout")?;
 
+    steps.push(("remember1", mark.elapsed().as_millis() as u64));
+    mark = Instant::now();
+
     // Step 3: Remember second memory (semantic fact)
     let remember2 = run_ee(&[
         "--workspace",
@@ -9262,9 +9281,15 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         "second remembered memory should get a distinct ID",
     )?;
 
+    steps.push(("remember2", mark.elapsed().as_millis() as u64));
+    mark = Instant::now();
+
     // Step 4: Verify database exists
     let database_path = workspace.join(".ee").join("ee.db");
     ensure(database_path.exists(), "database must exist after remember")?;
+
+    steps.push(("db-check", mark.elapsed().as_millis() as u64));
+    mark = Instant::now();
 
     // Step 5: Memory show
     let show = run_ee(&[
@@ -9299,6 +9324,9 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         "memory show trust_class",
     )?;
 
+    steps.push(("memory-show", mark.elapsed().as_millis() as u64));
+    mark = Instant::now();
+
     // Step 6: Memory list
     let list = run_ee(&[
         "--workspace",
@@ -9319,6 +9347,9 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         .as_array()
         .ok_or_else(|| "memory list must have memories array".to_string())?;
     ensure_equal(&memories.len(), &2, "memory list should show 2 memories")?;
+
+    steps.push(("memory-list", mark.elapsed().as_millis() as u64));
+    mark = Instant::now();
 
     // Step 7: Index rebuild
     let rebuild = run_ee(&[
@@ -9341,6 +9372,9 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         &serde_json::json!(2),
         "index rebuild should index 2 memories",
     )?;
+
+    steps.push(("index-rebuild", mark.elapsed().as_millis() as u64));
+    mark = Instant::now();
 
     // Step 8: Search
     let search = run_ee(&[
@@ -9365,6 +9399,9 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         "search should return results",
     )?;
 
+    steps.push(("search", mark.elapsed().as_millis() as u64));
+    mark = Instant::now();
+
     // Step 9: Context JSON
     let context_json = run_ee(&[
         "--workspace",
@@ -9387,6 +9424,9 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         "context --json stdout",
     )?;
 
+    steps.push(("context-json", mark.elapsed().as_millis() as u64));
+    mark = Instant::now();
+
     // Step 10: Context Markdown
     let context_md = run_ee(&[
         "--workspace",
@@ -9405,6 +9445,9 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         "context markdown should have header",
     )?;
     ensure_no_ansi(&context_md_stdout, "context markdown stdout")?;
+
+    steps.push(("context-md", mark.elapsed().as_millis() as u64));
+    mark = Instant::now();
 
     // Step 11: Why command
     let why = run_ee(&[
@@ -9434,12 +9477,30 @@ fn walking_skeleton_durability_scenario() -> TestResult {
     )?;
     ensure_no_ansi(&why_stdout, "why stdout")?;
 
+    steps.push(("why", mark.elapsed().as_millis() as u64));
+
     // Scenario timing
     let elapsed = start.elapsed();
+    // Slowest first: the question a reader has is "what ate the time", and a
+    // chronological list makes them scan for it. If the top entry is a large
+    // share of the total, that step is the address. If every entry is a
+    // similar fraction, nothing regressed and the worker was busy.
+    let mut ranked = steps.clone();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    let breakdown = ranked
+        .iter()
+        .map(|(label, ms)| format!("{label} {:.1}s", *ms as f64 / 1000.0))
+        .collect::<Vec<_>>()
+        .join(", ");
     ensure(
         elapsed.as_secs() < 60,
         format!(
-            "walking skeleton scenario should complete in under 60s, took {}s",
+            "walking skeleton scenario should complete in under 60s, took {}s. \
+             THIS IS WALL CLOCK ON A SHARED WORKER and cannot by itself \
+             distinguish a regression from a busy fleet (bd-x63yk); read the \
+             breakdown to tell them apart -- one step dominating is a \
+             regression with an address, an even spread is load. \
+             Slowest first: {breakdown}",
             elapsed.as_secs()
         ),
     )?;
