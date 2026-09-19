@@ -20,7 +20,9 @@ pub(super) fn inject_history_corruption(
         _ => return db.execute_raw(sql).map_err(work_history_error),
     };
     if db.count_table_rows(table).map_err(work_history_error)? == 0 {
-        return Err(work_history_error("append-only control requires an existing row"));
+        return Err(work_history_error(
+            "append-only control requires an existing row",
+        ));
     }
     let create = format!("CREATE TRIGGER {trigger}\n");
     let (_, definition) = crate::db::V036_APPEND_ONLY_TRIGGERS
