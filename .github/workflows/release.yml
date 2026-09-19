@@ -9,9 +9,25 @@ on:
 # release.yml identities from refs/tags/v* only, and a simultaneous main-branch
 # run would be an unauthoritative competing publisher for the same version.
 
+# bd-reality-core-convergence-1azkt.18: least privilege. This workflow-level
+# block is the DEFAULT every job inherits, so it must be the narrowest thing
+# any job needs, not the widest. It previously granted `contents: write` and
+# `id-token: write` to all eight jobs, which meant the build matrix, both
+# smoke tests and the Homebrew job all carried publish rights and an OIDC
+# token none of them used.
+#
+# Each job below now declares what it actually needs. Determined by reading
+# the steps, not by inference:
+#   contents: write  -> only `release`, which runs `gh release`.
+#                       `tag` only VALIDATES an existing tag; `update-homebrew`
+#                       pushes to a DIFFERENT repo with HOMEBREW_TAP_TOKEN, so
+#                       neither needs write here.
+#   id-token: write  -> only `build`, which runs `cosign sign-blob`. `release`
+#                       only runs `cosign verify-blob`; its
+#                       `--certificate-oidc-issuer` is a verification
+#                       constraint, not a token request.
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -162,6 +178,9 @@ jobs:
           echo "Using existing tag: $TAG"
 
   build:
+    permissions:
+      contents: read
+      id-token: write
     needs: [check-version, tag]
     if: needs.check-version.outputs.changed == 'true'
     strategy:
@@ -358,6 +377,53 @@ jobs:
           builder = "cargo zigbuild" if glibc else ("cross build" if cross else "cargo build")
           build_target = f"{target}.{glibc}" if glibc else target
           cargo_command = f"{builder} --release --bin ee --locked --target {build_target}"
+
+          # bd-reality-core-convergence-1azkt.18: `cargoCommand` and `features`
+          # below are RECONSTRUCTED from matrix inputs, not captured from the
+          # step that actually built the binary. They are correct today, and a
+          # Sigstore signature over a reconstruction that has silently drifted
+          # is worse than no attestation at all: an absent field prompts a
+          # question, a signed wrong one ends it.
+          #
+          # Capturing the real argv would mean rewriting the three build steps,
+          # which have no `shell:` directive and therefore run under pwsh on the
+          # Windows matrix leg -- a release path that cannot be exercised from a
+          # development machine. So instead of capturing, FAIL CLOSED: read the
+          # build steps and refuse to emit provenance whose assumptions they no
+          # longer satisfy. A broken release is recoverable; a signed false
+          # attestation is not.
+          workflow_path = pathlib.Path("../.github/workflows/release.yml")
+          workflow = workflow_path.read_text(encoding="utf-8")
+          build_lines = [
+              line.strip()
+              for line in workflow.splitlines()
+              if "--bin ee" in line
+              and any(b in line for b in ("cargo build", "cross build", "cargo zigbuild"))
+          ]
+          if not build_lines:
+              sys.exit(
+                  "provenance guard: no release build command found in "
+                  f"{workflow_path}. The reconstruction above can no longer be "
+                  "checked against anything, so it must not be signed."
+              )
+          unlocked = [line for line in build_lines if "--locked" not in line]
+          if unlocked:
+              sys.exit(
+                  "provenance guard: every release build must pass --locked "
+                  f"(bd-reality-core-convergence-1azkt.18). Offending: {unlocked}"
+              )
+          featured = [
+              line
+              for line in build_lines
+              if "--features" in line or "--no-default-features" in line
+          ]
+          if featured:
+              sys.exit(
+                  "provenance guard: a release build selects a feature set, but "
+                  "the attested featureSet below is the literal 'default'. "
+                  "Derive it from the build before signing. Offending: "
+                  f"{featured}"
+              )
           created_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
           provenance = {
               "_type": "https://in-toto.io/Statement/v1",
@@ -461,6 +527,8 @@ jobs:
           retention-days: 1
 
   release:
+    permissions:
+      contents: write
     needs: [check-version, tag, build]
     if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
