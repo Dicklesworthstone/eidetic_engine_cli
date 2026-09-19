@@ -2191,7 +2191,8 @@ const OPEN_CODED_SELF_EXCLUSION: &str = "verification_drift_guard";
 ///     not discarding a diagnostic.
 ///   - `if`/`let`/`while`/`match` on `.status.success()` is control flow, not
 ///     an assertion, and has no failure message to carry anything.
-///   - Functions in [`SUCCESS_ASSERTION_HELPERS`] are the chokepoints.
+///   - A COMPLETE assertion, wherever it lives. A helper that prints all three
+///     facts is not recorded, which is why no name allowlist exists.
 ///
 /// KEY SHAPE: `<file stem>::<enclosing fn>`, counted. Per enclosing function
 /// rather than per file is deliberate -- a per-file count cannot show a
