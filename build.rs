@@ -87,9 +87,9 @@ fn main() {
     }
 }
 
-/// The franken-stack crate versions this build resolved, as
-/// `asupersync@0.5.0,frankensearch@0.6.0,fsqlite@0.4.1`, or `None` when
-/// `Cargo.lock` is absent or does not name them.
+/// Every franken-stack crate version this build resolved, sorted and joined as
+/// `asupersync@0.5.0,asupersync-macros@0.5.0,fnx-algorithms@0.3.0,...`, or
+/// `None` when `Cargo.lock` is absent or names none of them.
 ///
 /// Read from the LOCKFILE, not from `Cargo.toml`, because the lock is what was
 /// actually resolved: a manifest requirement of `0.6` is satisfied by several
@@ -101,11 +101,40 @@ fn main() {
 /// franken-stack information" — silently, and indistinguishably from a build
 /// that genuinely had none.
 fn franken_stack_pins() -> Option<String> {
-    const TRACKED: [&str; 3] = ["asupersync", "frankensearch", "fsqlite"];
+    // bd-reality-core-convergence-1azkt.18: "Exact effective dependency
+    // identity appears in ee version".
+    //
+    // This tracked three names -- asupersync, frankensearch, fsqlite -- which
+    // is 3 of the 38 franken-stack crates the lock actually resolves. Those
+    // workspaces are NOT versioned in lockstep: today fsqlite is 0.4.1 while
+    // fsqlite-error, fsqlite-wal and eleven others are 0.4.0. So a build where
+    // fsqlite-error moves 0.4.0 -> 0.4.1 links different code and stamps a
+    // BYTE-IDENTICAL value, which is the exact confusion -- same source,
+    // different sibling pins, different verdict -- the stamp was added to end.
+    //
+    // Matching by family rather than by an enumerated list also means a new
+    // workspace member is covered when it appears, instead of silently
+    // widening the blind spot. The families are anchored to a `-` so that
+    // `tru` cannot match `truncate`; a bare family name matches exactly.
+    const FAMILIES: [&str; 7] = [
+        "asupersync",
+        "fnx",
+        "franken",
+        "frankensearch",
+        "fsqlite",
+        "sqlmodel",
+        "tru",
+    ];
+    let tracked = |name: &str| {
+        FAMILIES.iter().any(|family| {
+            name.strip_prefix(family)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+        })
+    };
 
     let lock = std::fs::read_to_string("Cargo.lock").ok()?;
     let mut pins: Vec<String> = Vec::new();
-    let mut current: Option<&str> = None;
+    let mut current: Option<String> = None;
 
     for line in lock.lines() {
         let line = line.trim();
@@ -113,7 +142,7 @@ fn franken_stack_pins() -> Option<String> {
             current = None;
         } else if let Some(rest) = line.strip_prefix("name = ") {
             let name = rest.trim_matches('"');
-            current = TRACKED.iter().find(|tracked| **tracked == name).copied();
+            current = tracked(name).then(|| name.to_owned());
         } else if let Some(rest) = line.strip_prefix("version = ") {
             // `version` always follows `name` inside a `[[package]]` block, so
             // `current` still names the package this version belongs to.

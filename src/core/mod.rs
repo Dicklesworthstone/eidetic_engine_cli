@@ -1238,15 +1238,52 @@ mod tests {
         // PRECONDITION ON CONTENT: a non-empty stamp is not enough. Require it
         // to name every sibling this crate links, or a stamp that silently lost
         // one would still satisfy the positive claim below.
+        //
+        // Checked as a WHOLE ENTRY, not as a substring. `contains("asupersync")`
+        // is satisfied by `asupersync-macros@0.5.0` with plain `asupersync`
+        // absent, so the substring form would pass a stamp that had dropped the
+        // very crate it claims to check. That was latent while the stamp tracked
+        // three names and none was a prefix of another; it is live now that the
+        // stamp covers whole families.
+        let entries: Vec<&str> = stamped.split(',').collect();
+        let names_entry = |wanted: &str| {
+            entries.iter().any(|entry| {
+                entry
+                    .split_once('@')
+                    .is_some_and(|(name, _)| name == wanted)
+            })
+        };
         for crate_name in ["asupersync", "frankensearch", "fsqlite"] {
             ensure(
-                stamped.contains(crate_name),
-                format!("stamped franken-stack {stamped:?} must name {crate_name}"),
+                names_entry(crate_name),
+                format!(
+                    "stamped franken-stack {stamped:?} must carry a {crate_name}@<version> entry"
+                ),
+            )?;
+        }
+
+        // bd-reality-core-convergence-1azkt.18. The top-level crates alone
+        // cannot distinguish two builds: these workspaces are not versioned in
+        // lockstep, so a member can move while its top-level name does not.
+        // Requiring members keeps the stamp at "exact effective dependency
+        // identity" instead of letting it decay back to three summary numbers.
+        for member in ["fsqlite-error", "frankensearch-core", "asupersync-macros"] {
+            ensure(
+                names_entry(member),
+                format!(
+                    "stamped franken-stack {stamped:?} must reach workspace members \
+                     such as {member}; top-level versions alone cannot distinguish \
+                     two builds whose members differ"
+                ),
             )?;
         }
         ensure(
-            stamped.contains('@'),
-            format!("stamped franken-stack {stamped:?} must carry name@version pairs"),
+            entries.len() > 10,
+            format!(
+                "stamped franken-stack {stamped:?} has only {} entries; the family \
+                 match in build.rs has stopped reaching the workspaces",
+                entries.len()
+            ),
         )?;
 
         // POSITIVE: the stamp reaches the reported provenance intact.
