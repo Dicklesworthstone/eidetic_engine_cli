@@ -1503,7 +1503,23 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         .to_owned();
     let database_path = workspace.join(".ee").join("ee.db");
 
-    let status_empty = run_ee_logged(
+    // HERMETIC EMBEDDER POSTURE. `ee model status` reports the ACTIVE embedder,
+    // and on a host with a populated model cache that is the real
+    // potion-multilingual-128M. This fixture therefore used to report one
+    // posture on a dev Mac and another on a cacheless worker, which is how
+    // b8015752b came to pin dev-machine values here.
+    //
+    // Pinned rather than downloaded on purpose: giving this test a real semantic
+    // embedder would buy hermeticity with a ~500MB fetch, turning a four-minute
+    // test into a slow network-dependent one that is still non-hermetic, just
+    // more expensively. A precondition that can fail for reasons unrelated to
+    // the assertion is a second failure mode, not a precondition.
+    //
+    // EE_EMBED_DOWNLOAD=off is this file's own idiom -- the cass fixtures and
+    // the two status fixtures repaired in 3d24f7e59 already pin it.
+    let embed_envs = [("EE_EMBED_DOWNLOAD", OsString::from("off"))];
+
+    let status_empty = run_ee_logged_with_env(
         "model-status-empty",
         &[
             "--workspace",
@@ -1517,6 +1533,7 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         "fx.model.status.empty.v2",
         "ee.response.v2",
         None,
+        &embed_envs,
     )?;
     let status_empty_json = parse_logged_response(&status_empty, "model status empty")?;
     ensure_equal(
@@ -1624,7 +1641,7 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         )
         .map_err(|error| error.to_string())?;
 
-    let status_registry = run_ee_logged(
+    let status_registry = run_ee_logged_with_env(
         "model-status-registry",
         &[
             "--workspace",
@@ -1638,6 +1655,7 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         "fx.model.status.registry.v2",
         "ee.response.v2",
         None,
+        &embed_envs,
     )?;
     let status_registry_json = parse_logged_response(&status_registry, "model status registry")?;
     // THREE, not two: the bundled declaration is still there. This fixture
@@ -1662,13 +1680,41 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         &serde_json::json!(1),
         "model status available count",
     )?;
+    // ---- ENVIRONMENT-DEPENDENT CONTRACT. Everything above this line is the
+    // hermetic REGISTRY-COUNT contract and holds on any host; everything from
+    // here is ACTIVE-EMBEDDER POSTURE and holds only under the pinned embedder
+    // above. They are separated deliberately: this fixture was rewritable in
+    // b8015752b precisely because nothing distinguished the two, so one premise
+    // about the environment could move a count and a posture together. Split,
+    // an environment change can only break the posture half, and it says so.
+    //
+    // ASSERT THE CAUSE, NOT ONLY THE LABEL. `source` is chosen at
+    // src/core/index.rs:8065-8085, where "registry_observed" requires
+    // `semantic && selected_registry_model.is_some()` and the final `else` is
+    // "frankensearch_hash_fallback". `semantic` comes from the ACTIVE EMBEDDER
+    // (:8061), not from the registry row -- which is why inserting an Available
+    // Hash entry above does not make the source registry_observed.
+    //
+    // WHAT MAKES THIS FAIL, stated so it cannot quietly become unfalsifiable:
+    // on a host where a semantic embedder actually loads, `semantic` is true and
+    // this source becomes "registry_observed" -- the exact value this assertion
+    // carried until now, observed red on hz3 at d214bb962 with
+    // `expected registry_observed, got frankensearch_hash_fallback`. So both
+    // values have been seen at this call site and the comparison discriminates
+    // them. If the pin above ever stops forcing the fallback, BOTH assertions
+    // here flip together and name the reason, rather than one silently passing.
+    ensure_equal(
+        &status_registry_json["data"]["active"]["semantic"],
+        &serde_json::json!(false),
+        "model status semantic posture under the pinned embedder",
+    )?;
     ensure_equal(
         &status_registry_json["data"]["active"]["source"],
-        &serde_json::json!("registry_observed"),
+        &serde_json::json!("frankensearch_hash_fallback"),
         "model status source",
     )?;
 
-    let list = run_ee_logged(
+    let list = run_ee_logged_with_env(
         "model-list-registry",
         &[
             "--workspace",
@@ -1682,6 +1728,7 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         "fx.model.list.registry.v1",
         "ee.response.v2",
         None,
+        &embed_envs,
     )?;
     let list_json = parse_logged_response(&list, "model list registry")?;
     ensure_equal(
