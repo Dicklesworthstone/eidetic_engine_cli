@@ -712,21 +712,47 @@ pub fn remember_memory_seeded(
 pub fn build_remember_git_capture_candidate(
     input: &RememberGitCaptureInput,
 ) -> RememberGitCaptureCandidate {
-    let changed_files = normalized_git_changed_files(&input.changed_files);
+    let mut redaction_reasons = Vec::new();
+    let reference = input.reference.as_deref().and_then(|value| {
+        admit_git_capture_metadata(
+            value,
+            "git_capture_reference_redacted",
+            &mut redaction_reasons,
+        )
+    });
+    let commit_sha = input.commit_sha.as_deref().and_then(|value| {
+        admit_git_capture_metadata(
+            value,
+            "git_capture_commit_id_redacted",
+            &mut redaction_reasons,
+        )
+    });
+    // File paths are also public capture fields and anchor inputs, not trusted
+    // merely because git returned them. Omit a sensitive path rather than
+    // inventing an anchor for a redaction placeholder.
+    let changed_files = normalized_git_changed_files(&input.changed_files)
+        .into_iter()
+        .filter_map(|path| {
+            admit_git_capture_metadata(&path, "git_capture_path_redacted", &mut redaction_reasons)
+        })
+        .collect::<Vec<_>>();
     let redacted_message = redact_git_capture_text(&git_capture_message(
         input.commit_subject.as_deref(),
         input.commit_body.as_deref(),
     ));
-    let redacted_diff = redact_git_capture_text(&truncate_utf8_lossless(
-        &input.diff_text,
-        REMEMBER_GIT_CAPTURE_DIFF_MAX_BYTES,
-    ));
-    let mut redaction_reasons = redacted_message
-        .redaction_reasons
-        .iter()
-        .chain(redacted_diff.redaction_reasons.iter())
-        .cloned()
-        .collect::<Vec<_>>();
+    // Screen the complete value before applying the presentation budget. A
+    // credential crossing that byte boundary otherwise becomes a shorter,
+    // unrecognized token and its prefix is exposed in the captured excerpt.
+    let mut redacted_diff = redact_git_capture_text(&input.diff_text);
+    redacted_diff.content =
+        truncate_utf8_lossless(&redacted_diff.content, REMEMBER_GIT_CAPTURE_DIFF_MAX_BYTES);
+    redaction_reasons.extend(
+        redacted_message
+            .redaction_reasons
+            .iter()
+            .chain(redacted_diff.redaction_reasons.iter())
+            .cloned(),
+    );
     redaction_reasons.sort_unstable();
     redaction_reasons.dedup();
     let changed_symbols = extract_git_capture_symbols(&redacted_diff.content);
@@ -738,12 +764,14 @@ pub fn build_remember_git_capture_candidate(
     );
     let source = git_capture_source(
         input.mode,
-        input.reference.as_deref(),
-        input.commit_sha.as_deref(),
+        reference.as_deref(),
+        commit_sha.as_deref(),
         &diff_fingerprint,
     );
     let content = render_git_capture_content(
-        input,
+        input.mode,
+        reference.as_deref(),
+        commit_sha.as_deref(),
         &changed_files,
         &changed_symbols,
         kind,
@@ -758,8 +786,8 @@ pub fn build_remember_git_capture_candidate(
     RememberGitCaptureCandidate {
         schema: REMEMBER_GIT_CAPTURE_SCHEMA_V1,
         mode: input.mode,
-        reference: input.reference.clone(),
-        commit_sha: input.commit_sha.clone(),
+        reference,
+        commit_sha,
         content,
         level: "episodic",
         kind,
@@ -823,9 +851,9 @@ fn remember_git_capture_commit_input(
     .trim()
     .to_owned();
     if commit_sha.is_empty() {
-        return Err(remember_usage_error(format!(
-            "git did not resolve commit ref `{reference}`"
-        )));
+        return Err(remember_usage_error(
+            "git did not resolve the requested commit ref".to_owned(),
+        ));
     }
 
     let message = git_command_text(
@@ -965,11 +993,13 @@ fn git_command_text(
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
+    // Refs, paths and git's stderr are caller/repository-controlled. Do not
+    // echo raw arguments even when capture fails before building a candidate.
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let public_stderr = crate::policy::redact_public_replay_text(stderr.trim());
     Err(remember_usage_error(format!(
-        "git {} failed while trying to {phase}: {}",
-        args.join(" "),
-        stderr.trim()
+        "git failed while trying to {phase} ({}): {}",
+        output.status, public_stderr.content,
     )))
 }
 
@@ -1007,7 +1037,7 @@ fn git_capture_message(subject: Option<&str>, body: Option<&str>) -> String {
 }
 
 fn redact_git_capture_text(content: &str) -> GitCaptureRedactedText {
-    let report = crate::policy::redact_secret_like_content(content);
+    let report = crate::policy::redact_git_capture_text(content);
     let mut redaction_reasons = report
         .redacted_reasons
         .into_iter()
@@ -1018,6 +1048,23 @@ fn redact_git_capture_text(content: &str) -> GitCaptureRedactedText {
     GitCaptureRedactedText {
         content: report.content,
         redaction_reasons,
+    }
+}
+
+/// Metadata is not prose: a partially scrubbed path/ref would claim a
+/// different source identity. Preserve the original safe value or withhold it.
+fn admit_git_capture_metadata(
+    value: &str,
+    reason: &'static str,
+    reasons: &mut Vec<String>,
+) -> Option<String> {
+    let report = redact_git_capture_text(value);
+    if report.redaction_reasons.is_empty() {
+        Some(value.to_owned())
+    } else {
+        reasons.push(reason.to_owned());
+        reasons.extend(report.redaction_reasons);
+        None
     }
 }
 
@@ -1166,7 +1213,10 @@ fn git_capture_source(
         RememberGitCaptureMode::Diff | RememberGitCaptureMode::WorkingTree => {
             let reference = reference
                 .map(sanitize_git_capture_ref_for_source)
-                .unwrap_or_else(|| "working-tree".to_owned());
+                .unwrap_or_else(|| match mode {
+                    RememberGitCaptureMode::Diff => "redacted-reference".to_owned(),
+                    _ => "working-tree".to_owned(),
+                });
             let short_hash = diff_fingerprint
                 .strip_prefix("blake3:")
                 .unwrap_or(diff_fingerprint)
@@ -1197,7 +1247,9 @@ fn sanitize_git_capture_ref_for_source(reference: &str) -> String {
 }
 
 fn render_git_capture_content(
-    input: &RememberGitCaptureInput,
+    mode: RememberGitCaptureMode,
+    reference: Option<&str>,
+    commit_sha: Option<&str>,
     changed_files: &[String],
     changed_symbols: &[String],
     kind: &str,
@@ -1209,10 +1261,13 @@ fn render_git_capture_content(
     redaction_reasons: &[String],
 ) -> String {
     let mut lines = Vec::new();
-    let reference = input.reference.as_deref().unwrap_or("working tree");
-    let headline = match input.mode {
+    let reference = reference.unwrap_or(match mode {
+        RememberGitCaptureMode::WorkingTree => "working tree",
+        _ => "redacted reference",
+    });
+    let headline = match mode {
         RememberGitCaptureMode::Commit => {
-            let sha = input.commit_sha.as_deref().unwrap_or("unknown");
+            let sha = commit_sha.unwrap_or("unknown");
             format!("Git commit `{sha}` captured a durable {kind} memory from `{reference}`.")
         }
         RememberGitCaptureMode::Diff => {
@@ -1225,7 +1280,12 @@ fn render_git_capture_content(
     lines.push(headline);
     lines.push(format!("Source: {source}."));
     lines.push(format!("Diff fingerprint: {diff_fingerprint}."));
-    lines.push(format!("Mode: {}.", input.mode.as_str()));
+    lines.push(format!("Mode: {}.", mode.as_str()));
+    // This generated notice must not introduce credential-keyword context
+    // beside the generated digest. Previously, the 32-byte entropy window
+    // reached "secret" in diff mode but not in commit mode, making the same
+    // sanitized evidence fail the ordinary remember policy only for a diff.
+    // The value detector and the downstream policy gate remain unchanged.
     if redacted {
         let reasons = if redaction_reasons.is_empty() {
             "unknown".to_owned()
@@ -1233,10 +1293,10 @@ fn render_git_capture_content(
             redaction_reasons.join(",")
         };
         lines.push(format!(
-            "Redaction: secret-like diff or message content was redacted before memory capture ({reasons})."
+            "Redaction: source values were removed before memory capture ({reasons})."
         ));
     } else {
-        lines.push("Redaction: no secret-like diff or message content detected.".to_owned());
+        lines.push("Redaction: no source values required removal.".to_owned());
     }
     if changed_files.is_empty() {
         lines.push("Changed surfaces: none reported by git.".to_owned());
@@ -1350,6 +1410,16 @@ fn extract_symbol_from_added_line(line: &str) -> Option<String> {
 }
 
 fn sanitize_git_capture_symbol(raw: &str) -> Option<String> {
+    // Redaction may split a declaration token. Never turn its remaining prefix
+    // into a fabricated symbol anchor, or retain text from the placeholder.
+    if raw.contains("[REDACTED:")
+        || raw
+            .split(['(', '<', '{'])
+            .next()
+            .is_some_and(|name| name.contains('['))
+    {
+        return None;
+    }
     let symbol = raw
         .trim_matches(|character: char| {
             matches!(
@@ -12653,6 +12723,10 @@ pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckRepo
         DedupeCheckReport::with_warnings(warnings, memories_scanned)
     }
 }
+
+#[cfg(test)]
+#[path = "memory_git_capture_security_tests.rs"]
+mod git_capture_security_tests;
 
 #[cfg(test)]
 mod tests {

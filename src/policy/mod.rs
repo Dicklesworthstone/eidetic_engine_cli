@@ -1653,6 +1653,56 @@ pub fn redact_secret_like_content(content: &str) -> SecretRedactionReport {
     }
 }
 
+/// Redact external Git capture text without trusting recorder-label boundaries.
+///
+/// Retain the generic detector's value-shape thresholds and contextual guards,
+/// but recognize supported bearer prefixes inside recorder labels and source
+/// identifiers too. Unlike public replay's whole-field projection, keep the
+/// surrounding incident or code evidence useful. Offsets refer to the original
+/// input, never to an intermediate string after replacement.
+#[must_use]
+pub fn redact_git_capture_text(content: &str) -> SecretRedactionReport {
+    let mut bearers = Vec::new();
+    detect_raw_api_token_matches_with_boundary(content, &mut bearers, false);
+    if bearers.is_empty() {
+        return redact_secret_like_content(content);
+    }
+    bearers.sort_by_key(|matched| (matched.start, matched.end));
+
+    // Resolve every bearer against the original text before any replacement.
+    // Otherwise a PII replacement inside a fused token can destroy its shape,
+    // or removing one token can remove the context needed to classify another.
+    // Merge overlapping source spans while preserving the surrounding code.
+    let mut screened = String::with_capacity(content.len());
+    let mut cursor = 0;
+    for matched in &bearers {
+        if matched.start >= cursor {
+            screened.push_str(&content[cursor..matched.start]);
+            screened.push_str(&redaction_placeholder(matched.pattern_id));
+        }
+        cursor = cursor.max(matched.end);
+    }
+    screened.push_str(&content[cursor..]);
+
+    let mut report = redact_secret_like_content(&screened);
+    report.redacted = true;
+    report
+        .redacted_reasons
+        .extend(bearers.iter().map(|matched| matched.pattern_id));
+    report.matches = detect_secret_like_matches(content);
+    report.matches.extend(bearers);
+    report.matches.sort_by(|left, right| {
+        left.start
+            .cmp(&right.start)
+            .then_with(|| left.end.cmp(&right.end))
+            .then_with(|| left.pattern_id.cmp(right.pattern_id))
+    });
+    report.matches.dedup();
+    report.redacted_reasons.sort_unstable();
+    report.redacted_reasons.dedup();
+    report
+}
+
 /// Redact secret-like content for public replay, diff, support, and delta egress.
 ///
 /// In addition to the normal policy, raw credential tokens are recognized at
@@ -2248,6 +2298,14 @@ const RAW_TOKEN_PATTERNS: &[(&str, &str, usize, bool)] = &[
 ];
 
 fn detect_raw_api_token_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
+    detect_raw_api_token_matches_with_boundary(input, matches, true);
+}
+
+fn detect_raw_api_token_matches_with_boundary(
+    input: &str,
+    matches: &mut Vec<SecretRedactionMatch>,
+    require_left_boundary: bool,
+) {
     for &(prefix, code, min_suffix_len, requires_context) in RAW_TOKEN_PATTERNS {
         let mut search_start = 0;
         loop {
@@ -2262,7 +2320,8 @@ fn detect_raw_api_token_matches(input: &str, matches: &mut Vec<SecretRedactionMa
             // The eeap1_ marker is deliberately recognizable so every
             // ee-controlled text path can scrub a leaked approval bearer even
             // when a recorder/tag has fused it to an identifier prefix.
-            if code != "mesh_approval_token"
+            if require_left_boundary
+                && code != "mesh_approval_token"
                 && token_start > 0
                 && input.as_bytes().get(token_start - 1).is_some_and(|byte| {
                     byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-'
@@ -6192,3 +6251,7 @@ mod tests {
         assert!(report.content.contains(&not_jwt));
     }
 }
+
+#[cfg(test)]
+#[path = "git_capture_redaction_tests.rs"]
+mod git_capture_redaction_tests;
