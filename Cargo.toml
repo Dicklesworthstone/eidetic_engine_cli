@@ -450,6 +450,10 @@ name = "json_contract_snapshots"
 path = "tests/json_contract_snapshots.rs"
 
 [[test]]
+name = "lexical_relevance_contract"
+path = "tests/lexical_relevance_contract.rs"
+
+[[test]]
 name = "mcp_parity"
 path = "tests/mcp_parity.rs"
 

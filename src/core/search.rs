@@ -782,10 +782,15 @@ fn calibrated_relevance_lower_bound(hit: &SearchHit) -> Option<f32> {
     lower.is_finite().then_some(lower.clamp(0.0, 1.0))
 }
 
-pub(crate) fn search_hit_meets_relevance_floor(
-    hit: &SearchHit,
-    user_floor_override: Option<f32>,
-) -> bool {
+/// Whether a hit clears the relevance floor.
+///
+/// Public so the admission contract is pinnable from a test target that can
+/// fail on its own without reddening the lib target
+/// (`tests/lexical_relevance_contract.rs`, bd-reality-core-convergence-1azkt.11).
+/// [`DEFAULT_RELEVANCE_FLOOR`] was already public while the predicate that
+/// consumes it was not, so the constant could be read but the decision it
+/// drives could not be exercised.
+pub fn search_hit_meets_relevance_floor(hit: &SearchHit, user_floor_override: Option<f32>) -> bool {
     let floor = user_floor_override.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
     let relevance_score =
         calibrated_relevance_lower_bound(hit).unwrap_or_else(|| hit.relevance_score());
@@ -11206,8 +11211,13 @@ pub(crate) fn resolved_search_fusion_weights(workspace_path: &Path) -> SearchFus
         .unwrap_or_default()
 }
 
+/// Which scale the Frankensearch adapter's final score arrives on.
+///
+/// Public only because it appears in [`search_hits_from_scored_results`]'s
+/// signature, which is itself public so the lexical projection contract can be
+/// pinned from a test target (bd-reality-core-convergence-1azkt.11).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FrankensearchFinalScoreScale {
+pub enum FrankensearchFinalScoreScale {
     Native,
     RrfFused,
 }
@@ -11302,7 +11312,12 @@ fn search_hit_from_scored_result(
 /// This is a query-relative projection, not a calibrated probability. The
 /// original engine value remains in `lexicalScore`; positive-score ordering
 /// is unchanged. Other execution modes retain their raw final ranking score.
-fn search_hits_from_scored_results(
+///
+/// Public so the raw-versus-rendered relationship this projection creates can
+/// be pinned by an independently-failing test target rather than only by inline
+/// tests that share the lib target's verdict
+/// (bd-reality-core-convergence-1azkt.11).
+pub fn search_hits_from_scored_results(
     results: Vec<crate::search::ScoredResult>,
     explain: bool,
     final_score_scale: FrankensearchFinalScoreScale,

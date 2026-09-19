@@ -42,10 +42,13 @@
 # The moment green can also mean "this was excused", no consumer can tell a
 # stage that worked from a stage that was allowed not to.
 #
-# ZERO stages declare a non-required requirement today. That is asserted by
+# ONE stage declares a non-required requirement today: "Lexical Relevance
+# Contract (tracked red)", owned by bd-reality-core-convergence-1azkt.11 and
+# declared 2026-09-19. That count is asserted by
 # `no_stage_is_declared_non_required_without_a_bead` in
-# tests/verification_drift_guard.rs, so introducing the first one is a
-# deliberate, reviewable act rather than a default anybody can drift into.
+# tests/verification_drift_guard.rs, so introducing one is a deliberate,
+# reviewable act rather than a default anybody can drift into — and removing one
+# is equally deliberate, because the count has to move in the same commit.
 total_expected_seconds = 600
 total_regression_factor = 1.5
 
@@ -275,6 +278,52 @@ regression_factor = 1.5
 [[stage]]
 name = "Unit, Contract, and Golden Tests"
 expected_seconds_p50 = 120
+regression_factor = 1.5
+
+[[stage]]
+name = "Lexical Relevance Contract Harness Guard"
+# REQUIRED arm of bd-reality-core-convergence-1azkt.11's pin pair.
+#
+# Proves its own listing predicate against synthetic input (so a guard that
+# cannot fail is caught before it is trusted), then checks the live artifact:
+# the binary exists, is not older than tests/lexical_relevance_contract.rs, and
+# enumerates exactly the two pins by name. Without this arm a missing or stale
+# binary would exit nonzero into the tracked-red stage below and be excused as
+# the known red.
+#
+# 1s, not the 0s it measures at: the hard-fail line is p50*3, and 3s is ample
+# for a no-cargo bash arm that runs one `--list` against a prebuilt binary.
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Lexical Relevance Contract (tracked red)"
+# THE FIRST DECLARED-NON-REQUIRED STAGE IN THIS FILE
+# (bd-reality-core-convergence-1azkt.11, declared 2026-09-19).
+#
+# Two #[ignore]d pins in tests/lexical_relevance_contract.rs that FAIL against
+# the current product on purpose. They exist so the repair has a pre-existing
+# red to be measured against: rename ScoreSource::Lexical's score kind and the
+# first pin either flips or it does not, which a rename landed alongside a
+# regenerated golden set could never demonstrate.
+#
+# 1s because this arm executes the binary Gate 5 already built; the pins run in
+# 0.00s. It deliberately does NOT re-enter cargo, which measured 74s on RCH hz4
+# at 82926d4c5 purely re-walking freshness over ~350 crates Gate 5 had just
+# walked. That double charge was a real cost in the gate, not a budgeting
+# obstacle -- removing it is why these two stages fit in 2s where one cargo
+# stage did not fit in 74.
+#
+# This stage MUST NOT report PASS while it carries this declaration. When the
+# pins go green, delete `requirement`/`tracked_red_bead` in the SAME commit and
+# drop the non-required count in `no_stage_is_declared_non_required_without_a_bead`
+# back by one. A tracked_red stage that quietly starts passing is exactly the
+# collapse between "this ran and passed" and "this was excused" that the
+# requirement policy above exists to prevent. scripts/lexical_relevance_pins.sh
+# prints an unmissable banner on a zero exit for that reason.
+requirement = "tracked_red"
+tracked_red_bead = "bd-reality-core-convergence-1azkt.11"
+expected_seconds_p50 = 1
 regression_factor = 1.5
 
 [[stage]]

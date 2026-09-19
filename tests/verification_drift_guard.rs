@@ -521,10 +521,20 @@ fn excused_stages_are_counted_and_never_reported_as_passed() {
 /// Absence of a `requirement` declaration means REQUIRED, and no stage may be
 /// non-required today without a bead owning it.
 ///
-/// Zero stages declare one at the time of writing. Asserting that makes
-/// introducing the first a deliberate, reviewable act instead of a default
-/// somebody drifts into — and the tracked_red arm refuses a stage that claims
-/// known-red status without naming who owns it.
+/// One stage declares one as of 2026-09-19: "Lexical Relevance Contract
+/// (tracked red)", owned by bd-reality-core-convergence-1azkt.11. Asserting the
+/// exact count makes adding or removing a declaration a deliberate, reviewable
+/// act instead of a default somebody drifts into — and the tracked_red arm
+/// refuses a stage that claims known-red status without naming who owns it.
+///
+/// Known gap, NOT closed here: this guard and
+/// `excused_stages_are_counted_and_never_reported_as_passed` both only inspect
+/// verify.sh's FAILURE branch. `run_stage`'s success path never consults
+/// `stage_requirement`, so a tracked_red stage whose pins start passing prints
+/// PASS — the exact collapse between "this ran and passed" and "this was
+/// excused" that the manifest's requirement policy forbids. Until that path
+/// checks the declaration, the discipline is the manifest comment: remove the
+/// declaration in the same commit that turns the stage green.
 #[test]
 fn no_stage_is_declared_non_required_without_a_bead() {
     let manifest = fs::read_to_string(verify_budget_path()).expect("read verify-budget.toml");
@@ -569,8 +579,11 @@ fn no_stage_is_declared_non_required_without_a_bead() {
     }
 
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+    // 1 since 2026-09-19: "Lexical Relevance Contract (tracked red)", owned by
+    // bd-reality-core-convergence-1azkt.11. Returns to 0 when those pins go
+    // green and the declaration is removed.
     assert_eq!(
-        non_required, 0,
+        non_required, 1,
         "stages are declared non-required. That may be correct, but it is a \
          deliberate act: update this count in the same commit so the excused \
          population stays visible in review."
