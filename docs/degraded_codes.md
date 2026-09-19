@@ -5448,6 +5448,40 @@ ee search '<previous evidence phrase>' --workspace . --json
 
 ---
 
+## `rule_live_admission_filtered`
+
+**Severity:** low
+
+**Surfaces:** search
+
+**Introduced by:** bd-vp087 (native-rule retrieval follow-on; not typed-pack migration completion)
+
+**Trigger.** A native rule candidate cannot be admitted from the addressed source
+workspace, is tombstoned or superseded, has an invalid identity or declared
+revision, references another workspace's source memory, or carries unverified
+mesh authority. Failed database/junction reads also withhold the rule. Indexed
+body, trust, tags and provenance never authorize it. Filtering precedes relevance
+calibration, the floor and query-assist construction; unrelated hits remain usable.
+
+Metadata-free semantic rule hits are hydrated from the canonical live rule
+projection, including source-less rules, and retain their native `rule_` identity
+and `ee://rule/<id>` provenance. A supplied `entity_revision` must match the live
+projection. Draft and deprecated rules remain searchable for inspection under
+the existing search-corpus contract; they do not become pack-admissible. This
+does not implement the ADR 0085 typed-pack migration or cross-workspace rules.
+
+**Invocation.** `ee search '<previous rule phrase>' --workspace . --json`
+
+**Expected emission.** `Filtered ... indexed rule candidates because current source-of-truth admission could not be verified.` No rejected identity or body is echoed.
+
+**Repair hint.** `ee index rebuild --workspace .` removes stale candidates; it
+does not restore revoked rules or grant scope. Repair unavailable source storage
+before rebuilding. Reads never create a store or repair an index.
+
+**Fixture.** [`tests/fixtures/failure_modes/rule_live_admission_filtered.json`](../tests/fixtures/failure_modes/rule_live_admission_filtered.json)
+
+---
+
 ## `expired_filtered`
 
 **Severity:** low

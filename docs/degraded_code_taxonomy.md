@@ -382,6 +382,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `index_missing` | medium | bd-17c65.2.1 (B1) |
 | `index_stale` | high | bd-17c65.2.1 (B1) |
 | `evidence_live_admission_filtered` | warning | bd-4frzq (P0) |
+| `rule_live_admission_filtered` | low | bd-vp087 |
 | `low_recall_after_floor` | info | bd-17c65.2.1 (B1) |
 | `malformed_validity_filtered` | medium | bd-17c65.2.10 (B11) |
 | `memory_drift_source_changed` | medium | bd-1z1fd.3 |

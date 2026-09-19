@@ -9290,6 +9290,8 @@ async fn run_search_inner_with_performance(
             let evidence_visibility_start = Instant::now();
             let raw_hits =
                 apply_live_evidence_visibility(options, raw_hits, &mut degraded, read_connection);
+            let raw_hits =
+                rule_admission::admit_hits(options, raw_hits, &mut degraded, read_connection);
             trace.record_elapsed(
                 "search::evidenceLiveAdmissionVisibility",
                 evidence_visibility_start,
@@ -10754,6 +10756,9 @@ fn invalidate_cached_index_status_for_search(options: &SearchOptions, index_dir:
 
 #[path = "search_diagnostic_snapshot.rs"]
 mod diagnostic_snapshot;
+
+#[path = "search_rule_admission.rs"]
+mod rule_admission;
 
 struct DiagSearchSyncResult {
     // Kept private: raw arm JSON intentionally contains only IDs, ranks and scores.

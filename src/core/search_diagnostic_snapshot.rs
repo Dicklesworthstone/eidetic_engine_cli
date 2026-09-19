@@ -189,7 +189,8 @@ mod tests {
     use std::time::Duration;
 
     type TestResult = Result<(), String>;
-    const WORKSPACE: &str = "wsp_diagnostic_snapshot";
+    const WORKSPACE: &str = "wsp_00000000000000000000000001";
+    const OTHER_WORKSPACE: &str = "wsp_00000000000000000000000002";
     const VISIBLE: &str = "mem_00000000000000000000000001";
     const HIDDEN: &str = "mem_00000000000000000000000002";
     const PHRASE: &str = "quartz snapshot diagnostic recovery preserves evidence";
@@ -344,8 +345,8 @@ mod tests {
         db.insert_memory(HIDDEN, &input(WORKSPACE, "private tombstoned evidence"))
             .map_err(|e| e.to_string())?;
         assert!(db.tombstone_memory(HIDDEN).map_err(|e| e.to_string())?);
-        let expired = "mem_expired";
-        let future = "mem_future";
+        let expired = "mem_00000000000000000000000003";
+        let future = "mem_00000000000000000000000004";
         let mut record = input(WORKSPACE, "private expired evidence");
         record.valid_to = Some("2026-01-01T00:00:00Z".to_owned());
         db.insert_memory(expired, &record)
@@ -354,16 +355,16 @@ mod tests {
         record.valid_from = Some("2030-01-01T00:00:00Z".to_owned());
         db.insert_memory(future, &record)
             .map_err(|e| e.to_string())?;
-        let foreign = "mem_foreign";
+        let foreign = "mem_00000000000000000000000005";
         db.insert_workspace(
-            "wsp_other",
+            OTHER_WORKSPACE,
             &CreateWorkspaceInput {
                 path: options.workspace_path.join("other").display().to_string(),
                 name: None,
             },
         )
         .map_err(|e| e.to_string())?;
-        db.insert_memory(foreign, &input("wsp_other", "private foreign evidence"))
+        db.insert_memory(foreign, &input(OTHER_WORKSPACE, "private foreign evidence"))
             .map_err(|e| e.to_string())?;
         let mut diag = diagnostic(
             &[HIDDEN, expired, future, foreign, "mem_absent", VISIBLE],
@@ -453,9 +454,9 @@ mod tests {
     fn diagnostic_admission_checks_raw_only_seals_validity_metadata_and_mesh_denial() -> TestResult
     {
         let (_temp, mut options, db) = fixture()?;
-        let sealed = "mem_sealed";
-        let stale = "mem_stale";
-        let mesh = "mem_mesh_denied";
+        let sealed = "mem_00000000000000000000000006";
+        let stale = "mem_00000000000000000000000007";
+        let mesh = "mem_00000000000000000000000008";
         for id in [VISIBLE, sealed, stale, mesh] {
             db.insert_memory(id, &input(WORKSPACE, PHRASE))
                 .map_err(|e| e.to_string())?;
