@@ -45,7 +45,7 @@ jobs:
       changed: ${{ steps.version.outputs.changed }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 2
 
@@ -81,7 +81,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Checkout Franken stack path dependencies
         shell: bash
@@ -106,7 +106,14 @@ jobs:
           ' Cargo.toml
 
       - name: Install nightly Rust
-        uses: dtolnay/rust-toolchain@nightly
+        # The SHA is the tip of dtolnay/rust-toolchain's `nightly` branch, whose
+        # action.yml defaults `toolchain: nightly` -- so the pin preserves the
+        # toolchain. Stated explicitly anyway: once the ref is a bare SHA a
+        # reader can no longer tell WHICH toolchain it selects, and the two
+        # other workflows in this repo that pin this SHA already pass it.
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly
 
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
@@ -128,7 +135,7 @@ jobs:
       # it fails today on an unmatched allow entry and deny.toml states
       # license posture is owned elsewhere.
       - name: RustSec advisory audit (cargo-deny)
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902
         with:
           command: check advisories
 
@@ -136,7 +143,7 @@ jobs:
       # one thing. A bans or sources regression must not hide behind an
       # unrelated advisory failure.
       - name: Ban and source audit (cargo-deny)
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902
         with:
           command: check bans sources
 
@@ -172,7 +179,7 @@ jobs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Validate existing release tag
         id: tag
@@ -225,7 +232,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Checkout Franken stack path dependencies (Unix)
         if: runner.os != 'Windows'
@@ -259,13 +266,25 @@ jobs:
           Set-Content Cargo.toml -Value $cargoText -NoNewline
 
       - name: Install nightly Rust
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
+          toolchain: nightly
           targets: ${{ matrix.target }}
 
       - name: Install cross
         if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        # bd-reality-core-convergence-1azkt.18: was an unpinned `--git` install,
+        # so every release built with whatever cross-rs HEAD happened to be
+        # that day. Pinned to the revision HEAD resolved to at pin time, which
+        # is exactly what an unpinned build would have fetched today -- so this
+        # changes what is REPRODUCIBLE, not what is installed.
+        #
+        # Deliberately NOT adding `--locked` here as cargo-zigbuild does: a git
+        # install resolves against cross's own lockfile, and if that lockfile
+        # is stale the install fails. That is a new failure mode I cannot
+        # exercise from a development machine, and pinning the revision already
+        # satisfies the acceptance line on its own.
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev 8c1a8aa4b661711f4b7b6ac07c2e8929ce2f7d27
 
       - name: Install GNU/Linux cross linker
         if: matrix.glibc
@@ -322,14 +341,20 @@ jobs:
           Remove-Item ee.exe
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9
 
       - name: Install provenance hash tools
         shell: bash
         run: |
           set -euo pipefail
           if ! command -v b3sum >/dev/null 2>&1; then
-            cargo install b3sum --locked
+            # bd-reality-core-convergence-1azkt.18: `--locked` without
+            # `--version` pinned the dependency graph but not the tool, so the
+            # checksum utility that computes release digests floated. 1.8.7 is
+            # verified published on crates.io and matches the blake3 1.8.7
+            # already resolved in Cargo.lock, so this pins to the version the
+            # tree already uses rather than to a guess.
+            cargo install b3sum --version 1.8.7 --locked
           fi
           # Ensure the cargo install bin dir is on PATH for later steps. Hosted
           # GitHub runners already have ~/.cargo/bin on PATH, but the dsr fallback
@@ -528,7 +553,7 @@ jobs:
             ee-${{ matrix.target }}.provenance.json
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-${{ matrix.target }}
           path: |
@@ -549,12 +574,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: artifacts
           pattern: release-*
@@ -624,7 +649,7 @@ jobs:
           fi
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9
 
       - name: Verify Sigstore bundles and provenance
         run: |
@@ -880,7 +905,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Wait for release assets
         run: sleep 30
