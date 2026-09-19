@@ -1,0 +1,155 @@
+name: Recover recorded and causal evidence fidelity
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/recorded-provenance-20260919.tar.xz.b64
+      - .github/workflows/recorded-provenance-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: recorded-provenance-recovery-delivery
+  cancel-in-progress: false
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.publish.outputs.source }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - name: Publish two preserved implementation increments
+        id: publish
+        run: |
+          set -euo pipefail
+          export RUSTUP_TOOLCHAIN=nightly-2026-08-31
+          base=$(git rev-parse HEAD)
+          scratch=$(mktemp -d "$RUNNER_TEMP/recorded-fidelity.XXXXXX")
+          base64 --decode scripts/delivery/recorded-provenance-20260919.tar.xz.b64 > "$scratch/patches.tar.xz"
+          echo "0a7731a9e14ed13133cd0687a1665df57849a6a5aeb52ec8320c57b4aa73db27  $scratch/patches.tar.xz" | sha256sum --check
+          tar -xJf "$scratch/patches.tar.xz" -C "$scratch"
+          echo "1a6e5d412a649cc960ba9060d309cb72df8cc454dd8886e73e65c4a88ae4d0fa  $scratch/01.patch" | sha256sum --check
+          echo "c44e578c1616de1df7186fd6d69c5cfe53cad19611a334a4eb799b448e2b46aa  $scratch/02.patch" | sha256sum --check
+          files=(src/core/backup.rs src/core/backup_history_recovery.rs)
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          publish() {
+            rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+            git diff --check
+            git add -- "${files[@]}"
+            if ! git diff --cached --quiet; then
+              git commit -m "$1" -m 'Recovered the preserved implementation and real-store regression tests. Patch integrity, application and Rust formatting checked. Current-source compilation and runtime results are reported by the separate verification job, not claimed by this commit.'
+              for attempt in 1 2 3 4; do
+                if git push origin HEAD:main; then break; fi
+                test "$attempt" -lt 4
+                git fetch origin main
+                git diff --exit-code "$base" origin/main -- "${files[@]}"
+                git merge --no-edit origin/main
+                base=$(git rev-parse origin/main)
+              done
+            fi
+            base=$(git rev-parse HEAD)
+          }
+          if ! grep -Fq 'fn capture_recorded_history(' src/core/backup_history_recovery.rs; then
+            test "$(git rev-parse HEAD:src/core/backup.rs)" = 5dc329d7906a55e992c92eeb8308e6cfcda350c2
+            test "$(git rev-parse HEAD:src/core/backup_history_recovery.rs)" = e4a5bb904181d3c4a7cfe8ec4950d52dcfab6a5e
+            git apply --check --whitespace=error-all "$scratch/01.patch"
+            git apply "$scratch/01.patch"
+            # Preserve our own unformatted intermediate so patch 2 keeps its
+            # original context after the independently formatted first commit.
+            cp src/core/backup.rs "$scratch/backup.rs"
+            cp src/core/backup_history_recovery.rs "$scratch/backup_history_recovery.rs"
+            publish 'fix(backup): preserve recorder chains and historical verification results'
+            cp "$scratch/backup.rs" src/core/backup.rs
+            cp "$scratch/backup_history_recovery.rs" src/core/backup_history_recovery.rs
+            git apply --check --whitespace=error-all "$scratch/02.patch"
+            git apply "$scratch/02.patch"
+            publish 'fix(backup): preserve causal explanations and harmful repair lineage'
+          else
+            grep -Fq 'fn capture_provenance_history(' src/core/backup_history_recovery.rs
+            grep -Fq 'fn provenance_recovery_survives_rebackup_without_rejudging_evidence()' src/core/backup.rs
+          fi
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > "$RUNNER_TEMP/recorded-source-sha.log"
+          tar -czf "$RUNNER_TEMP/recorded-source.tar.gz" "${files[@]}"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: recorded-provenance-source
+          path: |
+            ${{ runner.temp }}/recorded-source-sha.log
+            ${{ runner.temp }}/recorded-source.tar.gz
+          retention-days: 7
+  verify:
+    needs: integrate
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.integrate.outputs.source }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: recorded-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            recorded-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            contradiction-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Compile current source and all test targets
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD | tee "$RUNNER_TEMP/recorded-identity.log"
+          timeout 25m cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/recorded-check.log"
+      - name: Exercise corruption, repeated recovery and existing consumers
+        run: |
+          set -euo pipefail
+          group() {
+            timeout 25m cargo test --locked --lib "$1" -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recorded-$3.log"
+            grep -Fq "test result: ok. $2 passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/recorded-$3.log"
+          }
+          group core::backup::recovery::history::tests 3 rows
+          group core::backup::tests::recovery_rejects_ 6 corruption
+          group core::backup::tests::recorded_recovery_survives_rebackup_without_changing_failed_evidence 1 recorded-roundtrip
+          group core::backup::tests::provenance_recovery_survives_rebackup_without_rejudging_evidence 1 provenance-roundtrip
+          group core::backup::tests::default_backup_restores_recorded_history_and_live_consumers 1 recorded-consumers
+          group core::backup::tests::default_backup_restores_error_recall_and_live_diagnosis 1 diagnosis
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: recorded-provenance-results
+          path: ${{ runner.temp }}/recorded-*.log
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
