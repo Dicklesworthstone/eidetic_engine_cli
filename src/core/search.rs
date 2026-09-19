@@ -5678,6 +5678,7 @@ fn query_assist_visible_candidates(
         read_connection,
         false,
         None,
+        None,
     );
     for entry in admission_degraded {
         if degraded.iter().all(|existing| existing.code != entry.code) {
@@ -9258,17 +9259,28 @@ async fn run_search_inner_with_performance(
             // result set). Keep the highest-relevance occurrence and discard
             // the rest. Stable ordering is preserved (first occurrence's
             // position wins among ties).
+            // Retain source-store membership separately from searchable metadata.
+            // An index can claim `storeLane=global`; only rows admitted by the
+            // actual global-store read may carry this request-local authority.
+            let mut global_source_memories = BTreeMap::new();
             let global_hits = global_store_frankensearch_hits(
                 cx,
                 options,
                 &global_memory_policy,
                 effective_limit,
                 &mut degraded,
-                preloaded_memories.as_deref_mut(),
+                Some(&mut global_source_memories),
                 &mut trace,
                 !capture_deferred_audit,
             )
             .await;
+            let admitted_global_ids: BTreeSet<String> =
+                global_source_memories.keys().cloned().collect();
+            if let Some(preloaded) = preloaded_memories.as_deref_mut() {
+                for (id, memory) in global_source_memories {
+                    preloaded.entry(id).or_insert(memory);
+                }
+            }
             if !global_hits.is_empty() {
                 raw_hits.extend(global_hits);
                 sort_search_hits_by_score_order(&mut raw_hits);
@@ -9342,6 +9354,7 @@ async fn run_search_inner_with_performance(
                     read_connection,
                     include_passthrough_scope_analysis_metadata,
                     preloaded_memories.as_deref_mut(),
+                    Some(&admitted_global_ids),
                 );
             trace.record_elapsed("search::scopeVisibility", scope_start);
             let mesh_start = Instant::now();
@@ -9591,6 +9604,8 @@ pub async fn run_diag_search_with_cx(
     cx: &asupersync::Cx,
     options: &SearchOptions,
 ) -> Result<SearchDiagnosticReport, SearchError> {
+    options.validate()?;
+    search_checkpoint(cx)?;
     let index_dir = options.resolve_index_dir();
     let fast_embedder = if options.source_mode.uses_embeddings()
         && index_dir.exists()
@@ -9637,21 +9652,122 @@ async fn run_diag_search_with_cx_and_embedder_policy(
 ) -> Result<SearchDiagnosticReport, SearchError> {
     options.validate()?;
     search_checkpoint(cx)?;
+    // The source generation, visibility, scope, calibration and query assistance
+    // must all observe one read transaction, just as canonical search does.
+    // Freeze the wall-clock validity boundary for every arm in this request.
+    let mut snapshot_options = options.clone();
+    snapshot_options.as_of = Some(options.as_of.unwrap_or_else(Utc::now));
+    let database_path = options.resolve_database_path();
+    if !database_path.exists() {
+        return run_diag_search_in_snapshot(
+            cx,
+            &snapshot_options,
+            fast_embedder_override,
+            resolve_runtime_source_mode,
+            None,
+        )
+        .await;
+    }
+    let pool = registered_process_read_pool(
+        DatabaseConfig::file(database_path.clone()),
+        PoolConfig::default_single()
+            .with_max_pin_duration(search_snapshot_max_pin_duration(Duration::from_secs(30))),
+    );
+    let snapshot = pool.pin_snapshot().map_err(|_| {
+        SearchError::Index("Diagnostic search could not pin its source snapshot".to_owned())
+    })?;
+    let result = async {
+        let connection = snapshot.checked_connection().map_err(|_| {
+            SearchError::Index("Diagnostic source snapshot is unavailable".to_owned())
+        })?;
+        if connection.needs_migration().map_err(|_| {
+            SearchError::Index("Diagnostic search could not inspect the source schema".to_owned())
+        })? {
+            return Err(SearchError::Index(
+                "Database migration is required before diagnostic search; run `ee migrate run --workspace .`.".to_owned(),
+            ));
+        }
+        run_diag_search_in_snapshot(
+            cx,
+            &snapshot_options,
+            fast_embedder_override,
+            resolve_runtime_source_mode,
+            Some(connection),
+        )
+        .await
+    }
+    .await;
+    finish_search_snapshot(snapshot, result, &database_path)
+}
+
+async fn run_diag_search_in_snapshot(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
+    resolve_runtime_source_mode: bool,
+    read_connection: Option<&DbConnection>,
+) -> Result<SearchDiagnosticReport, SearchError> {
+    options.validate()?;
+    search_checkpoint(cx)?;
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
     let (effective_limit, limit_capped) = runtime_profile.cap_search_limit(options.limit);
 
-    if !index_dir.exists() {
+    let source_generation = if let Some(connection) = read_connection {
+        let workspace = crate::core::workspace::addressed_workspace_row(
+            connection,
+            &options.workspace_path,
+            &options.resolve_database_path(),
+        )
+        .map_err(|error| SearchError::WorkspaceBinding(Box::new(error)))?
+        .ok_or_else(|| {
+            SearchError::Index("Diagnostic source workspace is unavailable".to_owned())
+        })?;
+        Some(
+            connection
+                .get_workspace_generation(&workspace.id)
+                .map_err(|_| {
+                    SearchError::Index("Diagnostic source generation is unavailable".to_owned())
+                })?
+                .ok_or_else(|| {
+                    SearchError::Index(
+                        "Diagnostic source generation is missing; repair the source store"
+                            .to_owned(),
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    if !index_dir.exists() && (!cfg!(unix) || source_generation.is_none()) {
         return Err(SearchError::NoIndex);
     }
     #[cfg(unix)]
     let generation_lease = pin_search_generation(cx, &index_dir).await?;
-    if let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&index_dir) {
+    #[cfg(unix)]
+    if !index_dir.exists()
+        && !generation_lease
+            .has_retained_generation_directory(cx, &index_dir)
+            .map_err(map_index_generation_error)?
+    {
+        return Err(SearchError::NoIndex);
+    }
+    #[cfg(unix)]
+    let index_dir = match source_generation {
+        Some(generation) => generation_lease
+            .index_for_snapshot(cx, &index_dir, generation)
+            .map_err(map_index_generation_error)?,
+        None => index_dir,
+    };
+    if (!cfg!(unix) || source_generation.is_none())
+        && let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&index_dir)
+    {
         return Err(index_compatibility_search_error(&index_dir, reason));
     }
 
-    let (mut degraded, index_freshness) = search_degradations(options, &index_dir);
+    let (mut degraded, index_freshness) =
+        search_degradations_with_connection(options, &index_dir, read_connection);
     let source_mode = if resolve_runtime_source_mode {
         resolve_source_mode(
             options,
@@ -9683,7 +9799,7 @@ async fn run_diag_search_with_cx_and_embedder_policy(
     } else {
         EmbedBackend::HashFallback
     };
-    push_model_lifecycle_search_degradation(options, None, &mut degraded);
+    push_model_lifecycle_search_degradation(options, read_connection, &mut degraded);
     if limit_capped {
         degraded.push(SearchDegradation::profile_search_limit_capped(
             options.limit,
@@ -9708,12 +9824,24 @@ async fn run_diag_search_with_cx_and_embedder_policy(
     .await?;
     #[cfg(unix)]
     drop(generation_lease);
-    apply_live_evidence_visibility_to_diag(options, &mut diag_result, &mut degraded);
+    apply_live_evidence_visibility_to_diag(
+        options,
+        &mut diag_result,
+        &mut degraded,
+        read_connection,
+    );
+    diagnostic_snapshot::admit_memories(
+        cx,
+        options,
+        &mut diag_result,
+        &mut degraded,
+        read_connection,
+    )?;
 
     let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(diag_result.final_hits);
     let (raw_hits, mi_duplicates_collapsed, mi_eligible_count) =
         if options.dedup_mode == SearchDedupMode::MutualInformation {
-            dedupe_hits_on_mutual_information(raw_hits, options, None)
+            dedupe_hits_on_mutual_information(raw_hits, options, read_connection)
         } else {
             (raw_hits, 0, 0)
         };
@@ -9723,7 +9851,7 @@ async fn run_diag_search_with_cx_and_embedder_policy(
     annotate_hits_with_score_calibration(
         &options.workspace_path,
         options.database_path.as_deref(),
-        None,
+        read_connection,
         &mut raw_hits,
         &mut degraded,
     );
@@ -9734,14 +9862,21 @@ async fn run_diag_search_with_cx_and_embedder_policy(
         .into_iter()
         .partition(|hit| search_hit_meets_relevance_floor(hit, user_floor_override));
     let floor_counts = RelevanceFloorCounts::new(pre_floor_count, above_floor.len());
-    let above_floor =
-        apply_tombstone_visibility_collecting(options, above_floor, &mut degraded, None, None);
-    let (mut above_floor, scope_stats) =
-        apply_memory_scope_visibility(options, above_floor, &mut degraded, None);
+    let above_floor = apply_tombstone_visibility_collecting(
+        options,
+        above_floor,
+        &mut degraded,
+        read_connection,
+        None,
+    );
+    let (above_floor, scope_stats) =
+        apply_memory_scope_visibility(options, above_floor, &mut degraded, read_connection);
+    let mut above_floor = apply_mesh_query_visibility(above_floor, &mut degraded);
+    truncate_hits_to_limit(&mut above_floor, effective_limit);
     let kept = above_floor.len();
     let dropped = below_floor.len();
     let query_assist_candidates =
-        query_assist_visible_candidates(options, &below_floor, &mut degraded, None);
+        query_assist_visible_candidates(options, &below_floor, &mut degraded, read_connection);
     let floor = user_floor_override.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
 
     if duplicates_collapsed > 0 {
@@ -9813,6 +9948,7 @@ async fn run_diag_search_with_cx_and_embedder_policy(
         index_freshness,
     };
 
+    search_checkpoint(cx)?;
     Ok(SearchDiagnosticReport {
         query: options.query.clone(),
         requested_limit: options.limit,
@@ -9824,6 +9960,7 @@ async fn run_diag_search_with_cx_and_embedder_policy(
     })
 }
 
+#[cfg(test)]
 fn search_degradations(
     options: &SearchOptions,
     index_dir: &Path,
@@ -10615,7 +10752,12 @@ fn invalidate_cached_index_status_for_search(options: &SearchOptions, index_dir:
     }
 }
 
+#[path = "search_diagnostic_snapshot.rs"]
+mod diagnostic_snapshot;
+
 struct DiagSearchSyncResult {
+    // Kept private: raw arm JSON intentionally contains only IDs, ranks and scores.
+    candidate_metadata: BTreeMap<String, serde_json::Value>,
     pre_fusion: PreFusionDiagnostics,
     fusion: FusionDiagnostics,
     final_hits: Vec<SearchHit>,
@@ -10689,16 +10831,25 @@ async fn diag_search_sync(
             }
         };
 
+        let mut candidate_metadata = BTreeMap::new();
         let lexical_start = Instant::now();
         let lexical_result = match lexical.as_ref() {
             Some(lexical) => match lexical.search(&cx, &query_owned, candidate_limit).await {
-                Ok(results) => SearchArmDiagnostics {
-                    available: true,
-                    score_scale: "bm25_tfidf",
-                    elapsed_ms: lexical_start.elapsed().as_secs_f64() * 1000.0,
-                    results: scored_results_to_arm_hits(&results),
-                    error: None,
-                },
+                Ok(results) => {
+                    for result in &results {
+                        if let Some(metadata) = &result.metadata {
+                            candidate_metadata
+                                .insert(result.doc_id.to_string(), metadata.as_ref().clone());
+                        }
+                    }
+                    SearchArmDiagnostics {
+                        available: true,
+                        score_scale: "bm25_tfidf",
+                        elapsed_ms: lexical_start.elapsed().as_secs_f64() * 1000.0,
+                        results: scored_results_to_arm_hits(&results),
+                        error: None,
+                    }
+                }
                 Err(error @ frankensearch::SearchError::Cancelled { .. }) => {
                     if let Ok(mut guard) = task_result.lock() {
                         *guard = Some(Err(map_frankensearch_error(
@@ -10878,6 +11029,7 @@ async fn diag_search_sync(
                 canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                 sort_search_hits_by_score_order(&mut hits);
                 Ok(DiagSearchSyncResult {
+                    candidate_metadata,
                     pre_fusion: PreFusionDiagnostics {
                         lexical: lexical_result,
                         semantic_fast: semantic_result,
@@ -12352,16 +12504,6 @@ fn live_admitted_evidence_spans(
     live_admitted_evidence_spans_with_connection(options, evidence_ids, &connection)
 }
 
-fn live_admitted_evidence_doc_ids(
-    options: &SearchOptions,
-    evidence_ids: &BTreeSet<String>,
-    read_connection: Option<&DbConnection>,
-) -> BTreeSet<String> {
-    live_admitted_evidence_spans(options, evidence_ids, read_connection)
-        .into_keys()
-        .collect()
-}
-
 fn live_admitted_evidence_spans_with_connection(
     options: &SearchOptions,
     evidence_ids: &BTreeSet<String>,
@@ -12398,6 +12540,7 @@ fn apply_live_evidence_visibility_to_diag(
     options: &SearchOptions,
     diag: &mut DiagSearchSyncResult,
     degraded: &mut Vec<SearchDegradation>,
+    read_connection: Option<&DbConnection>,
 ) {
     let evidence_ids = diag
         .pre_fusion
@@ -12420,8 +12563,8 @@ fn apply_live_evidence_visibility_to_diag(
         return;
     }
 
-    let admitted = live_admitted_evidence_doc_ids(options, &evidence_ids, None);
-    let is_visible = |doc_id: &str| !doc_id.starts_with("ev_") || admitted.contains(doc_id);
+    let admitted = live_admitted_evidence_spans(options, &evidence_ids, read_connection);
+    let is_visible = |doc_id: &str| !doc_id.starts_with("ev_") || admitted.contains_key(doc_id);
     diag.pre_fusion
         .lexical
         .results
@@ -12434,6 +12577,13 @@ fn apply_live_evidence_visibility_to_diag(
         .per_doc_contribution
         .retain(|hit| is_visible(&hit.doc_id));
     diag.final_hits.retain(|hit| is_visible(&hit.doc_id));
+    for hit in &mut diag.final_hits {
+        if let Some(span) = admitted.get(&hit.doc_id) {
+            // Match canonical search: the admitted source projection, not a
+            // stale lexical body, supplies evidence content and provenance.
+            hit.metadata = Some(canonical_evidence_search_metadata(span));
+        }
+    }
 
     let filtered = evidence_ids.len().saturating_sub(admitted.len());
     if filtered > 0 {
@@ -12810,6 +12960,7 @@ fn apply_memory_scope_visibility_with_metadata_mode(
         read_connection,
         include_passthrough_analysis_metadata,
         None,
+        None,
     )
 }
 
@@ -12820,6 +12971,7 @@ fn apply_memory_scope_visibility_with_metadata_mode_collecting(
     read_connection: Option<&DbConnection>,
     include_passthrough_analysis_metadata: bool,
     mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
+    admitted_global_ids: Option<&BTreeSet<String>>,
 ) -> (Vec<SearchHit>, MemoryScopeStats) {
     let scope_context = MemoryScopeContext::for_workspace_with_connection(
         &options.workspace_path,
@@ -12862,6 +13014,7 @@ fn apply_memory_scope_visibility_with_metadata_mode_collecting(
             passthrough_scope,
             connection,
             preloaded_memories.as_deref_mut(),
+            admitted_global_ids,
         );
     }
 
@@ -12905,6 +13058,7 @@ fn apply_memory_scope_visibility_with_metadata_mode_collecting(
         passthrough_scope,
         &connection,
         preloaded_memories,
+        admitted_global_ids,
     )
 }
 
@@ -12917,6 +13071,7 @@ fn apply_memory_scope_visibility_with_connection(
     passthrough_scope: bool,
     connection: &DbConnection,
     mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
+    admitted_global_ids: Option<&BTreeSet<String>>,
 ) -> (Vec<SearchHit>, MemoryScopeStats) {
     let hit_doc_ids: BTreeSet<String> = hits.iter().map(|hit| hit.doc_id.clone()).collect();
     let hit_doc_refs: Vec<&str> = hit_doc_ids.iter().map(String::as_str).collect();
@@ -12927,9 +13082,20 @@ fn apply_memory_scope_visibility_with_connection(
         Ok(memories) => (memories, None),
         Err(error) => (BTreeMap::new(), Some(error.to_string())),
     };
+    let mut global_source_rows = BTreeSet::new();
     if let Some(preloaded) = preloaded_memories.as_deref() {
         for memory_id in &hit_doc_ids {
             if let Some(memory) = preloaded.get(memory_id) {
+                // A successful local lookup decides identity collisions. An
+                // absent local row can use the separately admitted global row;
+                // neither cached row bytes nor an index lane marker alone can
+                // supply global membership. A failed local read is not absence.
+                if read_error.is_none()
+                    && !scope_memories.contains_key(memory_id)
+                    && admitted_global_ids.is_some_and(|ids| ids.contains(memory_id))
+                {
+                    global_source_rows.insert(memory_id.clone());
+                }
                 scope_memories
                     .entry(memory_id.clone())
                     .or_insert_with(|| memory.clone());
@@ -12958,12 +13124,19 @@ fn apply_memory_scope_visibility_with_connection(
         let metadata_tags = search_hit_metadata_tags(&hit);
         match scope_memories.get(&hit.doc_id) {
             Some(memory) => {
-                let tags = scope_tags
-                    .get(&hit.doc_id)
-                    .or(metadata_tags.as_ref())
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                let in_scope = scope_context.memory_in_scope_with_tags(memory, tags);
+                // In Global scope an absent database tag row is an authoritative
+                // empty set, not permission to resurrect an old index tag.
+                let tags = if matches!(scope_context.scope, MemoryScope::Global) {
+                    scope_tags
+                        .get(&hit.doc_id)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[])
+                } else {
+                    metadata_tags.as_deref().unwrap_or(&[])
+                };
+                let in_scope = (matches!(scope_context.scope, MemoryScope::Global)
+                    && global_source_rows.contains(&hit.doc_id))
+                    || scope_context.memory_in_scope_with_tags(memory, tags);
                 stats.record_candidate_id(in_scope, Some(&hit.doc_id));
                 if in_scope {
                     mark_hit_scope(&mut hit, options.memory_scope, memory);
