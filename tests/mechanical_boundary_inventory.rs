@@ -2039,3 +2039,74 @@ fn ensure_all_markers_present(
         missing.join("`\n  `")
     ))
 }
+
+/// Every CLI command path carries a declared side-effect class. bd-o74n4.
+///
+/// The boundary matrix enforces its twelve-column contract on 24 of 453 command
+/// paths, and the obvious reading -- that 94.7% of the surface has no
+/// side-effect contract -- is wrong. `EffectManifest` declares a class for the
+/// WHOLE surface. What the matrix bounds is the hand-authored row list, and the
+/// existing cross-check (`matrix_row_classes_agree_with_the_effect_manifest`)
+/// iterates `matrix_rows`, so it can only validate classes somebody typed.
+///
+/// This asserts the property the manifest can actually carry alone: that no
+/// command path exists without a declared effect. It is the machine-checkable
+/// half of the contract, and unlike the other eleven columns it requires no
+/// editorial judgement, so it scales with the surface instead of with how much
+/// documentation anyone wrote.
+///
+/// Measured before landing, precisely, because a gate that arrives red is worse
+/// than no gate: 454 command paths, 460 manifest declarations, ZERO paths
+/// without an entry. An earlier loose regex of mine reported three absent
+/// (`daemon`, `migrate run`, `migrate shard-fanout`); all three are declared
+/// and that was a parse artifact, not a gap.
+///
+/// DELIBERATELY ONE-DIRECTIONAL. The manifest declares six paths the CLI does
+/// not expose -- `daemon background`, `daemon start`, `daemon stop`, the two
+/// `daemon foreground *` variants, and `orient decisions`. Those are not stale
+/// entries: `extract_command_path` collapses daemon's sub-behaviours to
+/// `daemon`, so the manifest is simply finer-grained than the path extractor.
+/// Asserting the reverse direction would fail on a granularity difference and
+/// report it as a defect.
+#[test]
+fn every_cli_command_path_has_an_effect_manifest_entry() -> Result<(), String> {
+    use ee::core::effect::EffectManifest;
+
+    let manifest = EffectManifest::build();
+    let commands = command_paths_from_extract_function(CLI_SOURCE)?;
+
+    // An empty extraction compares equal to everything. If `extract_command_path`
+    // is renamed or its markers move, that is a parser failure and must not
+    // read as full coverage.
+    if commands.len() < 100 {
+        return Err(format!(
+            "extracted only {} command paths from extract_command_path; the \
+             function's shape changed and this gate would pass vacuously",
+            commands.len()
+        ));
+    }
+
+    let mut undeclared: Vec<&String> = commands
+        .iter()
+        .filter(|command| manifest.get(command.as_str()).is_none())
+        .collect();
+    undeclared.sort();
+    undeclared.dedup();
+
+    if !undeclared.is_empty() {
+        return Err(format!(
+            "{} of {} CLI command paths have no EffectManifest entry, so they \
+             declare no side-effect class anywhere (ALL listed, not just the \
+             first):\n  {}",
+            undeclared.len(),
+            commands.len(),
+            undeclared
+                .iter()
+                .map(|command| format!("`{command}`"))
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        ));
+    }
+
+    Ok(())
+}
