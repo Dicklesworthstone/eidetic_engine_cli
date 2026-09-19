@@ -2,8 +2,8 @@
 
 use super::super::{
     EXPORT_FOOTER_SCHEMA_V1, EXPORT_HEADER_SCHEMA_V1, EXPORT_MEMORY_SCHEMA_V1, JsonValue,
-    JsonlImportOptions, MemoryId, Uuid, import_jsonl_records,
-    import_verified_backup_jsonl_records, json, parse_jsonl_source, validate_memories,
+    JsonlImportOptions, MemoryId, Uuid, import_jsonl_records, import_verified_backup_jsonl_records,
+    json, parse_jsonl_source, validate_memories,
 };
 use super::legacy_supersession_ids;
 use crate::models::WorkspaceId;
@@ -60,10 +60,7 @@ fn text(rows: &[JsonValue]) -> String {
 #[test]
 fn ambiguous_explicit_heads_are_rejected_before_any_destination_write() -> TestResult {
     let root = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let path = root
-        .path()
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
+    let path = root.path().canonicalize().map_err(|e| e.to_string())?;
     for reverse in [false, true] {
         let rows = disconnected_rows(reverse);
         let source = text(&rows);
