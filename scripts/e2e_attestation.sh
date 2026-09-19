@@ -58,7 +58,14 @@ assert_jq "$q" '.success == true' "attest query succeeds"
 assert_jq "$q" '.data.schema == "ee.attest.v1"' "query bundle carries the v1 schema"
 assert_jq "$q" '(.data.bundleHash // "") | startswith("blake3:")' \
     "query bundle carries a blake3 bundleHash"
-assert_jq "$q" '(.data.rawTextIncluded // false) == false' \
+# NOT `(.data.rawTextIncluded // false) == false` (bd-o8e1n). The jq alternative
+# operator substitutes its default when the left side is null OR false, so an
+# ABSENT field yielded `false` and PASSED. This is a privacy claim: if the field
+# is renamed, or dropped on a path where nothing is included, the assertion
+# silently becomes an assertion about nothing and reports green. Direct
+# comparison makes absence fail -- a privacy claim whose evidence is missing is
+# not a privacy claim, so the product has to show the field every time.
+assert_jq "$q" '.data.rawTextIncluded == false' \
     "query bundle is hash-only (rawTextIncluded false)"
 
 step "ee attest memory emits a bundle; it is deterministic"
@@ -72,7 +79,9 @@ h2="$(printf '%s' "$b2" | jq -r '.data.bundleHash // empty')"
 assert_eq "$h1" "$h2" "two attests of the same memory reproduce the identical bundleHash"
 
 step "the bundle is redaction-safe: zero secret leakage"
-assert_jq "$b1" '(.data.rawTextIncluded // false) == false' \
+# Direct comparison, not `// false` -- see the note above and bd-o8e1n. Absence
+# must fail here for the same reason: this is the redaction-safety claim.
+assert_jq "$b1" '.data.rawTextIncluded == false' \
     "memory bundle is redaction-safe (rawTextIncluded false)"
 leak_count="$(printf '%s' "$b1" | grep -c "$SECRET" || true)"
 assert_eq "$leak_count" "0" "raw secret never appears in the memory attestation bundle"
