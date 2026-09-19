@@ -162,3 +162,194 @@ fn memory_only_guard_retains_its_previous_budget_behavior() {
     assert_eq!(draft.used_tokens, 8);
     assert_eq!(draft.selection_audit.budget_used, 8);
 }
+
+fn graph_memory_id(number: u128) -> MemoryId {
+    MemoryId::from_uuid(uuid::Uuid::from_u128(number))
+}
+
+fn mixed_chain_draft() -> PackDraft {
+    let candidates = [
+        (
+            1,
+            "Use bounded worker retries with backoff.",
+            TrustClass::HumanExplicit,
+        ),
+        (
+            2,
+            "Disable every retry after a transient fault.",
+            TrustClass::AgentAssertion,
+        ),
+        (
+            3,
+            "Record the incident identifier before restarting the worker.",
+            TrustClass::LegacyImport,
+        ),
+    ]
+    .into_iter()
+    .map(|(number, content, class)| {
+        let memory_id = graph_memory_id(number);
+        PackCandidate::new(PackCandidateInput {
+            memory_id,
+            section: PackSection::ProceduralRules,
+            content: content.to_owned(),
+            estimated_tokens: 8,
+            relevance: UnitScore::parse(0.9).unwrap(),
+            utility: UnitScore::parse(0.5).unwrap(),
+            provenance: vec![
+                PackProvenance::new(ProvenanceUri::EeMemory(memory_id), "graph fixture").unwrap(),
+            ],
+            why: "worker recovery policy".to_owned(),
+        })
+        .unwrap()
+        .with_trust_signal(PackTrustSignal::new(class, None))
+    });
+    let mut draft = assemble_draft(
+        "worker recovery policy",
+        TokenBudget::new(128).unwrap(),
+        candidates,
+    )
+    .unwrap();
+    assert_eq!(draft.items.len(), 3);
+    let mut evidence = mixed_draft().evidence_items.into_iter().next().unwrap();
+    evidence.rank = 4;
+    draft.used_tokens += evidence.estimated_tokens;
+    draft.evidence_items.push(evidence);
+    draft.hash = Some("blake3:old-chain-pack".to_owned());
+    draft
+}
+
+fn chain_pairs() -> Vec<(String, String)> {
+    vec![
+        (
+            graph_memory_id(2).to_string(),
+            graph_memory_id(3).to_string(),
+        ),
+        (
+            graph_memory_id(1).to_string(),
+            graph_memory_id(2).to_string(),
+        ),
+    ]
+}
+
+#[test]
+fn graph_guard_retains_compatible_memory_and_native_evidence() {
+    let mut draft = mixed_chain_draft();
+    let evidence = draft.evidence_items.clone();
+    assert_eq!(draft.used_tokens, 41);
+    assert_eq!(draft.apply_contradiction_guard(&chain_pairs(), false), 1);
+    let selected: BTreeSet<_> = draft
+        .items
+        .iter()
+        .map(|item| item.memory_id.to_string())
+        .collect();
+    assert_eq!(
+        selected,
+        BTreeSet::from([
+            graph_memory_id(1).to_string(),
+            graph_memory_id(3).to_string()
+        ])
+    );
+    assert_eq!(draft.omitted.len(), 1);
+    assert_eq!(draft.omitted[0].memory_id, graph_memory_id(2));
+    assert_eq!(
+        draft.omitted[0].reason,
+        PackOmissionReason::ContradictionSuppressed
+    );
+    assert_eq!(draft.evidence_items, evidence);
+    assert_eq!(draft.used_tokens, 33);
+    assert_eq!(draft.selection_audit.selected_count, 2);
+    assert_eq!(draft.selection_audit.budget_used, 33);
+    assert!(draft.hash.is_none());
+
+    let metrics = draft.quality_metrics();
+    assert_eq!(metrics.item_count, 3);
+    assert_eq!(metrics.used_tokens, 33);
+    assert_eq!(
+        metrics
+            .sections
+            .iter()
+            .map(|section| section.used_tokens)
+            .sum::<u32>(),
+        33
+    );
+}
+
+#[test]
+fn graph_guard_public_draft_is_identical_for_equivalent_pair_inputs() {
+    let initial = mixed_chain_draft();
+    let mut expected = initial.clone();
+    expected.apply_contradiction_guard(&chain_pairs(), false);
+    let mut reversed = chain_pairs();
+    reversed.reverse();
+    let flipped: Vec<_> = chain_pairs().into_iter().map(|(a, b)| (b, a)).collect();
+    let mut noisy = reversed.clone();
+    noisy.extend(flipped.clone());
+    noisy.push((
+        graph_memory_id(1).to_string(),
+        graph_memory_id(1).to_string(),
+    ));
+    noisy.push((
+        initial.evidence_items[0].evidence_id.clone(),
+        graph_memory_id(3).to_string(),
+    ));
+    noisy.push((
+        format!(" {} ", graph_memory_id(1)),
+        format!(" {} ", graph_memory_id(2)),
+    ));
+    for variant in [reversed, flipped, noisy] {
+        let mut actual = initial.clone();
+        assert_eq!(actual.apply_contradiction_guard(&variant, false), 1);
+        assert_eq!(
+            actual, expected,
+            "selection, omissions, audit and evidence must agree"
+        );
+    }
+}
+
+#[test]
+fn graph_guard_is_idempotent_after_preserving_a_compatible_member() {
+    let mut draft = mixed_chain_draft();
+    assert_eq!(draft.apply_contradiction_guard(&chain_pairs(), false), 1);
+    let once = draft.clone();
+    assert_eq!(draft.apply_contradiction_guard(&chain_pairs(), false), 0);
+    assert_eq!(draft, once);
+    assert_eq!(draft.used_tokens, 33);
+}
+
+#[test]
+fn malformed_self_conflicts_cannot_delete_a_selected_memory() {
+    let mut draft = mixed_draft();
+    let before = draft.clone();
+    let id = graph_memory_id(1).to_string();
+    assert_eq!(
+        draft.apply_contradiction_guard(&[(id.clone(), id)], false),
+        0
+    );
+    assert_eq!(draft, before);
+}
+
+#[test]
+fn forced_graph_conflicts_preserve_the_original_draft() {
+    let mut draft = mixed_chain_draft();
+    let before = draft.clone();
+    assert_eq!(draft.apply_contradiction_guard(&chain_pairs(), true), 0);
+    assert_eq!(draft, before);
+}
+
+#[test]
+fn graph_guard_uses_trust_not_canonical_detector_order() {
+    let mut draft = mixed_chain_draft();
+    for item in &mut draft.items {
+        if item.memory_id == graph_memory_id(1) {
+            item.trust = PackTrustSignal::new(TrustClass::LegacyImport, None);
+        } else if item.memory_id == graph_memory_id(3) {
+            item.trust = PackTrustSignal::new(TrustClass::HumanExplicit, None);
+        }
+    }
+    let mut edges = chain_pairs();
+    edges.sort();
+    assert_eq!(draft.apply_contradiction_guard(&edges, false), 1);
+    assert_eq!(draft.items.len(), 2);
+    assert_eq!(draft.omitted[0].memory_id, graph_memory_id(2));
+    assert_eq!(draft.used_tokens, 33);
+}

@@ -8,7 +8,7 @@ use tiktoken_rs::{CoreBPE, cl100k_base};
 
 use crate::cache::{CacheBudget, MemoryPressure, assess_pressure};
 use crate::config::MeshCommandMode;
-use crate::core::contradiction_guard::{GuardedMemory, decide_contradiction_survivor};
+use crate::core::contradiction_guard::{GuardedMemory, decide_contradiction_suppressions};
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
 };
@@ -2163,12 +2163,12 @@ impl PackDraft {
         self.items.is_empty() && self.evidence_items.is_empty()
     }
 
-    /// bd-1n0np.7.5 — pack-time contradiction guard. Drops the lower-standing
-    /// side of each unresolved hard-contradiction pair among the selected items,
-    /// recording it as a [`PackOmissionReason::ContradictionSuppressed`] omission,
-    /// so a pack never carries both sides of an unresolved contradiction.
+    /// bd-1n0np.7.5 — pack-time contradiction guard. Keeps a maximal conflict-free
+    /// subset in standing order, recording suppressed neighbors as
+    /// [`PackOmissionReason::ContradictionSuppressed`] omissions. Every suppression
+    /// has a retained witness; detector pair order cannot change the selection.
     /// Standing is higher trust class, then better (lower) selection rank, then a
-    /// deterministic id tie-break (via [`decide_contradiction_survivor`]). A no-op
+    /// deterministic id tie-break (via [`decide_contradiction_suppressions`]). A no-op
     /// in `forced` mode (the caller surfaces both sides under a `## Contradictions`
     /// header instead). `unresolved_pairs` come from the 7.2 detector minus 7.4
     /// resolutions. Returns the number of items suppressed.
@@ -2180,33 +2180,22 @@ impl PackDraft {
         if forced || unresolved_pairs.is_empty() || self.items.len() < 2 {
             return 0;
         }
-        let standing: std::collections::BTreeMap<String, GuardedMemory> = self
+        let standing: Vec<GuardedMemory> = self
             .items
             .iter()
-            .map(|item| {
-                let id = item.memory_id.to_string();
-                (
-                    id.clone(),
-                    GuardedMemory {
-                        memory_id: id,
-                        trust_milli: trust_class_rank_milli(item.trust.class),
-                        // Lower selection rank = stronger standing -> higher key.
-                        freshness_epoch: -i64::from(item.rank),
-                    },
-                )
+            .map(|item| GuardedMemory {
+                memory_id: item.memory_id.to_string(),
+                trust_milli: trust_class_rank_milli(item.trust.class),
+                // Lower selection rank = stronger standing -> higher key.
+                freshness_epoch: -i64::from(item.rank),
             })
             .collect();
 
-        let mut suppressed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for (a, b) in unresolved_pairs {
-            if suppressed.contains(a) || suppressed.contains(b) {
-                continue;
-            }
-            let (Some(ga), Some(gb)) = (standing.get(a), standing.get(b)) else {
-                continue;
-            };
-            suppressed.insert(decide_contradiction_survivor(ga, gb).suppressed_memory_id);
-        }
+        let suppressed: BTreeSet<String> =
+            decide_contradiction_suppressions(&standing, unresolved_pairs)
+                .into_iter()
+                .map(|decision| decision.suppressed_memory_id)
+                .collect();
         if suppressed.is_empty() {
             return 0;
         }
