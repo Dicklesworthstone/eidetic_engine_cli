@@ -1,0 +1,173 @@
+name: Scoped read-only MCP answers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/mcp-ask-20260918.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp-ask-delivery
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - name: Bind the reviewed adapter into the existing MCP owner
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          path = Path('src/mcp.rs')
+          source = path.read_text()
+          replacements = {
+              'ask_tool_schema': '''fn ask_tool_schema() -> Value {
+              ask::schema()
+          }''',
+              'build_ask_tool_args': '''fn build_ask_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+              ask::build_args(args, arguments)
+          }''',
+          }
+          # Each reviewed function ends at a column-zero brace. JSON and Rust
+          # nested blocks in these functions are indented. Refuse multiple or
+          # missing definitions and verify distinctive original-body anchors.
+          guards = {
+              'ask_tool_schema': ['"required": ["question"]', '"requireConfidence"', '"limitEvidence"'],
+              'build_ask_tool_args': ['push_arg(args, "ask");', 'required_string(arguments, &["question"])', '"--require-confidence"'],
+          }
+          for name, replacement in replacements.items():
+              pattern = re.compile(r'^fn ' + name + r'\([^\n]*\)[^\n]*\{\n.*?^\}', re.M | re.S)
+              matches = list(pattern.finditer(source))
+              if len(matches) != 1:
+                  raise SystemExit(f'Expected one {name} definition; no files changed')
+              match = matches[0]
+              old = match.group()
+              if old.strip() == replacement.strip():
+                  continue
+              if not all(anchor in old for anchor in guards[name]):
+                  raise SystemExit(f'{name} changed concurrently; no files changed')
+              # A new scope/read-only implementation deserves manual merging,
+              # not replacement by this narrow reviewed integration.
+              if any(word in old for word in ['memoryScope', 'readOnly', '"--path"']):
+                  raise SystemExit(f'{name} already has constraint handling; review required')
+              source = source[:match.start()] + replacement + source[match.end():]
+          module = '#[path = "mcp_ask.rs"]\nmod ask;\n\n'
+          anchor = 'pub const SUBSYSTEM: &str = "mcp";'
+          if module not in source:
+              if source.count(anchor) != 1 or re.search(r'^mod ask;', source, re.M):
+                  raise SystemExit('MCP module anchor changed; no files changed')
+              source = source.replace(anchor, module + anchor, 1)
+          old_description = 'Run ee ask --json for extractive answers; abstention stays in the response payload'
+          new_description = 'Read-only extractive answers from scoped memories, native rules and admitted transcripts; supports literal task paths'
+          if old_description in source:
+              if source.count(old_description) != 1:
+                  raise SystemExit('Ambiguous ask descriptor; no files changed')
+              source = source.replace(old_description, new_description, 1)
+          elif new_description not in source:
+              raise SystemExit('Ask descriptor changed; no files changed')
+          adapter = Path('src/mcp_ask.rs')
+          adapter_text = adapter.read_text()
+          tests = '\n#[cfg(test)]\n#[path = "mcp_ask_live_tests.rs"]\nmod live_tests;\n'
+          if 'mod live_tests;' not in adapter_text:
+              adapter_text += tests
+          elif tests.strip() not in adapter_text:
+              raise SystemExit('Live test registration changed; no files changed')
+          path.write_text(source)
+          adapter.write_text(adapter_text)
+          PY
+          rustfmt --edition 2024 --config skip_children=true src/mcp.rs src/mcp_ask.rs src/mcp_ask_live_tests.rs
+          git diff --check
+          git diff --stat
+          git diff > "$RUNNER_TEMP/mcp-ask-integration.patch"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: mcp-ask-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            mcp-ask-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+            ask-paths-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+            ask-semantic-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+      - name: Compile production MCP and CLI
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --locked --features mcp --lib --bin ee 2>&1 | tee "$RUNNER_TEMP/mcp-ask-check.log"
+      - name: Resolve the tested path feature before protocol acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge --ff-only origin/main
+          grep -q 'pub fn load_ask_corpus_for_paths(' src/core/ask_corpus.rs
+          grep -q 'load_ask_corpus_for_paths(' src/cli/mod.rs
+      - name: Test strict argument mapping
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --features mcp --lib mcp::ask::tests:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mcp-ask-arguments.log"
+          grep -Eq 'test result: ok\. 12 passed; 0 failed' "$RUNNER_TEMP/mcp-ask-arguments.log"
+      - name: Test real JSON-RPC dispatch and no-write store contracts
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --features mcp --lib mcp::ask::live_tests:: -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/mcp-ask-live.log"
+          grep -Eq 'test result: ok\. 6 passed; 0 failed' "$RUNNER_TEMP/mcp-ask-live.log"
+      - name: Commit verified MCP integration directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- src/mcp.rs src/mcp_ask.rs src/mcp_ask_live_tests.rs
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat(mcp): expose scoped native ask with literal paths and enforced read-only semantics' -m 'Route every MCP ask constraint through the shared CLI. Preserve scope, path bytes, native citations and live rule revisions; reject ambiguous/unknown constraints and option-like positional injection. Read-only annotations now match execution, including errors and abstentions. Production MCP/CLI check, twelve adapter tests and six real JSON-RPC/store tests passed before this commit.'
+            published=false
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then published=true; break; fi
+              git fetch origin main
+              git merge --no-edit origin/main
+            done
+            test "$published" = true
+          fi
+          git rev-parse HEAD | tee "$RUNNER_TEMP/mcp-ask-source.log"
+      - name: Run existing MCP unit regressions
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --features mcp --lib mcp::tests:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mcp-ask-existing.log"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: scoped-mcp-ask-verification
+          path: |
+            ${{ runner.temp }}/mcp-ask-*.log
+            ${{ runner.temp }}/mcp-ask-*.patch
+          retention-days: 7
