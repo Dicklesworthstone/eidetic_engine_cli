@@ -54,16 +54,22 @@ jobs:
           echo "da3b52063de184cb13c1fea828e31f844cd0e264dc17ad5b22d63b2c4b92433b  $RUNNER_TEMP/arc.patch" | sha256sum --check
           base64 --decode scripts/delivery/session-arc-20260919/complete-loop.patch.xz.b64 | xz --decompress > "$RUNNER_TEMP/arc-complete.patch"
           echo "3a62787a4f27da037fd7c55a098ee08434ce488205cb71e5ed2b840815f9448c  $RUNNER_TEMP/arc-complete.patch" | sha256sum --check
+          contract=scripts/delivery/session-arc-20260919/preview-contract.patch
+          echo "3ed003964db8915b91ecbbb1d66cc4ec0d2fea4a18ea933143d439c1aa60da61  $contract" | sha256sum --check
           if ! test -f src/core/curate_session_arc.rs; then
             test "$(git rev-parse HEAD:src/core/curate.rs)" = 6dbbefaae061e74ccea8328bf0d8f912a904ab2a
             test "$(git rev-parse HEAD:src/curate/mod.rs)" = 4c7ad95abe69627a929ee53612ddd9ac3653ab64
             test "$(git rev-parse HEAD:scripts/e2e_capture.sh)" = 7b4e978553dbc7de0dfb9c28cc3a1944582e2875
+            test "$(git rev-parse HEAD:docs/schemas/ee.curate.show.v1.json)" = 1588bb2728153ec5a22e1c138a943505b518db91
+            test "$(git rev-parse HEAD:tests/docs_schemas_match_responses.rs)" = 59a1a98981b167101c0f77aba88ca2f7fc890930
             git apply --check --whitespace=error-all "$RUNNER_TEMP/arc.patch"
             git apply "$RUNNER_TEMP/arc.patch"
             git apply --check --whitespace=error-all "$RUNNER_TEMP/arc-complete.patch"
             git apply "$RUNNER_TEMP/arc-complete.patch"
+            git apply --check --whitespace=error-all "$contract"
+            git apply "$contract"
           fi
-          rustfmt --edition 2024 --config skip_children=true src/core/curate.rs src/core/curate_session_arc.rs src/core/curate_session_arc_tests.rs src/curate/mod.rs tests/session_arc_learning_cli.rs
+          rustfmt --edition 2024 --config skip_children=true src/core/curate.rs src/core/curate_session_arc.rs src/core/curate_session_arc_tests.rs src/curate/mod.rs tests/session_arc_learning_cli.rs tests/docs_schemas_match_responses.rs
           bash -n scripts/e2e_capture.sh
           # Cargo autodiscovery is disabled; make the real-binary scenarios
           # an explicit target in the same transaction as their source file.
@@ -94,6 +100,9 @@ jobs:
           cargo test --locked --test session_arc_learning_cli -- --test-threads=2 > "$RUNNER_TEMP/arc-cli.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/arc-cli.log"; exit 1; }
           tail -n 100 "$RUNNER_TEMP/arc-cli.log"
           grep -Fq 'test result: ok. 2 passed; 0 failed;' "$RUNNER_TEMP/arc-cli.log"
+          cargo test --locked --test integration_a_d docs_schemas_match_responses::curate_show_report_matches_schema -- --exact --test-threads=2 > "$RUNNER_TEMP/arc-schema.log" 2>&1 || { tail -n 140 "$RUNNER_TEMP/arc-schema.log"; exit 1; }
+          tail -n 80 "$RUNNER_TEMP/arc-schema.log"
+          grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/arc-schema.log"
       - name: Publish tested source directly to main
         run: |
           set -euo pipefail
@@ -103,7 +112,7 @@ jobs:
           name: Source-backed session arc learning (delivered)
           # One-time source delivery completed with all-target compilation,
           # thirteen learning-loop regressions, two real-binary CLI scenarios,
-          # existing review coverage and ordinary ownership/drift negatives.
+          # strict JSON preview compatibility, review coverage and ownership/drift negatives.
           # Kept as an inert receipt: no push trigger or write permission.
           on:
             workflow_dispatch:
@@ -132,13 +141,13 @@ jobs:
               steps:
                 - run: echo 'Source delivery is complete; consult this workflow history for execution results.'
           RECEIPT
-          files=(Cargo.toml src/core/curate.rs src/core/curate_session_arc.rs src/core/curate_session_arc_tests.rs src/curate/mod.rs tests/session_arc_learning_cli.rs scripts/e2e_capture.sh "$workflow" .github/workflows/contradiction-graph-20260919.yml)
+          files=(Cargo.toml src/core/curate.rs src/core/curate_session_arc.rs src/core/curate_session_arc_tests.rs src/curate/mod.rs tests/session_arc_learning_cli.rs scripts/e2e_capture.sh docs/schemas/ee.curate.show.v1.json tests/docs_schemas_match_responses.rs "$workflow" .github/workflows/contradiction-graph-20260919.yml)
           git diff --check
           git add -- "${files[@]}"
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(curate): learn linked failure and repair pairs from admitted session evidence' -m 'Recognize ordered arcs within one CASS window without inventing line provenance, reject negative/overlapping repairs, preserve complete pairs under limits, and report both capture lesson kinds correctly. Queue proposals atomically. Permit evidence sharing only with an exact source-reconstructed, reciprocally paired, explicitly applied live peer; keep the original evidence owner and record a typed related edge and audit in the same transaction. Preview shared ownership and the graph link before mutation. Carry concrete risk/mitigation and canonical CASS provenance without lowering specificity requirements. Preserve independent approval, dry runs, idempotent replay, and rollback. All-target compilation, thirteen learning regressions, two real-binary CLI scenarios, existing review-session tests, canonical-provenance specificity and ordinary evidence-ownership negatives passed before publication.'
+            git commit -m 'feat(curate): learn linked failure and repair pairs from admitted session evidence' -m 'Recognize ordered arcs within one CASS window without inventing line provenance, reject negative/overlapping repairs, preserve complete pairs under limits, and report both capture lesson kinds correctly. Queue proposals atomically. Permit evidence sharing only with an exact source-reconstructed, reciprocally paired, explicitly applied live peer; keep the original evidence owner and record a typed related edge and audit in the same transaction. Preview shared ownership and the graph link before mutation. Carry concrete risk/mitigation and canonical CASS provenance without lowering specificity requirements. Preserve independent approval, dry runs, idempotent replay, and rollback. All-target compilation, thirteen learning regressions, two real-binary CLI scenarios, strict JSON preview-schema compatibility, existing review-session tests, canonical-provenance specificity and ordinary evidence-ownership negatives passed before publication.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
