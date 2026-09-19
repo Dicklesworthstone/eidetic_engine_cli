@@ -1,0 +1,120 @@
+name: Deterministic contradiction graph integration
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/contradiction-graph-20260919/**
+      - .github/workflows/contradiction-graph-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: contradiction-graph-delivery
+  cancel-in-progress: false
+jobs:
+  integrate-and-verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Retain inspected source identity
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/guard-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/guard-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: contradiction-graph-inspection-source
+          path: |
+            ${{ runner.temp }}/guard-source.tar.gz
+            ${{ runner.temp }}/guard-source-sha.log
+          retention-days: 7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: contradiction-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            contradiction-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            rule-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            diagnostic-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            snapshot-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Integrate and execute real Rust guard regressions
+        run: |
+          set -euo pipefail
+          base=$(git rev-parse HEAD)
+          delivery=scripts/delivery/contradiction-graph-20260919
+          base64 --decode "$delivery/pack.patch.xz.b64" | xz --decompress > "$RUNNER_TEMP/guard-pack.patch"
+          echo "a76c05b13a969df247522b2e1e48d982800c5ac3f70f4c7aa6be65b4e480ebb6  $RUNNER_TEMP/guard-pack.patch" | sha256sum --check
+          if ! grep -Fq 'decide_contradiction_suppressions(&standing, unresolved_pairs)' src/pack/mod.rs; then
+            test "$(git rev-parse HEAD:src/pack/mod.rs)" = f0ca6561bcfc591d7da06cc1dd3a5f6fad1fd420
+            test "$(git rev-parse HEAD:src/pack/native_evidence_guard_tests.rs)" = 28f7306ac823f892d944fb24c6fc390f4adeb560
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/guard-pack.patch"
+            git apply "$RUNNER_TEMP/guard-pack.patch"
+          fi
+          files=(src/core/contradiction_guard.rs src/core/contradiction_guard_graph_tests.rs src/pack/mod.rs src/pack/native_evidence_guard_tests.rs)
+          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+          rustc --edition 2024 --test src/core/contradiction_guard.rs -o "$RUNNER_TEMP/guard-core-tests"
+          "$RUNNER_TEMP/guard-core-tests" > "$RUNNER_TEMP/guard-core.log" 2>&1
+          cat "$RUNNER_TEMP/guard-core.log"
+          grep -Fq 'test result: ok. 12 passed; 0 failed;' "$RUNNER_TEMP/guard-core.log"
+          verify() {
+            cargo check --locked --all-targets > "$RUNNER_TEMP/guard-check.log" 2>&1 || { tail -n 100 "$RUNNER_TEMP/guard-check.log"; return 1; }
+            cargo test --locked --lib pack::native_evidence_guard_tests -- --test-threads=2 > "$RUNNER_TEMP/guard-pack.log" 2>&1 || { tail -n 120 "$RUNNER_TEMP/guard-pack.log"; return 1; }
+            tail -n 80 "$RUNNER_TEMP/guard-pack.log"
+            grep -Fq 'test result: ok. 12 passed; 0 failed;' "$RUNNER_TEMP/guard-pack.log"
+            cargo test --locked --lib contradiction_guard -- --test-threads=2 > "$RUNNER_TEMP/guard-regressions.log" 2>&1 || { tail -n 120 "$RUNNER_TEMP/guard-regressions.log"; return 1; }
+            tail -n 80 "$RUNNER_TEMP/guard-regressions.log"
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/guard-regressions.log"
+          }
+          verify
+          git diff --check
+          git add -- "${files[@]}"
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'fix(pack): apply deterministic conflict-graph selection to context packs' -m 'Wire the graph decision core into production packing so suppressed memories cannot suppress compatible neighbors. Preserve trust, rank, forced disclosure, native evidence and exact token accounting. Add six mixed-pack regressions and format the eight graph regressions. All-target compilation, twelve standalone core tests, twelve mixed-pack tests and the existing contradiction-guard regression group passed before publication.'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${files[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+              verify
+            done
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/guard-integrated-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/guard-integrated-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: contradiction-graph-rust-results
+          path: |
+            ${{ runner.temp }}/guard-*.log
+            ${{ runner.temp }}/guard-integrated-source.tar.gz
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
