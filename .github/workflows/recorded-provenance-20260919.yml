@@ -1,9 +1,10 @@
-name: Recover recorded and causal evidence fidelity
+name: Verify recorded and causal recovery boundaries
 on:
   push:
     branches: [main]
     paths:
-      - scripts/delivery/recorded-provenance-20260919.tar.xz.b64
+      - scripts/delivery/recorder-fixture-repair-20260919.patch
+      - src/core/backup_fault_injection_tests.rs
       - .github/workflows/recorded-provenance-20260919.yml
   workflow_dispatch:
 permissions:
@@ -29,68 +30,49 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
-      - name: Publish two preserved implementation increments
+      - name: Repair test setup without relaxing recovery rejection
         id: publish
         run: |
           set -euo pipefail
           export RUSTUP_TOOLCHAIN=nightly-2026-08-31
           base=$(git rev-parse HEAD)
-          scratch=$(mktemp -d "$RUNNER_TEMP/recorded-fidelity.XXXXXX")
-          base64 --decode scripts/delivery/recorded-provenance-20260919.tar.xz.b64 > "$scratch/patches.tar.xz"
-          echo "0a7731a9e14ed13133cd0687a1665df57849a6a5aeb52ec8320c57b4aa73db27  $scratch/patches.tar.xz" | sha256sum --check
-          tar -xJf "$scratch/patches.tar.xz" -C "$scratch"
-          echo "1a6e5d412a649cc960ba9060d309cb72df8cc454dd8886e73e65c4a88ae4d0fa  $scratch/01.patch" | sha256sum --check
-          echo "c44e578c1616de1df7186fd6d69c5cfe53cad19611a334a4eb799b448e2b46aa  $scratch/02.patch" | sha256sum --check
-          files=(src/core/backup.rs src/core/backup_history_recovery.rs)
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          publish() {
-            rustfmt --edition 2024 --config skip_children=true "${files[@]}"
-            git diff --check
-            git add -- "${files[@]}"
-            if ! git diff --cached --quiet; then
-              git commit -m "$1" -m 'Recovered the preserved implementation and real-store regression tests. Patch integrity, application and Rust formatting checked. Current-source compilation and runtime results are reported by the separate verification job, not claimed by this commit.'
-              for attempt in 1 2 3 4; do
-                if git push origin HEAD:main; then break; fi
-                test "$attempt" -lt 4
-                git fetch origin main
-                git diff --exit-code "$base" origin/main -- "${files[@]}"
-                git merge --no-edit origin/main
-                base=$(git rev-parse origin/main)
-              done
-            fi
-            base=$(git rev-parse HEAD)
-          }
-          if ! grep -Fq 'fn capture_recorded_history(' src/core/backup_history_recovery.rs; then
-            test "$(git rev-parse HEAD:src/core/backup.rs)" = 5dc329d7906a55e992c92eeb8308e6cfcda350c2
-            test "$(git rev-parse HEAD:src/core/backup_history_recovery.rs)" = e4a5bb904181d3c4a7cfe8ec4950d52dcfab6a5e
-            git apply --check --whitespace=error-all "$scratch/01.patch"
-            git apply "$scratch/01.patch"
-            # Preserve our own unformatted intermediate so patch 2 keeps its
-            # original context after the independently formatted first commit.
-            cp src/core/backup.rs "$scratch/backup.rs"
-            cp src/core/backup_history_recovery.rs "$scratch/backup_history_recovery.rs"
-            publish 'fix(backup): preserve recorder chains and historical verification results'
-            cp "$scratch/backup.rs" src/core/backup.rs
-            cp "$scratch/backup_history_recovery.rs" src/core/backup_history_recovery.rs
-            git apply --check --whitespace=error-all "$scratch/02.patch"
-            git apply "$scratch/02.patch"
-            publish 'fix(backup): preserve causal explanations and harmful repair lineage'
-          else
-            grep -Fq 'fn capture_provenance_history(' src/core/backup_history_recovery.rs
-            grep -Fq 'fn provenance_recovery_survives_rebackup_without_rejudging_evidence()' src/core/backup.rs
+          patch=scripts/delivery/recorder-fixture-repair-20260919.patch
+          echo "9fff8e55f27edac18c4ff2b36c3c7a31580e0ea471024a01a815d4e5882aef89  $patch" | sha256sum --check
+          if ! grep -Fq 'recovery_faults::inject_history_corruption(&db, table, sql)' src/core/backup.rs; then
+            git apply --check --whitespace=error-all "$patch"
+            git apply "$patch"
+          fi
+          files=(src/core/backup.rs src/core/backup_fault_injection_tests.rs)
+          if test -f src/core/backup_operational_recovery_tests.rs; then
+            python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/core/backup_operational_recovery_tests.rs')
+          text = p.read_text()
+          old = 'db.execute_raw(sql).map_err(work_history_error)?;'
+          new = 'crate::core::backup::recovery_faults::inject_history_corruption(&db, table, sql)?;'
+          if new not in text:
+              assert text.count(old) == 1
+              p.write_text(text.replace(old, new))
+          PY
+            files+=(src/core/backup_operational_recovery_tests.rs)
+          fi
+          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+          git diff --check
+          git add -- "${files[@]}"
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'test(backup): exercise recovery corruption below append-only guards' -m 'Keep the public rationale insertion outside an already-open fixture transaction. For recorder and audit corruption, prove the engine rejects the change, inject in a disposable test transaction, reinstate the exact compiled trigger and prove enforcement again. Retain all count, content, refusal, privacy and source-immutability assertions. Runtime results are reported separately.'
+            for attempt in 1 2 3 4; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 4
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${files[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
           fi
           echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          git rev-parse HEAD > "$RUNNER_TEMP/recorded-source-sha.log"
-          tar -czf "$RUNNER_TEMP/recorded-source.tar.gz" "${files[@]}"
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() }}
-        with:
-          name: recorded-provenance-source
-          path: |
-            ${{ runner.temp }}/recorded-source-sha.log
-            ${{ runner.temp }}/recorded-source.tar.gz
-          retention-days: 7
   verify:
     needs: integrate
     runs-on: ubuntu-latest
@@ -120,20 +102,21 @@ jobs:
           key: recorded-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
             recorded-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            operational-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-            contradiction-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Compile current source and all test targets
+      - name: Compile every target
         run: |
           set -euo pipefail
           git rev-parse HEAD | tee "$RUNNER_TEMP/recorded-identity.log"
           timeout 25m cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/recorded-check.log"
-      - name: Exercise corruption, repeated recovery and existing consumers
+      - name: Execute real-store corruption, repeated recovery and consumers
         run: |
           set -euo pipefail
           group() {
-            timeout 25m cargo test --locked --lib "$1" -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recorded-$3.log"
+            timeout 25m cargo test --locked --lib "$1" -- --test-threads=4 2>&1 | tee "$RUNNER_TEMP/recorded-$3.log"
             grep -Fq "test result: ok. $2 passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/recorded-$3.log"
           }
+          group core::backup::recovery_faults 1 fault-control
           group core::backup::recovery::history::tests 3 rows
           group core::backup::tests::recovery_rejects_ 6 corruption
           group core::backup::tests::recorded_recovery_survives_rebackup_without_changing_failed_evidence 1 recorded-roundtrip
