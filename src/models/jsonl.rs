@@ -1006,6 +1006,10 @@ pub struct ExportMemoryRecord {
     pub expires_at: Option<String>,
     pub source_agent: Option<String>,
     pub provenance_uri: Option<String>,
+    /// Revision supersession is independent of the author's temporal expiry.
+    /// Older archives may carry only `superseded_by` or legacy `valid_to`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_at: Option<String>,
     pub superseded_by: Option<String>,
     pub supersedes: Option<String>,
     pub redacted: bool,
@@ -1053,6 +1057,7 @@ pub struct ExportMemoryRecordBuilder {
     expires_at: Option<String>,
     source_agent: Option<String>,
     provenance_uri: Option<String>,
+    superseded_at: Option<String>,
     superseded_by: Option<String>,
     supersedes: Option<String>,
     redacted: bool,
@@ -1242,6 +1247,12 @@ impl ExportMemoryRecordBuilder {
     }
 
     #[must_use]
+    pub fn superseded_at(mut self, superseded_at: impl Into<String>) -> Self {
+        self.superseded_at = Some(superseded_at.into());
+        self
+    }
+
+    #[must_use]
     pub fn superseded_by(mut self, superseded_by: impl Into<String>) -> Self {
         self.superseded_by = Some(superseded_by.into());
         self
@@ -1318,6 +1329,7 @@ impl ExportMemoryRecordBuilder {
             expires_at: self.expires_at,
             source_agent: self.source_agent,
             provenance_uri: self.provenance_uri,
+            superseded_at: self.superseded_at,
             superseded_by: self.superseded_by,
             supersedes: self.supersedes,
             redacted: self.redacted,

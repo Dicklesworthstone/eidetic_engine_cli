@@ -24101,6 +24101,45 @@ impl DbConnection {
         }
     }
 
+    /// Capture exact revision supersession timestamps in the caller's export snapshot.
+    pub(crate) fn list_memory_supersession_markers(
+        &self,
+        workspace_id: &str,
+    ) -> Result<BTreeMap<String, String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, superseded_at FROM memories WHERE workspace_id = ?1 AND superseded_at IS NOT NULL ORDER BY id ASC",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        rows.iter()
+            .map(|row| {
+                Ok((
+                    required_text(row, 0, DbOperation::Query, "id")?.to_owned(),
+                    required_text(row, 1, DbOperation::Query, "superseded_at")?.to_owned(),
+                ))
+            })
+            .collect()
+    }
+
+    /// Restore the marker on a just-inserted imported revision, inside the
+    /// import transaction. Never change the author's expiry or bookkeeping
+    /// timestamps, and never overwrite an existing supersession decision.
+    pub(crate) fn restore_imported_memory_supersession(
+        &self,
+        id: &str,
+        superseded_at: &str,
+    ) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET superseded_at = ?1 WHERE id = ?2 AND superseded_at IS NULL",
+            &[
+                Value::Text(superseded_at.to_owned()),
+                Value::Text(id.to_owned()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
     /// Read revision identities in one query for a workspace export snapshot.
     pub(crate) fn list_memory_logical_ids(
         &self,

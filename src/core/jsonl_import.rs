@@ -4,6 +4,11 @@
 //! and imports memories, tags, and their relationships into the local workspace
 //! database. Other record families are counted but are not replayed here.
 
+#[path = "jsonl_recovery.rs"]
+pub(crate) mod recovery;
+#[path = "jsonl_revisions.rs"]
+mod revisions;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
@@ -605,6 +610,7 @@ struct PreparedMemory {
     updated_at: String,
     tombstoned_at: Option<String>,
     tombstoned_reason: Option<String>,
+    superseded_at: Option<String>,
     bayes_posterior: Option<(f64, f64)>,
     /// bd-multiplicity-aware-trust-p0u7g: attempt-family block restored into
     /// the pointer columns and the family ledger after the memory row lands.
@@ -622,6 +628,7 @@ struct ValidatedMemory<'a> {
     level: MemoryLevel,
     kind: MemoryKind,
     content: MemoryContent,
+    superseded_at: Option<String>,
     confidence: Option<f32>,
     utility: f32,
     importance: f32,
@@ -963,6 +970,15 @@ fn import_jsonl_records_with_policy(
                 &memory.updated_at,
                 &memory.logical_id,
             )?;
+            if let Some(at) = &memory.superseded_at {
+                if !connection.restore_imported_memory_supersession(&memory.id, at)? {
+                    return Err(DbError::MalformedRow {
+                        operation: DbOperation::Execute,
+                        message: "imported revision could not retain its supersession marker"
+                            .to_owned(),
+                    });
+                }
+            }
             if let Some((alpha, beta)) = memory.bayes_posterior {
                 connection.update_memory_bayes_posterior(&memory.id, alpha, beta)?;
             }
@@ -1347,7 +1363,12 @@ fn destination_lineage_issues(
         let chain_changed = existing_logical_id.as_deref() != Some(memory.logical_id.as_str());
         let fields_changed = revision_roots.contains(memory.logical_id.as_str())
             && reimport_conflict_issue(&existing, memory).is_some();
-        if chain_changed || fields_changed {
+        let supersession_changed = if let Some(expected) = &memory.superseded_at {
+            connection.get_memory_superseded_at(&memory.id)?.as_ref() != Some(expected)
+        } else {
+            false
+        };
+        if chain_changed || fields_changed || supersession_changed {
             issues.push(JsonlImportIssue::error(
                 None,
                 "reimport_divergent_revision_chain",
@@ -1992,6 +2013,16 @@ fn validate_memories(
         }
     }
     if issues.is_empty() {
+        match revisions::supersession_timestamps(&memories) {
+            Ok(markers) => {
+                for memory in &mut memories {
+                    memory.superseded_at = markers.get(&memory.record.memory_id).cloned();
+                }
+            }
+            Err(issue) => issues.push(issue),
+        }
+    }
+    if issues.is_empty() {
         let by_id = memories
             .iter()
             .map(|memory| (memory.record.memory_id.as_str(), memory))
@@ -2031,7 +2062,8 @@ fn validate_memories(
                     // so. The gate still refuses the thing it exists to refuse:
                     // two revisions in one chain that claim headship by
                     // carrying NO marker at all.
-                    let is_history = record.superseded_by.is_some()
+                    let is_history = memory.superseded_at.is_some()
+                        || record.superseded_by.is_some()
                         || record.valid_to.is_some()
                         || record.expires_at.is_some()
                         || record.tombstoned_at.is_some();
@@ -2133,6 +2165,7 @@ fn validate_memory(
         ("created_at", Some(memory.created_at.as_str())),
         ("updated_at", memory.updated_at.as_deref()),
         ("tombstoned_at", memory.tombstoned_at.as_deref()),
+        ("superseded_at", memory.superseded_at.as_deref()),
         ("valid_from", memory.valid_from.as_deref()),
         ("valid_to", memory.valid_to.as_deref()),
         ("expires_at", memory.expires_at.as_deref()),
@@ -2158,6 +2191,7 @@ fn validate_memory(
         level,
         kind,
         content,
+        superseded_at: None,
         confidence,
         utility,
         importance,
@@ -2296,6 +2330,7 @@ fn prepare_memory(
             .as_deref()
             .map(|raw| normalize_imported_timestamp(raw, TimestampClass::Row)),
         tombstoned_reason: memory.tombstoned_reason.clone(),
+        superseded_at: validated.superseded_at,
         bayes_posterior: validated.bayes_posterior,
         attempt_family: memory.attempt_family.clone(),
         details: json!({

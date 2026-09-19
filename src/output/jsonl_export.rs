@@ -634,6 +634,11 @@ pub fn redact_memory_record(
         if let Some(logical_id) = record.logical_id.as_mut() {
             *logical_id = redact_identifier(logical_id, level);
         }
+        for reference in [&mut record.superseded_by, &mut record.supersedes] {
+            if let Some(id) = reference.as_mut() {
+                *id = redact_identifier(id, level);
+            }
+        }
         record.workspace_id = redact_identifier(&record.workspace_id, level);
         if let Some(agent) = record.source_agent.as_ref() {
             record.source_agent = Some(redact_identifier(agent, level));

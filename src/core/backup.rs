@@ -6,6 +6,9 @@
 
 #[path = "backup_recovery.rs"]
 mod recovery;
+#[cfg(test)]
+#[path = "backup_revision_recovery_tests.rs"]
+mod revision_recovery_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -1215,6 +1218,7 @@ struct BackupExportData {
     logical_ids_by_memory: BTreeMap<String, String>,
     /// bd-tmv70: see `superseded_by_within_export`.
     superseded_by_by_memory: BTreeMap<String, String>,
+    superseded_at_by_memory: BTreeMap<String, String>,
     tags_by_memory: BTreeMap<String, Vec<String>>,
     links: Vec<StoredMemoryLink>,
     audits: Vec<StoredAuditEntry>,
@@ -3588,6 +3592,13 @@ fn verify_backup_manifest(
 pub fn restore_backup_to_side_path(
     options: &BackupRestoreOptions,
 ) -> Result<BackupRestoreReport, DomainError> {
+    restore_backup_to_side_path_with_verification_hook(options, |_| Ok(()))
+}
+
+fn restore_backup_to_side_path_with_verification_hook(
+    options: &BackupRestoreOptions,
+    before_verification: impl FnOnce(&Path) -> Result<(), DomainError>,
+) -> Result<BackupRestoreReport, DomainError> {
     let workspace_path = normalize_path(&options.workspace_path);
     let backup_path = normalize_backup_input_path(&options.backup_path)?;
     let side_path = normalize_restore_side_path(&options.side_path)?;
@@ -3897,7 +3908,14 @@ pub fn restore_backup_to_side_path(
     // A writer's success or a valid artifact checksum cannot prove that every
     // durable family landed. Reconcile the actual staged rows before derived
     // rebuilding can change job state and before the marker becomes visible.
+    before_verification(&restored_database_path)?;
     recovery_inventory.verify_database(&restored_database_path)?;
+    crate::core::jsonl_import::recovery::verify_backup_records(
+        &restored_database_path,
+        &restore_artifact_dir.join(RECORDS_FILE),
+        &side_path,
+        &restored_workspace.id,
+    )?;
 
     // Build from the complete restored corpus while it is still private.
     // Imported job history alone cannot make a missing lexical index usable,
@@ -5613,6 +5631,9 @@ fn load_export_data_in_current_snapshot(
     }
 
     let superseded_by_by_memory = superseded_by_within_export(&memories, &logical_ids_by_memory);
+    let superseded_at_by_memory = connection
+        .list_memory_supersession_markers(&workspace_row.id)
+        .map_err(work_history_error)?;
 
     Ok(BackupExportData {
         workspace_row,
@@ -5622,6 +5643,7 @@ fn load_export_data_in_current_snapshot(
         memories,
         logical_ids_by_memory,
         superseded_by_by_memory,
+        superseded_at_by_memory,
         tags_by_memory,
         links,
         audits,
@@ -5675,6 +5697,7 @@ fn render_records(
             // Without this the archive records no headship at all post-V123,
             // and restore cannot tell a superseded revision from the head.
             record.superseded_by = data.superseded_by_by_memory.get(&memory.id).cloned();
+            record.superseded_at = data.superseded_at_by_memory.get(&memory.id).cloned();
             exporter
                 .write_memory(record)
                 .map_err(io_error("write backup memory record"))?;
