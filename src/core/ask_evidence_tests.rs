@@ -383,18 +383,24 @@ fn linked_evidence_follows_parent_admission_without_hiding_unlinked_evidence() {
     let unlinked = evidence(&db, &workspace, &second_session, 2, BODY);
     let live = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
     assert_eq!(live.candidates.len(), 3);
-    assert_eq!(live.native_sources[&linked].source_memory_ids, vec![parent.clone()]);
+    assert_eq!(
+        live.native_sources[&linked].source_memory_ids,
+        vec![parent.clone()]
+    );
     for mutation in [
         "valid_to = '2000-01-01T00:00:00Z'",
+        "valid_from = '2999-01-01T00:00:00Z'",
         "tombstoned_at = '2000-01-01T00:00:00Z'",
         "content = 'password=private-parent-canary'",
     ] {
         db.execute_raw(&format!(
-            "UPDATE memories SET valid_to = NULL, tombstoned_at = NULL, content = '{BODY}' WHERE id = '{parent}'"
+            "UPDATE memories SET valid_from = '1990-01-01T00:00:00Z', valid_to = NULL, tombstoned_at = NULL, content = '{BODY}' WHERE id = '{parent}'"
         ))
         .unwrap();
-        db.execute_raw(&format!("UPDATE memories SET {mutation} WHERE id = '{parent}'"))
-            .unwrap();
+        db.execute_raw(&format!(
+            "UPDATE memories SET {mutation} WHERE id = '{parent}'"
+        ))
+        .unwrap();
         let withheld = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
         assert_eq!(withheld.candidates.len(), 1, "{mutation}");
         assert_eq!(withheld.candidates[0].memory_id, unlinked);
@@ -405,7 +411,7 @@ fn linked_evidence_follows_parent_admission_without_hiding_unlinked_evidence() {
         assert!(!output.contains("private-parent-canary"));
     }
     db.execute_raw(&format!(
-        "UPDATE memories SET valid_to = NULL, tombstoned_at = NULL, content = '{BODY}' WHERE id = '{parent}'"
+        "UPDATE memories SET valid_from = '1990-01-01T00:00:00Z', valid_to = NULL, tombstoned_at = NULL, content = '{BODY}' WHERE id = '{parent}'"
     ))
     .unwrap();
     let restored = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
@@ -434,7 +440,11 @@ fn concurrent_parent_revocation_obeys_the_owned_evidence_snapshot() {
     .unwrap();
     assert_eq!(pinned.candidates.len(), 2);
     assert!(pinned.native_sources.contains_key(&linked));
-    let excerpt = pinned.candidates.iter().find(|item| item.memory_id == linked).unwrap();
+    let excerpt = pinned
+        .candidates
+        .iter()
+        .find(|item| item.memory_id == linked)
+        .unwrap();
     assert_eq!(excerpt.confidence, 0.5);
     assert_eq!(excerpt.trust_class, "cass_evidence");
     let current = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
