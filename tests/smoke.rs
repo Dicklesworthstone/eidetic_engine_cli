@@ -7466,15 +7466,11 @@ fn memory_temporal_links_and_graph_outputs_compose() -> TestResult {
     let staged_rendered = serde_json::to_string(staged_suggestions)
         .unwrap_or_else(|error| format!("<unserializable: {error}>"));
     ensure(
-        staged_suggestions.iter().any(|suggestion| {
-            suggestion["relation"].as_str() == Some("co_tag")
-                && suggestion["target_memory_id"].as_str() == Some(current_id.as_str())
-                && suggestion["evidence_count"].as_u64() == Some(4)
-        }),
+        staged_suggestions.is_empty(),
         format!(
-            "remember should stage a deterministic co_tag suggestion without applying it; \
-             expected relation=co_tag target={current_id} evidence_count=4; staged {} \
-             suggestion(s): {staged_rendered}",
+            "`expired` shares ALL FOUR of its tags with `current`, so ADR 0051 auto-links it \
+             and the suggestion is correctly suppressed; staged {} suggestion(s): \
+             {staged_rendered}",
             staged_suggestions.len()
         ),
     )?;
@@ -7962,6 +7958,157 @@ fn memory_temporal_links_and_graph_outputs_compose() -> TestResult {
             },
             "firstFailure": graph_dossier_dir.join("first-failure.md").display().to_string()
         }),
+    )
+}
+
+/// ADR 0051's auto-link threshold, pinned from BOTH sides.
+///
+/// `memory_temporal_links_and_graph_outputs_compose` used to assert that a
+/// strong co-tag neighbour was STAGED without being APPLIED. That was true until
+/// ADR 0051 (docs/adr/0051-remember-cotag-auto-linking.md) made remember persist
+/// durable links for strong neighbours, after which the neighbour it named is
+/// auto-linked and therefore suppressed from suggestions by
+/// `src/core/memory.rs:6619`. The product is right; the expectation was stale.
+///
+/// The behaviour that assertion existed for is still real, but only BELOW the
+/// threshold. It lives here rather than in that fixture because that fixture
+/// asserts an exact whole-workspace link count (`seeded memory link count`, 4)
+/// and a `rememberSuggestionsMutatedLinks: false` invariant -- so adding a
+/// memory that auto-links by design would break two unrelated assertions and
+/// look like a graph regression rather than an insertion.
+///
+/// WHY THESE TAG SETS SIT WHERE THEY DO, recorded so a future threshold change
+/// fails loudly instead of silently reclassifying them:
+///
+///   co_tag_score(m, t) = min(0.55 + (m / t) * 0.4, 0.95)   src/core/memory.rs:6671
+///   auto-link fires at >= 0.75                             src/core/memory.rs:5551
+///     (REMEMBER_AUTO_COTAG_LINK_MIN_SCORE)
+///   => 0.55 + (m/t)*0.4 >= 0.75  <=>  m/t >= 0.5, i.e. "at least half of the
+///      new memory's tags overlap the neighbour" -- memory.rs:5546 says exactly
+///      that in prose, and this is the arithmetic behind it.
+///
+///   sub   shares ONLY `temporal`:               m=1, t=4 -> 0.25 -> score 0.65
+///   supra shares temporal+validity+composition: m=3, t=4 -> 0.75 -> score 0.85
+///
+/// Both sit 0.10 clear of 0.75 rather than astride it. A case landing exactly on
+/// `m/t == 0.5` would compute `0.55 + 0.2` in f32, which can fall either side of
+/// 0.75 on rounding -- a coin flip dressed as a boundary test.
+#[cfg(unix)]
+#[test]
+fn remember_cotag_threshold_separates_applied_links_from_staged_suggestions() -> TestResult {
+    let workspace = unique_artifact_dir("remember-cotag-threshold")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+
+    let init = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "init"])?;
+    ensure(
+        init.status.success(),
+        format!(
+            "init should succeed; stderr: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )?;
+
+    let remember = |content: &str, tags: &str| -> Result<serde_json::Value, String> {
+        let output = run_ee(&[
+            "--workspace",
+            workspace_arg.as_str(),
+            "--json",
+            "remember",
+            "--level",
+            "semantic",
+            "--kind",
+            "fact",
+            "--tags",
+            tags,
+            content,
+        ])?;
+        ensure(
+            output.status.success(),
+            format!(
+                "remember should succeed; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+        serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("remember stdout must be JSON: {error}"))
+    };
+
+    // The anchor every later memory is measured against.
+    remember(
+        "Anchor memory for the co-tag threshold boundary.",
+        "temporal,validity,composition,link-proof",
+    )?;
+
+    // BELOW the line: one shared tag out of four -> 0.65. Must be STAGED only.
+    let sub = remember(
+        "Sub-threshold co-tag neighbour: shares one tag in four.",
+        "temporal,cotag-sub-a,cotag-sub-b,cotag-sub-c",
+    )?;
+    let sub_suggested = sub["data"]["suggested_links"]
+        .as_array()
+        .ok_or_else(|| "sub-threshold suggested_links must be an array".to_string())?;
+    let sub_auto = sub["data"]["auto_links"]
+        .as_array()
+        .ok_or_else(|| "sub-threshold auto_links must be an array".to_string())?;
+    ensure(
+        sub_auto.is_empty(),
+        format!(
+            "a 1-of-4 overlap scores 0.65 and must NOT be auto-linked; auto_links: {}",
+            serde_json::to_string(sub_auto).unwrap_or_default()
+        ),
+    )?;
+    ensure(
+        !sub_suggested.is_empty()
+            && sub_suggested.iter().all(|suggestion| {
+                suggestion["relation"].as_str() == Some("co_tag")
+                    && suggestion["evidence_count"].as_u64() == Some(1)
+            }),
+        format!(
+            "a sub-threshold neighbour must be STAGED as co_tag with evidence_count 1 and never \
+             applied; staged {} suggestion(s): {}",
+            sub_suggested.len(),
+            serde_json::to_string(sub_suggested).unwrap_or_default()
+        ),
+    )?;
+
+    // ABOVE the line: three shared tags out of four -> 0.85. Must be APPLIED.
+    let supra = remember(
+        "Supra-threshold co-tag neighbour: shares three tags in four.",
+        "temporal,validity,composition,cotag-supra-a",
+    )?;
+    let supra_suggested = supra["data"]["suggested_links"]
+        .as_array()
+        .ok_or_else(|| "supra-threshold suggested_links must be an array".to_string())?;
+    let supra_auto = supra["data"]["auto_links"]
+        .as_array()
+        .ok_or_else(|| "supra-threshold auto_links must be an array".to_string())?;
+    ensure(
+        !supra_auto.is_empty(),
+        format!(
+            "a 3-of-4 overlap scores 0.85 and must BE auto-linked; suggested instead: {}",
+            serde_json::to_string(supra_suggested).unwrap_or_default()
+        ),
+    )?;
+
+    // The RELATIONSHIP, not the identities. Which tied neighbour wins the
+    // LIMIT-3 auto-link cut is a tie-break this test does not care about, so
+    // naming one would pin an ordering rather than the contract. What must hold
+    // is that nothing is both applied and staged -- which is exactly the filter
+    // at src/core/memory.rs:6619, asserted from the outside.
+    let applied_and_staged = supra_suggested
+        .iter()
+        .filter_map(|suggestion| suggestion["target_memory_id"].as_str())
+        .filter(|target| {
+            supra_auto
+                .iter()
+                .any(|link| link["target_memory_id"].as_str() == Some(*target))
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    ensure(
+        applied_and_staged.is_empty(),
+        format!("a target may be APPLIED or STAGED, never both; overlap: {applied_and_staged:?}"),
     )
 }
 
