@@ -7752,7 +7752,9 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
         if let Some(preparation) = embedder_preparation {
             run.performance
                 .record_duration("search::embedderPrepare", preparation.elapsed);
-            run.report.embed_backend = preparation.backend;
+            if run.report.source_mode_applied.uses_embeddings() {
+                run.report.embed_backend = preparation.backend;
+            }
         }
         run.report.elapsed_ms = total_start.elapsed().as_secs_f64() * 1000.0;
         // bd-l8dn0. Record this retrieval. The pack path (`retrieval_only`) is
@@ -7803,7 +7805,9 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     if let Some(preparation) = embedder_preparation {
         run.performance
             .record_duration("search::embedderPrepare", preparation.elapsed);
-        run.report.embed_backend = preparation.backend;
+        if run.report.source_mode_applied.uses_embeddings() {
+            run.report.embed_backend = preparation.backend;
+        }
     }
     run.report.elapsed_ms = total_start.elapsed().as_secs_f64() * 1000.0;
     Ok(run)
@@ -9310,7 +9314,22 @@ async fn run_search_inner_with_performance(
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     match search_result {
-        Ok((mut raw_hits, retrieval_degraded)) => {
+        Ok(retrieval) => {
+            let source_mode = retrieval.resolve_mode(
+                options.source_mode,
+                options.strict_source_mode,
+                source_mode,
+            )?;
+            let embed_backend = if source_mode.applied.uses_embeddings() {
+                embed_backend
+            } else {
+                EmbedBackend::HashFallback
+            };
+            let runtime_fallback::Retrieval {
+                hits: mut raw_hits,
+                degraded: retrieval_degraded,
+                ..
+            } = retrieval;
             degraded.extend(retrieval_degraded);
             // Bead bd-17c65.2.3 (B3): dedupe on docId BEFORE the floor
             // filter so the floor metrics reflect the deduped pool.
@@ -9594,7 +9613,9 @@ async fn run_search_inner_with_performance(
                 performance: trace,
             })
         }
-        Err(SearchError::Cancelled(reason)) => Err(SearchError::Cancelled(reason)),
+        Err(error @ (SearchError::Cancelled(_) | SearchError::SourceModeUnavailable { .. })) => {
+            Err(error)
+        }
         Err(error) => {
             let e = error.to_string();
             let mut degraded = degraded;
@@ -10818,6 +10839,9 @@ fn invalidate_cached_index_status_for_search(options: &SearchOptions, index_dir:
 #[path = "search_diagnostic_snapshot.rs"]
 mod diagnostic_snapshot;
 
+#[path = "search_runtime_fallback.rs"]
+mod runtime_fallback;
+
 #[path = "search_rule_admission.rs"]
 mod rule_admission;
 
@@ -11577,7 +11601,11 @@ async fn global_store_frankensearch_hits(
     trace.record_elapsed("search::globalRetrieve", global_search_start);
     #[cfg(unix)]
     drop(generation_lease);
-    let (raw_hits, retrieval_degraded) = match search_result {
+    let runtime_fallback::Retrieval {
+        hits: raw_hits,
+        degraded: retrieval_degraded,
+        ..
+    } = match search_result {
         Ok(result) => result,
         Err(error) => {
             degraded.push(SearchDegradation::global_index_unavailable(
@@ -12158,6 +12186,7 @@ fn search_sync(
         .await
     })
     .map_err(|error| error.to_string())?
+    .map(|retrieval| (retrieval.hits, retrieval.degraded))
     .map_err(|error| error.to_string())
 }
 
@@ -12175,7 +12204,7 @@ async fn search_sync_with_performance(
     fusion_weights: SearchFusionWeights,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
     trace: &mut SearchPerformanceTrace,
-) -> Result<(Vec<SearchHit>, Vec<SearchDegradation>), SearchError> {
+) -> Result<runtime_fallback::Retrieval, SearchError> {
     search_checkpoint(cx)?;
     #[cfg(unix)]
     let _generation_lease = pin_search_generation(cx, index_dir).await?;
@@ -12205,10 +12234,8 @@ async fn search_sync_with_performance(
         seed_hash = %rerank_seed.seed_hash_prefix(),
         "threaded deterministic token through search_sync"
     );
-    #[allow(clippy::type_complexity)]
-    let result_holder: Arc<
-        Mutex<Option<Result<(Vec<SearchHit>, Vec<SearchDegradation>), SearchError>>>,
-    > = Arc::new(Mutex::new(None));
+    let result_holder: Arc<Mutex<Option<Result<runtime_fallback::Retrieval, SearchError>>>> =
+        Arc::new(Mutex::new(None));
     let task_result = Arc::clone(&result_holder);
     let sync_timings: Arc<Mutex<Vec<SearchPerformanceTiming>>> = Arc::new(Mutex::new(Vec::new()));
     let async_timings = Arc::clone(&sync_timings);
@@ -12283,7 +12310,11 @@ async fn search_sync_with_performance(
                     );
                     canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                     sort_search_hits_by_score_order(&mut hits);
-                    Ok((hits, Vec::new()))
+                    Ok(runtime_fallback::Retrieval {
+                        hits,
+                        degraded: Vec::new(),
+                        applied: source_mode,
+                    })
                 }
                 Err(error) => Err(map_frankensearch_error(&cx, "Lexical search failed", error)),
             };
@@ -12325,13 +12356,14 @@ async fn search_sync_with_performance(
         let embedder_start = Instant::now();
         let fast_embedder = fast_embedder_override
             .unwrap_or_else(|| crate::core::index::default_search_embedder_stack().fast_arc());
+        let observed = Arc::new(runtime_fallback::ObservedEmbedder::new(fast_embedder));
         push_search_performance_timing(
             &async_timings,
             "searchSync::embedderInit",
             embedder_start.elapsed(),
         );
         let searcher_build_start = Instant::now();
-        let mut searcher = TwoTierSearcher::new(index, fast_embedder, config);
+        let mut searcher = TwoTierSearcher::new(index, observed.clone(), config);
         if source_mode == SearchSourceMode::Hybrid {
             let (lexical_weight, semantic_weight) = fusion_weights.upstream_rrf_weights();
             searcher = searcher.with_rrf_weights(lexical_weight, semantic_weight);
@@ -12387,6 +12419,27 @@ async fn search_sync_with_performance(
         if let Err(error) = search_checkpoint(&cx) {
             if let Ok(mut guard) = task_result.lock() {
                 *guard = Some(Err(error));
+            }
+            return;
+        }
+        if observed.needs_recovery(&search_result) {
+            let recovered = runtime_fallback::recover_lexical(
+                &cx,
+                &index_dir_owned,
+                &query_owned,
+                limit,
+                explain,
+                source_mode,
+                rerank_seed,
+            )
+            .await;
+            push_search_performance_timing(
+                &async_timings,
+                "searchSync::runtimeLexicalRecovery",
+                collect_start.elapsed(),
+            );
+            if let Ok(mut guard) = task_result.lock() {
+                *guard = Some(recovered);
             }
             return;
         }
@@ -12460,7 +12513,11 @@ async fn search_sync_with_performance(
                 let mut hits = search_hits_from_scored_results(results, explain, final_score_scale);
                 canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                 sort_search_hits_by_score_order(&mut hits);
-                Ok((hits, degraded))
+                Ok(runtime_fallback::Retrieval {
+                    hits,
+                    degraded,
+                    applied: source_mode,
+                })
             }
             Err(error) => Err(map_frankensearch_error(&cx, "Search failed", error)),
         };
@@ -14151,8 +14208,9 @@ mod tests {
                         Err(error) => Err(format!(
                             "collection cancellation must remain typed, got {error:?}"
                         )),
-                        Ok((hits, errors)) => Err(format!(
-                            "cancelled collection returned hits={hits:?}, errors={errors:?}"
+                        Ok(retrieval) => Err(format!(
+                            "cancelled collection returned hits={:?}, errors={:?}",
+                            retrieval.hits, retrieval.degraded
                         )),
                     }
                 } else {
