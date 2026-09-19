@@ -143,7 +143,13 @@ assert_jq "$refuse" '.success == false' \
 
     step "apply requires the same reference selectors as the reviewed run"
     mismatch="$(ee_json bootstrap apply "$run_id" --approved-only --workspace "$WS" --json)"
-    assert_jq "$mismatch" '(.success // false) != true and (.error.message | contains("does not match"))' \
+    # State the value expected, never the value rejected (bd-o8e1n). A NEGATION is
+    # satisfied by absence: with .success dropped, `(.success // false) != true`
+    # and `.success != true` both pass. I first judged this site safe because the
+    # sibling error.message clause raises on an absent field -- but it only raises
+    # when error.message is ALSO absent. Measured: {"error":{"message":"does not
+    # match"}} with no .success at all returns TRUE. Asserting == false closes it.
+    assert_jq "$mismatch" '.success == false and (.error.message | contains("does not match"))' \
         "bootstrap apply rejects a run when its include selectors are omitted"
 
     step "apply --approved-only writes nothing when no candidate is approved"
