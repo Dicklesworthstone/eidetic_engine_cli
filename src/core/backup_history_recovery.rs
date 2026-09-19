@@ -19,6 +19,9 @@ use super::{recovery_error, storage_error};
 use crate::db::DbConnection;
 use crate::models::DomainError;
 
+#[path = "backup_pack_recovery.rs"]
+mod packs;
+
 const LEARNING_TABLES: &[&str] = &[
     "procedural_rules",
     "rule_source_memories",
@@ -74,6 +77,7 @@ impl Rows {
 pub(in crate::core::backup) struct HistoryExpectation {
     workspace_id: String,
     learning: Rows,
+    packs: packs::PackExpectation,
 }
 
 impl HistoryExpectation {
@@ -88,6 +92,7 @@ impl HistoryExpectation {
         let mut expected = Self {
             workspace_id: workspace_id.to_owned(),
             learning: Rows::default(),
+            packs: packs::PackExpectation::from_assets(assets, backup_id, workspace_id)?,
         };
         for asset in assets
             .iter()
@@ -195,7 +200,8 @@ impl HistoryExpectation {
                 &row,
             )?;
         }
-        self.learning.verify(&actual, LEARNING_TABLES)
+        self.learning.verify(&actual, LEARNING_TABLES)?;
+        self.packs.verify_connection(db)
     }
 }
 

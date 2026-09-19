@@ -1,10 +1,12 @@
-name: Learned history recovery
+# Source delivery is complete. This lane only reads and verifies its triggering commit.
+name: Learned and pack history recovery
 on:
   push:
     branches: [main]
     paths:
-      - scripts/delivery/learned-history-recovery-20260919/**
       - src/core/backup_history_recovery*.rs
+      - src/core/backup_pack_recovery*.rs
+      - src/core/backup_recovery.rs
       - .github/workflows/learned-history-recovery-20260919.yml
   workflow_dispatch:
 permissions:
@@ -13,12 +15,10 @@ concurrency:
   group: learned-history-recovery
   cancel-in-progress: false
 jobs:
-  integrate-and-verify:
+  verify:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 55
-    permissions:
-      contents: write
     env:
       RUSTUP_TOOLCHAIN: nightly
       CARGO_BUILD_JOBS: '2'
@@ -29,41 +29,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
-          fetch-depth: 0
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
-      - name: Commit learned-state recovery directly to main
+      - name: Capture exact verification source
         run: |
           set -euo pipefail
-          paths=(src/core/backup.rs src/core/backup_recovery.rs src/core/backup_history_recovery.rs src/core/backup_history_recovery_tests.rs)
-          if ! git ls-files --error-unmatch src/core/backup_history_recovery.rs >/dev/null 2>&1; then
-            test "$(git rev-parse HEAD:src/core/backup.rs)" = 4d06a31b0ed7eb227fec314d12a61ef3f5968a9c
-            test "$(git rev-parse HEAD:src/core/backup_recovery.rs)" = a6acdbc8fec7f6ecf5364eb4f0a618218a2f7f32
-            base64 --decode scripts/delivery/learned-history-recovery-20260919/01.patch.xz.b64 | xz --decompress > "$RUNNER_TEMP/history.patch"
-            echo "69b370c52901346e5101b1ea2da195fc2d405349bb46977df94963413ee1811a  $RUNNER_TEMP/history.patch" | sha256sum --check
-            git apply --check --whitespace=error-all "$RUNNER_TEMP/history.patch"
-            git apply "$RUNNER_TEMP/history.patch"
-            rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
-            git diff --check
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            base=$(git rev-parse HEAD)
-            git add -- "${paths[@]}"
-            git commit -m 'fix(backup): verify learned state before publishing restored stores' -m 'Capture typed per-identity fingerprints before recovery writes, then compare every rule, source link, tag, feedback row and learned agent profile in the same read-only snapshot as durable row counts. Refuse same-count content corruption without publishing the side store or leaking private values. Include six real recovery regressions and two fingerprint tests. Patch and formatting checks passed; runtime results follow independently.'
-            for attempt in 1 2 3; do
-              if git push origin HEAD:main; then break; fi
-              test "$attempt" -lt 3
-              git fetch origin main
-              git diff --exit-code "$base" origin/main -- "${paths[@]}"
-              git merge --no-edit origin/main
-              base=$(git rev-parse origin/main)
-            done
-          fi
-          git diff --exit-code HEAD -- "${paths[@]}"
           git rev-parse HEAD > "$RUNNER_TEMP/history-source-sha.log"
-          tar -czf "$RUNNER_TEMP/history-source.tar.gz" "${paths[@]}"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code
+          tar -czf "$RUNNER_TEMP/history-source.tar.gz" src/core/backup.rs src/core/backup_recovery.rs src/core/backup_history_recovery*.rs src/core/backup_pack_recovery*.rs
           rustc --version --verbose > "$RUNNER_TEMP/history-toolchain.log"
       - uses: actions/upload-artifact@v4
         with:
@@ -73,7 +49,8 @@ jobs:
             ${{ runner.temp }}/history-source.tar.gz
             ${{ runner.temp }}/history-toolchain.log
           retention-days: 7
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: cache
         with:
           path: |
             ~/.cargo/registry
@@ -101,19 +78,36 @@ jobs:
             if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/history-$name.log"; then failed=1; fi
           }
           run_group publication core::backup::history_recovery_tests 6
-          run_group inventory core::backup::recovery:: 16
+          run_group inventory core::backup::recovery:: 25
           run_group chunks core::backup::tests::default_backup_restores_learning_history 1
+          run_group replay core::backup::tests::default_backup_restores_pack_history_and_replay 1
+          run_group evidence core::backup::tests::pack_history_restores_native_evidence_and_legacy_missing_ledger 1
           exit "$failed"
-      - name: Check production Clippy
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: learned-history-test-results
+          path: ${{ runner.temp }}/history-*.log
+          retention-days: 7
+      - name: Check production Clippy and source formatting
         if: ${{ !cancelled() }}
         run: |
-          status=0
-          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/history-clippy.log" 2>&1 || status=$?
+          failed=0
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/history-clippy.log" 2>&1 || failed=1
           tail -n 100 "$RUNNER_TEMP/history-clippy.log"
-          exit "$status"
+          rustfmt --check --edition 2024 --config skip_children=true src/core/backup_history_recovery*.rs src/core/backup_pack_recovery*.rs > "$RUNNER_TEMP/history-format.log" 2>&1 || failed=1
+          cat "$RUNNER_TEMP/history-format.log"
+          exit "$failed"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
           name: learned-history-verification
           path: ${{ runner.temp }}/history-*.log
           retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: learned-history-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
