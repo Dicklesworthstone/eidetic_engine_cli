@@ -522,13 +522,7 @@ fn real_store_document_copies_abstain_but_a_direct_answer_remains_retrievable() 
         assert!(raw < ASK_MIN_CONFIDENCE_DEFAULT);
         assert!(raw * 1.3 > ASK_MIN_CONFIDENCE_DEFAULT);
         for number in 1..=32 {
-            seed_with_provenance(
-                &db,
-                &workspace,
-                number,
-                body,
-                &format!("{prefix}{number}"),
-            );
+            seed_with_provenance(&db, &workspace, number, body, &format!("{prefix}{number}"));
         }
         let before = db.list_memories(&workspace, None, true).unwrap();
         let corpus = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
@@ -572,4 +566,106 @@ fn real_store_document_copies_abstain_but_a_direct_answer_remains_retrievable() 
         }
         assert_eq!(before, db.list_memories(&workspace, None, true).unwrap());
     }
+}
+
+#[test]
+fn an_independent_document_can_corroborate_marginal_real_store_evidence() {
+    use crate::core::ask::{ASK_MIN_CONFIDENCE_DEFAULT, score_span, tokenize_for_ask};
+
+    let (_root, db, workspace) = fixture();
+    let body = "Run cargo fmt with rustfmt before release candidates.";
+    let question = "cargo fmt build";
+    let raw = score_span(&tokenize_for_ask(question), body, 0.9, "human_explicit");
+    let expected = raw * (1.0 + 0.1 * 2.0_f32.ln());
+    assert!(raw < ASK_MIN_CONFIDENCE_DEFAULT);
+    assert!(expected > ASK_MIN_CONFIDENCE_DEFAULT);
+    for number in 1..=32 {
+        let provenance = format!("file://docs/release.md#L{number}");
+        seed_with_provenance(&db, &workspace, number, body, &provenance);
+    }
+    let request = AskRequest {
+        question: question.to_owned(),
+        ..AskRequest::default()
+    };
+    let before = db.list_memories(&workspace, None, true).unwrap();
+    let corpus = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
+    assert_eq!(corpus.candidates.len(), 32);
+    let report = evaluate_ask(&request, &corpus.candidates);
+    assert!(report.abstained);
+    assert!((report.confidence - raw).abs() < 1e-6);
+    assert_eq!(before, db.list_memories(&workspace, None, true).unwrap());
+
+    seed_with_provenance(
+        &db,
+        &workspace,
+        33,
+        body,
+        "file://docs/independent-observation.md#L1",
+    );
+    let before = db.list_memories(&workspace, None, true).unwrap();
+    let corpus = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
+    assert_eq!(corpus.candidates.len(), 33);
+    let accepted = evaluate_ask(&request, &corpus.candidates);
+    assert!(!accepted.abstained);
+    assert!(!accepted.extractiveness_violated);
+    assert!((accepted.confidence - expected).abs() < 1e-6);
+    assert_eq!(accepted.citations.len(), 1);
+    assert_eq!(accepted.citations[0].text, body);
+    assert_eq!(before, db.list_memories(&workspace, None, true).unwrap());
+}
+
+#[test]
+fn persisted_encoded_metadata_is_withheld_from_answers_and_abstention_hints() {
+    let (_root, db, workspace) = fixture();
+    let uris = [
+        "file://%2Fvault%2Furi-canary.md#L1",
+        "file://src/%252e%252e/uri-canary.md",
+        "https://reader%3Aopaque%40example.test/uri-canary",
+        "https://example.test/uri-canary%00",
+    ];
+    for (index, uri) in uris.iter().enumerate() {
+        seed_with_provenance(
+            &db,
+            &workspace,
+            index + 1,
+            "Run cargo fmt before release.",
+            uri,
+        );
+    }
+    let before = db.list_memories(&workspace, None, true).unwrap();
+    let corpus = load_current_ask_corpus(&db, &workspace, Utc::now()).unwrap();
+    assert_eq!(corpus.candidates.len(), uris.len());
+    for candidate in &corpus.candidates {
+        assert_eq!(
+            candidate.provenance_uri,
+            Some(format!("ee-mem://{}", candidate.memory_id))
+        );
+    }
+    let accepted = answer(&corpus, 0.55);
+    assert!(!accepted.abstained);
+    let abstained = evaluate_ask(
+        &AskRequest {
+            question: "cargo build".to_owned(),
+            ..AskRequest::default()
+        },
+        &corpus.candidates,
+    );
+    assert!(abstained.abstained);
+    assert!(
+        abstained
+            .nearest_evidence
+            .as_ref()
+            .is_some_and(|items| !items.is_empty())
+    );
+    for report in [accepted, abstained] {
+        assert!(!report.extractiveness_violated);
+        for output in [
+            ask_data_json(&report).to_string(),
+            render_ask_markdown(&report),
+        ] {
+            assert!(!output.contains("uri-canary"));
+            assert!(!output.contains("reader%3Aopaque"));
+        }
+    }
+    assert_eq!(before, db.list_memories(&workspace, None, true).unwrap());
 }
