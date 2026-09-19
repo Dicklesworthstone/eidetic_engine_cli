@@ -9486,7 +9486,7 @@ fn walking_skeleton_durability_scenario() -> TestResult {
     // share of the total, that step is the address. If every entry is a
     // similar fraction, nothing regressed and the worker was busy.
     let mut ranked = steps.clone();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|a| std::cmp::Reverse(a.1));
     let breakdown = ranked
         .iter()
         .map(|(label, ms)| format!("{label} {:.1}s", *ms as f64 / 1000.0))
