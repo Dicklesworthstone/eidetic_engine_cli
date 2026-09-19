@@ -11,6 +11,7 @@ on:
       - src/core/search_rule_admission.rs
       - src/core/search_revision_admission.rs
       - src/core/search_revision_admission_tests.rs
+      - src/core/search_diagnostic_snapshot.rs
       - src/core/backup_revision_recovery_tests.rs
       - .github/workflows/recovery-headship-admission-20260919.yml
   workflow_dispatch:
@@ -76,6 +77,7 @@ jobs:
             if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$RUNNER_TEMP/recovery-$name.log"; then failed=1; fi
           }
           run_group retrieval-admission 'core::search::rule_admission::' 14
+          run_group diagnostic-snapshot 'core::search::diagnostic_snapshot::' 14
           run_group headship-admission 'core::jsonl_import::recovery_regression_tests::' 8
           run_group ambiguous-heads 'core::jsonl_import::revisions::head_tests::' 4
           run_group record-graph 'core::jsonl_import::recovery::tests::' 13
@@ -100,7 +102,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           status=0
-          rustfmt --edition 2024 --config skip_children=true --check src/core/jsonl_import.rs src/core/jsonl_recovery.rs src/core/jsonl_revisions.rs src/core/jsonl_recovery_regression_tests.rs src/core/jsonl_revision_heads_tests.rs src/core/search_rule_admission.rs src/core/search_revision_admission.rs src/core/search_revision_admission_tests.rs src/core/backup_revision_recovery_tests.rs > "$RUNNER_TEMP/recovery-fmt.log" 2>&1 || status=$?
+          rustfmt --edition 2024 --config skip_children=true --check src/core/jsonl_import.rs src/core/jsonl_recovery.rs src/core/jsonl_revisions.rs src/core/jsonl_recovery_regression_tests.rs src/core/jsonl_revision_heads_tests.rs src/core/search_rule_admission.rs src/core/search_revision_admission.rs src/core/search_revision_admission_tests.rs src/core/search_diagnostic_snapshot.rs src/core/backup_revision_recovery_tests.rs > "$RUNNER_TEMP/recovery-fmt.log" 2>&1 || status=$?
           cat "$RUNNER_TEMP/recovery-fmt.log"
           exit "$status"
       - uses: actions/upload-artifact@v4

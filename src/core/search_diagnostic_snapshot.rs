@@ -1,7 +1,8 @@
 //! Source-snapshot admission for every diagnostic arm, not only final hits.
 //!
 //! A raw rank is still an observation of a memory. Filtering only `final` can
-//! expose tombstoned, expired, sealed or out-of-scope IDs in preFusion/fusion.
+//! expose superseded, tombstoned, expired, sealed or out-of-scope IDs in
+//! preFusion/fusion. Revision identity and author expiry are separate gates.
 //! Keep allowed below-floor candidates and their original rank/score; visibility
 //! is not a relevance floor, and removing a row must not invent a new ranking.
 
@@ -109,6 +110,12 @@ pub(super) fn admit_memories(
         candidates.push(hit);
     }
     let mut admission_degraded = Vec::new();
+    let candidates = super::rule_admission::memory_revisions::admit_hits(
+        options,
+        candidates,
+        &mut admission_degraded,
+        Some(connection),
+    );
     let candidates = apply_tombstone_visibility_collecting(
         options,
         candidates,
@@ -123,10 +130,11 @@ pub(super) fn admit_memories(
         Some(connection),
     );
     if admission_degraded.iter().any(|entry| {
-        matches!(
-            entry.code.as_str(),
-            "tombstone_visibility_unavailable" | "scope_metadata_unavailable"
-        )
+        entry.code == super::rule_admission::memory_revisions::UNAVAILABLE
+            || matches!(
+                entry.code.as_str(),
+                "tombstone_visibility_unavailable" | "scope_metadata_unavailable"
+            )
     }) {
         return Err(admission_error());
     }
@@ -334,6 +342,144 @@ mod tests {
                 .collect::<Vec<_>>(),
             expected
         );
+    }
+
+    fn revision_fixture() -> Result<(tempfile::TempDir, SearchOptions, DbConnection), String> {
+        let (temp, options, db) = fixture()?;
+        for (id, created, text) in [
+            (HIDDEN, "2026-05-01T00:00:00Z", "Original diagnostic evidence."),
+            (VISIBLE, "2026-06-01T00:00:00Z", PHRASE),
+        ] {
+            let mut record = input(WORKSPACE, text);
+            record.valid_from = Some(created.to_owned());
+            record.valid_to = Some("2099-01-01T00:00:00Z".to_owned());
+            db.insert_memory_with_timestamps(id, &record, created, created, HIDDEN)
+                .map_err(|e| e.to_string())?;
+        }
+        assert!(
+            db.restore_imported_memory_supersession(HIDDEN, "2026-06-01T00:00:00Z")
+                .map_err(|e| e.to_string())?
+        );
+        Ok((temp, options, db))
+    }
+
+    #[test]
+    fn diagnostic_revision_admission_removes_history_from_every_arm_without_rewriting_scores()
+    -> TestResult {
+        let (_temp, mut options, db) = revision_fixture()?;
+        options.include_expired = true;
+        options.include_stale = true;
+        options.include_tombstoned = true;
+        options.relevance_floor = Some(1.0);
+        let before = db
+            .list_memories(WORKSPACE, None, true)
+            .map_err(|e| e.to_string())?;
+        for final_ids in [&[HIDDEN][..], &[HIDDEN, VISIBLE][..]] {
+            let mut diag = diagnostic(&[HIDDEN, VISIBLE], final_ids);
+            diag.candidate_metadata.insert(
+                HIDDEN.to_owned(),
+                json!({"superseded_at": null, "current_revision": true}),
+            );
+            let raw = diag.pre_fusion.lexical.results[1].clone();
+            let mut degraded = Vec::new();
+            admit_memories(
+                &asupersync::Cx::for_testing(),
+                &options,
+                &mut diag,
+                &mut degraded,
+                Some(&db),
+            )
+            .map_err(|e| e.to_string())?;
+            assert_arms(&diag, &[VISIBLE]);
+            assert_eq!(diag.pre_fusion.lexical.results[0].rank, raw.rank);
+            assert_eq!(
+                diag.pre_fusion.lexical.results[0].raw_score.to_bits(),
+                raw.raw_score.to_bits()
+            );
+            assert_eq!(diag.pre_fusion.semantic_fast.results[0].rank, 2);
+            assert_eq!(diag.fusion.per_doc_contribution[0].lexical_rank, Some(2));
+            assert_eq!(
+                diag.fusion.per_doc_contribution[0].fused_score.to_bits(),
+                0.003_f64.to_bits()
+            );
+            assert_eq!(
+                diag.final_hits
+                    .iter()
+                    .map(|hit| hit.doc_id.as_str())
+                    .collect::<Vec<_>>(),
+                final_ids
+                    .iter()
+                    .copied()
+                    .filter(|id| *id == VISIBLE)
+                    .collect::<Vec<_>>(),
+            );
+            assert!(
+                degraded
+                    .iter()
+                    .any(|entry| entry.code == "superseded_revision_filtered")
+            );
+            assert!(!degraded.iter().any(|entry| entry.message.contains(HIDDEN)));
+        }
+        assert_eq!(
+            db.list_memories(WORKSPACE, None, true)
+                .map_err(|e| e.to_string())?,
+            before
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostic_history_changes_at_the_exact_supersession_instant() -> TestResult {
+        let (_temp, mut options, db) = revision_fixture()?;
+        db.begin_read_snapshot().map_err(|e| e.to_string())?;
+        for (reference, expected, rank) in [
+            ("2026-05-15T00:00:00Z", HIDDEN, 1),
+            ("2026-05-31T23:59:59.999999999Z", HIDDEN, 1),
+            ("2026-06-01T01:00:00+01:00", VISIBLE, 2),
+        ] {
+            options.as_of = Some(
+                chrono::DateTime::parse_from_rfc3339(reference)
+                    .map_err(|e| e.to_string())?
+                    .with_timezone(&chrono::Utc),
+            );
+            let mut diag = diagnostic(&[HIDDEN, VISIBLE], &[HIDDEN, VISIBLE]);
+            admit_memories(
+                &asupersync::Cx::for_testing(),
+                &options,
+                &mut diag,
+                &mut Vec::new(),
+                Some(&db),
+            )
+            .map_err(|e| e.to_string())?;
+            assert_arms(&diag, &[expected]);
+            assert_eq!(diag.final_hits.len(), 1);
+            assert_eq!(diag.final_hits[0].doc_id, expected);
+            assert_eq!(diag.pre_fusion.lexical.results[0].rank, rank);
+        }
+        db.commit_read_snapshot().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_diagnostic_revision_authority_fails_without_echoing_source_values() -> TestResult {
+        let (_temp, options, db) = revision_fixture()?;
+        db.execute_raw(&format!(
+            "UPDATE memories SET superseded_at = 'PRIVATE_DIAGNOSTIC_REVISION' WHERE id = '{VISIBLE}'"
+        ))
+        .map_err(|e| e.to_string())?;
+        let mut diag = diagnostic(&[VISIBLE], &[VISIBLE]);
+        let error = admit_memories(
+            &asupersync::Cx::for_testing(),
+            &options,
+            &mut diag,
+            &mut Vec::new(),
+            Some(&db),
+        )
+        .expect_err("unverified raw ranks must not be returned");
+        assert!(error.to_string().contains("source snapshot"));
+        assert!(!error.to_string().contains("PRIVATE_DIAGNOSTIC_REVISION"));
+        assert!(!error.to_string().contains(VISIBLE));
+        Ok(())
     }
 
     #[test]
@@ -747,6 +893,79 @@ mod tests {
         assert!(report.fusion.per_doc_contribution.is_empty());
         assert!(report.final_report.results.is_empty());
         assert!(!report.data_json().to_string().contains(VISIBLE));
+        assert_eq!(index_bytes(&index)?, before);
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn diagnostic_public_revision_cutoff_uses_live_source_without_erasing_indexed_history()
+    -> TestResult {
+        let (_temp, mut options, db) = fixture()?;
+        let mut record = input(WORKSPACE, PHRASE);
+        record.valid_from = Some("2026-05-01T00:00:00Z".to_owned());
+        record.valid_to = Some("2099-01-01T00:00:00Z".to_owned());
+        db.insert_memory_with_timestamps(
+            VISIBLE,
+            &record,
+            "2026-05-01T00:00:00Z",
+            "2026-05-01T00:00:00Z",
+            VISIBLE,
+        )
+        .map_err(|e| e.to_string())?;
+        let generation = db
+            .get_workspace_generation(WORKSPACE)
+            .map_err(|e| e.to_string())?
+            .ok_or("generation")?;
+        let index = options.resolve_index_dir();
+        let index_ref = &index;
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            build_index(&cx, index_ref, generation).await
+        })
+        .map_err(|e| e.to_string())??;
+        db.close().map_err(|e| e.to_string())?;
+        let baseline = run_diag_search(&options).map_err(|e| e.to_string())?;
+        assert_eq!(baseline.final_report.results.len(), 1);
+        assert_eq!(baseline.final_report.results[0].doc_id, VISIBLE);
+        assert!(
+            baseline
+                .pre_fusion
+                .lexical
+                .results
+                .iter()
+                .any(|hit| hit.doc_id == VISIBLE)
+        );
+        let writer =
+            DbConnection::open_file(&options.resolve_database_path()).map_err(|e| e.to_string())?;
+        assert!(
+            writer
+                .restore_imported_memory_supersession(VISIBLE, "2026-07-01T00:00:00Z")
+                .map_err(|e| e.to_string())?
+        );
+        writer.close().map_err(|e| e.to_string())?;
+        let before = index_bytes(&index)?;
+        let current = run_diag_search(&options).map_err(|e| e.to_string())?;
+        assert!(current.pre_fusion.lexical.results.is_empty());
+        assert!(current.pre_fusion.semantic_fast.results.is_empty());
+        assert!(current.fusion.per_doc_contribution.is_empty());
+        assert!(current.final_report.results.is_empty());
+        assert!(!current.data_json().to_string().contains(VISIBLE));
+        options.as_of = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+                .map_err(|e| e.to_string())?
+                .with_timezone(&chrono::Utc),
+        );
+        let historical = run_diag_search(&options).map_err(|e| e.to_string())?;
+        assert_eq!(historical.final_report.results.len(), 1);
+        assert_eq!(historical.final_report.results[0].doc_id, VISIBLE);
+        assert!(
+            historical
+                .pre_fusion
+                .lexical
+                .results
+                .iter()
+                .any(|hit| hit.doc_id == VISIBLE)
+        );
         assert_eq!(index_bytes(&index)?, before);
         Ok(())
     }
