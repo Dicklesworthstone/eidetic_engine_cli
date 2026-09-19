@@ -66,6 +66,15 @@ pub(super) fn append_evidence(
     if !matches!(scope, MemoryScope::Workspace | MemoryScope::Swarm) {
         return Ok(());
     }
+    // Keep the completed admission decision, not merely parent existence.
+    // A second identity must not resurrect an expired, tombstoned, sealed or
+    // unsafe memory. This set belongs to the same snapshot as the span visitor;
+    // rule IDs and newly appended evidence cannot become eligible parents.
+    let admitted_memories: std::collections::BTreeSet<String> = candidates
+        .iter()
+        .filter(|candidate| MemoryId::from_str(&candidate.memory_id).is_ok())
+        .map(|candidate| candidate.memory_id.clone())
+        .collect();
     connection
         .visit_search_admitted_evidence_spans_in_current_snapshot(workspace_id, |span| {
             let Ok(id) = EvidenceId::from_str(&span.id) else {
@@ -92,15 +101,13 @@ pub(super) fn append_evidence(
                 let Ok(memory_id) = MemoryId::from_str(memory_id) else {
                     return Ok(());
                 };
-                let Some(memory) = connection.get_memory(&memory_id.to_string())? else {
-                    return Ok(());
-                };
-                if memory.workspace_id != workspace_id {
+                let memory_id = memory_id.to_string();
+                if !admitted_memories.contains(&memory_id) {
                     return Ok(());
                 }
-                // Lineage is only for correlated-support accounting. The
-                // memory's body, lifecycle, confidence and trust are not used.
-                source_memory_ids.push(memory_id.to_string());
+                // Lineage only correlates support. It does not substitute the
+                // parent's body or transfer its confidence or trust.
+                source_memory_ids.push(memory_id);
             }
             let source = super::super::AskNativeSource {
                 entity: crate::pack::PackEntityRef::EvidenceSpan(id),
