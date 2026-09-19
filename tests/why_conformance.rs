@@ -131,7 +131,31 @@ fn why_response_schema_is_ee_response_v1() -> TestResult {
         "4000",
         "--json",
     ])?;
-    ensure_equal(&context.status.code(), &Some(0), "context exit")?;
+    // CAPTURE THE DIAGNOSIS. THE PREDICATE IS UNCHANGED.
+    //
+    // `ee` maps Outcome::Cancelled to exit 130 (src/core/outcome.rs:158) and the
+    // reason IS available on the error surface -- cancel_message has production
+    // references including core/context.rs:561 and :1406, on this very path.
+    // This assertion reported only the code, so seven rows failed as a bare
+    // "context exit: expected Some(0), got Some(130)" with the reason discarded
+    // at the assertion boundary, and six of the seven never persisted the
+    // context output either (bd-2bdos).
+    //
+    // Still compared against &Some(0). Only the failure LABEL changed, so these
+    // rows must keep failing after this edit -- a green here would mean the
+    // expectation moved, which is the opposite of the intent.
+    ensure_equal(
+        &context.status.code(),
+        &Some(0),
+        &format!(
+            "context exit (stderr: {}) (stdout head: {})",
+            String::from_utf8_lossy(&context.stderr).trim(),
+            String::from_utf8_lossy(&context.stdout)
+                .chars()
+                .take(300)
+                .collect::<String>()
+        ),
+    )?;
 
     // Test: ee why
     let why = run_ee(&["--workspace", &workspace, "why", memory_id, "--json"])?;
@@ -325,7 +349,31 @@ fn why_storage_section_is_complete() -> TestResult {
         "4000",
         "--json",
     ])?;
-    ensure_equal(&context.status.code(), &Some(0), "context exit")?;
+    // CAPTURE THE DIAGNOSIS. THE PREDICATE IS UNCHANGED.
+    //
+    // `ee` maps Outcome::Cancelled to exit 130 (src/core/outcome.rs:158) and the
+    // reason IS available on the error surface -- cancel_message has production
+    // references including core/context.rs:561 and :1406, on this very path.
+    // This assertion reported only the code, so seven rows failed as a bare
+    // "context exit: expected Some(0), got Some(130)" with the reason discarded
+    // at the assertion boundary, and six of the seven never persisted the
+    // context output either (bd-2bdos).
+    //
+    // Still compared against &Some(0). Only the failure LABEL changed, so these
+    // rows must keep failing after this edit -- a green here would mean the
+    // expectation moved, which is the opposite of the intent.
+    ensure_equal(
+        &context.status.code(),
+        &Some(0),
+        &format!(
+            "context exit (stderr: {}) (stdout head: {})",
+            String::from_utf8_lossy(&context.stderr).trim(),
+            String::from_utf8_lossy(&context.stdout)
+                .chars()
+                .take(300)
+                .collect::<String>()
+        ),
+    )?;
 
     let why = run_ee(&["--workspace", &workspace, "why", memory_id, "--json"])?;
     persist_artifact("storage_why", &why);
@@ -445,7 +493,31 @@ fn why_retrieval_section_exposes_numeric_scores() -> TestResult {
         "4000",
         "--json",
     ])?;
-    ensure_equal(&context.status.code(), &Some(0), "context exit")?;
+    // CAPTURE THE DIAGNOSIS. THE PREDICATE IS UNCHANGED.
+    //
+    // `ee` maps Outcome::Cancelled to exit 130 (src/core/outcome.rs:158) and the
+    // reason IS available on the error surface -- cancel_message has production
+    // references including core/context.rs:561 and :1406, on this very path.
+    // This assertion reported only the code, so seven rows failed as a bare
+    // "context exit: expected Some(0), got Some(130)" with the reason discarded
+    // at the assertion boundary, and six of the seven never persisted the
+    // context output either (bd-2bdos).
+    //
+    // Still compared against &Some(0). Only the failure LABEL changed, so these
+    // rows must keep failing after this edit -- a green here would mean the
+    // expectation moved, which is the opposite of the intent.
+    ensure_equal(
+        &context.status.code(),
+        &Some(0),
+        &format!(
+            "context exit (stderr: {}) (stdout head: {})",
+            String::from_utf8_lossy(&context.stderr).trim(),
+            String::from_utf8_lossy(&context.stdout)
+                .chars()
+                .take(300)
+                .collect::<String>()
+        ),
+    )?;
 
     let why = run_ee(&["--workspace", &workspace, "why", memory_id, "--json"])?;
     persist_artifact("retrieval_why", &why);
@@ -616,7 +688,31 @@ fn why_selection_section_exposes_score_formula() -> TestResult {
         "4000",
         "--json",
     ])?;
-    ensure_equal(&context.status.code(), &Some(0), "context exit")?;
+    // CAPTURE THE DIAGNOSIS. THE PREDICATE IS UNCHANGED.
+    //
+    // `ee` maps Outcome::Cancelled to exit 130 (src/core/outcome.rs:158) and the
+    // reason IS available on the error surface -- cancel_message has production
+    // references including core/context.rs:561 and :1406, on this very path.
+    // This assertion reported only the code, so seven rows failed as a bare
+    // "context exit: expected Some(0), got Some(130)" with the reason discarded
+    // at the assertion boundary, and six of the seven never persisted the
+    // context output either (bd-2bdos).
+    //
+    // Still compared against &Some(0). Only the failure LABEL changed, so these
+    // rows must keep failing after this edit -- a green here would mean the
+    // expectation moved, which is the opposite of the intent.
+    ensure_equal(
+        &context.status.code(),
+        &Some(0),
+        &format!(
+            "context exit (stderr: {}) (stdout head: {})",
+            String::from_utf8_lossy(&context.stderr).trim(),
+            String::from_utf8_lossy(&context.stdout)
+                .chars()
+                .take(300)
+                .collect::<String>()
+        ),
+    )?;
 
     let why = run_ee(&["--workspace", &workspace, "why", memory_id, "--json"])?;
     persist_artifact("selection_why", &why);
@@ -680,7 +776,31 @@ fn why_latest_pack_selection_references_context_pack() -> TestResult {
         "--json",
     ])?;
     persist_artifact("pack_ref_context", &context);
-    ensure_equal(&context.status.code(), &Some(0), "context exit")?;
+    // CAPTURE THE DIAGNOSIS. THE PREDICATE IS UNCHANGED.
+    //
+    // `ee` maps Outcome::Cancelled to exit 130 (src/core/outcome.rs:158) and the
+    // reason IS available on the error surface -- cancel_message has production
+    // references including core/context.rs:561 and :1406, on this very path.
+    // This assertion reported only the code, so seven rows failed as a bare
+    // "context exit: expected Some(0), got Some(130)" with the reason discarded
+    // at the assertion boundary, and six of the seven never persisted the
+    // context output either (bd-2bdos).
+    //
+    // Still compared against &Some(0). Only the failure LABEL changed, so these
+    // rows must keep failing after this edit -- a green here would mean the
+    // expectation moved, which is the opposite of the intent.
+    ensure_equal(
+        &context.status.code(),
+        &Some(0),
+        &format!(
+            "context exit (stderr: {}) (stdout head: {})",
+            String::from_utf8_lossy(&context.stderr).trim(),
+            String::from_utf8_lossy(&context.stdout)
+                .chars()
+                .take(300)
+                .collect::<String>()
+        ),
+    )?;
     let context_json = stdout_json(&context)?;
     persist_json_artifact("pack_ref_context", &context_json);
 
@@ -849,7 +969,31 @@ fn why_explanation_covers_all_memory_levels() -> TestResult {
         "8000",
         "--json",
     ])?;
-    ensure_equal(&context.status.code(), &Some(0), "context exit")?;
+    // CAPTURE THE DIAGNOSIS. THE PREDICATE IS UNCHANGED.
+    //
+    // `ee` maps Outcome::Cancelled to exit 130 (src/core/outcome.rs:158) and the
+    // reason IS available on the error surface -- cancel_message has production
+    // references including core/context.rs:561 and :1406, on this very path.
+    // This assertion reported only the code, so seven rows failed as a bare
+    // "context exit: expected Some(0), got Some(130)" with the reason discarded
+    // at the assertion boundary, and six of the seven never persisted the
+    // context output either (bd-2bdos).
+    //
+    // Still compared against &Some(0). Only the failure LABEL changed, so these
+    // rows must keep failing after this edit -- a green here would mean the
+    // expectation moved, which is the opposite of the intent.
+    ensure_equal(
+        &context.status.code(),
+        &Some(0),
+        &format!(
+            "context exit (stderr: {}) (stdout head: {})",
+            String::from_utf8_lossy(&context.stderr).trim(),
+            String::from_utf8_lossy(&context.stdout)
+                .chars()
+                .take(300)
+                .collect::<String>()
+        ),
+    )?;
 
     for (level, memory_id) in &memory_ids {
         let why = run_ee(&["--workspace", &workspace, "why", memory_id, "--json"])?;
@@ -922,7 +1066,31 @@ fn why_explanation_covers_all_memory_kinds() -> TestResult {
         "8000",
         "--json",
     ])?;
-    ensure_equal(&context.status.code(), &Some(0), "context exit")?;
+    // CAPTURE THE DIAGNOSIS. THE PREDICATE IS UNCHANGED.
+    //
+    // `ee` maps Outcome::Cancelled to exit 130 (src/core/outcome.rs:158) and the
+    // reason IS available on the error surface -- cancel_message has production
+    // references including core/context.rs:561 and :1406, on this very path.
+    // This assertion reported only the code, so seven rows failed as a bare
+    // "context exit: expected Some(0), got Some(130)" with the reason discarded
+    // at the assertion boundary, and six of the seven never persisted the
+    // context output either (bd-2bdos).
+    //
+    // Still compared against &Some(0). Only the failure LABEL changed, so these
+    // rows must keep failing after this edit -- a green here would mean the
+    // expectation moved, which is the opposite of the intent.
+    ensure_equal(
+        &context.status.code(),
+        &Some(0),
+        &format!(
+            "context exit (stderr: {}) (stdout head: {})",
+            String::from_utf8_lossy(&context.stderr).trim(),
+            String::from_utf8_lossy(&context.stdout)
+                .chars()
+                .take(300)
+                .collect::<String>()
+        ),
+    )?;
 
     for (kind, memory_id) in &memory_ids {
         let why = run_ee(&["--workspace", &workspace, "why", memory_id, "--json"])?;
@@ -991,7 +1159,31 @@ fn why_json_output_is_stdout_only() -> TestResult {
         "4000",
         "--json",
     ])?;
-    ensure_equal(&context.status.code(), &Some(0), "context exit")?;
+    // CAPTURE THE DIAGNOSIS. THE PREDICATE IS UNCHANGED.
+    //
+    // `ee` maps Outcome::Cancelled to exit 130 (src/core/outcome.rs:158) and the
+    // reason IS available on the error surface -- cancel_message has production
+    // references including core/context.rs:561 and :1406, on this very path.
+    // This assertion reported only the code, so seven rows failed as a bare
+    // "context exit: expected Some(0), got Some(130)" with the reason discarded
+    // at the assertion boundary, and six of the seven never persisted the
+    // context output either (bd-2bdos).
+    //
+    // Still compared against &Some(0). Only the failure LABEL changed, so these
+    // rows must keep failing after this edit -- a green here would mean the
+    // expectation moved, which is the opposite of the intent.
+    ensure_equal(
+        &context.status.code(),
+        &Some(0),
+        &format!(
+            "context exit (stderr: {}) (stdout head: {})",
+            String::from_utf8_lossy(&context.stderr).trim(),
+            String::from_utf8_lossy(&context.stdout)
+                .chars()
+                .take(300)
+                .collect::<String>()
+        ),
+    )?;
 
     let why = run_ee(&["--workspace", &workspace, "why", memory_id, "--json"])?;
     persist_artifact("output_contract_why", &why);
@@ -1045,7 +1237,31 @@ fn why_human_mode_uses_stderr_for_diagnostics() -> TestResult {
         "4000",
         "--json",
     ])?;
-    ensure_equal(&context.status.code(), &Some(0), "context exit")?;
+    // CAPTURE THE DIAGNOSIS. THE PREDICATE IS UNCHANGED.
+    //
+    // `ee` maps Outcome::Cancelled to exit 130 (src/core/outcome.rs:158) and the
+    // reason IS available on the error surface -- cancel_message has production
+    // references including core/context.rs:561 and :1406, on this very path.
+    // This assertion reported only the code, so seven rows failed as a bare
+    // "context exit: expected Some(0), got Some(130)" with the reason discarded
+    // at the assertion boundary, and six of the seven never persisted the
+    // context output either (bd-2bdos).
+    //
+    // Still compared against &Some(0). Only the failure LABEL changed, so these
+    // rows must keep failing after this edit -- a green here would mean the
+    // expectation moved, which is the opposite of the intent.
+    ensure_equal(
+        &context.status.code(),
+        &Some(0),
+        &format!(
+            "context exit (stderr: {}) (stdout head: {})",
+            String::from_utf8_lossy(&context.stderr).trim(),
+            String::from_utf8_lossy(&context.stdout)
+                .chars()
+                .take(300)
+                .collect::<String>()
+        ),
+    )?;
 
     // Run without --json (human mode)
     let why = run_ee(&["--workspace", &workspace, "why", memory_id])?;
