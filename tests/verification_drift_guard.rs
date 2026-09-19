@@ -2198,15 +2198,168 @@ const OPEN_CODED_SELF_EXCLUSION: &str = "verification_drift_guard";
 /// gets trusted past them: it cannot detect one open-coded assertion REPLACING
 /// another inside the SAME function. The count is unchanged and the swap is
 /// invisible. This stops the population from GROWING. That is the entire claim.
+/// How many lines after an assertion's first line may belong to it.
+///
+/// Every spelling in this tree closes within a few lines. A window rather than
+/// a paren-matcher because the classifier only needs to know WHICH TOKENS the
+/// failure text mentions, not to parse Rust -- and a wrong window makes a site
+/// look less complete than it is, which fails toward recording debt rather
+/// than toward hiding it.
+const ASSERTION_WINDOW: usize = 14;
+
+/// The exact source text of ONE assertion, bounded by bracket depth.
+///
+/// A FIXED LINE WINDOW CANNOT BOUND AN ASSERTION, and trying cost two wrong
+/// classifications before this existed. It bled past the function boundary and
+/// borrowed the next function's tokens; bounding it at the boundary then still
+/// bled across ADJACENT STATEMENTS, so an assertion printing nothing was read
+/// as printing stderr because the next statement did. Both times the counts
+/// looked plausible and every affected row recorded the wrong deficiency.
+///
+/// Depth matching is exact instead: walk from the construct's opening bracket
+/// until it closes. `if cond { .. }` ends at its matching brace; `ensure( .. )`
+/// ends when the parens balance, on one line or five.
+///
+/// The start backs up one line when the previous line opened an `ensure(`,
+/// because for a multi-line ensure the CANDIDATE line is the condition, which
+/// sits inside the construct rather than at its head.
+fn assertion_window(lines: &[&str], index: usize) -> String {
+    let start = if index > 0 && lines[index - 1].trim().ends_with("ensure(") {
+        index - 1
+    } else {
+        index
+    };
+    let hard_end = (start + ASSERTION_WINDOW).min(lines.len());
+    let mut depth: i32 = 0;
+    let mut opened = false;
+    let mut end = start;
+    while end < hard_end {
+        for ch in lines[end].chars() {
+            match ch {
+                '(' | '{' | '[' => {
+                    depth += 1;
+                    opened = true;
+                }
+                ')' | '}' | ']' => depth -= 1,
+                _ => {}
+            }
+        }
+        end += 1;
+        if opened && depth <= 0 {
+            break;
+        }
+    }
+    lines[start..end].join("\n")
+}
+
+/// Does `window` mention `token` as a WHOLE WORD?
+///
+/// `stdout_json(&init, "init")` contains the substring `stdout` and prints
+/// nothing of the sort. A naive `contains` read that helper's NAME as evidence
+/// the assertion surfaces stdout, marking incomplete sites complete -- the
+/// failure direction that hides debt rather than inventing it.
+fn mentions_token(window: &str, token: &str) -> bool {
+    window.match_indices(token).any(|(at, _)| {
+        let before_ok = at == 0
+            || !window[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let after = &window[at + token.len()..];
+        let after_ok = !after
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        before_ok && after_ok
+    })
+}
+
+/// Which of the three diagnostic facts a failing assertion will carry.
+///
+/// THIS IS THE KEY THE GATE IS BUILT ON, and it is deliberately NOT the
+/// spelling. Spelling is orthogonal to quality: `require_ok` compared
+/// `status.code()` and printed the exit code and stderr, while
+/// `ensure_equal(&x.status.code(), &Some(0), "init exit")` uses the same
+/// comparison and prints neither stream. Keying on syntax would grandfather
+/// 281 sites of unknown quality, condemning some already adequate and blessing
+/// some that are not. Keying on the PROPERTY -- does a failing assertion say
+/// why -- is what makes bd-wq41r's deletion condition true rather than
+/// aspirational, because it cannot be evaded by changing spelling.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+struct DiagnosticFacts {
+    code: bool,
+    stdout: bool,
+    stderr: bool,
+}
+
+impl DiagnosticFacts {
+    fn complete(self) -> bool {
+        self.code && self.stdout && self.stderr
+    }
+
+    /// The missing set, rendered stably for the baseline and for failure text.
+    fn missing(self) -> String {
+        let mut out = Vec::new();
+        if !self.code {
+            out.push("code");
+        }
+        if !self.stdout {
+            out.push("stdout");
+        }
+        if !self.stderr {
+            out.push("stderr");
+        }
+        out.join("+")
+    }
+}
+
+/// Inventory the success assertions under `tests/` that cannot explain a failure.
+///
+/// WHAT COUNTS AS A SUCCESS ASSERTION, in either spelling:
+///   `ensure(<expr>.status.success(), <msg>)`
+///   `ensure_equal(&<expr>.status.code(), &Some(0|EXIT_SUCCESS), <label>)`
+///   `if <expr>.status.code() == Some(0|EXIT_SUCCESS) { .. } else { .. Err(..) }`
+///
+/// WHAT DOES NOT, and why each exclusion is principled:
+///   - `!<expr>.status.success()` and comparisons against a NON-success code
+///     (`Some(10)`) assert FAILURE. That is a legitimate and different shape.
+///   - Control flow with no `Err(` in its window is not an assertion at all and
+///     has no failure message to carry anything.
+///   - Comments. A specimen quoted in prose is not a site, and this file quotes
+///     the pattern constantly.
+///
+/// WHAT IS RECORDED: only INCOMPLETE sites, with WHICH facts are missing. A
+/// complete site is not debt and vanishes from the baseline when repaired --
+/// that disappearance is the decay signal the gate exists to make visible.
+///
+/// An `ensure_equal` on `status.code()` counts as carrying the code because
+/// ensure_equal renders `expected Some(0), got Some(130)` itself. That is how
+/// the why_conformance rows showed an exit code and no streams.
+///
+/// WHAT THIS CANNOT SEE: one incomplete assertion REPLACING another inside the
+/// same function with the same missing set. The counts are unchanged and the
+/// swap is invisible. It stops the population GROWING, which is the claim.
 fn scan_open_coded_success_sites(dir: &Path) -> BTreeMap<String, usize> {
-    const NEEDLE: &str = ".status.success(),";
     let mut sites: BTreeMap<String, usize> = BTreeMap::new();
+    for (key, missing) in scan_incomplete_success_assertions(dir) {
+        // The missing set is part of the KEY, not a note beside it. Repairing a
+        // site from `code+stdout+stderr` to `stdout` must show up as a change,
+        // and a key of the function alone would hide a partial repair behind an
+        // unchanged count.
+        *sites.entry(format!("{key} [{missing}]")).or_insert(0) += 1;
+    }
+    sites
+}
+
+/// The classifier proper: every incomplete site as `(file::fn, missing-set)`.
+fn scan_incomplete_success_assertions(dir: &Path) -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = Vec::new();
     let mut files: Vec<PathBuf> = match fs::read_dir(dir) {
         Ok(entries) => entries
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
             .collect(),
-        Err(_) => return sites,
+        Err(_) => return found,
     };
     files.sort();
 
@@ -2226,9 +2379,6 @@ fn scan_open_coded_success_sites(dir: &Path) -> BTreeMap<String, usize> {
         let mut enclosing = "<file scope>".to_string();
 
         for (index, raw) in lines.iter().enumerate() {
-            // Track the innermost top-level `fn`. These files declare their
-            // test functions at column zero, so this is exact rather than a
-            // heuristic about indentation.
             let trimmed_start = raw.trim_start();
             if raw.starts_with("fn ") || raw.starts_with("pub fn ") {
                 if let Some(rest) = trimmed_start
@@ -2246,31 +2396,73 @@ fn scan_open_coded_success_sites(dir: &Path) -> BTreeMap<String, usize> {
             }
 
             let line = raw.trim();
-            // A specimen quoted in prose is not a site. Doc comments and
-            // ordinary comments describe the pattern constantly -- including
-            // in the helper that fixes it -- and counting them would report
-            // documentation as debt.
             if line.starts_with("//") {
                 continue;
             }
-            if !line.contains(NEEDLE) || line.starts_with('!') || line.contains("ensure(!") {
+            let success_spelling = line.contains(".status.success()");
+            let code_spelling = line.contains(".status.code()");
+            if !success_spelling && !code_spelling {
                 continue;
             }
-            // Multi-line: the assertion's condition sits alone on this line and
-            // `ensure(` opened on the previous one. Single-line: both on this one.
-            let multi =
-                line.ends_with(NEEDLE) && index > 0 && lines[index - 1].trim().ends_with("ensure(");
-            let single = line.contains("ensure(") && line.contains(NEEDLE);
-            if !(multi || single) {
+            // ASSERTING FAILURE IS A DIFFERENT SHAPE -- BUT `!` ALONE DOES NOT
+            // MEAN THAT, AND TREATING IT SO HID 153 SITES.
+            //
+            //   ensure(!out.status.success(), "should fail")   asserts FAILURE
+            //   if !out.status.success() { return Err(..) }    asserts SUCCESS
+            //
+            // Both contain `!` and `.status.success()`; they mean opposite
+            // things. The earlier rule skipped any line with `!`, which is the
+            // negation the `if`-not idiom is BUILT from -- so every
+            // success assertion written that way was silently exempt.
+            //
+            // Third time this session that a rule derived from the examples in
+            // front of me failed to survive the population. The construct is
+            // what disambiguates, not the operator.
+            let negated_ensure = line.contains("ensure(!")
+                || (line.starts_with('!')
+                    && index > 0
+                    && lines[index - 1].trim().ends_with("ensure("));
+            if negated_ensure {
                 continue;
             }
-            if SUCCESS_ASSERTION_HELPERS.contains(&enclosing.as_str()) {
+            // For the code spelling, a line is a SUCCESS assertion only when it
+            // actually compares against success. Anything else is either a
+            // comparison against a specific failure code -- a different and
+            // legitimate shape -- or a `.status.code()` interpolated into a
+            // MESSAGE, which is evidence, not an assertion. Without this, the
+            // repaired `require_ok` shape counts twice: once for its comparison
+            // and once for the exit code it prints. Its own known-positive
+            // caught that.
+            if !success_spelling
+                && !(line.contains("Some(0)") || line.contains("Some(EXIT_SUCCESS)"))
+            {
                 continue;
             }
-            *sites.entry(format!("{stem}::{enclosing}")).or_insert(0) += 1;
+
+            let window = assertion_window(&lines, index);
+
+            // An assertion has somewhere to put a message. Control flow does not.
+            let asserts = window.contains("Err(")
+                || line.contains("ensure(")
+                || line.contains("ensure_equal(")
+                || (index > 0 && lines[index - 1].trim().ends_with("ensure("));
+            if !asserts {
+                continue;
+            }
+
+            let facts = DiagnosticFacts {
+                // ensure_equal on status.code() renders expected/got itself.
+                code: window.contains(".code()"),
+                stdout: mentions_token(&window, "stdout"),
+                stderr: mentions_token(&window, "stderr"),
+            };
+            if facts.complete() {
+                continue;
+            }
+            found.push((format!("{stem}::{enclosing}"), facts.missing()));
         }
     }
-    sites
+    found
 }
 
 /// The baseline's explanatory header.
@@ -2279,15 +2471,34 @@ fn scan_open_coded_success_sites(dir: &Path) -> BTreeMap<String, usize> {
 /// file, because a header that regeneration deletes is a header that survives
 /// exactly until the first person uses the documented regeneration command.
 const OPEN_CODED_BASELINE_HEADER: &str = "\
-# OPEN-CODED SUCCESS-ASSERTION BASELINE (bd-wq41r) -- generated, do not hand-edit.
+# INCOMPLETE SUCCESS-ASSERTION BASELINE (bd-w5bza) -- generated, do not hand-edit.
 #
-# WHAT A ROW IS. One row per TEST FUNCTION containing at least one open-coded
-# `ensure(<expr>.status.success(), <label>)`, with how many it contains.
-# ROWS ARE FUNCTIONS. THE SUM OF THE COUNTS IS SITES. They are different units,
-# and a reader who re-derives one while quoting the other gets a third number.
-# A function holding four such assertions is ONE row and FOUR sites.
+# WHAT A ROW IS. One row per (TEST FUNCTION, MISSING-FACT-SET), with how many
+# such assertions it holds. The bracket is part of the key:
+#
+#     smoke::some_test [code+stdout]    3
+#
+# means three assertions there whose failure text carries stderr and NEITHER
+# the exit code NOR stdout.
+#
+# KEYED ON WHAT A SITE PRINTS, NOT ON ITS SPELLING -- this is the whole design.
+# Spelling is orthogonal to quality: `require_ok` compared status.code() and
+# printed the exit code and stderr, while an ensure_equal on status.code() uses
+# the same comparison and prints neither stream. A spelling-keyed gate
+# grandfathers sites of unknown quality, condemning some already adequate and
+# blessing some that are not, and is evaded by changing spelling. This one
+# polices the property cared about: DOES A FAILING ASSERTION SAY WHY.
+#
+# UNIT CHANGE -- DO NOT COMPARE THE TOTALS.
+#   bd-wq41r  367 rows / 569 sites   ONE spelling, EVERY site recorded
+#   bd-w5bza  see CURRENT below      BOTH spellings, only INCOMPLETE recorded
+# The number rose because coverage widened, not because the tree got worse.
+# Complete sites are not debt and are not listed; a row DISAPPEARING is the
+# decay signal this gate exists to make visible.
 #
 # RELATIONSHIP TO EARLIER FIGURES, recorded so nobody derives a fourth:
+#   281  RETIRED as a target. The sites the previous gate could not SEE, which
+#        motivated bd-w5bza. Superseded by the quality-keyed census.
 #   174  RETIRED. Published 2026-09-19T12:50Z over THREE files only and built
 #        on three miscounts -- a `grep -c` that counted a definition line, a
 #        `grep -v` that matched nothing, and a substring anchored to labels
@@ -2301,24 +2512,26 @@ const OPEN_CODED_BASELINE_HEADER: &str = "\
 # failed and discards the exit code, stdout and stderr that would say why. This
 # file forbids the NEXT one; it does not bless these.
 #
-# WHAT THIS GATE CANNOT SEE -- read before trusting \"the population cannot grow\".
-# It matches ONE spelling, `ensure(<expr>.status.success(), ..)`. It is blind to
-# the exit-code-comparison spelling:
-#     ensure_equal(&init.status.code(), &Some(0), \"init exit\")
-#     if output.status.code() == Some(EXIT_SUCCESS) { .. }
-# 281 such sites exist across 42 files (advanced_e2e 61, why_conformance 50,
-# e2e_pack_determinism 21, ...), against the 569 this gate sees. That is not a
-# marginal tail: why_conformance's 50 are the rows bd-2bdos was filed for, so
-# THIS GATE DOES NOT POLICE THE SHAPE THAT MOTIVATED IT, and a new site in the
-# uncovered spelling passes silently.
+# BOTH SPELLINGS ARE NOW COVERED:
+#     ensure(<expr>.status.success(), <msg>)
+#     ensure_equal(&<expr>.status.code(), &Some(0|EXIT_SUCCESS), <label>)
+#     if <expr>.status.code() == Some(0|EXIT_SUCCESS) { .. } else { .. Err(..) }
 #
-# The cause is worth keeping: the scanner's pattern was derived from the five
-# rows already repaired, all of which happened to use `.status.success()`. THE
-# PATTERN CAME FROM THE SAMPLE, NOT THE POPULATION.
+# HOW THE PREVIOUS GATE MISSED HALF THE TREE, kept because the mistake is
+# reusable: its pattern was derived from the five rows already repaired, all of
+# which happened to use `.status.success()`. THE PATTERN CAME FROM THE SAMPLE,
+# NOT THE POPULATION -- and why_conformance's 50 sites, the very rows bd-2bdos
+# was filed for, sat outside it.
 #
-# Those 281 are UNCLASSIFIED, not condemned -- spelling is orthogonal to
-# diagnostic quality. `require_ok` used that spelling and printed two of three
-# streams; `ensure_equal(&x.status.code(), &Some(0), label)` prints none.
+# WHAT THIS GATE STILL CANNOT SEE, so nobody infers a guarantee it lacks:
+#   - One incomplete assertion REPLACING another in the same function with the
+#     same missing set. Counts are unchanged and the swap is invisible.
+#   - Whether an interpolated value is USEFUL. It matches the tokens `code()`,
+#     `stdout` and `stderr` in the assertion's window; a message that mentions
+#     stderr and prints an empty one still counts as carrying it.
+#   - Assertions that reach a status through a helper this classifier does not
+#     read. A helper whose own body is complete is correctly not recorded, but
+#     its callers are judged by the helper, not by themselves.
 #
 # Regenerate: UPDATE_GOLDEN=1 cargo test --test verification_drift_guard \\
 #   open_coded_success_assertions_do_not_grow
@@ -2427,15 +2640,26 @@ fn open_coded_success_assertions_do_not_grow() {
 
     assert!(
         grew.is_empty(),
-        "new open-coded `ensure(x.status.success(), ..)` assertion(s) under tests/.\n\
-         Such an assertion reports THAT a command failed and discards the exit \
-         code, stdout and stderr that would say why -- see bd-2bdos and bd-hwye2, \
-         where five rows cost a fleet dispatch each to diagnose.\n\
-         Use `ensure_command_success(&output, \"context\")` instead, which prints \
-         all three. If the new site is a legitimate assertion of FAILURE, spell \
-         it `ensure(!x.status.success(), ..)`.\n\
+        "new success assertion(s) under tests/ that cannot explain a failure.\n\
+         The bracket names WHAT IS MISSING from the failure text, so a site \
+         marked [code+stdout] will print stderr and neither the exit code nor \
+         stdout.\n\
+         Why it matters: such an assertion reports THAT a command failed and \
+         discards what says why. Under `--json` the ee.error.v2 envelope goes \
+         to STDOUT while stderr stays empty, and exit 130 is \
+         Outcome::Cancelled, so omitting any one of the three can make a \
+         cancellation indistinguishable from a rejection. Five rows in \
+         bd-hwye2 cost a fleet dispatch each for exactly that reason.\n\
+         FIX: print all three. `ensure_command_success(&output, \"context\")` \
+         does it for the ensure spelling; for the `status.code()` spelling add \
+         the two streams to the message you already build.\n\
+         NOT A DEFECT, and spell it this way so the gate agrees: asserting a \
+         command FAILED is `ensure(!x.status.success(), ..)`, and asserting a \
+         SPECIFIC failure code is a comparison against that code. Neither is \
+         reported here. Note `if !x.status.success() {{ Err(..) }}` asserts \
+         SUCCESS and IS reported.\n\
          Grew:\n{}\n\
-         (bd-wq41r. Existing sites are grandfathered in {OPEN_CODED_BASELINE}.)",
+         (bd-w5bza. Existing sites are grandfathered in {OPEN_CODED_BASELINE}.)",
         grew.join("\n")
     );
 
@@ -2494,10 +2718,36 @@ fn already_repaired() -> TestResult {
     ensure_command_success(&output, "context")?;
 }
 
+fn code_spelling_printing_nothing() -> TestResult {
+    ensure_equal(&init.status.code(), &Some(0), "init exit")?;
+}
+
+fn code_spelling_printing_two_of_three() -> TestResult {
+    if output.status.code() == Some(EXIT_SUCCESS) {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("{label} got {:?}; stderr: {stderr}", output.status.code()))
+    }
+}
+
+fn asserting_a_specific_failure_code() -> TestResult {
+    ensure(output.status.code() == Some(10), "must exit 10")?;
+}
+
+fn if_not_idiom_asserts_success() -> TestResult {
+    if !output.status.success() {
+        return Err(format!("{label} failed; stderr: {stderr}"));
+    }
+}
+
 fn ensure_command_success(output: &Output, context: &str) -> TestResult {
     ensure(
         output.status.success(),
-        format!("{context}: expected success, got exit {:?}", output.status.code()),
+        format!(
+            "{context}: got exit {:?}; stdout: {stdout}; stderr: {stderr}",
+            output.status.code()
+        ),
     )
 }
 "#,
@@ -2508,28 +2758,50 @@ fn ensure_command_success(output: &Output, context: &str) -> TestResult {
     let _ = fs::remove_file(&fixture);
     let _ = fs::remove_dir(&dir);
 
-    // KNOWN POSITIVES: both spellings must be caught.
-    assert_eq!(
-        found.get("subject::offending_multiline"),
-        Some(&1),
-        "the multi-line spelling must be detected; found: {found:?}"
-    );
-    assert_eq!(
-        found.get("subject::offending_singleline"),
-        Some(&1),
-        "the single-line spelling must be detected; found: {found:?}"
-    );
+    // KNOWN POSITIVES. Each asserts the MISSING SET, not merely that something
+    // was found -- a classifier that detects every site but mislabels what it
+    // lacks would pass a presence-only check while making the baseline lie.
+    for (key, why) in [
+        (
+            "subject::offending_multiline [code+stdout]",
+            "prints stderr only",
+        ),
+        (
+            "subject::offending_singleline [code+stdout+stderr]",
+            "a bare literal prints nothing",
+        ),
+        (
+            "subject::code_spelling_printing_nothing [stdout+stderr]",
+            "ensure_equal renders the code, and no stream",
+        ),
+        (
+            "subject::code_spelling_printing_two_of_three [stdout]",
+            "the require_ok shape: code and stderr, no stdout",
+        ),
+        (
+            "subject::if_not_idiom_asserts_success [code+stdout]",
+            "`if !success() { Err }` asserts SUCCESS and must NOT be exempt",
+        ),
+    ] {
+        assert_eq!(
+            found.get(key),
+            Some(&1),
+            "{key} must be reported ({why}); found: {found:?}"
+        );
+    }
 
     // KNOWN NEGATIVES: each exclusion must hold, or the gate reports offenders
-    // it has no business reporting and gets switched off.
+    // it has no business reporting and gets switched off. Matched by PREFIX
+    // because the missing-set suffix must not let a mislabelled row slip past.
     for exempt in [
         "subject::legitimate_failure_assertion",
         "subject::control_flow_is_not_an_assertion",
         "subject::already_repaired",
+        "subject::asserting_a_specific_failure_code",
         "subject::ensure_command_success",
     ] {
         assert!(
-            !found.contains_key(exempt),
+            !found.keys().any(|key| key.starts_with(exempt)),
             "{exempt} must not be reported; found: {found:?}"
         );
     }

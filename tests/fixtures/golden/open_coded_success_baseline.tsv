@@ -1,12 +1,31 @@
-# OPEN-CODED SUCCESS-ASSERTION BASELINE (bd-wq41r) -- generated, do not hand-edit.
+# INCOMPLETE SUCCESS-ASSERTION BASELINE (bd-w5bza) -- generated, do not hand-edit.
 #
-# WHAT A ROW IS. One row per TEST FUNCTION containing at least one open-coded
-# `ensure(<expr>.status.success(), <label>)`, with how many it contains.
-# ROWS ARE FUNCTIONS. THE SUM OF THE COUNTS IS SITES. They are different units,
-# and a reader who re-derives one while quoting the other gets a third number.
-# A function holding four such assertions is ONE row and FOUR sites.
+# WHAT A ROW IS. One row per (TEST FUNCTION, MISSING-FACT-SET), with how many
+# such assertions it holds. The bracket is part of the key:
+#
+#     smoke::some_test [code+stdout]    3
+#
+# means three assertions there whose failure text carries stderr and NEITHER
+# the exit code NOR stdout.
+#
+# KEYED ON WHAT A SITE PRINTS, NOT ON ITS SPELLING -- this is the whole design.
+# Spelling is orthogonal to quality: `require_ok` compared status.code() and
+# printed the exit code and stderr, while an ensure_equal on status.code() uses
+# the same comparison and prints neither stream. A spelling-keyed gate
+# grandfathers sites of unknown quality, condemning some already adequate and
+# blessing some that are not, and is evaded by changing spelling. This one
+# polices the property cared about: DOES A FAILING ASSERTION SAY WHY.
+#
+# UNIT CHANGE -- DO NOT COMPARE THE TOTALS.
+#   bd-wq41r  367 rows / 569 sites   ONE spelling, EVERY site recorded
+#   bd-w5bza  see CURRENT below      BOTH spellings, only INCOMPLETE recorded
+# The number rose because coverage widened, not because the tree got worse.
+# Complete sites are not debt and are not listed; a row DISAPPEARING is the
+# decay signal this gate exists to make visible.
 #
 # RELATIONSHIP TO EARLIER FIGURES, recorded so nobody derives a fourth:
+#   281  RETIRED as a target. The sites the previous gate could not SEE, which
+#        motivated bd-w5bza. Superseded by the quality-keyed census.
 #   174  RETIRED. Published 2026-09-19T12:50Z over THREE files only and built
 #        on three miscounts -- a `grep -c` that counted a definition line, a
 #        `grep -v` that matched nothing, and a substring anchored to labels
@@ -20,394 +39,623 @@
 # failed and discards the exit code, stdout and stderr that would say why. This
 # file forbids the NEXT one; it does not bless these.
 #
-# WHAT THIS GATE CANNOT SEE -- read before trusting "the population cannot grow".
-# It matches ONE spelling, `ensure(<expr>.status.success(), ..)`. It is blind to
-# the exit-code-comparison spelling:
-#     ensure_equal(&init.status.code(), &Some(0), "init exit")
-#     if output.status.code() == Some(EXIT_SUCCESS) { .. }
-# 281 such sites exist across 42 files (advanced_e2e 61, why_conformance 50,
-# e2e_pack_determinism 21, ...), against the 569 this gate sees. That is not a
-# marginal tail: why_conformance's 50 are the rows bd-2bdos was filed for, so
-# THIS GATE DOES NOT POLICE THE SHAPE THAT MOTIVATED IT, and a new site in the
-# uncovered spelling passes silently.
+# BOTH SPELLINGS ARE NOW COVERED:
+#     ensure(<expr>.status.success(), <msg>)
+#     ensure_equal(&<expr>.status.code(), &Some(0|EXIT_SUCCESS), <label>)
+#     if <expr>.status.code() == Some(0|EXIT_SUCCESS) { .. } else { .. Err(..) }
 #
-# The cause is worth keeping: the scanner's pattern was derived from the five
-# rows already repaired, all of which happened to use `.status.success()`. THE
-# PATTERN CAME FROM THE SAMPLE, NOT THE POPULATION.
+# HOW THE PREVIOUS GATE MISSED HALF THE TREE, kept because the mistake is
+# reusable: its pattern was derived from the five rows already repaired, all of
+# which happened to use `.status.success()`. THE PATTERN CAME FROM THE SAMPLE,
+# NOT THE POPULATION -- and why_conformance's 50 sites, the very rows bd-2bdos
+# was filed for, sat outside it.
 #
-# Those 281 are UNCLASSIFIED, not condemned -- spelling is orthogonal to
-# diagnostic quality. `require_ok` used that spelling and printed two of three
-# streams; `ensure_equal(&x.status.code(), &Some(0), label)` prints none.
+# WHAT THIS GATE STILL CANNOT SEE, so nobody infers a guarantee it lacks:
+#   - One incomplete assertion REPLACING another in the same function with the
+#     same missing set. Counts are unchanged and the swap is invisible.
+#   - Whether an interpolated value is USEFUL. It matches the tokens `code()`,
+#     `stdout` and `stderr` in the assertion's window; a message that mentions
+#     stderr and prints an empty one still counts as carrying it.
+#   - Assertions that reach a status through a helper this classifier does not
+#     read. A helper whose own body is complete is correctly not recorded, but
+#     its callers are judged by the helper, not by themselves.
 #
 # Regenerate: UPDATE_GOLDEN=1 cargo test --test verification_drift_guard \
 #   open_coded_success_assertions_do_not_grow
 #
-# CURRENT: 367 rows (test functions), 569 sites (assertions).
+# CURRENT: 594 rows (function + missing-set), 872 incomplete assertions.
 
-agent_golden_baselines::agent_docs_flag_matches_golden	1
-agent_golden_baselines::agent_docs_recipes_topic_exposes_machine_readable_branches	1
-agent_golden_baselines::all_json_commands_have_schema_envelope	1
-agent_golden_baselines::capabilities_json_output_matches_golden	1
-agent_golden_baselines::capabilities_toon_output_matches_golden	1
-agent_golden_baselines::check_json_output_matches_golden	1
-agent_golden_baselines::check_toon_output_matches_golden	1
-agent_golden_baselines::diag_dependencies_json_matches_golden	1
-agent_golden_baselines::diag_integrity_json_matches_golden	1
-agent_golden_baselines::doctor_franken_health_json_matches_golden	1
-agent_golden_baselines::doctor_json_output_matches_golden	1
-agent_golden_baselines::doctor_toon_output_matches_golden	1
-agent_golden_baselines::schema_flag_matches_golden	1
-agent_golden_baselines::status_json_output_matches_golden	1
-agent_golden_baselines::version_json_advertises_supported_schemas_exactly	1
-agent_golden_baselines::version_json_matches_golden	1
-boundary_migration_logging::boundary_log_records_real_binary_budgeted_index_dry_run	3
-boundary_migration_logging::boundary_log_records_v76q_claim_and_certificate_manifest_evidence	2
-cache_hotset_contract::cache_hotset_manifest_real_binary_missing_authority_abstains	1
-cache_hotset_contract::cache_hotset_manifest_real_binary_streams_large_tracker_privately	1
-cache_prewarm_e2e::cache_prewarm_real_binary_emits_response_envelope_for_hotset_manifest	1
-cass_import_concurrency::parallel_cass_imports_preserve_ledger_counters	1
-cass_import_concurrency::run_import_once	1
-closure_lint_harness::closure_lint_accepts_clean_implementation_and_honesty_sibling	1
-closure_lint_harness::closure_lint_accepts_tests_snapshots_as_golden_evidence	1
-closure_lint_harness::closure_lint_audit_baseline_excuses_known_debt_and_fails_on_a_stale_entry	1
-closure_lint_harness::closure_lint_reports_a_wholly_stale_baseline_on_a_clean_tree	1
-closure_lint_harness::closure_lint_skips_when_beads_write_lock_is_held	1
-consolidation_maintain_e2e::ensure	1
-contract_drift_radar_degraded_taxonomy::contract_drift_radar_pins_json_example_count_semantics	1
-curate_auto_promote_safety_contracts::apply_requires_explicit_apply_flag_even_when_other_flags_are_set	1
-curate_auto_promote_safety_contracts::dry_run_override_keeps_apply_false_even_when_apply_flag_is_set	1
-curate_auto_promote_safety_contracts::effective_thresholds_appear_in_proposal_envelope	1
-curate_auto_promote_safety_contracts::init_workspace	1
-curate_auto_promote_safety_contracts::remember	1
-daemon_start_lifecycle::daemon_pids_for_socket_path	1
-daemon_start_lifecycle::run_daemon_stop	1
-daemon_start_lifecycle::terminate_process	1
-degraded_honesty::init_workspace	1
-degraded_honesty::recorder_start_event_finish_persist_real_state	1
-degraded_honesty::recorder_tail_reads_initialized_store_without_degraded_sentinel	1
-diag_plan_cache_e2e::diag_plan_cache_real_binary_emits_response_envelope	1
-e2e_agent_sources::run_agent_scan	1
-e2e_agent_sources::run_agent_sources	1
-e2e_appendix_c_agent_flow::run_cass_json	1
-e2e_cass_import_dry_run_and_since_filter::dry_run_import_creates_no_persistent_state	1
-e2e_cass_import_dry_run_and_since_filter::since_filter_drops_pre_cutoff_sessions	1
-e2e_cass_import_redaction::parse_json_output	1
-e2e_config_set_invalid_value::init_workspace	1
-e2e_config_unknown_key::init_workspace	1
-e2e_curate_auto_promote::curate_auto_promote_dry_run_default_when_apply_not_set	1
-e2e_curate_auto_promote::curate_auto_promote_dry_run_on_empty_workspace_emits_zero_proposals_and_no_mutation	1
-e2e_curate_auto_promote::init_workspace	1
-e2e_curate_candidates_validators::curate_candidates_happy_path_on_empty_workspace_returns_empty_listing	1
-e2e_curate_candidates_validators::init_workspace	1
-e2e_curate_disposition::curate_disposition_happy_path_on_empty_workspace_succeeds	1
-e2e_curate_disposition::init_workspace	1
-e2e_curate_propose_derived::curate_propose_derived_dry_run_does_not_mutate_database	2
-e2e_curate_propose_derived::curate_propose_derived_inserts_pending_candidate_and_is_idempotent	6
-e2e_curate_propose_derived::init_workspace	1
-e2e_curate_review_actions::init_workspace	1
-e2e_curate_tombstone::curate_tombstone_happy_path_returns_persisted_envelope_with_audit	1
-e2e_curate_tombstone::curate_tombstone_rejects_re_tombstone_already_tombstoned_memory	1
-e2e_curate_tombstone::init_workspace	1
-e2e_curate_validate_errors::init_workspace	1
-e2e_derived_apply_race_retry::assert_success	1
-e2e_diag_resource_admission::diag_resource_admission_wait_for_rch_is_advisory_only	1
-e2e_doctor_concise_default::doctor_default_json_is_concise_and_full_json_keeps_diagnostics	4
-e2e_doctor_robot_docs::doctor_robot_docs_json_route_is_agent_readable_response_envelope	1
-e2e_doctor_robot_triage::doctor_robot_triage_json_route_is_agent_readable_response_envelope	1
-e2e_economy_pin::economy_report_on_empty_db_returns_stable_envelope	1
-e2e_economy_pin::economy_report_with_seeded_memories_counts_artifacts	1
-e2e_economy_pin::economy_score_breakdown_flag_adds_breakdown_object	1
-e2e_economy_pin::economy_score_on_real_memory_returns_stable_envelope	1
-e2e_economy_pin::init_workspace	1
-e2e_graceful_degradation::multiprocess_write_after_source_snapshot_is_present_or_explicitly_stale	1
-e2e_graph_articulation::graph_articulation_emits_sorted_points_for_multi_bridge_chain	1
-e2e_graph_articulation::graph_articulation_identifies_bridge_node_on_two_edge_path	1
-e2e_graph_articulation::graph_articulation_returns_empty_points_on_fresh_workspace	1
-e2e_graph_articulation::init_workspace	1
-e2e_graph_betweenness::graph_betweenness_limit_truncates_deterministically	2
-e2e_graph_betweenness::graph_betweenness_ranks_bridge_node_highest_on_two_edge_path	1
-e2e_graph_betweenness::graph_betweenness_returns_empty_scores_on_fresh_workspace	1
-e2e_graph_betweenness::init_workspace	1
-e2e_graph_centrality::graph_centrality_read_limit_truncates_rows	2
-e2e_graph_centrality::graph_centrality_read_memory_id_filter_returns_single_row	2
-e2e_graph_centrality::graph_centrality_read_reports_scores_unavailable_without_snapshot	1
-e2e_graph_centrality::graph_centrality_read_returns_betweenness_rows_after_refresh	2
-e2e_graph_centrality::graph_centrality_refresh_dry_run_does_not_persist_snapshot	2
-e2e_graph_centrality::init_workspace	1
-e2e_graph_centrality_algorithm::graph_centrality_betweenness_centrality_alias_returns_betweenness_available	1
-e2e_graph_centrality_algorithm::graph_centrality_bogus_algorithm_returns_algorithm_unavailable_with_unknown	1
-e2e_graph_centrality_algorithm::graph_centrality_hits_hubs_alias_returns_algorithm_unavailable	1
-e2e_graph_centrality_algorithm::graph_centrality_page_rank_alias_returns_pagerank_available	1
-e2e_graph_centrality_algorithm::init_workspace	1
-e2e_graph_centrality_algorithm::refresh_centrality	1
-e2e_graph_centrality_memory_id_no_match::graph_centrality_memory_id_no_match_returns_available_with_empty_rows	1
-e2e_graph_centrality_memory_id_no_match::init_workspace	1
-e2e_graph_centrality_memory_id_no_match::refresh_centrality	1
-e2e_graph_communities::graph_communities_returns_empty_set_on_fresh_workspace	1
-e2e_graph_communities::graph_communities_splits_disjoint_components_into_separate_communities	1
-e2e_graph_communities::init_workspace	1
-e2e_graph_explain_link::graph_explain_link_returns_direct_link_found_when_pair_has_direct_edge	1
-e2e_graph_explain_link::graph_explain_link_returns_no_link_path_when_pair_unconnected	1
-e2e_graph_explain_link::graph_explain_link_returns_path_found_on_two_edge_indirect_path	1
-e2e_graph_explain_link::init_workspace	1
-e2e_graph_export::graph_export_no_snapshot_returns_degraded_refresh_repair	1
-e2e_graph_export::init_workspace	1
-e2e_graph_feature_enrichment::graph_feature_enrichment_dry_run_uses_persisted_snapshot	2
-e2e_graph_feature_enrichment::init_workspace	1
-e2e_graph_hits::graph_hits_limit_truncates_hubs_and_authorities_deterministically	2
-e2e_graph_hits::graph_hits_ranks_src_as_top_hub_and_dst_as_top_authority	1
-e2e_graph_hits::graph_hits_returns_empty_score_maps_on_fresh_workspace	1
-e2e_graph_hits::init_workspace	1
-e2e_graph_k_core::graph_k_core_returns_empty_core_on_fresh_workspace	1
-e2e_graph_k_core::graph_k_core_returns_empty_when_k_exceeds_max_degree	1
-e2e_graph_k_core::graph_k_core_returns_full_triangle_at_k_equals_one	1
-e2e_graph_k_core::graph_k_core_returns_full_triangle_at_main_core	1
-e2e_graph_k_core::init_workspace	1
-e2e_graph_louvain::graph_louvain_returns_empty_communities_on_fresh_workspace	1
-e2e_graph_louvain::graph_louvain_seeded_runs_are_byte_deterministic	1
-e2e_graph_louvain::graph_louvain_splits_disjoint_components_into_separate_communities	1
-e2e_graph_louvain::init_workspace	1
-e2e_graph_neighborhood_mermaid::graph_neighborhood_machine_modes_override_format_mermaid	1
-e2e_graph_neighborhood_mermaid::graph_neighborhood_mermaid_limit_emits_truncation_comment	1
-e2e_graph_neighborhood_mermaid::graph_neighborhood_mermaid_output_is_deterministic_across_repeated_runs	1
-e2e_graph_neighborhood_mermaid::graph_neighborhood_mermaid_renders_directed_edge_with_relation_label	1
-e2e_graph_neighborhood_mermaid::graph_neighborhood_mermaid_renders_empty_neighborhood_marker	1
-e2e_graph_neighborhood_mermaid::graph_neighborhood_mermaid_renders_undirected_edge_without_arrowhead	1
-e2e_graph_neighborhood_mermaid::init_workspace	1
-e2e_graph_neighborhood_validators::init_workspace	1
-e2e_graph_pagerank::graph_pagerank_limit_truncates_deterministically	2
-e2e_graph_pagerank::graph_pagerank_returns_empty_scores_on_fresh_workspace	1
-e2e_graph_pagerank::graph_pagerank_returns_ranked_scores_for_two_edge_path	1
-e2e_graph_pagerank::init_workspace	1
-e2e_graph_pagerank_tombstoned::graph_pagerank_default_excludes_tombstoned_node_via_excluded_nodes	1
-e2e_graph_pagerank_tombstoned::graph_pagerank_with_include_tombstoned_clears_excluded_nodes	1
-e2e_graph_pagerank_tombstoned::init_workspace	1
-e2e_graph_pagerank_tombstoned::tombstone_memory	1
-e2e_graph_path::graph_path_returns_no_path_on_fresh_workspace	1
-e2e_graph_path::graph_path_returns_no_path_when_memories_unlinked	1
-e2e_graph_path::graph_path_returns_path_found_on_two_edge_directed_path	1
-e2e_graph_path::init_workspace	1
-e2e_graph_snapshot_refresh_validators::graph_snapshot_refresh_accepts_causal_evidence_alias_in_dry_run	1
-e2e_graph_snapshot_refresh_validators::graph_snapshot_refresh_accepts_revision_dag_alias_in_dry_run	1
-e2e_graph_snapshot_refresh_validators::init_workspace	1
-e2e_insights_json_stream_mutex::init_workspace	1
-e2e_insights_json_stream_mutex::insights_json_stream_alone_emits_parseable_jsonl_header	1
-e2e_lab_swarm_workload_generator::lab_generate_workload_emits_all_profiles_as_redaction_safe_json	1
-e2e_lab_swarm_workload_generator::lab_promote_workload_turns_redacted_agent_trace_into_replayable_swarm_trace	1
-e2e_lab_swarm_workload_generator::lab_swarm_replay_executes_small_generated_fixture_with_artifact_ledger	2
-e2e_memory_expire::init_workspace	1
-e2e_memory_expire::memory_expire_dry_run_emits_would_expire_preview_without_mutating	2
-e2e_memory_expire::memory_expire_happy_path_returns_expired_envelope_with_audit	1
-e2e_memory_expire::memory_expire_include_tombstoned_reports_already_expired_no_change	1
-e2e_memory_expire::memory_expire_is_idempotent_on_already_expired_memory	2
-e2e_memory_expire::tombstone_memory	1
-e2e_memory_link_list_and_dry_run::init_workspace	1
-e2e_memory_link_list_and_dry_run::memory_link_dry_run_returns_would_create_preview_without_persisting	2
-e2e_memory_link_list_and_dry_run::memory_link_list_filters_by_relation_and_includes_both_directions	3
-e2e_memory_link_list_and_dry_run::memory_link_list_on_isolated_memory_returns_empty_links_envelope	1
-e2e_memory_link_semantic::init_workspace	1
-e2e_memory_link_semantic::tombstone_memory	1
-e2e_memory_link_usage::init_workspace	1
-e2e_memory_revise_errors::init_workspace	1
-e2e_memory_revise_errors::tombstone_memory	1
-e2e_memory_show_and_history::init_workspace	1
-e2e_memory_show_and_history::memory_history_format_mermaid_renders_deterministic_audit_diagram	1
-e2e_memory_show_and_history::memory_history_happy_path_returns_audit_entries	1
-e2e_memory_show_and_history::memory_history_machine_modes_override_format_mermaid	1
-e2e_memory_show_and_history::memory_show_happy_path_returns_stable_envelope	1
-e2e_memory_tags_validation::init_workspace	1
-e2e_memory_tags_validation::memory_tags_list_mode_on_untagged_memory_succeeds	1
-e2e_mesh_lane_grant::human_confirmation_reuses_json_preview_and_commits_the_reviewed_effect	2
-e2e_multi_agent_writers::single_shot_write_contention_script_real_binary_acceptance_bridge	1
-e2e_plan_recipe::plan_recipe_list_emits_success_envelope_with_recipes_array	1
-e2e_proximity::init_workspace	1
-e2e_proximity::proximity_disconnected_pair_returns_unreachable_with_degraded_entry	1
-e2e_proximity::proximity_missing_memory_returns_missing_interpretation	1
-e2e_proximity::proximity_self_pair_returns_self_interpretation_with_zero_min_cut	1
-e2e_retrieval_truth_script::retrieval_truth_script_exercises_public_cli_and_structured_logging	1
-e2e_schema_export_unknown::schema_export_response_schema_emits_json_schema_document	1
-e2e_schema_export_unknown::schema_export_unknown_id_emits_schema_not_found_envelope_with_zero_exit	1
-e2e_subscribe_poll_filter_validators::init_workspace	1
-e2e_subscribe_stream_renderer::init_workspace	1
-e2e_subscribe_stream_renderer::subscribe_stream_with_json_flag_then_format_markdown_still_errors	1
-e2e_why::init_workspace	1
-e2e_why::why_format_mermaid_renders_diagram_referencing_memory_id	1
-e2e_why::why_returns_stable_envelope_for_existing_memory	1
-effect_contracts::bare_status_inspects_current_workspace	1
-effect_contracts::canonical_database_reads_leave_initialized_workspace_byte_identical	3
-effect_contracts::capabilities_command_does_not_mutate_workspace	1
-effect_contracts::introspect_command_does_not_mutate_workspace	1
-effect_contracts::retrieval_surfaces_append_exactly_one_audit_row_and_nothing_else	4
-effect_contracts::version_command_does_not_mutate_workspace	1
-error_recovery_conformance_e2e::empty_initialized_root_discovers_populated_child_and_populated_root_skips	13
-error_recovery_conformance_e2e::empty_workspace_discovers_registered_remote_store_and_skips_bad_rows	7
-error_recovery_conformance_e2e::ordinary_storage_failure_keeps_exit_three_and_init_preserves_agent_docs	2
-error_recovery_conformance_e2e::orient_explicit_external_database_uses_recorded_workspace_identity	3
-error_recovery_conformance_e2e::relocated_store_reports_identity_mismatch_and_executes_explicit_read_recovery	1
-error_recovery_conformance_e2e::storeless_custom_address_reports_all_ranked_nearby_stores	3
-error_recovery_conformance_e2e::storeless_miss_quotes_spaced_nearby_workspace_and_command_executes	6
-error_recovery_conformance_e2e::storeless_miss_surfaces_nearby_populated_store	2
-error_recovery_conformance_e2e::storeless_registry_failure_preserves_local_retarget_and_is_read_only	1
-error_recovery_conformance_e2e::storeless_same_root_default_and_campaign_retargets_are_database_exact	9
-eval_report_e2e::eval_report_summarizes_fixture_hashes_and_first_failure_with_logged_binary_run	1
-export_playbook_e2e::run_step	1
-fake_tailscale_harness::fake_tailscale_assert_no_invalid_events_exits_non_zero_when_any_event_invalid	1
-fake_tailscale_harness::fake_tailscale_responder_returns_hello_response_with_configured_workspace_ids	1
-fake_tailscale_harness::fake_tailscale_shell_self_test_emits_valid_events	1
-focus_suggest_phase2_e2e::must_succeed	1
-focus_suggest_schema::focus_suggest_default_recent_window_is_24_hours_and_limit_is_5	1
-focus_suggest_schema::focus_suggest_emits_v1_schema_and_no_phase1_sentinel	1
-focus_suggest_schema::focus_suggest_task_frame_flag_accepted	1
-golden::normalize_json_for_comparison	17
-graph_neighborhood_smoke::graph_centrality_read_json_toon_and_golden_are_stable	2
-graph_neighborhood_smoke::graph_centrality_read_reports_unavailable_algorithm	1
-graph_neighborhood_smoke::graph_link_path_and_why_outputs_compose_for_real_memory_edges	4
-graph_neighborhood_smoke::graph_neighborhood_human_renderer_includes_summary	1
-graph_neighborhood_smoke::graph_neighborhood_json_envelope_is_stable	1
-graph_neighborhood_smoke::graph_neighborhood_relation_filter_excludes_other_relations	1
-graph_neighborhood_smoke::init_workspace	1
-graph_neighborhood_smoke::insights_causal_bottlenecks_returns_seeded_bridge_memory	1
-graph_neighborhood_smoke::insights_proximity_hotspots_returns_seeded_min_cut_pair	1
-graph_neighborhood_smoke::memory_revise_and_why_emit_revision_impact_blocks	2
-graph_neighborhood_smoke::memory_revise_dry_run_impact_analysis_reports_branch_frontier	2
-graph_neighborhood_smoke::memory_revise_dry_run_impact_analysis_reports_singleton_revision_gap	1
-graph_neighborhood_smoke::proximity_human_renderer_includes_pair_and_interpretation	1
-graph_neighborhood_smoke::proximity_json_reports_min_cut_for_seeded_memory_pair	2
-graph_neighborhood_smoke::refresh_graph_centrality_snapshot	1
-graph_neighborhood_smoke::seed_workspace_with_causal_evidence	1
-graph_neighborhood_smoke::seed_workspace_with_link	1
-graph_neighborhood_smoke::status_json_exposes_graph_result_cache_hit_rate_metric	1
-graph_neighborhood_smoke::why_causal_explain_returns_seeded_min_cost_path	1
-graph_neighborhood_smoke::why_revision_lineage_reports_ancestor_depths_for_revision_chain	1
-hotset_prewarm_e2e::hotset_prewarm_script_emits_event_log_and_preserves_semantics	1
-index_vacuum_e2e::index_vacuum_reports_missing_index_preview_with_logged_binary_run	2
-install_workflows::install_check_already_current_is_idempotent	1
-install_workflows::install_check_detects_duplicate_path_binaries_without_stderr	1
-install_workflows::install_check_handles_symlinked_install_root	1
-install_workflows::install_check_permission_denied_matches_golden	1
-install_workflows::install_check_pins_shadowed_stale_path_contract_bd_3utv2_5	1
-install_workflows::install_freshness_claim_gate_e2e_script_bd_3utv2_7	1
-install_workflows::install_plan_checksum_mismatch_refuses_unverified_artifact	1
-install_workflows::install_plan_empty_manifest_is_blocked	1
-install_workflows::install_plan_huge_manifest_does_not_hang	1
-install_workflows::install_plan_selects_manifest_artifact_and_stays_dry_run	1
-install_workflows::install_plan_unsupported_target_matches_golden	1
-install_workflows::install_plan_without_manifest_matches_offline_golden	1
-install_workflows::installer_has_no_bash_3_2_unsafe_empty_array_expansions	1
-install_workflows::installer_proxy_forwarding_is_bash_3_2_nounset_safe	1
-install_workflows::installer_retries_compatible_linux_archive_without_crossing_trust_inputs	1
-install_workflows::matching_version_installer_rerun_repairs_integration_without_acquisition	2
-install_workflows::source_installers_fail_closed_on_missing_or_non_tagged_requested_versions	1
-install_workflows::update_dry_run_manifest_plan_matches_golden	1
-journal_capture_contract::e2e_journal_capture_records_success_shaped_nonzero_results	1
-journal_capture_contract::journal_capture_real_binary_e2e_completes_without_false_green	1
-journal_capture_contract::planted_success_shaped_failure_fails_the_real_harness_summary	1
-memory_expire_tags_e2e::run_step	1
-memory_link_e2e::run_step	1
-memory_seal_e2e::ensure_success	1
-no_mocks_e2e::run_cass_json	1
-no_mocks_e2e::run_tool	1
-north_star_context_e2e::init_workspace	1
-north_star_context_e2e::north_star_1_release_context_includes_verification_rules	1
-north_star_context_e2e::north_star_2_async_migration_context_is_json_and_mentions_cx	1
-north_star_context_e2e::north_star_3_promoted_ci_rule_is_retrievable	2
-north_star_context_e2e::north_star_3b_pack_surfaces_promoted_rule	1
-north_star_context_e2e::north_star_4_onboarding_context_includes_conventions	1
-north_star_context_e2e::north_star_5_cleanup_context_warns_about_dangers	1
-north_star_context_e2e::north_star_6_degraded_mode_uses_lexical_fallback	3
-north_star_context_e2e::promote_rule_from_memory	1
-north_star_context_e2e::seed_async_migration_memories	1
-north_star_context_e2e::seed_cleanup_memories	1
-north_star_context_e2e::seed_failure_memory	1
-north_star_context_e2e::seed_onboarding_memories	1
-north_star_context_e2e::seed_release_memories	1
-rch_runbook_docs_lint::shell_e2e_driver_emits_phase_logs_and_final_summary	1
-rch_verify_control_plane::shell_e2e_driver_emits_phase_logs_and_final_summary	1
-read_pool_concurrency_e2e::read_pool_concurrency_script_smoke_emits_valid_events	1
-renderer_command_capabilities::machine_modes_override_unsupported_mermaid_status_to_canonical_json	1
-resource_admission_report_conformance::run_report	1
-retrieval_pipeline_monotonic::run_ee_json	1
-rule_mark_update_e2e::run_step	1
-rule_provenance_integration::run_ee	1
-rule_provenance_unit::run_ee	1
-search_deterministic_golden::run_search_json_for_query	1
-smoke::artifact_registry_registers_indexes_exports_and_supports_context	12
-smoke::backup_create_json_writes_redacted_artifacts_and_manifest	3
-smoke::clap_help_keeps_stderr_clean	1
-smoke::context_explain_emits_pack_dna	1
-smoke::context_no_pack_dna_suppresses_pack_dna	1
-smoke::contract_drift_agent_docs_all_topics_valid	1
-smoke::contract_drift_agent_docs_without_topic_valid	1
-smoke::contract_drift_data_field_present_on_success	1
-smoke::curate_apply_json_updates_approved_candidate_target	3
-smoke::curate_apply_procedure_candidate_then_harmful_outcomes_auto_retire	4
-smoke::curate_candidates_after_seed_matches_snapshot	3
-smoke::curate_candidates_json_lists_empty_pending_queue	3
-smoke::curate_review_lifecycle_commands_json_update_review_state	2
-smoke::curate_review_with_reason_pins_audit_row_shape	5
-smoke::curate_validate_json_approves_pending_candidate	3
-smoke::daemon_foreground_once_json_runs_real_health_job_in_isolated_workspace	1
-smoke::expanded_memory_substrate_composition_logged_e2e_scenario	1
-smoke::format_json_global_selects_machine_output	1
-smoke::global_json_flag_is_order_independent	3
-smoke::import_cass_json_uses_cass_robot_contract_and_is_idempotent	2
-smoke::import_cass_real_robot_output_retrieves_evidence_with_provenance	1
-smoke::import_jsonl_json_validates_imports_and_skips_duplicates	5
-smoke::index_reembed_json_rebuilds_index_and_records_job	4
-smoke::insights_section_pagination_json_is_deterministic_and_stdout_only	1
-smoke::integration_foundation_asupersync_runtime_reports_correctly	1
-smoke::integration_foundation_capability_status_structure	1
-smoke::integration_foundation_degradation_codes_present_when_unimplemented	1
-smoke::integration_foundation_degradation_includes_repair_hints	1
-smoke::integration_foundation_exit_code_zero_on_success	1
-smoke::integration_foundation_memory_health_structure	1
-smoke::integration_foundation_response_envelope_schema	1
-smoke::integration_foundation_version_reported_in_status	1
-smoke::mcp_manifest_json_real_binary_smoke	1
-smoke::mcp_serve_stdio_default_build_reports_capability_gap	1
-smoke::mcp_validate_json_real_binary_smoke	2
-smoke::mcp_validate_reports_invalid_schema_fixture	1
-smoke::memory_temporal_links_and_graph_outputs_compose	7
-smoke::model_status_and_list_json_report_registry_contracts	2
-smoke::pack_query_file_max_results_and_output_explain_are_observable	2
-smoke::perf_budget_check_profile_mismatch_degrades_but_stays_read_only	1
-smoke::perf_compare_json_success_is_read_only_and_stdout_only	1
-smoke::profile_config_plan_and_apply_json_are_stable_machine_data	3
-smoke::remember_cotag_threshold_separates_applied_links_from_staged_suggestions	2
-smoke::remember_persists_and_feeds_search_context_flow	9
-smoke::remember_returns_staged_tag_cooccurrence_suggestions_without_mutating_links	4
-smoke::robot_global_selects_machine_output	1
-smoke::seed_context_pack_dna_workspace	2
-smoke::status_json_stdout_is_stable_machine_data	2
-smoke::status_skyline_human_stdout_is_compact_status_surface	1
-smoke::status_skyline_json_stdout_is_stable_machine_data	1
-smoke::status_workspace_reports_ambiguity_diagnostics	1
-smoke::walking_skeleton_durability_scenario	10
-smoke::workspace_alias_commands_resolve_global_workspace_flag	4
-smoke::workspace_resolve_reports_monorepo_subproject_scope	5
-subscribe_e2e::expect_success	1
-subscribe_error_conformance_e2e::expect_success	1
-subscribe_filter_modes_e2e::expect_success	1
-subscribe_filters_e2e::expect_success	1
-swarm_coordination_health_unit::health_script_parses_degraded_http_health_body_without_path_leaks	1
-swarm_coordination_health_unit::health_script_preserves_redacted_semantic_readiness_failure	1
-swarm_coordination_health_unit::health_script_reports_agent_mail_panic_and_fallback	1
-swarm_coordination_health_unit::health_script_treats_http_error_status_as_fallback_without_recovery_body	1
-swarm_coordination_health_unit::health_script_treats_recovery_corrupt_as_fallback_even_when_green	1
-symbol_graph_manifest_conformance_e2e::expect_success	1
-usr002_pre_task_brief_scenario::pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts	10
-usr003_in_task_scenario::in_task_recovery_scenario_explains_selection_repair_and_tripwires	10
-usr005_degraded_scenario::dependency_surface_reports_unavailable_dependency_codes	1
-usr005_degraded_scenario::doctor_fix_plan_is_ordered_and_non_destructive	1
-usr005_degraded_scenario::eval_and_science_status_return_useful_partial_output_under_degradation	1
-usr006_privacy_redaction_backup_scenario::backup_workflow_creates_verifiable_artifact	6
-usr006_privacy_redaction_backup_scenario::export_with_redaction_prevents_secret_leakage	3
-vision_coverage_gate::vision_coverage_accepts_an_unexercised_surface_that_is_baselined	1
-vision_coverage_gate::vision_coverage_blocks_release_tag_when_gap_remains	1
-vision_coverage_gate::vision_coverage_canonicalizes_known_command_aliases	1
-vision_coverage_gate::vision_coverage_compare_ref_includes_delta_report	1
-vision_coverage_gate::vision_coverage_fails_closed_when_the_evidence_corpus_is_absent	1
-vision_coverage_gate::vision_coverage_keeps_command_after_leading_global_options	1
-vision_coverage_gate::vision_coverage_rejects_unknown_leading_inline_global_options	1
-vision_coverage_gate::vision_coverage_report_has_required_shape	1
-vision_coverage_gate::vision_coverage_warns_below_the_published_cadence_threshold	1
+advanced_e2e::assert_causal_success [stdout+stderr]	1
+advanced_e2e::assert_lab_report_common [stdout+stderr]	1
+advanced_e2e::ee_impact_path_surface_returns_exact_anchor_hit_with_stable_json [stdout+stderr]	3
+advanced_e2e::initialized_recorder_workspace [stdout+stderr]	1
+advanced_e2e::initialized_workspace [stdout+stderr]	1
+advanced_e2e::learn_close_dry_run_records_outcome_shape [stdout+stderr]	1
+advanced_e2e::learn_observe_dry_run_records_evidence_shape [stdout+stderr]	1
+advanced_e2e::preflight_run_blocks_high_risk_deploy_task [stdout+stderr]	1
+advanced_e2e::preflight_run_show_close_persists_guard_tripwire_lifecycle [stdout+stderr]	3
+advanced_e2e::procedure_list_returns_empty_persisted_records [stdout+stderr]	1
+advanced_e2e::recorder_commands_support_human_dry_run_output [stdout+stderr]	1
+advanced_e2e::recorder_import_dry_run_maps_cass_view_without_mutation [stdout+stderr]	1
+advanced_e2e::recorder_start_dry_run_reports_without_store_mutation [stdout+stderr]	1
+advanced_e2e::recorder_start_event_finish_persist_and_list_events [stdout+stderr]	4
+advanced_e2e::recorder_tail_returns_empty_snapshot_from_initialized_store [stdout+stderr]	2
+advanced_e2e::rehearse_inspect_and_promote_plan_read_run_manifest [stdout+stderr]	2
+advanced_e2e::rehearse_plan_reports_sandbox_ready_contract [stdout+stderr]	1
+advanced_e2e::rehearse_plan_with_command_spec_reports_unsupported_commands [stdout+stderr]	1
+advanced_e2e::rehearse_run_creates_sandbox_manifest_without_mutating_source [stdout+stderr]	1
+advanced_e2e::release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean [stdout+stderr]	8
+advanced_e2e::rule_add_dry_run_returns_response_envelope [stdout+stderr]	1
+advanced_e2e::rule_add_persists_rule_with_source_memory [stdout+stderr]	5
+agent_golden_baselines::agent_docs_flag_matches_golden [code+stdout+stderr]	1
+agent_golden_baselines::agent_docs_recipes_topic_exposes_machine_readable_branches [code+stdout+stderr]	1
+agent_golden_baselines::all_json_commands_have_schema_envelope [code+stdout]	1
+agent_golden_baselines::capabilities_json_output_matches_golden [code+stdout]	1
+agent_golden_baselines::capabilities_toon_output_matches_golden [code+stdout]	1
+agent_golden_baselines::check_json_output_matches_golden [code+stdout]	1
+agent_golden_baselines::check_toon_output_matches_golden [code+stdout]	1
+agent_golden_baselines::diag_dependencies_json_matches_golden [code+stdout]	1
+agent_golden_baselines::diag_integrity_json_matches_golden [code+stdout]	1
+agent_golden_baselines::doctor_franken_health_json_matches_golden [code+stdout]	1
+agent_golden_baselines::doctor_json_output_matches_golden [code+stdout]	1
+agent_golden_baselines::doctor_toon_output_matches_golden [code+stdout]	1
+agent_golden_baselines::schema_flag_matches_golden [code+stdout+stderr]	1
+agent_golden_baselines::status_json_output_matches_golden [code+stdout]	1
+agent_golden_baselines::validate_contract_case [stdout+stderr]	1
+agent_golden_baselines::version_json_advertises_supported_schemas_exactly [code+stdout+stderr]	1
+agent_golden_baselines::version_json_matches_golden [code+stdout+stderr]	1
+agent_golden_baselines::version_subcommand_matches_golden [code+stdout+stderr]	1
+agentsmd_bridge::export_create_human_summary_matches_golden [code+stderr]	1
+agentsmd_bridge::export_missing_file_reports_file_missing_golden [code+stderr]	1
+agentsmd_bridge::import_dry_run_human_summary_matches_golden [code+stderr]	1
+agentsmd_bridge::run_ee_json [code]	1
+audit_jsonl_contract::audit_show_missing_row_exits_nonzero_with_error_envelope [code+stderr]	1
+auto_enroll_real_tailscale_self_test::auto_enroll_real_tailscale_fake_run_retains_redacted_tailnet_artifacts [code]	1
+auto_enroll_real_tailscale_self_test::auto_enroll_real_tailscale_passes_bash_n_parse_check [code+stdout]	1
+boundary_migration_logging::boundary_log_records_real_binary_budgeted_index_dry_run [code]	3
+boundary_migration_logging::boundary_log_records_v76q_claim_and_certificate_manifest_evidence [code+stdout+stderr]	2
+bridge_staleness_gate::run_script [stdout]	1
+cache_hotset_contract::cache_hotset_manifest_real_binary_missing_authority_abstains [code]	1
+cache_hotset_contract::cache_hotset_manifest_real_binary_streams_large_tracker_privately [code]	1
+cass_import_concurrency::parallel_cass_imports_preserve_ledger_counters [code]	1
+cass_import_concurrency::run_import_once [code]	1
+cli_completion_regen::run_completion [stdout]	1
+cli_help_emits::agent_docs_commands_json_matches_help_grammars [stdout]	1
+cli_help_emits::command_help [stdout]	1
+cli_loop_e2e::cli_loop_context_empty_workspace_degrades_gracefully [stdout+stderr]	1
+cli_loop_e2e::cli_loop_init_remember_search_context_why_full_cycle [stdout+stderr]	4
+cli_loop_e2e::cli_loop_multiple_memories_with_same_tags_are_searchable [stdout+stderr]	4
+cli_loop_e2e::cli_loop_search_empty_workspace_returns_empty_results [stdout+stderr]	2
+cli_loop_e2e::cli_loop_status_reports_workspace_health [stdout+stderr]	2
+cli_loop_e2e::cli_loop_why_unknown_memory_returns_error [stdout+stderr]	1
+closeout_audit_runner_unit::closeout_audit_script_is_bash_syntax_clean [code+stdout]	1
+closeout_audit_runner_unit::run_audit_with_env_strings [stdout]	1
+closure_lint_harness::closure_lint_accepts_clean_implementation_and_honesty_sibling [code+stdout+stderr]	1
+closure_lint_harness::closure_lint_accepts_tests_snapshots_as_golden_evidence [code+stdout+stderr]	1
+closure_lint_harness::closure_lint_audit_baseline_excuses_known_debt_and_fails_on_a_stale_entry [code+stdout+stderr]	1
+closure_lint_harness::closure_lint_reports_a_wholly_stale_baseline_on_a_clean_tree [code+stdout+stderr]	1
+closure_lint_harness::closure_lint_skips_when_beads_write_lock_is_held [code+stdout+stderr]	1
+consolidation_maintain_e2e::ensure [stdout]	1
+contract_drift_radar_degraded_taxonomy::contract_drift_radar_pins_json_example_count_semantics [stdout]	1
+curate_auto_promote_safety_contracts::apply_requires_explicit_apply_flag_even_when_other_flags_are_set [code+stdout]	1
+curate_auto_promote_safety_contracts::dry_run_override_keeps_apply_false_even_when_apply_flag_is_set [code+stdout]	1
+curate_auto_promote_safety_contracts::effective_thresholds_appear_in_proposal_envelope [code+stdout]	1
+curate_auto_promote_safety_contracts::init_workspace [code+stdout]	1
+curate_auto_promote_safety_contracts::remember [code+stdout]	1
+daemon_start_lifecycle::daemon_pids_for_socket_path [code+stdout]	1
+daemon_start_lifecycle::run_daemon_stop [code]	1
+daemon_start_lifecycle::terminate_process [code]	1
+degraded_codes_doc_coverage::generated_doc_is_byte_identical_to_builder_output [code]	1
+degraded_honesty::init_workspace [code]	1
+degraded_honesty::recorder_start_event_finish_persist_real_state [code]	1
+degraded_honesty::recorder_tail_reads_initialized_store_without_degraded_sentinel [code]	1
+demo_env_redaction::assert_secret_absent_and_key_visible [stdout+stderr]	1
+determinism_unit::init_workspace [code]	1
+determinism_unit::run_ee_stdout [code]	1
+e2e_agent_sources::run_agent_scan [code+stdout]	1
+e2e_agent_sources::run_agent_sources [code+stdout]	1
+e2e_appendix_c_agent_flow::run_cass_json [stdout]	1
+e2e_artifact_manifest_contract::bash_harness_attests_actual_binary_behind_env_prefix [stdout]	1
+e2e_artifact_manifest_contract::bash_harness_emits_command_artifact_manifest [stdout]	1
+e2e_artifact_manifest_contract::bash_harness_emits_verified_remote_artifact_manifest_v2 [stdout]	1
+e2e_artifact_manifest_contract::bash_harness_refuses_forged_remote_artifact_attestations [stdout]	1
+e2e_artifact_manifest_contract::bash_harness_refuses_v2_when_exercised_binary_does_not_match_report [stdout]	1
+e2e_artifact_manifest_contract::bash_harness_warns_when_manifest_binary_hash_is_missing [stdout]	1
+e2e_backup_restore_roundtrip::backup_verify_and_restore_reject_real_store_tamper_matrix [stdout+stderr]	1
+e2e_backup_restore_roundtrip::run_ee_with_passphrase [code]	1
+e2e_cass_import_dry_run_and_since_filter::dry_run_import_creates_no_persistent_state [code]	1
+e2e_cass_import_dry_run_and_since_filter::since_filter_drops_pre_cutoff_sessions [code]	1
+e2e_cass_import_redaction::parse_json_output [code]	1
+e2e_config_set_invalid_value::init_workspace [code+stdout]	1
+e2e_config_unknown_key::init_workspace [code+stdout]	1
+e2e_core_workflow::context_and_why_report_changed_file_provenance [stdout+stderr]	5
+e2e_core_workflow::context_pack_includes_relevant_memories [stdout+stderr]	1
+e2e_core_workflow::memory_list_and_show_round_trip_local_provenance_uri [stdout+stderr]	4
+e2e_core_workflow::memory_list_tag_filter_round_trips_mixed_case_without_reindex [stdout+stderr]	1
+e2e_core_workflow::remember_creates_searchable_memory [stdout+stderr]	3
+e2e_core_workflow::remember_three_memories_keeps_search_index_fresh_without_manual_rebuild [stdout+stderr]	1
+e2e_core_workflow::search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture [stdout+stderr]	2
+e2e_curate_auto_promote::curate_auto_promote_dry_run_default_when_apply_not_set [code+stdout]	1
+e2e_curate_auto_promote::curate_auto_promote_dry_run_on_empty_workspace_emits_zero_proposals_and_no_mutation [code+stdout]	1
+e2e_curate_auto_promote::init_workspace [code+stdout]	1
+e2e_curate_candidates_validators::curate_candidates_happy_path_on_empty_workspace_returns_empty_listing [code+stdout]	1
+e2e_curate_candidates_validators::init_workspace [code+stdout]	1
+e2e_curate_disposition::curate_disposition_happy_path_on_empty_workspace_succeeds [code+stdout]	1
+e2e_curate_disposition::init_workspace [code+stdout]	1
+e2e_curate_propose_derived::curate_propose_derived_inserts_pending_candidate_and_is_idempotent [code+stdout+stderr]	1
+e2e_curate_propose_derived::curate_propose_derived_inserts_pending_candidate_and_is_idempotent [code]	3
+e2e_curate_propose_derived::remember [code]	1
+e2e_curate_review_actions::init_workspace [code+stdout]	1
+e2e_curate_tombstone::curate_tombstone_happy_path_returns_persisted_envelope_with_audit [code+stdout]	1
+e2e_curate_tombstone::curate_tombstone_rejects_re_tombstone_already_tombstoned_memory [code+stdout+stderr]	1
+e2e_curate_tombstone::init_workspace [code+stdout]	1
+e2e_curate_tombstone::remember [code]	1
+e2e_curate_validate_errors::init_workspace [code+stdout]	1
+e2e_derived_apply_race_retry::assert_success [code]	1
+e2e_diag_resource_admission::diag_resource_admission_wait_for_rch_is_advisory_only [code+stdout]	1
+e2e_doctor_concise_default::doctor_default_json_is_concise_and_full_json_keeps_diagnostics [code]	4
+e2e_doctor_concise_default::doctor_read_only_modes_honor_environment_and_walk_up_workspace_resolution [code]	2
+e2e_doctor_robot_docs::doctor_robot_docs_json_route_is_agent_readable_response_envelope [code]	1
+e2e_doctor_robot_triage::doctor_robot_triage_json_route_is_agent_readable_response_envelope [code]	1
+e2e_economy_pin::economy_report_on_empty_db_returns_stable_envelope [code+stdout]	1
+e2e_economy_pin::economy_report_with_seeded_memories_counts_artifacts [code+stdout]	1
+e2e_economy_pin::economy_score_breakdown_flag_adds_breakdown_object [code+stdout]	1
+e2e_economy_pin::economy_score_on_real_memory_returns_stable_envelope [code+stdout]	1
+e2e_economy_pin::init_workspace [code+stdout]	1
+e2e_economy_pin::remember [code]	1
+e2e_graceful_degradation::multiprocess_write_after_source_snapshot_is_present_or_explicitly_stale [code]	1
+e2e_graph_articulation::graph_articulation_emits_sorted_points_for_multi_bridge_chain [code+stdout]	1
+e2e_graph_articulation::graph_articulation_identifies_bridge_node_on_two_edge_path [code+stdout]	1
+e2e_graph_articulation::graph_articulation_returns_empty_points_on_fresh_workspace [code+stdout]	1
+e2e_graph_articulation::init_workspace [code+stdout]	1
+e2e_graph_articulation::remember [code]	1
+e2e_graph_betweenness::graph_betweenness_limit_truncates_deterministically [code+stdout+stderr]	2
+e2e_graph_betweenness::graph_betweenness_ranks_bridge_node_highest_on_two_edge_path [code+stdout]	1
+e2e_graph_betweenness::graph_betweenness_returns_empty_scores_on_fresh_workspace [code+stdout]	1
+e2e_graph_betweenness::init_workspace [code+stdout]	1
+e2e_graph_betweenness::remember [code]	1
+e2e_graph_centrality::graph_centrality_read_limit_truncates_rows [code+stdout]	2
+e2e_graph_centrality::graph_centrality_read_memory_id_filter_returns_single_row [code+stdout]	2
+e2e_graph_centrality::graph_centrality_read_reports_scores_unavailable_without_snapshot [code+stdout]	1
+e2e_graph_centrality::graph_centrality_read_returns_betweenness_rows_after_refresh [code+stdout]	2
+e2e_graph_centrality::graph_centrality_refresh_dry_run_does_not_persist_snapshot [code+stdout]	2
+e2e_graph_centrality::init_workspace [code+stdout]	1
+e2e_graph_centrality::remember [code]	1
+e2e_graph_centrality_algorithm::graph_centrality_betweenness_centrality_alias_returns_betweenness_available [code+stdout]	1
+e2e_graph_centrality_algorithm::graph_centrality_bogus_algorithm_returns_algorithm_unavailable_with_unknown [code+stdout]	1
+e2e_graph_centrality_algorithm::graph_centrality_hits_hubs_alias_returns_algorithm_unavailable [code+stdout]	1
+e2e_graph_centrality_algorithm::graph_centrality_page_rank_alias_returns_pagerank_available [code+stdout]	1
+e2e_graph_centrality_algorithm::init_workspace [code+stdout]	1
+e2e_graph_centrality_algorithm::refresh_centrality [code+stdout]	1
+e2e_graph_centrality_algorithm::remember [code]	1
+e2e_graph_centrality_memory_id_no_match::graph_centrality_memory_id_no_match_returns_available_with_empty_rows [code+stdout]	1
+e2e_graph_centrality_memory_id_no_match::init_workspace [code+stdout]	1
+e2e_graph_centrality_memory_id_no_match::refresh_centrality [code+stdout]	1
+e2e_graph_centrality_memory_id_no_match::remember [code]	1
+e2e_graph_communities::graph_communities_returns_empty_set_on_fresh_workspace [code+stdout]	1
+e2e_graph_communities::graph_communities_splits_disjoint_components_into_separate_communities [code+stdout]	1
+e2e_graph_communities::init_workspace [code+stdout]	1
+e2e_graph_communities::remember [code]	1
+e2e_graph_explain_link::graph_explain_link_returns_direct_link_found_when_pair_has_direct_edge [code+stdout]	1
+e2e_graph_explain_link::graph_explain_link_returns_no_link_path_when_pair_unconnected [code+stdout]	1
+e2e_graph_explain_link::graph_explain_link_returns_path_found_on_two_edge_indirect_path [code+stdout]	1
+e2e_graph_explain_link::init_workspace [code+stdout]	1
+e2e_graph_explain_link::remember [code]	1
+e2e_graph_export::graph_export_no_snapshot_returns_degraded_refresh_repair [code+stderr]	1
+e2e_graph_export::init_workspace [code+stdout]	1
+e2e_graph_feature_enrichment::graph_feature_enrichment_dry_run_uses_persisted_snapshot [code]	2
+e2e_graph_feature_enrichment::init_workspace [code+stdout]	1
+e2e_graph_feature_enrichment::remember [code]	1
+e2e_graph_hits::graph_hits_limit_truncates_hubs_and_authorities_deterministically [code+stdout+stderr]	2
+e2e_graph_hits::graph_hits_ranks_src_as_top_hub_and_dst_as_top_authority [code+stdout]	1
+e2e_graph_hits::graph_hits_returns_empty_score_maps_on_fresh_workspace [code+stdout]	1
+e2e_graph_hits::init_workspace [code+stdout]	1
+e2e_graph_hits::remember [code]	1
+e2e_graph_k_core::graph_k_core_returns_empty_core_on_fresh_workspace [code+stdout]	1
+e2e_graph_k_core::graph_k_core_returns_empty_when_k_exceeds_max_degree [code+stdout]	1
+e2e_graph_k_core::graph_k_core_returns_full_triangle_at_k_equals_one [code+stdout]	1
+e2e_graph_k_core::graph_k_core_returns_full_triangle_at_main_core [code+stdout]	1
+e2e_graph_k_core::init_workspace [code+stdout]	1
+e2e_graph_k_core::remember [code]	1
+e2e_graph_louvain::graph_louvain_returns_empty_communities_on_fresh_workspace [code+stdout]	1
+e2e_graph_louvain::graph_louvain_seeded_runs_are_byte_deterministic [code+stdout+stderr]	1
+e2e_graph_louvain::graph_louvain_splits_disjoint_components_into_separate_communities [code+stdout]	1
+e2e_graph_louvain::init_workspace [code+stdout]	1
+e2e_graph_louvain::remember [code]	1
+e2e_graph_neighborhood_mermaid::graph_neighborhood_machine_modes_override_format_mermaid [code+stdout]	1
+e2e_graph_neighborhood_mermaid::graph_neighborhood_mermaid_limit_emits_truncation_comment [code+stdout]	1
+e2e_graph_neighborhood_mermaid::graph_neighborhood_mermaid_output_is_deterministic_across_repeated_runs [code+stdout+stderr]	1
+e2e_graph_neighborhood_mermaid::graph_neighborhood_mermaid_renders_directed_edge_with_relation_label [code+stdout]	1
+e2e_graph_neighborhood_mermaid::graph_neighborhood_mermaid_renders_empty_neighborhood_marker [code+stdout]	1
+e2e_graph_neighborhood_mermaid::graph_neighborhood_mermaid_renders_undirected_edge_without_arrowhead [code+stdout]	1
+e2e_graph_neighborhood_mermaid::init_workspace [code+stdout]	1
+e2e_graph_neighborhood_mermaid::remember [code]	1
+e2e_graph_neighborhood_validators::init_workspace [code+stdout]	1
+e2e_graph_pagerank::graph_pagerank_limit_truncates_deterministically [code+stdout+stderr]	2
+e2e_graph_pagerank::graph_pagerank_returns_empty_scores_on_fresh_workspace [code+stdout]	1
+e2e_graph_pagerank::graph_pagerank_returns_ranked_scores_for_two_edge_path [code+stdout]	1
+e2e_graph_pagerank::init_workspace [code+stdout]	1
+e2e_graph_pagerank::remember [code]	1
+e2e_graph_pagerank_tombstoned::graph_pagerank_default_excludes_tombstoned_node_via_excluded_nodes [code+stdout]	1
+e2e_graph_pagerank_tombstoned::graph_pagerank_with_include_tombstoned_clears_excluded_nodes [code+stdout]	1
+e2e_graph_pagerank_tombstoned::init_workspace [code+stdout]	1
+e2e_graph_pagerank_tombstoned::remember [code]	1
+e2e_graph_pagerank_tombstoned::tombstone_memory [code+stdout]	1
+e2e_graph_path::graph_path_returns_no_path_on_fresh_workspace [code+stdout]	1
+e2e_graph_path::graph_path_returns_no_path_when_memories_unlinked [code+stdout]	1
+e2e_graph_path::graph_path_returns_path_found_on_two_edge_directed_path [code+stdout]	1
+e2e_graph_path::init_workspace [code+stdout]	1
+e2e_graph_path::remember [code]	1
+e2e_graph_snapshot_refresh_validators::graph_snapshot_refresh_accepts_causal_evidence_alias_in_dry_run [code+stdout]	1
+e2e_graph_snapshot_refresh_validators::graph_snapshot_refresh_accepts_revision_dag_alias_in_dry_run [code+stdout]	1
+e2e_graph_snapshot_refresh_validators::init_workspace [code+stdout]	1
+e2e_insights_json_stream_mutex::init_workspace [code+stdout]	1
+e2e_insights_json_stream_mutex::insights_json_stream_alone_emits_parseable_jsonl_header [code+stdout]	1
+e2e_mcp_top_level::run_workspace_setup [code+stdout]	1
+e2e_mcp_wave_tools::run_ee [code]	1
+e2e_memory_expire::init_workspace [code+stdout]	1
+e2e_memory_expire::memory_expire_dry_run_emits_would_expire_preview_without_mutating [code+stdout]	2
+e2e_memory_expire::memory_expire_happy_path_returns_expired_envelope_with_audit [code+stdout]	1
+e2e_memory_expire::memory_expire_include_tombstoned_reports_already_expired_no_change [code+stdout]	1
+e2e_memory_expire::memory_expire_is_idempotent_on_already_expired_memory [code+stdout+stderr]	2
+e2e_memory_expire::remember [code]	1
+e2e_memory_expire::tombstone_memory [code+stdout]	1
+e2e_memory_link_list_and_dry_run::init_workspace [code+stdout]	1
+e2e_memory_link_list_and_dry_run::memory_link_dry_run_returns_would_create_preview_without_persisting [code+stdout]	2
+e2e_memory_link_list_and_dry_run::memory_link_list_filters_by_relation_and_includes_both_directions [code+stdout]	3
+e2e_memory_link_list_and_dry_run::memory_link_list_on_isolated_memory_returns_empty_links_envelope [code+stdout]	1
+e2e_memory_link_list_and_dry_run::remember [code]	1
+e2e_memory_link_semantic::init_workspace [code+stdout]	1
+e2e_memory_link_semantic::remember [code]	1
+e2e_memory_link_semantic::tombstone_memory [code+stdout]	1
+e2e_memory_link_usage::init_workspace [code+stdout]	1
+e2e_memory_revise_errors::init_workspace [code+stdout]	1
+e2e_memory_revise_errors::remember [code]	1
+e2e_memory_revise_errors::tombstone_memory [code+stdout]	1
+e2e_memory_show_and_history::init_workspace [code+stdout]	1
+e2e_memory_show_and_history::memory_history_format_mermaid_renders_deterministic_audit_diagram [code+stdout]	1
+e2e_memory_show_and_history::memory_history_happy_path_returns_audit_entries [code+stdout]	1
+e2e_memory_show_and_history::memory_history_machine_modes_override_format_mermaid [code+stdout]	1
+e2e_memory_show_and_history::memory_show_happy_path_returns_stable_envelope [code+stdout]	1
+e2e_memory_show_and_history::remember [code]	1
+e2e_memory_tags_validation::init_workspace [code+stdout]	1
+e2e_memory_tags_validation::memory_tags_list_mode_on_untagged_memory_succeeds [code+stdout]	1
+e2e_memory_tags_validation::remember [code]	1
+e2e_migration_boundary::data_survives_across_sessions [stdout+stderr]	5
+e2e_migration_boundary::init_is_idempotent [stdout+stderr]	3
+e2e_migration_boundary::status_reports_storage_ready_after_init [stdout+stderr]	2
+e2e_migration_boundary::why_works_for_remembered_memory [stdout+stderr]	3
+e2e_multi_agent_writers::single_shot_write_contention_script_real_binary_acceptance_bridge [stdout+stderr]	1
+e2e_outcome_invalid_memory::outcome_empty_memory_id_returns_error [stdout+stderr]	1
+e2e_outcome_invalid_memory::outcome_malformed_memory_id_returns_not_found_error [stdout+stderr]	1
+e2e_outcome_invalid_memory::outcome_nonexistent_memory_id_returns_not_found_error [stdout+stderr]	1
+e2e_outcome_invalid_memory_id::outcome_nonexistent_memory_id_returns_error_envelope [stdout+stderr]	2
+e2e_pack_determinism::low_match_pack_is_deterministic [stdout+stderr]	3
+e2e_pack_determinism::pack_hash_is_deterministic_across_runs [stdout+stderr]	3
+e2e_pack_determinism::pack_item_ordering_is_deterministic [stdout+stderr]	3
+e2e_pack_determinism::pack_query_file_persists_selection_ledger [stdout+stderr]	4
+e2e_pack_determinism::pack_replay_and_diff_work_for_real_pack_records [stdout+stderr]	7
+e2e_perf_compare::perf_compare_malformed_json_returns_error [stdout+stderr]	1
+e2e_perf_compare::perf_compare_missing_baseline_returns_error [stdout+stderr]	1
+e2e_perf_compare::perf_compare_missing_candidate_returns_error [stdout+stderr]	1
+e2e_plan_recipe::plan_recipe_list_emits_success_envelope_with_recipes_array [code+stdout]	1
+e2e_plan_recipe_list_category::run_recipe_list [code+stdout]	1
+e2e_proximity::init_workspace [code+stdout]	1
+e2e_proximity::proximity_disconnected_pair_returns_unreachable_with_degraded_entry [code+stdout]	1
+e2e_proximity::proximity_missing_memory_returns_missing_interpretation [code+stdout]	1
+e2e_proximity::proximity_self_pair_returns_self_interpretation_with_zero_min_cut [code+stdout]	1
+e2e_proximity::remember [code]	1
+e2e_query_file_validation::query_file_missing_returns_error [stdout+stderr]	1
+e2e_query_file_validation::query_file_with_invalid_tags_array_returns_error [stdout+stderr]	1
+e2e_query_file_validation::query_file_with_malformed_json_returns_error [stdout+stderr]	1
+e2e_query_file_validation::query_file_with_unknown_graph_field_returns_malformed_error [stdout+stderr]	1
+e2e_remember_empty_content::remember_empty_string_returns_error_envelope [stdout+stderr]	1
+e2e_remember_empty_content::remember_tabs_and_newlines_only_returns_error_envelope [stdout+stderr]	1
+e2e_remember_empty_content::remember_whitespace_only_returns_error_envelope [stdout+stderr]	1
+e2e_schema_export_unknown::schema_export_response_schema_emits_json_schema_document [code+stdout]	1
+e2e_schema_export_unknown::schema_export_unknown_id_emits_schema_not_found_envelope_with_zero_exit [code+stdout]	1
+e2e_serve_localhost::serve_foreground_real_context_first_consumes_process_advisory [code+stdout]	1
+e2e_subscribe_poll_filter_validators::init_workspace [code+stdout]	1
+e2e_subscribe_stream_renderer::init_workspace [code+stdout]	1
+e2e_subscribe_stream_renderer::subscribe_stream_with_json_flag_then_format_markdown_still_errors [code+stdout]	1
+e2e_why::init_workspace [code+stdout]	1
+e2e_why::remember [code]	1
+e2e_why::why_format_mermaid_renders_diagram_referencing_memory_id [code+stdout]	1
+e2e_why::why_returns_stable_envelope_for_existing_memory [code+stdout]	1
+effect_contracts::bare_status_inspects_current_workspace [code+stdout+stderr]	1
+effect_contracts::canonical_database_reads_leave_initialized_workspace_byte_identical [code+stdout+stderr]	3
+effect_contracts::capabilities_command_does_not_mutate_workspace [code+stdout+stderr]	1
+effect_contracts::check_command_does_not_mutate_workspace [stdout+stderr]	1
+effect_contracts::health_command_does_not_mutate_workspace [stdout+stderr]	1
+effect_contracts::introspect_command_does_not_mutate_workspace [code+stdout+stderr]	1
+effect_contracts::retrieval_surfaces_append_exactly_one_audit_row_and_nothing_else [code+stdout+stderr]	3
+effect_contracts::retrieval_surfaces_append_exactly_one_audit_row_and_nothing_else [code]	1
+effect_contracts::status_command_does_not_mutate_workspace [stdout+stderr]	1
+effect_contracts::version_command_does_not_mutate_workspace [code+stdout+stderr]	1
+error_recall_e2e::diagnose_error_log [code]	1
+error_recall_e2e::diagnose_tool_with_args [code]	1
+error_recall_e2e::init_workspace [code]	1
+error_recall_e2e::success_json [code]	1
+error_recovery_conformance_e2e::empty_initialized_root_discovers_populated_child_and_populated_root_skips [code+stderr]	6
+error_recovery_conformance_e2e::empty_initialized_root_discovers_populated_child_and_populated_root_skips [code+stdout]	3
+error_recovery_conformance_e2e::empty_initialized_root_discovers_populated_child_and_populated_root_skips [code]	4
+error_recovery_conformance_e2e::empty_workspace_discovers_registered_remote_store_and_skips_bad_rows [code+stderr]	4
+error_recovery_conformance_e2e::empty_workspace_discovers_registered_remote_store_and_skips_bad_rows [code]	3
+error_recovery_conformance_e2e::memory_list_pending_migration_preserves_store_and_emits_executable_targeted_repair [code+stdout]	1
+error_recovery_conformance_e2e::ordinary_storage_failure_keeps_exit_three_and_init_preserves_agent_docs [code+stderr]	2
+error_recovery_conformance_e2e::orient_explicit_external_database_uses_recorded_workspace_identity [code]	3
+error_recovery_conformance_e2e::storeless_custom_address_reports_all_ranked_nearby_stores [code+stderr]	2
+error_recovery_conformance_e2e::storeless_custom_address_reports_all_ranked_nearby_stores [code]	1
+error_recovery_conformance_e2e::storeless_miss_quotes_spaced_nearby_workspace_and_command_executes [code+stderr]	3
+error_recovery_conformance_e2e::storeless_miss_quotes_spaced_nearby_workspace_and_command_executes [code+stdout]	1
+error_recovery_conformance_e2e::storeless_miss_quotes_spaced_nearby_workspace_and_command_executes [code]	2
+error_recovery_conformance_e2e::storeless_miss_surfaces_nearby_populated_store [code+stderr]	2
+error_recovery_conformance_e2e::storeless_registry_failure_preserves_local_retarget_and_is_read_only [code]	1
+error_recovery_conformance_e2e::storeless_same_root_default_and_campaign_retargets_are_database_exact [code+stdout+stderr]	2
+error_recovery_conformance_e2e::storeless_same_root_default_and_campaign_retargets_are_database_exact [code]	7
+eval_report_e2e::eval_report_summarizes_fixture_hashes_and_first_failure_with_logged_binary_run [code]	1
+exit_code_conformance::exit_0_on_causal_dry_run_after_init [stdout+stderr]	1
+exit_code_conformance::exit_0_success_on_help [stdout+stderr]	1
+exit_code_conformance::exit_0_success_on_valid_init [stdout+stderr]	1
+exit_code_conformance::exit_1_usage_on_invalid_memory_id_format [stdout+stderr]	1
+exit_code_conformance::exit_3_storage_on_nonexistent_memory [stdout+stderr]	1
+exit_code_conformance::exit_4_search_index_on_stale_or_missing_index [stdout+stderr]	2
+export_playbook_e2e::run_step [code]	1
+fake_tailscale_harness::fake_tailscale_shell_self_test_emits_valid_events [code]	1
+focus_suggest_phase2_e2e::must_succeed [code+stdout]	1
+focus_suggest_schema::focus_suggest_default_recent_window_is_24_hours_and_limit_is_5 [code+stdout]	1
+focus_suggest_schema::focus_suggest_emits_v1_schema_and_no_phase1_sentinel [code+stdout]	1
+focus_suggest_schema::focus_suggest_task_frame_flag_accepted [code+stdout]	1
+global_store_e2e::memory_curation_verbs_reach_global_store [code+stderr]	1
+global_store_e2e::stdout_json [stdout]	1
+golden::normalize_json_for_comparison [code+stdout+stderr]	3
+golden::normalize_json_for_comparison [code+stdout]	13
+golden::normalize_json_for_comparison [stdout]	2
+graph_determinism::graph_louvain_output_is_deterministic [code+stdout]	1
+graph_determinism::graph_snapshot_refresh_accepts_each_graph_target [code+stdout]	1
+graph_determinism::graph_snapshot_refresh_accepts_each_graph_target [code]	1
+graph_determinism::graph_snapshot_refresh_causal_persists_stable_snapshot_row [code+stdout]	1
+graph_determinism::graph_snapshot_refresh_causal_persists_stable_snapshot_row [code]	1
+graph_determinism::remember [code]	1
+graph_determinism::run_graph_command [code+stdout]	1
+graph_determinism::run_why_causal_explain [code]	1
+graph_determinism::seed_causal_why_workspace [code+stdout]	1
+graph_determinism::seed_graph_workspace [code+stdout]	1
+graph_neighborhood_smoke::graph_centrality_read_json_toon_and_golden_are_stable [code+stdout]	2
+graph_neighborhood_smoke::graph_centrality_read_reports_unavailable_algorithm [code+stdout]	1
+graph_neighborhood_smoke::graph_link_path_and_why_outputs_compose_for_real_memory_edges [code+stdout]	4
+graph_neighborhood_smoke::graph_neighborhood_human_renderer_includes_summary [code+stdout]	1
+graph_neighborhood_smoke::graph_neighborhood_json_envelope_is_stable [code+stdout]	1
+graph_neighborhood_smoke::graph_neighborhood_relation_filter_excludes_other_relations [code+stdout]	1
+graph_neighborhood_smoke::init_workspace [code+stdout]	1
+graph_neighborhood_smoke::insights_causal_bottlenecks_returns_seeded_bridge_memory [code+stdout]	1
+graph_neighborhood_smoke::insights_proximity_hotspots_returns_seeded_min_cut_pair [code+stdout]	1
+graph_neighborhood_smoke::memory_revise_and_why_emit_revision_impact_blocks [code+stdout]	2
+graph_neighborhood_smoke::memory_revise_dry_run_impact_analysis_reports_branch_frontier [code+stdout]	2
+graph_neighborhood_smoke::memory_revise_dry_run_impact_analysis_reports_singleton_revision_gap [code+stdout]	1
+graph_neighborhood_smoke::proximity_human_renderer_includes_pair_and_interpretation [code+stdout]	1
+graph_neighborhood_smoke::proximity_json_reports_min_cut_for_seeded_memory_pair [code+stdout]	2
+graph_neighborhood_smoke::refresh_graph_centrality_snapshot [code+stdout]	1
+graph_neighborhood_smoke::remember [code]	1
+graph_neighborhood_smoke::revise_memory [code]	1
+graph_neighborhood_smoke::seed_workspace_with_causal_evidence [code+stdout]	1
+graph_neighborhood_smoke::seed_workspace_with_link [code+stdout]	1
+graph_neighborhood_smoke::status_json_exposes_graph_result_cache_hit_rate_metric [code+stdout]	1
+graph_neighborhood_smoke::why_causal_explain_returns_seeded_min_cost_path [code+stdout]	1
+graph_neighborhood_smoke::why_revision_lineage_reports_ancestor_depths_for_revision_chain [code+stdout]	1
+handoff_capsule_roundtrip::handoff_create_capsule_ids_currently_differ_across_runs [stdout+stderr]	2
+handoff_capsule_roundtrip::handoff_create_dry_run_does_not_write_file [stdout+stderr]	1
+handoff_capsule_roundtrip::handoff_create_redacts_task_frame_secrets_from_capsule_file [stdout+stderr]	1
+handoff_capsule_roundtrip::handoff_create_redacts_task_frame_secrets_from_capsule_file [stdout]	1
+handoff_capsule_roundtrip::handoff_create_writes_real_capsule_file [stdout+stderr]	1
+handoff_capsule_roundtrip::handoff_inspect_reports_missing_file_as_invalid [stdout+stderr]	1
+handoff_capsule_roundtrip::handoff_inspect_validates_existing_capsule [stdout+stderr]	2
+handoff_capsule_roundtrip::handoff_resume_emits_capsule_id_and_objective [stdout+stderr]	2
+handoff_capsule_roundtrip::handoff_resume_is_structurally_consistent_across_runs [stdout+stderr]	2
+handoff_capsule_roundtrip::init_workspace [stdout+stderr]	1
+harness_hook_install_audit::successful [code]	1
+index_vacuum_e2e::index_vacuum_reports_missing_index_preview_with_logged_binary_run [code]	2
+install_workflows::install_check_already_current_is_idempotent [code+stdout]	1
+install_workflows::install_check_detects_duplicate_path_binaries_without_stderr [code+stdout]	1
+install_workflows::install_check_handles_symlinked_install_root [code+stdout]	1
+install_workflows::install_check_permission_denied_matches_golden [code+stdout+stderr]	1
+install_workflows::install_check_pins_shadowed_stale_path_contract_bd_3utv2_5 [code+stdout]	1
+install_workflows::install_plan_checksum_mismatch_refuses_unverified_artifact [code+stdout+stderr]	1
+install_workflows::install_plan_empty_manifest_is_blocked [code+stdout+stderr]	1
+install_workflows::install_plan_huge_manifest_does_not_hang [code+stdout+stderr]	1
+install_workflows::install_plan_selects_manifest_artifact_and_stays_dry_run [code+stdout]	1
+install_workflows::install_plan_unsupported_target_matches_golden [code+stdout+stderr]	1
+install_workflows::install_plan_without_manifest_matches_offline_golden [code+stdout+stderr]	1
+install_workflows::matching_version_installer_rerun_repairs_integration_without_acquisition [code+stdout+stderr]	1
+install_workflows::matching_version_installer_rerun_repairs_integration_without_acquisition [stdout+stderr]	1
+install_workflows::update_dry_run_manifest_plan_matches_golden [code+stdout]	1
+journal_capture_contract::e2e_journal_capture_records_success_shaped_nonzero_results [stdout]	1
+lexical_ram_tier_p99_proof_self_test::lexical_ram_tier_p99_proof_passes_bash_n_parse_check [code+stdout]	1
+memory_expire_tags_e2e::run_step [code]	1
+memory_link_e2e::run_step [code]	1
+mesh_command_modes::ensure_success [stdout]	1
+mesh_e2e_logging_contract::run_bash [stdout]	1
+mesh_emergency_disable_e2e::contradictory_peer_and_all_workspaces_scopes_are_rejected [code+stdout+stderr]	1
+mesh_off_no_network::ensure_success [stdout]	1
+mesh_responder_broker_loopback::mesh_transport_kill_switch_binds_no_broker_socket [code]	1
+mesh_sync_once_real_tailscale_self_test::mesh_sync_once_real_tailscale_fake_run_retains_redacted_tailnet_artifacts [code]	1
+mesh_sync_once_real_tailscale_self_test::mesh_sync_once_real_tailscale_passes_bash_n_parse_check [code+stdout]	1
+mesh_transport_session_loopback::invalid_kill_switch_value_fails_closed_on_both_paths [code]	1
+mesh_transport_session_loopback::kill_switch_refuses_connect_and_accepted_paths_before_authentication [code]	1
+model_bundled_embedding_cli_e2e::model_fetch_embedding_default_uses_public_embedding_dispatcher [code+stdout+stderr]	1
+networkx_differential::run_networkx [stdout]	1
+no_mocks_e2e::run_cass_json [stdout]	1
+north_star_context_e2e::init_workspace [code+stdout+stderr]	1
+north_star_context_e2e::north_star_1_release_context_includes_verification_rules [code+stdout+stderr]	1
+north_star_context_e2e::north_star_2_async_migration_context_is_json_and_mentions_cx [code+stdout+stderr]	1
+north_star_context_e2e::north_star_3_promoted_ci_rule_is_retrievable [code+stdout+stderr]	1
+north_star_context_e2e::north_star_3_promoted_ci_rule_is_retrievable [code]	1
+north_star_context_e2e::north_star_3b_pack_surfaces_promoted_rule [code+stdout+stderr]	1
+north_star_context_e2e::north_star_4_onboarding_context_includes_conventions [code+stdout+stderr]	1
+north_star_context_e2e::north_star_5_cleanup_context_warns_about_dangers [code+stdout+stderr]	1
+north_star_context_e2e::north_star_6_degraded_mode_uses_lexical_fallback [code+stdout+stderr]	3
+north_star_context_e2e::promote_rule_from_memory [code+stdout+stderr]	1
+north_star_context_e2e::seed_async_migration_memories [code+stdout+stderr]	1
+north_star_context_e2e::seed_cleanup_memories [code+stdout+stderr]	1
+north_star_context_e2e::seed_failure_memory [code+stdout+stderr]	1
+north_star_context_e2e::seed_onboarding_memories [code+stdout+stderr]	1
+north_star_context_e2e::seed_release_memories [code+stdout+stderr]	1
+pack_baseline_ledger_unit::initialized_connection [code+stdout]	1
+pack_budget_too_small_test::assert_success [stdout+stderr]	1
+pack_quality_contracts::pack_quality_artifact_paths_are_reported [code+stdout]	1
+pack_quality_contracts::pack_quality_from_outcomes_reports_feedback_loop_metrics [code+stdout]	1
+pack_quality_contracts::pack_quality_lexical_only_branch_is_reported [code+stdout]	1
+pack_quality_contracts::pack_quality_report_has_stable_field_names [code+stdout]	1
+perf_budget_conformance::budget_check_empty_profile_returns_error [stdout+stderr]	1
+perf_budget_conformance::budget_check_missing_report_returns_error [stdout+stderr]	1
+plan_drift_gate::run_script_with_args [stdout]	1
+preflight_hook_bash::bash_preflight_shell_cli_json_emits_real_service_hook_report [code]	1
+preflight_hook_bash::bash_preflight_shell_interceptor_is_not_a_public_command [code+stderr]	1
+preflight_hook_bash::bash_snippet_syntax_check_passes [code]	1
+preflight_hook_bash::explicit_preflight_memory_query_remains_available [code+stdout]	1
+preflight_hook_zsh::hook_help_does_not_advertise_a_shell_interceptor [code+stdout]	1
+preflight_hook_zsh::zsh_preflight_shell_interceptor_is_not_a_public_command [code+stderr]	1
+preflight_hook_zsh::zsh_snippet_syntax_check_passes [code]	1
+preflight_hook_zsh::zsh_snippet_treats_preflight_exit_7_as_advisory [code]	1
+preflight_token_cli::public_preflight_is_advisory_read_only_and_has_no_token_control_plane [code+stdout+stderr]	1
+primer_cli_golden::primer_json_output_matches_golden_and_schema [code]	1
+primer_cli_golden::primer_markdown_output_matches_golden [code]	1
+primer_cli_golden::sweep_run [code+stdout]	1
+property_context_query_metamorphic::run_ee_json [stdout]	1
+property_pack_metamorphic::refresh_memory_links_graph_snapshot [stdout]	1
+property_pack_profile_variation_metamorphic::ee_stdout_json [stdout]	1
+property_query_and_pack::run_ee_checked [code]	1
+rch_compile_blocker_router::preflight_e2e_temp_repo_logs_and_does_not_mutate_inputs [code]	2
+rch_local_cargo_tripwire::self_test_subcommand_exits_zero_with_passed_marker [code]	1
+rch_portability_diagnostic::self_test_subcommand_exits_zero_with_expected_count [code]	1
+rch_recover_verification_contract::script_is_syntax_valid_and_non_destructive [code+stdout]	1
+rch_verify_contract::script_is_syntax_valid_and_uses_explicit_rch_exec [code+stdout]	1
+rch_verify_path_deps::inspect [stdout]	1
+read_pool_concurrency_e2e::read_pool_concurrency_script_smoke_emits_valid_events [code]	1
+readme_cli_parity::invoke_help [stdout]	1
+recall_cli_golden::parse_response [code]	1
+recall_cli_golden::recall_json_output_matches_golden_and_schema [code]	1
+recall_cli_golden::recall_markdown_output_matches_golden [code]	1
+recall_cli_golden::recall_rejects_zero_budget_tokens [code+stdout+stderr]	1
+recall_cli_golden::recall_requires_at_least_one_selector [code+stdout+stderr]	1
+recorder_tail_follow::assert_recorder_follow_sigint [code+stdout]	1
+renderer_command_capabilities::machine_modes_override_unsupported_mermaid_status_to_canonical_json [code+stdout]	1
+resource_admission_report_conformance::run_report [code+stdout]	1
+rule_mark_update_e2e::run_step [code]	1
+rule_provenance_integration::run_ee [code]	1
+rule_provenance_unit::run_ee [code]	1
+search_conformal_e2e::assert_success [stdout]	1
+search_deterministic_golden::run_search_json_for_query [code+stdout]	1
+smoke::artifact_registry_registers_indexes_exports_and_supports_context [code+stdout]	12
+smoke::backup_create_json_writes_redacted_artifacts_and_manifest [code+stdout]	2
+smoke::backup_create_json_writes_redacted_artifacts_and_manifest [code]	1
+smoke::clap_help_keeps_stderr_clean [code+stdout]	1
+smoke::context_explain_emits_pack_dna [code+stdout]	1
+smoke::context_no_pack_dna_suppresses_pack_dna [code+stdout]	1
+smoke::contract_drift_agent_docs_all_topics_valid [code+stdout+stderr]	1
+smoke::contract_drift_agent_docs_without_topic_valid [code+stdout+stderr]	1
+smoke::contract_drift_data_field_present_on_success [code+stdout+stderr]	1
+smoke::curate_apply_json_updates_approved_candidate_target [code+stdout]	3
+smoke::curate_apply_procedure_candidate_then_harmful_outcomes_auto_retire [code+stdout]	2
+smoke::curate_apply_procedure_candidate_then_harmful_outcomes_auto_retire [code]	2
+smoke::curate_candidates_after_seed_matches_snapshot [code+stdout]	2
+smoke::curate_candidates_after_seed_matches_snapshot [code]	1
+smoke::curate_candidates_json_lists_empty_pending_queue [code+stdout]	3
+smoke::curate_review_lifecycle_commands_json_update_review_state [code+stdout]	2
+smoke::curate_review_with_reason_pins_audit_row_shape [code+stdout]	5
+smoke::curate_validate_json_approves_pending_candidate [code+stdout]	3
+smoke::daemon_foreground_once_json_runs_real_health_job_in_isolated_workspace [code+stdout]	1
+smoke::expanded_memory_substrate_composition_logged_e2e_scenario [code+stdout]	1
+smoke::format_json_global_selects_machine_output [code+stdout]	1
+smoke::global_json_flag_is_order_independent [code+stdout+stderr]	2
+smoke::global_json_flag_is_order_independent [code]	1
+smoke::import_cass_json_uses_cass_robot_contract_and_is_idempotent [code+stdout]	1
+smoke::import_cass_json_uses_cass_robot_contract_and_is_idempotent [code]	1
+smoke::import_cass_real_robot_output_retrieves_evidence_with_provenance [code]	1
+smoke::import_jsonl_json_validates_imports_and_skips_duplicates [code+stdout]	4
+smoke::import_jsonl_json_validates_imports_and_skips_duplicates [code]	1
+smoke::index_reembed_json_rebuilds_index_and_records_job [code+stdout]	3
+smoke::index_reembed_json_rebuilds_index_and_records_job [code]	1
+smoke::insights_section_pagination_json_is_deterministic_and_stdout_only [code+stdout]	1
+smoke::integration_foundation_asupersync_runtime_reports_correctly [code+stdout+stderr]	1
+smoke::integration_foundation_capability_status_structure [code+stdout+stderr]	1
+smoke::integration_foundation_degradation_codes_present_when_unimplemented [code+stdout+stderr]	1
+smoke::integration_foundation_degradation_includes_repair_hints [code+stdout+stderr]	1
+smoke::integration_foundation_exit_code_zero_on_success [code+stdout+stderr]	1
+smoke::integration_foundation_memory_health_structure [code+stdout+stderr]	1
+smoke::integration_foundation_response_envelope_schema [code+stdout+stderr]	1
+smoke::integration_foundation_version_reported_in_status [code+stdout+stderr]	1
+smoke::learn_experiment_propose_json_reads_empty_persisted_ledger [stdout+stderr]	1
+smoke::learn_experiment_propose_json_reads_empty_persisted_ledger [stdout]	1
+smoke::mcp_manifest_json_real_binary_smoke [code+stdout]	1
+smoke::mcp_serve_stdio_default_build_reports_capability_gap [code+stdout]	1
+smoke::mcp_validate_json_real_binary_smoke [code+stdout+stderr]	1
+smoke::mcp_validate_json_real_binary_smoke [code+stdout]	1
+smoke::mcp_validate_reports_invalid_schema_fixture [code+stdout]	1
+smoke::memory_temporal_links_and_graph_outputs_compose [code+stdout]	7
+smoke::model_status_and_list_json_report_registry_contracts [code]	2
+smoke::pack_query_file_max_results_and_output_explain_are_observable [code+stdout]	2
+smoke::perf_budget_check_profile_mismatch_degrades_but_stays_read_only [code+stdout]	1
+smoke::perf_compare_json_success_is_read_only_and_stdout_only [code+stdout]	1
+smoke::profile_config_plan_and_apply_json_are_stable_machine_data [code]	3
+smoke::remember_cotag_threshold_separates_applied_links_from_staged_suggestions [code+stdout]	2
+smoke::remember_persists_and_feeds_search_context_flow [code+stdout]	8
+smoke::remember_persists_and_feeds_search_context_flow [code]	1
+smoke::remember_returns_staged_tag_cooccurrence_suggestions_without_mutating_links [code+stdout]	3
+smoke::remember_returns_staged_tag_cooccurrence_suggestions_without_mutating_links [code]	1
+smoke::robot_global_selects_machine_output [code+stdout]	1
+smoke::seed_context_pack_dna_workspace [code+stdout]	2
+smoke::status_json_stdout_is_stable_machine_data [code+stdout]	1
+smoke::status_json_stdout_is_stable_machine_data [code]	1
+smoke::status_skyline_human_stdout_is_compact_status_surface [code+stdout]	1
+smoke::status_skyline_json_stdout_is_stable_machine_data [code+stdout]	1
+smoke::status_workspace_reports_ambiguity_diagnostics [code+stdout]	1
+smoke::walking_skeleton_durability_scenario [code+stdout]	10
+smoke::workspace_alias_commands_resolve_global_workspace_flag [code+stdout]	4
+smoke::workspace_resolve_reports_monorepo_subproject_scope [code+stdout]	5
+subscribe_e2e::expect_success [code]	1
+subscribe_error_conformance_e2e::expect_success [code]	1
+subscribe_filter_modes_e2e::expect_success [code]	1
+subscribe_filters_e2e::expect_success [code]	1
+swarm_coordination_health_unit::health_script_parses_degraded_http_health_body_without_path_leaks [code+stdout]	1
+swarm_coordination_health_unit::health_script_preserves_redacted_semantic_readiness_failure [code+stdout]	1
+swarm_coordination_health_unit::health_script_reports_agent_mail_panic_and_fallback [code+stdout]	1
+swarm_coordination_health_unit::health_script_treats_http_error_status_as_fallback_without_recovery_body [code+stdout]	1
+swarm_coordination_health_unit::health_script_treats_recovery_corrupt_as_fallback_even_when_green [code+stdout]	1
+symbol_graph_manifest_conformance_e2e::expect_success [code]	1
+tag_backfill_e2e::run_json [code+stdout]	1
+trust_freshness_e2e::assert_success_json [stdout+stderr]	1
+trust_freshness_e2e::why_verify_and_drift_pin_trust_freshness_transitions [stdout+stderr]	1
+usr002_pre_task_brief_scenario::pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts [code+stdout+stderr]	10
+usr002_pre_task_brief_scenario::pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts [stdout+stderr]	1
+usr003_in_task_scenario::in_task_recovery_scenario_explains_selection_repair_and_tripwires [code+stdout+stderr]	10
+usr005_degraded_scenario::dependency_surface_reports_unavailable_dependency_codes [code+stdout+stderr]	1
+usr005_degraded_scenario::doctor_fix_plan_is_ordered_and_non_destructive [code+stdout+stderr]	1
+usr005_degraded_scenario::eval_and_science_status_return_useful_partial_output_under_degradation [code+stdout+stderr]	1
+usr006_privacy_redaction_backup_scenario::backup_workflow_creates_verifiable_artifact [code+stdout+stderr]	6
+usr006_privacy_redaction_backup_scenario::export_with_redaction_prevents_secret_leakage [code+stdout+stderr]	3
+vision_coverage_gate::vision_coverage_accepts_an_unexercised_surface_that_is_baselined [code]	1
+vision_coverage_gate::vision_coverage_blocks_release_tag_when_gap_remains [code+stdout+stderr]	1
+vision_coverage_gate::vision_coverage_canonicalizes_known_command_aliases [code]	1
+vision_coverage_gate::vision_coverage_compare_ref_includes_delta_report [code]	1
+vision_coverage_gate::vision_coverage_fails_closed_when_the_evidence_corpus_is_absent [code+stdout]	1
+vision_coverage_gate::vision_coverage_keeps_command_after_leading_global_options [code]	1
+vision_coverage_gate::vision_coverage_rejects_unknown_leading_inline_global_options [code]	1
+vision_coverage_gate::vision_coverage_report_has_required_shape [code]	1
+vision_coverage_gate::vision_coverage_warns_below_the_published_cadence_threshold [code+stdout+stderr]	1
+why_conformance::why_accepts_result_doc_id_targets [stdout+stderr]	5
+why_conformance::why_explanation_covers_all_memory_kinds [stdout+stderr]	4
+why_conformance::why_explanation_covers_all_memory_levels [stdout+stderr]	4
+why_conformance::why_graph_retrieval_features_are_complete_when_snapshot_is_missing [stdout+stderr]	3
+why_conformance::why_history_section_includes_audit_timeline [stdout+stderr]	3
+why_conformance::why_human_mode_uses_stderr_for_diagnostics [stdout+stderr]	4
+why_conformance::why_invalid_memory_id_returns_usage_error [stdout+stderr]	1
+why_conformance::why_json_output_is_stdout_only [stdout+stderr]	4
+why_conformance::why_latest_pack_selection_references_context_pack [stdout+stderr]	4
+why_conformance::why_nonexistent_memory_returns_not_found [stdout+stderr]	1
+why_conformance::why_response_schema_is_ee_response_v1 [stdout+stderr]	3
+why_conformance::why_result_target_non_memory_doc_id_explains_unsupported_source [stdout+stderr]	1
+why_conformance::why_retrieval_section_exposes_numeric_scores [stdout+stderr]	4
+why_conformance::why_selection_section_exposes_score_formula [stdout+stderr]	4
+why_conformance::why_storage_section_is_complete [stdout+stderr]	4
+why_renders_credible_interval_unit::assert_success_json [code]	1
