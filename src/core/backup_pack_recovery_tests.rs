@@ -388,14 +388,10 @@ fn evidence_content_fence_rejects_changed_excerpt_with_consistent_content_hash()
 
 #[test]
 fn evidence_content_fence_rejects_promoted_redacted_evidence() -> TestResult {
-    assert_corruption_refused_with_redaction(
-        "evidence_spans",
-        RedactionLevel::Full,
-        |_| {
-            "UPDATE evidence_spans SET pack_eligibility = 'admitted', search_eligibility = 'admitted'"
-                .to_owned()
-        },
-    )
+    assert_corruption_refused_with_redaction("evidence_spans", RedactionLevel::Full, |_| {
+        "UPDATE evidence_spans SET pack_eligibility = 'admitted', search_eligibility = 'admitted'"
+            .to_owned()
+    })
 }
 
 #[test]

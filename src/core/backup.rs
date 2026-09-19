@@ -4,6 +4,8 @@
 //! redacted JSONL export plus a manifest with content hashes. It never
 //! overwrites an existing backup artifact.
 
+#[path = "backup_evidence_export.rs"]
+mod evidence_export;
 #[cfg(test)]
 #[path = "backup_history_recovery_tests.rs"]
 mod history_recovery_tests;
@@ -1493,33 +1495,7 @@ impl BackupCassEvidenceRecord {
     }
 
     fn redact_for_export(&mut self, level: RedactionLevel, provenance_admitted: bool) {
-        if level == RedactionLevel::None {
-            return;
-        }
-        let excerpt = if provenance_admitted {
-            redact_content(&self.excerpt, level)
-        } else {
-            // Legacy or quarantined rows retain their identity and disposition,
-            // but cannot carry unchecked source text into a portable backup.
-            redact_content(&self.excerpt, RedactionLevel::Full)
-        };
-        if !provenance_admitted {
-            self.cass_span_id = hash_bytes(self.cass_span_id.as_bytes());
-            self.span_kind = redact_content(&self.span_kind, level);
-            self.role = self.role.as_deref().map(|role| redact_content(role, level));
-        }
-        if excerpt != self.excerpt || !provenance_admitted {
-            self.excerpt = excerpt;
-            self.content_hash = hash_bytes(self.excerpt.as_bytes());
-            self.canonical_excerpt_hash = None;
-            self.canonical_provenance_revision = 0;
-            self.security_policy_epoch = 0;
-            self.metadata_json = None;
-            self.secret_redaction_status = "redacted".to_owned();
-            self.redaction_classes_json = "[\"backup_redaction\"]".to_owned();
-            self.search_eligibility = "denied".to_owned();
-            self.pack_eligibility = "denied".to_owned();
-        }
+        evidence_export::redact_evidence(self, level, provenance_admitted);
     }
 }
 
@@ -8547,12 +8523,7 @@ fn restore_work_history(
 /// replacement when redaction changes a key, rather than merging identities
 /// into one prose placeholder.
 fn redact_recovery_identity(key: &str, redaction: RedactionLevel) -> String {
-    let redacted = redact_content(key, redaction);
-    if redacted == key {
-        redacted
-    } else {
-        format!("key_{}", blake3::hash(key.as_bytes()).to_hex())
-    }
+    evidence_export::redact_identity(key, redaction)
 }
 
 fn collect_learning_history_payloads(

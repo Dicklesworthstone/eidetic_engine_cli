@@ -75,7 +75,10 @@ impl CassExpectation {
 
     pub(super) fn verify_connection(&self, db: &DbConnection) -> Result<(), DomainError> {
         let mut actual = Rows::default();
-        for row in db.list_sessions(&self.workspace_id).map_err(storage_error)? {
+        for row in db
+            .list_sessions(&self.workspace_id)
+            .map_err(storage_error)?
+        {
             actual.insert_session(&row)?;
         }
         // Include denied and quarantined rows, not just search-admitted evidence.

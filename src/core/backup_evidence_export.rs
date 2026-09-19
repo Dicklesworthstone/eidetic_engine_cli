@@ -60,8 +60,16 @@ pub(super) fn redact_evidence(
         if !matches!(
             row.role.as_deref(),
             None | Some(
-                "user" | "assistant" | "system" | "developer" | "tool" | "unknown"
-                    | "agentsmd_import" | "docs_bootstrap" | "journal_distill" | "reinforcement"
+                "user"
+                    | "assistant"
+                    | "system"
+                    | "developer"
+                    | "tool"
+                    | "unknown"
+                    | "agentsmd_import"
+                    | "docs_bootstrap"
+                    | "journal_distill"
+                    | "reinforcement"
             )
         ) {
             row.role = None;
@@ -138,8 +146,18 @@ mod tests {
     #[test]
     fn denied_evidence_preserves_all_schema_kinds_and_recognized_roles() {
         for kind in ["message", "tool_call", "tool_result", "file", "summary"] {
-            for role in ["user", "assistant", "system", "developer", "tool", "unknown",
-                "agentsmd_import", "docs_bootstrap", "journal_distill", "reinforcement"] {
+            for role in [
+                "user",
+                "assistant",
+                "system",
+                "developer",
+                "tool",
+                "unknown",
+                "agentsmd_import",
+                "docs_bootstrap",
+                "journal_distill",
+                "reinforcement",
+            ] {
                 let mut value = row();
                 value.span_kind = kind.to_owned();
                 value.role = Some(role.to_owned());
@@ -153,8 +171,13 @@ mod tests {
 
     #[test]
     fn unchecked_legacy_text_and_references_are_removed_once() {
-        for level in [RedactionLevel::Minimal, RedactionLevel::Standard,
-            RedactionLevel::Strict, RedactionLevel::Paranoid, RedactionLevel::Full] {
+        for level in [
+            RedactionLevel::Minimal,
+            RedactionLevel::Standard,
+            RedactionLevel::Strict,
+            RedactionLevel::Paranoid,
+            RedactionLevel::Full,
+        ] {
             let mut value = row();
             value.role = Some("api_key=PRIVATE_SENTINEL".to_owned());
             value.cass_span_id = "/Users/private/PRIVATE_SENTINEL".to_owned();
@@ -163,8 +186,14 @@ mod tests {
             redact_evidence(&mut value, level, false);
             assert_eq!(value.role, None);
             assert_ne!(value.excerpt, "PRIVATE_SENTINEL");
-            assert_eq!(value.cass_span_id, hash_bytes(b"/Users/private/PRIVATE_SENTINEL"));
-            assert_eq!(value.upstream_ref_hash, Some(hash_bytes(b"PRIVATE_SENTINEL")));
+            assert_eq!(
+                value.cass_span_id,
+                hash_bytes(b"/Users/private/PRIVATE_SENTINEL")
+            );
+            assert_eq!(
+                value.upstream_ref_hash,
+                Some(hash_bytes(b"PRIVATE_SENTINEL"))
+            );
             assert!(value.metadata_json.is_none());
             let first = value.clone();
             redact_evidence(&mut value, level, false);
@@ -186,24 +215,38 @@ mod tests {
 
     #[test]
     fn agent_and_task_pseudonyms_survive_recovery_without_aliasing() {
-        for key in ["RecoveryAgent", "/Users/private/task", "api_key=PRIVATE_SENTINEL"] {
+        for key in [
+            "RecoveryAgent",
+            "/Users/private/task",
+            "api_key=PRIVATE_SENTINEL",
+        ] {
             let once = redact_identity(key, RedactionLevel::Full);
             assert_ne!(once, key);
-            for level in [RedactionLevel::None, RedactionLevel::Minimal,
-                RedactionLevel::Standard, RedactionLevel::Strict,
-                RedactionLevel::Paranoid, RedactionLevel::Full] {
+            for level in [
+                RedactionLevel::None,
+                RedactionLevel::Minimal,
+                RedactionLevel::Standard,
+                RedactionLevel::Strict,
+                RedactionLevel::Paranoid,
+                RedactionLevel::Full,
+            ] {
                 assert_eq!(redact_identity(&once, level), once);
             }
         }
-        assert_ne!(redact_identity("one", RedactionLevel::Full),
-            redact_identity("two", RedactionLevel::Full));
+        assert_ne!(
+            redact_identity("one", RedactionLevel::Full),
+            redact_identity("two", RedactionLevel::Full)
+        );
     }
 
     #[test]
     fn unredacted_and_admitted_unchanged_evidence_remain_exact() {
         let original = row();
-        for (level, admitted) in [(RedactionLevel::None, false),
-            (RedactionLevel::None, true), (RedactionLevel::Standard, true)] {
+        for (level, admitted) in [
+            (RedactionLevel::None, false),
+            (RedactionLevel::None, true),
+            (RedactionLevel::Standard, true),
+        ] {
             let mut value = original.clone();
             redact_evidence(&mut value, level, admitted);
             assert_eq!(value, original);
