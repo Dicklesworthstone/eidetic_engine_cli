@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use crate::db::StoredMemory;
 
@@ -112,7 +112,21 @@ impl ConsolidationProposal for BorrowedConsolidationProposal<'_> {
     }
 }
 
-impl BorrowedConsolidationProposal<'_> {
+impl<'a> BorrowedConsolidationProposal<'a> {
+    fn new(
+        source: &'a StoredMemory,
+        target: &'a StoredMemory,
+        normalized_content: &'a str,
+        group_size: usize,
+    ) -> Self {
+        Self {
+            source,
+            target,
+            normalized_content,
+            objective_score: consolidation_candidate_objective(source, target, group_size),
+        }
+    }
+
     fn into_plan(self, workspace_id: &str) -> ConsolidationCandidatePlan {
         let level = self.level();
         let kind = self.kind();
@@ -139,16 +153,89 @@ impl BorrowedConsolidationProposal<'_> {
     }
 }
 
+type ConsolidationGroups<'a> = BTreeMap<(String, String, String), Vec<&'a StoredMemory>>;
+
+struct ConsolidationGroupCursor<'a> {
+    next: BorrowedConsolidationProposal<'a>,
+    remaining: std::slice::Iter<'a, &'a StoredMemory>,
+    group_size: usize,
+}
+
+impl Ord for ConsolidationGroupCursor<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // The public comparator orders best first, while BinaryHeap pops max.
+        compare_consolidation_candidate_plan(&other.next, &self.next)
+    }
+}
+
+impl PartialOrd for ConsolidationGroupCursor<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for ConsolidationGroupCursor<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for ConsolidationGroupCursor<'_> {}
+
+/// Merge already-ranked groups without building a globally ranked proposal
+/// vector. Each duplicate group contributes at most one frontier descriptor.
+/// The source corpus/group memberships remain borrowed and corpus-sized.
+struct ConsolidationCandidateStream<'a> {
+    frontier: BinaryHeap<ConsolidationGroupCursor<'a>>,
+}
+
+impl<'a> ConsolidationCandidateStream<'a> {
+    fn new(groups: &'a ConsolidationGroups<'a>) -> Self {
+        let mut frontier = BinaryHeap::new();
+        for ((_, _, normalized), group) in groups {
+            let Some((&source, targets)) = group.split_first() else {
+                continue;
+            };
+            let Some((&target, remaining)) = targets.split_first() else {
+                continue;
+            };
+            frontier.push(ConsolidationGroupCursor {
+                next: BorrowedConsolidationProposal::new(source, target, normalized, group.len()),
+                remaining: remaining.iter(),
+                group_size: group.len(),
+            });
+        }
+        Self { frontier }
+    }
+}
+
+impl<'a> Iterator for ConsolidationCandidateStream<'a> {
+    type Item = BorrowedConsolidationProposal<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut cursor = self.frontier.pop()?;
+        if let Some(target) = cursor.remaining.next().copied() {
+            let next = BorrowedConsolidationProposal::new(
+                cursor.next.source,
+                target,
+                cursor.next.normalized_content,
+                cursor.group_size,
+            );
+            let result = std::mem::replace(&mut cursor.next, next);
+            self.frontier.push(cursor);
+            Some(result)
+        } else {
+            Some(cursor.next)
+        }
+    }
+}
+
 fn normalize_memory_content_for_consolidation(content: &str) -> String {
     crate::curate::normalize_memory_content_for_consolidation(content)
 }
 
-pub(super) fn plan_consolidation_candidates(
-    workspace_id: &str,
-    memories: &[StoredMemory],
-    item_limit: Option<u64>,
-) -> ConsolidationCandidateSelection {
-    let mut grouped = BTreeMap::<(String, String, String), Vec<&StoredMemory>>::new();
+fn prepare_consolidation_groups(memories: &[StoredMemory]) -> ConsolidationGroups<'_> {
+    let mut grouped = ConsolidationGroups::new();
     for memory in memories {
         let normalized = normalize_memory_content_for_consolidation(&memory.content);
         if normalized.is_empty() {
@@ -159,30 +246,33 @@ pub(super) fn plan_consolidation_candidates(
             .or_default()
             .push(memory);
     }
-    for group in grouped.values_mut() {
+    for ((_, _, normalized), group) in &mut grouped {
         group.sort_by(|left, right| compare_consolidation_memory_preference(left, right));
-    }
-
-    // Source grouping and lightweight ranking metadata remain corpus-sized.
-    // Full payloads do not: normalized text is shared per group, source/target
-    // rows are borrowed, and only the final bounded selection becomes plans.
-    let mut candidates = Vec::new();
-    for ((_, _, normalized), group) in &grouped {
-        let Some((&source, targets)) = group.split_first() else {
+        let group_size = group.len();
+        let Some((source, targets)) = group.split_first_mut() else {
             continue;
         };
-        for &target in targets {
-            candidates.push(BorrowedConsolidationProposal {
-                source,
-                target,
-                normalized_content: normalized,
-                objective_score: consolidation_candidate_objective(source, target, group.len()),
-            });
-        }
+        let source = *source;
+        // Source preference and proposal preference are different: the best
+        // surviving source stays fixed while higher-gain targets rank first.
+        targets.sort_by(|left, right| {
+            compare_consolidation_candidate_plan(
+                &BorrowedConsolidationProposal::new(source, left, normalized, group_size),
+                &BorrowedConsolidationProposal::new(source, right, normalized, group_size),
+            )
+        });
     }
-    candidates.sort_by(compare_consolidation_candidate_plan);
+    grouped
+}
+
+pub(super) fn plan_consolidation_candidates(
+    workspace_id: &str,
+    memories: &[StoredMemory],
+    item_limit: Option<u64>,
+) -> ConsolidationCandidateSelection {
+    let grouped = prepare_consolidation_groups(memories);
     let selection = sieve_stream_consolidation_candidates(
-        candidates,
+        ConsolidationCandidateStream::new(&grouped),
         consolidation_sieve_candidate_limit(item_limit),
     );
     ConsolidationCandidateSelection {
@@ -270,7 +360,9 @@ impl ConsolidationCoverage {
         if groups.is_empty() {
             self.level_kinds += 1;
         }
-        let count = groups.entry(candidate.normalized_content().to_owned()).or_default();
+        let count = groups
+            .entry(candidate.normalized_content().to_owned())
+            .or_default();
         if *count == 0 {
             self.groups += 1;
         }
@@ -370,8 +462,7 @@ fn sieve_stream_consolidation_candidates<T: ConsolidationProposal>(
         let mut best_replacement = None;
         let mut best_objective = consolidation_selection_objective(&selected);
         for index in 0..selected.len() {
-            let replacement_objective =
-                coverage.replacement_objective(&selected, index, &candidate);
+            let replacement_objective = coverage.replacement_objective(&selected, index, &candidate);
             if replacement_objective > best_objective {
                 best_objective = replacement_objective;
                 best_replacement = Some(index);
@@ -678,7 +769,11 @@ mod tests {
         assert_eq!(actual.candidates.len(), 7);
         assert_eq!(format!("{:?}", actual.candidates), format!("{expected:?}"));
         for selected in actual.candidates {
-            assert!(candidates.iter().any(|original| std::ptr::eq(original, selected)));
+            assert!(
+                candidates
+                    .iter()
+                    .any(|original| std::ptr::eq(original, selected))
+            );
         }
     }
 
@@ -726,7 +821,9 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
         }
-        let before = db.list_memories(&workspace, None, true).map_err(|error| error.to_string())?;
+        let before = db
+            .list_memories(&workspace, None, true)
+            .map_err(|error| error.to_string())?;
         let selection = plan_consolidation_candidates(&workspace, &before, Some(3));
         assert_eq!(selection.considered_candidates, 8);
         assert_eq!(selection.max_candidates, 3);
@@ -752,6 +849,63 @@ mod tests {
             before,
             db.list_memories(&workspace, None, true).map_err(|error| error.to_string())?
         );
+
+        // Exercise the full ranked stream separately from the sieve. In each
+        // group, the source with highest confidence survives; the lowest-
+        // confidence target normally ranks first because it has greater gain.
+        let template = before.first().ok_or("missing stored fixture")?;
+        let mut corpus = Vec::new();
+        for group in 0..7 {
+            for member in 0..group + 5 {
+                let mut memory = template.clone();
+                memory.id = format!("mem_{:026}", group * 100 + member + 100);
+                memory.content = format!("Distinct duplicate group {group}.");
+                memory.kind = if group % 2 == 0 { "rule" } else { "fact" }.to_owned();
+                memory.confidence = 0.9 - member as f32 * 0.03;
+                memory.utility = (member % 3) as f32 * 0.1;
+                corpus.push(memory);
+            }
+        }
+        let grouped = prepare_consolidation_groups(&corpus);
+        let mut expected_stream = Vec::new();
+        for ((_, _, normalized), group) in &grouped {
+            let (&source, targets) = group.split_first().ok_or("empty duplicate group")?;
+            for &target in targets {
+                expected_stream.push(
+                    BorrowedConsolidationProposal::new(source, target, normalized, group.len())
+                        .into_plan(&workspace),
+                );
+            }
+        }
+        expected_stream.sort_by(compare_consolidation_candidate_plan);
+        let mut stream = ConsolidationCandidateStream::new(&grouped);
+        assert_eq!(stream.frontier.len(), 7);
+        for expected in &expected_stream {
+            let actual = stream.next().ok_or("ranked stream ended early")?;
+            assert_eq!(
+                format!("{:?}", actual.into_plan(&workspace)),
+                format!("{expected:?}")
+            );
+            assert!(stream.frontier.len() <= 7);
+        }
+        assert!(stream.next().is_none());
+        assert!(stream.frontier.is_empty());
+        for limit in [1, 7, 64] {
+            let expected = reference_selection(&expected_stream, limit);
+            let actual = plan_consolidation_candidates(&workspace, &corpus, Some(limit as u64));
+            assert_eq!(actual.considered_candidates, expected_stream.len());
+            assert_eq!(format!("{:?}", actual.candidates), format!("{expected:?}"));
+            assert_eq!(
+                actual.objective_value.to_bits(),
+                consolidation_selection_objective(&expected).to_bits()
+            );
+        }
+        corpus.reverse();
+        let reversed_groups = prepare_consolidation_groups(&corpus);
+        let reversed_stream: Vec<_> = ConsolidationCandidateStream::new(&reversed_groups)
+            .map(|candidate| candidate.into_plan(&workspace))
+            .collect();
+        assert_eq!(format!("{reversed_stream:?}"), format!("{expected_stream:?}"));
         Ok(())
     }
 }
