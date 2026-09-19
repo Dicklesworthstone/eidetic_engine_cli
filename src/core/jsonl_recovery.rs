@@ -28,6 +28,7 @@ fn unreadable(_: impl fmt::Display) -> DomainError {
 struct ExpectedRecords {
     memories: Vec<PreparedMemory>,
     links: Vec<PreparedLink>,
+    legacy_supersession_ids: BTreeSet<String>,
 }
 
 impl ExpectedRecords {
@@ -69,6 +70,7 @@ impl ExpectedRecords {
         }
         let validated =
             validate_memories(parsed).map_err(|_| mismatch("invalid memory records"))?;
+        let legacy_supersession_ids = revisions::legacy_supersession_ids(&validated);
         let prepared = prepare_memories_with_policy(
             parsed,
             validated,
@@ -83,6 +85,7 @@ impl ExpectedRecords {
         Ok(Self {
             memories: prepared.memories,
             links,
+            legacy_supersession_ids,
         })
     }
 
@@ -128,15 +131,17 @@ impl ExpectedRecords {
             {
                 return Err(mismatch("revision-family identity differs"));
             }
-            if let Some(at) = &expected.superseded_at {
-                if connection
+            // None is an obligation too: an accidentally superseded head is
+            // not a faithful restore, even when every row and body survived.
+            // Legacy expiry-only rows retain their structural fallback; only
+            // that explicitly identified compatibility case is ambiguous.
+            if !self.legacy_supersession_ids.contains(&expected.id)
+                && connection
                     .get_memory_superseded_at(&expected.id)
                     .map_err(unreadable)?
-                    .as_ref()
-                    != Some(at)
-                {
-                    return Err(mismatch("revision supersession differs"));
-                }
+                    != expected.superseded_at
+            {
+                return Err(mismatch("revision supersession differs"));
             }
             let tags: BTreeSet<_> = connection
                 .get_memory_tags(&expected.id)
