@@ -41,11 +41,21 @@ impl TrustExpectation {
                 || chunk.chunk_count != count
                 || chunk.chunk_index >= count
                 || !slots.insert(chunk.chunk_index)
-                || source_workspace.as_deref().is_some_and(|id| id != chunk.workspace_id)
-                || [chunk.seals.len(), chunk.quarantines.len(), chunk.certificates.len(), chunk.agents.len()]
-                    .into_iter().any(|n| n > WORK_HISTORY_CHUNK_ROWS)
+                || source_workspace
+                    .as_deref()
+                    .is_some_and(|id| id != chunk.workspace_id)
+                || [
+                    chunk.seals.len(),
+                    chunk.quarantines.len(),
+                    chunk.certificates.len(),
+                    chunk.agents.len(),
+                ]
+                .into_iter()
+                .any(|n| n > WORK_HISTORY_CHUNK_ROWS)
             {
-                return Err(recovery_error("Incomplete or substituted recovered trust history"));
+                return Err(recovery_error(
+                    "Incomplete or substituted recovered trust history",
+                ));
             }
             source_workspace = Some(chunk.workspace_id.clone());
             for row in chunk.seals {
@@ -54,7 +64,11 @@ impl TrustExpectation {
             for mut row in chunk.quarantines {
                 check_scope(&row.workspace_id, &chunk.workspace_id)?;
                 row.workspace_id = workspace_id.to_owned();
-                rows.insert("trust_quarantine", &(&row.workspace_id, &row.source_uri), &row)?;
+                rows.insert(
+                    "trust_quarantine",
+                    &(&row.workspace_id, &row.source_uri),
+                    &row,
+                )?;
             }
             for mut row in chunk.certificates {
                 check_scope(&row.workspace_id, &chunk.workspace_id)?;
@@ -67,23 +81,42 @@ impl TrustExpectation {
                 rows.insert("agents", &row.id, &row)?;
             }
         }
-        Ok(Self { workspace_id: workspace_id.to_owned(), rows })
+        Ok(Self {
+            workspace_id: workspace_id.to_owned(),
+            rows,
+        })
     }
 
     pub(super) fn verify_connection(&self, db: &DbConnection) -> Result<(), DomainError> {
         let mut actual = Rows::default();
-        for row in db.list_memory_seals_for_recovery(&self.workspace_id).map_err(storage_error)? {
+        for row in db
+            .list_memory_seals_for_recovery(&self.workspace_id)
+            .map_err(storage_error)?
+        {
             actual.insert("memory_seals", &row.memory_id, &row)?;
         }
         // Include released and expired decisions too; filtering to active rows
         // would let a late release disappear from this comparison.
-        for row in db.list_trust_quarantine(&self.workspace_id, false).map_err(storage_error)? {
-            actual.insert("trust_quarantine", &(&row.workspace_id, &row.source_uri), &row)?;
+        for row in db
+            .list_trust_quarantine(&self.workspace_id, false)
+            .map_err(storage_error)?
+        {
+            actual.insert(
+                "trust_quarantine",
+                &(&row.workspace_id, &row.source_uri),
+                &row,
+            )?;
         }
-        for row in db.list_certificates_for_recovery(&self.workspace_id).map_err(storage_error)? {
+        for row in db
+            .list_certificates_for_recovery(&self.workspace_id)
+            .map_err(storage_error)?
+        {
             actual.insert("certificates", &row.id, &row)?;
         }
-        for row in db.list_agents_for_recovery(&self.workspace_id).map_err(storage_error)? {
+        for row in db
+            .list_agents_for_recovery(&self.workspace_id)
+            .map_err(storage_error)?
+        {
             actual.insert("agents", &row.id, &row)?;
         }
         self.rows.verify(&actual, TRUST_TABLES)

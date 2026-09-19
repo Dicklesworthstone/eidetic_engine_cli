@@ -8992,8 +8992,16 @@ fn redact_learning_reference(
         return value.to_owned();
     }
     let redacted = redact_content(value, level);
-    if redacted == value {
-        redacted
+    // Recovery's own opaque references are already scrubbed identifiers.
+    // Preserve only the exact emitted grammar, never an arbitrary prefix.
+    let opaque = value.strip_prefix("backup-ref:").is_some_and(|suffix| {
+        suffix.len() == 64
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    });
+    if redacted == value || opaque {
+        value.to_owned()
     } else {
         format!("backup-ref:{}", blake3::hash(value.as_bytes()).to_hex())
     }
