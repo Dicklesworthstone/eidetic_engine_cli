@@ -4,6 +4,9 @@
 //! redacted JSONL export plus a manifest with content hashes. It never
 //! overwrites an existing backup artifact.
 
+#[cfg(test)]
+#[path = "backup_history_recovery_tests.rs"]
+mod history_recovery_tests;
 #[path = "backup_recovery.rs"]
 mod recovery;
 #[cfg(test)]
@@ -3760,6 +3763,14 @@ fn restore_backup_to_side_path_with_verification_hook(
         &staging_workspace,
         &inspect,
     )?;
+    // Bind expected learned state before any recovery writer runs. The family
+    // restore paths still authenticate every chunk; these fingerprints prove
+    // that the admitted values, not merely their row counts, survived writing.
+    let expected_history = recovery::HistoryExpectation::from_assets(
+        &restored_derived,
+        &inspect.backup_id,
+        &restored_workspace.id,
+    )?;
     restore_shard_fanout_assets(&staging_workspace, &restored_derived)?;
 
     let db = DbConnection::open_file(&restored_database_path).map_err(work_history_error)?;
@@ -3909,7 +3920,7 @@ fn restore_backup_to_side_path_with_verification_hook(
     // durable family landed. Reconcile the actual staged rows before derived
     // rebuilding can change job state and before the marker becomes visible.
     before_verification(&restored_database_path)?;
-    recovery_inventory.verify_database(&restored_database_path)?;
+    recovery_inventory.verify_database(&restored_database_path, &expected_history)?;
     crate::core::jsonl_import::recovery::verify_backup_records(
         &restored_database_path,
         &restore_artifact_dir.join(RECORDS_FILE),
@@ -13026,7 +13037,7 @@ mod tests {
         }
     }
 
-    fn fixture() -> Result<(TempDir, PathBuf, PathBuf), DomainError> {
+    pub(super) fn fixture() -> Result<(TempDir, PathBuf, PathBuf), DomainError> {
         fixture_with_memory_content("Authorization header should be redacted")
     }
 
@@ -18218,7 +18229,7 @@ mod tests {
         assert_backup_history_round_trip(false)
     }
 
-    fn recovery_rule(workspace_id: &str, n: u128) -> StoredProceduralRule {
+    pub(super) fn recovery_rule(workspace_id: &str, n: u128) -> StoredProceduralRule {
         StoredProceduralRule {
             id: crate::models::RuleId::from_uuid(Uuid::from_u128(1000 + n)).to_string(),
             workspace_id: workspace_id.to_owned(),
@@ -18244,7 +18255,11 @@ mod tests {
         }
     }
 
-    fn recovery_feedback(workspace_id: &str, memory_id: &str, n: usize) -> StoredFeedbackEvent {
+    pub(super) fn recovery_feedback(
+        workspace_id: &str,
+        memory_id: &str,
+        n: usize,
+    ) -> StoredFeedbackEvent {
         StoredFeedbackEvent {
             id: format!("fb_{n:026}"),
             workspace_id: workspace_id.to_owned(),
@@ -18262,7 +18277,10 @@ mod tests {
         }
     }
 
-    fn seed_recovery_pack(connection: &DbConnection, n: u128) -> Result<StoredPackHistory, String> {
+    pub(super) fn seed_recovery_pack(
+        connection: &DbConnection,
+        n: u128,
+    ) -> Result<StoredPackHistory, String> {
         let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
         let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
         let pack_id = crate::models::PackId::from_uuid(Uuid::from_u128(n)).to_string();
@@ -25912,7 +25930,7 @@ mod tests {
         Ok(())
     }
 
-    fn recovery_agent_profile(
+    pub(super) fn recovery_agent_profile(
         workspace_id: &str,
         memory_id: &str,
         agent: &str,

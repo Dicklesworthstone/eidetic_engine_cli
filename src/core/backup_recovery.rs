@@ -14,6 +14,10 @@ use crate::models::DomainError;
 
 use super::BackupTablePolicy;
 
+#[path = "backup_history_recovery.rs"]
+mod history;
+pub(super) use history::HistoryExpectation;
+
 // One registry owns both capture policy and restore obligations. Rebuildable
 // indexes, host credentials, locks and migration metadata deliberately do not
 // appear here. Empty durable tables still need an explicit inventory entry.
@@ -223,16 +227,31 @@ impl RestoreInventory {
     /// Run after every durable family is restored and before index rebuilding
     /// or publication. Rebuilding is allowed to change derived generations/job
     /// state; it must not hide an omitted recovery writer or missing chunk.
-    pub(super) fn verify_database(&self, path: &Path) -> Result<(), DomainError> {
+    pub(super) fn verify_database(
+        &self,
+        path: &Path,
+        history: &HistoryExpectation,
+    ) -> Result<(), DomainError> {
         let connection = DbConnection::open(DatabaseConfig::read_only_file(path.to_path_buf()))
             .map_err(storage_error)?;
-        let verified = self.verify_connection(&connection);
+        let verified = (|| {
+            let snapshot = RecoveryReadSnapshot::begin(&connection)?;
+            self.verify_rows(&connection)?;
+            history.verify_connection(&connection)?;
+            snapshot.finish()
+        })();
         let closed = connection.close().map(|_| ()).map_err(storage_error);
         verified.and(closed)
     }
 
+    #[cfg(test)]
     fn verify_connection(&self, connection: &DbConnection) -> Result<(), DomainError> {
         let snapshot = RecoveryReadSnapshot::begin(connection)?;
+        self.verify_rows(connection)?;
+        snapshot.finish()
+    }
+
+    fn verify_rows(&self, connection: &DbConnection) -> Result<(), DomainError> {
         let tables: BTreeSet<_> = connection
             .list_user_tables()
             .map_err(storage_error)?
@@ -251,7 +270,7 @@ impl RestoreInventory {
             self.source_audit_rows,
             true,
         )?;
-        snapshot.finish()
+        Ok(())
     }
 
     fn check_table(
@@ -617,7 +636,8 @@ mod tests {
         let before = db.list_memories(&workspace, None, true).unwrap();
         let plan = RestoreInventory::from_manifest(&manifest_for_database(&db)).unwrap();
         db.close().unwrap();
-        plan.verify_database(&path).unwrap();
+        let history = HistoryExpectation::from_assets(&[], "backup-empty", &workspace).unwrap();
+        plan.verify_database(&path, &history).unwrap();
         let reopened = DbConnection::open_file(&path).unwrap();
         assert_eq!(
             before,
