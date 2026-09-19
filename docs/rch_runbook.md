@@ -357,6 +357,7 @@ RCH proof:
 - remote_source_materialized: <true|false>
 - source_manifest_hash: <source_manifest_hash or none>
 - worker_id: <worker_id or none>
+- oracle_evidence: <oracle_evidence.proof_digest or none>@<oracle_evidence.worker_id or none>
 - exit_code: <exit_code>
 - degraded_codes: <degraded_codes or none>
 - source_state_degraded_codes: <source_state_degraded_codes or none>
@@ -367,6 +368,22 @@ RCH proof:
 - build_admission: <build_admission.status>/<build_admission.admitted>
 - first_error: <first_error_file>:<first_error_line or none>
 ```
+
+`oracle_evidence` binds a content-addressed proof capsule to the worker that
+produced it (bd-0v23w face 3). The capsule is written remotely by the test
+process, which cannot name its own host; `rch` names the host client-side. The
+wrapper sees both, so it records the binding:
+
+- `null`: the wrapper never dispatched, so there is no transcript to read.
+- `not_observed`: the run produced a transcript and it carried no capsule.
+- `recorded`: `proof_digest` and `worker_id` together are the citation. When
+  `observed_count` exceeds 1, `proof_digest` names the LAST capsule only.
+- `unaddressed`: the oracle emitted an `evidence:` line whose name is not a
+  64-hex content address — it failed to write the capsule.
+
+`digest_is_empty_content` is true when the digest is BLAKE3 of the empty
+string, which is the defect bd-0v23w was filed for: a capsule that is
+content-addressed and holds nothing. Do not cite such a digest as proof.
 
 Use precise Agent Mail wording:
 

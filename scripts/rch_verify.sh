@@ -1847,6 +1847,62 @@ extract_dependency_planner_worker_id() {
         | tail -n 1
 }
 
+# bd-0v23w face 3: bind {proof digest -> worker}.
+#
+# The oracle writes its content-addressed capsule REMOTELY and cannot name the
+# host it ran on; rch names the host CLIENT-side, before it syncs. Both halves
+# already land in the transcript this script captures, and until now the
+# digest half survived only inside stdout_tail -- prose, truncated to
+# RCH_VERIFY_TAIL_BYTES. Recording it as a field is what makes the binding a
+# fact on the receipt rather than a coincidence of tail budget.
+#
+# tests/retrieval_index_regression_oracle.rs:1295 and :1303 print the same
+# `evidence: <path>` line on BOTH the passing and the failing branch, so one
+# extractor covers a green and a red alike.
+ORACLE_EMPTY_EVIDENCE_DIGEST="af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+
+extract_oracle_evidence_paths() {
+    sed -n -e 's/^[[:space:]]*evidence: \(.*[^[:space:]]\)[[:space:]]*$/\1/p'
+}
+
+# Classify by the NAME's shape rather than by trusting the prefix that carried
+# it: only a 64-hex content address yields a digest. An `<evidence unwritable:
+# ...>` line (oracle :1287) is still reported, as `unaddressed`, because the
+# oracle having tried and failed to write its capsule is itself a finding.
+oracle_evidence_json() {
+    local transcript="$1"
+    local worker="$2"
+    local paths count path base digest status empty
+    paths="$(printf '%s' "$transcript" | extract_oracle_evidence_paths)"
+    if [ -z "$paths" ]; then
+        printf '{"schema":"ee.rch.oracle_evidence.v1","status":"not_observed","observed_count":0,"proof_path":null,"proof_digest":null,"digest_is_empty_content":false,"worker_id":%s}' \
+            "$([ -n "$worker" ] && json_quote "$worker" || printf 'null')"
+        return 0
+    fi
+    count="$(printf '%s\n' "$paths" | wc -l | tr -d ' ')"
+    path="$(printf '%s\n' "$paths" | tail -n 1)"
+    base="${path##*/}"
+    digest="${base%.ee-test-event.jsonl}"
+    if [ "$digest" != "$base" ] && printf '%s' "$digest" | grep -Eq '^[0-9a-f]{64}$'; then
+        status="recorded"
+    else
+        status="unaddressed"
+        digest=""
+    fi
+    if [ -n "$digest" ] && [ "$digest" = "$ORACLE_EMPTY_EVIDENCE_DIGEST" ]; then
+        empty=true
+    else
+        empty=false
+    fi
+    printf '{"schema":"ee.rch.oracle_evidence.v1","status":"%s","observed_count":%s,"proof_path":%s,"proof_digest":%s,"digest_is_empty_content":%s,"worker_id":%s}' \
+        "$status" \
+        "$count" \
+        "$(json_quote "$path")" \
+        "$([ -n "$digest" ] && json_quote "$digest" || printf 'null')" \
+        "$empty" \
+        "$([ -n "$worker" ] && json_quote "$worker" || printf 'null')"
+}
+
 is_worker_disk_full_output() {
     grep -Eiq "No space left on device|disk full|ENOSPC"
 }
@@ -5215,6 +5271,8 @@ emit_json() {
     fi
     known_blocker_json="${KNOWN_BLOCKER_JSON:-null}"
     proof_broker_json="${PROOF_BROKER_JSON:-null}"
+    local oracle_evidence_json
+    oracle_evidence_json="${ORACLE_EVIDENCE_JSON:-null}"
     cargo_config_provenance_json="$CARGO_CONFIG_PROVENANCE_JSON"
     franken_stack_json="$FRANKEN_STACK_JSON"
     local source_state_json
@@ -5234,7 +5292,7 @@ emit_json() {
     done
     artifacts_json="$(attempt_artifacts_json "${artifact_args[@]}")"
     json_payload="$(cat <<EOF
-{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"attempt_timeout_ms":$RCH_VERIFY_ATTEMPT_TIMEOUT_MS,"timed_out":$RCH_ATTEMPT_TIMED_OUT,"stdout_bytes":$RCH_STDOUT_BYTES,"stderr_bytes":$RCH_STDERR_BYTES,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"artifacts":$artifacts_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"rch_runtime":$rch_runtime_json,"known_blocker":$known_blocker_json,"proof_broker":$proof_broker_json,"local_cargo_processes":$local_cargo_processes_json,"cargo_config_provenance":$cargo_config_provenance_json,"franken_stack":$franken_stack_json,"source_state":$source_state_json}
+{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"oracle_evidence":$oracle_evidence_json,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"attempt_timeout_ms":$RCH_VERIFY_ATTEMPT_TIMEOUT_MS,"timed_out":$RCH_ATTEMPT_TIMED_OUT,"stdout_bytes":$RCH_STDOUT_BYTES,"stderr_bytes":$RCH_STDERR_BYTES,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"artifacts":$artifacts_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"rch_runtime":$rch_runtime_json,"known_blocker":$known_blocker_json,"proof_broker":$proof_broker_json,"local_cargo_processes":$local_cargo_processes_json,"cargo_config_provenance":$cargo_config_provenance_json,"franken_stack":$franken_stack_json,"source_state":$source_state_json}
 EOF
 )"
     JSON_PAYLOAD="$json_payload" \
@@ -6609,6 +6667,7 @@ positive_integer_if_set_or_die "RCH_BUILD_TIMEOUT_SEC" "${RCH_BUILD_TIMEOUT_SEC:
 positive_integer_if_set_or_die "RCH_TEST_TIMEOUT_SEC" "${RCH_TEST_TIMEOUT_SEC:-}"
 WOULD_OFFLOAD=false
 WORKER_ID_JSON=null
+ORACLE_EVIDENCE_JSON=null
 REMOTE_PROJECT_ROOT="/data/projects/eidetic_engine_cli"
 REMOTE_TARGET_DIR="/tmp/ee-rch-verify-target"
 REMOTE_PROJECT_ROOT_JSON="$(json_quote "$REMOTE_PROJECT_ROOT")"
@@ -7042,6 +7101,9 @@ if [ -n "$worker_id" ]; then
         worker_filter_ignored=1
     fi
 fi
+# Computed AFTER the disk-full retry has had its say, so the binding names the
+# worker that actually produced the capsule rather than the one that failed.
+ORACLE_EVIDENCE_JSON="$(oracle_evidence_json "$combined_output" "$worker_id")"
 if [ -n "$PROOF_BROKER_LEDGER" ] && [ "$(proof_broker_json_field dispatchAttempted)" = "true" ]; then
     proof_broker_remote_launched=false
     if [ -n "$worker_id" ]; then
