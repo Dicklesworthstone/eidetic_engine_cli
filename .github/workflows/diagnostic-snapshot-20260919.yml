@@ -32,20 +32,35 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
-      - name: Apply reviewed native rule retrieval increment
+      - name: Apply complete native-rule diagnostic admission
         run: |
           set -euo pipefail
           git rev-parse HEAD > "$RUNNER_TEMP/rules-base.log"
-          if ! git ls-files --error-unmatch src/core/search_rule_admission.rs >/dev/null 2>&1; then
-            test "$(git rev-parse HEAD:src/core/search.rs)" = ac53aafb26ff6097b5f51c7809d83d27b3f35789
-            test "$(git rev-parse HEAD:src/core/search_diagnostic_snapshot.rs)" = a4d3c4c61bbc1e44e11bbb47cd32b48b9911a843
-            test "$(git rev-parse HEAD:docs/degraded_codes.md)" = 84bfb91980471745e7ec3aa4e585df5aff2a21fa
-            test "$(git rev-parse HEAD:docs/degraded_code_taxonomy.md)" = c0dee9013db63c30a33f9d59a2c63c657566f78b
-            base64 --decode scripts/delivery/diagnostic-snapshot-20260919/native-rules.patch.xz.b64 | xz --decompress > "$RUNNER_TEMP/rules.patch"
-            echo "2f34bda5ab63056758396bc17cbf768da4a50a2ecf78ba1825884632525666e1  $RUNNER_TEMP/rules.patch" | sha256sum --check
-            git apply --check --whitespace=error-all "$RUNNER_TEMP/rules.patch"
-            git apply "$RUNNER_TEMP/rules.patch"
-            rustfmt --edition 2024 --config skip_children=true src/core/search.rs src/core/search_rule_admission.rs src/core/search_diagnostic_snapshot.rs
+          test -f src/core/search_rule_admission.rs
+          if ! grep -Fq 'pub(super) fn admit_diagnostics(' src/core/search_rule_admission.rs; then
+            python3 - <<'PY'
+          import base64, hashlib, lzma, os
+          from pathlib import Path
+          delivery = Path('scripts/delivery/diagnostic-snapshot-20260919')
+          first = lzma.decompress(base64.b64decode((delivery / 'native-rules.patch.xz.b64').read_bytes()))
+          assert hashlib.sha256(first).hexdigest() == '2f34bda5ab63056758396bc17cbf768da4a50a2ecf78ba1825884632525666e1'
+          name = 'src/core/search_rule_admission.rs'
+          section = first.decode().split(f'diff --git a/{name} b/{name}\n', 1)[1].split('diff --git ', 1)[0]
+          source = ''.join(line[1:] for line in section.splitlines(keepends=True) if line.startswith('+') and not line.startswith('+++'))
+          temp = Path(os.environ['RUNNER_TEMP'])
+          (temp / 'rules-phase1-raw.rs').write_text(source)
+          (temp / 'rules-phase1-formatted.rs').write_text(source)
+          second = lzma.decompress(base64.b64decode((delivery / 'native-diagnostics.patch.xz.b64').read_bytes()))
+          assert hashlib.sha256(second).hexdigest() == 'd186266a6790db1901d058d9df54a1b463f44330a1cd99d80ebb8dfc76241cf8'
+          (temp / 'rules-phase2.patch').write_bytes(second)
+          PY
+            # Prove formatting is the only difference before bridging the saved patch input.
+            rustfmt --edition 2024 --config-path "$GITHUB_WORKSPACE/rustfmt.toml" --config skip_children=true "$RUNNER_TEMP/rules-phase1-formatted.rs"
+            cmp src/core/search_rule_admission.rs "$RUNNER_TEMP/rules-phase1-formatted.rs"
+            cp "$RUNNER_TEMP/rules-phase1-raw.rs" src/core/search_rule_admission.rs
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/rules-phase2.patch"
+            git apply "$RUNNER_TEMP/rules-phase2.patch"
+            rustfmt --edition 2024 --config skip_children=true src/core/index.rs src/core/search.rs src/core/search_rule_admission.rs
             git diff --check
           fi
       - uses: actions/cache/restore@v4
@@ -60,23 +75,23 @@ jobs:
             diagnostic-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             snapshot-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Compile all targets and execute native rule regressions before publication
+      - name: Compile and execute native rule regressions before publication
         run: |
           set -euo pipefail
           cargo check --locked --all-targets > "$RUNNER_TEMP/rules-check.log" 2>&1 || { tail -n 100 "$RUNNER_TEMP/rules-check.log"; exit 1; }
           cargo test --locked --lib core::search::rule_admission::tests -- --test-threads=2 > "$RUNNER_TEMP/rules-native.log" 2>&1 || { tail -n 120 "$RUNNER_TEMP/rules-native.log"; exit 1; }
           tail -n 100 "$RUNNER_TEMP/rules-native.log"
-          grep -Fq 'test result: ok. 6 passed; 0 failed;' "$RUNNER_TEMP/rules-native.log"
+          grep -Fq 'test result: ok. 13 passed; 0 failed;' "$RUNNER_TEMP/rules-native.log"
       - name: Commit checked functional source directly to main
         run: |
           set -euo pipefail
-          paths=(src/core/search.rs src/core/search_rule_admission.rs src/core/search_diagnostic_snapshot.rs docs/degraded_codes.md docs/degraded_code_taxonomy.md tests/fixtures/failure_modes/rule_live_admission_filtered.json)
+          paths=(src/core/index.rs src/core/search.rs src/core/search_rule_admission.rs docs/degraded_codes.md tests/fixtures/failure_modes/rule_live_admission_filtered.json)
           base=$(cat "$RUNNER_TEMP/rules-base.log")
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- "${paths[@]}"
           if ! git diff --cached --quiet; then
-            git commit -m 'feat(search): hydrate and admit native procedural rules from source truth' -m 'Give semantic-only and source-less rules canonical body, native provenance, lifecycle and revision metadata without fabricating memory identities. Reject revoked, foreign, stale-revision and unverified rule authority before calibration and query hints. Preserve draft/deprecated inspection, not pack promotion. Repair invalid fixture IDs in the preceding diagnostic suite without weakening assertions. All-target compilation and six real-store rule regressions passed before publication; diagnostic runtime results follow separately.'
+            git commit -m 'feat(search): enforce native rule admission across diagnostic retrieval' -m 'Apply source-backed native rule admission to raw lexical/vector ranks, RRF contributions, final results and query hints. Reject conflicting revision or scope claims without changing surviving scores or promoting raw-only candidates. Restore full live rule bodies beyond index previews for --full. Add seven regressions including real lexical/vector backend reads, live revocation and pinned snapshots. All-target compilation and all 13 native-rule tests passed before publication; broader runtime results follow separately.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
@@ -111,6 +126,10 @@ jobs:
           run_group existing 'core::search::tests::diag_search_' '[1-9][0-9]*'
           run_group evidence 'core::search::tests::live_evidence_admission_filters' '[1-9][0-9]*'
           run_group recovery 'core::index::read_lease::snapshot_recovery_tests' 8
+          status=0
+          cargo test --locked --test integration_a_d concurrent_search_lexical_arm_e2e::snapshot_index_recovery -- --test-threads=1 > "$RUNNER_TEMP/rules-pack-recovery.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/rules-pack-recovery.log"
+          if test "$status" -ne 0 || ! grep -Fq 'test result: ok. 4 passed; 0 failed;' "$RUNNER_TEMP/rules-pack-recovery.log"; then failed=1; fi
           exit "$failed"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
