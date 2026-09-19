@@ -1,0 +1,130 @@
+name: Revision and memory graph recovery
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/revision-record-recovery-20260919/**
+      - .github/workflows/revision-record-recovery-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: revision-record-recovery-delivery
+  cancel-in-progress: false
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      - name: Apply reviewed revision and record recovery implementation
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD:src/core/backup.rs)" = 6042eeebcbcd349934062cba54ab05b131b2106c
+          test "$(git rev-parse HEAD:src/core/jsonl_import.rs)" = e6caf20b1a9a317030ad9729cbef10dd09e7bb3c
+          test "$(git rev-parse HEAD:src/db/mod.rs)" = ce7658a6bfad8b8818c2751de348df1b028d0ca5
+          test "$(git rev-parse HEAD:src/models/jsonl.rs)" = 53ee00f5e3160eb655de23de1504f3eddf810b61
+          test "$(git rev-parse HEAD:src/output/jsonl_export.rs)" = d42b0036b3f92f010d18ebfbf6bde3a40e6093a1
+          cat scripts/delivery/revision-record-recovery-20260919/{0,1,2,3,4,5,6}.xz.b64 | base64 --decode | xz --decompress > "$RUNNER_TEMP/revision.patch"
+          echo "6a19cd85a1254fff2faed3bd27ef8004e2bf028f25fe5caf1abc44ad5fe88aff  $RUNNER_TEMP/revision.patch" | sha256sum --check
+          git apply --check "$RUNNER_TEMP/revision.patch"
+          git apply "$RUNNER_TEMP/revision.patch"
+          rustfmt --edition 2024 --config skip_children=true src/core/backup.rs src/core/backup_revision_recovery_tests.rs src/core/jsonl_import.rs src/core/jsonl_recovery.rs src/core/jsonl_revisions.rs src/db/mod.rs src/models/jsonl.rs src/output/jsonl_export.rs
+          git diff --check
+      - name: Commit functional source directly to main
+        run: |
+          set -euo pipefail
+          paths=(src/core/backup.rs src/core/backup_revision_recovery_tests.rs src/core/jsonl_import.rs src/core/jsonl_recovery.rs src/core/jsonl_revisions.rs src/db/mod.rs src/models/jsonl.rs src/output/jsonl_export.rs)
+          base=$(git rev-parse HEAD)
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "${paths[@]}"
+          git commit -m 'fix(recovery): preserve revision headship and verify restored memory graph' -m 'Export actual superseded_at independently of author expiry; restore explicit revision markers and validated successor-only archives without resurrecting history. Reject cyclic, dangling, cross-family and contradictory revision references before writes. Redact revision references consistently. Before publication, read the staged memory graph in one snapshot and compare identities, body and scoring/trust fields, chronology, tags, Bayesian evidence, family metadata and links against the admitted archive projection. Add 13 focused regressions and two real create/restore/index and late-corruption scenarios. Formatting and patch application passed; compilation and runtime evidence are reported separately.'
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then break; fi
+            test "$attempt" -lt 3
+            git fetch origin main
+            git diff --exit-code "$base" origin/main -- "${paths[@]}"
+            git merge --no-edit origin/main
+            base=$(git rev-parse origin/main)
+          done
+          git rev-parse HEAD > "$RUNNER_TEMP/revision-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/revision-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: revision-recovery-source
+          path: |
+            ${{ runner.temp }}/revision-source-sha.log
+            ${{ runner.temp }}/revision-source.tar.gz
+          retention-days: 7
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Resolve pinned Franken stack build paths
+        run: |
+          set -euo pipefail
+          ./scripts/checkout-franken-stack.sh "$GITHUB_WORKSPACE/.ci/franken-stack/projects"
+          CARGO_PATH_ROOT=".ci/franken-stack/projects" perl -0pi -e '
+            s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+            s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+          ' Cargo.toml
+          git diff -- Cargo.toml > "$RUNNER_TEMP/revision-build-paths.patch"
+          rustc --version --verbose > "$RUNNER_TEMP/revision-toolchain.log"
+      - name: Check the production library
+        run: |
+          status=0
+          cargo check --locked --lib > "$RUNNER_TEMP/revision-check.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/revision-check.log"
+          exit "$status"
+      - name: Execute recovery and revision regressions
+        run: |
+          set -uo pipefail
+          failed=0
+          run_group() {
+            local name="$1" filter="$2" expected="$3" status=0
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/revision-$name.log" 2>&1 || status=$?
+            tail -n 100 "$RUNNER_TEMP/revision-$name.log"
+            if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$RUNNER_TEMP/revision-$name.log"; then failed=1; fi
+          }
+          run_group records 'core::jsonl_import::recovery::tests::' 13
+          run_group inventory 'core::backup::recovery::tests::' 14
+          run_group publication 'backup_revision_recovery_' 2
+          run_group existing 'core::backup::tests::restore_backup_to_side_path_imports_memories' 1
+          exit "$failed"
+      - name: Check production Clippy
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/revision-clippy.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/revision-clippy.log"
+          exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: revision-recovery-verification
+          path: |
+            ${{ runner.temp }}/revision-*.log
+            ${{ runner.temp }}/revision-*.patch
+          retention-days: 7
