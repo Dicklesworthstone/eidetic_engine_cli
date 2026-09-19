@@ -93,6 +93,118 @@ fn provenance_docs_and_audit_surface_are_registered() {
     }
 }
 
+/// bd-reality-core-convergence-1azkt.18: "Exact effective dependency identity
+/// appears in ... post-release audit."
+///
+/// `dependency_resolution_inventory` in scripts/audit_install_pipeline.sh asks
+/// crates.io, per crate, "is THIS version published and unyanked?". The
+/// versions were a hand-maintained table with nothing holding them to the
+/// resolved tree, and 30 of its 31 rows had drifted -- asupersync 0.4.10 against
+/// a locked 0.5.0, every fsqlite crate at 0.3.16 against 0.4.0/0.4.1, and so on.
+///
+/// That is worse than an out-of-date comment. The probe was verifying that
+/// SUPERSEDED versions were available on crates.io and reporting the release
+/// ready, while the versions actually being shipped went unchecked. A green
+/// that answers a question nobody asked.
+///
+/// A row may legitimately be absent from Cargo.lock when it is only pulled in
+/// under an optional feature, so absence is allowed -- but only for rows whose
+/// strategy is conditional. A `must_be_published` crate that is not in the
+/// resolved tree is a contradiction and fails here.
+#[test]
+fn post_release_audit_inventory_matches_the_resolved_tree() {
+    let audit = repo_file("scripts/audit_install_pipeline.sh");
+    let lock = repo_file("Cargo.lock");
+
+    let mut locked = std::collections::BTreeMap::new();
+    let mut name: Option<String> = None;
+    for line in lock.lines() {
+        if let Some(value) = line.strip_prefix("name = \"") {
+            name = value.strip_suffix('"').map(str::to_owned);
+        } else if let Some(value) = line.strip_prefix("version = \"") {
+            if let (Some(n), Some(v)) = (name.take(), value.strip_suffix('"')) {
+                locked.insert(n, v.to_owned());
+            }
+        }
+    }
+
+    let rows: Vec<Vec<&str>> = audit
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.matches('|').count() == 4)
+        .map(|line| line.split('|').collect::<Vec<_>>())
+        .filter(|parts| {
+            parts[1]
+                .split('.')
+                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+        })
+        .collect();
+
+    // Empty inventories and empty lockfiles both compare equal to everything.
+    assert!(
+        !locked.is_empty(),
+        "parsed zero crates from Cargo.lock; the parser is broken, not the audit"
+    );
+    assert!(
+        rows.len() > 10,
+        "parsed {} inventory rows from audit_install_pipeline.sh; the heredoc \
+         format changed and this test can no longer read it",
+        rows.len()
+    );
+
+    let mut problems = Vec::new();
+    for parts in &rows {
+        let (crate_name, declared, strategy) = (parts[0], parts[1], parts[4]);
+        match locked.get(crate_name) {
+            Some(resolved) if resolved == declared => {}
+            Some(resolved) => problems.push(format!(
+                "  {crate_name}: audit says {declared}, Cargo.lock resolves {resolved} \
+                 -- the probe would verify the wrong version on crates.io"
+            )),
+            None if strategy != "must_be_published" => {}
+            None => problems.push(format!(
+                "  {crate_name}: marked {strategy} but absent from Cargo.lock \
+                 -- a crate that must be published is not in the resolved tree"
+            )),
+        }
+    }
+
+    // Drift is only half of it. A crate the inventory never mentions is also
+    // never probed, and `dep_resolution_ready` is an `all()` over the rows --
+    // so an omission reads as readiness just as convincingly as a pass.
+    //
+    // The families here are not a guess: they are derived from the inventory's
+    // own rows, and four of the seven (fnx 4/4, fsqlite 17/17, sqlmodel 2/2,
+    // tru 1/1) already cover their family exactly. Exhaustive family coverage
+    // is the existing intent; asupersync and frankensearch had holes.
+    let families: std::collections::BTreeSet<&str> = rows
+        .iter()
+        .map(|parts| parts[0].split('-').next().unwrap_or(parts[0]))
+        .collect();
+    let listed: std::collections::BTreeSet<&str> = rows.iter().map(|parts| parts[0]).collect();
+
+    let mut omitted = Vec::new();
+    for crate_name in locked.keys() {
+        let family = crate_name.split('-').next().unwrap_or(crate_name);
+        if families.contains(family) && !listed.contains(crate_name.as_str()) {
+            omitted.push(format!(
+                "  {crate_name} {}: in the resolved tree and in a family the \
+                 inventory enumerates, but no row probes it",
+                locked[crate_name]
+            ));
+        }
+    }
+    problems.extend(omitted);
+
+    assert!(
+        problems.is_empty(),
+        "the post-release audit's dependency inventory has drifted from the \
+         resolved tree. Each row below means the crates.io probe checks a \
+         version this build does not use, or checks nothing at all:\n{}",
+        problems.join("\n")
+    );
+}
+
 /// Extract a bash array literal `name=(\n  a\n  b\n)` from a workflow.
 fn bash_array(workflow: &str, name: &str) -> Vec<String> {
     workflow
