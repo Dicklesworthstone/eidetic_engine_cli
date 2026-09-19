@@ -3774,6 +3774,14 @@ fn restore_backup_to_side_path_with_recovery_hooks(
         &restored_derived,
     )?;
 
+    // Freeze the authenticated primary projection before importing it. Both
+    // recovery fences compare against this same object, never against a file
+    // that a recovery writer or index rebuild could have rewritten.
+    let expected_records = crate::core::jsonl_import::recovery::BackupRecordsExpectation::capture(
+        &restore_records_path,
+        &side_path,
+        &restored_workspace.id,
+    )?;
     let import_report = import_verified_backup_jsonl_records(&JsonlImportOptions {
         workspace_path: side_path.clone(),
         database_path: Some(restored_database_path.clone()),
@@ -3905,12 +3913,7 @@ fn restore_backup_to_side_path_with_recovery_hooks(
     // rebuilding can change job state and before the marker becomes visible.
     before_verification(&restored_database_path)?;
     recovery_inventory.verify_database(&restored_database_path, &expected_history)?;
-    crate::core::jsonl_import::recovery::verify_backup_records(
-        &restored_database_path,
-        &restore_artifact_dir.join(RECORDS_FILE),
-        &side_path,
-        &restored_workspace.id,
-    )?;
+    expected_records.verify_database(&restored_database_path)?;
 
     // Build from the complete restored corpus while it is still private.
     // Imported job history alone cannot make a missing lexical index usable,
@@ -3949,6 +3952,7 @@ fn restore_backup_to_side_path_with_recovery_hooks(
     // authority. Recheck the admitted history after the last rebuilding stage.
     before_publication(&restored_database_path)?;
     expected_history.verify_before_publication(&restored_database_path)?;
+    expected_records.verify_database(&restored_database_path)?;
 
     let restore_issue_count = import_report
         .issues

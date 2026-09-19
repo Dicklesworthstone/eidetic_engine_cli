@@ -7,6 +7,9 @@ use uuid::Uuid;
 
 type TestResult = Result<(), String>;
 
+#[path = "backup_primary_publication_tests.rs"]
+mod publication;
+
 fn source() -> Result<(tempfile::TempDir, PathBuf, PathBuf, String, String, String), String> {
     let root = tempfile::tempdir().map_err(|e| e.to_string())?;
     let workspace = root

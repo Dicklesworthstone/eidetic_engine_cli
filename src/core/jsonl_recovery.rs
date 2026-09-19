@@ -225,27 +225,53 @@ impl ExpectedRecords {
     }
 }
 
-/// Call only after the manifest and copied records have been authenticated and
-/// every durable recovery writer has finished, before rebuilding/publishing.
-/// This checks the fields represented in JSONL, not every column of every
-/// durable table. Row-count reconciliation and typed asset checks remain needed.
+/// Immutable projection of the admitted primary records. Keep this across
+/// recovery writers and derived rebuilding: rereading a mutable staging file
+/// could let a paired file/database rewrite redefine the expected result.
+/// This is not archive authentication; the caller must authenticate the
+/// manifest and copied records before capturing the projection.
+pub(crate) struct BackupRecordsExpectation {
+    workspace_id: String,
+    records: ExpectedRecords,
+}
+
+impl BackupRecordsExpectation {
+    pub(crate) fn capture(
+        records_path: &Path,
+        workspace_path: &Path,
+        workspace_id: &str,
+    ) -> Result<Self, DomainError> {
+        ensure_import_source_path_is_regular_file(records_path).map_err(unreadable)?;
+        let source = read_jsonl_source_bounded(records_path).map_err(unreadable)?;
+        let parsed = parse_jsonl_source(&source);
+        let auth = native_import_auth_state(&parsed, workspace_path, workspace_id);
+        Ok(Self {
+            workspace_id: workspace_id.to_owned(),
+            records: ExpectedRecords::from_parsed(&parsed, workspace_id, &auth)?,
+        })
+    }
+
+    /// Read-only verification of the exact primary graph, including both live
+    /// and superseded revisions. Other durable tables retain their own fence.
+    pub(crate) fn verify_database(&self, database_path: &Path) -> Result<(), DomainError> {
+        let connection =
+            DbConnection::open(DatabaseConfig::read_only_file(database_path.to_path_buf()))
+                .map_err(unreadable)?;
+        let result = verify_in_snapshot(&connection, &self.records, &self.workspace_id);
+        let closed = connection.close().map(|_| ()).map_err(unreadable);
+        result.and(closed)
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn verify_backup_records(
     database_path: &Path,
     records_path: &Path,
     workspace_path: &Path,
     workspace_id: &str,
 ) -> Result<(), DomainError> {
-    ensure_import_source_path_is_regular_file(records_path).map_err(unreadable)?;
-    let source = read_jsonl_source_bounded(records_path).map_err(unreadable)?;
-    let parsed = parse_jsonl_source(&source);
-    let auth = native_import_auth_state(&parsed, workspace_path, workspace_id);
-    let expected = ExpectedRecords::from_parsed(&parsed, workspace_id, &auth)?;
-    let connection =
-        DbConnection::open(DatabaseConfig::read_only_file(database_path.to_path_buf()))
-            .map_err(unreadable)?;
-    let result = verify_in_snapshot(&connection, &expected, workspace_id);
-    let closed = connection.close().map(|_| ()).map_err(unreadable);
-    result.and(closed)
+    BackupRecordsExpectation::capture(records_path, workspace_path, workspace_id)?
+        .verify_database(database_path)
 }
 
 fn verify_in_snapshot(
