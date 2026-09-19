@@ -804,7 +804,14 @@ fn closure_lint_skips_when_beads_write_lock_is_held() -> TestResult {
         .arg(&lock_path)
         .arg("sh")
         .arg("-c")
-        .arg("printf ready > \"$1\"; sleep 2")
+        // THE LOCK WINDOW IS LOAD-SENSITIVE, so it is held far longer than the
+        // linter should need. At 2s this fixture raced: closure-lint is a large
+        // bash script and on a busy worker its startup can outlast the window,
+        // after which the lock is FREE and the linter runs normally -- the test
+        // then observes a clean run and reports whatever the assertions happen
+        // to catch, rather than the contention it meant to create.
+        // The holder is waited on below, so this bounds the test's own runtime.
+        .arg("printf ready > \"$1\"; sleep 10")
         .arg("sh")
         .arg(&ready_path)
         .spawn()
@@ -822,7 +829,14 @@ fn closure_lint_skips_when_beads_write_lock_is_held() -> TestResult {
     }
     ensure(ready_path.exists(), "lock holder did not report ready")?;
 
-    let linter_result = run_linter_with_env(temp.path(), &[("EE_BEADS_LOCK_WAIT_SECONDS", "0")]);
+    // WAIT 1s, NOT 0. `flock -w 0` is not portable: util-linux accepts it as
+    // "do not wait", while the flock on macOS rejects it outright --
+    // "timeout must be greater than 0", exit 64. Under that build the linter
+    // would skip because its FLOCK INVOCATION was invalid, not because the
+    // lock was contended, and this test would pass while exercising the wrong
+    // path. 1 fails fast against the 10s holder above and means the same thing
+    // everywhere.
+    let linter_result = run_linter_with_env(temp.path(), &[("EE_BEADS_LOCK_WAIT_SECONDS", "1")]);
     let holder_status = holder
         .wait()
         .map_err(|error| format!("wait for lock holder: {error}"))?;
@@ -845,20 +859,37 @@ fn closure_lint_skips_when_beads_write_lock_is_held() -> TestResult {
     // number of its own; verify.sh already routes it as a skipped stage toward
     // the INCOMPLETE banner (see contended_closure_lint_is_reported_as_
     // contention_not_as_a_pass in tests/verification_drift_guard.rs).
+    // ORDER MATTERS: ESTABLISH THAT THE SKIP FIRED BEFORE JUDGING ITS EXIT CODE.
+    //
+    // Asserting the exit code first produced "expected 75, got 0", which cannot
+    // distinguish "the skip fired and still exits 0" (the fix failed) from "the
+    // skip never fired" (the lock window expired and the linter ran normally).
+    // Those have opposite remedies, and the first ordering hid which -- the
+    // same discarded-evidence defect this whole gate exists to catch, in the
+    // test verifying it.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure_eq(
+        report_status(&report)?,
+        "skipped",
+        format!(
+            "the linter must have SKIPPED; a different status means the lock \
+             window expired before it reached flock and it ran normally, which \
+             is a fixture race rather than a linter defect\nstderr: {stderr}"
+        ),
+    )?;
+    // Only now is the exit code meaningful: the skip demonstrably happened.
     ensure_eq(
         output.status.code().unwrap_or(-1),
         75,
-        "a lock-contended skip must exit 75, not 0",
+        format!("a skip that DID fire must exit 75, not 0\nstderr: {stderr}"),
     )?;
     // And it must SAY so. The notice was previously suppressed under --json,
     // which is the invocation CI uses, so the one path where this gate does
     // not run was the one path that printed nothing.
-    let stderr = String::from_utf8_lossy(&output.stderr);
     ensure(
         stderr.contains("SKIPPED") && stderr.contains("NOT a pass"),
         format!("the skip must announce itself on stderr; got: {stderr:?}"),
     )?;
-    ensure_eq(report_status(&report)?, "skipped", "report status")?;
     ensure_eq(report_count(&report)?, 0, "report count")?;
     let reason = report
         .get("reason")
