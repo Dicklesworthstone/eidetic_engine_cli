@@ -7,13 +7,14 @@
 //! are captured before recovery writes; live digests are read in the same
 //! snapshot as the publication fence's table counts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
 use super::super::{
-    BackupLearningHistory, BackupRestoredDerivedAssetReport, BackupRuleSource, BackupRuleTag,
-    LEARNING_HISTORY_SCHEMA, read_restored_derived_json,
+    BackupLearningHistory, BackupRecordedHistory, BackupRestoredDerivedAssetReport,
+    BackupRuleSource, BackupRuleTag, LEARNING_HISTORY_SCHEMA, RECORDED_HISTORY_SCHEMA,
+    WORK_HISTORY_CHUNK_ROWS, read_restored_derived_json,
 };
 use super::{recovery_error, storage_error};
 use crate::db::DbConnection;
@@ -41,6 +42,8 @@ const LEARNING_TABLES: &[&str] = &[
     "feedback_events",
     "agent_context_profiles",
 ];
+
+const RECORDED_TABLES: &[&str] = &["recorder_runs", "recorder_events", "rch_verify_runs"];
 
 /// Digests bound to primary keys, not row order. Composite keys are serialized
 /// as tuples: delimiter-bearing identities cannot alias one another. Only
@@ -84,12 +87,34 @@ impl Rows {
         }
         Ok(())
     }
+
+    /// Scoped readers and joins must not hide extra foreign or orphan rows in
+    /// this isolated recovery database, especially at the post-rebuild fence.
+    fn verify_complete(
+        &self,
+        actual: &Self,
+        db: &DbConnection,
+        tables: &[&str],
+    ) -> Result<(), DomainError> {
+        self.verify(actual, tables)?;
+        for &table in tables {
+            let expected = self.0.get(table).map_or(0, BTreeMap::len);
+            let count = db.count_table_rows(table).map_err(storage_error)?;
+            if usize::try_from(count).ok() != Some(expected) {
+                return Err(recovery_error(format!(
+                    "Restored durable population differs for {table}; the restored store was not published"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(in crate::core::backup) struct HistoryExpectation {
     maintenance: maintenance::MaintenanceExpectation,
     workspace_id: String,
     learning: Rows,
+    recorded: Rows,
     packs: packs::PackExpectation,
     cass: cass::CassExpectation,
     trust: trust::TrustExpectation,
@@ -114,6 +139,7 @@ impl HistoryExpectation {
             )?,
             workspace_id: workspace_id.to_owned(),
             learning: Rows::default(),
+            recorded: Rows::default(),
             packs: packs::PackExpectation::from_assets(assets, backup_id, workspace_id)?,
             cass: cass::CassExpectation::from_assets(assets, workspace_id)?,
             trust: trust::TrustExpectation::from_assets(assets, backup_id, workspace_id)?,
@@ -124,6 +150,7 @@ impl HistoryExpectation {
                 workspace_id,
             )?,
         };
+        expected.capture_recorded_history(assets, backup_id)?;
         for asset in assets
             .iter()
             .filter(|asset| asset.kind == "learning_history")
@@ -175,6 +202,99 @@ impl HistoryExpectation {
             }
         }
         Ok(expected)
+    }
+
+    fn capture_recorded_history(
+        &mut self,
+        assets: &[BackupRestoredDerivedAssetReport],
+        backup_id: &str,
+    ) -> Result<(), DomainError> {
+        let count = assets
+            .iter()
+            .filter(|asset| asset.kind == "recorded_history")
+            .count();
+        let mut slots = BTreeSet::new();
+        let mut source_workspace: Option<String> = None;
+        for asset in assets
+            .iter()
+            .filter(|asset| asset.kind == "recorded_history")
+        {
+            let chunk: BackupRecordedHistory =
+                serde_json::from_value(read_restored_derived_json(asset)?)
+                    .map_err(|_| recovery_error("Invalid recovered recorded history"))?;
+            if chunk.schema != RECORDED_HISTORY_SCHEMA
+                || chunk.backup_id != backup_id
+                || chunk.chunk_count != count
+                || chunk.chunk_index >= count
+                || !slots.insert(chunk.chunk_index)
+                || source_workspace
+                    .as_deref()
+                    .is_some_and(|id| id != chunk.workspace_id)
+                || [
+                    chunk.runs.len(),
+                    chunk.events.len(),
+                    chunk.verification.len(),
+                ]
+                .into_iter()
+                .any(|n| n > WORK_HISTORY_CHUNK_ROWS)
+            {
+                return Err(recovery_error("Incomplete or substituted recorded history"));
+            }
+            for mut row in chunk.runs {
+                if let Some(workspace) = row.workspace_id.as_mut() {
+                    if workspace.as_str() != chunk.workspace_id {
+                        return Err(recovery_error("Foreign recovered recorder run"));
+                    }
+                    workspace.clone_from(&self.workspace_id);
+                }
+                // No recording process survives restore. This is the only
+                // allowed lifecycle change; broken chains stay broken and
+                // unfinished runs must not turn into successful recordings.
+                if row.status == "active" {
+                    row.status = "abandoned".to_owned();
+                }
+                self.recorded.insert("recorder_runs", &row.run_id, &row)?;
+            }
+            for row in chunk.events {
+                self.recorded
+                    .insert("recorder_events", &row.event_id, &row)?;
+            }
+            for entry in chunk.verification {
+                let mut row = entry.row;
+                if row.workspace_id != chunk.workspace_id {
+                    return Err(recovery_error("Foreign recovered verification run"));
+                }
+                row.workspace_id.clone_from(&self.workspace_id);
+                self.recorded.insert("rch_verify_runs", &row.id, &row)?;
+            }
+            source_workspace = Some(chunk.workspace_id);
+        }
+        Ok(())
+    }
+
+    fn verify_recorded_history(&self, db: &DbConnection) -> Result<(), DomainError> {
+        let mut actual = Rows::default();
+        for row in db
+            .list_recorder_runs_for_recovery(&self.workspace_id)
+            .map_err(storage_error)?
+        {
+            for event in db
+                .list_recorder_events(&row.run_id)
+                .map_err(storage_error)?
+            {
+                actual.insert("recorder_events", &event.event_id, &event)?;
+            }
+            actual.insert("recorder_runs", &row.run_id, &row)?;
+        }
+        // The last argument only controls ordering, not membership. A fixed
+        // instant and identity-keyed fingerprints avoid wall-clock dependence.
+        for row in db
+            .query_rch_verify_runs(&self.workspace_id, None, None, "1970-01-01T00:00:00Z")
+            .map_err(storage_error)?
+        {
+            actual.insert("rch_verify_runs", &row.id, &row)?;
+        }
+        self.recorded.verify_complete(&actual, db, RECORDED_TABLES)
     }
 
     /// The caller owns one read snapshot spanning row counts and these reads.
@@ -231,6 +351,7 @@ impl HistoryExpectation {
             )?;
         }
         self.learning.verify(&actual, LEARNING_TABLES)?;
+        self.verify_recorded_history(db)?;
         self.packs.verify_connection(db)?;
         self.cass.verify_connection(db)?;
         self.trust.verify_connection(db)?;

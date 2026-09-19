@@ -21466,6 +21466,267 @@ mod tests {
         }
     }
 
+    fn recorded_recovery_state(
+        db: &DbConnection,
+        workspace_id: &str,
+    ) -> Result<JsonValue, DomainError> {
+        let runs = db
+            .list_recorder_runs_for_recovery(workspace_id)
+            .map_err(work_history_error)?;
+        let mut events = Vec::new();
+        for run in &runs {
+            events.extend(
+                db.list_recorder_events(&run.run_id)
+                    .map_err(work_history_error)?,
+            );
+        }
+        let verification = db
+            .query_rch_verify_runs(workspace_id, None, None, "1970-01-01T00:00:00Z")
+            .map_err(work_history_error)?;
+        Ok(json!({"runs": runs, "events": events, "verification": verification}))
+    }
+
+    fn seed_recorded_recovery_state(database: &Path, workspace_id: &str) -> TestResult {
+        let db = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+        let mut run = recovery_recording(workspace_id, 0);
+        run.event_count = 2;
+        run.payload_bytes = 20;
+        let mut active = recovery_recording(workspace_id, 1);
+        active.workspace_id = None;
+        active.status = "active".to_owned();
+        active.ended_at = None;
+        active.event_count = 0;
+        active.payload_bytes = 0;
+        let mut broken = recovery_recorded_event(&run, 1);
+        broken.chain_status = "broken".to_owned();
+        db.with_transaction(|| {
+            db.insert_recorder_run_for_recovery(&run)?;
+            db.insert_recorder_run_for_recovery(&active)?;
+            db.insert_recorder_event_for_recovery(&recovery_recorded_event(&run, 0))?;
+            db.insert_recorder_event_for_recovery(&broken)?;
+            db.insert_rch_verify_run_for_recovery(&recovery_verification(workspace_id, 0))?;
+            db.insert_rch_verify_run_for_recovery(&recovery_verification(workspace_id, 1))?;
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn assert_recorded_change_refused(table: &str, sql: &str, late: bool) -> TestResult {
+        let (root, workspace, database) = fixture().map_err(|e| e.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        seed_recorded_recovery_state(&database, &workspace_id)?;
+        let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let original = recorded_recovery_state(&source, &workspace_id).map_err(|e| e.message())?;
+        source.close().map_err(|e| e.to_string())?;
+        let backup = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            output_dir: None,
+            label: None,
+            redaction_level: RedactionLevel::None,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        let options = BackupRestoreOptions {
+            workspace_path: workspace.clone(),
+            backup_path: PathBuf::from(&backup.backup_path),
+            side_path: root
+                .path()
+                .canonicalize()
+                .map_err(|e| e.to_string())?
+                .join("refused-recording"),
+            restore_graph_cache: false,
+            dry_run: false,
+        };
+        let mutated = std::cell::Cell::new(false);
+        let mutate = |path: &Path| -> Result<(), DomainError> {
+            if late {
+                let store = path
+                    .parent()
+                    .ok_or_else(|| work_history_error("missing staged store"))?;
+                assert!(store.join("index/meta.json").is_file());
+            }
+            let db = DbConnection::open_file(path).map_err(work_history_error)?;
+            let before = recorded_recovery_state(&db, &workspace_id)?;
+            let count = db.count_table_rows(table).map_err(work_history_error)?;
+            db.execute_raw(sql).map_err(work_history_error)?;
+            assert_ne!(
+                before,
+                recorded_recovery_state(&db, &workspace_id)?,
+                "mutation must execute"
+            );
+            assert_eq!(
+                count,
+                db.count_table_rows(table).map_err(work_history_error)?
+            );
+            db.close().map_err(work_history_error)?;
+            mutated.set(true);
+            Ok(())
+        };
+        let error = restore_backup_to_side_path_with_recovery_hooks(
+            &options,
+            |path| if late { Ok(()) } else { mutate(path) },
+            |path| if late { mutate(path) } else { Ok(()) },
+        )
+        .err()
+        .ok_or("published changed recorded evidence")?;
+        ensure(mutated.get(), "the intended mutation ran")?;
+        ensure(
+            error.message().contains(table),
+            "correct durable family rejected",
+        )?;
+        ensure(
+            !error.message().contains("recorded-private-canary"),
+            "diagnostics hide evidence",
+        )?;
+        ensure(
+            !options.side_path.join(WORKSPACE_MARKER).exists(),
+            "no active store published",
+        )?;
+        let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        ensure_equal(
+            recorded_recovery_state(&source, &workspace_id).map_err(|e| e.message())?,
+            original,
+            "source evidence is untouched",
+        )?;
+        source.close().map_err(|e| e.to_string())?;
+        ensure_equal(
+            verify_backup(&BackupVerifyOptions {
+                workspace_path: workspace,
+                backup_path: options.backup_path,
+            })
+            .map_err(|e| e.message())?
+            .status
+            .as_str(),
+            "verified",
+            "source archive remains authenticated",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_rejects_recording_lifecycle_and_chain_rewrites() -> TestResult {
+        for sql in [
+            "UPDATE recorder_runs SET status = 'completed' WHERE status = 'abandoned'",
+            "UPDATE recorder_runs SET chain_complete = 1 WHERE chain_complete = 0",
+            "UPDATE recorder_runs SET payload_bytes = payload_bytes + 1",
+        ] {
+            for late in [false, true] {
+                assert_recorded_change_refused("recorder_runs", sql, late)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_rejects_reparented_or_rewritten_recorded_events() -> TestResult {
+        for sql in [
+            "UPDATE recorder_events SET run_id = 'run_recovery_0001'",
+            "UPDATE recorder_events SET chain_status = 'linked' WHERE chain_status = 'broken'",
+            "UPDATE recorder_events SET source_line_start = source_line_start + 1, source_line_end = source_line_end + 1",
+        ] {
+            for late in [false, true] {
+                assert_recorded_change_refused("recorder_events", sql, late)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_rejects_fabricated_verification_success_or_provenance() -> TestResult {
+        for sql in [
+            "UPDATE rch_verify_runs SET status = 'passed', exit_code = 0",
+            "UPDATE rch_verify_runs SET remote_required = 0",
+            "UPDATE rch_verify_runs SET stdout_tail = 'recorded-private-canary'",
+            "UPDATE rch_verify_runs SET retry_after = NULL WHERE retry_after IS NOT NULL",
+        ] {
+            for late in [false, true] {
+                assert_recorded_change_refused("rch_verify_runs", sql, late)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_recovery_survives_rebackup_without_changing_failed_evidence() -> TestResult {
+        let (root, workspace, database) = fixture().map_err(|e| e.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        seed_recorded_recovery_state(&database, &workspace_id)?;
+        let mut source_workspace = workspace;
+        let mut source_database = database;
+        let mut first_state = None;
+        for round in 0..2 {
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: source_workspace.clone(),
+                database_path: Some(source_database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: RedactionLevel::Standard,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            let side = root
+                .path()
+                .canonicalize()
+                .map_err(|e| e.to_string())?
+                .join(format!("recording-round-{round}"));
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: source_workspace,
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: side.clone(),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            let db = DbConnection::open_file(&restored.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let state = recorded_recovery_state(&db, &workspace_id).map_err(|e| e.message())?;
+            ensure_equal(
+                state["runs"].as_array().ok_or("missing runs")?.len(),
+                2,
+                "both recordings survived",
+            )?;
+            ensure_equal(
+                state["events"].as_array().ok_or("missing events")?.len(),
+                2,
+                "both events survived",
+            )?;
+            let runs = db
+                .list_recorder_runs_for_recovery(&workspace_id)
+                .map_err(|e| e.to_string())?;
+            ensure(
+                runs.iter()
+                    .any(|run| run.status == "abandoned" && run.workspace_id.is_none()),
+                "active unscoped process is not resurrected",
+            )?;
+            let verification = db
+                .query_rch_verify_runs(&workspace_id, None, None, "1970-01-01T00:00:00Z")
+                .map_err(|e| e.to_string())?;
+            ensure_equal(verification.len(), 2, "both verifier results survived")?;
+            ensure(
+                verification
+                    .iter()
+                    .all(|row| row.status != "passed" && row.exit_code == Some(1)),
+                "recovery never validates failed evidence",
+            )?;
+            if let Some(first) = &first_state {
+                ensure_equal(&state, first, "all recorded fields survive rebackup")?;
+            } else {
+                first_state = Some(state);
+            }
+            db.close().map_err(|e| e.to_string())?;
+            source_workspace = side;
+            source_database = PathBuf::from(restored.restored_database_path);
+        }
+        Ok(())
+    }
+
     #[test]
     fn default_backup_restores_recorded_history_and_live_consumers() -> TestResult {
         for redaction in [
