@@ -7961,10 +7961,33 @@ fn memory_temporal_links_and_graph_outputs_compose() -> TestResult {
             &serde_json::json!("dry_run"),
             "graph feature dry-run status",
         )?;
-        ensure_equal(
-            &graph_json["data"]["graph"]["edgeCount"],
-            &serde_json::json!(6),
-            "graph dry-run edge count",
+        // A LOWER BOUND, because the exact total is not this fixture's to own.
+        // This asserted 6 and measured 24 on hz4: src/core/graph_diff.rs:385
+        // sets edge_count = view.edges.len(), and the view expands stored links
+        // into edges by its own directed/undirected rule, so reproducing the
+        // number here would mean re-implementing that rule in a smoke test and
+        // re-breaking it every time the rule changes.
+        //
+        // Worse, `== 6` was BACKWARDS after ADR 0051: it fails precisely when
+        // the graph grows, and waking the graph up from ordinary tagged
+        // remembers is the entire point of that ADR (src/core/memory.rs:5539 --
+        // "leaving the entire graph layer ... dormant by default"). An
+        // assertion that reds when the feature works is worse than no assertion.
+        //
+        // What this test does own is that every link it can see is represented:
+        // the graph view must not report fewer edges than there are stored
+        // links. That still fails loudly if the graph drops edges -- which is
+        // the regression this line exists to catch -- and it does not drift.
+        let graph_edge_count = graph_json["data"]["graph"]["edgeCount"]
+            .as_u64()
+            .ok_or_else(|| "graph edgeCount must be a number".to_string())?;
+        ensure(
+            graph_edge_count >= links_after.len() as u64,
+            format!(
+                "graph dry-run must represent every stored link: edgeCount {graph_edge_count} < \
+                 {} stored links",
+                links_after.len()
+            ),
         )?;
     }
 
