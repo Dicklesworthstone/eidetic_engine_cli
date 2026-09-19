@@ -217,7 +217,9 @@ mod tests {
             trust_class: "human_explicit".to_owned(),
             trust_subclass: None,
             tags: Vec::new(),
-            valid_from: None,
+            // The fixture queries at a fixed August instant. An ambient
+            // creation-time default turns its visible control into a future row.
+            valid_from: Some("2026-01-01T00:00:00Z".to_owned()),
             valid_to: None,
         }
     }

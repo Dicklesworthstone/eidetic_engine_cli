@@ -722,7 +722,9 @@ fn ensure_global_workspace_row(
     Ok(requested)
 }
 
-/// Read memories persisted in the user-global store (read-only).
+/// Read current, revealed memories in the user-global store (read-only).
+/// Supersession and seals are source authority, not author validity windows.
+/// This current-head read is wall-clock-free for deterministic primer caching.
 ///
 /// Returns an empty vector when the store does not exist yet (no `remember
 /// --global` has run), so callers can include the global tier unconditionally
@@ -736,14 +738,51 @@ pub fn read_global_store_memories(
     paths: &GlobalStorePaths,
     include_tombstoned: bool,
 ) -> Result<Vec<StoredMemory>, String> {
-    if !paths.database_path.exists() {
+    read_global_store_memories_at(paths, include_tombstoned, None)
+}
+
+/// Read global memory bodies, revision markers and seals in one source snapshot.
+/// `Some(as_of)` preserves history until the exclusive supersession boundary;
+/// `None` selects current heads without consulting the clock. Author expiry is
+/// deliberately left to each caller's existing validity-window policy.
+pub fn read_global_store_memories_at(
+    paths: &GlobalStorePaths,
+    include_tombstoned: bool,
+    as_of: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Vec<StoredMemory>, String> {
+    if !paths
+        .database_path
+        .try_exists()
+        .map_err(global_read_error)?
+    {
         return Ok(Vec::new());
     }
-    let connection = DbConnection::open_file_read_only(&paths.database_path)
-        .map_err(|error| format!("failed to open global store database read-only: {error}"))?;
-    let needs_migration = connection
-        .needs_migration()
-        .map_err(|error| format!("failed to inspect global store migration state: {error}"))?;
+    let connection =
+        DbConnection::open_file_read_only(&paths.database_path).map_err(global_read_error)?;
+    connection
+        .begin_read_snapshot()
+        .map_err(global_read_error)?;
+    // The synchronous helper cannot yield between authority reads. On error
+    // the snapshot is still released; unwinding drops the owned connection.
+    let result = read_global_rows_in_snapshot(&connection, paths, include_tombstoned, as_of);
+    let released = connection
+        .rollback_read_snapshot()
+        .map_err(global_read_error);
+    result.and_then(|rows| released.map(|()| rows))
+}
+
+fn global_read_error(_: impl std::fmt::Display) -> String {
+    "Could not verify the user-global memory snapshot; the optional global lane was withheld"
+        .to_owned()
+}
+
+fn read_global_rows_in_snapshot(
+    connection: &DbConnection,
+    paths: &GlobalStorePaths,
+    include_tombstoned: bool,
+    as_of: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Vec<StoredMemory>, String> {
+    let needs_migration = connection.needs_migration().map_err(global_read_error)?;
     if needs_migration {
         // Must keep containing `GLOBAL_STORE_NEEDS_MIGRATION_MARKER`; the
         // search read path classifies this case by that substring.
@@ -753,23 +792,45 @@ pub fn read_global_store_memories(
     }
     let requested = global_workspace_id(paths);
     let Some(workspace) = crate::core::workspace::select_existing_workspace_row(
-        &connection,
+        connection,
         &requested,
         &[paths.root.as_path()],
     )
-    .map_err(|error| {
-        format!(
-            "failed to resolve global workspace row: {}",
-            error.message()
-        )
-    })?
+    .map_err(global_read_error)?
     else {
         return Ok(Vec::new());
     };
-    connection
+    let memories = connection
         .list_memories(&workspace.id, None, include_tombstoned)
-        .map_err(|error| format!("failed to list global store memories: {error}"))
+        .map_err(global_read_error)?;
+    let revisions = connection
+        .list_memory_supersession_markers(&workspace.id)
+        .map_err(global_read_error)?;
+    let closed_seals = connection
+        .list_memory_seals_for_recovery(&workspace.id)
+        .map_err(global_read_error)?
+        .into_iter()
+        .filter(|seal| seal.is_sealed())
+        .map(|seal| seal.memory_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut admitted = Vec::with_capacity(memories.len());
+    for memory in memories {
+        if let Some(raw) = revisions.get(&memory.id) {
+            let cutoff = chrono::DateTime::parse_from_rfc3339(raw).map_err(global_read_error)?;
+            if as_of.is_none_or(|reference| reference >= cutoff.with_timezone(&chrono::Utc)) {
+                continue;
+            }
+        }
+        if !closed_seals.contains(&memory.id) {
+            admitted.push(memory);
+        }
+    }
+    Ok(admitted)
 }
+
+#[cfg(test)]
+#[path = "global_store_revision_tests.rs"]
+mod revision_tests;
 
 #[cfg(test)]
 mod tests {

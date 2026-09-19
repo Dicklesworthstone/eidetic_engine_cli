@@ -11532,7 +11532,11 @@ async fn global_store_frankensearch_hits(
         }
         return Vec::new();
     }
-    let memories = match super::global_store::read_global_store_memories(&paths, true) {
+    let memories = match super::global_store::read_global_store_memories_at(
+        &paths,
+        options.include_tombstoned,
+        Some(options.as_of.unwrap_or_else(Utc::now)),
+    ) {
         Ok(memories) => memories,
         Err(error) => {
             // A global store that merely needs migration is an optional lane

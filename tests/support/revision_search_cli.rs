@@ -207,7 +207,7 @@ fn revised_advice_is_current_in_cli_search_diagnostics_and_read_only_packs() -> 
         "--include-expired",
         "--include-stale",
     ])?;
-    assert_eq!(ids(&search, "/data/results", "id")?, vec![head.as_str()]);
+    assert_eq!(ids(&search, "/data/results", "docId")?, vec![head.as_str()]);
     let diag = fixture.run(&[
         "diag",
         "search",
@@ -217,7 +217,7 @@ fn revised_advice_is_current_in_cli_search_diagnostics_and_read_only_packs() -> 
         "0",
     ])?;
     assert_eq!(
-        ids(&diag, "/data/final/results", "id")?,
+        ids(&diag, "/data/final/results", "docId")?,
         vec![head.as_str()]
     );
     assert_eq!(
@@ -304,7 +304,7 @@ fn historical_cli_search_selects_the_prior_until_the_exact_revision_boundary() -
             reference,
         ])?;
         assert_eq!(
-            ids(&search, "/data/results", "id")?,
+            ids(&search, "/data/results", "docId")?,
             vec![expected],
             "{reference}"
         );
