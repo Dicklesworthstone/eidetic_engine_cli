@@ -769,3 +769,144 @@ fn backup_doc_names_manifest_registry_runtime_and_assets() -> TestResult {
     }
     Ok(())
 }
+
+/// GRANDFATHERED UNRESOLVED CLAIMS -- **not** approved exceptions. bd-nwyir.
+///
+/// Each entry is an asset kind whose `complianceStatus` says
+/// `declared_conformant` while its `roundTripEvidenceStatus` says
+/// `planned_contract_only`. That pairing is the defect: a surface reporting an
+/// asset as proven while recording, in the field beside it, that nothing was
+/// ever round-tripped.
+///
+/// NOTHING HERE HAS BEEN DECIDED OR APPROVED. These eleven are OPEN QUESTIONS
+/// awaiting a recorded decision on bd-nwyir: for each row, either the CLAIM is
+/// corrected (it is not conformant) or the EVIDENCE is produced (a real round
+/// trip). This list exists only so a TWELFTH cannot be added quietly while
+/// those decisions are pending. A row's presence here is not permission for it
+/// to stay, and this gate does not resolve any of them.
+///
+/// The evidence status is recorded beside each kind on purpose. A bare count
+/// cannot tell a reader whether a row was fixed or merely swapped for a
+/// different offender, and swapping is exactly what a count-only baseline
+/// permits silently.
+const GRANDFATHERED_UNRESOLVED_CONFORMANCE_CLAIMS: &[(&str, &str)] = &[
+    ("attestation_bundles", "planned_contract_only"),
+    ("derived_outcome_evidence", "planned_contract_only"),
+    ("error_fingerprints", "planned_contract_only"),
+    ("memory_anchors", "planned_contract_only"),
+    ("memory_sentinel_results", "planned_contract_only"),
+    ("memory_sentinel_specs", "planned_contract_only"),
+    ("pack_candidate_impressions", "planned_contract_only"),
+    ("query_miss_ledger", "planned_contract_only"),
+    ("source_write_stats", "planned_contract_only"),
+    ("typed_memory_fields", "planned_contract_only"),
+    ("workspace_generations", "planned_contract_only"),
+];
+
+/// A surface may not be declared conformant while its own round-trip evidence
+/// field says nothing was round-tripped. bd-nwyir.
+///
+/// The existing gate checks that `roundTripEvidenceStatus` correctly MIRRORS
+/// the asset's `roundTripEvidence`. It never checks `complianceStatus` against
+/// either, so those two cannot disagree and the pair is structurally incapable
+/// of detecting the state it exists to detect. Measured 2026-09-19: 11 of 11
+/// rows declared conformant, 11 of 11 on planned-only evidence.
+///
+/// RATCHETS DOWN ONLY. Today's eleven is a ceiling, never a target: a twelfth
+/// offender fails, and so does a grandfathered row that gets resolved while
+/// the list still names it. A baseline that only blocks growth becomes a floor
+/// nobody ever descends.
+#[test]
+fn conformance_is_never_declared_on_planned_only_evidence() -> TestResult {
+    // Overridable so the ratchet can be proven against a real copy of the
+    // matrix carrying a planted offender, leaving the repo unmodified.
+    let manifest_path = match std::env::var("EE_BACKUP_COVERAGE_MANIFEST_PATH") {
+        Ok(path) => PathBuf::from(path),
+        Err(_) => repo_root().join(MANIFEST_REL),
+    };
+    let raw = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("read {}: {error}", manifest_path.display()))?;
+    let manifest: Value =
+        serde_json::from_str(&raw).map_err(|error| format!("parse backup coverage: {error}"))?;
+
+    let rows = manifest
+        .get("assetCoverageMatrix")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "assetCoverageMatrix missing or not an array".to_owned())?;
+
+    // EMPTY-WORLD GUARD. Zero rows is what a rename, a moved file or a broken
+    // invocation produces, and every comparison below would then pass
+    // vacuously. A consistency gate that goes green while measuring nothing is
+    // worse than no gate, because it reports success.
+    if rows.is_empty() {
+        return Err(format!(
+            "assetCoverageMatrix in {} parsed as ZERO rows; this gate measured \
+             nothing and must not report success",
+            manifest_path.display()
+        ));
+    }
+
+    let mut observed: BTreeMap<String, String> = BTreeMap::new();
+    for row in rows {
+        let kind = string_field(row, "/assetKind", "assetCoverageMatrix row")?;
+        let compliance = string_field(row, "/complianceStatus", kind)?;
+        let evidence = string_field(row, "/roundTripEvidenceStatus", kind)?;
+        if compliance == "declared_conformant" && evidence == "planned_contract_only" {
+            observed.insert(kind.to_owned(), evidence.to_owned());
+        }
+    }
+
+    let recorded: BTreeMap<&str, &str> = GRANDFATHERED_UNRESOLVED_CONFORMANCE_CLAIMS
+        .iter()
+        .copied()
+        .collect();
+
+    let mut undeclared = Vec::new();
+    for (kind, evidence) in &observed {
+        match recorded.get(kind.as_str()) {
+            None => undeclared.push(format!(
+                "  {kind}: declared conformant on {evidence} evidence, and it is not \
+                 one of the {} rows grandfathered unresolved under bd-nwyir",
+                recorded.len()
+            )),
+            Some(expected) if *expected != evidence.as_str() => undeclared.push(format!(
+                "  {kind}: grandfathered at evidence {expected} but the matrix now says \
+                 {evidence}; the row changed rather than being resolved"
+            )),
+            Some(_) => {}
+        }
+    }
+
+    // RATCHET: a grandfathered row that no longer offends must leave the list.
+    let mut resolved = Vec::new();
+    for kind in recorded.keys() {
+        if !observed.contains_key(*kind) {
+            resolved.push(format!(
+                "  {kind}: no longer declares conformance on planned-only evidence. \
+                 Remove it from GRANDFATHERED_UNRESOLVED_CONFORMANCE_CLAIMS -- the \
+                 ceiling must come down when the debt does"
+            ));
+        }
+    }
+
+    if !undeclared.is_empty() || !resolved.is_empty() {
+        return Err(format!(
+            "backup coverage conformance claims disagree with their own evidence.\n\
+             NEW OR CHANGED OFFENDERS (declared conformant while round-trip evidence \
+             is planned-only):\n{}\n\
+             RESOLVED, SO THE BASELINE MUST SHRINK:\n{}",
+            if undeclared.is_empty() {
+                "  (none)".to_owned()
+            } else {
+                undeclared.join("\n")
+            },
+            if resolved.is_empty() {
+                "  (none)".to_owned()
+            } else {
+                resolved.join("\n")
+            },
+        ));
+    }
+
+    Ok(())
+}
