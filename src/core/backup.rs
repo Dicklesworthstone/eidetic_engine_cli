@@ -21514,11 +21514,27 @@ mod tests {
     }
 
     fn assert_recorded_change_refused(table: &str, sql: &str, late: bool) -> TestResult {
+        assert_history_change_refused(
+            table,
+            sql,
+            late,
+            seed_recorded_recovery_state,
+            recorded_recovery_state,
+        )
+    }
+
+    fn assert_history_change_refused(
+        table: &str,
+        sql: &str,
+        late: bool,
+        seed: fn(&Path, &str) -> TestResult,
+        snapshot: fn(&DbConnection, &str) -> Result<JsonValue, DomainError>,
+    ) -> TestResult {
         let (root, workspace, database) = fixture().map_err(|e| e.message())?;
         let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
-        seed_recorded_recovery_state(&database, &workspace_id)?;
+        seed(&database, &workspace_id)?;
         let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
-        let original = recorded_recovery_state(&source, &workspace_id).map_err(|e| e.message())?;
+        let original = snapshot(&source, &workspace_id).map_err(|e| e.message())?;
         source.close().map_err(|e| e.to_string())?;
         let backup = create_backup(&BackupCreateOptions {
             workspace_path: workspace.clone(),
@@ -21538,7 +21554,7 @@ mod tests {
                 .path()
                 .canonicalize()
                 .map_err(|e| e.to_string())?
-                .join("refused-recording"),
+                .join("refused-history"),
             restore_graph_cache: false,
             dry_run: false,
         };
@@ -21551,12 +21567,12 @@ mod tests {
                 assert!(store.join("index/meta.json").is_file());
             }
             let db = DbConnection::open_file(path).map_err(work_history_error)?;
-            let before = recorded_recovery_state(&db, &workspace_id)?;
+            let before = snapshot(&db, &workspace_id)?;
             let count = db.count_table_rows(table).map_err(work_history_error)?;
             db.execute_raw(sql).map_err(work_history_error)?;
             assert_ne!(
                 before,
-                recorded_recovery_state(&db, &workspace_id)?,
+                snapshot(&db, &workspace_id)?,
                 "mutation must execute"
             );
             assert_eq!(
@@ -21573,7 +21589,7 @@ mod tests {
             |path| if late { mutate(path) } else { Ok(()) },
         )
         .err()
-        .ok_or("published changed recorded evidence")?;
+        .ok_or("published changed durable history")?;
         ensure(mutated.get(), "the intended mutation ran")?;
         ensure(
             error.message().contains(table),
@@ -21589,7 +21605,7 @@ mod tests {
         )?;
         let source = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
         ensure_equal(
-            recorded_recovery_state(&source, &workspace_id).map_err(|e| e.message())?,
+            snapshot(&source, &workspace_id).map_err(|e| e.message())?,
             original,
             "source evidence is untouched",
         )?;
@@ -24015,6 +24031,223 @@ mod tests {
             .with_evidence_uri("https://example.test/run?api_key=reasoning-evidence-canary")
             .with_causal_trace_id("cev_recovery"),
         })
+    }
+
+    fn seed_provenance_recovery_state(database: &Path, workspace_id: &str) -> TestResult {
+        let db = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+        let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        let cause_id = insert_recovery_cause(&db, workspace_id)?;
+        let trace = recovery_rationale(workspace_id, &memory_id)?;
+        let fingerprint = recovery_error_fingerprint(workspace_id);
+        let mut repair = recovery_error_link(&fingerprint, 0);
+        repair.link_kind = "repair".to_owned();
+        repair.target_id = memory_id.clone();
+        repair.outcome = "harmful".to_owned();
+        db.with_transaction(|| {
+            db.insert_rationale_trace(workspace_id, &trace.trace)?;
+            db.insert_causal_evidence_for_recovery(&recovery_causal(
+                workspace_id,
+                &memory_id,
+                &cause_id,
+            ))?;
+            db.insert_error_fingerprint_for_recovery(&fingerprint)?;
+            db.insert_error_repair_link_for_recovery(&repair)?;
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn provenance_recovery_state(
+        db: &DbConnection,
+        workspace_id: &str,
+    ) -> Result<JsonValue, DomainError> {
+        let traces = db
+            .list_rationale_traces_for_recovery(workspace_id)
+            .map_err(work_history_error)?;
+        let mut links = Vec::new();
+        for row in &traces {
+            links.extend(
+                db.list_rationale_trace_links(&row.trace.trace_id)
+                    .map_err(work_history_error)?,
+            );
+        }
+        let causal = db
+            .list_causal_evidence_for_recovery(workspace_id)
+            .map_err(work_history_error)?;
+        let fingerprints = db
+            .list_error_fingerprints_for_recovery(workspace_id)
+            .map_err(work_history_error)?;
+        let mut repairs = Vec::new();
+        for row in &fingerprints {
+            repairs.extend(
+                db.list_error_repair_links(workspace_id, &row.fingerprint_key)
+                    .map_err(work_history_error)?,
+            );
+        }
+        Ok(json!({
+            "traces": traces,
+            "links": links,
+            "causal": causal,
+            "fingerprints": fingerprints,
+            "repairs": repairs,
+        }))
+    }
+
+    #[test]
+    fn recovery_rejects_rewritten_explanations_and_rationale_links() -> TestResult {
+        for (table, sql) in [
+            (
+                "rationale_traces",
+                "UPDATE rationale_traces SET summary = 'recorded-private-canary'",
+            ),
+            (
+                "rationale_traces",
+                "UPDATE rationale_traces SET confidence_basis_points = 9999",
+            ),
+            (
+                "rationale_trace_links",
+                "UPDATE rationale_trace_links SET created_at = '2099-01-01T00:00:00Z'",
+            ),
+            (
+                "rationale_trace_links",
+                "UPDATE rationale_trace_links SET relation = 'contradicted_by'",
+            ),
+        ] {
+            for late in [false, true] {
+                assert_history_change_refused(
+                    table,
+                    sql,
+                    late,
+                    seed_provenance_recovery_state,
+                    provenance_recovery_state,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_rejects_changed_causal_attribution() -> TestResult {
+        for sql in [
+            "UPDATE causal_evidence SET contribution_score = 0.25",
+            "UPDATE causal_evidence SET evidence_uris_json = '[\"https://example.test/recorded-private-canary\"]'",
+        ] {
+            for late in [false, true] {
+                assert_history_change_refused(
+                    "causal_evidence",
+                    sql,
+                    late,
+                    seed_provenance_recovery_state,
+                    provenance_recovery_state,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_rejects_rehabilitated_repairs_and_changed_error_signatures() -> TestResult {
+        for (table, sql) in [
+            (
+                "error_fingerprints",
+                "UPDATE error_fingerprints SET canonical_code = 'E0308'",
+            ),
+            (
+                "error_fingerprints",
+                "UPDATE error_fingerprints SET version_hints = 'recorded-private-canary'",
+            ),
+            (
+                "error_repair_links",
+                "UPDATE error_repair_links SET outcome = 'helpful'",
+            ),
+            (
+                "error_repair_links",
+                "UPDATE error_repair_links SET evidence_ref = 'recorded-private-canary'",
+            ),
+        ] {
+            for late in [false, true] {
+                assert_history_change_refused(
+                    table,
+                    sql,
+                    late,
+                    seed_provenance_recovery_state,
+                    provenance_recovery_state,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn provenance_recovery_survives_rebackup_without_rejudging_evidence() -> TestResult {
+        let (root, workspace, database) = fixture().map_err(|e| e.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        seed_provenance_recovery_state(&database, &workspace_id)?;
+        let mut source_workspace = workspace;
+        let mut source_database = database;
+        let mut first_state = None;
+        for round in 0..2 {
+            let backup = create_backup(&BackupCreateOptions {
+                workspace_path: source_workspace.clone(),
+                database_path: Some(source_database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level: RedactionLevel::Standard,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            let side = root
+                .path()
+                .canonicalize()
+                .map_err(|e| e.to_string())?
+                .join(format!("provenance-round-{round}"));
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: source_workspace,
+                backup_path: PathBuf::from(&backup.backup_path),
+                side_path: side.clone(),
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|e| e.message())?;
+            let db = DbConnection::open_file(&restored.restored_database_path)
+                .map_err(|e| e.to_string())?;
+            let state = provenance_recovery_state(&db, &workspace_id).map_err(|e| e.message())?;
+            let edges = db
+                .list_causal_evidence_for_recovery(&workspace_id)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(edges.len(), 1, "causal evidence survived")?;
+            ensure_equal(
+                edges[0].contribution_score,
+                0.8123456789012345,
+                "no score rounding",
+            )?;
+            let fingerprints = db
+                .list_error_fingerprints_for_recovery(&workspace_id)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(fingerprints.len(), 1, "error identity survived")?;
+            let repairs = db
+                .list_error_repair_links(&workspace_id, &fingerprints[0].fingerprint_key)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(repairs.len(), 1, "repair lineage survived")?;
+            ensure_equal(
+                repairs[0].outcome.as_str(),
+                "harmful",
+                "recovery does not endorse a failed repair",
+            )?;
+            if let Some(first) = &first_state {
+                ensure_equal(&state, first, "all provenance survives rebackup")?;
+            } else {
+                first_state = Some(state);
+            }
+            db.close().map_err(|e| e.to_string())?;
+            source_workspace = side;
+            source_database = PathBuf::from(restored.restored_database_path);
+        }
+        Ok(())
     }
 
     fn recovery_causal(

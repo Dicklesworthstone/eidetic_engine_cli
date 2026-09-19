@@ -12,8 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use super::super::{
-    BackupLearningHistory, BackupRecordedHistory, BackupRestoredDerivedAssetReport,
-    BackupRuleSource, BackupRuleTag, LEARNING_HISTORY_SCHEMA, RECORDED_HISTORY_SCHEMA,
+    BackupErrorRecall, BackupLearningHistory, BackupReasoningHistory, BackupRecordedHistory,
+    BackupRestoredDerivedAssetReport, BackupRuleSource, BackupRuleTag, ERROR_RECALL_SCHEMA,
+    LEARNING_HISTORY_SCHEMA, REASONING_HISTORY_SCHEMA, RECORDED_HISTORY_SCHEMA,
     WORK_HISTORY_CHUNK_ROWS, read_restored_derived_json,
 };
 use super::{recovery_error, storage_error};
@@ -44,6 +45,13 @@ const LEARNING_TABLES: &[&str] = &[
 ];
 
 const RECORDED_TABLES: &[&str] = &["recorder_runs", "recorder_events", "rch_verify_runs"];
+const PROVENANCE_TABLES: &[&str] = &[
+    "rationale_traces",
+    "rationale_trace_links",
+    "causal_evidence",
+    "error_fingerprints",
+    "error_repair_links",
+];
 
 /// Digests bound to primary keys, not row order. Composite keys are serialized
 /// as tuples: delimiter-bearing identities cannot alias one another. Only
@@ -115,6 +123,7 @@ pub(in crate::core::backup) struct HistoryExpectation {
     workspace_id: String,
     learning: Rows,
     recorded: Rows,
+    provenance: Rows,
     packs: packs::PackExpectation,
     cass: cass::CassExpectation,
     trust: trust::TrustExpectation,
@@ -140,6 +149,7 @@ impl HistoryExpectation {
             workspace_id: workspace_id.to_owned(),
             learning: Rows::default(),
             recorded: Rows::default(),
+            provenance: Rows::default(),
             packs: packs::PackExpectation::from_assets(assets, backup_id, workspace_id)?,
             cass: cass::CassExpectation::from_assets(assets, workspace_id)?,
             trust: trust::TrustExpectation::from_assets(assets, backup_id, workspace_id)?,
@@ -151,6 +161,7 @@ impl HistoryExpectation {
             )?,
         };
         expected.capture_recorded_history(assets, backup_id)?;
+        expected.capture_provenance_history(assets, backup_id)?;
         for asset in assets
             .iter()
             .filter(|asset| asset.kind == "learning_history")
@@ -297,6 +308,171 @@ impl HistoryExpectation {
         self.recorded.verify_complete(&actual, db, RECORDED_TABLES)
     }
 
+    fn capture_provenance_history(
+        &mut self,
+        assets: &[BackupRestoredDerivedAssetReport],
+        backup_id: &str,
+    ) -> Result<(), DomainError> {
+        for kind in ["reasoning_history", "error_recall"] {
+            let count = assets.iter().filter(|asset| asset.kind == kind).count();
+            let mut slots = BTreeSet::new();
+            let mut source_workspace: Option<String> = None;
+            for asset in assets.iter().filter(|asset| asset.kind == kind) {
+                let value = read_restored_derived_json(asset)?;
+                let (source, index, declared, lengths) = if kind == "reasoning_history" {
+                    let chunk: BackupReasoningHistory = serde_json::from_value(value)
+                        .map_err(|_| recovery_error("Invalid recovered reasoning history"))?;
+                    if chunk.schema != REASONING_HISTORY_SCHEMA || chunk.backup_id != backup_id {
+                        return Err(recovery_error("Substituted recovered reasoning history"));
+                    }
+                    let lengths = [
+                        chunk.traces.len(),
+                        chunk.links.len(),
+                        chunk.causal_evidence.len(),
+                    ];
+                    for mut row in chunk.traces {
+                        self.rebind_provenance_workspace(
+                            &mut row.workspace_id,
+                            &chunk.workspace_id,
+                        )?;
+                        self.provenance
+                            .insert("rationale_traces", &row.trace.trace_id, &row)?;
+                    }
+                    for row in chunk.links {
+                        self.provenance.insert(
+                            "rationale_trace_links",
+                            &(
+                                &row.trace_id,
+                                &row.target_type,
+                                &row.target_id,
+                                &row.relation,
+                            ),
+                            &row,
+                        )?;
+                    }
+                    for mut row in chunk.causal_evidence {
+                        self.rebind_provenance_workspace(
+                            &mut row.workspace_id,
+                            &chunk.workspace_id,
+                        )?;
+                        self.provenance.insert("causal_evidence", &row.id, &row)?;
+                    }
+                    (
+                        chunk.workspace_id,
+                        chunk.chunk_index,
+                        chunk.chunk_count,
+                        lengths,
+                    )
+                } else {
+                    let chunk: BackupErrorRecall = serde_json::from_value(value)
+                        .map_err(|_| recovery_error("Invalid recovered error recall"))?;
+                    if chunk.schema != ERROR_RECALL_SCHEMA || chunk.backup_id != backup_id {
+                        return Err(recovery_error("Substituted recovered error recall"));
+                    }
+                    let lengths = [chunk.fingerprints.len(), chunk.links.len(), 0];
+                    for mut row in chunk.fingerprints {
+                        self.rebind_provenance_workspace(
+                            &mut row.workspace_id,
+                            &chunk.workspace_id,
+                        )?;
+                        self.provenance.insert(
+                            "error_fingerprints",
+                            &(&row.workspace_id, &row.fingerprint_key),
+                            &row,
+                        )?;
+                    }
+                    for mut row in chunk.links {
+                        self.rebind_provenance_workspace(
+                            &mut row.workspace_id,
+                            &chunk.workspace_id,
+                        )?;
+                        self.provenance
+                            .insert("error_repair_links", &row.link_id, &row)?;
+                    }
+                    (
+                        chunk.workspace_id,
+                        chunk.chunk_index,
+                        chunk.chunk_count,
+                        lengths,
+                    )
+                };
+                if declared != count
+                    || index >= count
+                    || !slots.insert(index)
+                    || source_workspace.as_deref().is_some_and(|id| id != source)
+                    || lengths.into_iter().any(|n| n > WORK_HISTORY_CHUNK_ROWS)
+                {
+                    return Err(recovery_error(
+                        "Incomplete or foreign recovered provenance history",
+                    ));
+                }
+                source_workspace = Some(source);
+            }
+        }
+        Ok(())
+    }
+
+    fn rebind_provenance_workspace(
+        &self,
+        workspace: &mut String,
+        source: &str,
+    ) -> Result<(), DomainError> {
+        if workspace.as_str() != source {
+            return Err(recovery_error("Foreign recovered provenance row"));
+        }
+        workspace.clone_from(&self.workspace_id);
+        Ok(())
+    }
+
+    fn verify_provenance_history(&self, db: &DbConnection) -> Result<(), DomainError> {
+        let mut actual = Rows::default();
+        for row in db
+            .list_rationale_traces_for_recovery(&self.workspace_id)
+            .map_err(storage_error)?
+        {
+            for link in db
+                .list_rationale_trace_links(&row.trace.trace_id)
+                .map_err(storage_error)?
+            {
+                actual.insert(
+                    "rationale_trace_links",
+                    &(
+                        &link.trace_id,
+                        &link.target_type,
+                        &link.target_id,
+                        &link.relation,
+                    ),
+                    &link,
+                )?;
+            }
+            actual.insert("rationale_traces", &row.trace.trace_id, &row)?;
+        }
+        for row in db
+            .list_causal_evidence_for_recovery(&self.workspace_id)
+            .map_err(storage_error)?
+        {
+            actual.insert("causal_evidence", &row.id, &row)?;
+        }
+        for row in db
+            .list_error_fingerprints_for_recovery(&self.workspace_id)
+            .map_err(storage_error)?
+        {
+            for link in db
+                .list_error_repair_links(&self.workspace_id, &row.fingerprint_key)
+                .map_err(storage_error)?
+            {
+                actual.insert("error_repair_links", &link.link_id, &link)?;
+            }
+            actual.insert(
+                "error_fingerprints",
+                &(&row.workspace_id, &row.fingerprint_key),
+                &row,
+            )?;
+        }
+        self.provenance
+            .verify_complete(&actual, db, PROVENANCE_TABLES)
+    }
+
     /// The caller owns one read snapshot spanning row counts and these reads.
     pub(super) fn verify_connection(&self, db: &DbConnection) -> Result<(), DomainError> {
         let mut actual = Rows::default();
@@ -352,6 +528,7 @@ impl HistoryExpectation {
         }
         self.learning.verify(&actual, LEARNING_TABLES)?;
         self.verify_recorded_history(db)?;
+        self.verify_provenance_history(db)?;
         self.packs.verify_connection(db)?;
         self.cass.verify_connection(db)?;
         self.trust.verify_connection(db)?;
@@ -365,6 +542,65 @@ impl HistoryExpectation {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn population_fence_rejects_foreign_runs_hidden_by_scoped_readers() {
+        let db = DbConnection::open_memory().unwrap();
+        db.migrate().unwrap();
+        let target = crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_u128(1)).to_string();
+        let foreign = crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_u128(2)).to_string();
+        let expected = Rows::default();
+        let actual = Rows::default();
+        expected
+            .verify_complete(&actual, &db, RECORDED_TABLES)
+            .unwrap();
+        db.insert_workspace(
+            &foreign,
+            &crate::db::CreateWorkspaceInput {
+                path: "/recovery/foreign".to_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+        db.insert_recorder_run(
+            "run_hidden",
+            &crate::db::CreateRecorderRunInput {
+                workspace_id: Some(foreign.clone()),
+                agent_id: "private-agent-canary".to_owned(),
+                session_id: None,
+                source_type: "live".to_owned(),
+                source_id: None,
+                status: "completed".to_owned(),
+                started_at: "2026-09-01T00:00:00Z".to_owned(),
+                ended_at: Some("2026-09-01T00:01:00Z".to_owned()),
+                event_count: 0,
+                redacted_count: 0,
+                payload_bytes: 0,
+                chain_complete: true,
+            },
+        )
+        .unwrap();
+        db.begin_read_snapshot().unwrap();
+        assert!(
+            db.list_recorder_runs_for_recovery(&target)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(db.count_table_rows("recorder_runs").unwrap(), 1);
+        // Equal scoped maps must not turn a partial view into a passing fence.
+        expected.verify(&actual, RECORDED_TABLES).unwrap();
+        let message = expected
+            .verify_complete(&actual, &db, RECORDED_TABLES)
+            .err()
+            .unwrap()
+            .message();
+        assert!(message.contains("recorder_runs"));
+        for private in [foreign.as_str(), "private-agent-canary", "run_hidden"] {
+            assert!(!message.contains(private));
+        }
+        db.commit_read_snapshot().unwrap();
+        db.close().unwrap();
+    }
 
     #[test]
     fn row_fingerprints_ignore_iteration_order_but_not_values_or_identities() {
