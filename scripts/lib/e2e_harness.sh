@@ -191,8 +191,39 @@ assert_contains() {
 #   - the "true"/"false" pair handed to e2e_log_assert_eq, which the event log
 #     records.
 # Only the text of the three non-property failures is new.
+# _assert_jq_resolvable_null_paths <json> <filter> — BEST EFFORT, NOT A CENSUS.
+#
+# Prints the comma-separated root-anchored `.data.*` paths named by <filter> that
+# resolve to null in <json>. Used only to enrich a failure message (bd-boyui): a
+# filter naming a field the command does not emit produces `null == false` ->
+# false -> jq exit 1, the same code a genuine behavioural mismatch produces, so
+# no exit code can separate them.
+#
+# WHAT THIS EXTRACTOR CANNOT SEE — the message must never claim completeness:
+#   * paths built by string interpolation, e.g. "\(.data.x)"
+#   * `.[]` / iterator traversals and anything downstream of them
+#   * getpath(...) and computed keys like .["a-b"]
+#   * bare `.foo` inside any(...; .foo) / all(...; .foo) lambdas — DELIBERATELY
+#     excluded. Those are ELEMENT-relative, not root-relative; evaluating them
+#     against the root would report a false "absent" and manufacture exactly the
+#     wrong diagnosis. Anchoring on `.data.` sidesteps the whole class.
+# A diagnostic that overstates its coverage recreates, one level up, the defect
+# it was written to fix.
+_assert_jq_resolvable_null_paths() {
+    local json="$1" filter="$2" path out=""
+    for path in $(printf '%s' "$filter" | grep -oE '\.data(\.[A-Za-z_][A-Za-z0-9_]*)+' | sort -u); do
+        # `jq -e "<path> == null"` exits 0 only when the path IS null. A non-JSON
+        # input makes jq error here, which falls through as "not null" — correct,
+        # because that case is already reported as its own HARNESS ERROR (rc 5).
+        if printf '%s' "$json" | jq -e "$path == null" >/dev/null 2>&1; then
+            out="${out:+$out, }$path"
+        fi
+    done
+    printf '%s' "$out"
+}
+
 assert_jq() {
-    local json="$1" filter="$2" label="${3:-assert_jq}" jq_err rc
+    local json="$1" filter="$2" label="${3:-assert_jq}" jq_err rc null_paths
     # `2>&1 >/dev/null` captures stderr and discards stdout: jq's diagnostic is
     # the thing worth keeping, and the boolean is carried by the exit code.
     jq_err="$(printf '%s' "$json" | jq -e "$filter" 2>&1 >/dev/null)"
@@ -204,7 +235,17 @@ assert_jq() {
     fi
     e2e_log_assert_eq "false" "true" "$label"
     case "$rc" in
-        1) _harness_fail "$label: jq filter false [$filter]" ;;
+        1)
+            # Exit 1 is ambiguous: the property is genuinely false, OR the filter
+            # names a field this command does not emit (absent -> null -> false).
+            # Naming the null paths separates those without changing any verdict.
+            null_paths="$(_assert_jq_resolvable_null_paths "$json" "$filter")"
+            if [ -n "$null_paths" ]; then
+                _harness_fail "$label: jq filter false [$filter] -- of the root-anchored .data paths this checker could resolve, these are ABSENT/null in the payload: $null_paths (other path shapes are not inspected; see _assert_jq_resolvable_null_paths)"
+            else
+                _harness_fail "$label: jq filter false [$filter]"
+            fi
+            ;;
         3) _harness_fail "$label: HARNESS ERROR -- jq filter did not compile [$filter]: $(printf '%s' "$jq_err" | tr '\n' ' ' | cut -c1-300)" ;;
         4) _harness_fail "$label: HARNESS ERROR -- no output to test; the command produced nothing for [$filter]" ;;
         5) _harness_fail "$label: HARNESS ERROR -- input is not JSON for [$filter]: $(printf '%s' "$jq_err" | tr '\n' ' ' | cut -c1-300)" ;;
