@@ -2174,42 +2174,94 @@ fn detect_pem_block_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>
     }
 }
 
-fn detect_raw_api_token_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
-    const RAW_TOKEN_PATTERNS: &[(&str, &str, usize, bool)] = &[
-        // Authenticated mesh lane/body approval bearers: eeap1_...
-        ("eeap1_", "mesh_approval_token", 16, false),
-        ("sk-ant-api03-", "anthropic_api_key", 40, false),
-        ("sk-proj-", "openai_api_key", 40, false),
-        ("sk-", "openai_api_key", 48, false),
-        ("ghp_", "github_token", 36, false),
-        ("gho_", "github_token", 36, false),
-        ("ghs_", "github_token", 36, false),
-        ("ghu_", "github_token", 36, false),
-        ("ghr_", "github_token", 36, false),
-        ("github_pat_", "github_token", 40, false),
-        ("glpat-", "personal_access_token", 20, false),
-        ("AKIA", "aws_access_key", 16, false),
-        ("ASIA", "aws_access_key", 16, false),
-        ("sk_live_", "stripe_secret_key", 24, false),
-        ("sk_test_", "stripe_secret_key", 24, false),
-        ("rk_live_", "stripe_restricted_key", 24, false),
-        ("rk_test_", "stripe_restricted_key", 24, false),
-        ("AIza", "gcp_api_key", 35, false),
-        ("xoxb-", "slack_token", 24, false),
-        ("xoxp-", "slack_token", 24, false),
-        ("xoxa-", "slack_token", 24, false),
-        ("xoxr-", "slack_token", 24, false),
-        ("npm_", "npm_token", 16, false),
-        ("hf_", "huggingface_token", 16, false),
-        ("pypi-", "pypi_token", 24, false),
-        ("AC", "twilio_account_sid", 32, true),
-        ("SG.", "sendgrid_api_key", 24, false),
-        ("sq0idp-", "square_token", 20, false),
-        ("sq0csp-", "square_token", 20, false),
-        ("key-", "mailgun_key", 24, false),
-        ("pubkey-", "mailgun_key", 24, false),
-    ];
+/// Raw API-token prefixes, shared by detection and redaction.
+///
+/// ONE TABLE ON PURPOSE. This list previously existed twice, as identical
+/// function-local consts in `detect_raw_api_token_matches` and
+/// `redact_raw_api_tokens_with_boundary`, with nothing holding them equal
+/// (bd-vcch1). The asymmetry is what made that dangerous rather than merely
+/// untidy: the detector's copy gates whether a write is PERMITTED, and the
+/// redactor's copy performs the REDACTION. A row added to one and not the
+/// other yields a token that blocks a write but is never redacted, or one
+/// that is redacted but never detected.
+///
+/// A lockstep assertion was the obvious repair and is not possible against
+/// function-local consts, which no test can name. Sharing one table removes
+/// the failure mode instead of detecting it, and matches how this file
+/// already holds its other pattern tables -- `SECRET_KEY_PATTERNS`,
+/// `INSTRUCTION_PATTERNS`, `PHONE_NUMBER_PATTERN` are all module level.
+///
+/// ONE CONSEQUENCE OF MODULE SCOPE, recorded because it is the cost of this
+/// shape: a module-level const can be SHADOWED by a local of the same name,
+/// where two function-local consts could not shadow each other. If a future
+/// edit declares `RAW_TOKEN_PATTERNS` inside either of these functions
+/// again, that function silently stops sharing this table and the drift this
+/// change removed comes back with no compiler complaint. Do not reintroduce
+/// a local of this name; extend the table here instead.
+///
+/// Tuple layout: (prefix, degraded/redaction code, minimum suffix length,
+/// requires surrounding context).
+const RAW_TOKEN_PATTERNS: &[(&str, &str, usize, bool)] = &[
+    // Authenticated mesh lane/body approval bearers: eeap1_...
+    ("eeap1_", "mesh_approval_token", 16, false),
+    // Anthropic API keys: sk-ant-api03-...
+    ("sk-ant-api03-", "anthropic_api_key", 40, false),
+    // OpenAI project keys: sk-proj-...
+    ("sk-proj-", "openai_api_key", 40, false),
+    // OpenAI legacy keys: sk-... (48 chars after prefix)
+    ("sk-", "openai_api_key", 48, false),
+    // GitHub personal access tokens: ghp_...
+    ("ghp_", "github_token", 36, false),
+    // GitHub OAuth tokens: gho_...
+    ("gho_", "github_token", 36, false),
+    // GitHub server-to-server tokens: ghs_...
+    ("ghs_", "github_token", 36, false),
+    // GitHub user-to-server tokens: ghu_...
+    ("ghu_", "github_token", 36, false),
+    // GitHub refresh tokens: ghr_...
+    ("ghr_", "github_token", 36, false),
+    // GitHub fine-grained personal access tokens: github_pat_...
+    ("github_pat_", "github_token", 40, false),
+    // GitLab personal access tokens: glpat-...
+    ("glpat-", "personal_access_token", 20, false),
+    // AWS access key IDs: AKIA...
+    ("AKIA", "aws_access_key", 16, false),
+    // AWS temporary credentials: ASIA...
+    ("ASIA", "aws_access_key", 16, false),
+    // Stripe live secret keys: sk_live_...
+    ("sk_live_", "stripe_secret_key", 24, false),
+    // Stripe test secret keys: sk_test_...
+    ("sk_test_", "stripe_secret_key", 24, false),
+    // Stripe live restricted keys: rk_live_...
+    ("rk_live_", "stripe_restricted_key", 24, false),
+    // Stripe test restricted keys: rk_test_...
+    ("rk_test_", "stripe_restricted_key", 24, false),
+    // GCP API keys: AIza...
+    ("AIza", "gcp_api_key", 35, false),
+    // Slack bot/user/app/refresh tokens: xoxb-..., xoxp-..., xoxa-..., xoxr-...
+    ("xoxb-", "slack_token", 24, false),
+    ("xoxp-", "slack_token", 24, false),
+    ("xoxa-", "slack_token", 24, false),
+    ("xoxr-", "slack_token", 24, false),
+    // npm automation/access tokens: npm_...
+    ("npm_", "npm_token", 16, false),
+    // Hugging Face tokens: hf_...
+    ("hf_", "huggingface_token", 16, false),
+    // PyPI API tokens: pypi-...
+    ("pypi-", "pypi_token", 24, false),
+    // Twilio account SIDs: AC + 32 characters.
+    ("AC", "twilio_account_sid", 32, true),
+    // SendGrid keys: SG.<id>.<token>
+    ("SG.", "sendgrid_api_key", 24, false),
+    // Square application and secret tokens.
+    ("sq0idp-", "square_token", 20, false),
+    ("sq0csp-", "square_token", 20, false),
+    // Mailgun private and public API keys.
+    ("key-", "mailgun_key", 24, false),
+    ("pubkey-", "mailgun_key", 24, false),
+];
 
+fn detect_raw_api_token_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
     for &(prefix, code, min_suffix_len, requires_context) in RAW_TOKEN_PATTERNS {
         let mut search_start = 0;
         loop {
@@ -2880,66 +2932,12 @@ fn redact_raw_api_tokens_with_boundary(
     let mut output = input.to_owned();
     let mut changed = false;
 
-    const RAW_TOKEN_PATTERNS: &[(&str, &str, usize, bool)] = &[
-        // Authenticated mesh lane/body approval bearers: eeap1_...
-        ("eeap1_", "mesh_approval_token", 16, false),
-        // Anthropic API keys: sk-ant-api03-...
-        ("sk-ant-api03-", "anthropic_api_key", 40, false),
-        // OpenAI project keys: sk-proj-...
-        ("sk-proj-", "openai_api_key", 40, false),
-        // OpenAI legacy keys: sk-... (48 chars after prefix)
-        ("sk-", "openai_api_key", 48, false),
-        // GitHub personal access tokens: ghp_...
-        ("ghp_", "github_token", 36, false),
-        // GitHub OAuth tokens: gho_...
-        ("gho_", "github_token", 36, false),
-        // GitHub server-to-server tokens: ghs_...
-        ("ghs_", "github_token", 36, false),
-        // GitHub user-to-server tokens: ghu_...
-        ("ghu_", "github_token", 36, false),
-        // GitHub refresh tokens: ghr_...
-        ("ghr_", "github_token", 36, false),
-        // GitHub fine-grained personal access tokens: github_pat_...
-        ("github_pat_", "github_token", 40, false),
-        // GitLab personal access tokens: glpat-...
-        ("glpat-", "personal_access_token", 20, false),
-        // AWS access key IDs: AKIA...
-        ("AKIA", "aws_access_key", 16, false),
-        // AWS temporary credentials: ASIA...
-        ("ASIA", "aws_access_key", 16, false),
-        // Stripe live secret keys: sk_live_...
-        ("sk_live_", "stripe_secret_key", 24, false),
-        // Stripe test secret keys: sk_test_...
-        ("sk_test_", "stripe_secret_key", 24, false),
-        // Stripe live restricted keys: rk_live_...
-        ("rk_live_", "stripe_restricted_key", 24, false),
-        // Stripe test restricted keys: rk_test_...
-        ("rk_test_", "stripe_restricted_key", 24, false),
-        // GCP API keys: AIza...
-        ("AIza", "gcp_api_key", 35, false),
-        // Slack bot/user/app/refresh tokens: xoxb-..., xoxp-..., xoxa-..., xoxr-...
-        ("xoxb-", "slack_token", 24, false),
-        ("xoxp-", "slack_token", 24, false),
-        ("xoxa-", "slack_token", 24, false),
-        ("xoxr-", "slack_token", 24, false),
-        // npm automation/access tokens: npm_...
-        ("npm_", "npm_token", 16, false),
-        // Hugging Face tokens: hf_...
-        ("hf_", "huggingface_token", 16, false),
-        // PyPI API tokens: pypi-...
-        ("pypi-", "pypi_token", 24, false),
-        // Twilio account SIDs: AC + 32 characters.
-        ("AC", "twilio_account_sid", 32, true),
-        // SendGrid keys: SG.<id>.<token>
-        ("SG.", "sendgrid_api_key", 24, false),
-        // Square application and secret tokens.
-        ("sq0idp-", "square_token", 20, false),
-        ("sq0csp-", "square_token", 20, false),
-        // Mailgun private and public API keys.
-        ("key-", "mailgun_key", 24, false),
-        ("pubkey-", "mailgun_key", 24, false),
-    ];
-
+    // Shares the module-level RAW_TOKEN_PATTERNS with
+    // `detect_raw_api_token_matches`. These were two identical local copies
+    // until bd-vcch1: the detector decides whether a write is permitted and
+    // this function performs the redaction, so a row present in one and not
+    // the other means a token that blocks a write without being redacted, or
+    // the reverse.
     for &(prefix, code, min_suffix_len, requires_context) in RAW_TOKEN_PATTERNS {
         let mut search_start = 0;
         loop {
