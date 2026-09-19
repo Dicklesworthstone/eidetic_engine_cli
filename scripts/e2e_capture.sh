@@ -789,13 +789,21 @@ if remember_git_capture_available; then
         "remember --from-commit --apply succeeds"
     assert_jq "$apply_commit" '
         ((.data.persisted // false) == true)
-        # NOT `(.data.dry_run // true) == false` (bd-o8e1n). The jq alternative
-        # operator `//` fires on `false` as well as null, so a literal false --
-        # the value this clause exists to assert -- was replaced by the `true`
-        # default before the comparison. That form is unsatisfiable for every
-        # input (false, true, null and absent all yield true), and its permanent
-        # red read as a product defect. Compare directly: an absent field is null,
-        # `null == false` is false, and the clause fails as it should.
+        # RULE (bd-o8e1n): NEVER use `//` to assert a boolean is FALSE. Not with
+        # either default -- this is a property of the operator, not of the value
+        # I happened to pick. `//` fires on `false` AS WELL AS null, so it can
+        # never distinguish "the field is false" from "the field is absent":
+        #   (X // true)  == false   unsatisfiable. false, true, null and absent
+        #                           all yield true, so nothing ever equals false.
+        #                           This was the bug here: a permanent red that
+        #                           read as a product defect.
+        #   (X // false) == false   the opposite failure. absent and null both
+        #                           yield false and PASS, so a missing field is
+        #                           silently accepted.
+        # Asserting == true is safe, because the default can be `false` -- which
+        # is why the persisted clause above is correct and this one was not.
+        # Direct comparison is the only sound form: an absent field is null,
+        # `null == false` is false, so absence still fails.
         and (.data.dry_run == false)
         and ((.data.content // .data.memory.content // "") | test("capture: redact secret-bearing diff evidence|redact secret"; "i"))
     ' "git capture derives memory text from commit message"
