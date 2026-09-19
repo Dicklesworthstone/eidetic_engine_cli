@@ -15,7 +15,7 @@
 //! assembly. Deterministic and panic-free.
 
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Default cap on how many contradiction sides `forced` mode surfaces under the
 /// `## Contradictions` header (the rest are summarized as a count — never a
@@ -91,6 +91,78 @@ pub fn decide_contradiction_survivor(
         suppressed_memory_id: suppress.memory_id.clone(),
         basis,
     }
+}
+
+/// Select a conflict-free set in standing order, rather than detector order.
+///
+/// Every suppression has a retained, higher-standing witness. In particular,
+/// for A > B > C with edges A--B and B--C, retaining A suppresses B but does not
+/// suppress the compatible C. Processing B--C first must not change that result.
+/// The retained set is maximal, not necessarily maximum-cardinality: preserving
+/// the existing trust/freshness/id priority takes precedence over item count.
+///
+/// Callers supply canonical memory IDs. Duplicate members use their strongest
+/// standing; pairs are trimmed, deduplicated, and restricted to present members.
+/// Blanks and self-loops cannot suppress a memory. Decisions are sorted by the
+/// suppressed ID, independent of member, edge, or endpoint order.
+#[must_use]
+pub fn decide_contradiction_suppressions(
+    members: &[GuardedMemory],
+    unresolved: &[(String, String)],
+) -> Vec<ContradictionSuppression> {
+    let mut ranked: Vec<&GuardedMemory> = members
+        .iter()
+        .filter(|memory| !memory.memory_id.trim().is_empty())
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.trust_milli
+            .cmp(&a.trust_milli)
+            .then(b.freshness_epoch.cmp(&a.freshness_epoch))
+            .then(a.memory_id.cmp(&b.memory_id))
+    });
+    let mut seen = BTreeSet::new();
+    ranked.retain(|memory| seen.insert(memory.memory_id.clone()));
+    let standing: BTreeMap<&str, &GuardedMemory> = ranked
+        .iter()
+        .map(|&memory| (memory.memory_id.as_str(), memory))
+        .collect();
+
+    let mut neighbors: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (a, b) in unresolved {
+        let Some((a, b)) = canonical_pair(a, b) else {
+            continue;
+        };
+        if !standing.contains_key(a.as_str()) || !standing.contains_key(b.as_str()) {
+            continue;
+        }
+        neighbors.entry(a.clone()).or_default().insert(b.clone());
+        neighbors.entry(b).or_default().insert(a);
+    }
+
+    let mut suppressed = BTreeSet::new();
+    let mut decisions = Vec::new();
+    for memory in ranked {
+        if suppressed.contains(&memory.memory_id) {
+            continue;
+        }
+        let Some(adjacent) = neighbors.get(&memory.memory_id) else {
+            continue;
+        };
+        for id in adjacent {
+            if suppressed.contains(id) {
+                continue;
+            }
+            if let Some(other) = standing.get(id.as_str()) {
+                // Any higher-standing retained neighbor would already have
+                // suppressed `memory`. Thus this witness survives the full pass.
+                let decision = decide_contradiction_survivor(memory, other);
+                suppressed.insert(decision.suppressed_memory_id.clone());
+                decisions.push(decision);
+            }
+        }
+    }
+    decisions.sort_by(|a, b| a.suppressed_memory_id.cmp(&b.suppressed_memory_id));
+    decisions
 }
 
 /// Canonicalize a pair to an unordered, trimmed `(low, high)`, dropping blanks
@@ -249,3 +321,7 @@ mod tests {
         assert_eq!(full.shown.len(), 3);
     }
 }
+
+#[cfg(test)]
+#[path = "contradiction_guard_graph_tests.rs"]
+mod graph_tests;
