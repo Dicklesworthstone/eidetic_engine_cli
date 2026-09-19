@@ -79,7 +79,7 @@ jobs:
             if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/history-$name.log"; then failed=1; fi
           }
           run_group publication core::backup::history_recovery_tests 6
-          run_group inventory core::backup::recovery:: 30
+          run_group inventory core::backup::recovery:: 31
           run_group chunks core::backup::tests::default_backup_restores_learning_history 1
           run_group replay core::backup::tests::default_backup_restores_pack_history_and_replay 1
           run_group evidence core::backup::tests::pack_history_restores_native_evidence_and_legacy_missing_ledger 1

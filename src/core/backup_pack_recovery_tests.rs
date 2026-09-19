@@ -11,7 +11,8 @@ use crate::core::backup::{
     restore_backup_to_side_path_with_verification_hook, verify_backup, work_history_error,
 };
 use crate::db::{
-    CreateEvidenceSpanInput, CreatePackEvidenceItemInput, CreatePackRecordInput, EvidenceProducerKind,
+    CreateEvidenceSpanInput, CreatePackEvidenceItemInput, CreatePackRecordInput,
+    EvidenceProducerKind,
 };
 use crate::models::{EvidenceId, PackId, RedactionLevel, SessionId, WorkspaceId};
 
@@ -196,7 +197,10 @@ fn pack_content_fence_preserves_modern_legacy_and_native_evidence_history() -> T
     Ok(())
 }
 
-fn assert_corruption_refused(table: &str, statement: impl FnOnce(&[String]) -> String) -> TestResult {
+fn assert_corruption_refused(
+    table: &str,
+    statement: impl FnOnce(&[String]) -> String,
+) -> TestResult {
     assert_corruption_refused_with_redaction(table, RedactionLevel::None, statement)
 }
 
@@ -399,4 +403,77 @@ fn evidence_content_fence_rejects_changed_provenance_epoch() -> TestResult {
     assert_corruption_refused("evidence_spans", |_| {
         "UPDATE evidence_spans SET security_policy_epoch = security_policy_epoch + 1".to_owned()
     })
+}
+
+/// Compare the durable rows across independently created recovery points, not
+/// the deliberately different backup IDs, capture times or artifact hashes.
+#[test]
+fn context_history_survives_rebackup_without_regaining_evidence_authority() -> TestResult {
+    fn snapshot(
+        path: &str,
+        workspace_id: &str,
+    ) -> Result<
+        (
+            Vec<StoredPackHistory>,
+            Vec<crate::db::StoredSession>,
+            Vec<crate::db::StoredEvidenceSpan>,
+        ),
+        String,
+    > {
+        let db = DbConnection::open_file(path).map_err(|e| e.to_string())?;
+        let packs = db
+            .list_pack_record_ids_for_recovery(workspace_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|id| db.get_pack_history_for_recovery(&id))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        let sessions = db.list_sessions(workspace_id).map_err(|e| e.to_string())?;
+        let evidence = db
+            .list_evidence_spans_for_workspace(workspace_id)
+            .map_err(|e| e.to_string())?;
+        db.close().map_err(|e| e.to_string())?;
+        Ok((packs, sessions, evidence))
+    }
+
+    for redaction in [RedactionLevel::None, RedactionLevel::Full] {
+        let fixture = fixture(redaction)?;
+        let first = restore_backup_to_side_path(&fixture.options).map_err(|e| e.message())?;
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+        let before = snapshot(&first.restored_database_path, &workspace_id)?;
+        assert_eq!(before.0.len(), 3);
+        assert_eq!(before.1.len(), 1);
+        assert_eq!(before.2.len(), 1);
+        if redaction == RedactionLevel::Full {
+            assert_eq!(before.2[0].pack_eligibility, "denied");
+            assert_eq!(before.2[0].search_eligibility, "denied");
+        }
+
+        let rebackup = create_backup(&BackupCreateOptions {
+            workspace_path: fixture.options.side_path.clone(),
+            database_path: Some(PathBuf::from(&first.restored_database_path)),
+            output_dir: None,
+            label: None,
+            redaction_level: redaction,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        assert_ne!(rebackup.backup_id, first.backup_id);
+        let second = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: fixture.options.side_path,
+            backup_path: PathBuf::from(rebackup.backup_path),
+            side_path: fixture._root.path().join("restored-again"),
+            restore_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?;
+        assert_eq!(
+            snapshot(&second.restored_database_path, &workspace_id)?,
+            before,
+            "pack admission order, exact replay state, portable locators and every evidence field must survive a second recovery point"
+        );
+    }
+    Ok(())
 }

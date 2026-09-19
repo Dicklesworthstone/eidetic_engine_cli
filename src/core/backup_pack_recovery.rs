@@ -122,7 +122,11 @@ impl Rows {
             self.insert("pack_items", &(&row.pack_id, row.rank), row)?;
         }
         for row in &history.evidence_items {
-            self.insert("pack_evidence_items", &(&row.pack_id, &row.evidence_id), row)?;
+            self.insert(
+                "pack_evidence_items",
+                &(&row.pack_id, &row.evidence_id),
+                row,
+            )?;
         }
         for row in &history.omissions {
             self.insert("pack_omissions", &(&row.pack_id, &row.memory_id), row)?;
