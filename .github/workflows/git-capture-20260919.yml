@@ -1,9 +1,9 @@
-name: Git capture security
+name: Git capture completeness
 on:
   push:
     branches: [main]
     paths:
-      - scripts/delivery/git-capture-20260919/**
+      - scripts/delivery/git-capture-completeness-20260919/**
       - .github/workflows/git-capture-20260919.yml
   workflow_dispatch:
 permissions:
@@ -15,7 +15,7 @@ jobs:
   integrate-and-verify:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
     permissions:
       contents: write
     env:
@@ -49,23 +49,23 @@ jobs:
         with:
           path: |
             ~/.cargo/registry
+            ~/.cargo/git
             target
-          key: capture-security-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: capture-complete-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
+            capture-complete-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             capture-security-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            journal-ingestion-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             trust-recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-            evidence-export-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-            learned-history-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Apply preserved capture implementation and execute real regressions
+      - name: Apply preserved capture increments and execute real Rust regressions
         run: |
           set -euo pipefail
-          paths=(src/core/memory.rs src/core/memory_git_capture_security_tests.rs src/policy/mod.rs src/policy/git_capture_redaction_tests.rs)
-          if ! git ls-files --error-unmatch src/core/memory_git_capture_security_tests.rs >/dev/null 2>&1; then
-            for n in 01 02; do
-              xz -dc "scripts/delivery/git-capture-20260919/$n.patch.xz" > "$RUNNER_TEMP/$n.patch"
-            done
-            echo "2b8dfd069ddeb907be34e270da1380a1f893c4592618454adfb1fd202411e187  $RUNNER_TEMP/01.patch" | sha256sum -c
-            echo "3bc519804414a9ee24e35b67342d5005824e0accdaf541cea1cec14efe3b1fd9  $RUNNER_TEMP/02.patch" | sha256sum -c
+          paths=(src/core/memory.rs src/core/memory_git_capture_repo.rs src/core/memory_git_capture_repo_tests.rs src/core/memory_git_capture_identity_tests.rs src/core/memory_git_capture_security_tests.rs)
+          if ! git ls-files --error-unmatch src/core/memory_git_capture_identity_tests.rs >/dev/null 2>&1; then
+            xz -dc scripts/delivery/git-capture-completeness-20260919/01.patch.xz > "$RUNNER_TEMP/01.patch"
+            xz -dc scripts/delivery/git-capture-completeness-20260919/02.patch.xz > "$RUNNER_TEMP/02.patch"
+            echo "2dce61606816ef64a149b81bc98f4009c4a227bda1805543c100b9265348bbf9  $RUNNER_TEMP/01.patch" | sha256sum -c
+            echo "ee2562b7e05f5a6c0478b077f14817dabc0360596ffa1e964da6ba637e45713b  $RUNNER_TEMP/02.patch" | sha256sum -c
             for n in 01 02; do
               git apply --check --whitespace=error-all "$RUNNER_TEMP/$n.patch"
               git apply "$RUNNER_TEMP/$n.patch"
@@ -76,11 +76,13 @@ jobs:
           run_group() {
             local name="$1" filter="$2" expected="$3" status=0
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/capture-$name.log" 2>&1 || status=$?
-            tail -n 100 "$RUNNER_TEMP/capture-$name.log"
+            tail -n 120 "$RUNNER_TEMP/capture-$name.log"
             test "$status" -eq 0
             grep -Fq "test result: ok. $expected passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/capture-$name.log"
           }
-          run_group memory core::memory::git_capture_security_tests 11
+          run_group repository core::memory::git_capture_repo::tests 15
+          run_group identity core::memory::git_capture_identity_tests 7
+          run_group security core::memory::git_capture_security_tests 11
           run_group policy policy::git_capture_redaction_tests 7
           run_group existing core::memory::tests::remember_git_capture 4
           git config user.name 'github-actions[bot]'
@@ -88,7 +90,7 @@ jobs:
           if ! git diff --quiet -- "${paths[@]}" || test -n "$(git ls-files --others --exclude-standard -- "${paths[@]}")"; then
             base=$(git rev-parse HEAD)
             git add -- "${paths[@]}"
-            git commit -m 'fix(capture): protect git content and provenance before truncation and storage' -m 'Screen the complete diff before budgeting, keep sanitized diff and commit capture admissible, and redact fused bearer tokens against original input spans. Withhold sensitive refs, paths and commit identifiers; do not invent symbol anchors or leak Git arguments through errors. Preserve manual policy thresholds and concurrent external-ingestion changes. All 18 new and 4 existing capture regressions passed before this source commit.'
+            git commit -m 'feat(capture): collect complete Git changes and fingerprint all sanitized evidence' -m 'Capture staged and unstaged tracked content before the first commit, root and first-parent merge deltas, and pinned revision ranges from one NUL-framed comparison. Preserve exact paths, reject conflicts and missing shallow ancestry, and disable external diff/textconv. Fingerprint the complete sanitized diff while presenting bounded excerpts and only complete visible symbol anchors. Reconciles the two preserved local increments, repairs their missing delimiter, and passes all 44 real Rust capture regressions before publication.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
@@ -106,14 +108,14 @@ jobs:
           name: capture-source-and-tests
           path: ${{ runner.temp }}/capture-*
           retention-days: 7
-      - name: Check all targets and production Clippy
+      - name: Check all targets and strict Clippy
         if: ${{ !cancelled() }}
         run: |
           failed=0
           cargo check --locked --all-targets > "$RUNNER_TEMP/capture-check.log" 2>&1 || failed=1
-          tail -n 80 "$RUNNER_TEMP/capture-check.log"
-          cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/capture-clippy.log" 2>&1 || failed=1
-          tail -n 80 "$RUNNER_TEMP/capture-clippy.log"
+          tail -n 100 "$RUNNER_TEMP/capture-check.log"
+          cargo clippy --locked --all-targets -- -D warnings > "$RUNNER_TEMP/capture-clippy.log" 2>&1 || failed=1
+          tail -n 100 "$RUNNER_TEMP/capture-clippy.log"
           exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
@@ -126,5 +128,6 @@ jobs:
         with:
           path: |
             ~/.cargo/registry
+            ~/.cargo/git
             target
-          key: capture-security-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: capture-complete-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
