@@ -1788,7 +1788,9 @@ impl SearchAuditFacts {
                     serde_json::json!({
                         "queryHash": &q_hash, "rank": (rank + 1) as u32,
                         "score": hit.score, "relevanceScore": hit.relevance_score(),
-                        "scoreKind": hit.score_kind(), "source": hit.source.as_str(),
+                        "scoreKind": hit.score_kind(),
+                        "calibrationId": search_hit_calibration_id_json(hit),
+                        "source": hit.source.as_str(),
                     })
                     .to_string(),
                 ),
@@ -3475,6 +3477,7 @@ impl SearchReport {
                     "score": hit.score,
                     "relevanceScore": round_metric_f32(hit.relevance_score()),
                     "scoreKind": hit.score_kind(),
+                    "calibrationId": search_hit_calibration_id_json(hit),
                     "scoreInterval": search_hit_score_interval_json(hit),
                     "coverageGuarantee": search_hit_coverage_guarantee_json(hit),
                     "calibrated": search_hit_calibrated_json(hit),
@@ -4589,6 +4592,21 @@ impl SearchScoreCalibration {
         }
     }
 
+    fn calibration_id(&self) -> String {
+        let feedback_ids = self.feedback_event_ids.join("\n");
+        let material = format!(
+            "schema={}\nmethod=scaled_split_conformal\nstatus={}\ncoverage={:.6}\nsample_count={}\njsonl_hash={}\nfeedback_ids={}\nfeedback_ids_truncated={}\n",
+            SEARCH_SCORE_CALIBRATION_SCHEMA_V1,
+            self.status.as_str(),
+            SEARCH_SCORE_COVERAGE_GUARANTEE,
+            self.sample_count,
+            self.jsonl_hash.as_deref().unwrap_or("none"),
+            feedback_ids,
+            self.feedback_event_ids_truncated,
+        );
+        format!("blake3:{}", blake3::hash(material.as_bytes()).to_hex())
+    }
+
     fn interval_for_score(&self, score: f32) -> [f32; 2] {
         let score = if score.is_finite() {
             score.clamp(0.0, 1.0)
@@ -4615,6 +4633,7 @@ impl SearchScoreCalibration {
             "schema": SEARCH_SCORE_CALIBRATION_SCHEMA_V1,
             "method": "scaled_split_conformal",
             "status": self.status.as_str(),
+            "calibrationId": self.calibration_id(),
             "coverage": round_metric_f32(SEARCH_SCORE_COVERAGE_GUARANTEE),
             "sampleCount": self.sample_count,
             "minimumSamples": MIN_SEARCH_SCORE_CALIBRATION_SAMPLES,
@@ -5217,6 +5236,14 @@ fn search_hit_coverage_guarantee_json(hit: &SearchHit) -> serde_json::Value {
     hit.metadata
         .as_ref()
         .and_then(|metadata| metadata.get("coverageGuarantee"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn search_hit_calibration_id_json(hit: &SearchHit) -> serde_json::Value {
+    hit.metadata
+        .as_ref()
+        .and_then(|metadata| metadata.pointer("/scoreCalibration/calibrationId"))
         .cloned()
         .unwrap_or(serde_json::Value::Null)
 }
