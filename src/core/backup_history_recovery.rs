@@ -23,6 +23,8 @@ use crate::models::DomainError;
 
 #[path = "backup_cass_recovery.rs"]
 mod cass;
+#[path = "backup_import_recovery.rs"]
+mod imports;
 #[path = "backup_lifecycle_recovery.rs"]
 mod lifecycle;
 #[path = "backup_maintenance_recovery.rs"]
@@ -123,6 +125,7 @@ impl Rows {
 pub(in crate::core::backup) struct HistoryExpectation {
     maintenance: maintenance::MaintenanceExpectation,
     workspace_id: String,
+    imports: imports::ImportExpectation,
     operational: operational::OperationalExpectation,
     learning: Rows,
     recorded: Rows,
@@ -141,8 +144,9 @@ impl HistoryExpectation {
     pub(in crate::core::backup) fn from_assets(
         assets: &[BackupRestoredDerivedAssetReport],
         backup_id: &str,
-        workspace_id: &str,
+        workspace: &crate::db::StoredWorkspace,
     ) -> Result<Self, DomainError> {
+        let workspace_id = workspace.id.as_str();
         let mut expected = Self {
             maintenance: maintenance::MaintenanceExpectation::from_assets(
                 assets,
@@ -150,6 +154,7 @@ impl HistoryExpectation {
                 workspace_id,
             )?,
             workspace_id: workspace_id.to_owned(),
+            imports: imports::ImportExpectation::from_assets(assets, backup_id, workspace)?,
             operational: operational::OperationalExpectation::from_assets(
                 assets,
                 backup_id,
@@ -483,6 +488,7 @@ impl HistoryExpectation {
 
     /// The caller owns one read snapshot spanning row counts and these reads.
     pub(super) fn verify_connection(&self, db: &DbConnection) -> Result<(), DomainError> {
+        self.imports.verify_connection(db)?;
         let mut actual = Rows::default();
         for row in db
             .list_procedural_rules(&self.workspace_id, None, None, true)

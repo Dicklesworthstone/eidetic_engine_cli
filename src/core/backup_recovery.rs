@@ -658,8 +658,12 @@ mod tests {
             restore_path: captured.to_string_lossy().into_owned(),
             lab_episode_path: None,
         };
-        let history =
-            HistoryExpectation::from_assets(&[asset], "backup-empty", &workspace).unwrap();
+        let history = HistoryExpectation::from_assets(
+            &[asset],
+            "backup-empty",
+            &db.get_workspace(&workspace).unwrap().unwrap(),
+        )
+        .unwrap();
         db.close().unwrap();
         plan.verify_database(&path, &history).unwrap();
         let reopened = DbConnection::open_file(&path).unwrap();
@@ -675,7 +679,12 @@ mod tests {
         let before = db.list_curation_ttl_policies().unwrap();
         assert!(!before.is_empty());
         let plan = RestoreInventory::from_manifest(&manifest_for_database(&db)).unwrap();
-        let history = HistoryExpectation::from_assets(&[], "backup-empty", &workspace).unwrap();
+        let history = HistoryExpectation::from_assets(
+            &[],
+            "backup-empty",
+            &db.get_workspace(&workspace).unwrap().unwrap(),
+        )
+        .unwrap();
         db.close().unwrap();
         let error = plan.verify_database(&path, &history).unwrap_err();
         assert!(error.message().contains("curation_ttl_policies"));

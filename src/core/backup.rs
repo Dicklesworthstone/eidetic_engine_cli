@@ -3753,7 +3753,7 @@ fn restore_backup_to_side_path_with_recovery_hooks(
     let expected_history = recovery::HistoryExpectation::from_assets(
         &restored_derived,
         &inspect.backup_id,
-        &restored_workspace.id,
+        &restored_workspace,
     )?;
     restore_shard_fanout_assets(&staging_workspace, &restored_derived)?;
 
@@ -3948,10 +3948,11 @@ fn restore_backup_to_side_path_with_recovery_hooks(
             ),
         });
     }
-    // Rebuilding may consume jobs, but cannot grant or rewrite durable
-    // authority. Recheck the admitted history after the last rebuilding stage.
+    // A full rebuild changes derived generations, not the durable history
+    // population. Reconcile every required table as well as its captured values
+    // after rebuilding; scoped content reads alone can hide foreign/orphan rows.
     before_publication(&restored_database_path)?;
-    expected_history.verify_before_publication(&restored_database_path)?;
+    expected_history.verify_before_publication(&restored_database_path, &recovery_inventory)?;
     expected_records.verify_database(&restored_database_path)?;
 
     let restore_issue_count = import_report
