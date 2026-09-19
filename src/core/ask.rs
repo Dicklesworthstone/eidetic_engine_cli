@@ -2087,6 +2087,16 @@ mod tests {
         assert_eq!(json["schema"], ASK_SCHEMA_V1);
         assert_eq!(json["question"], "test question");
         assert_eq!(json["abstained"], false);
+        assert_eq!(
+            json["confidenceCalibration"]["status"],
+            ASK_CONFIDENCE_CALIBRATION_STATUS
+        );
+        assert_eq!(json["confidenceCalibration"]["calibrated"], false);
+        assert_eq!(
+            json["confidenceCalibration"]["scoreKind"],
+            ASK_CONFIDENCE_SCORE_KIND
+        );
+        assert!(json["confidenceCalibration"]["calibrationId"].is_null());
         assert!(json["citations"].as_array().is_some());
         let cits = json["citations"].as_array().unwrap();
         assert_eq!(cits.len(), 1);
@@ -2238,6 +2248,16 @@ mod tests {
         assert_eq!(value["reason"], DEGRADED_NO_ANSWER);
         assert_eq!(value["candidateCount"], 7);
         assert_eq!(value["nearestEvidenceCount"], 1);
+        assert_eq!(
+            value["confidenceCalibration"]["status"],
+            ASK_CONFIDENCE_CALIBRATION_STATUS
+        );
+        assert_eq!(value["confidenceCalibration"]["calibrated"], false);
+        assert_eq!(
+            value["confidenceCalibration"]["scoreKind"],
+            ASK_CONFIDENCE_SCORE_KIND
+        );
+        assert!(value["confidenceCalibration"]["calibrationId"].is_null());
         assert_eq!(value["redaction"]["rawQueryStored"], false);
         assert_eq!(value["redaction"]["queryTextStored"], false);
         assert_eq!(value["redaction"]["queryVectorStored"], false);
