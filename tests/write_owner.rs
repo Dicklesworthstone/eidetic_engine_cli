@@ -202,7 +202,22 @@ fn write_group_commit_one_shot_intake_covers_durable_command_paths_and_status() 
     assert_eq!(enabled.fsync_count, 6);
     assert_eq!(enabled.batches, 6);
     assert_eq!(enabled.writes_coalesced, 0);
-    assert_eq!(enabled.fallback_reasons.single_writer, 6);
+    // PRINT THE WHOLE BREAKDOWN, not just the field that tripped.
+    //
+    // This assertion failed `left: 4, right: 6` and stopped, which says two of
+    // the six writes were attributed somewhere else and NOT which somewhere.
+    // The candidates are meaningfully different: `oversized` is deterministic
+    // for a fixed payload, while `degraded` means "storage posture or runtime
+    // context required the per-write path" and therefore varies with the
+    // environment the test ran in. One of those is a product bug and the other
+    // is a load-coupled assertion, and the old message could not tell them
+    // apart -- so diagnosing it cost a fleet round trip (bd-hwye2).
+    assert_eq!(
+        enabled.fallback_reasons.single_writer, 6,
+        "all six one-shot writes should fall back for lack of a sibling; \
+         full breakdown: {:?}, batches {}, coalesced {}",
+        enabled.fallback_reasons, enabled.batches, enabled.writes_coalesced
+    );
 
     Ok(())
 }

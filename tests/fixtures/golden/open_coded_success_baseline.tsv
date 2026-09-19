@@ -63,7 +63,7 @@
 # Regenerate: UPDATE_GOLDEN=1 cargo test --test verification_drift_guard \
 #   open_coded_success_assertions_do_not_grow
 #
-# CURRENT: 594 rows (function + missing-set), 872 incomplete assertions.
+# CURRENT: 594 rows (function + missing-set), 870 incomplete assertions.
 
 advanced_e2e::assert_causal_success [stdout+stderr]	1
 advanced_e2e::assert_lab_report_common [stdout+stderr]	1
@@ -610,7 +610,7 @@ smoke::status_json_stdout_is_stable_machine_data [code]	1
 smoke::status_skyline_human_stdout_is_compact_status_surface [code+stdout]	1
 smoke::status_skyline_json_stdout_is_stable_machine_data [code+stdout]	1
 smoke::status_workspace_reports_ambiguity_diagnostics [code+stdout]	1
-smoke::walking_skeleton_durability_scenario [code+stdout]	10
+smoke::walking_skeleton_durability_scenario [code+stdout]	8
 smoke::workspace_alias_commands_resolve_global_workspace_flag [code+stdout]	4
 smoke::workspace_resolve_reports_monorepo_subproject_scope [code+stdout]	5
 subscribe_e2e::expect_success [code]	1

@@ -9373,11 +9373,7 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         "context",
         "prepare release",
     ])?;
-    let context_json_stderr = String::from_utf8_lossy(&context_json.stderr);
-    ensure(
-        context_json.status.success(),
-        format!("context --json should succeed; stderr: {context_json_stderr}"),
-    )?;
+    ensure_command_success(&context_json, "context --json")?;
     ensure_clean_stderr(&context_json.stderr, "context --json stderr must be empty")?;
     let context_json_parsed: serde_json::Value = serde_json::from_slice(&context_json.stdout)
         .map_err(|error| format!("context --json stdout must be valid JSON: {error}"))?;
@@ -9401,11 +9397,7 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         "prepare release",
     ])?;
     let context_md_stdout = String::from_utf8_lossy(&context_md.stdout);
-    let context_md_stderr = String::from_utf8_lossy(&context_md.stderr);
-    ensure(
-        context_md.status.success(),
-        format!("context --format markdown should succeed; stderr: {context_md_stderr}"),
-    )?;
+    ensure_command_success(&context_md, "context --format markdown")?;
     ensure_clean_stderr(&context_md.stderr, "context markdown stderr must be empty")?;
     ensure_contains(
         &context_md_stdout,
