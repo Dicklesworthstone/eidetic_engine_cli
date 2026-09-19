@@ -2,7 +2,13 @@ name: Recovery headship and backup admission
 on:
   push:
     branches: [main]
-    paths: [.github/workflows/recovery-headship-admission-20260919.yml]
+    paths:
+      - src/core/jsonl_import.rs
+      - src/core/jsonl_recovery.rs
+      - src/core/jsonl_revisions.rs
+      - src/core/jsonl_recovery_regression_tests.rs
+      - src/core/jsonl_revision_heads_tests.rs
+      - .github/workflows/recovery-headship-admission-20260919.yml
   workflow_dispatch:
 permissions:
   contents: read
@@ -10,12 +16,10 @@ concurrency:
   group: recovery-headship-admission-delivery
   cancel-in-progress: false
 jobs:
-  integrate-and-verify:
+  verify:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 55
-    permissions:
-      contents: write
     env:
       RUSTUP_TOOLCHAIN: nightly
       CARGO_BUILD_JOBS: '2'
@@ -26,71 +30,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
-          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
-      - name: Apply and commit two reviewed source increments directly to main
-        run: |
-          set -euo pipefail
-          paths=(src/core/jsonl_import.rs src/core/jsonl_recovery.rs src/core/jsonl_revisions.rs src/core/jsonl_recovery_regression_tests.rs)
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          if grep -q 'fn early_backup_admission_and_final_recovery_verification_use_the_same_counts' src/core/jsonl_recovery_regression_tests.rs 2>/dev/null; then
-            grep -q 'recovery::validate_backup_source(&parsed)' src/core/jsonl_import.rs
-            grep -q 'legacy_supersession_ids.contains(&memory.id)' src/core/jsonl_import.rs
-            grep -q 'self.legacy_supersession_ids.contains(&expected.id)' src/core/jsonl_recovery.rs
-            echo 'Source increments already applied; verify the current source without rewriting it.'
-          else
-            test "$(git rev-parse HEAD:src/core/jsonl_import.rs)" = 358f4002defdacf26e6fe5d66c4c9c0368897d81
-            test "$(git rev-parse HEAD:src/core/jsonl_recovery.rs)" = 7d59f208d8afb3683f3508431dfef9c490811c65
-            test "$(git rev-parse HEAD:src/core/jsonl_revisions.rs)" = 954644f46609d1b7fc2a13e665c1c332c0e4b984
-            cat <<'PATCH1' | base64 --decode | gzip --decompress > "$RUNNER_TEMP/recovery-headship.patch"
-          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
-          PATCH1
-            echo "bf7b9d1619f79783082e30c75468019af159a414256351df8f72558143769256  $RUNNER_TEMP/recovery-headship.patch" | sha256sum --check
-            cat <<'PATCH2' | base64 --decode | gzip --decompress > "$RUNNER_TEMP/recovery-admission.patch"
-          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
-          PATCH2
-            echo "3e3ba992e35134da5ff7b93908d7903320b012e8d9c59bfa3feacca50cf9d273  $RUNNER_TEMP/recovery-admission.patch" | sha256sum --check
-            publish() {
-              local base="$1" pushed=0
-              for attempt in 1 2 3; do
-                if git push origin HEAD:main; then pushed=1; break; fi
-                git fetch origin main
-                git diff --exit-code "$base" origin/main -- "${paths[@]}"
-                git merge --no-edit origin/main
-                base=$(git rev-parse origin/main)
-              done
-              test "$pushed" -eq 1
-            }
-            base=$(git rev-parse HEAD)
-            git apply --check "$RUNNER_TEMP/recovery-headship.patch"
-            git apply "$RUNNER_TEMP/recovery-headship.patch"
-            rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
-            git diff --check
-            git add -- "${paths[@]}"
-            git commit -m 'fix(recovery): preserve explicit current revisions during restore' -m 'Limit legacy expiry-based inference to eligible imported identities, protecting both endpoints of explicit revision edges while retaining mixed-era ancestors. Verify absent supersession as well as present markers before publication. Add five real-store regressions for clock skew, reverse references, idempotency, unexpected retirement, legacy and mixed-era history, and redacted IDs. Formatting passed; compilation and runtime tests are reported separately.'
-            publish "$base"
-            base=$(git rev-parse HEAD)
-            git apply --check "$RUNNER_TEMP/recovery-admission.patch"
-            git apply "$RUNNER_TEMP/recovery-admission.patch"
-            rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
-            git diff --check
-            git add -- "${paths[@]}"
-            git commit -m 'fix(backup): reject incomplete recovery streams before destination writes' -m 'Share strict backup record-count and workspace admission between import and final recovery verification, before directory creation, database migration, or workspace insertion. Preserve ordinary JSONL warning semantics and existing trust caps. Add three tests including ten corruptions in both dry-run and applied modes, source immutability, destination absence, and final-fence agreement. Formatting passed; compilation and runtime tests are reported separately.'
-            publish "$base"
-          fi
-          git rev-parse HEAD > "$RUNNER_TEMP/recovery-source-sha.log"
-          git archive HEAD | gzip > "$RUNNER_TEMP/recovery-source.tar.gz"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: recovery-headship-admission-source
-          path: |
-            ${{ runner.temp }}/recovery-source-sha.log
-            ${{ runner.temp }}/recovery-source.tar.gz
-          retention-days: 7
       - uses: actions/cache@v4
         with:
           path: |
@@ -100,9 +44,10 @@ jobs:
           restore-keys: |
             recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Resolve pinned Franken stack build paths
+      - name: Record source and resolve pinned Franken stack paths
         run: |
           set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/recovery-source-sha.log"
           ./scripts/checkout-franken-stack.sh "$GITHUB_WORKSPACE/.ci/franken-stack/projects"
           CARGO_PATH_ROOT=".ci/franken-stack/projects" perl -0pi -e '
             s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
@@ -116,7 +61,7 @@ jobs:
           cargo check --locked --lib > "$RUNNER_TEMP/recovery-check.log" 2>&1 || status=$?
           tail -n 100 "$RUNNER_TEMP/recovery-check.log"
           exit "$status"
-      - name: Execute real recovery regressions
+      - name: Execute recovery and ordinary import regressions
         run: |
           set -uo pipefail
           failed=0
@@ -127,7 +72,9 @@ jobs:
             if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$RUNNER_TEMP/recovery-$name.log"; then failed=1; fi
           }
           run_group headship-admission 'core::jsonl_import::recovery_regression_tests::' 8
+          run_group ambiguous-heads 'core::jsonl_import::revisions::head_tests::' 4
           run_group record-graph 'core::jsonl_import::recovery::tests::' 13
+          run_group ordinary-import 'core::jsonl_import::tests::' 61
           run_group backup-publication 'backup_revision_recovery_' 2
           exit "$failed"
       - name: Check production Clippy
@@ -136,6 +83,13 @@ jobs:
           status=0
           cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/recovery-clippy.log" 2>&1 || status=$?
           tail -n 100 "$RUNNER_TEMP/recovery-clippy.log"
+          exit "$status"
+      - name: Check changed-source formatting
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          rustfmt --edition 2024 --config skip_children=true --check src/core/jsonl_import.rs src/core/jsonl_recovery.rs src/core/jsonl_revisions.rs src/core/jsonl_recovery_regression_tests.rs src/core/jsonl_revision_heads_tests.rs > "$RUNNER_TEMP/recovery-fmt.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/recovery-fmt.log"
           exit "$status"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}

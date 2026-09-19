@@ -129,6 +129,30 @@ pub(super) fn supersession_timestamps(
         }
         complete.extend(path);
     }
+    // Explicit terminal revisions remain current even when the author gave
+    // them an expiry. The legacy lineage gate treats expiry-only rows as
+    // possible history; letting that compatibility rule cover two explicit
+    // terminals would silently accept disconnected current heads in one
+    // family. Tombstoned or explicitly superseded terminals are history.
+    let mut current_families = BTreeSet::new();
+    for &head_id in predecessors.keys() {
+        let head = by_id[head_id];
+        if successors.contains_key(head_id)
+            || head.superseded_at.is_some()
+            || head.tombstoned_at.is_some()
+        {
+            continue;
+        }
+        let family = (
+            head.workspace_id.as_str(),
+            head.logical_id.as_deref().unwrap_or(head_id),
+        );
+        if !current_families.insert(family) {
+            return Err(invalid(
+                "revision family declares multiple explicit current heads",
+            ));
+        }
+    }
     for (prior_id, next_id) in successors {
         let next = by_id[next_id];
         markers.entry(prior_id.to_owned()).or_insert_with(|| {
@@ -140,3 +164,7 @@ pub(super) fn supersession_timestamps(
     }
     Ok(markers)
 }
+
+#[cfg(test)]
+#[path = "jsonl_revision_heads_tests.rs"]
+mod head_tests;
