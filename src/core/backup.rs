@@ -4,6 +4,9 @@
 //! redacted JSONL export plus a manifest with content hashes. It never
 //! overwrites an existing backup artifact.
 
+#[path = "backup_recovery.rs"]
+mod recovery;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -1926,25 +1929,11 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
             "legacy_debris_not_replayed",
         );
     }
+    if let Some(policy) = recovery::required_table_policy(table) {
+        return policy;
+    }
 
     match table {
-        "workspaces" => BackupTablePolicy::new(
-            "maintain",
-            "export_restore_required",
-            "authenticated_manifest",
-        ),
-        "memories" | "memory_tags" | "memory_links" => {
-            BackupTablePolicy::new("retrieve", "export_restore_required", "records_jsonl")
-        }
-        "attempt_families" | "attempt_family_members" => {
-            BackupTablePolicy::new("learn", "export_restore_required", "records_jsonl")
-        }
-        "audit_log" => BackupTablePolicy::new(
-            "maintain",
-            "export_restore_required",
-            "derived_artifact_restore",
-        ),
-
         "graph_snapshots" | "graph_algorithm_witnesses" | "graph_algorithm_results" => {
             BackupTablePolicy::new(
                 "retrieve",
@@ -2008,91 +1997,6 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
         | "team_removal_acknowledgements" => {
             BackupTablePolicy::new("maintain", "secret_rekeyed", "rekey_or_reenroll")
         }
-
-        "task_episodes" => BackupTablePolicy::new(
-            "learn",
-            "export_restore_required",
-            "derived_artifact_restore",
-        ),
-        "journal_entries"
-        | "search_index_jobs"
-        | "recorder_runs"
-        | "recorder_events"
-        | "rch_verify_runs"
-        | "error_fingerprints"
-        | "error_repair_links"
-        | "artifacts"
-        | "artifact_links"
-        | "rationale_traces"
-        | "rationale_trace_links"
-        | "causal_evidence"
-        | "agents"
-        | "certificates"
-        | "memory_seals"
-        | "trust_quarantine" => BackupTablePolicy::new(
-            "maintain",
-            "export_restore_required",
-            "derived_artifact_restore",
-        ),
-        "procedural_rules"
-        | "rule_source_memories"
-        | "rule_tags"
-        | "feedback_events"
-        | "agent_context_profiles" => BackupTablePolicy::new(
-            "learn",
-            "export_restore_required",
-            "derived_artifact_restore",
-        ),
-
-        "debt_snapshots"
-        | "memory_sentinel_specs"
-        | "reflection_request_ledger"
-        | "situation_records"
-        | "tripwire_check_events"
-        | "tripwires" => BackupTablePolicy::new(
-            "maintain",
-            "export_restore_required",
-            "derived_artifact_restore",
-        ),
-        "evidence_spans" | "sessions" => BackupTablePolicy::new(
-            "ingest",
-            "export_restore_required",
-            "derived_artifact_restore",
-        ),
-        "import_ledger" => BackupTablePolicy::new(
-            "ingest",
-            "export_restore_required",
-            "derived_artifact_restore",
-        ),
-        "pack_baselines"
-        | "pack_candidate_impressions"
-        | "pack_evidence_items"
-        | "pack_items"
-        | "pack_omissions"
-        | "pack_records" => BackupTablePolicy::new(
-            "pack",
-            "export_restore_required",
-            "derived_artifact_restore",
-        ),
-        "curation_candidates" | "curation_ttl_policies" | "procedures" | "procedure_events" => {
-            BackupTablePolicy::new(
-                "learn",
-                "export_restore_required",
-                "derived_artifact_restore",
-            )
-        }
-        "feedback_quarantine" | "learning_observations" | "outcome_evidence_rows" => {
-            BackupTablePolicy::new(
-                "learn",
-                "export_restore_required",
-                "derived_artifact_restore",
-            )
-        }
-        "plan_recipes" => BackupTablePolicy::new(
-            "learn",
-            "export_restore_required",
-            "derived_artifact_restore",
-        ),
         _ => BackupTablePolicy::new("maintain", "unclassified", "unclassified"),
     }
 }
@@ -3720,6 +3624,10 @@ pub fn restore_backup_to_side_path(
         });
     }
 
+    // Authentication establishes the bytes, not recovery completeness. Check
+    // the binary-owned durable obligations before a dry-run can report success
+    // or a real restore creates any staged files.
+    let recovery_inventory = recovery::RestoreInventory::from_manifest(&manifest)?;
     let mut restored_workspace = read_backup_workspace_metadata(&manifest)?;
     restored_workspace.path = side_path.to_string_lossy().into_owned();
     let source_records_path = backup_artifact_path(&backup_path, &inspect, RECORDS_FILE)?;
@@ -3849,14 +3757,7 @@ pub fn restore_backup_to_side_path(
         .map_err(work_history_error)?;
     db.close().map_err(work_history_error)?;
 
-    let expected_audit_rows = manifest["recoveryInventory"]["tables"]
-        .as_array()
-        .and_then(|tables| {
-            tables
-                .iter()
-                .find(|table| table["table"] == "audit_log" && table["snapshotCovered"] == true)
-        })
-        .and_then(|table| table["rowCount"].as_u64());
+    let expected_audit_rows = Some(recovery_inventory.expected_audit_rows());
     restore_audit_history(
         &restored_database_path,
         &side_path,
@@ -3993,6 +3894,11 @@ pub fn restore_backup_to_side_path(
     } else {
         0
     };
+    // A writer's success or a valid artifact checksum cannot prove that every
+    // durable family landed. Reconcile the actual staged rows before derived
+    // rebuilding can change job state and before the marker becomes visible.
+    recovery_inventory.verify_database(&restored_database_path)?;
+
     // Build from the complete restored corpus while it is still private.
     // Imported job history alone cannot make a missing lexical index usable,
     // and strict search deliberately does not repair that absence on read.
