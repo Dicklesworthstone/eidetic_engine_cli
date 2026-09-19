@@ -1,0 +1,137 @@
+name: Snapshot generation recovery
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/snapshot-recovery-20260919/**
+      - .github/workflows/snapshot-recovery-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: snapshot-recovery-delivery
+  cancel-in-progress: false
+jobs:
+  integrate-and-verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: write
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      - name: Apply and commit snapshot recovery in two source increments
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          publish() {
+            local base="$1"; shift
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then return 0; fi
+              test "$attempt" -lt 3
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "$@"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+            return 1
+          }
+          for part in 01 02; do
+            base64 --decode "scripts/delivery/snapshot-recovery-20260919/$part.patch.xz.b64" | xz --decompress > "$RUNNER_TEMP/snapshot-$part.patch"
+          done
+          echo "be5b65101a673a17b427a9b76db35e709e24577894ca4d657ee5c50b087a2c62  $RUNNER_TEMP/snapshot-01.patch" | sha256sum --check
+          echo "1deb219b2303b0e7b6075ca5cba1560098b169e3d78b8f932929af657707c659  $RUNNER_TEMP/snapshot-02.patch" | sha256sum --check
+          if ! git ls-files --error-unmatch src/core/index_snapshot_recovery_tests.rs >/dev/null 2>&1; then
+            test "$(git rev-parse HEAD:src/core/index_read_lease.rs)" = f218523cce141059015905036237044fab4fabb6
+            test "$(git rev-parse HEAD:src/core/search.rs)" = 8b55db3a66e001ae0377ba0c97ec5f47f4f66648
+            paths=(src/core/index_read_lease.rs src/core/index_snapshot_recovery_tests.rs src/core/search.rs)
+            base=$(git rev-parse HEAD)
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/snapshot-01.patch"
+            git apply "$RUNNER_TEMP/snapshot-01.patch"
+            rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
+            git diff --check
+            git add -- "${paths[@]}"
+            git commit -m 'fix(search): recover complete snapshot generations after live index loss' -m 'Validate actual vector and lexical tiers before selecting the live generation. Recover missing directories and damaged tiers from compatible retained generations bounded by the database snapshot. Preserve typed cancellation, unsafe-entry refusals, read-only behavior, and the genuine NoIndex fallback. Add eight real-backend and lease regressions. Patch and formatting checks passed; runtime verification follows separately.'
+            publish "$base" "${paths[@]}"
+          fi
+          if ! git ls-files --error-unmatch tests/snapshot_index_recovery_e2e.rs >/dev/null 2>&1; then
+            test "$(git rev-parse HEAD:tests/concurrent_search_lexical_arm_e2e.rs)" = 60c92331e880f76fcbc98aefab32e85cb2eaaf09
+            paths=(tests/concurrent_search_lexical_arm_e2e.rs tests/snapshot_index_recovery_e2e.rs)
+            base=$(git rev-parse HEAD)
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/snapshot-02.patch"
+            git apply "$RUNNER_TEMP/snapshot-02.patch"
+            rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
+            git diff --check
+            git add -- "${paths[@]}"
+            git commit -m 'test(search): exercise concurrent read-only packs through index recovery' -m 'Register four end-to-end regressions in the existing explicit Cargo test target. Require exact source memory retrieval, stable hashes and ordering across four simultaneous readers, unchanged index bytes, and no database-scan substitution. Retain an independent genuine NoIndex database-fallback case. Tests are added, not yet claimed passing.'
+            publish "$base" "${paths[@]}"
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/snapshot-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/snapshot-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-recovery-source
+          path: |
+            ${{ runner.temp }}/snapshot-source-sha.log
+            ${{ runner.temp }}/snapshot-source.tar.gz
+          retention-days: 7
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: snapshot-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            snapshot-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            ask-admission-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Check production library
+        run: |
+          status=0
+          cargo check --locked --lib > "$RUNNER_TEMP/snapshot-check.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/snapshot-check.log"
+          exit "$status"
+      - name: Execute real generation and read-only pack regressions
+        run: |
+          set -uo pipefail
+          failed=0
+          for filter in core::index::read_lease::tests core::index::read_lease::snapshot_recovery_tests; do
+            log="$RUNNER_TEMP/snapshot-${filter##*::}.log"
+            status=0
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$log" 2>&1 || status=$?
+            tail -n 80 "$log"
+            if test "$status" -ne 0 || ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$log"; then failed=1; fi
+          done
+          status=0
+          cargo test --locked --test concurrent_search_lexical_arm_e2e snapshot_index_recovery -- --test-threads=1 > "$RUNNER_TEMP/snapshot-e2e.log" 2>&1 || status=$?
+          tail -n 100 "$RUNNER_TEMP/snapshot-e2e.log"
+          if test "$status" -ne 0 || ! grep -Fq 'test result: ok. 4 passed; 0 failed;' "$RUNNER_TEMP/snapshot-e2e.log"; then failed=1; fi
+          exit "$failed"
+      - name: Check all targets and Clippy
+        if: ${{ !cancelled() }}
+        run: |
+          failed=0
+          cargo check --locked --all-targets > "$RUNNER_TEMP/snapshot-all-targets.log" 2>&1 || failed=1
+          tail -n 80 "$RUNNER_TEMP/snapshot-all-targets.log"
+          cargo clippy --locked --all-targets -- -D warnings > "$RUNNER_TEMP/snapshot-clippy.log" 2>&1 || failed=1
+          tail -n 80 "$RUNNER_TEMP/snapshot-clippy.log"
+          exit "$failed"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: snapshot-recovery-verification
+          path: ${{ runner.temp }}/snapshot-*.log
+          retention-days: 7
