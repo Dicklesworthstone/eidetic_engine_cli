@@ -281,6 +281,14 @@ fn release_expected_assets_match_the_build_matrix() {
          expected but not built (the release would fail waiting for them): {unexpected:?}"
     );
 
+    // Not an invariant: whether release.yml declares expected_artifact_count is
+    // a property of a file read at runtime, so this expect CAN fire. That is
+    // deliberate -- its absence is exactly what this test exists to catch, the
+    // panic message is the diagnostic, and the enclosing fn returns () so there
+    // is nothing to propagate to. Cargo.toml:551 carves tests out of
+    // expect_used for this case; src/lib.rs:12 does the same for the lib's own
+    // cfg(test), which this separate tests/ crate does not inherit.
+    #[allow(clippy::expect_used)]
     let declared: usize = workflow
         .lines()
         .find_map(|line| line.trim().strip_prefix("expected_artifact_count="))
