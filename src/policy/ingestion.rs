@@ -17,7 +17,14 @@ use super::{
 const MAX_SCAN_BYTES: usize = 1024 * 1024;
 
 pub(super) fn screen(content: &str) -> ExternalIngestionScreenReport {
-    let (content, redacted, mut reasons) = if content.len() > MAX_SCAN_BYTES {
+    screen_with_span_count(content).0
+}
+
+/// Retain the existing generic match-count semantics plus every additional
+/// provider replacement. Count events in the actual pass, not placeholders
+/// that may already have existed in source text.
+pub(super) fn screen_with_span_count(content: &str) -> (ExternalIngestionScreenReport, usize) {
+    let (content, redacted, mut reasons, span_count) = if content.len() > MAX_SCAN_BYTES {
         (
             format!(
                 "[REDACTED:external_ingestion_oversized:{}]",
@@ -25,34 +32,43 @@ pub(super) fn screen(content: &str) -> ExternalIngestionScreenReport {
             ),
             true,
             vec!["external_ingestion_oversized"],
+            1,
         )
     } else {
         let base = redact_secret_like_content(content);
         let mut reasons = base.redacted_reasons;
+        let previous_reasons = reasons.len();
         let (content, embedded) = redact_raw_api_tokens_anywhere(&base.content, &mut reasons);
-        (content, base.redacted || embedded, reasons)
+        let span_count = base
+            .matches
+            .len()
+            .saturating_add(reasons.len() - previous_reasons);
+        (content, base.redacted || embedded, reasons, span_count)
     };
     reasons.sort_unstable();
     reasons.dedup();
     let instructions = detect_instruction_like_content(&content);
-    ExternalIngestionScreenReport {
-        content,
-        redacted,
-        redacted_reasons: reasons.into_iter().map(str::to_owned).collect(),
-        instruction_like: instructions.is_instruction_like,
-        instruction_risk: instructions.risk.as_str(),
-        instruction_score: format!("{:.4}", instructions.score),
-        rejected_reasons: instructions
-            .rejected_reasons
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
-        signal_codes: instructions
-            .signals
-            .into_iter()
-            .map(|signal| signal.code.to_owned())
-            .collect(),
-    }
+    (
+        ExternalIngestionScreenReport {
+            content,
+            redacted,
+            redacted_reasons: reasons.into_iter().map(str::to_owned).collect(),
+            instruction_like: instructions.is_instruction_like,
+            instruction_risk: instructions.risk.as_str(),
+            instruction_score: format!("{:.4}", instructions.score),
+            rejected_reasons: instructions
+                .rejected_reasons
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            signal_codes: instructions
+                .signals
+                .into_iter()
+                .map(|signal| signal.code.to_owned())
+                .collect(),
+        },
+        span_count,
+    )
 }
 
 #[cfg(test)]

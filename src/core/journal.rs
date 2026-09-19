@@ -30,7 +30,7 @@ use crate::db::{
     JournalEntryListFilter, StoredJournalEntry, StoredMemory, audit_actions, generate_audit_id,
 };
 use crate::models::{CandidateId, DomainError};
-use crate::policy::{InstructionRisk, detect_instruction_like_content, redact_secret_like_content};
+use crate::policy::{InstructionRisk, screen_external_text_for_ingestion_with_span_count};
 use crate::search::HashEmbedder;
 use crate::search::simhash::{cosine_similarity, hamming_distance, simhash_128};
 
@@ -2241,26 +2241,28 @@ struct PreparedJournalEntry {
     raw_body_bytes: usize,
 }
 
-/// One screened text field. Mirrors the canonical
-/// `crate::policy::screen_external_text_for_ingestion` sequence (redact
-/// first, then grade instruction-likeness on the redacted text) while
-/// preserving the per-span match count that the combined screen report
-/// does not expose.
+/// One screened text field. Delegate to the canonical external screen so
+/// direct, stdin, daemon and distillation paths cannot drift from evidence
+/// admission. Its counting variant preserves the journal's span telemetry.
 struct ScreenedJournalText {
     content: String,
-    classes: Vec<&'static str>,
+    classes: Vec<String>,
     span_count: usize,
     instruction_risk: InstructionRisk,
 }
 
 fn screen_journal_text(raw: &str) -> ScreenedJournalText {
-    let redaction = redact_secret_like_content(raw);
-    let instruction = detect_instruction_like_content(&redaction.content);
+    let (report, span_count) = screen_external_text_for_ingestion_with_span_count(raw);
     ScreenedJournalText {
-        classes: redaction.redacted_reasons,
-        span_count: redaction.matches.len(),
-        instruction_risk: instruction.risk,
-        content: redaction.content,
+        classes: report.redacted_reasons,
+        span_count,
+        instruction_risk: match report.instruction_risk {
+            "none" => InstructionRisk::None,
+            "low" => InstructionRisk::Low,
+            "medium" => InstructionRisk::Medium,
+            _ => InstructionRisk::High,
+        },
+        content: report.content,
     }
 }
 
@@ -2268,7 +2270,7 @@ fn screen_journal_text(raw: &str) -> ScreenedJournalText {
 /// risk across every screened field of one entry.
 struct JournalScreenAccumulator {
     span_count: usize,
-    classes: Vec<&'static str>,
+    classes: Vec<String>,
     instruction_risk: InstructionRisk,
 }
 
@@ -2422,16 +2424,15 @@ fn prepare_journal_entry(
         )?;
     }
 
-    // Screen before storage (ADR 0062 §3): truncate the raw body to its
-    // hard cap, then redact body and every structured string field. The
-    // stored bytes are always the REDACTED content.
+    // Screen the complete source before the storage cut. Truncating a raw
+    // provider token first can turn it into an unrecognized credential
+    // fragment. The canonical screen handles oversized sources fail-closed.
     let raw_body_bytes = draft.body.len();
-    let capped_body = truncate_at_char_boundary(&draft.body, JOURNAL_BODY_MAX_BYTES);
-    let mut truncated = capped_body.len() < raw_body_bytes;
+    let mut truncated = raw_body_bytes > JOURNAL_BODY_MAX_BYTES;
 
     let mut accumulator = JournalScreenAccumulator::default();
 
-    let screened_body = accumulator.screen(capped_body);
+    let screened_body = accumulator.screen(&draft.body);
     // Redaction placeholders can be longer than the secret they replace;
     // re-truncate so the stored body never exceeds the hard cap.
     let body = truncate_at_char_boundary(&screened_body, JOURNAL_BODY_MAX_BYTES);
@@ -2483,7 +2484,7 @@ fn prepare_journal_entry(
     classes.sort_unstable();
     classes.dedup();
     let span_count = accumulator.span_count;
-    let redaction_classes: Vec<String> = classes.iter().map(|class| (*class).to_owned()).collect();
+    let redaction_classes = classes;
     let redaction_applied = span_count > 0 || !redaction_classes.is_empty();
     let redaction_report_json = serde_json::json!({
         "classesApplied": redaction_classes,
@@ -3961,3 +3962,7 @@ mod tests {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "journal_ingestion_tests.rs"]
+mod ingestion_tests;

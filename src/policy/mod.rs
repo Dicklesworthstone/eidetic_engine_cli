@@ -2011,6 +2011,14 @@ pub fn screen_external_text_for_ingestion(content: &str) -> ExternalIngestionScr
     ingestion::screen(content)
 }
 
+/// Canonical ingestion screen with exact replacement-count telemetry for
+/// capture paths whose durable reports already expose a span count.
+pub(crate) fn screen_external_text_for_ingestion_with_span_count(
+    content: &str,
+) -> (ExternalIngestionScreenReport, usize) {
+    ingestion::screen_with_span_count(content)
+}
+
 #[must_use]
 fn detect_secret_like_matches(input: &str) -> Vec<SecretRedactionMatch> {
     let mut matches = Vec::new();
