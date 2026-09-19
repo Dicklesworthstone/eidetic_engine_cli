@@ -902,3 +902,6 @@ where
         Err(format!("{context}: expected {expected:?}, got {actual:?}"))
     }
 }
+
+#[path = "e2e_cass_import_redaction/ingestion_boundaries.rs"]
+mod ingestion_boundaries;

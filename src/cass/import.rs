@@ -1504,6 +1504,9 @@ fn validate_reported_session_path(path: &str) -> Result<(), CassImportError> {
     Ok(())
 }
 
+#[path = "ingestion.rs"]
+mod ingestion;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CassViewSpanForImport {
     cass_span_id: String,
@@ -1668,14 +1671,11 @@ fn parse_view_line_value(
         })?;
     let content = required_string(line, "content", "view")?;
     let (span_kind, role) = classify_line(&content);
-    let raw_excerpt = truncate_excerpt(&content, 65_536);
-    let redaction = crate::policy::redact_secret_like_content(&raw_excerpt);
-    let redacted = redaction.redacted;
-    let redacted_reasons = redaction
-        .redacted_reasons
-        .iter()
-        .map(|reason| (*reason).to_string())
-        .collect();
+    // Scan the complete upstream line before truncation can split a credential.
+    let screen = ingestion::screen_excerpt(&content);
+    let redacted = screen.redacted;
+    let redacted_reasons = screen.redacted_reasons;
+    let safe_excerpt = screen.content;
     Ok(CassViewSpanForImport {
         cass_span_id: format!("{source_path}:{line_number}"),
         span_kind,
@@ -1686,8 +1686,8 @@ fn parse_view_line_value(
         // derivation-source-package validation (curate::is_canonical_blake3_content_hash)
         // accepts them on the persist path (`ee review session --propose`). `blake3_hex`
         // returns a BARE hex digest, so prefix it here. See issue #10.
-        content_hash: format!("blake3:{}", blake3_hex(&raw_excerpt)),
-        excerpt: raw_excerpt,
+        content_hash: format!("blake3:{}", blake3_hex(&safe_excerpt)),
+        excerpt: safe_excerpt,
         redacted,
         redacted_reasons,
     })
@@ -1996,7 +1996,7 @@ fn evidence_input(
             })
             .to_string(),
         ),
-        inherited_redaction_classes: Vec::new(),
+        inherited_redaction_classes: span.redacted_reasons.clone(),
     }
 }
 
