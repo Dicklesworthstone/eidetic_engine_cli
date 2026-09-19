@@ -147,9 +147,10 @@ pub(super) fn markdown_identity(report: &AskReport, id: &str) -> String {
 }
 
 /// Rules and their derivation inputs are correlated, not independent votes.
-/// Excerpts from one CASS session are likewise one source even when they have
-/// different evidence IDs or line windows. Join both kinds of lineage before
-/// counting support, including a shared memory outside the answer corpus.
+/// Excerpts from one CASS session, file or web document are likewise one source
+/// even when they have different entity IDs or line/fragment windows. Explicit
+/// memory references join that same lineage rather than creating new votes.
+/// Join before counting support, including a shared parent outside the corpus.
 /// Root choice and path compression are deterministic.
 pub(super) fn support_groups(
     spans: &[AskSpan],
@@ -163,18 +164,35 @@ pub(super) fn support_groups(
         }
     }
     for span in spans {
-        if let Some(uri) = span.provenance_uri.as_deref()
-            && let Ok(ProvenanceUri::CassSession { session, .. }) = ProvenanceUri::from_str(uri)
-        {
-            // This private union key is not an entity or a citation. It cannot
-            // collide with a typed memory/rule/evidence ID, and is never put
-            // into source_memory_ids or public source metadata.
-            join(
-                &mut parents,
-                &span.memory_id,
-                &format!("cass-session:{session}"),
-            );
-        }
+        let Some(uri) = span.provenance_uri.as_deref() else {
+            continue;
+        };
+        let Ok(uri) = ProvenanceUri::from_str(uri) else {
+            continue;
+        };
+        let source_key = match uri {
+            ProvenanceUri::CassSession { session, .. } => {
+                format!("cass-session:{session}")
+            }
+            ProvenanceUri::File { path, .. } => format!("file-source:{path}"),
+            ProvenanceUri::Web { url } => {
+                // A fragment selects a position in one document, not another
+                // independent observation. Keep the query and scheme: they
+                // can identify different documents. Do not fetch/canonicalize
+                // resources or guess that different URLs are equivalent.
+                let document = url.split_once('#').map_or(url.as_str(), |(base, _)| base);
+                format!("web-document:{document}")
+            }
+            ProvenanceUri::EeMemory(parent) => parent.to_string(),
+            // Opaque capture labels (especially manual://cli) need not name
+            // an individual source. Treating them as lineage would collapse
+            // unrelated observations just because they used the same tool.
+            ProvenanceUri::AgentMail { .. } | ProvenanceUri::External { .. } => continue,
+        };
+        // Private document keys cannot collide with typed entity IDs and are
+        // never exported as citations or as source_memory_ids. EeMemory uses
+        // the actual parent ID so memory/rule/document lineage is transitive.
+        join(&mut parents, &span.memory_id, &source_key);
     }
     if sources.is_empty() && parents.is_empty() {
         return BTreeMap::new();
@@ -297,10 +315,139 @@ mod session_support_tests {
     }
 
     #[test]
-    fn ordinary_non_cass_sources_keep_the_default_grouping() {
+    fn opaque_capture_labels_do_not_invent_shared_lineage() {
         let spans = vec![
-            span("first", "manual://note"),
-            span("second", "file://src/lib.rs#L1"),
+            span("first", "manual://cli"),
+            span("second", "manual://cli"),
+        ];
+        assert!(support_groups(&spans, &BTreeMap::new()).is_empty());
+    }
+
+    #[test]
+    fn file_line_windows_share_support_but_different_files_do_not() {
+        let spans = vec![
+            span("first", "file://src/cache.rs#L1-3"),
+            span("second", "file://src/cache.rs#L20"),
+            span("whole", "file://src/cache.rs"),
+            span("other", "file://src/other.rs#L1-3"),
+        ];
+        let groups = support_groups(&spans, &BTreeMap::new());
+        assert_eq!(groups.get("first"), groups.get("second"));
+        assert_eq!(groups.get("first"), groups.get("whole"));
+        assert_ne!(groups.get("first"), groups.get("other"));
+        assert_eq!(groups.len(), spans.len());
+    }
+
+    #[test]
+    fn web_fragments_share_support_without_discarding_query_or_scheme() {
+        let spans = vec![
+            span("first", "https://example.test/decision?id=1#summary"),
+            span("second", "https://example.test/decision?id=1#details"),
+            span("whole", "https://example.test/decision?id=1"),
+            span("other-query", "https://example.test/decision?id=2#summary"),
+            span("other-scheme", "http://example.test/decision?id=1#summary"),
+        ];
+        let groups = support_groups(&spans, &BTreeMap::new());
+        assert_eq!(groups.get("first"), groups.get("second"));
+        assert_eq!(groups.get("first"), groups.get("whole"));
+        assert_ne!(groups.get("first"), groups.get("other-query"));
+        assert_ne!(groups.get("first"), groups.get("other-scheme"));
+    }
+
+    #[test]
+    fn provenance_schemes_have_separate_private_identity_domains() {
+        let spans = vec![
+            span("file", "file://conversation#L1"),
+            span("session", "cass-session://conversation#L1"),
+            span("web", "https://conversation/#L1"),
+        ];
+        let groups = support_groups(&spans, &BTreeMap::new());
+        assert_eq!(groups.values().collect::<BTreeSet<_>>().len(), 3);
+    }
+
+    #[test]
+    fn memory_references_join_file_and_rule_lineage_transitively() {
+        let parent = MemoryId::from_uuid(uuid::Uuid::from_u128(11)).to_string();
+        let spans = vec![
+            span(&parent, "file://decisions.md#L1"),
+            span("copy", &format!("ee-mem://{parent}")),
+            span("excerpt", "file://decisions.md#L20"),
+            span("rule", "manual://rule"),
+        ];
+        let sources = BTreeMap::from([("rule".to_owned(), rule_source("copy"))]);
+        let groups = support_groups(&spans, &sources);
+        assert_eq!(groups.values().collect::<BTreeSet<_>>().len(), 1);
+        assert_eq!(groups.len(), spans.len());
+        assert!(groups.keys().all(|id| spans.iter().any(|span| &span.memory_id == id)));
+        // Support analysis must not rewrite the public citation or lineage.
+        assert_eq!(spans[1].provenance_uri, Some(format!("ee-mem://{parent}")));
+        assert_eq!(sources["rule"].source_memory_ids, vec!["copy".to_owned()]);
+    }
+
+    #[test]
+    fn shared_absent_memory_parent_correlates_only_visible_citations() {
+        let parent = MemoryId::from_uuid(uuid::Uuid::from_u128(12)).to_string();
+        let spans = vec![
+            span("first", &format!("ee-mem://{parent}")),
+            span("second", &format!("ee-mem://{parent}")),
+        ];
+        let groups = support_groups(&spans, &BTreeMap::new());
+        assert_eq!(groups.get("first"), groups.get("second"));
+        assert!(!groups.contains_key(&parent));
+    }
+
+    #[test]
+    fn repeated_documents_cannot_lift_weak_evidence_above_the_answer_floor() {
+        for prefix in ["file://fact.md#L", "https://example.test/fact#section-"] {
+            let mut spans: Vec<_> = (1..=32)
+                .map(|index| {
+                    let mut item = span(&format!("copy-{index:02}"), &format!("{prefix}{index}"));
+                    item.score = 0.54;
+                    item
+                })
+                .collect();
+            // The old distinct-ID count alone would authorize this answer.
+            let ungrouped = super::super::clustering::cluster_spans(&spans);
+            assert!(ungrouped[0].score > super::super::ASK_MIN_CONFIDENCE_DEFAULT);
+            let groups = support_groups(&spans, &BTreeMap::new());
+            let clustered = super::super::clustering::cluster_spans_with_groups(&spans, &groups);
+            assert_eq!(clustered.len(), 1);
+            assert_eq!(clustered[0].score, 0.54);
+            assert!(clustered[0].score < super::super::ASK_MIN_CONFIDENCE_DEFAULT);
+
+            let mut independent = span("independent", "file://independent-observation.md#L1");
+            independent.score = 0.54;
+            spans.push(independent);
+            let groups = support_groups(&spans, &BTreeMap::new());
+            let clustered = super::super::clustering::cluster_spans_with_groups(&spans, &groups);
+            assert!(clustered[0].score > super::super::ASK_MIN_CONFIDENCE_DEFAULT);
+            assert!((clustered[0].score - 0.54 * (1.0 + 0.1 * 2.0_f32.ln())).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn memory_reference_cycles_are_deterministic_and_do_not_loop() {
+        let first = MemoryId::from_uuid(uuid::Uuid::from_u128(13)).to_string();
+        let second = MemoryId::from_uuid(uuid::Uuid::from_u128(14)).to_string();
+        let mut spans = vec![
+            span(&first, &format!("ee-mem://{second}")),
+            span(&second, &format!("ee-mem://{first}")),
+        ];
+        let groups = support_groups(&spans, &BTreeMap::new());
+        assert_eq!(groups.get(&first), groups.get(&second));
+        spans.reverse();
+        assert_eq!(groups, support_groups(&spans, &BTreeMap::new()));
+    }
+
+    #[test]
+    fn missing_and_malformed_provenance_cannot_invent_shared_support() {
+        let mut missing = span("missing", "manual://cli");
+        missing.provenance_uri = None;
+        let spans = vec![
+            missing,
+            span("first", "file://"),
+            span("second", "file://"),
+            span("invalid-memory", "ee-mem://not-a-memory-id"),
         ];
         assert!(support_groups(&spans, &BTreeMap::new()).is_empty());
     }
