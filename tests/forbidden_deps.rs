@@ -838,3 +838,122 @@ fn core_source_excludes_ambient_randomness_patterns() {
         panic!("{report}");
     }
 }
+
+/// bd-reality-core-convergence-1azkt.18: FOUR copies of the forbidden-crate
+/// list exist and nothing holds them equal.
+///
+///   `FORBIDDEN_CRATES` in this file          enforced by this test target
+///   `scripts/check-forbidden-deps.sh`        enforced four times over
+///                                            (ci-static, ci, release, verify.sh)
+///   `AGENTS.md` forbidden-dependency table   documentation
+///   `deny.toml` `[bans]`                     NOT ENFORCED -- CI runs only
+///                                            `cargo deny check advisories`
+///
+/// They agree at the time of writing; that was measured with set diffs rather
+/// than length comparisons, which is the check that would have missed a swap
+/// of equal size. But agreeing today is a statement about the calendar. The
+/// copy with the most conventional authority to an outside reviewer --
+/// `deny.toml`, the standard supply-chain artifact -- is the one copy that
+/// cannot fail a build, so a crate added there in good faith is not banned
+/// and nothing says so.
+///
+/// This test does not decide WHICH list is authoritative. Equality does not
+/// require primacy: naming the authority decides where a future edit should
+/// land, while this decides that no edit can land in one place only. The
+/// first question is open; the second is closed by this test.
+///
+/// On divergence it names the source, the missing entries and the unexpected
+/// ones, and reports every diverging source at once rather than the first. A
+/// four-way comparison that printed "lists differ" would reproduce, in the
+/// commit that fixes this, the defect of an assertion that says something
+/// failed without saying what.
+#[test]
+fn forbidden_crate_list_is_identical_in_every_source() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let read = |relative: &str| -> String {
+        std::fs::read_to_string(format!("{root}/{relative}"))
+            .unwrap_or_else(|error| panic!("{relative} must be readable: {error}"))
+    };
+
+    // deny.toml: `[bans]` ... `deny = [ { name = "x" }, ... ]`, up to the next
+    // top-level table.
+    let deny_toml = read("deny.toml");
+    let bans: BTreeSet<String> = deny_toml
+        .lines()
+        .skip_while(|line| line.trim() != "[bans]")
+        .skip(1)
+        .take_while(|line| !line.trim_start().starts_with('['))
+        .filter_map(|line| {
+            let rest = line.split("name").nth(1)?;
+            let mut parts = rest.split('"');
+            parts.next()?;
+            parts.next().map(str::to_owned)
+        })
+        .collect();
+
+    // AGENTS.md: the first column of the forbidden-dependency table holds one
+    // or more backticked crate names per row.
+    let agents = read("AGENTS.md");
+    let table: BTreeSet<String> = agents
+        .lines()
+        .skip_while(|line| !line.contains("Forbidden Dependencies"))
+        .take_while(|line| !line.trim_start().starts_with("Run `cargo tree"))
+        .filter(|line| line.trim_start().starts_with('|'))
+        .filter_map(|line| line.split('|').nth(1))
+        .flat_map(|cell| {
+            cell.split('`')
+                .skip(1)
+                .step_by(2)
+                .map(str::trim)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|name| !name.is_empty())
+        .collect();
+
+    // check-forbidden-deps.sh: `FORBIDDEN=(` one bare crate name per line `)`.
+    let script = read("scripts/check-forbidden-deps.sh");
+    let shell: BTreeSet<String> = script
+        .lines()
+        .skip_while(|line| line.trim() != "FORBIDDEN=(")
+        .skip(1)
+        .take_while(|line| line.trim() != ")")
+        .map(|line| line.trim().to_owned())
+        .filter(|name| !name.is_empty() && !name.starts_with('#'))
+        .collect();
+
+    let canonical: BTreeSet<String> = FORBIDDEN_CRATES.iter().map(|c| (*c).to_owned()).collect();
+
+    let mut divergences = Vec::new();
+    for (source, actual) in [
+        ("deny.toml [bans]", &bans),
+        ("AGENTS.md forbidden-dependency table", &table),
+        ("scripts/check-forbidden-deps.sh FORBIDDEN=()", &shell),
+    ] {
+        // An empty parse means the format moved, which is a different failure
+        // from a real divergence and must not be reported as one.
+        assert!(
+            !actual.is_empty(),
+            "{source}: parsed zero crate names. The file's format changed and \
+             this test can no longer read it -- fix the parser before trusting \
+             any verdict from it."
+        );
+        let missing: Vec<&str> = canonical.difference(actual).map(String::as_str).collect();
+        let unexpected: Vec<&str> = actual.difference(&canonical).map(String::as_str).collect();
+        if !missing.is_empty() || !unexpected.is_empty() {
+            divergences.push(format!(
+                "  {source}\n    missing (present in FORBIDDEN_CRATES, absent here): {missing:?}\n    unexpected (here, absent from FORBIDDEN_CRATES): {unexpected:?}"
+            ));
+        }
+    }
+
+    assert!(
+        divergences.is_empty(),
+        "the forbidden-crate list has diverged across its copies. \
+         FORBIDDEN_CRATES in tests/forbidden_deps.rs is the comparison basis \
+         (this is a comparison basis, NOT a ruling on which copy is \
+         authoritative -- see bd-reality-core-convergence-1azkt.18). \
+         Every diverging source is listed:\n{}",
+        divergences.join("\n")
+    );
+}
