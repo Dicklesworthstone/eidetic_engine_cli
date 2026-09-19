@@ -13,6 +13,9 @@ use super::{
     score_span, segment_spans, tokenize_for_ask, trust_tilt,
 };
 
+#[path = "ask_candidate_diversity.rs"]
+mod diversity;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SelectionError {
     AmbiguousSource,
@@ -78,13 +81,14 @@ fn best_span_score(
         .fold(0.0, f32::max)
 }
 
-/// Admit the best `limit` distinct sources, protecting supported opposition.
+/// Admit relevant independent sources, protecting supported opposition.
 ///
 /// Every provided row is checked, including rows outside the eventual budget.
 /// Conflicting bodies or citation metadata cannot be resolved by input order.
 /// The identity registry holds references, not cloned content. Ranking retains
-/// at most `limit` entries; expensive cross-span clustering remains bounded by
-/// the admitted source set. The caller owns database retrieval and its scope.
+/// at most `limit` entries per bounded selection set; expensive cross-span
+/// clustering remains bounded by the admitted source set. The caller owns
+/// database retrieval and its scope.
 pub(super) fn select_candidates<'a>(
     request: &AskRequest,
     question_terms: &[String],
@@ -146,6 +150,7 @@ pub(super) fn select_candidates_with_scorer<'a>(
     }
 
     let mut ranked = retained.into_sorted_vec();
+    diversity::preserve_independent_support(request, question_terms, &unique, &mut ranked, scorer);
     if !preserve_linked_opposition(request, question_terms, &unique, &mut ranked, scorer) {
         preserve_inferred_opposition(request, question_terms, &unique, &mut ranked, scorer);
     }

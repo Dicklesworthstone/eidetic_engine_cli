@@ -156,15 +156,45 @@ pub(super) fn support_groups(
     spans: &[AskSpan],
     sources: &BTreeMap<String, AskNativeSource>,
 ) -> BTreeMap<String, String> {
-    let ids: BTreeSet<_> = spans.iter().map(|span| span.memory_id.as_str()).collect();
+    source_support_groups(
+        spans
+            .iter()
+            .map(|span| (span.memory_id.as_str(), span.provenance_uri.as_deref())),
+        sources,
+    )
+}
+
+/// Apply exactly the same lineage rules before the candidate budget is spent.
+/// Only borrowed identity metadata is visited; bodies are not cloned and spans
+/// are not segmented or synthesized merely to discover independent sources.
+pub(super) fn candidate_support_groups<'a>(
+    candidates: impl Iterator<Item = &'a AskCandidate> + Clone,
+    sources: &BTreeMap<String, AskNativeSource>,
+) -> BTreeMap<String, String> {
+    source_support_groups(
+        candidates.map(|candidate| {
+            (
+                candidate.memory_id.as_str(),
+                candidate.provenance_uri.as_deref(),
+            )
+        }),
+        sources,
+    )
+}
+
+fn source_support_groups<'a>(
+    records: impl Iterator<Item = (&'a str, Option<&'a str>)> + Clone,
+    sources: &BTreeMap<String, AskNativeSource>,
+) -> BTreeMap<String, String> {
+    let ids: BTreeSet<_> = records.clone().map(|(id, _)| id).collect();
     let mut parents: BTreeMap<String, String> = BTreeMap::new();
     for (id, source) in sources.iter().filter(|(id, _)| ids.contains(id.as_str())) {
         for parent in &source.source_memory_ids {
             join(&mut parents, id, parent);
         }
     }
-    for span in spans {
-        let Some(uri) = span.provenance_uri.as_deref() else {
+    for (id, provenance_uri) in records {
+        let Some(uri) = provenance_uri else {
             continue;
         };
         let Ok(uri) = ProvenanceUri::from_str(uri) else {
@@ -192,7 +222,7 @@ pub(super) fn support_groups(
         // Private document keys cannot collide with typed entity IDs and are
         // never exported as citations or as source_memory_ids. EeMemory uses
         // the actual parent ID so memory/rule/document lineage is transitive.
-        join(&mut parents, &span.memory_id, &source_key);
+        join(&mut parents, id, &source_key);
     }
     if sources.is_empty() && parents.is_empty() {
         return BTreeMap::new();
