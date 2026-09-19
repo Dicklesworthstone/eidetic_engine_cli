@@ -131,34 +131,134 @@ fn compare_consolidation_candidate_plan(
         .then_with(|| left.target_memory_id.cmp(&right.target_memory_id))
 }
 
-fn sieve_stream_consolidation_candidates(
-    candidates: Vec<ConsolidationCandidatePlan>,
-    max_candidates: usize,
-) -> ConsolidationCandidateSelection {
-    let considered_candidates = candidates.len();
-    if max_candidates == 0 || candidates.is_empty() {
-        return ConsolidationCandidateSelection {
-            candidates: Vec::new(),
-            considered_candidates,
-            max_candidates,
-            objective_value: 0.0,
-        };
+/// Coverage of the retained set only. Nested maps allow borrowed string
+/// lookups: considering a rejected candidate never clones its normalized body.
+#[derive(Default)]
+struct ConsolidationCoverage {
+    levels: BTreeMap<String, BTreeMap<String, BTreeMap<String, usize>>>,
+    groups: usize,
+    level_kinds: usize,
+}
+
+impl ConsolidationCoverage {
+    fn group_count(&self, candidate: &ConsolidationCandidatePlan) -> usize {
+        self.levels
+            .get(&candidate.level)
+            .and_then(|kinds| kinds.get(&candidate.kind))
+            .and_then(|groups| groups.get(&candidate.normalized_content))
+            .copied()
+            .unwrap_or(0)
     }
 
+    fn kind_count(&self, candidate: &ConsolidationCandidatePlan) -> usize {
+        self.levels
+            .get(&candidate.level)
+            .and_then(|kinds| kinds.get(&candidate.kind))
+            .map(|groups| groups.values().sum())
+            .unwrap_or(0)
+    }
+
+    fn insert(&mut self, candidate: &ConsolidationCandidatePlan) {
+        let kinds = self.levels.entry(candidate.level.clone()).or_default();
+        let groups = kinds.entry(candidate.kind.clone()).or_default();
+        if groups.is_empty() {
+            self.level_kinds += 1;
+        }
+        let count = groups.entry(candidate.normalized_content.clone()).or_default();
+        if *count == 0 {
+            self.groups += 1;
+        }
+        *count += 1;
+    }
+
+    fn remove(&mut self, candidate: &ConsolidationCandidatePlan) {
+        let Some(kinds) = self.levels.get_mut(&candidate.level) else {
+            return;
+        };
+        let Some(groups) = kinds.get_mut(&candidate.kind) else {
+            return;
+        };
+        let Some(count) = groups.get_mut(&candidate.normalized_content) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            groups.remove(&candidate.normalized_content);
+            self.groups -= 1;
+        }
+        if groups.is_empty() {
+            kinds.remove(&candidate.kind);
+            self.level_kinds -= 1;
+        }
+        if kinds.is_empty() {
+            self.levels.remove(&candidate.level);
+        }
+    }
+
+    fn replacement_objective(
+        &self,
+        selected: &[ConsolidationCandidatePlan],
+        index: usize,
+        candidate: &ConsolidationCandidatePlan,
+    ) -> f64 {
+        let previous = &selected[index];
+        let same_kind = previous.level == candidate.level && previous.kind == candidate.kind;
+        let same_group = same_kind && previous.normalized_content == candidate.normalized_content;
+        let groups = if same_group {
+            self.groups
+        } else {
+            self.groups - usize::from(self.group_count(previous) == 1)
+                + usize::from(self.group_count(candidate) == 0)
+        };
+        let level_kinds = if same_kind {
+            self.level_kinds
+        } else {
+            self.level_kinds - usize::from(self.kind_count(previous) == 1)
+                + usize::from(self.kind_count(candidate) == 0)
+        };
+        // Keep the original left-to-right sum, not total - old + new. Floating
+        // point reassociation can change strict-improvement and tie decisions.
+        // This scans small scalar scores; it never clones the retained bodies.
+        let base_score = selected
+            .iter()
+            .enumerate()
+            .map(|(position, item)| {
+                if position == index {
+                    candidate.objective_score
+                } else {
+                    item.objective_score
+                }
+            })
+            .sum::<f64>();
+        base_score
+            + (groups as f64 * CONSOLIDATION_SIEVE_GROUP_BONUS)
+            + (level_kinds as f64 * CONSOLIDATION_SIEVE_LEVEL_KIND_BONUS)
+    }
+}
+
+fn sieve_stream_consolidation_candidates(
+    candidates: impl IntoIterator<Item = ConsolidationCandidatePlan>,
+    max_candidates: usize,
+) -> ConsolidationCandidateSelection {
+    let mut considered_candidates = 0;
     let mut selected = Vec::<ConsolidationCandidatePlan>::new();
+    let mut coverage = ConsolidationCoverage::default();
     for candidate in candidates {
+        considered_candidates += 1;
+        if max_candidates == 0 {
+            continue;
+        }
         if selected.len() < max_candidates {
+            coverage.insert(&candidate);
             selected.push(candidate);
             continue;
         }
 
-        let current_objective = consolidation_selection_objective(&selected);
         let mut best_replacement = None;
-        let mut best_objective = current_objective;
+        let mut best_objective = consolidation_selection_objective(&selected);
         for index in 0..selected.len() {
-            let mut replacement = selected.clone();
-            replacement[index] = candidate.clone();
-            let replacement_objective = consolidation_selection_objective(&replacement);
+            let replacement_objective =
+                coverage.replacement_objective(&selected, index, &candidate);
             if replacement_objective > best_objective {
                 best_objective = replacement_objective;
                 best_replacement = Some(index);
@@ -166,6 +266,8 @@ fn sieve_stream_consolidation_candidates(
         }
 
         if let Some(index) = best_replacement {
+            coverage.remove(&selected[index]);
+            coverage.insert(&candidate);
             selected[index] = candidate;
         }
     }
@@ -352,5 +454,95 @@ mod tests {
             ));
         }
         Ok(())
+    }
+
+    // Retain the original materialized algorithm as a differential oracle.
+    // A quality-only test would miss changed tie breaking or rounding.
+    fn reference_selection(
+        candidates: &[ConsolidationCandidatePlan],
+        limit: usize,
+    ) -> Vec<ConsolidationCandidatePlan> {
+        let mut selected = Vec::new();
+        if limit == 0 {
+            return selected;
+        }
+        for candidate in candidates {
+            if selected.len() < limit {
+                selected.push(candidate.clone());
+                continue;
+            }
+            let mut best = consolidation_selection_objective(&selected);
+            let mut replacement_index = None;
+            for index in 0..selected.len() {
+                let mut replacement = selected.clone();
+                replacement[index] = candidate.clone();
+                let objective = consolidation_selection_objective(&replacement);
+                if objective > best {
+                    best = objective;
+                    replacement_index = Some(index);
+                }
+            }
+            if let Some(index) = replacement_index {
+                selected[index] = candidate.clone();
+            }
+        }
+        selected.sort_by(compare_consolidation_candidate_plan);
+        selected
+    }
+
+    #[test]
+    fn indexed_sieve_matches_original_decisions_and_objective_bits() {
+        for seed in 0..12 {
+            let mut candidates: Vec<_> = (0..48)
+                .map(|index| {
+                    candidate(
+                        &format!("{index:04}"),
+                        &format!("group-{}", (index * 7 + seed) % 11),
+                        if index % 3 == 0 { "episodic" } else { "procedural" },
+                        if index % 5 == 0 { "failure" } else { "rule" },
+                        0.1 * ((index * 13 + seed) % 31) as f64,
+                    )
+                })
+                .collect();
+            if seed % 2 == 0 {
+                candidates.sort_by(compare_consolidation_candidate_plan);
+            }
+            for limit in [0, 1, 2, 7, 16, 64] {
+                let expected = reference_selection(&candidates, limit);
+                let actual = sieve_stream_consolidation_candidates(candidates.clone(), limit);
+                assert_eq!(actual.considered_candidates, candidates.len());
+                assert_eq!(actual.max_candidates, limit);
+                assert_eq!(
+                    actual.objective_value.to_bits(),
+                    consolidation_selection_objective(&expected).to_bits()
+                );
+                assert_eq!(
+                    format!("{:?}", actual.candidates),
+                    format!("{expected:?}"),
+                    "seed {seed}, limit {limit}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn coverage_tracks_shared_groups_and_removes_last_members() {
+        let first = candidate("a", "shared", "procedural", "rule", 0.1);
+        let second = candidate("b", "shared", "procedural", "rule", 0.2);
+        let third = candidate("c", "other", "procedural", "rule", 0.3);
+        let mut coverage = ConsolidationCoverage::default();
+        for item in [&first, &second, &third] {
+            coverage.insert(item);
+        }
+        assert_eq!((coverage.groups, coverage.level_kinds), (2, 1));
+        assert_eq!(coverage.kind_count(&first), 3);
+        coverage.remove(&first);
+        assert_eq!(coverage.group_count(&second), 1);
+        assert_eq!((coverage.groups, coverage.level_kinds), (2, 1));
+        coverage.remove(&second);
+        assert_eq!((coverage.groups, coverage.level_kinds), (1, 1));
+        coverage.remove(&third);
+        assert_eq!((coverage.groups, coverage.level_kinds), (0, 0));
+        assert!(coverage.levels.is_empty());
     }
 }
