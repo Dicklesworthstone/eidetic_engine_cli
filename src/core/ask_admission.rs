@@ -182,24 +182,74 @@ fn public_label(value: &str) -> String {
     }
 }
 
-fn public_provenance(value: &str) -> Option<String> {
-    if !public_text(value) {
-        return None;
-    }
-    let uri = ProvenanceUri::from_str(value).ok()?;
-    if let ProvenanceUri::File { path, .. } = &uri {
-        // Check the parsed target, not the URI as a whole. This also covers
-        // absolute roots outside the shared sensitive-prefix inventory and
-        // Windows paths when the CLI is running on Unix.
-        let drive_path = path.as_bytes().get(1) == Some(&b':')
-            && path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
-        if path.starts_with(['/', '\\', '~'])
-            || drive_path
-            || path.split(['/', '\\']).any(|part| part == "..")
-            || !public_text(path)
-        {
+/// Inspect escaped provenance without changing its stored/canonical spelling.
+/// A consumer can decode an escape even when the text detector cannot see it.
+/// Check every representation, including nested encodings, before admission.
+/// Malformed, non-UTF-8, control-bearing or excessively nested forms are
+/// withheld; this is neither a URL resolver nor a filesystem read.
+fn inspected_provenance(value: &str) -> Option<String> {
+    let mut current = value.to_owned();
+    for _ in 0..=4 {
+        if !public_text(&current) || current.chars().any(char::is_control) {
             return None;
         }
+        if !current.contains('%') {
+            return Some(current);
+        }
+        let mut decoded = Vec::with_capacity(current.len());
+        let mut bytes = current.bytes();
+        while let Some(byte) = bytes.next() {
+            if byte == b'%' {
+                let high = char::from(bytes.next()?).to_digit(16)?;
+                let low = char::from(bytes.next()?).to_digit(16)?;
+                decoded.push((high * 16 + low) as u8);
+            } else {
+                decoded.push(byte);
+            }
+        }
+        current = String::from_utf8(decoded).ok()?;
+    }
+    None
+}
+
+fn public_file_path(path: &str) -> bool {
+    // Check the parsed target, not the URI as a whole. This also covers
+    // absolute roots outside the sensitive-prefix inventory and Windows paths
+    // on Unix. Do not normalize traversal away before deciding whether to emit.
+    let drive_path = path.as_bytes().get(1) == Some(&b':')
+        && path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
+    !path.starts_with(['/', '\\', '~'])
+        && !drive_path
+        && !path.split(['/', '\\']).any(|part| part == "..")
+        && public_text(path)
+}
+
+fn public_provenance(value: &str) -> Option<String> {
+    inspected_provenance(value)?;
+    let uri = ProvenanceUri::from_str(value).ok()?;
+    match &uri {
+        ProvenanceUri::File { path, .. } => {
+            let inspected = inspected_provenance(path)?;
+            if !public_file_path(path) || !public_file_path(&inspected) {
+                return None;
+            }
+        }
+        ProvenanceUri::Web { url } => {
+            // Generic web provenance accepts an opaque authority. A citation
+            // must never export userinfo/passwords merely because they do not
+            // resemble a known provider credential. Inspect the original
+            // authority separately so an escaped delimiter cannot move its
+            // boundary while the safety check is interpreting it.
+            let (_, body) = url.split_once("://")?;
+            let authority = body.split(['/', '?', '#']).next()?;
+            let inspected = inspected_provenance(authority)?;
+            if inspected.contains(['@', '/', '\\', '?', '#'])
+                || inspected.chars().any(char::is_whitespace)
+            {
+                return None;
+            }
+        }
+        _ => {}
     }
     let canonical = uri.to_string();
     public_text(&canonical).then_some(canonical)
@@ -243,4 +293,98 @@ pub(super) fn into_candidate(memory: StoredMemory) -> Option<AskCandidate> {
         kind: kind.as_str().to_owned(),
         team_provenance,
     })
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    #[test]
+    fn escaped_absolute_and_traversing_file_targets_are_withheld() {
+        for uri in [
+            "file://%2Fvault%2Fnote.md#L1",
+            "file://%252Fvault%252Fnote.md#L1",
+            "file://%5C%5Cserver%5Cshare%5Cnote.md",
+            "file://%43%3A%5Cnotes%5Cone.md",
+            "file://src/%2e%2e/private.md",
+            "file://src/%252e%252e/private.md",
+            "file://src%5C..%5Cprivate.md",
+            "file://%7Euser%2Fnote.md",
+        ] {
+            assert!(public_provenance(uri).is_none(), "unsafe file provenance");
+        }
+    }
+
+    #[test]
+    fn escaped_sensitive_paths_are_checked_in_non_file_provenance_too() {
+        for uri in [
+            "manual://%2Fhome%2Foperator%2Fnote.md",
+            "manual://%252Fhome%252Foperator%252Fnote.md",
+            "https://example.test/?source=%2Fhome%2Foperator%2Fnote.md",
+        ] {
+            assert!(public_provenance(uri).is_none());
+        }
+    }
+
+    #[test]
+    fn web_citations_cannot_export_userinfo_or_smuggle_authority_delimiters() {
+        for uri in [
+            "https://reader:opaque@example.test/notes",
+            "https://reader%3Aopaque%40example.test/notes",
+            "https://reader%253Aopaque%2540example.test/notes",
+            "https://example.test%2Fother/notes",
+            "https://example.test%5Cother/notes",
+            "https://example.test%23other/notes",
+            "https://example.test%3Fother/notes",
+            "https://example.test%20other/notes",
+        ] {
+            assert!(public_provenance(uri).is_none(), "unsafe web authority");
+        }
+    }
+
+    #[test]
+    fn safe_escaped_citations_keep_the_original_spelling_and_line_window() {
+        for uri in [
+            "file://docs/release%20notes.md#L1-3",
+            "file://docs/caf%C3%A9.md#L2",
+            "https://example.test/docs/release%20notes#summary",
+            "https://example.test/?q=release%20notes",
+            "https://example.test/users/reader%40example.test",
+            "cass-session://conversation#L2-5",
+            "manual://release-check",
+        ] {
+            assert_eq!(public_provenance(uri), Some(uri.to_owned()));
+        }
+    }
+
+    #[test]
+    fn malformed_non_utf8_control_and_over_nested_escapes_are_withheld() {
+        for uri in [
+            "file://docs/note%",
+            "file://docs/note%2",
+            "file://docs/note%GG",
+            "file://docs/%FF.md",
+            "file://docs/note%00.md",
+            "file://docs/note%0A.md",
+            "file://docs/note%250D.md",
+            "file://docs/%2525252520note.md",
+        ] {
+            assert!(public_provenance(uri).is_none());
+        }
+    }
+
+    #[test]
+    fn inspection_is_bounded_and_does_not_rewrite_quoted_evidence() {
+        assert_eq!(
+            inspected_provenance("docs/release%20notes.md"),
+            Some("docs/release notes.md".to_owned())
+        );
+        assert_eq!(
+            inspected_provenance("docs/%2520note.md"),
+            Some("docs/ note.md".to_owned())
+        );
+        // Escape handling belongs to URI admission only: a literal percentage
+        // in stored evidence is not malformed provenance or a changed byte span.
+        assert!(public_text("Cache hit rate is 75% after the release."));
+    }
 }
