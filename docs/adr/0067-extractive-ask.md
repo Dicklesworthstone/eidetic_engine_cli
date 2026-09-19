@@ -58,8 +58,30 @@ deterministic. No thresholds are weakened to make native rules answerable.
 Ordinary successful asks append retrieval audits against the real `rule`
 target and include its revision, not a `memory` alias. Abstentions do not count
 as retrievals. `--read-only` suppresses both retrieval and query-miss auditing;
-neither mode implicitly migrates a database. This amendment does not enable
-direct CASS evidence answering or path-specific rule matching.
+neither mode implicitly migrates a database. Native transcript admission is
+independent of the rule path applicability described below.
+
+### Path-specific rule answers (2026-09-18)
+
+`ee ask "What must I check?" --path src/lib.rs --read-only` admits matching
+directory and file-pattern rules in addition to ordinary workspace evidence.
+Repeat `--path` to describe multiple task targets. Paths are literal,
+workspace-relative selectors, not file contents or query globs; nonexistent
+files are valid targets. Absolute paths, parent traversal, and existing symlink
+escapes are rejected without disclosing the submitted path in errors.
+
+Rule patterns use recall's existing case-sensitive fnmatch language (`*`
+crosses `/`, `?` and character classes are supported). Directory patterns match
+whole target/ancestor components: `src` includes `src/core/lib.rs` but not
+`src-other/lib.rs`. File patterns match the complete target. Equivalent path
+separators, redundant `.` components, repeated targets, and target ordering
+do not change the answer.
+
+Paths do not widen `--memory-scope`, promote trust, admit retired rules, or
+exclude otherwise eligible memories/transcripts. With no path, path-scoped
+rules remain excluded. Rule scope, pattern, lifecycle, revision, and body are
+read in the same snapshot; later scope updates are visible without rebuilding
+an index. Citations retain the native RuleId and exact stored body offsets.
 
 ### 1. Span model
 

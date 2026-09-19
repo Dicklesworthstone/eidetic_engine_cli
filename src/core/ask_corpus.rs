@@ -53,10 +53,24 @@ pub fn load_scoped_ask_corpus(
     reference_time: DateTime<Utc>,
     scope: MemoryScope,
 ) -> Result<AskCorpus, DomainError> {
-    load_corpus_with_scope_boundary(
+    load_ask_corpus_for_paths(connection, workspace_id, reference_time, scope, &[])
+}
+
+/// Add literal workspace-relative task targets without widening memory scope.
+/// Paths select directory/file rules; ordinary workspace evidence is retained.
+/// No target contents are opened and targets may describe not-yet-created files.
+pub fn load_ask_corpus_for_paths(
+    connection: &DbConnection,
+    workspace_id: &str,
+    reference_time: DateTime<Utc>,
+    scope: MemoryScope,
+    paths: &[String],
+) -> Result<AskCorpus, DomainError> {
+    load_corpus_with_path_boundary(
         connection,
         workspace_id,
         reference_time,
+        paths,
         || scope_context(connection, workspace_id, scope),
         || Ok(()),
     )
@@ -126,7 +140,26 @@ fn load_corpus_with_scope_boundary(
     scope_context: impl FnOnce() -> Result<MemoryScopeContext, DomainError>,
     after_memory_read: impl FnOnce() -> Result<(), DomainError>,
 ) -> Result<AskCorpus, DomainError> {
+    load_corpus_with_path_boundary(
+        connection,
+        workspace_id,
+        reference_time,
+        &[],
+        scope_context,
+        after_memory_read,
+    )
+}
+
+fn load_corpus_with_path_boundary(
+    connection: &DbConnection,
+    workspace_id: &str,
+    reference_time: DateTime<Utc>,
+    paths: &[String],
+    scope_context: impl FnOnce() -> Result<MemoryScopeContext, DomainError>,
+    after_memory_read: impl FnOnce() -> Result<(), DomainError>,
+) -> Result<AskCorpus, DomainError> {
     let snapshot = AskReadSnapshot::begin(connection)?;
+    let paths = normalize_ask_targets(connection, workspace_id, paths)?;
     let stored = connection
         .list_memories(workspace_id, None, false)
         .map_err(|_| corpus_storage_error())?;
@@ -177,6 +210,7 @@ fn load_corpus_with_scope_boundary(
         workspace_id,
         &scope,
         &attributed_memories,
+        &paths,
         &mut candidates,
     )?;
     admission::append_evidence(
@@ -199,6 +233,7 @@ fn load_rules(
     workspace_id: &str,
     scope: &MemoryScopeContext,
     attributed_memories: &BTreeSet<String>,
+    paths: &[String],
     candidates: &mut Vec<AskCandidate>,
 ) -> Result<BTreeMap<String, AskNativeSource>, DomainError> {
     let rules = connection
@@ -219,14 +254,7 @@ fn load_rules(
         .list_rule_source_memory_ids_for_workspace(workspace_id)
         .map_err(|_| corpus_storage_error())?;
     for rule in rules {
-        // A plain question carries no file or directory context. Do not apply
-        // a path-specific rule universally merely because its words match.
-        if rule.workspace_id != workspace_id
-            || !matches!(
-                RuleScope::from_str(&rule.scope),
-                Ok(RuleScope::Global | RuleScope::Workspace | RuleScope::Project)
-            )
-        {
+        if rule.workspace_id != workspace_id {
             continue;
         }
         let rule_tags = tags.remove(&rule.id).unwrap_or_default();
@@ -256,12 +284,89 @@ fn load_rules(
         }
         let projection =
             crate::search::RuleIndexProjection::new(rule, &workspace.path, rule_tags, source_ids);
+        if !rule_matches_targets(&projection, paths) {
+            continue;
+        }
         if let Some((candidate, source)) = admission::rule_candidate(&projection) {
             native_sources.insert(candidate.memory_id.clone(), source);
             candidates.push(candidate);
         }
     }
     Ok(native_sources)
+}
+
+fn target_usage_error(code: &str) -> DomainError {
+    DomainError::Usage {
+        // Never echo the submitted path or a filesystem diagnostic; either may
+        // disclose a private absolute path through an otherwise safe answer.
+        message: format!(
+            "Invalid ee ask --path ({code}); use a literal workspace-relative target without glob characters or parent traversal"
+        ),
+        repair: Some(
+            "ee ask \"What must I check?\" --path src/lib.rs --read-only --json".to_owned(),
+        ),
+    }
+}
+
+fn normalize_ask_targets(
+    connection: &DbConnection,
+    workspace_id: &str,
+    paths: &[String],
+) -> Result<Vec<String>, DomainError> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let workspace = connection
+        .get_workspace(workspace_id)
+        .map_err(|_| corpus_storage_error())?
+        .ok_or_else(corpus_storage_error)?;
+    let mut normalized = BTreeSet::new();
+    for path in paths {
+        if path.trim().starts_with('~')
+            || path
+                .chars()
+                .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
+        {
+            return Err(target_usage_error("non_literal_target"));
+        }
+        // Reuse the rule writer's portable path and symlink-escape contract.
+        // Glob characters are rejected above so every existing target prefix
+        // is inspected, rather than stopping at the first pattern component.
+        let path = crate::search::normalize_rule_scope_pattern(
+            std::path::Path::new(&workspace.path),
+            RuleScope::FilePattern,
+            Some(path),
+        )
+        .map_err(|error| target_usage_error(error.code()))?
+        .ok_or_else(|| target_usage_error("missing_target"))?;
+        normalized.insert(path);
+    }
+    Ok(normalized.into_iter().collect())
+}
+
+fn rule_matches_targets(projection: &crate::search::RuleIndexProjection, paths: &[String]) -> bool {
+    match RuleScope::from_str(&projection.rule().scope) {
+        Ok(RuleScope::Global | RuleScope::Workspace | RuleScope::Project) => true,
+        Ok(scope @ (RuleScope::Directory | RuleScope::FilePattern)) => {
+            let Some(pattern) = projection.normalized_scope_pattern() else {
+                return false;
+            };
+            paths.iter().any(|path| {
+                // Use recall's established case-sensitive fnmatch language.
+                // Directory rules match whole ancestor components, never a
+                // lexical prefix such as `src` matching `src-other`.
+                std::iter::successors(Some(path.as_str()), |&parent| {
+                    if scope == RuleScope::Directory {
+                        parent.rsplit_once('/').map(|(prefix, _)| prefix)
+                    } else {
+                        None
+                    }
+                })
+                .any(|target| crate::core::recall::recall_glob_match(pattern, target))
+            })
+        }
+        Err(_) => false,
+    }
 }
 
 /// Own only the read transaction that this operation successfully began.

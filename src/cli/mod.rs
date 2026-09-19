@@ -1745,6 +1745,11 @@ pub struct AskArgs {
     #[arg(long, value_parser = parse_memory_scope_arg, default_value = "workspace")]
     pub memory_scope: MemoryScope,
 
+    /// Literal workspace-relative task target for directory/file-scoped rules.
+    /// Repeat --path for multiple targets; this never widens --memory-scope.
+    #[arg(long = "path", value_name = "PATH")]
+    pub paths: Vec<String>,
+
     /// Query without writing retrieval or query-miss audit records.
     /// Opens the store read-only and never migrates it.
     #[arg(long)]
@@ -50909,11 +50914,12 @@ where
     };
 
     // Resolve temporal eligibility before scoring, hints, and contradiction lookup.
-    let corpus = match crate::core::ask::load_scoped_ask_corpus(
+    let corpus = match crate::core::ask::load_ask_corpus_for_paths(
         &connection,
         &workspace_id,
         chrono::Utc::now(),
         args.memory_scope,
+        &args.paths,
     ) {
         Ok(corpus) => corpus,
         Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),

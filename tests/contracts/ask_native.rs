@@ -146,13 +146,13 @@ fn applied_curation_rule_answers_from_its_own_body_and_records_its_own_target() 
             target_memory_id: Some(memory_id.clone()),
             proposed_content: Some(RULE.to_owned()),
             proposed_confidence: Some(0.95),
-            proposed_trust_class: Some("human_explicit".to_owned()),
-            source_type: "feedback_event".to_owned(),
-            source_id: None,
+            proposed_trust_class: Some("agent_assertion".to_owned()),
+            source_type: "agent_inference".to_owned(),
+            source_id: Some(memory_id.clone()),
             reason: "Approved release guidance from reviewed historical evidence.".to_owned(),
             confidence: 0.95,
-            status: Some("approved".to_owned()),
-            created_at: Some("2020-01-01T00:00:00Z".to_owned()),
+            status: Some("pending".to_owned()),
+            created_at: None,
             ttl_expires_at: None,
             derivation_source_refs_json: None,
             derivation_metadata_json: None,
@@ -160,6 +160,17 @@ fn applied_curation_rule_answers_from_its_own_body_and_records_its_own_target() 
     )
     .map_err(|error| error.to_string())?;
     drop(db);
+    let validated = command(
+        &workspace,
+        &[
+            "curate",
+            "validate",
+            candidate_id,
+            "--actor",
+            "native-ask-acceptance",
+        ],
+    )?;
+    assert_eq!(validated["data"]["validation"]["decision"], "approved");
     let applied = command(
         &workspace,
         &[
@@ -182,6 +193,10 @@ fn applied_curation_rule_answers_from_its_own_body_and_records_its_own_target() 
     let answer = command(&workspace, &["ask", QUESTION])?;
     assert_eq!(answer["data"]["abstained"], false);
     check_citation(&answer["data"]["citations"][0], &id, RULE)?;
+    assert_eq!(
+        answer["data"]["citations"][0]["trustClass"],
+        "agent_assertion"
+    );
     assert!(
         !answer.to_string().contains(&memory_id),
         "source memory must not replace rule identity"
@@ -214,6 +229,180 @@ fn applied_curation_rule_answers_from_its_own_body_and_records_its_own_target() 
             .len(),
         1
     );
+    Ok(())
+}
+
+#[test]
+fn public_path_rules_select_only_matching_native_sources_without_writes() -> Result<(), String> {
+    let (_root, workspace, database) = super::super::build_empty_workspace()?;
+    let directory = added_rule(
+        &workspace,
+        RULE,
+        &["--scope", "directory", "--scope-pattern", "src"],
+    )?;
+    let test_file = added_rule(
+        &workspace,
+        RULE,
+        &["--scope", "file_pattern", "--scope-pattern", "tests/*.rs"],
+    )?;
+    let before = std::fs::read(&database).map_err(|error| error.to_string())?;
+    for (path, expected, forbidden) in [
+        ("src/new/lib.rs", &directory, &test_file),
+        ("tests/new.rs", &test_file, &directory),
+    ] {
+        let data = command(
+            &workspace,
+            &["ask", QUESTION, "--path", path, "--read-only"],
+        )?;
+        assert_eq!(data["data"]["abstained"], false);
+        assert_eq!(data["data"]["candidatesScanned"], 1);
+        check_citation(&data["data"]["citations"][0], expected, RULE)?;
+        assert!(!data.to_string().contains(forbidden));
+        assert_eq!(
+            data,
+            command(
+                &workspace,
+                &["ask", QUESTION, "--path", path, "--read-only"]
+            )?
+        );
+    }
+    for flags in [
+        vec!["ask", QUESTION, "--read-only"],
+        vec!["ask", QUESTION, "--path", "src-other/lib.rs", "--read-only"],
+    ] {
+        let data = command(&workspace, &flags)?;
+        assert_eq!(data["data"]["abstained"], true);
+        assert_eq!(data["data"]["candidatesScanned"], 0);
+        assert!(!data.to_string().contains(&directory));
+        assert!(!data.to_string().contains(&test_file));
+    }
+    let combined = command(
+        &workspace,
+        &[
+            "ask",
+            QUESTION,
+            "--path",
+            "src/new/lib.rs",
+            "--path",
+            "tests/new.rs",
+            "--read-only",
+        ],
+    )?;
+    assert_eq!(combined["data"]["candidatesScanned"], 2);
+    assert_eq!(
+        combined,
+        command(
+            &workspace,
+            &[
+                "ask",
+                QUESTION,
+                "--path",
+                "./tests/new.rs",
+                "--path",
+                r"src\new\lib.rs",
+                "--path",
+                "src/new/lib.rs",
+                "--read-only"
+            ]
+        )?
+    );
+    assert_eq!(
+        std::fs::read(&database).map_err(|error| error.to_string())?,
+        before
+    );
+    let db = DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+    let stored = db
+        .get_procedural_rule(&directory)
+        .map_err(|error| error.to_string())?
+        .ok_or("missing rule")?;
+    assert!(
+        db.list_memories(&stored.workspace_id, None, true)
+            .map_err(|error| error.to_string())?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn public_path_rules_follow_scope_changes_and_retirement_without_reindexing() -> Result<(), String>
+{
+    let (_root, workspace, _database) = super::super::build_empty_workspace()?;
+    let id = added_rule(
+        &workspace,
+        RULE,
+        &["--scope", "directory", "--scope-pattern", "src"],
+    )?;
+    let original = command(
+        &workspace,
+        &["ask", QUESTION, "--path", "src/lib.rs", "--read-only"],
+    )?;
+    check_citation(&original["data"]["citations"][0], &id, RULE)?;
+    command(
+        &workspace,
+        &["rule", "update", &id, "--scope-pattern", "tests"],
+    )?;
+    let stale_target = command(
+        &workspace,
+        &["ask", QUESTION, "--path", "src/lib.rs", "--read-only"],
+    )?;
+    assert_eq!(stale_target["data"]["abstained"], true);
+    assert!(!stale_target.to_string().contains(&id));
+    let moved = command(
+        &workspace,
+        &["ask", QUESTION, "--path", "tests/check.rs", "--read-only"],
+    )?;
+    check_citation(&moved["data"]["citations"][0], &id, RULE)?;
+    assert_ne!(
+        moved["data"]["citations"][0]["entityRevision"],
+        original["data"]["citations"][0]["entityRevision"]
+    );
+    command(&workspace, &["rule", "mark", &id, "--trigger", "deprecate"])?;
+    let retired = command(
+        &workspace,
+        &["ask", QUESTION, "--path", "tests/check.rs", "--read-only"],
+    )?;
+    assert_eq!(retired["data"]["abstained"], true);
+    assert!(!retired.to_string().contains(&id));
+    Ok(())
+}
+
+#[test]
+fn public_path_rules_reject_unsafe_targets_before_optional_auditing() -> Result<(), String> {
+    let (_root, workspace, database) = super::super::build_empty_workspace()?;
+    added_rule(&workspace, RULE, &[])?;
+    let before = std::fs::read(&database).map_err(|error| error.to_string())?;
+    for path in [
+        "../private-canary",
+        "/home/private-canary",
+        r"C:\private-canary",
+        "src/*.rs",
+        "",
+    ] {
+        let output = crate::common_spawn::serialized_real_ee_with(|cmd| {
+            cmd.arg("--workspace")
+                .arg(&workspace)
+                .arg("--json")
+                .arg("ask")
+                .arg(QUESTION)
+                .arg("--path")
+                .arg(path);
+        })
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            output.status.code(),
+            Some(ee::models::ProcessExitCode::Usage as i32)
+        );
+        let value: Value =
+            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+        assert_eq!(value["schema"], "ee.error.v2");
+        assert_eq!(value["error"]["code"], "usage");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("private-canary"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("private-canary"));
+        assert_eq!(
+            std::fs::read(&database).map_err(|error| error.to_string())?,
+            before
+        );
+    }
     Ok(())
 }
 

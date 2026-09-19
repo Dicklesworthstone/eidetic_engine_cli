@@ -79,6 +79,282 @@ fn rule(db: &DbConnection, workspace: &str, n: usize, body: &str, sources: &[Str
     id
 }
 
+fn path_rule(db: &DbConnection, workspace: &str, n: usize, scope: &str, pattern: &str) -> String {
+    let id = rule(db, workspace, n, BODY, &[]);
+    db.execute_raw(&format!(
+        "UPDATE procedural_rules SET scope = '{scope}', scope_pattern = '{pattern}' WHERE id = '{id}'"
+    )).unwrap();
+    id
+}
+
+fn path_corpus(db: &DbConnection, workspace: &str, paths: &[&str]) -> AskCorpus {
+    load_ask_corpus_for_paths(
+        db,
+        workspace,
+        Utc::now(),
+        MemoryScope::Workspace,
+        &paths
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap()
+}
+
+fn source_ids(corpus: &AskCorpus) -> BTreeSet<String> {
+    corpus
+        .candidates
+        .iter()
+        .map(|candidate| candidate.memory_id.clone())
+        .collect()
+}
+
+#[test]
+fn path_rules_require_a_matching_target_and_preserve_universal_evidence() {
+    let (_root, db, workspace) = fixture();
+    let universal = rule(&db, &workspace, 1, BODY, &[]);
+    let directory = path_rule(&db, &workspace, 2, "directory", "src");
+    let file = path_rule(&db, &workspace, 3, "file_pattern", "src/*.rs");
+    let excluded = path_rule(&db, &workspace, 4, "directory", "src-other");
+    path_rule(&db, &workspace, 5, "file_pattern", "src/*.toml");
+    let malformed = path_rule(&db, &workspace, 6, "directory", "../outside");
+    let draft = path_rule(&db, &workspace, 7, "directory", "src");
+    db.execute_raw(&format!(
+        "UPDATE procedural_rules SET maturity = 'draft' WHERE id = '{draft}'"
+    ))
+    .unwrap();
+    assert_eq!(
+        source_ids(&path_corpus(&db, &workspace, &[])),
+        BTreeSet::from([universal.clone()])
+    );
+    assert_eq!(
+        source_ids(&path_corpus(&db, &workspace, &["docs/new.md"])),
+        BTreeSet::from([universal.clone()])
+    );
+    let corpus = path_corpus(&db, &workspace, &["src/new/lib.rs"]);
+    assert_eq!(
+        source_ids(&corpus),
+        BTreeSet::from([universal, directory, file])
+    );
+    let output = ask_data_json(&answer(&corpus)).to_string();
+    assert!(!output.contains(&excluded));
+    assert!(!output.contains(&malformed));
+    assert!(!output.contains(&draft));
+}
+
+#[test]
+fn path_rules_normalize_deduplicate_and_match_targets_deterministically() {
+    let (_root, db, workspace) = fixture();
+    let rust = path_rule(&db, &workspace, 1, "file_pattern", "src/[lm]ib.r?");
+    let test = path_rule(&db, &workspace, 2, "directory", "tests");
+    let paths = [
+        "./src//lib.rs",
+        "tests/new/check.rs",
+        r"src\lib.rs",
+        "./tests/new/check.rs",
+    ];
+    let corpus = path_corpus(&db, &workspace, &paths);
+    assert_eq!(source_ids(&corpus), BTreeSet::from([rust, test]));
+    let reversed = ["tests/new/check.rs", "src/lib.rs"];
+    assert_eq!(
+        ask_data_json(&answer(&corpus)),
+        ask_data_json(&answer(&path_corpus(&db, &workspace, &reversed)))
+    );
+    assert!(
+        path_corpus(&db, &workspace, &["SRC/lib.rs"])
+            .candidates
+            .is_empty()
+    );
+}
+
+#[test]
+fn path_rules_keep_verified_and_self_scope_authority() {
+    let (_root, db, workspace) = fixture();
+    let own = memory(&db, &workspace, 10, "Alice", "Historical source.");
+    let other = memory(&db, &workspace, 11, "Bob", "Another source.");
+    let admitted = rule(&db, &workspace, 1, BODY, &[own]);
+    let foreign = rule(&db, &workspace, 2, BODY, &[other]);
+    let unverified = path_rule(&db, &workspace, 3, "directory", "src");
+    for id in [&admitted, &foreign] {
+        db.execute_raw(&format!("UPDATE procedural_rules SET scope = 'directory', scope_pattern = 'src' WHERE id = '{id}'")).unwrap();
+    }
+    db.execute_raw(&format!(
+        "UPDATE procedural_rules SET trust_class = 'agent_assertion' WHERE id = '{unverified}'"
+    ))
+    .unwrap();
+    let verified = load_ask_corpus_for_paths(
+        &db,
+        &workspace,
+        Utc::now(),
+        MemoryScope::Verified,
+        &["src/lib.rs".to_owned()],
+    )
+    .unwrap();
+    assert_eq!(
+        verified
+            .native_sources
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([admitted.clone(), foreign.clone()])
+    );
+    let self_only = load_corpus_with_path_boundary(
+        &db,
+        &workspace,
+        Utc::now(),
+        &["src/lib.rs".to_owned()],
+        || {
+            Ok(MemoryScopeContext {
+                scope: MemoryScope::SelfOnly,
+                strict_scope: false,
+                current_agent: Some("Alice".to_owned()),
+                team_members: BTreeSet::new(),
+            })
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        self_only.native_sources.keys().cloned().collect::<Vec<_>>(),
+        vec![admitted]
+    );
+    let global = load_ask_corpus_for_paths(
+        &db,
+        &workspace,
+        Utc::now(),
+        MemoryScope::Global,
+        &["src/lib.rs".to_owned()],
+    )
+    .unwrap();
+    assert!(global.native_sources.is_empty());
+}
+
+#[test]
+fn path_rules_scope_updates_are_snapshot_consistent_and_need_no_rebuild() {
+    let (root, db, workspace) = fixture();
+    let id = path_rule(&db, &workspace, 1, "directory", "src");
+    let before = path_corpus(&db, &workspace, &["src/lib.rs"]);
+    let writer = DbConnection::open_file(&root.path().join(".ee/ee.db")).unwrap();
+    let pinned = load_corpus_with_path_boundary(
+        &db,
+        &workspace,
+        Utc::now(),
+        &["src/lib.rs".to_owned()],
+        || scope_context(&db, &workspace, MemoryScope::Workspace),
+        || {
+            writer
+                .with_transaction(|| {
+                    writer.execute_raw(&format!(
+                        "UPDATE procedural_rules SET scope_pattern = 'tests' WHERE id = '{id}'"
+                    ))
+                })
+                .unwrap();
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(source_ids(&pinned), BTreeSet::from([id.clone()]));
+    assert_eq!(
+        pinned.native_sources[&id].entity_revision,
+        before.native_sources[&id].entity_revision
+    );
+    assert!(
+        path_corpus(&db, &workspace, &["src/lib.rs"])
+            .candidates
+            .is_empty()
+    );
+    let moved = path_corpus(&db, &workspace, &["tests/new.rs"]);
+    assert_ne!(
+        moved.native_sources[&id].entity_revision,
+        before.native_sources[&id].entity_revision
+    );
+    db.execute_raw(&format!(
+        "UPDATE procedural_rules SET maturity = 'deprecated' WHERE id = '{id}'"
+    ))
+    .unwrap();
+    assert!(
+        path_corpus(&db, &workspace, &["tests/new.rs"])
+            .candidates
+            .is_empty()
+    );
+}
+
+#[test]
+fn path_rules_invalid_targets_fail_without_disclosure_and_release_the_snapshot() {
+    let (root, db, workspace) = fixture();
+    rule(&db, &workspace, 1, BODY, &[]);
+    for path in [
+        "",
+        ".",
+        "../secret",
+        "src/../secret",
+        "/home/private/canary",
+        r"C:\private\canary",
+        "~/private",
+        "src/*.rs",
+        "src/[ab]",
+        "src/\0",
+    ] {
+        let error = load_ask_corpus_for_paths(
+            &db,
+            &workspace,
+            Utc::now(),
+            MemoryScope::Workspace,
+            &[path.to_owned()],
+        )
+        .unwrap_err();
+        assert!(matches!(error, DomainError::Usage { .. }));
+        assert!(!error.message().contains("canary"));
+        assert!(
+            !error
+                .message()
+                .contains(&root.path().to_string_lossy().to_string())
+        );
+        db.begin_read_snapshot().unwrap();
+        db.commit_read_snapshot().unwrap();
+    }
+    assert_eq!(
+        load_current_ask_corpus(&db, &workspace, Utc::now())
+            .unwrap()
+            .candidates
+            .len(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn path_rules_refuse_existing_symlink_escape_without_reading_target_contents() {
+    use std::os::unix::fs::symlink;
+    let (root, db, workspace) = fixture();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.rs"), "private-target-canary").unwrap();
+    symlink(outside.path(), root.path().join("alias")).unwrap();
+    path_rule(&db, &workspace, 1, "file_pattern", "*.rs");
+    let error = load_ask_corpus_for_paths(
+        &db,
+        &workspace,
+        Utc::now(),
+        MemoryScope::Workspace,
+        &["alias/secret.rs".to_owned()],
+    )
+    .unwrap_err();
+    assert!(matches!(error, DomainError::Usage { .. }));
+    assert!(error.message().contains("symlink_escape"));
+    assert!(!error.message().contains("private-target-canary"));
+    assert!(
+        !error
+            .message()
+            .contains(&outside.path().to_string_lossy().to_string())
+    );
+    assert_eq!(
+        path_corpus(&db, &workspace, &["src/new.rs"])
+            .candidates
+            .len(),
+        1
+    );
+}
+
 fn request(corpus: &AskCorpus) -> AskRequest {
     AskRequest {
         question: QUESTION.to_owned(),
