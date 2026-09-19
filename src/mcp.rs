@@ -29,6 +29,9 @@ use crate::models::{ContextProfileName, ProcessExitCode, RedactionLevel};
 pub use crate::output::MCP_PROTOCOL_VERSION;
 use crate::output::public_schemas;
 
+#[path = "mcp_capture_git.rs"]
+mod capture_git;
+
 pub const SUBSYSTEM: &str = "mcp";
 pub const MCP_SCHEMA_V1: &str = "ee.mcp.v1";
 pub const MCP_SIZE_LIMIT_EXCEEDED_CODE: &str = "size_limit_exceeded";
@@ -396,6 +399,14 @@ const TOOL_REGISTRY: &[McpToolEntry] = &[
         annotations: WRITE_TOOL_ANNOTATIONS,
         effect: Some(REMEMBER_TOOL_EFFECT),
         args_builder: build_remember_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_capture_git",
+        description: "Capture a Git commit, revision range, or tracked working changes as memory through ee remember; preview by default, apply only with dryRun=false and allowWrite=true",
+        input_schema: capture_git::schema,
+        annotations: WRITE_TOOL_ANNOTATIONS,
+        effect: Some(capture_git::EFFECT),
+        args_builder: capture_git::args,
     },
     McpToolEntry {
         name: "ee_outcome",

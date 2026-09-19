@@ -39,6 +39,7 @@ const PARITY_TESTED_TOOLS: &[&str] = &[
     "ee_memory_show",
     "ee_why",
     "ee_remember",
+    "ee_capture_git",
     "ee_outcome",
     "ee_journal_append",
     "ee_decide_record",
@@ -1171,3 +1172,6 @@ fn schema_list_covers_mcp_schemas() -> TestResult {
 
     Ok(())
 }
+
+#[path = "mcp_capture_git.rs"]
+mod capture_git;
