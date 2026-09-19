@@ -560,17 +560,36 @@ emit_workspace_file_fingerprints() {
 capture_repo_state() {
     local label="${1:?label required}"
     local artifact="$EVENT_ROOT/${label}_repo_state.txt"
-    (
-        cd "$REPO_ROOT"
-        printf '## git status --porcelain=v2 --branch --untracked-files=all\n'
-        git status --porcelain=v2 --branch --untracked-files=all
-        printf '\n## git diff --name-status\n'
-        git diff --name-status
-        printf '\n## git diff --cached --name-status\n'
-        git diff --cached --name-status
-        printf '\n## git ls-files --others --exclude-standard\n'
-        git ls-files --others --exclude-standard
-    ) > "$artifact"
+    # RECORD UNAVAILABILITY, DO NOT DIE OF IT. This captures the CALLER's
+    # checkout before and after, so the pair proves the self-test did not mutate
+    # it. The caller checkout is not always a git work tree: an RCH
+    # --clean-overlay export is a source tree with no .git, and under
+    # `set -euo pipefail` the first `git` here exited 1 and killed the run
+    # BEFORE ANY CONTRACT EXECUTED -- the whole self-test reported
+    # "fatal: not a git repository" and nothing else (bd-hwye2).
+    #
+    # DECLARED LIMITATION: where there is no work tree the before/after pair
+    # compares two identical markers, so it cannot detect mutation. That is
+    # honest rather than silent -- the artifact SAYS the evidence is absent and
+    # why, instead of the check appearing to pass. There is also no git state to
+    # mutate in that case, and the self-test's actual contracts run against the
+    # isolated temporary git workspaces it creates itself, which are unaffected.
+    if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        (
+            cd "$REPO_ROOT"
+            printf '## git status --porcelain=v2 --branch --untracked-files=all\n'
+            git status --porcelain=v2 --branch --untracked-files=all
+            printf '\n## git diff --name-status\n'
+            git diff --name-status
+            printf '\n## git diff --cached --name-status\n'
+            git diff --cached --name-status
+            printf '\n## git ls-files --others --exclude-standard\n'
+            git ls-files --others --exclude-standard
+        ) > "$artifact"
+    else
+        printf '## repo state unavailable: %s is not a git work tree\n' "$REPO_ROOT" > "$artifact"
+        printf '## the caller-checkout no-mutation comparison is a no-op here\n' >> "$artifact"
+    fi
     printf '%s\t%s\n' "$(hash_file "$artifact")" "$artifact"
 }
 
