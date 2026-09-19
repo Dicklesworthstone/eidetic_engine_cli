@@ -158,6 +158,63 @@ pub(in crate::core::search) fn admit_hits(
     hits
 }
 
+/// Source truth for a similarity seed; missing or closed evidence cannot
+/// drive either lexical query construction or semantic embedding. The caller
+/// owns a snapshot covering the body and all of these admission reads.
+pub(in crate::core::search) fn seed_is_visible(
+    connection: &DbConnection,
+    id: &str,
+    reference: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    let states = states(connection, &BTreeSet::from([id]))?;
+    match states.get(id).copied() {
+        Some(RevisionState::Malformed) => Err(DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "Could not verify similarity seed revision state".to_owned(),
+        }),
+        Some(state) if state.visible_at(reference) => Ok(connection
+            .get_memory_seal(id)?
+            .is_none_or(|seal| !seal.is_sealed())),
+        _ => Ok(false),
+    }
+}
+
+/// Own only snapshots begun here. A nested begin must not release a caller's
+/// existing transaction, and early returns must never leave a snapshot pinned.
+pub(in crate::core::search) struct RevisionReadSnapshot<'a> {
+    connection: &'a DbConnection,
+    active: bool,
+}
+
+impl<'a> RevisionReadSnapshot<'a> {
+    pub(in crate::core::search) fn begin(connection: &'a DbConnection) -> Result<Self, DbError> {
+        connection.begin_read_snapshot()?;
+        Ok(Self {
+            connection,
+            active: true,
+        })
+    }
+
+    pub(in crate::core::search) fn finish(mut self) -> Result<(), DbError> {
+        self.connection.rollback_read_snapshot()?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for RevisionReadSnapshot<'_> {
+    fn drop(&mut self) {
+        if self.active && self.connection.rollback_read_snapshot().is_err() {
+            // Do not expose database paths or source evidence on cleanup.
+            tracing::error!(target: "ee::search::revision", "could not release revision read snapshot");
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "search_seed_admission_tests.rs"]
+mod seed_tests;
+
 #[cfg(test)]
 #[path = "search_revision_admission_tests.rs"]
 mod tests;

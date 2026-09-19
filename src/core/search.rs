@@ -8217,7 +8217,16 @@ fn resolve_similar_seed_memory(
         )
     };
 
-    if admissible && validity_ok {
+    // A query seed is an evidence read too. Expiry flags cannot revive a
+    // superseded revision, and sealed content must never reach an embedder.
+    if admissible
+        && validity_ok
+        && rule_admission::memory_revisions::seed_is_visible(
+            connection,
+            &memory.id,
+            options.as_of.unwrap_or_else(Utc::now),
+        )?
+    {
         Ok(memory)
     } else {
         Err(SimilarError::MemoryNotFound {
@@ -8255,6 +8264,10 @@ async fn run_similar_with_cx_and_posture(
     search_checkpoint(cx)?;
     let database_path = options.resolve_database_path();
     let connection = DbConnection::open_file_read_only(&database_path)?;
+    // Pin scope, seed body, seal, revision and neighbor admission together.
+    // The guard releases the snapshot on every early error/cancellation path.
+    let revision_snapshot =
+        rule_admission::memory_revisions::RevisionReadSnapshot::begin(&connection)?;
     // Resolve the requested workspace and memory scope BEFORE the seed lookup so
     // the seed is admitted through the same workspace / `--memory-scope` /
     // validity gating search uses for every other candidate (bd-2vq2z.25).
@@ -8367,6 +8380,7 @@ async fn run_similar_with_cx_and_posture(
             report.source_mode_fallback = true;
         }
     }
+    revision_snapshot.finish()?;
     if let Err(error) = connection.close() {
         tracing::warn!(
             target: "ee::search::similar",
