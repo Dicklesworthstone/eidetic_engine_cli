@@ -23,6 +23,8 @@ use crate::models::DomainError;
 mod cass;
 #[path = "backup_lifecycle_recovery.rs"]
 mod lifecycle;
+#[path = "backup_maintenance_recovery.rs"]
+mod maintenance;
 #[path = "backup_pack_recovery.rs"]
 mod packs;
 #[path = "backup_publication_recovery.rs"]
@@ -85,6 +87,7 @@ impl Rows {
 }
 
 pub(in crate::core::backup) struct HistoryExpectation {
+    maintenance: maintenance::MaintenanceExpectation,
     workspace_id: String,
     learning: Rows,
     packs: packs::PackExpectation,
@@ -104,6 +107,11 @@ impl HistoryExpectation {
         workspace_id: &str,
     ) -> Result<Self, DomainError> {
         let mut expected = Self {
+            maintenance: maintenance::MaintenanceExpectation::from_assets(
+                assets,
+                backup_id,
+                workspace_id,
+            )?,
             workspace_id: workspace_id.to_owned(),
             learning: Rows::default(),
             packs: packs::PackExpectation::from_assets(assets, backup_id, workspace_id)?,
@@ -227,7 +235,8 @@ impl HistoryExpectation {
         self.cass.verify_connection(db)?;
         self.trust.verify_connection(db)?;
         self.signals.verify_connection(db)?;
-        self.lifecycle.verify_connection(db)
+        self.lifecycle.verify_connection(db)?;
+        self.maintenance.verify_connection(db)
     }
 }
 
