@@ -884,6 +884,20 @@ fn import_jsonl_records_with_policy(
     if parsed.has_errors() {
         return Ok(report);
     }
+    // A verified backup must be complete before any destination directory,
+    // database, migration or workspace row is created, including dry-run.
+    // Generic JSONL import keeps its existing warning-only count semantics.
+    if native_trust_policy == NativeTrustPolicy::VerifiedBackupRestore
+        && let Err(reason) = recovery::validate_backup_source(&parsed)
+    {
+        report.issues.push(JsonlImportIssue::error(
+            None,
+            "invalid_backup_record_stream",
+            reason,
+        ));
+        report.status = "rejected".to_owned();
+        return Ok(report);
+    }
     let validated_memories = match validate_memories(&parsed) {
         Ok(memories) => memories,
         Err(issues) => {

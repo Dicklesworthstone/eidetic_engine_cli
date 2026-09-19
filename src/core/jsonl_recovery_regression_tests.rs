@@ -340,3 +340,129 @@ fn legacy_selector_returns_imported_ids_not_redacted_archive_aliases() -> TestRe
     assert!(revisions::legacy_supersession_ids(&validated).is_empty());
     Ok(())
 }
+
+#[test]
+fn incomplete_backup_streams_are_rejected_before_creating_any_destination() -> TestResult {
+    let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let path = root
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    for dry_run in [false, true] {
+        for case in 0..10 {
+            let mut records = rows();
+            match case {
+                0 => records[6]["success"] = json!(false),
+                1 => records[6]["total_records"] = json!(8),
+                2 => records[6]["memory_count"] = json!(3),
+                3 => records[6]["tag_count"] = json!(3),
+                4 => records[6]["link_count"] = json!(2),
+                5 => records[6]["artifact_count"] = json!(1),
+                6 => records[0]["workspace_id"] = json!(null),
+                7 => records[0]["workspace_id"] = json!("  "),
+                8 => records[1]["workspace_id"] = json!("PRIVATE-WORKSPACE-CANARY"),
+                _ => {
+                    // A dropped relationship must not become a successful
+                    // partial restore merely because the remaining rows parse.
+                    records.remove(5);
+                }
+            }
+            let options = JsonlImportOptions {
+                workspace_path: path.join(format!("absent-{dry_run}-{case}")),
+                database_path: Some(path.join(format!("absent-db-{dry_run}-{case}/ee.db"))),
+                source_path: path.join(format!("source-{dry_run}-{case}.jsonl")),
+                dry_run,
+            };
+            let source = source_text(&records);
+            fs::write(&options.source_path, &source).map_err(|e| e.to_string())?;
+            let report =
+                import_verified_backup_jsonl_records(&options).map_err(|e| e.to_string())?;
+            assert_eq!(report.status, "rejected", "case {case}, dry_run={dry_run}");
+            let issue = report
+                .issues
+                .iter()
+                .find(|issue| issue.code == "invalid_backup_record_stream")
+                .ok_or_else(|| {
+                    format!(
+                        "missing strict admission issue for case {case}: {:?}",
+                        report.issues
+                    )
+                })?;
+            assert_eq!(issue.severity, JsonlImportIssueSeverity::Error);
+            assert!(!issue.message.contains("PRIVATE-WORKSPACE-CANARY"));
+            assert!(
+                !options.workspace_path.exists(),
+                "case {case}, dry_run={dry_run}"
+            );
+            let database = database_path(&options);
+            assert!(!database.exists());
+            assert!(!database.parent().ok_or("database parent")?.exists());
+            assert_eq!(
+                fs::read_to_string(&options.source_path).map_err(|e| e.to_string())?,
+                source
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn ordinary_jsonl_preview_retains_its_warning_only_count_contract() -> TestResult {
+    let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let path = root
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let mut records = rows();
+    records[6]["success"] = json!(false);
+    records[6]["memory_count"] = json!(99);
+    let options = JsonlImportOptions {
+        workspace_path: path.join("absent"),
+        database_path: None,
+        source_path: path.join("ordinary.jsonl"),
+        dry_run: true,
+    };
+    fs::write(&options.source_path, source_text(&records)).map_err(|e| e.to_string())?;
+    let report = import_jsonl_records(&options).map_err(|e| e.to_string())?;
+    assert_ne!(report.status, "rejected", "{:?}", report.issues);
+    for code in ["source_export_incomplete", "footer_memory_count_mismatch"] {
+        assert!(
+            report.issues.iter().any(|issue| {
+                issue.code == code && issue.severity == JsonlImportIssueSeverity::Warning
+            }),
+            "{code}"
+        );
+    }
+    assert!(
+        !report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "invalid_backup_record_stream")
+    );
+    assert!(!options.workspace_path.exists());
+    Ok(())
+}
+
+#[test]
+fn early_backup_admission_and_final_recovery_verification_use_the_same_counts() -> TestResult {
+    let mut records = rows();
+    let fixture = Fixture::new(&records)?;
+    fixture.verify().map_err(|e| e.to_string())?;
+    records[6]["artifact_count"] = json!(1);
+    let parsed = parse_jsonl_source(&source_text(&records));
+    assert!(recovery::validate_backup_source(&parsed).is_err());
+    fs::write(&fixture.options.source_path, source_text(&records)).map_err(|e| e.to_string())?;
+    let error = fixture
+        .verify()
+        .expect_err("an omitted artifact must fail the final fence too");
+    assert!(error.message().contains("counts disagree"));
+    assert!(!error.to_string().contains(&fixture.workspace));
+    assert_eq!(
+        fixture
+            .db
+            .count_table_rows("memories")
+            .map_err(|e| e.to_string())?,
+        2
+    );
+    Ok(())
+}

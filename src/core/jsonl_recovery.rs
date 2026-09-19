@@ -25,6 +25,45 @@ fn unreadable(_: impl fmt::Display) -> DomainError {
     mismatch("record verification could not read the required data")
 }
 
+/// Validate a complete backup projection before opening its destination.
+/// Ordinary JSONL import deliberately retains its warning-only count policy.
+/// Authentication remains the caller's responsibility; this adds no trust.
+pub(super) fn validate_backup_source(parsed: &ParsedJsonlImport) -> Result<(), &'static str> {
+    if parsed.has_errors() {
+        return Err("backup record stream contains malformed records");
+    }
+    let header = parsed
+        .header
+        .as_ref()
+        .ok_or("backup record stream has no header")?;
+    let footer = parsed
+        .footer
+        .as_ref()
+        .ok_or("backup record stream has no footer")?;
+    if !footer.success
+        || footer.total_records != u64::from(parsed.records_total)
+        || footer.memory_count != parsed.memories.len() as u64
+        || footer.tag_count != u64::from(parsed.tag_records)
+        || footer.link_count != parsed.links.len() as u64
+        || footer.artifact_count != u64::from(parsed.artifact_records)
+    {
+        return Err("backup record stream is incomplete or its counts disagree");
+    }
+    let workspace = header
+        .workspace_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or("backup record stream has no workspace identity")?;
+    if parsed
+        .memories
+        .iter()
+        .any(|memory| memory.workspace_id != workspace)
+    {
+        return Err("backup record stream contains a foreign workspace");
+    }
+    Ok(())
+}
+
 struct ExpectedRecords {
     memories: Vec<PreparedMemory>,
     links: Vec<PreparedLink>,
@@ -37,36 +76,21 @@ impl ExpectedRecords {
         workspace_id: &str,
         auth: &NativeAuthState,
     ) -> Result<Self, DomainError> {
+        validate_backup_source(parsed).map_err(mismatch)?;
         let header = parsed
             .header
             .as_ref()
             .ok_or_else(|| mismatch("missing header"))?;
-        let footer = parsed
-            .footer
-            .as_ref()
-            .ok_or_else(|| mismatch("missing footer"))?;
-        if parsed.has_errors()
-            || !footer.success
-            || footer.total_records != u64::from(parsed.records_total)
-            || footer.memory_count != parsed.memories.len() as u64
-            || footer.tag_count != u64::from(parsed.tag_records)
-            || footer.link_count != parsed.links.len() as u64
-            || header.workspace_id.as_deref()
-                != Some(
-                    crate::output::jsonl_export::redact_identifier(
-                        workspace_id,
-                        header.redaction_level,
-                    )
-                    .as_str(),
+        if header.workspace_id.as_deref()
+            != Some(
+                crate::output::jsonl_export::redact_identifier(
+                    workspace_id,
+                    header.redaction_level,
                 )
-            || parsed
-                .memories
-                .iter()
-                .any(|memory| Some(memory.workspace_id.as_str()) != header.workspace_id.as_deref())
+                .as_str(),
+            )
         {
-            return Err(mismatch(
-                "incomplete, malformed or cross-workspace record stream",
-            ));
+            return Err(mismatch("record stream belongs to a different workspace"));
         }
         let validated =
             validate_memories(parsed).map_err(|_| mismatch("invalid memory records"))?;
