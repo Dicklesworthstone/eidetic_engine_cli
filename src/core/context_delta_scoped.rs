@@ -41,8 +41,7 @@ impl ContextDeltaEnvelope {
         workspace_id: &str,
         feature_flag_set_hash: Option<&str>,
     ) -> Result<ContextDeltaPackSnapshot, ContextDeltaError> {
-        if workspace_id.trim().is_empty()
-            || self.data.workspace_id.as_deref() != Some(workspace_id)
+        if workspace_id.trim().is_empty() || self.data.workspace_id.as_deref() != Some(workspace_id)
         {
             return Err(scope_error(
                 "workspace does not match the retained baseline context",
@@ -292,12 +291,7 @@ mod tests {
         );
         assert_eq!(client, prior);
         client
-            .apply_json_delta_scoped_with_limit(
-                &transport,
-                transport.len(),
-                WORKSPACE,
-                Some(FLAGS),
-            )
+            .apply_json_delta_scoped_with_limit(&transport, transport.len(), WORKSPACE, Some(FLAGS))
             .expect("the exact inclusive limit accepts the entire JSON transport");
         assert_eq!(client, next);
     }
@@ -338,7 +332,10 @@ mod tests {
     fn scoped_application_does_not_mint_new_ledger_verification() {
         let (prior, _, mut delta) = fixture();
         let mut client = prior.with_server_verified_pack_record();
-        delta.data.server_decision.computed_from_server_verified_pack_record = true;
+        delta
+            .data
+            .server_decision
+            .computed_from_server_verified_pack_record = true;
         let received = client
             .apply_json_delta_scoped(&bytes(&delta), WORKSPACE, Some(FLAGS))
             .expect("receive a claimed server-verified delta");
@@ -348,6 +345,100 @@ mod tests {
                 .server_decision
                 .computed_from_server_verified_pack_record
         );
+        assert!(!client.server_verified_pack_record);
+    }
+
+    fn between(
+        prior: &ContextDeltaPackSnapshot,
+        next: &ContextDeltaPackSnapshot,
+    ) -> ContextDeltaEnvelope {
+        let mut delta = compute_context_delta(prior, next, ContextDeltaOptions::new(None))
+            .expect("compute canonical-record delta");
+        delta.data.workspace_id = Some(WORKSPACE.to_owned());
+        delta.data.prior_feature_flag_set_hash = Some(FLAGS.to_owned());
+        delta.data.new_feature_flag_set_hash = Some(FLAGS.to_owned());
+        delta
+    }
+
+    #[test]
+    fn scoped_receiver_reconstructs_mixed_edits_across_canonical_generations() {
+        let (mut client, mut second, _) = fixture();
+        second.items[0].fields.remove("content");
+        second.items.reverse();
+        second.items.push(
+            ContextDeltaItemSnapshot::new("mem_new")
+                .with_field("content", json!("new memory"))
+                .with_field("metadata", json!({"optional": null})),
+        );
+        let first_delivery = between(&client, &second);
+        client
+            .apply_json_delta_scoped(&bytes(&first_delivery), WORKSPACE, Some(FLAGS))
+            .expect("apply removal, reorder, field deletion and addition");
+        assert_eq!(client, second);
+
+        let mut third = second.clone();
+        third.pack_hash = "blake3:third".to_owned();
+        third.db_generation += 1;
+        third.items.remove(0);
+        third.items.reverse();
+        third.items[0]
+            .fields
+            .insert("content".to_owned(), json!("updated new memory"));
+        let second_delivery = between(&second, &third);
+        client
+            .apply_json_delta_scoped(&bytes(&second_delivery), WORKSPACE, Some(FLAGS))
+            .expect("advance from the newly reconstructed baseline");
+        assert_eq!(client, third);
+
+        // Each sender delta still comes from canonical full-pack records. A
+        // client may advance repeatedly without enabling protocol delta chains.
+        assert!(!first_delivery.data.server_decision.delta_chained);
+        assert!(!second_delivery.data.server_decision.delta_chained);
+    }
+
+    #[test]
+    fn scoped_receiver_rejects_duplicate_delivery_then_accepts_the_next_generation() {
+        let (mut client, second, first_delivery) = fixture();
+        let transport = bytes(&first_delivery);
+        client
+            .apply_json_delta_scoped(&transport, WORKSPACE, Some(FLAGS))
+            .expect("first delivery");
+        assert!(
+            client
+                .apply_json_delta_scoped(&transport, WORKSPACE, Some(FLAGS))
+                .is_err()
+        );
+        assert_eq!(client, second, "replay must not roll the baseline back");
+
+        let mut third = second.clone();
+        third.pack_hash = "blake3:third".to_owned();
+        third.db_generation += 1;
+        third.items.clear();
+        let next_delivery = between(&second, &third);
+        client
+            .apply_json_delta_scoped(&bytes(&next_delivery), WORKSPACE, Some(FLAGS))
+            .expect("a rejected duplicate must not poison the next valid update");
+        assert_eq!(client, third);
+    }
+
+    #[test]
+    fn scoped_receiver_can_retry_after_rejection_and_preserves_verification_on_failure() {
+        let (prior, next, delta) = fixture();
+        let mut client = prior.with_server_verified_pack_record();
+        let original = client.clone();
+        let mut rejected = delta.clone();
+        rejected.data.workspace_id = Some("different workspace".to_owned());
+        assert!(
+            client
+                .apply_json_delta_scoped(&bytes(&rejected), WORKSPACE, Some(FLAGS))
+                .is_err()
+        );
+        assert_eq!(client, original);
+        assert!(client.server_verified_pack_record);
+        client
+            .apply_json_delta_scoped(&bytes(&delta), WORKSPACE, Some(FLAGS))
+            .expect("retry the correct envelope against the untouched baseline");
+        assert_eq!(client, next);
         assert!(!client.server_verified_pack_record);
     }
 }
