@@ -25,9 +25,49 @@ fn unreadable(_: impl fmt::Display) -> DomainError {
     mismatch("record verification could not read the required data")
 }
 
+/// Validate a complete backup projection before opening its destination.
+/// Ordinary JSONL import deliberately retains its warning-only count policy.
+/// Authentication remains the caller's responsibility; this adds no trust.
+pub(super) fn validate_backup_source(parsed: &ParsedJsonlImport) -> Result<(), &'static str> {
+    if parsed.has_errors() {
+        return Err("backup record stream contains malformed records");
+    }
+    let header = parsed
+        .header
+        .as_ref()
+        .ok_or("backup record stream has no header")?;
+    let footer = parsed
+        .footer
+        .as_ref()
+        .ok_or("backup record stream has no footer")?;
+    if !footer.success
+        || footer.total_records != u64::from(parsed.records_total)
+        || footer.memory_count != parsed.memories.len() as u64
+        || footer.tag_count != u64::from(parsed.tag_records)
+        || footer.link_count != parsed.links.len() as u64
+        || footer.artifact_count != u64::from(parsed.artifact_records)
+    {
+        return Err("backup record stream is incomplete or its counts disagree");
+    }
+    let workspace = header
+        .workspace_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or("backup record stream has no workspace identity")?;
+    if parsed
+        .memories
+        .iter()
+        .any(|memory| memory.workspace_id != workspace)
+    {
+        return Err("backup record stream contains a foreign workspace");
+    }
+    Ok(())
+}
+
 struct ExpectedRecords {
     memories: Vec<PreparedMemory>,
     links: Vec<PreparedLink>,
+    legacy_supersession_ids: BTreeSet<String>,
 }
 
 impl ExpectedRecords {
@@ -36,39 +76,25 @@ impl ExpectedRecords {
         workspace_id: &str,
         auth: &NativeAuthState,
     ) -> Result<Self, DomainError> {
+        validate_backup_source(parsed).map_err(mismatch)?;
         let header = parsed
             .header
             .as_ref()
             .ok_or_else(|| mismatch("missing header"))?;
-        let footer = parsed
-            .footer
-            .as_ref()
-            .ok_or_else(|| mismatch("missing footer"))?;
-        if parsed.has_errors()
-            || !footer.success
-            || footer.total_records != u64::from(parsed.records_total)
-            || footer.memory_count != parsed.memories.len() as u64
-            || footer.tag_count != u64::from(parsed.tag_records)
-            || footer.link_count != parsed.links.len() as u64
-            || header.workspace_id.as_deref()
-                != Some(
-                    crate::output::jsonl_export::redact_identifier(
-                        workspace_id,
-                        header.redaction_level,
-                    )
-                    .as_str(),
+        if header.workspace_id.as_deref()
+            != Some(
+                crate::output::jsonl_export::redact_identifier(
+                    workspace_id,
+                    header.redaction_level,
                 )
-            || parsed
-                .memories
-                .iter()
-                .any(|memory| Some(memory.workspace_id.as_str()) != header.workspace_id.as_deref())
+                .as_str(),
+            )
         {
-            return Err(mismatch(
-                "incomplete, malformed or cross-workspace record stream",
-            ));
+            return Err(mismatch("record stream belongs to a different workspace"));
         }
         let validated =
             validate_memories(parsed).map_err(|_| mismatch("invalid memory records"))?;
+        let legacy_supersession_ids = revisions::legacy_supersession_ids(&validated);
         let prepared = prepare_memories_with_policy(
             parsed,
             validated,
@@ -83,6 +109,7 @@ impl ExpectedRecords {
         Ok(Self {
             memories: prepared.memories,
             links,
+            legacy_supersession_ids,
         })
     }
 
@@ -128,15 +155,17 @@ impl ExpectedRecords {
             {
                 return Err(mismatch("revision-family identity differs"));
             }
-            if let Some(at) = &expected.superseded_at {
-                if connection
+            // None is an obligation too: an accidentally superseded head is
+            // not a faithful restore, even when every row and body survived.
+            // Legacy expiry-only rows retain their structural fallback; only
+            // that explicitly identified compatibility case is ambiguous.
+            if !self.legacy_supersession_ids.contains(&expected.id)
+                && connection
                     .get_memory_superseded_at(&expected.id)
                     .map_err(unreadable)?
-                    .as_ref()
-                    != Some(at)
-                {
-                    return Err(mismatch("revision supersession differs"));
-                }
+                    != expected.superseded_at
+            {
+                return Err(mismatch("revision supersession differs"));
             }
             let tags: BTreeSet<_> = connection
                 .get_memory_tags(&expected.id)

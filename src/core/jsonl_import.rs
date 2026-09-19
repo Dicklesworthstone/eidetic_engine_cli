@@ -6,6 +6,9 @@
 
 #[path = "jsonl_recovery.rs"]
 pub(crate) mod recovery;
+#[cfg(test)]
+#[path = "jsonl_recovery_regression_tests.rs"]
+mod recovery_regression_tests;
 #[path = "jsonl_revisions.rs"]
 mod revisions;
 
@@ -881,6 +884,20 @@ fn import_jsonl_records_with_policy(
     if parsed.has_errors() {
         return Ok(report);
     }
+    // A verified backup must be complete before any destination directory,
+    // database, migration or workspace row is created, including dry-run.
+    // Generic JSONL import keeps its existing warning-only count semantics.
+    if native_trust_policy == NativeTrustPolicy::VerifiedBackupRestore
+        && let Err(reason) = recovery::validate_backup_source(&parsed)
+    {
+        report.issues.push(JsonlImportIssue::error(
+            None,
+            "invalid_backup_record_stream",
+            reason,
+        ));
+        report.status = "rejected".to_owned();
+        return Ok(report);
+    }
     let validated_memories = match validate_memories(&parsed) {
         Ok(memories) => memories,
         Err(issues) => {
@@ -908,6 +925,7 @@ fn import_jsonl_records_with_policy(
     let workspace_id = ensure_workspace(&connection, &workspace_path)?;
 
     let native_auth = native_import_auth_state(&parsed, &workspace_path, &workspace_id);
+    let legacy_supersession_ids = revisions::legacy_supersession_ids(&validated_memories);
     let prepared = prepare_memories_with_policy(
         &parsed,
         validated_memories,
@@ -1039,16 +1057,13 @@ fn import_jsonl_records_with_policy(
             )?;
         }
 
-        // bd-tmv70: an archive written before V123 encodes supersession in
-        // `valid_to`, because that column doubled as the marker. Import writes
-        // those values faithfully, so without this every restored revision comes
-        // back with `superseded_at = NULL` and the whole chain reads as live
-        // heads -- silent corruption of the revision graph on restore.
-        //
-        // Re-derived structurally from the chain rather than by widening the
-        // archive format, and scoped to the rows this import wrote.
+        // Only rows whose archive still encodes history through expiry need
+        // the pre-V123 fallback. Explicit revision edges are authoritative,
+        // including the absence of a marker on their terminal head. Re-running
+        // timestamp inference on that head can retire it under clock skew.
         let imported_ids = to_insert
             .iter()
+            .filter(|memory| legacy_supersession_ids.contains(&memory.id))
             .map(|memory| memory.id.clone())
             .collect::<Vec<_>>();
         connection.derive_supersession_for_memory_ids(&imported_ids)?;

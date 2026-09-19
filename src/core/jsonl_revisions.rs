@@ -16,6 +16,43 @@ fn invalid(reason: &'static str) -> JsonlImportIssue {
     JsonlImportIssue::error(None, "invalid_memory_supersession", reason)
 }
 
+/// Imported identities eligible for the pre-V123 expiry-based fallback.
+///
+/// Call after validation has checked references, family membership and cycles.
+/// An explicit edge defines the headship of BOTH endpoints; its terminal node
+/// can have an author-supplied expiry without being superseded. Protect these
+/// nodes even when creation timestamps disagree with the explicit edge order.
+/// Do not exclude an entire family: a mixed-era archive may still contain an
+/// older, unreferenced ancestor whose only history marker is its expiry.
+pub(super) fn legacy_supersession_ids(memories: &[ValidatedMemory<'_>]) -> BTreeSet<String> {
+    let mut explicit = BTreeSet::new();
+    for memory in memories {
+        let record = memory.record;
+        if record.superseded_at.is_some() {
+            explicit.insert(record.memory_id.as_str());
+        }
+        if let Some(next) = record.superseded_by.as_deref() {
+            explicit.insert(record.memory_id.as_str());
+            explicit.insert(next);
+        }
+        if let Some(prior) = record.supersedes.as_deref() {
+            explicit.insert(record.memory_id.as_str());
+            explicit.insert(prior);
+        }
+    }
+    memories
+        .iter()
+        .filter(|memory| {
+            let record = memory.record;
+            (record.valid_to.is_some() || record.expires_at.is_some())
+                && !explicit.contains(record.memory_id.as_str())
+        })
+        // The writer uses imported IDs, which differ from archive aliases for
+        // redacted records. Never pass the unparsed source identity to SQL.
+        .map(|memory| memory.id.clone())
+        .collect()
+}
+
 pub(super) fn supersession_timestamps(
     memories: &[ValidatedMemory<'_>],
 ) -> Result<BTreeMap<String, String>, JsonlImportIssue> {
