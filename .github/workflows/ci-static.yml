@@ -89,5 +89,14 @@ jobs:
       - name: Contract drift radar
         run: ./scripts/contract-drift-radar.sh
 
+      # bd-yytkz. Self-test FIRST and as its own step: if the guard's failure
+      # arms have stopped working, the audit below is a clean answer from a
+      # broken instrument, and a combined step would report that as one green.
+      - name: Pinned definition guard --self-test
+        run: ./scripts/check-pinned-definitions.sh --self-test
+
+      - name: Pinned definitions
+        run: ./scripts/check-pinned-definitions.sh
+
       - name: Format
         run: cargo fmt --check
