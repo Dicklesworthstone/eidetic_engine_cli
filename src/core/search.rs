@@ -792,8 +792,52 @@ fn calibrated_relevance_lower_bound(hit: &SearchHit) -> Option<f32> {
 /// drives could not be exercised.
 pub fn search_hit_meets_relevance_floor(hit: &SearchHit, user_floor_override: Option<f32>) -> bool {
     let floor = user_floor_override.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
-    let relevance_score =
-        calibrated_relevance_lower_bound(hit).unwrap_or_else(|| hit.relevance_score());
+
+    // An explicitly calibrated hit is judged on its calibrated lower bound, in
+    // whatever domain the calibration established. This branch is the only one
+    // entitled to compare across sources, because a calibration is what makes
+    // the values comparable.
+    if let Some(lower) = calibrated_relevance_lower_bound(hit) {
+        return lower.is_finite() && lower >= floor;
+    }
+
+    // DOMAIN CHECK (bd-reality-core-convergence-1azkt.11, acceptance bullet 4).
+    //
+    // DEFAULT_RELEVANCE_FLOOR is calibrated on ABSOLUTE COSINE -- its own doc
+    // records the corpus: junk semantic_fast hits below 0.03, meaningful hits
+    // 0.10..=0.50. Applying it to `Lexical` compares that threshold against a
+    // QUERY-RELATIVE POOL RATIO, where 0.05 silently means "at least 5% of
+    // whatever else this query happened to return". Sharing the 0..1 RANGE is
+    // not sharing a DOMAIN -- the same false equivalence the `scoreKind` rename
+    // removed from the label, and here it lives in the predicate.
+    //
+    // Measured consequence: raw BM25 2.0 is ADMITTED beside a 9.0 (2/9 = 0.22)
+    // and DROPPED beside a 1000.0 (2/1000 = 0.002). Identical evidence, opposite
+    // decisions, determined entirely by an unrelated document's score.
+    //
+    // No lexical-domain floor is calibrated, and inventing one would repeat the
+    // defect a layer down. So the lexical arm admits on EVIDENCE PRESENCE and is
+    // explicitly uncalibrated: the pool projection already forces absent or
+    // non-finite evidence to 0.0, so `> 0.0` is exactly "this document matched".
+    // The bead's acceptance permits this — irrelevant lexical-only results may be
+    // "excluded OR explicitly low-confidence rather than 1.0/good" — and search
+    // already reports qualityAssessment=unknown with honestQualityScore=null.
+    //
+    // This admits a SUPERSET of what the cross-domain floor admitted, so it
+    // cannot reproduce the recall@5 1.0 -> 0.3 regression this bead recorded
+    // when admission last changed; that regression came from DROPPING hits.
+    // ONLY WHEN NO EXPLICIT OVERRIDE IS SET. An explicit `--relevance-floor`
+    // is the caller deliberately choosing a threshold, and this repo already
+    // holds that convention: `explicit_override_applies_uniformly_across_all_
+    // sources` states it as "the adaptive policy ONLY kicks in when no explicit
+    // override is set", which also keeps `--relevance-floor 0.0` (disabled) and
+    // every existing fixture at their exact prior semantics. The defect is the
+    // DEFAULT silently spanning two domains, not a caller choosing one.
+    if hit.source == ScoreSource::Lexical && user_floor_override.is_none() {
+        return hit.score.is_finite() && hit.score > 0.0;
+    }
+
+    let relevance_score = hit.relevance_score();
     relevance_score.is_finite() && relevance_score >= floor
 }
 
@@ -21353,8 +21397,23 @@ mod tests {
     }
 
     #[test]
-    fn lexical_normalization_still_rejects_weak_and_absent_evidence() {
-        for raw in [vec![9.0_f32, 0.001, 0.0], vec![0.0, 0.0]] {
+    fn lexical_admission_is_evidence_based_not_pool_relative() {
+        // RE-AIMED, NOT DELETED (bd-reality-core-convergence-1azkt.11 bullet 4).
+        //
+        // This test was `lexical_normalization_still_rejects_weak_and_absent_
+        // evidence` and asserted `admitted == (raw == 9.0)` over the pool
+        // [9.0, 0.001, 0.0] -- i.e. that a raw 0.001 is REJECTED. It was written
+        // during the recall repair and its intent was sound, but the expectation
+        // it encoded was POOL-RELATIVE rather than evidence-based: the 0.001 was
+        // rejected only because a 9.0 shared its pool. Alone, that same 0.001
+        // normalizes to 1.0 and was admitted, so the old expectation could not
+        // distinguish weak evidence from relatively-weak evidence.
+        //
+        // THE CONTRACT IT EXISTED FOR IS KEPT AND STRENGTHENED: absent or
+        // zero evidence must still be rejected, and that is now asserted over
+        // BOTH pool shapes rather than one. What is deliberately gone is the
+        // claim that a positive match is rejected for the company it keeps.
+        for raw in [vec![9.0_f32, 0.001, 0.0], vec![0.0, 0.0], vec![0.001]] {
             let results = raw
                 .iter()
                 .enumerate()
@@ -21377,10 +21436,15 @@ mod tests {
                 FrankensearchFinalScoreScale::Native,
             );
             for (hit, raw_score) in hits.iter().zip(&raw) {
+                // The raw engine value always survives the projection.
                 assert_eq!(hit.lexical_score, Some(*raw_score));
+                // Admission tracks EVIDENCE, not the pool: every positive raw
+                // score is admitted, every zero is not, in every pool shape.
                 assert_eq!(
                     search_hit_meets_relevance_floor(hit, None),
-                    *raw_score == 9.0
+                    *raw_score > 0.0,
+                    "raw {raw_score} in pool {raw:?}: admission must follow the \
+                     hit's own evidence, not its share of the pool maximum"
                 );
             }
         }
