@@ -1290,6 +1290,40 @@ contention when multiple agents are building simultaneously.
 
 ---
 
+## Before You Search: Establish the Search Space
+
+**Answer "where would this live, if it existed?" BEFORE you search for whether it exists.**
+
+The dominant search failure in this repo is not a bad pattern. It is a good pattern aimed at the wrong place, run before that question was asked. It produces a confident zero, and a confident zero is indistinguishable from a real absence.
+
+Six instances from a single night, four agents:
+
+| What was searched | Where the answer actually lived |
+|---|---|
+| `"maintain"`, the acceptance's word | the CLI subcommand is `maintenance` |
+| `mod <basename>` for a test module | `#[path = "..."] mod <other_name>;` — the module name need not match the file name |
+| `tests/suites/` and `Cargo.toml` for a test's wiring | `tests/contracts.rs`, via a `#[path]` include |
+| `tests/` for a backup guard | `src/core/backup.rs`'s own inline `mod tests` |
+| one file for a constant | it was declared in five |
+| `tail` as the chokepoint | the script used `cat` |
+
+Every one of these is the same shape: **a declaration lives where declarations live, not where the thing is used. A test lives where the harness includes it, not next to its subject.**
+
+### The checks, in order
+
+1. **Name the surface first.** Say where this kind of thing is declared, included, or registered in THIS repo, then search there. If you cannot name it, that is the first thing to find out — not something to infer from a zero.
+2. **Carry a known positive in the same invocation.** Include a term you have already seen with your own eyes in that search space, with the same quoting and expansion. If the positive returns zero, your instrument is broken and every other zero is unmeasured, not empty. (In zsh, `grep $FILES` passes one argument, not a list — use `${=FILES}` or an array. That alone produced five false zeros in one sweep.)
+3. **Uniform zeros are a defect signature.** Real coverage gaps are ragged — 0, 14, 3, 0, 228. A clean block of zeros across unrelated terms is almost always the instrument.
+4. **Presence is not provenance.** `git log -S '<symbol>' -- <path>` dates when something arrived. A symbol found today may predate the change you are citing it as evidence for, by weeks.
+5. **A mention is not a definition.** A version note naming `V124_SOURCE_WRITE_STATS`, a comment naming a flag, a doc naming a table — none of them is the thing. Check that the hit is a declaration before treating it as one.
+6. **Publish the search space with the claim.** An absence is only as strong as its enumeration. State the spellings tried and the files covered, so the next reader can spot the one you missed instead of inheriting your conclusion.
+
+### Why this is here
+
+It is placed immediately before the tool-selection guidance because that is the moment it applies — when you are about to compose a search, not afterwards when you are writing up what you found. A lesson recorded somewhere it is read after the fact is a gate that does not execute.
+
+---
+
 ## ast-grep vs ripgrep
 
 **Use `ast-grep` when structure matters.** It parses code and matches AST nodes, ignoring comments/strings, and can **safely rewrite** code.
