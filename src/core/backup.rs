@@ -3578,6 +3578,14 @@ fn restore_backup_to_side_path_with_verification_hook(
     options: &BackupRestoreOptions,
     before_verification: impl FnOnce(&Path) -> Result<(), DomainError>,
 ) -> Result<BackupRestoreReport, DomainError> {
+    restore_backup_to_side_path_with_recovery_hooks(options, before_verification, |_| Ok(()))
+}
+
+fn restore_backup_to_side_path_with_recovery_hooks(
+    options: &BackupRestoreOptions,
+    before_verification: impl FnOnce(&Path) -> Result<(), DomainError>,
+    before_publication: impl FnOnce(&Path) -> Result<(), DomainError>,
+) -> Result<BackupRestoreReport, DomainError> {
     let workspace_path = normalize_path(&options.workspace_path);
     let backup_path = normalize_backup_input_path(&options.backup_path)?;
     let side_path = normalize_restore_side_path(&options.side_path)?;
@@ -3937,6 +3945,11 @@ fn restore_backup_to_side_path_with_verification_hook(
             ),
         });
     }
+    // Rebuilding may consume jobs, but cannot grant or rewrite durable
+    // authority. Recheck the admitted history after the last rebuilding stage.
+    before_publication(&restored_database_path)?;
+    expected_history.verify_before_publication(&restored_database_path)?;
+
     let restore_issue_count = import_report
         .issues
         .len()
