@@ -30,12 +30,12 @@ pub(crate) struct IndexGenerationLease {
 }
 
 impl IndexGenerationLease {
-    /// An already-pinned database snapshot can predate the live directory even
-    /// after it acquires a reader lease. Use only a committed, validated retained
-    /// generation no newer than that snapshot. Missing, malformed or obsolete
-    /// live metadata must not strand a usable retained generation. Never promote
-    /// files or inspect staging/rejected directories as candidate evidence on a
-    /// read path. Callers still validate the selected live index's actual tiers.
+    /// Select a complete generation no newer than the pinned source snapshot.
+    ///
+    /// The live directory is preferred only after validating its actual tiers.
+    /// Missing directories and damaged regular files can use a retained index;
+    /// redirected or special entries cannot. Selection is read-only, and the
+    /// caller must keep this lease through collection of both search arms.
     pub(crate) fn index_for_snapshot(
         &self,
         cx: &asupersync::Cx,
@@ -51,9 +51,7 @@ impl IndexGenerationLease {
             "select snapshot index",
         )?;
         let metadata_path = index_dir.join(super::INDEX_METADATA_FILE);
-        // A damaged manifest permits read-only recovery; a redirected or special
-        // filesystem entry does not. Keep these checks outside the parse-error
-        // fallback so it cannot turn a symlink refusal into successful retrieval.
+        // Keep unsafe-entry refusals outside recoverable parse/backend errors.
         ensure_index_path_has_no_symlinks(&metadata_path, "select snapshot metadata")?;
         super::ensure_index_metadata_path_is_regular_or_missing(
             &metadata_path,
@@ -67,10 +65,16 @@ impl IndexGenerationLease {
             })
             .and_then(|metadata| metadata.generation);
         index_checkpoint(cx)?;
-        if current.is_some_and(|generation| generation <= maximum_generation) {
-            // Do not open the live tiers twice: the search caller performs the
-            // full corpus/tier validation before it admits any index contents.
-            return Ok(index_dir.to_path_buf());
+        if let Some(generation) = current.filter(|generation| *generation <= maximum_generation) {
+            ensure_generation_entries_are_regular(cx, index_dir)?;
+            let valid = super::validated_index_generation(index_dir).ok() == Some(generation);
+            index_checkpoint(cx)?;
+            if valid {
+                return Ok(index_dir.to_path_buf());
+            }
+            // A valid manifest is not proof of a complete generation. Continue
+            // to retained candidates after a missing/corrupt vector or lexical
+            // tier, rather than returning a path the caller cannot open.
         }
 
         let prefix = format!(
@@ -98,12 +102,20 @@ impl IndexGenerationLease {
             {
                 continue;
             }
-            // Cheap metadata admission first; open actual tiers only for the
-            // newest eligible candidates. Corrupt or legacy rows cannot become
-            // an implicit generation-zero fallback.
+            let metadata_path = path.join(super::INDEX_METADATA_FILE);
+            ensure_index_path_has_no_symlinks(&metadata_path, "select retained metadata")?;
+            super::ensure_index_metadata_path_is_regular_or_missing(
+                &metadata_path,
+                "select retained metadata",
+            )?;
+            // Admit metadata first, then open only the newest eligible tiers.
+            // Missing watermarks never become an implicit generation zero.
             let Some(generation) = super::parse_index_metadata(&path)
                 .ok()
                 .flatten()
+                .filter(|metadata| {
+                    super::index_metadata_compatibility_error(&metadata_path, metadata).is_none()
+                })
                 .and_then(|metadata| metadata.generation)
                 .filter(|generation| *generation <= maximum_generation)
             else {
@@ -114,22 +126,62 @@ impl IndexGenerationLease {
         candidates.sort();
         for (generation, _, path) in candidates.into_iter().rev() {
             index_checkpoint(cx)?;
+            ensure_generation_entries_are_regular(cx, &path)?;
             let valid = super::validated_index_generation(&path).ok() == Some(generation);
-            // Tier validation can perform substantial I/O. Cancellation during
-            // that work must not be turned into a successful fallback read.
             index_checkpoint(cx)?;
             if valid {
                 return Ok(path);
             }
         }
+        index_checkpoint(cx)?;
         Err(IndexRebuildError::Index(
-            if current.is_some() {
+            if current.is_some_and(|generation| generation > maximum_generation) {
                 "The live index is newer than the source snapshot and no compatible retained generation is available; retry with a fresh snapshot"
             } else {
-                "The live index metadata is unavailable or incompatible and no compatible retained generation is available; rebuild the index"
+                "No complete index generation is available for the source snapshot; rebuild the index"
             }
             .to_owned(),
         ))
+    }
+
+    /// Preserve the ordinary NoIndex result when neither a live directory nor
+    /// any recognized retained directory exists. This is presence detection,
+    /// not admission: every returned candidate still needs full validation.
+    pub(crate) fn has_retained_generation_directory(
+        &self,
+        cx: &asupersync::Cx,
+        index_dir: &Path,
+    ) -> Result<bool, IndexRebuildError> {
+        index_checkpoint(cx)?;
+        let parent = index_parent(index_dir);
+        verify_parent_identity(parent, &self._directory)?;
+        let prefix = format!(
+            "{}{}",
+            super::index_base_name(index_dir)?,
+            super::INDEX_RETAINED_SUFFIX
+        );
+        for entry in std::fs::read_dir(parent)
+            .map_err(|error| lease_error("inspect retained generation presence", error))?
+        {
+            index_checkpoint(cx)?;
+            let entry = entry.map_err(|error| lease_error("inspect retained entry", error))?;
+            if super::retained_generation_sequence(&entry.file_name().to_string_lossy(), &prefix)
+                .is_none()
+            {
+                continue;
+            }
+            ensure_index_path_has_no_symlinks(&entry.path(), "inspect retained generation")?;
+            if entry
+                .file_type()
+                .map_err(|error| lease_error("inspect retained entry", error))?
+                .is_dir()
+            {
+                index_checkpoint(cx)?;
+                return Ok(true);
+            }
+        }
+        index_checkpoint(cx)?;
+        Ok(false)
     }
 
     pub(crate) async fn read(
@@ -187,6 +239,48 @@ impl IndexGenerationLease {
     }
 }
 
+/// Backend failure can authorize another generation, never path redirection.
+/// Check directory entries without opening their bodies before a backend can
+/// follow a segment, vector or manifest path. Cooperating publishers are held
+/// out by the parent lease; this is not protection against arbitrary external
+/// writers that ignore that lease and race subsequent backend opens.
+fn ensure_generation_entries_are_regular(
+    cx: &asupersync::Cx,
+    root: &Path,
+) -> Result<(), IndexRebuildError> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        index_checkpoint(cx)?;
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| lease_error("inspect generation entry", error))?;
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(&path)
+                .map_err(|error| lease_error("inspect generation directory", error))?
+            {
+                index_checkpoint(cx)?;
+                let entry =
+                    entry.map_err(|error| lease_error("inspect generation entry", error))?;
+                let kind = entry
+                    .file_type()
+                    .map_err(|error| lease_error("inspect generation entry", error))?;
+                if kind.is_dir() {
+                    pending.push(entry.path());
+                } else if !kind.is_file() {
+                    return Err(IndexRebuildError::Index(
+                        "Refusing to read an index generation containing a symlink or special entry"
+                            .to_owned(),
+                    ));
+                }
+            }
+        } else {
+            return Err(IndexRebuildError::Index(
+                "Refusing to read an index generation whose directory was replaced".to_owned(),
+            ));
+        }
+    }
+    index_checkpoint(cx)
+}
+
 fn open_directory(parent: &Path) -> Result<File, IndexRebuildError> {
     ensure_index_path_has_no_symlinks(parent, "lease index generation")?;
     OpenOptions::new()
@@ -234,6 +328,10 @@ fn lease_error(action: &str, error: impl std::fmt::Display) -> IndexRebuildError
         "Could not {action} index generation lease: {error}"
     ))
 }
+
+#[cfg(test)]
+#[path = "index_snapshot_recovery_tests.rs"]
+mod snapshot_recovery_tests;
 
 #[cfg(test)]
 mod tests {

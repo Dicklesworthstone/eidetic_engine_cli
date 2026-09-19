@@ -770,7 +770,11 @@ pub fn normalized_relevance_score(source: ScoreSource, score: f32) -> f32 {
 
 fn calibrated_relevance_lower_bound(hit: &SearchHit) -> Option<f32> {
     let metadata = hit.metadata.as_ref()?;
-    if metadata.get("calibrated").and_then(serde_json::Value::as_bool) != Some(true) {
+    if metadata
+        .get("calibrated")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
         return None;
     }
     let interval = metadata.get("scoreInterval")?.as_array()?;
@@ -783,7 +787,8 @@ pub(crate) fn search_hit_meets_relevance_floor(
     user_floor_override: Option<f32>,
 ) -> bool {
     let floor = user_floor_override.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
-    let relevance_score = calibrated_relevance_lower_bound(hit).unwrap_or_else(|| hit.relevance_score());
+    let relevance_score =
+        calibrated_relevance_lower_bound(hit).unwrap_or_else(|| hit.relevance_score());
     relevance_score.is_finite() && relevance_score >= floor
 }
 
@@ -7792,14 +7797,29 @@ async fn pin_search_generation(
 ) -> Result<crate::core::index::IndexGenerationLease, SearchError> {
     crate::core::index::ensure_index_path_has_no_symlinks(index_dir, "pin search generation")
         .map_err(|error| SearchError::IndexIncompatible(error.to_string()))?;
+    search_checkpoint(cx)?;
+    let parent = index_dir
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if matches!(std::fs::symlink_metadata(parent), Err(error)
+        if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        // A missing parent cannot contain a retained sibling. Keep the public
+        // NoIndex contract without creating a lock directory on a read path.
+        return Err(SearchError::NoIndex);
+    }
     crate::core::index::IndexGenerationLease::read(cx, index_dir)
         .await
-        .map_err(|error| match error {
-            crate::core::index::IndexRebuildError::Cancelled(reason) => {
-                SearchError::Cancelled(reason)
-            }
-            error => SearchError::Index(error.to_string()),
-        })
+        .map_err(map_index_generation_error)
+}
+
+#[cfg(unix)]
+fn map_index_generation_error(error: crate::core::index::IndexRebuildError) -> SearchError {
+    match error {
+        crate::core::index::IndexRebuildError::Cancelled(reason) => SearchError::Cancelled(reason),
+        error => SearchError::Index(error.to_string()),
+    }
 }
 
 fn with_search_root<F, Fut, T>(operation: F) -> Result<T, SearchError>
@@ -9058,7 +9078,9 @@ async fn run_search_inner_with_performance(
     };
 
     let index_exists_start = Instant::now();
-    if !index_dir.exists() {
+    // With a source snapshot, the lease can recover from an absent live
+    // directory. Index-only callers and platforms without leases stay strict.
+    if !index_dir.exists() && (!cfg!(unix) || source_generation.is_none()) {
         trace.record_elapsed("search::indexExists", index_exists_start);
         return Err(SearchError::NoIndex);
     }
@@ -9067,6 +9089,15 @@ async fn run_search_inner_with_performance(
     // lookup; the shared lease excludes publication and rollback until collect.
     #[cfg(unix)]
     let generation_lease = pin_search_generation(cx, &index_dir).await?;
+    #[cfg(unix)]
+    if !index_dir.exists()
+        && !generation_lease
+            .has_retained_generation_directory(cx, &index_dir)
+            .map_err(map_index_generation_error)?
+    {
+        trace.record_elapsed("search::indexExists", index_exists_start);
+        return Err(SearchError::NoIndex);
+    }
     // A shared lease prevents subsequent swaps, but the source snapshot may
     // have been established BEFORE this publisher committed. Read the newest
     // valid retained generation the snapshot can actually describe instead.
@@ -9074,12 +9105,14 @@ async fn run_search_inner_with_performance(
     let index_dir = match source_generation {
         Some(generation) => generation_lease
             .index_for_snapshot(cx, &index_dir, generation)
-            .map_err(|error| SearchError::Index(error.to_string()))?,
+            .map_err(map_index_generation_error)?,
         None => index_dir,
     };
-    #[cfg(not(unix))]
-    let _ = source_generation;
-    if let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&index_dir) {
+    // Snapshot selection already validated the complete generation. Do not
+    // reopen every backend for that same validation on the healthy path.
+    if (!cfg!(unix) || source_generation.is_none())
+        && let Err(reason) = crate::core::index::validate_index_corpus_compatibility(&index_dir)
+    {
         trace.record_elapsed("search::indexExists", index_exists_start);
         return Err(index_compatibility_search_error(&index_dir, reason));
     }
