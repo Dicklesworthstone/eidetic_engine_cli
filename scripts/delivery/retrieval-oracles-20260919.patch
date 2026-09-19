@@ -45,3 +45,51 @@ diff --git a/tests/support/revision_search_cli.rs b/tests/support/revision_searc
              vec![expected],
              "{reference}"
          );
+diff --git a/src/core/global_store.rs b/src/core/global_store.rs
+--- a/src/core/global_store.rs
++++ b/src/core/global_store.rs
+@@ -786,5 +786,7 @@
+         return Ok(Vec::new());
+     };
+     let memories = connection
+-        .list_memories(&workspace.id, None, include_tombstoned)
++        // The false arm of list_memories also excludes superseded history.
++        // Keep that independent from this API's tombstone and as-of policies.
++        .list_memories(&workspace.id, None, true)
+         .map_err(global_read_error)?;
+@@ -800,5 +802,8 @@
+         .collect::<std::collections::BTreeSet<_>>();
+     let mut admitted = Vec::with_capacity(memories.len());
+     for memory in memories {
++        if memory.tombstoned_at.is_some() && !include_tombstoned {
++            continue;
++        }
+         if let Some(raw) = revisions.get(&memory.id) {
+             let cutoff = chrono::DateTime::parse_from_rfc3339(raw).map_err(global_read_error)?;
+diff --git a/src/core/global_store_revision_tests.rs b/src/core/global_store_revision_tests.rs
+--- a/src/core/global_store_revision_tests.rs
++++ b/src/core/global_store_revision_tests.rs
+@@ -62,13 +62,16 @@
+ #[test]
+ fn global_historical_reads_use_the_exact_exclusive_supersession_boundary() -> TestResult {
+     let (_root, paths, _db, _workspace) = fixture()?;
+-    let before = read_global_store_memories_at(&paths, true,
+-        Some(at("2026-05-31T23:59:59.999999999Z")))?;
+-    // This API gates revision authority only. The search caller additionally
+-    // applies each row's author validity interval, including future starts.
+-    assert_eq!(ids(&before), [PRIOR, HEAD]);
+-    for reference in [CUTOFF, "2026-08-01T00:00:00Z", "2026-06-01T01:00:00+01:00"] {
+-        assert_eq!(ids(&read_global_store_memories_at(&paths, true, Some(at(reference)))?), [HEAD]);
++    for include_tombstoned in [false, true] {
++        let before = read_global_store_memories_at(&paths, include_tombstoned,
++            Some(at("2026-05-31T23:59:59.999999999Z")))?;
++        // This API gates revision authority only. The search caller additionally
++        // applies each row's author validity interval, including future starts.
++        assert_eq!(ids(&before), [PRIOR, HEAD]);
++        for reference in [CUTOFF, "2026-08-01T00:00:00Z", "2026-06-01T01:00:00+01:00"] {
++            assert_eq!(ids(&read_global_store_memories_at(&paths, include_tombstoned,
++                Some(at(reference)))?), [HEAD]);
++        }
+     }
+     Ok(())
+ }
