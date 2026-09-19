@@ -284,14 +284,30 @@ fn north_star_1_release_context_includes_verification_rules() -> TestResult {
     ensure(output.status.success(), "context command failed")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(
-        stdout.contains("cargo test") || stdout.contains("test"),
-        "context should mention running tests before release",
-    )?;
-    ensure(
-        stdout.contains("force-push") || stdout.contains("main branch"),
-        "context should warn about force-push dangers",
-    )?;
+    // EXACT SEEDED SENTENCES, not substrings that the output could satisfy by
+    // accident. `seed_release_memories` wrote these verbatim, so asserting them
+    // whole proves the pack SURFACED THE MEMORY rather than that the word
+    // happened to appear somewhere in a markdown document about releasing.
+    //
+    // The previous form was `contains("cargo test") || contains("test")`, and
+    // the second disjunct made the first INERT: "test" is a substring of
+    // "cargo test", so the disjunction is true whenever the specific check is,
+    // and also true for any output containing "test" anywhere at all. The
+    // narrow check could not change the outcome. That is an assertion voided on
+    // the same line it was written (bd-2mpct).
+    //
+    // Same justification the file already gives at the exact-match assertions
+    // below: the fixtures are ours, so an exact match cannot flake on
+    // unrelated copy.
+    for expected in [
+        "Always run cargo test before creating a release tag.",
+        "Never force-push to main branch during release.",
+    ] {
+        ensure(
+            stdout.contains(expected),
+            format!("release pack must surface the seeded rule {expected:?}; got:\n{stdout}"),
+        )?;
+    }
 
     Ok(())
 }
@@ -316,16 +332,41 @@ fn north_star_2_async_migration_context_is_json_and_mentions_cx() -> TestResult 
     let json = parse_json_stdout(&output, "async migration context")?;
 
     ensure(json.is_object(), "output must be JSON object")?;
+    // BOTH fields, not either. The previous `schema OR data` was satisfied by
+    // a response carrying one and missing the other, which is the shape a
+    // truncated or half-built envelope has -- so the assertion passed in
+    // exactly the cases it should have caught. A conjunction is strictly
+    // stronger and invents no constant: the schema's VALUE is not asserted
+    // here because this test has not measured it and a guessed literal would
+    // be a different defect.
     ensure(
-        json.get("schema").is_some() || json.get("data").is_some(),
-        "output should have schema or data field",
+        json.get("schema")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| !s.is_empty()),
+        format!("response must carry a non-empty schema; got: {json}"),
+    )?;
+    ensure(
+        json.get("data").is_some(),
+        format!("response must carry a data field; got: {json}"),
     )?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    ensure(
-        stdout.contains("Cx") || stdout.contains("asupersync") || stdout.contains("Outcome"),
-        "context should mention &Cx or asupersync or Outcome",
-    )?;
+    // Exact seeded sentences. The previous three-way disjunction was not inert
+    // -- "Cx", "asupersync" and "Outcome" do not subsume one another -- but
+    // "Cx" is TWO CHARACTERS and matches inside unrelated words, so the
+    // assertion could be satisfied by text that surfaces none of the seeded
+    // rules. Asserting the sentences proves the pack retrieved the memory.
+    for expected in [
+        "Asupersync uses &Cx for threading, not Tokio runtime.",
+        "Outcome::ok() and Outcome::err() replace Result in async code.",
+    ] {
+        ensure(
+            stdout.contains(expected),
+            format!(
+                "async-migration pack must surface the seeded rule {expected:?}; got:\n{stdout}"
+            ),
+        )?;
+    }
 
     Ok(())
 }
@@ -352,14 +393,19 @@ fn north_star_4_onboarding_context_includes_conventions() -> TestResult {
     ensure(output.status.success(), "context command failed")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    ensure(
-        stdout.contains("cargo fmt") || stdout.contains("fmt"),
-        "onboarding context should mention formatting",
-    )?;
-    ensure(
-        stdout.contains("AGENTS.md") || stdout.contains("conventions"),
-        "onboarding context should mention conventions",
-    )?;
+    // Exact seeded sentences, for the reason given in scenario 1. Here the
+    // inert pair was `contains("cargo fmt") || contains("fmt")`: "fmt" is a
+    // substring of "cargo fmt", so the specific check could never decide the
+    // outcome, and any output mentioning "fmt" satisfied it.
+    for expected in [
+        "Run cargo fmt --check before committing.",
+        "Check AGENTS.md for coding conventions.",
+    ] {
+        ensure(
+            stdout.contains(expected),
+            format!("onboarding pack must surface the seeded rule {expected:?}; got:\n{stdout}"),
+        )?;
+    }
 
     Ok(())
 }
