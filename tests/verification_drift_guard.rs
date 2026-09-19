@@ -2139,22 +2139,26 @@ fn the_drift_guard_never_defaults_a_failed_probe_to_zero() {
 /// Where the grandfathered inventory of open-coded success assertions lives.
 const OPEN_CODED_BASELINE: &str = "tests/fixtures/golden/open_coded_success_baseline.tsv";
 
-/// Enclosing functions where `ensure(x.status.success(), ..)` is the CORRECT shape.
-///
-/// `ensure_command_success` is the chokepoint this gate exists to push work
-/// toward: it prints the exit code, stdout and stderr. Each test binary needs
-/// its own copy because they are separate compilation units and cannot share
-/// one (usr002 and usr003 each received a copy in 43a96043c), so a new copy
-/// must not be reported as a new offender -- otherwise the gate would fire on
-/// the exact pattern it is promoting.
-///
-/// Deliberately NOT allowlisted: `parse_logged_response` and
-/// `parse_logged_external_json`. They surface stdout and stderr but drop the
-/// EXIT CODE, so they are the same defect centralized rather than fixed. They
-/// sit in the baseline as grandfathered, and repairing those two functions
-/// would repair every one of their callers at once -- the highest-leverage
-/// follow-up available here.
-const SUCCESS_ASSERTION_HELPERS: &[&str] = &["ensure_command_success"];
+// THERE IS NO HELPER ALLOWLIST, AND THAT IS THE DESIGN, NOT AN OMISSION.
+//
+// The spelling-keyed scanner needed one: `ensure_command_success` matched the
+// forbidden shape, so its NAME had to be exempted or the gate would fire on
+// the exact pattern it promotes -- and each test binary needs its own copy,
+// being separate compilation units (usr002 and usr003 each got one in
+// 43a96043c), so the list could never be closed.
+//
+// Keying on WHAT A SITE PRINTS removes the need entirely. A helper that prints
+// all three facts classifies as complete and is simply not recorded, wherever
+// it lives and however many copies exist. A helper that does NOT is recorded,
+// which is correct: `parse_logged_response` and `parse_logged_external_json`
+// surfaced both streams and dropped the exit code, and a name-based allowlist
+// would have exempted them for looking like chokepoints while they centralized
+// the defect rather than fixing it. Both were repaired in d6abbb3aa.
+//
+// The old `SUCCESS_ASSERTION_HELPERS` constant survived the rewrite unused and
+// made 3258fd6ce born-red under `cargo clippy --all-targets -- -D warnings`
+// (dead_code). Kept as a comment because the reasoning is why the allowlist is
+// absent; a reader who does not find one should not conclude it was forgotten.
 
 /// The one file excluded from the inventory: this one.
 ///
