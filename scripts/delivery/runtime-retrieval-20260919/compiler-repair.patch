@@ -1,0 +1,51 @@
+diff --git a/runtime-first.patch b/runtime-first.patch
+--- a/runtime-first.patch
++++ b/runtime-first.patch
+@@ -153,7 +153,7 @@
+ +                limit,
+ +                explain,
+ +                source_mode,
+-+                &rerank_seed,
+++                rerank_seed,
+ +            )
+ +            .await;
+ +            push_search_performance_timing(
+@@ -375,7 +375,7 @@
+ +    limit: usize,
+ +    explain: bool,
+ +    requested: SearchSourceMode,
+-+    seed: &Deterministic<Seed>,
+++    seed: Deterministic<Seed>,
+ +) -> Result<Retrieval, SearchError> {
+ +    search_checkpoint(cx)?;
+ +    // Open the lexical arm from the generation the caller already pinned.
+@@ -396,7 +396,7 @@
+ +        explain,
+ +        FrankensearchFinalScoreScale::Native,
+ +    );
+-+    canonicalize_equivalent_component_scores(&mut hits, seed);
+++    canonicalize_equivalent_component_scores(&mut hits, &seed);
+ +    sort_search_hits_by_score_order(&mut hits);
+ +    Ok(Retrieval {
+ +        hits,
+@@ -509,7 +509,7 @@
+ +                    assert_eq!(actual.hits.len(), expected);
+ +                    if let Some(hit) = actual.hits.first() {
+ +                        assert_eq!(hit.doc_id, "mem_51000000000000000000000001");
+-+                        assert_eq!(hit.source, frankensearch::ScoreSource::Lexical);
+++                        assert_eq!(hit.source, super::super::ScoreSource::Lexical);
+ +                        assert!(hit.lexical_score.is_some_and(|score| score > 0.0));
+ +                    }
+ +                    let before = SourceModeResolution { applied: source, fallback_applied: false, unavailable_no_results: false };
+diff --git a/runtime-second.patch b/runtime-second.patch
+--- a/runtime-second.patch
++++ b/runtime-second.patch
+@@ -154,7 +154,7 @@
+ +                    if fast_embedder.needs_recovery(&collected) {
+ +                        let seed = Deterministic::from_seed(0).shared_child("search.rerank");
+ +                        runtime_fallback::recover_lexical(
+-+                            &cx, &index_dir_owned, &query_owned, limit, explain, source_mode, &seed,
+++                            &cx, &index_dir_owned, &query_owned, limit, explain, source_mode, seed,
+ +                        ).await
+ +                    } else {
+ +                        collected.map(|(results, metrics)| {
