@@ -115,6 +115,29 @@ impl PackL2Cache {
         now_epoch_seconds: u64,
         allow_mutations: bool,
     ) -> Result<PackL2CacheLookup, PackL2CacheError> {
+        // bd-ndzfg.4: `lookup` opens every cache consultation, and exactly one
+        // terminal phase follows it -- hit, miss, corruption or unavailable.
+        // Emitting the opener unconditionally is what makes a missing terminal
+        // phase visible in a trace: a `lookup` with no partner means the
+        // lookup neither returned nor raised, which no other field reports.
+        trace_pack_l2("lookup", key, "");
+        let outcome = self.lookup_at_traced(key, now_epoch_seconds, allow_mutations);
+        match &outcome {
+            Ok(PackL2CacheLookup::Hit(_)) => trace_pack_l2("hit", key, ""),
+            Ok(PackL2CacheLookup::Miss(miss)) => {
+                trace_pack_l2("miss", key, &format!("{:?}", miss.reason));
+            }
+            Err(error) => trace_pack_l2(error_phase(error), key, &error.to_string()),
+        }
+        outcome
+    }
+
+    fn lookup_at_traced(
+        &self,
+        key: &str,
+        now_epoch_seconds: u64,
+        allow_mutations: bool,
+    ) -> Result<PackL2CacheLookup, PackL2CacheError> {
         let fallback_path = self.entry_path(key);
         let candidates = self.entry_candidates(key)?;
         if candidates.is_empty() {
@@ -269,6 +292,11 @@ impl PackL2Cache {
         pack_json: &JsonValue,
         stored_at_epoch_seconds: u64,
     ) -> Result<PackL2WriteReport, PackL2CacheError> {
+        // bd-ndzfg.4: the `write` phase. Emitted on entry rather than on
+        // success so that a write which fails part-way still leaves a trace
+        // of having been attempted -- a write phase with no following
+        // eviction or completion is the signal that something stopped here.
+        trace_pack_l2("write", key, "uncompressed");
         let path = self.entry_path(key);
         let entry = PackL2CacheEntry {
             schema: PACK_L2_CACHE_ENTRY_SCHEMA_V1.to_owned(),
@@ -353,6 +381,22 @@ impl PackL2Cache {
         dictionary: Option<&PackL2CompressionDictionary>,
         stored_at_epoch_seconds: u64,
     ) -> Result<PackL2WriteReport, PackL2CacheError> {
+        // bd-ndzfg.4: compressed writes are a SEPARATE public entry point from
+        // `put_at`, and instrumenting only that one would have left every
+        // compressed write emitting no `write` phase at all -- a hole of
+        // exactly the kind this clause exists to close. Emitted on the shared
+        // implementation rather than on `put_compressed`/`put_compressed_at`,
+        // which both delegate here, so the phase fires once per write instead
+        // of once per wrapper.
+        trace_pack_l2(
+            "write",
+            key,
+            if dictionary.is_some() {
+                "compressed:dictionary"
+            } else {
+                "compressed"
+            },
+        );
         let path = self.entry_path(key);
         let uncompressed =
             serde_json::to_vec(pack_json).map_err(|source| PackL2CacheError::Json {
@@ -441,6 +485,13 @@ impl PackL2Cache {
         &self,
         now_epoch_seconds: u64,
     ) -> Result<PackL2EvictionReport, PackL2CacheError> {
+        // bd-ndzfg.4: the `evict` phase. It is emitted here rather than in
+        // src/core/context.rs because eviction is not reachable from there --
+        // `evict_best_effort` is called only from this module's own put paths
+        // and its public wrapper, so a context-side event could never observe
+        // it. The key field is empty because eviction is sweep-scoped rather
+        // than keyed.
+        trace_pack_l2("evict", "", "sweep start");
         ensure_no_symlink_components(&self.root, "inspect_root")?;
         let mut report = PackL2EvictionReport::default();
         let mut candidates = Vec::new();
@@ -908,6 +959,54 @@ struct EvictionCandidate {
     stored_epoch_seconds: u64,
     last_used_epoch_seconds: u64,
     expired: bool,
+}
+
+/// Structured phase tracing for the L2 pack cache surface. bd-ndzfg.4.
+///
+/// The acceptance asks for `surface=pack_cache_l2` and
+/// `phase=lookup|hit|miss|write|evict|corruption|unavailable`. Those seven
+/// phases are all observable HERE and only here: `src/core/context.rs` already
+/// carries 17 `target: "ee::pack_l2"` events, but they use an `event = "..."`
+/// vocabulary and between them name only four of the seven -- lookup, evict
+/// and unavailable appear in none of them, and eviction is not reachable from
+/// context.rs at all, since `evict_best_effort` is called only from inside
+/// this module.
+///
+/// Emitting from one module keeps a phase sequence readable in a single trace
+/// stream rather than split across two vocabularies. The `target` matches the
+/// existing sites so nobody has to subscribe to two targets to see one cache
+/// operation.
+///
+/// `bead_id` follows the `src/core/outcome.rs` convention: overridable through
+/// `EE_TRACE_BEAD_ID` so a run can be attributed to the work that provoked it,
+/// with this bead as the default.
+fn trace_pack_l2(phase: &'static str, key: &str, detail: &str) {
+    tracing::debug!(
+        target: "ee::pack_l2",
+        surface = "pack_cache_l2",
+        phase,
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-ndzfg.4"),
+        key,
+        detail,
+        "pack L2 cache phase"
+    );
+}
+
+/// The phase an error belongs to, kept deliberately consistent with the
+/// degraded code the same failure raises in `src/core/context.rs`.
+///
+/// `push_pack_l2_cache_error` maps EVERY `PackL2CacheError` to
+/// `l2_pack_cache_unavailable`, and `l2_pack_cache_corruption` is raised
+/// separately when a cache entry fails to decode. So a decode failure is the
+/// corruption phase and everything else is unavailable -- if this function
+/// disagreed with that split, a trace would name one failure class while the
+/// response named another, which is the confusion the degraded codes exist to
+/// prevent.
+const fn error_phase(error: &PackL2CacheError) -> &'static str {
+    match error {
+        PackL2CacheError::Json { .. } => "corruption",
+        _ => "unavailable",
+    }
 }
 
 fn remove_cache_entry_best_effort(path: &Path) {
