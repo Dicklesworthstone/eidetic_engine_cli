@@ -12786,6 +12786,22 @@ fn normalize_restore_side_path(path: &Path) -> Result<PathBuf, DomainError> {
 }
 
 #[cfg(test)]
+fn assert_recovery_policy_covers_migrated_tables(connection: &DbConnection) -> Result<(), String> {
+    for table in connection
+        .list_user_tables()
+        .map_err(|error| error.to_string())?
+    {
+        let policy = backup_table_policy(&table);
+        if policy.disposition == "unclassified" || policy.coverage == "unclassified" {
+            return Err(format!(
+                "migrated table {table} has no explicit backup recovery policy"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
@@ -12801,6 +12817,13 @@ mod tests {
     use uuid::Uuid;
 
     type TestResult = Result<(), String>;
+
+    #[test]
+    fn every_migrated_table_has_explicit_backup_recovery_policy() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        assert_recovery_policy_covers_migrated_tables(&connection)
+    }
 
     #[test]
     fn key_recovery_refusals_preserve_destinations_and_source() {
