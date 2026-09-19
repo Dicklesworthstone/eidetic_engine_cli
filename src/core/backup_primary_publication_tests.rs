@@ -2,7 +2,14 @@
 
 use super::*;
 
-fn primary_state(db: &DbConnection, workspace_id: &str) -> Result<JsonValue, DomainError> {
+#[derive(Debug, PartialEq)]
+struct PrimaryState {
+    memories: Vec<crate::db::StoredMemory>,
+    revisions: Vec<JsonValue>,
+    link: Option<crate::db::StoredMemoryLink>,
+}
+
+fn primary_state(db: &DbConnection, workspace_id: &str) -> Result<PrimaryState, DomainError> {
     let memories = db
         .list_memories(workspace_id, None, true)
         .map_err(work_history_error)?;
@@ -18,7 +25,11 @@ fn primary_state(db: &DbConnection, workspace_id: &str) -> Result<JsonValue, Dom
     let link = db
         .get_memory_link(&MemoryLinkId::from_uuid(Uuid::from_u128(23)).to_string())
         .map_err(work_history_error)?;
-    Ok(serde_json::json!({"memories": memories, "revisions": revisions, "link": link}))
+    Ok(PrimaryState {
+        memories,
+        revisions,
+        link,
+    })
 }
 
 fn assert_late_primary_change_refused(sql: &str, rewrite_records: bool) -> TestResult {
