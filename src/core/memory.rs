@@ -8,7 +8,6 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -122,11 +121,11 @@ const REMEMBER_GIT_CAPTURE_MAX_SYMBOLS: usize = 16;
 /// Git source mode for frictionless remember capture.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RememberGitCaptureMode {
-    /// Capture from one commit object.
+    /// Capture one commit against its first parent (roots use an empty tree).
     Commit,
-    /// Capture from `git diff <ref>`.
+    /// Capture a tree-ish against the worktree, or a pinned two/three-dot range.
     Diff,
-    /// Capture from the current working tree against `HEAD` when available.
+    /// Capture tracked staged and unstaged state against HEAD, or an empty tree.
     WorkingTree,
 }
 
@@ -176,6 +175,7 @@ pub struct RememberGitCaptureCandidate {
     pub source: String,
     pub changed_files: Vec<String>,
     pub changed_symbols: Vec<String>,
+    /// BLAKE3 of the complete sanitized comparison, never just its excerpt.
     pub diff_fingerprint: String,
     pub redacted: bool,
     pub redaction_reasons: Vec<String>,
@@ -743,9 +743,11 @@ pub fn build_remember_git_capture_candidate(
     // Screen the complete value before applying the presentation budget. A
     // credential crossing that byte boundary otherwise becomes a shorter,
     // unrecognized token and its prefix is exposed in the captured excerpt.
-    let mut redacted_diff = redact_git_capture_text(&input.diff_text);
-    redacted_diff.content =
-        truncate_utf8_lossless(&redacted_diff.content, REMEMBER_GIT_CAPTURE_DIFF_MAX_BYTES);
+    let redacted_diff = redact_git_capture_text(&input.diff_text);
+    // Identity and classification belong to all observed sanitized evidence.
+    // Only presentation is budgeted: otherwise different changes sharing a
+    // long prefix silently acquire the same source and deduplication identity.
+    let diff_view = git_capture_diff_view(&redacted_diff.content);
     redaction_reasons.extend(
         redacted_message
             .redaction_reasons
@@ -755,7 +757,8 @@ pub fn build_remember_git_capture_candidate(
     );
     redaction_reasons.sort_unstable();
     redaction_reasons.dedup();
-    let changed_symbols = extract_git_capture_symbols(&redacted_diff.content);
+    // Do not invent a symbol from a cut declaration or from omitted evidence.
+    let changed_symbols = extract_git_capture_symbols(diff_view.complete_lines);
     let kind = suggest_git_capture_kind(&redacted_message.content, &redacted_diff.content);
     let tags = git_capture_tags(input.mode, kind, &changed_files);
     let diff_fingerprint = format!(
@@ -778,7 +781,7 @@ pub fn build_remember_git_capture_candidate(
         &source,
         &diff_fingerprint,
         &redacted_message.content,
-        &redacted_diff.content,
+        &diff_view,
         !redaction_reasons.is_empty(),
         &redaction_reasons,
     );
@@ -806,13 +809,13 @@ pub fn remember_git_capture_candidate_from_repo(
     options: &RememberGitCaptureOptions<'_>,
 ) -> Result<RememberGitCaptureCandidate, DomainError> {
     let workspace_path = resolve_workspace_path(options.workspace_path, false)?;
-    let git_root = remember_git_root(&workspace_path)?;
+    let git_root = git_capture_repo::root(&workspace_path)?;
     let input = match options.mode {
         RememberGitCaptureMode::Commit => {
             let reference = options.reference.ok_or_else(|| {
                 remember_usage_error("--from-commit requires a commit ref such as HEAD".to_owned())
             })?;
-            remember_git_capture_commit_input(&git_root, reference)?
+            git_capture_repo::commit_input(&git_root, reference)?
         }
         RememberGitCaptureMode::Diff => {
             let reference = options.reference.ok_or_else(|| {
@@ -821,9 +824,9 @@ pub fn remember_git_capture_candidate_from_repo(
                         .to_owned(),
                 )
             })?;
-            remember_git_capture_diff_input(&git_root, Some(reference))?
+            git_capture_repo::diff_input(&git_root, Some(reference))?
         }
-        RememberGitCaptureMode::WorkingTree => remember_git_capture_diff_input(&git_root, None)?,
+        RememberGitCaptureMode::WorkingTree => git_capture_repo::diff_input(&git_root, None)?,
     };
     Ok(build_remember_git_capture_candidate(&input))
 }
@@ -834,174 +837,8 @@ struct GitCaptureRedactedText {
     redaction_reasons: Vec<String>,
 }
 
-fn remember_git_capture_commit_input(
-    git_root: &Path,
-    reference: &str,
-) -> Result<RememberGitCaptureInput, DomainError> {
-    let reference = validate_git_capture_ref(reference)?;
-    let commit_arg = format!("{reference}^{{commit}}");
-    let commit_sha = git_command_text(
-        git_root,
-        &["rev-parse", "--verify", commit_arg.as_str()],
-        "resolve commit ref",
-    )?
-    .lines()
-    .next()
-    .unwrap_or_default()
-    .trim()
-    .to_owned();
-    if commit_sha.is_empty() {
-        return Err(remember_usage_error(
-            "git did not resolve the requested commit ref".to_owned(),
-        ));
-    }
-
-    let message = git_command_text(
-        git_root,
-        &["log", "-1", "--format=%s%x00%b", commit_sha.as_str()],
-        "read commit message",
-    )?;
-    let (subject, body) = message
-        .split_once('\0')
-        .map_or((message.trim(), ""), |(subject, body)| {
-            (subject.trim(), body.trim())
-        });
-    let changed_files = git_command_text(
-        git_root,
-        &[
-            "diff-tree",
-            "--no-commit-id",
-            "--name-only",
-            "-r",
-            "--root",
-            commit_sha.as_str(),
-            "--",
-        ],
-        "read commit changed files",
-    )?
-    .lines()
-    .map(str::trim)
-    .filter(|line| !line.is_empty())
-    .map(str::to_owned)
-    .collect::<Vec<_>>();
-    let diff_text = git_command_text(
-        git_root,
-        &[
-            "show",
-            "--format=",
-            "--no-ext-diff",
-            "--find-renames",
-            "--unified=80",
-            commit_sha.as_str(),
-            "--",
-        ],
-        "read commit diff",
-    )?;
-
-    Ok(RememberGitCaptureInput {
-        mode: RememberGitCaptureMode::Commit,
-        reference: Some(reference),
-        commit_sha: Some(commit_sha),
-        commit_subject: (!subject.is_empty()).then(|| subject.to_owned()),
-        commit_body: (!body.is_empty()).then(|| body.to_owned()),
-        changed_files,
-        diff_text,
-    })
-}
-
-fn remember_git_capture_diff_input(
-    git_root: &Path,
-    reference: Option<&str>,
-) -> Result<RememberGitCaptureInput, DomainError> {
-    let reference = reference.map(validate_git_capture_ref).transpose()?;
-    let mut diff_args = vec![
-        "diff".to_owned(),
-        "--no-ext-diff".to_owned(),
-        "--find-renames".to_owned(),
-        "--unified=80".to_owned(),
-    ];
-    let mut name_args = vec!["diff".to_owned(), "--name-only".to_owned()];
-    let mode = if let Some(reference) = reference.as_deref() {
-        diff_args.push(reference.to_owned());
-        name_args.push(reference.to_owned());
-        RememberGitCaptureMode::Diff
-    } else {
-        if git_head_exists(git_root) {
-            diff_args.push("HEAD".to_owned());
-            name_args.push("HEAD".to_owned());
-        }
-        RememberGitCaptureMode::WorkingTree
-    };
-    diff_args.push("--".to_owned());
-    name_args.push("--".to_owned());
-
-    let diff_arg_refs = diff_args.iter().map(String::as_str).collect::<Vec<_>>();
-    let name_arg_refs = name_args.iter().map(String::as_str).collect::<Vec<_>>();
-    let changed_files = git_command_text(git_root, &name_arg_refs, "read diff changed files")?
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let diff_text = git_command_text(git_root, &diff_arg_refs, "read diff text")?;
-
-    Ok(RememberGitCaptureInput {
-        mode,
-        reference,
-        commit_sha: None,
-        commit_subject: None,
-        commit_body: None,
-        changed_files,
-        diff_text,
-    })
-}
-
-fn remember_git_root(workspace_path: &Path) -> Result<PathBuf, DomainError> {
-    let root = git_command_text(
-        workspace_path,
-        &["rev-parse", "--show-toplevel"],
-        "resolve git root",
-    )?;
-    let root = root.lines().next().unwrap_or_default().trim();
-    if root.is_empty() {
-        return Err(remember_usage_error(format!(
-            "{} is not inside a git repository",
-            workspace_path.display()
-        )));
-    }
-    Ok(PathBuf::from(root))
-}
-
-fn git_head_exists(git_root: &Path) -> bool {
-    git_command_text(git_root, &["rev-parse", "--verify", "HEAD"], "check HEAD").is_ok()
-}
-
-fn git_command_text(
-    git_root: &Path,
-    args: &[&str],
-    phase: &'static str,
-) -> Result<String, DomainError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(git_root)
-        .args(args)
-        .output()
-        .map_err(|error| DomainError::Configuration {
-            message: format!("Failed to run git while trying to {phase}: {error}"),
-            repair: Some("Install git and run this command inside a git workspace.".to_owned()),
-        })?;
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
-    }
-    // Refs, paths and git's stderr are caller/repository-controlled. Do not
-    // echo raw arguments even when capture fails before building a candidate.
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let public_stderr = crate::policy::redact_public_replay_text(stderr.trim());
-    Err(remember_usage_error(format!(
-        "git failed while trying to {phase} ({}): {}",
-        output.status, public_stderr.content,
-    )))
-}
+#[path = "memory_git_capture_repo.rs"]
+mod git_capture_repo;
 
 fn validate_git_capture_ref(reference: &str) -> Result<String, DomainError> {
     let trimmed = reference.trim();
@@ -1071,7 +908,9 @@ fn admit_git_capture_metadata(
 fn normalized_git_changed_files(changed_files: &[String]) -> Vec<String> {
     let mut unique = BTreeSet::new();
     for raw in changed_files {
-        let path = raw.trim().trim_start_matches("./").replace('\\', "/");
+        // Git's -z path framing is exact. Spaces and a literal backslash
+        // must never be transformed into a different repository filename.
+        let path = raw.strip_prefix("./").unwrap_or(raw).to_owned();
         if path.is_empty()
             || path.starts_with('/')
             || path.contains("://")
@@ -1256,7 +1095,7 @@ fn render_git_capture_content(
     source: &str,
     diff_fingerprint: &str,
     redacted_message: &str,
-    redacted_diff: &str,
+    diff_view: &GitCaptureDiffView<'_>,
     redacted: bool,
     redaction_reasons: &[String],
 ) -> String {
@@ -1307,14 +1146,20 @@ fn render_git_capture_content(
             .collect::<Vec<_>>()
             .join(", ");
         lines.push(format!("Changed surfaces: {rendered}."));
-        lines.push(format!(
-            "Anchor tokens: {}.",
-            changed_files
-                .iter()
-                .map(|path| format!("ee-anchor:path:{path}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ));
+        // The anchor grammar is whitespace-delimited. Report exact unusual
+        // filenames above, but do not mint an anchor for only part of a name.
+        let anchors = changed_files
+            .iter()
+            .filter(|path| {
+                !path
+                    .chars()
+                    .any(|c| c.is_whitespace() || matches!(c, '\\' | '`' | '"' | '\''))
+            })
+            .map(|path| format!("ee-anchor:path:{path}"))
+            .collect::<Vec<_>>();
+        if !anchors.is_empty() {
+            lines.push(format!("Anchor tokens: {}.", anchors.join(" ")));
+        }
     }
     if !changed_symbols.is_empty() {
         let rendered = changed_symbols
@@ -1336,21 +1181,56 @@ fn render_git_capture_content(
         lines.push("Message evidence:".to_owned());
         lines.push(truncate_utf8_lossless(redacted_message.trim(), 4096));
     }
-    let excerpt = git_capture_diff_excerpt(redacted_diff);
-    if !excerpt.is_empty() {
+    if !diff_view.visible.is_empty() {
+        if diff_view.truncated {
+            lines.push(
+                "Diff excerpt is truncated; the fingerprint covers the complete sanitized comparison."
+                    .to_owned(),
+            );
+        }
         lines.push("Redacted diff excerpt:".to_owned());
         lines.push("```diff".to_owned());
-        lines.push(excerpt);
+        lines.push(diff_view.visible.lines().collect::<Vec<_>>().join("\n"));
+        if diff_view.truncated {
+            lines.push("... [truncated]".to_owned());
+        }
         lines.push("```".to_owned());
     }
     lines.join("\n")
 }
 
-fn git_capture_diff_excerpt(diff: &str) -> String {
-    diff.lines()
+struct GitCaptureDiffView<'a> {
+    visible: &'a str,
+    complete_lines: &'a str,
+    truncated: bool,
+}
+
+fn git_capture_diff_view(diff: &str) -> GitCaptureDiffView<'_> {
+    // Borrow a bounded prefix; do not clone a potentially enormous first line
+    // merely to truncate it afterward. Keep byte cuts on UTF-8 boundaries.
+    let line_end = diff
+        .split_inclusive('\n')
         .take(REMEMBER_GIT_CAPTURE_DIFF_EXCERPT_LINES)
-        .collect::<Vec<_>>()
-        .join("\n")
+        .map(str::len)
+        .sum::<usize>();
+    let mut end = line_end.min(REMEMBER_GIT_CAPTURE_DIFF_MAX_BYTES);
+    while !diff.is_char_boundary(end) {
+        end -= 1;
+    }
+    let visible = &diff[..end];
+    let truncated = end < diff.len();
+    let complete_end = if truncated && !visible.ends_with('\n') {
+        // An identifier cut at the byte limit is not a real declaration. The
+        // partial last line may be shown, but cannot become an anchor.
+        visible.rfind('\n').map_or(0, |newline| newline + 1)
+    } else {
+        end
+    };
+    GitCaptureDiffView {
+        visible,
+        complete_lines: &diff[..complete_end],
+        truncated,
+    }
 }
 
 fn truncate_utf8_lossless(input: &str, max_bytes: usize) -> String {
@@ -12723,6 +12603,10 @@ pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckRepo
         DedupeCheckReport::with_warnings(warnings, memories_scanned)
     }
 }
+
+#[cfg(test)]
+#[path = "memory_git_capture_identity_tests.rs"]
+mod git_capture_identity_tests;
 
 #[cfg(test)]
 #[path = "memory_git_capture_security_tests.rs"]

@@ -2,6 +2,7 @@
 //! metadata must not make already-sanitized evidence fail ordinary admission.
 
 use super::*;
+use std::process::Command;
 
 type TestResult = Result<(), String>;
 
@@ -115,10 +116,9 @@ fn secret_crossing_the_capture_budget_is_redacted_before_truncation() {
                 .iter()
                 .any(|reason| reason == "openai_api_key")
         );
-        let expected = truncate_utf8_lossless(
-            &crate::policy::redact_secret_like_content(&diff).content,
-            REMEMBER_GIT_CAPTURE_DIFF_MAX_BYTES,
-        );
+        // The fingerprint now binds the full sanitized evidence, not the
+        // bounded presentation prefix. Truncation still follows screening.
+        let expected = crate::policy::redact_secret_like_content(&diff).content;
         assert_eq!(
             candidate.diff_fingerprint,
             format!("blake3:{}", blake3::hash(expected.as_bytes()).to_hex()),
@@ -292,17 +292,12 @@ fn capture_errors_do_not_echo_sensitive_refs_or_git_stderr() -> TestResult {
     git(root.path(), &["init", "--initial-branch=main"])?;
     let token = format!("ghp_{}", "q".repeat(36));
     let reference = format!("missing-{token}");
-    let error = git_command_text(
-        root.path(),
-        &["show", &reference, "--"],
-        "read capture fixture",
-    )
-    .err()
-    .ok_or("expected unresolved-ref failure")?;
+    let error = git_capture_repo::commit_input(root.path(), &reference)
+        .err()
+        .ok_or("expected unresolved-ref failure")?;
     assert!(!error.message().contains(&token));
     assert!(!error.message().contains(&reference));
-    assert!(error.message().contains("read capture fixture"));
-    assert!(error.message().contains("REDACTED"));
+    assert!(error.message().contains("resolve capture revision"));
     assert!(!root.path().join(".ee").exists());
     Ok(())
 }
