@@ -1,0 +1,134 @@
+name: Similarity seed source admission
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/seed-authority-20260919.patch
+      - .github/workflows/seed-authority-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: seed-authority-20260919
+  cancel-in-progress: false
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Apply the reviewed seed admission implementation
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          paths=(src/core/search.rs src/core/search_revision_admission.rs src/core/search_seed_admission_tests.rs)
+          if test -f src/core/search_seed_admission_tests.rs; then
+            grep -q 'fn seed_is_visible' src/core/search_revision_admission.rs
+            grep -q 'revision_snapshot.finish()?' src/core/search.rs
+          else
+            test "$(git rev-parse HEAD:src/core/search.rs)" = 0f8c87af0179a53bda1b452ab38e8e4be55d0cb1
+            test "$(git rev-parse HEAD:src/core/search_revision_admission.rs)" = 79da714fd5d1e84b6ee2ba96f553c7ead5a689fc
+            base=$(git rev-parse HEAD)
+            git apply --check scripts/delivery/seed-authority-20260919.patch
+            git apply scripts/delivery/seed-authority-20260919.patch
+            rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
+            git diff --check
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add -- "${paths[@]}"
+            git commit -m 'fix(similar): enforce source revision and seal admission in one snapshot' -m 'Reject superseded and unrevealed seeds before lexical query construction, embedding, index access or audit writes. Reuse the revision timestamp parser and exact exclusive cutoff. Pin scope, seed body and neighbor admission in one read snapshot, with cleanup on success, refusal and cancellation. Add six real-store regressions including public similar refusal and two-connection snapshot isolation. Patch application and rustfmt passed; compilation and runtime evidence are reported separately.'
+            pushed=0
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then pushed=1; break; fi
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${paths[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+            test "$pushed" -eq 1
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > "$RUNNER_TEMP/seed-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/seed-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seed-admission-source
+          path: |
+            ${{ runner.temp }}/seed-source-sha.log
+            ${{ runner.temp }}/seed-source.tar.gz
+          retention-days: 7
+  verify:
+    needs: integrate
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.integrate.outputs.source_sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: seed-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ needs.integrate.outputs.source_sha }}
+          restore-keys: |
+            seed-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Check the production library
+        run: |
+          set -o pipefail
+          git rev-parse HEAD | tee "$RUNNER_TEMP/seed-source-sha.log"
+          cargo check --locked --lib 2>&1 | tee "$RUNNER_TEMP/seed-check.log"
+      - name: Execute real seed admission and existing retrieval regressions
+        run: |
+          set -uo pipefail
+          failed=0
+          run_group() {
+            local name="$1" filter="$2" expected="$3" status=0
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/seed-$name.log" 2>&1 || status=$?
+            tail -n 80 "$RUNNER_TEMP/seed-$name.log"
+            if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$RUNNER_TEMP/seed-$name.log"; then failed=1; fi
+          }
+          run_group admission 'core::search::rule_admission::memory_revisions::seed_tests::' 6
+          run_group revisions 'core::search::rule_admission::memory_revisions::tests::' 8
+          run_group similar 'core::search::tests::run_similar_hash_embedder_falls_back_to_lexical_and_excludes_seed' 1
+          exit "$failed"
+      - name: Check all targets and production Clippy
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          failed=0
+          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/seed-all-targets.log" || failed=1
+          cargo clippy --locked --lib -- -D warnings 2>&1 | tee "$RUNNER_TEMP/seed-clippy.log" || failed=1
+          rustfmt --edition 2024 --config skip_children=true --check src/core/search.rs src/core/search_revision_admission.rs src/core/search_seed_admission_tests.rs 2>&1 | tee "$RUNNER_TEMP/seed-fmt.log" || failed=1
+          exit "$failed"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: seed-admission-verification
+          path: ${{ runner.temp }}/seed-*.log
+          retention-days: 7
