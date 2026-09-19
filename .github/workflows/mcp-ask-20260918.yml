@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: mcp-ask-delivery
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   integrate:
@@ -37,7 +37,7 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
-      - name: Bind the reviewed adapter into the existing MCP owner
+      - name: Bind the reviewed adapter and preserve the existing strict contract
         shell: bash
         run: |
           set -euo pipefail
@@ -54,9 +54,6 @@ jobs:
               ask::build_args(args, arguments)
           }''',
           }
-          # Each reviewed function ends at a column-zero brace. JSON and Rust
-          # nested blocks in these functions are indented. Refuse multiple or
-          # missing definitions and verify distinctive original-body anchors.
           guards = {
               'ask_tool_schema': ['"required": ["question"]', '"requireConfidence"', '"limitEvidence"'],
               'build_ask_tool_args': ['push_arg(args, "ask");', 'required_string(arguments, &["question"])', '"--require-confidence"'],
@@ -68,12 +65,10 @@ jobs:
                   raise SystemExit(f'Expected one {name} definition; no files changed')
               match = matches[0]
               old = match.group()
-              if old.strip() == replacement.strip():
+              if re.sub(r'\s+', ' ', old).strip() == re.sub(r'\s+', ' ', replacement).strip():
                   continue
               if not all(anchor in old for anchor in guards[name]):
                   raise SystemExit(f'{name} changed concurrently; no files changed')
-              # A new scope/read-only implementation deserves manual merging,
-              # not replacement by this narrow reviewed integration.
               if any(word in old for word in ['memoryScope', 'readOnly', '"--path"']):
                   raise SystemExit(f'{name} already has constraint handling; review required')
               source = source[:match.start()] + replacement + source[match.end():]
@@ -91,6 +86,35 @@ jobs:
               source = source.replace(old_description, new_description, 1)
           elif new_description not in source:
               raise SystemExit('Ask descriptor changed; no files changed')
+          # Preserve the preexisting exact transport assertion, extending it
+          # to require scope and path forwarding as well as actual read-only.
+          old_input = '"question": "What MCP write tools require allowWrite?",\n                "limitEvidence": 4,'
+          new_input = '"question": "What MCP write tools require allowWrite?",\n                "memoryScope": "verified",\n                "path": ["src/mcp.rs"],\n                "limitEvidence": 4,'
+          if old_input in source:
+              if source.count(old_input) != 1:
+                  raise SystemExit('Ambiguous old ask input contract')
+              source = source.replace(old_input, new_input, 1)
+          elif new_input not in source:
+              raise SystemExit('Ask input contract changed; review required')
+          pattern = re.compile(r'assert_eq!\(\s*ask,\s*vec!\[.*?\]\s*\);', re.S)
+          matches = list(pattern.finditer(source))
+          if len(matches) != 1:
+              raise SystemExit('Expected one exact ask argument assertion')
+          match = matches[0]
+          old = match.group()
+          if not all(item in old for item in ['What MCP write tools require allowWrite?', '/tmp/ee.db', '"ee"', '"--json"']):
+              raise SystemExit('Existing ask assertion changed; review required')
+          replacement = '''assert_eq!(
+              ask,
+              vec![
+                  "ee", "--json", "ask", "--read-only",
+                  "--memory-scope=verified", "--path=src/mcp.rs",
+                  "--limit-evidence=4", "--min-confidence=0.4",
+                  "--require-confidence=0.7", "--database=/tmp/ee.db",
+                  "--", "What MCP write tools require allowWrite?",
+              ]
+          );'''
+          source = source[:match.start()] + replacement + source[match.end():]
           adapter = Path('src/mcp_ask.rs')
           adapter_text = adapter.read_text()
           tests = '\n#[cfg(test)]\n#[path = "mcp_ask_live_tests.rs"]\nmod live_tests;\n'
@@ -120,7 +144,7 @@ jobs:
         run: |
           set -o pipefail
           cargo check --locked --features mcp --lib --bin ee 2>&1 | tee "$RUNNER_TEMP/mcp-ask-check.log"
-      - name: Resolve the tested path feature before protocol acceptance
+      - name: Resolve the published path feature before protocol acceptance
         shell: bash
         run: |
           set -euo pipefail
@@ -140,6 +164,11 @@ jobs:
           set -o pipefail
           cargo test --locked --features mcp --lib mcp::ask::live_tests:: -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/mcp-ask-live.log"
           grep -Eq 'test result: ok\. 6 passed; 0 failed' "$RUNNER_TEMP/mcp-ask-live.log"
+      - name: Run existing MCP unit regressions
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --features mcp --lib mcp::tests:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mcp-ask-existing.log"
       - name: Commit verified MCP integration directly to main
         shell: bash
         run: |
@@ -148,7 +177,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- src/mcp.rs src/mcp_ask.rs src/mcp_ask_live_tests.rs
           if ! git diff --cached --quiet; then
-            git commit -m 'feat(mcp): expose scoped native ask with literal paths and enforced read-only semantics' -m 'Route every MCP ask constraint through the shared CLI. Preserve scope, path bytes, native citations and live rule revisions; reject ambiguous/unknown constraints and option-like positional injection. Read-only annotations now match execution, including errors and abstentions. Production MCP/CLI check, twelve adapter tests and six real JSON-RPC/store tests passed before this commit.'
+            git commit -m 'feat(mcp): expose scoped native ask with literal paths and enforced read-only semantics' -m 'Route every MCP ask constraint through the shared CLI. Preserve scope, path bytes, native citations and live rule revisions; reject ambiguous/unknown constraints and option-like positional injection. Read-only annotations now match execution, including errors and abstentions. Production MCP/CLI check, twelve adapter tests, six real JSON-RPC/store tests and the existing MCP unit suite passed before this commit.'
             published=false
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then published=true; break; fi
@@ -158,11 +187,6 @@ jobs:
             test "$published" = true
           fi
           git rev-parse HEAD | tee "$RUNNER_TEMP/mcp-ask-source.log"
-      - name: Run existing MCP unit regressions
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo test --locked --features mcp --lib mcp::tests:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mcp-ask-existing.log"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
