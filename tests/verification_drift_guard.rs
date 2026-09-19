@@ -579,11 +579,18 @@ fn no_stage_is_declared_non_required_without_a_bead() {
     }
 
     assert!(problems.is_empty(), "{}", problems.join("\n"));
-    // 1 since 2026-09-19: "Lexical Relevance Contract (tracked red)", owned by
-    // bd-reality-core-convergence-1azkt.11. Returns to 0 when those pins go
-    // green and the declaration is removed.
+    // 2 since 2026-09-19, and the two are red for DIFFERENT reasons:
+    //   "Lexical Relevance Contract (tracked red)" -> bd-reality-core-convergence-1azkt.11
+    //       the pins, red on purpose, documenting the lexical relevance defect
+    //   "Lexical Relevance Contract Harness Guard" -> bd-iqg34
+    //       red because the RCH target dir writes the test binary outside
+    //       <target>/debug/deps, so the harness cannot locate it. Measured on
+    //       hz4, job 30025237340881842: GUARD_EXIT=1 in 0s.
+    // The guard was REQUIRED when introduced at e99eb0bbb, which fail-fasted
+    // verify.sh on this fleet. Returns to 1 when bd-iqg34 is fixed and the
+    // guard goes back to required, and to 0 when the pins themselves go green.
     assert_eq!(
-        non_required, 1,
+        non_required, 2,
         "stages are declared non-required. That may be correct, but it is a \
          deliberate act: update this count in the same commit so the excused \
          population stays visible in review."

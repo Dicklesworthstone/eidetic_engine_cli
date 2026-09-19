@@ -195,7 +195,34 @@ ${PIN_TWO}: test
 fi
 
 binary="$(pin_binary_path)" || {
-    echo "no lexical_relevance_contract binary under $(pin_target_dir)/debug/deps; run the --guard arm for the diagnosis." >&2
+    # TWO CAUSES REACH run_stage AS THE SAME NONZERO EXIT, AND IT EXCUSES BOTH.
+    # This stage is declared tracked_red, so `run_stage` records ANY nonzero as
+    # the known red. "The pins failed" (the red this stage exists for) and "the
+    # binary is missing" (bd-iqg34, an unrelated layout defect) are therefore
+    # indistinguishable from the stage's exit status alone. They are only
+    # distinguishable from this text, so it says which one happened, in the
+    # words a reader of the verify.sh log needs.
+    cat >&2 <<BANNER
+================================================================================
+NOT THE TRACKED RED. THE HARNESS COULD NOT RUN THE PINS AT ALL.
+
+  searched : $(pin_target_dir)/debug/deps
+  for      : lexical_relevance_contract-*
+  found    : nothing
+
+This is bd-iqg34, NOT bd-reality-core-convergence-1azkt.11. The pins are not
+being reported as failing here -- they were never executed. Measured on RCH
+worker hz4 (job 30025237340881842), cargo writes this target's executable to
+  <target>/debug/build/eidetic-engine/<hash>/out/
+instead of <target>/debug/deps/, so the artifact Gate 5 built is not where the
+standard layout says it is.
+
+The search is deliberately NARROW and is not to be widened. A recursive find
+would locate some artifact, report success, and on a shared target dir could
+execute a stale or wrong-platform binary in ~0s while printing green -- a
+silent green manufactured out of a real failure.
+================================================================================
+BANNER
     exit 1
 }
 

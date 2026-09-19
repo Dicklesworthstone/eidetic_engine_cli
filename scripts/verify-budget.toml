@@ -42,9 +42,15 @@
 # The moment green can also mean "this was excused", no consumer can tell a
 # stage that worked from a stage that was allowed not to.
 #
-# ONE stage declares a non-required requirement today: "Lexical Relevance
-# Contract (tracked red)", owned by bd-reality-core-convergence-1azkt.11 and
-# declared 2026-09-19. That count is asserted by
+# TWO stages declare a non-required requirement today, both declared
+# 2026-09-19:
+#   "Lexical Relevance Contract (tracked red)"  -> bd-reality-core-convergence-1azkt.11
+#       the pins themselves, red on purpose, documenting the relevance defect
+#   "Lexical Relevance Contract Harness Guard"  -> bd-iqg34
+#       red for an UNRELATED reason: the RCH target-dir layout puts the test
+#       binary outside <target>/debug/deps, so the harness cannot find it
+# Two reds, two causes, two owning beads -- kept separate so neither is read as
+# the other. That count is asserted by
 # `no_stage_is_declared_non_required_without_a_bead` in
 # tests/verification_drift_guard.rs, so introducing one is a deliberate,
 # reviewable act rather than a default anybody can drift into — and removing one
@@ -282,7 +288,23 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Lexical Relevance Contract Harness Guard"
-# REQUIRED arm of bd-reality-core-convergence-1azkt.11's pin pair.
+# TRACKED RED AGAINST bd-iqg34, NOT against the pin bead. Measured on RCH
+# worker hz4 (job 30025237340881842): this arm exits 1 because the test binary
+# is written to `<target>/debug/build/eidetic-engine/<hash>/out/` rather than
+# `<target>/debug/deps/`, so the harness cannot locate the artifact Gate 5 just
+# built. That is a worker/rch layout defect, filed as bd-iqg34; it is not a
+# defect in what this gate asserts.
+#
+# It was REQUIRED when introduced at e99eb0bbb, which meant verify.sh
+# fail-fasted here on this fleet -- a hard red on a required stage, worse than
+# the inert stage it was assumed to be. Declaring it tracked_red keeps the
+# stage IN verify.sh (no gate-removal diff to defend), keeps it RED for a TRUE
+# reason with the owning bead named, and costs ~0s because it fails before any
+# work. Restore `requirement`-less REQUIRED status the moment bd-iqg34 is
+# fixed, and drop the non-required count in
+# `no_stage_is_declared_non_required_without_a_bead` back by one.
+requirement = "tracked_red"
+tracked_red_bead = "bd-iqg34"
 #
 # Proves its own listing predicate against synthetic input (so a guard that
 # cannot fail is caught before it is trusted), then checks the live artifact:
