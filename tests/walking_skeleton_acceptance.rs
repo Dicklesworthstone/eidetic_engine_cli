@@ -54,13 +54,31 @@ fn stdout_json(output: &Output, context: &str) -> Result<serde_json::Value, Stri
         .map_err(|error| format!("{context}: stdout not JSON: {error}\nstdout: {stdout}"))
 }
 
+/// Assert a command exited 0, surfacing the exit code AND BOTH streams.
+///
+/// THIS USED TO DISCARD STDOUT, which is where the answer lives. Every command
+/// in this gate runs with `--json`, and under `--json` `ee` writes its
+/// `ee.error.v2` envelope to STDOUT while stderr stays empty. So the old
+/// message rendered as "...; stderr: " with nothing after it -- not because
+/// there was no diagnosis, but because the diagnosis was on the stream nobody
+/// printed.
+///
+/// That is how this gate's bd-hwye2 row read as a bare `got Some(130)` on both
+/// hosts. 130 is `Outcome::Cancelled` (src/core/outcome.rs), so a cancellation
+/// and a rejection-carrying-an-envelope were indistinguishable from the
+/// failure text alone, and telling them apart cost a fleet round trip.
+///
+/// The family lesson, learned three times across smoke.rs, why_conformance and
+/// here: each surface kept a DIFFERENT two of {exit code, stdout, stderr}, so
+/// no cross-surface hypothesis could be tested. Print all three.
 fn require_ok(output: &Output, label: &str) -> TestResult {
     if output.status.code() == Some(EXIT_SUCCESS) {
         Ok(())
     } else {
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!(
-            "{label} expected exit 0, got {:?}; stderr: {stderr}",
+            "{label} expected exit 0, got {:?}; stdout: {stdout}; stderr: {stderr}",
             output.status.code()
         ))
     }
