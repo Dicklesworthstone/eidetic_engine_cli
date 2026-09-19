@@ -534,6 +534,23 @@ fn failure_catalog_entries_match_toolchain_schema_codes() -> TestResult {
     Ok(())
 }
 
+/// Whether `start` (or any ancestor) is inside a git work tree.
+///
+/// Walks upward the way git itself discovers a repository, and `.exists()`
+/// accepts both a `.git` DIRECTORY and the `.git` FILE a worktree uses. Done
+/// with std::fs rather than by spawning `git` so the probe cannot itself fail
+/// for environmental reasons and be mistaken for the answer.
+fn workspace_is_git_repo(start: &std::path::Path) -> bool {
+    let mut dir = Some(start);
+    while let Some(current) = dir {
+        if current.join(".git").exists() {
+            return true;
+        }
+        dir = current.parent();
+    }
+    false
+}
+
 #[test]
 fn live_toolchain_collector_smoke_is_schema_valid_and_redacted() -> TestResult {
     let workspace = std::env::current_dir().map_err(|error| format!("current_dir: {error}"))?;
@@ -589,12 +606,51 @@ fn live_toolchain_collector_smoke_is_schema_valid_and_redacted() -> TestResult {
         scripts == expected_scripts,
         format!("live_smoke: default script hash inventory drifted: {scripts:?}"),
     )?;
+    // SPLIT: the blake3 hash is HERMETIC -- computed from file content, true
+    // anywhere. `tracked` is ENVIRONMENT-DEPENDENT: support_bundle.rs:1161 sets
+    // it by running `git ls-files --error-unmatch <script>` IN THE WORKSPACE,
+    // and this test's workspace is std::env::current_dir(), i.e. the repo root
+    // under cargo test. An RCH --clean-overlay export has no .git, so every row
+    // returns tracked=false there. That is why this assertion passed on every
+    // dev checkout and failed on hz3 AND hz4 at two separate bases.
+    //
+    // `tracked == in_git_repo` is STRICTLY STRONGER than the old bare `tracked`:
+    // it keeps the original meaning inside a repo -- every declared script must
+    // be tracked -- and adds the outside-a-repo case the old form got wrong. It
+    // can fail in BOTH directions: a genuinely untracked script in a repo, and a
+    // spuriously tracked row outside one.
+    //
+    // FILED SEPARATELY, because it is a product gap and not a test one: the
+    // report CANNOT distinguish "untracked" from "git unavailable".
+    // ToolchainScriptHashRow is {script, blake3, tracked} with no probe
+    // evidence -- unlike ToolchainToolRow, which carries `probe` -- and
+    // collect_toolchain_script_hashes emits a degradation only for HASH
+    // failures. Both conditions collapse to one `false` with an empty
+    // degraded[], so this test asserts the value it can see rather than the
+    // distinction it cannot.
+    let in_git_repo = workspace_is_git_repo(&workspace);
+    let hash_violations = report
+        .script_hashes
+        .iter()
+        .filter(|row| !row.blake3.starts_with("blake3:"))
+        .map(|row| format!("{} blake3={:?}", row.script, row.blake3))
+        .collect::<Vec<_>>();
     ensure(
-        report
-            .script_hashes
-            .iter()
-            .all(|row| row.tracked && row.blake3.starts_with("blake3:")),
-        "live_smoke: script hashes must be tracked blake3 rows",
+        hash_violations.is_empty(),
+        format!("live_smoke: script hashes must be blake3 rows; violations: {hash_violations:?}"),
+    )?;
+    let tracked_violations = report
+        .script_hashes
+        .iter()
+        .filter(|row| row.tracked != in_git_repo)
+        .map(|row| format!("{} tracked={}", row.script, row.tracked))
+        .collect::<Vec<_>>();
+    ensure(
+        tracked_violations.is_empty(),
+        format!(
+            "live_smoke: script tracked flags must match the workspace git state \
+             (in_git_repo={in_git_repo}); violations: {tracked_violations:?}"
+        ),
     )?;
 
     let rendered = capsule.to_string();
