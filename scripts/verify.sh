@@ -138,6 +138,11 @@ BEADS_LOCK_SKIP_CODE=75
 # longer exists. Kept distinct from 1 so the Verification Drift Guard cannot
 # excuse it as a tracked violation; see closure_lint_or_tracked_drift.
 CLOSURE_LINT_STALE_BASELINE_CODE=3
+# scripts/closure-lint.sh exits this when its AUDIT matched zero beads: an
+# abstention, not a pass. Kept distinct from 3 and from 75 because a gate that
+# read nothing, a gate whose baseline is stale, and a gate blocked by lock
+# contention are three different states that were previously one exit code.
+CLOSURE_LINT_EMPTY_POPULATION_CODE=4
 VERIFY_BUDGET_FILE="${EE_VERIFY_BUDGET_FILE:-${SCRIPT_DIR}/verify-budget.toml}"
 VERIFY_BUDGET_FAIL_CODE=6
 
@@ -1098,6 +1103,20 @@ closure_lint_or_tracked_drift() {
     # not to open a bead, so there is nothing for the guard to find.
     if [ "$closure_exit" -eq "$CLOSURE_LINT_STALE_BASELINE_CODE" ]; then
         echo "[-] Closure linter: audit baseline lists debt that no longer exists; delete those lines" >&2
+        return "$closure_exit"
+    fi
+
+    # AN EMPTY AUDIT POPULATION IS NOT EXCUSABLE EITHER, and for the same
+    # reason as the stale baseline directly above: the drift guard decides by
+    # reading `.count` from the report, which is ZERO when the audit matched no
+    # beads at all. Routing an abstention through the guard would excuse it
+    # every time and make the arm inert -- the linter would report "I read
+    # nothing" and the gate would answer "excused".
+    #
+    # There is nothing for the guard to find here. The fix is to repair the
+    # ledger read, not to open a bead.
+    if [ "$closure_exit" -eq "$CLOSURE_LINT_EMPTY_POPULATION_CODE" ]; then
+        echo "[-] Closure linter ABSTAINED: the audit matched zero beads, so its pass would have been vacuous" >&2
         return "$closure_exit"
     fi
 

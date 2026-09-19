@@ -160,6 +160,21 @@ STALE_AUDIT_BASELINE_ENTRIES=""
 # not 1: see the comment at the reporting site for why a plain failure would be
 # excused by the Verification Drift Guard.
 STALE_AUDIT_BASELINE_EXIT_CODE=3
+
+# An audit that matched ZERO beads is an ABSTENTION, not a pass.
+#
+# `relevant_closed_bead_rows` ends `2>/dev/null || true`, so a missing
+# .beads/issues.jsonl, a malformed line, and a genuine "no beads carry these
+# labels" all produce the same empty result. Until this code existed, all three
+# wrote status:"pass" and exited 0 -- a clean answer from an instrument that
+# may have read nothing. The real population is 233 rows today, so zero means
+# something broke rather than that the tree is clean.
+#
+# A PASS AND AN ABSTENTION MUST NOT SHARE AN EXIT CODE OR A STATUS WORD. This
+# is the same empty-world hole bd-yytkz's gate was built to avoid, live in an
+# older gate. 4 is unused: 3 is the stale baseline, 6 is the verify budget,
+# 75 is beads-lock contention.
+EMPTY_AUDIT_POPULATION_EXIT_CODE=4
 CURRENT_BEAD_ID=""
 CURRENT_BEAD_LABELS=""
 CURRENT_BEAD_DESCRIPTION=""
@@ -435,15 +450,22 @@ EOF
 
 write_report() {
     local status="$1"
+    # THE DENOMINATOR TRAVELS WITH THE COUNT. "count: 0" cannot be told from
+    # "read nothing"; "auditedBeads: 233, count: 0" is a verdict. Defaults to 0
+    # so the field is never absent -- an absent denominator reads as zero to a
+    # consumer and as "old report" to a human, and those must not be the same.
+    local audited="${AUDITED_BEAD_COUNT:-0}"
     if [ -n "$VIOLATIONS" ]; then
         violation_rows_as_json |
             jq -s \
                 --arg status "$status" \
                 --arg baseline_file "$AUDIT_BASELINE_FILE" \
                 --argjson baselined "$BASELINED_VIOLATION_COUNT" \
+                --argjson audited "$audited" \
                 '{
                     violations: .,
                     count: length,
+                    auditedBeads: $audited,
                     status: $status
                 } + (
                     if $baselined > 0 then
@@ -457,9 +479,11 @@ write_report() {
             --arg status "$status" \
             --arg baseline_file "$AUDIT_BASELINE_FILE" \
             --argjson baselined "$BASELINED_VIOLATION_COUNT" \
+            --argjson audited "$audited" \
             '{
                 violations: [],
                 count: 0,
+                auditedBeads: $audited,
                 status: $status
             } + (
                 if $baselined > 0 then
@@ -1855,6 +1879,18 @@ else
     BEAD_ROWS=$(recently_changed_closed_bead_rows "$CHANGED_IDS" | prepare_bead_rows)
 fi
 
+# THE DENOMINATOR, carried beside the count so a verdict is readable.
+#
+# "count: 0" says nothing was found. It does not say whether anything was
+# LOOKED AT, and those are the two readings a reader has to choose between.
+# prepare_bead_rows emits exactly one line per bead (newlines inside a record
+# become ), so this is a bead count and not a line artefact.
+if [ -z "$BEAD_ROWS" ]; then
+    AUDITED_BEAD_COUNT=0
+else
+    AUDITED_BEAD_COUNT=$(printf '%s\n' "$BEAD_ROWS" | grep -c . || true)
+fi
+
 check_graph_schema_docs() {
     for schema in \
         "ee.insights.v1" \
@@ -1883,14 +1919,34 @@ check_unimplemented_failure_mode_honesty_only
 write_closure_quality_report
 
 if [ -z "$BEAD_ROWS" ] && [ "$VIOLATION_COUNT" -eq 0 ]; then
-    if [ "$JSON_OUTPUT" != true ]; then
-        if [ "$AUDIT_MODE" = true ]; then
-            echo "No closed beads with implements-surface or honesty-only labels found."
-        else
-            echo "No recently changed closed beads with implements-surface or honesty-only labels found."
+    # AUDIT MODE: zero beads is an ABSTENTION and must not be reported as a
+    # pass. In this mode the population is the whole ledger, which holds 233
+    # matching rows today, so an empty result means the read failed -- a
+    # missing file, a malformed line, or a filter that stopped matching -- not
+    # that every closure is clean.
+    #
+    # The message goes to stderr UNCONDITIONALLY, including under --json. The
+    # previous silence here was the defect: CI invokes this with --json, so the
+    # one case that must never pass quietly was the one case that printed
+    # nothing at all.
+    if [ "$AUDIT_MODE" = true ]; then
+        echo "closure-lint: ABSTAINED -- audit matched ZERO beads in $BEADS_FILE." >&2
+        echo "  This is NOT a pass. Audit mode reads the whole ledger, so zero means" >&2
+        echo "  the read failed (missing file, malformed line, or a filter that no" >&2
+        echo "  longer matches), not that every closure is clean." >&2
+        if [ "$JSON_OUTPUT" = true ]; then
+            write_report "abstained_empty_population"
         fi
+        exit "$EMPTY_AUDIT_POPULATION_EXIT_CODE"
     fi
-    if [ "$JSON_OUTPUT" = true ]; then
+
+    # RECENT-CHANGES MODE: zero is the ordinary case -- most commits close no
+    # labelled beads -- so it stays a pass. The distinction is the point: the
+    # same emptiness means different things in the two modes, and collapsing
+    # them is what made the audit-mode hole invisible.
+    if [ "$JSON_OUTPUT" != true ]; then
+        echo "No recently changed closed beads with implements-surface or honesty-only labels found."
+    else
         write_report "pass"
     fi
     exit 0
