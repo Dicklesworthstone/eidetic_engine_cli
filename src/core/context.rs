@@ -12756,8 +12756,18 @@ fn append_direct_evidence_pack_items(
             rejected_live_admission = rejected_live_admission.saturating_add(1);
             continue;
         };
-        let relevance =
-            UnitScore::parse(hit.relevance_score()).unwrap_or_else(|_| UnitScore::zero());
+        // bd-reality-core-convergence-1azkt.11. Was
+        // `.unwrap_or_else(|_| UnitScore::zero())`: a projection the unit type
+        // REFUSED was admitted as a confident 0.0, and the `why` string two
+        // statements below then reported that manufactured number to the agent
+        // as "relevance {:.4}". Rejecting it uses the same `continue` this loop
+        // already applies to an unconstructable provenance directly above, so
+        // an unscorable hit is counted as a rejected admission rather than
+        // admitted with an invented score.
+        let Ok(relevance) = UnitScore::parse(hit.relevance_score()) else {
+            rejected_live_admission = rejected_live_admission.saturating_add(1);
+            continue;
+        };
         let utility = UnitScore::neutral();
         let rank = u32::try_from(
             draft

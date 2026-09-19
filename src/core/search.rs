@@ -6059,6 +6059,25 @@ fn search_hit_pack_item(index: usize, hit: &SearchHit) -> Option<PackDraftItem> 
     let lifecycle = search_hit_pack_lifecycle(metadata);
     let rank = u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX);
 
+    // bd-reality-core-convergence-1azkt.11. This previously read
+    // `UnitScore::parse(..).unwrap_or_else(|_| UnitScore::neutral())`, so a
+    // projection the unit type REFUSED became 0.5 -- a middling relevance
+    // indistinguishable from a genuinely mid-ranked hit, and the most
+    // confident-looking value available for a score we could not compute.
+    //
+    // `normalized_relevance_score` pre-clamps, so the surviving trigger is NaN,
+    // which `f32::clamp` propagates rather than bounding. Narrow is not absent,
+    // and "the unit type rejected this value" is exactly the moment to decline.
+    //
+    // Dropping the hit matches the sibling path in `context.rs`, whose
+    // `candidate_from_hit_preloaded` already returns None rather than score a
+    // hit it cannot score. This function is already `-> Option<PackDraftItem>`
+    // and already declines on absent metadata and an unparsable id, so an
+    // unscorable hit is declined the same way rather than invented.
+    let Ok(relevance) = UnitScore::parse(hit.relevance_score()) else {
+        return None;
+    };
+
     Some(PackDraftItem {
         rank,
         memory_id,
@@ -6069,7 +6088,7 @@ fn search_hit_pack_item(index: usize, hit: &SearchHit) -> Option<PackDraftItem> 
                 .or_else(|| metadata_string(metadata, "content"))
                 .unwrap_or_default(),
         ),
-        relevance: UnitScore::parse(hit.relevance_score()).unwrap_or_else(|_| UnitScore::neutral()),
+        relevance,
         utility: metadata_f32(metadata, SEARCH_ANALYSIS_UTILITY_KEY)
             .and_then(|value| {
                 UnitScore::parse(if value.is_nan() {
