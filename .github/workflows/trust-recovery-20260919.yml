@@ -5,13 +5,14 @@ on:
     paths:
       - scripts/delivery/trust-recovery-20260919/**
       - src/core/backup_signal_recovery*.rs
+      - src/core/backup_publication_recovery*.rs
       - .github/workflows/trust-recovery-20260919.yml
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
   group: trust-recovery-publication
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   integrate-and-verify:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
@@ -47,27 +48,29 @@ jobs:
             trust-recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             evidence-export-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             learned-history-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Complete reference recovery and test trust and learning signals
+      - name: Complete reference recovery and test final publication admission
         run: |
           set -euo pipefail
           grep -Fq 'evidence_export::redact_evidence(self, level, provenance_admitted)' src/core/backup.rs
           python3 scripts/delivery/trust-recovery-20260919/apply.py
-          paths=(src/core/backup.rs src/core/backup_history_recovery.rs src/core/backup_trust_recovery.rs src/core/backup_trust_recovery_tests.rs src/core/backup_reference_recovery_tests.rs src/core/backup_signal_recovery.rs src/core/backup_signal_recovery_tests.rs)
+          paths=(src/core/backup.rs src/core/backup_history_recovery.rs src/core/backup_trust_recovery.rs src/core/backup_trust_recovery_tests.rs src/core/backup_reference_recovery_tests.rs src/core/backup_signal_recovery.rs src/core/backup_signal_recovery_tests.rs src/core/backup_publication_recovery.rs src/core/backup_publication_recovery_tests.rs)
           rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
           git diff --check
           for family in trust signals; do
             status=0
+            expected=8
+            if test "$family" = trust; then expected=11; fi
             cargo test --locked --lib "core::backup::recovery::history::$family::tests" -- --test-threads=2 > "$RUNNER_TEMP/trust-$family.log" 2>&1 || status=$?
             tail -n 120 "$RUNNER_TEMP/trust-$family.log"
             test "$status" -eq 0
-            grep -Fq 'test result: ok. 8 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/trust-$family.log"
+            grep -Fq "test result: ok. $expected passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/trust-$family.log"
           done
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           if ! git diff --quiet -- "${paths[@]}"; then
             base=$(git rev-parse HEAD)
             git add -- "${paths[@]}"
-            git commit -m 'fix(backup): complete stable trust and learning reference recovery' -m 'Preserve canonical opaque references when original targets are absent. Keep source-invalid quarantined hashes invalid and preserve seal, quarantine, certificate and outcome authority. Format the active recovery guards and tests. All 16 focused real trust, learning-signal and reference regressions passed before this source commit.'
+            git commit -m 'fix(backup): preserve restored authority through the final publication boundary' -m 'Recheck exact admitted learned, pack, evidence, trust and outcome history in a read-only snapshot after derived index rebuilding. Legitimate job/generation changes do not bypass or falsely trip the durable-content check. Preserve opaque external reference identities across backup generations. All 19 focused trust, post-rebuild corruption, learning-signal and reference regressions passed before this source commit.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
@@ -96,11 +99,11 @@ jobs:
             tail -n 100 "$RUNNER_TEMP/trust-$name.log"
             if test "$status" -ne 0 || ! grep -Fq "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/trust-$name.log"; then failed=1; fi
           }
-          run_group inventory core::backup::recovery:: 47
+          run_group inventory core::backup::recovery:: 50
           run_group learning core::backup::history_recovery_tests 6
           run_group projection core::backup::evidence_export::tests 6
           run_group live-trust default_backup_restores_trust_history_and_live_consumers 1
-          run_group live-signals default_backup_restores_learning_signals_and_review_behavior 1
+          run_group live-signals default_backup_restores_learning_signals_and_live_review 1
           cargo check --locked --all-targets > "$RUNNER_TEMP/trust-check.log" 2>&1 || failed=1
           tail -n 80 "$RUNNER_TEMP/trust-check.log"
           cargo clippy --locked --lib -- -D warnings > "$RUNNER_TEMP/trust-clippy.log" 2>&1 || failed=1

@@ -30,19 +30,19 @@ block = source[start:end]
 old = """    if redacted == value {
         redacted
     } else {
-        format!(\"backup-ref:{}\", blake3::hash(value.as_bytes()).to_hex())
+        format!("backup-ref:{}", blake3::hash(value.as_bytes()).to_hex())
     }
 """
 new = """    // Recovery's own opaque references are already scrubbed identifiers.
     // Preserve only the exact emitted grammar, never an arbitrary prefix.
-    let opaque = value.strip_prefix(\"backup-ref:\").is_some_and(|suffix| {
+    let opaque = value.strip_prefix("backup-ref:").is_some_and(|suffix| {
         suffix.len() == 64
             && suffix.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     });
     if redacted == value || opaque {
         value.to_owned()
     } else {
-        format!(\"backup-ref:{}\", blake3::hash(value.as_bytes()).to_hex())
+        format!("backup-ref:{}", blake3::hash(value.as_bytes()).to_hex())
     }
 """
 if old in block:
@@ -56,3 +56,53 @@ path = Path("src/core/backup_trust_recovery_tests.rs")
 source = path.read_text()
 if "mod references;" not in source:
     path.write_text(source + '\n#[path = "backup_reference_recovery_tests.rs"]\nmod references;\n')
+
+# Index publication changes derived jobs and generations but must never change
+# admitted authority. Reopen a read-only snapshot after rebuilding succeeds.
+path = Path("src/core/backup_history_recovery.rs")
+source = path.read_text()
+if "mod publication;" not in source:
+    anchor = 'mod packs;'
+    assert source.count(anchor) == 1
+    path.write_text(source.replace(anchor, anchor + '\n#[path = "backup_publication_recovery.rs"]\nmod publication;', 1))
+
+path = Path("src/core/backup.rs")
+source = path.read_text()
+old = """fn restore_backup_to_side_path_with_verification_hook(
+    options: &BackupRestoreOptions,
+    before_verification: impl FnOnce(&Path) -> Result<(), DomainError>,
+) -> Result<BackupRestoreReport, DomainError> {
+    let workspace_path = normalize_path(&options.workspace_path);"""
+new = """fn restore_backup_to_side_path_with_verification_hook(
+    options: &BackupRestoreOptions,
+    before_verification: impl FnOnce(&Path) -> Result<(), DomainError>,
+) -> Result<BackupRestoreReport, DomainError> {
+    restore_backup_to_side_path_with_recovery_hooks(options, before_verification, |_| Ok(()))
+}
+
+fn restore_backup_to_side_path_with_recovery_hooks(
+    options: &BackupRestoreOptions,
+    before_verification: impl FnOnce(&Path) -> Result<(), DomainError>,
+    before_publication: impl FnOnce(&Path) -> Result<(), DomainError>,
+) -> Result<BackupRestoreReport, DomainError> {
+    let workspace_path = normalize_path(&options.workspace_path);"""
+if old in source:
+    assert source.count(old) == 1
+    source = source.replace(old, new, 1)
+else:
+    assert "fn restore_backup_to_side_path_with_recovery_hooks(" in source
+if "expected_history.verify_before_publication(" not in source:
+    anchor = "    let restore_issue_count = import_report"
+    assert source.count(anchor) == 1
+    source = source.replace(anchor, """    // Rebuilding may consume jobs, but cannot grant or rewrite durable
+    // authority. Recheck the admitted history after the last rebuilding stage.
+    before_publication(&restored_database_path)?;
+    expected_history.verify_before_publication(&restored_database_path)?;
+
+""" + anchor, 1)
+path.write_text(source)
+
+path = Path("src/core/backup_trust_recovery_tests.rs")
+source = path.read_text()
+if "mod publication;" not in source:
+    path.write_text(source + '\n#[path = "backup_publication_recovery_tests.rs"]\nmod publication;\n')
