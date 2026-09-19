@@ -11,11 +11,11 @@ permissions:
   contents: read
 concurrency:
   group: recorded-provenance-recovery-delivery
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   integrate:
     if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     permissions:
       contents: write
@@ -112,9 +112,19 @@ jobs:
       - name: Execute real-store corruption, repeated recovery and consumers
         run: |
           set -euo pipefail
+          failed=0
           group() {
-            timeout 25m cargo test --locked --lib "$1" -- --test-threads=4 2>&1 | tee "$RUNNER_TEMP/recorded-$3.log"
-            grep -Fq "test result: ok. $2 passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/recorded-$3.log"
+            if ! timeout 25m cargo test --locked --lib "$1" -- --test-threads=4 2>&1 | tee "$RUNNER_TEMP/recorded-$3.log"; then
+              echo "FAILED: $3" | tee -a "$RUNNER_TEMP/recorded-summary.log"
+              failed=1
+              return
+            fi
+            if ! grep -Fq "test result: ok. $2 passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/recorded-$3.log"; then
+              echo "INVALID TEST INVENTORY: $3" | tee -a "$RUNNER_TEMP/recorded-summary.log"
+              failed=1
+            else
+              echo "PASS: $3 ($2 tests)" | tee -a "$RUNNER_TEMP/recorded-summary.log"
+            fi
           }
           group core::backup::recovery_faults 1 fault-control
           group core::backup::recovery::history::tests 3 rows
@@ -123,6 +133,11 @@ jobs:
           group core::backup::tests::provenance_recovery_survives_rebackup_without_rejudging_evidence 1 provenance-roundtrip
           group core::backup::tests::default_backup_restores_recorded_history_and_live_consumers 1 recorded-consumers
           group core::backup::tests::default_backup_restores_error_recall_and_live_diagnosis 1 diagnosis
+          group core::backup::recovery::history::operational::tests 9 operational
+          group core::backup::recovery::history::imports::tests 7 imports
+          group core::backup::tests::default_backup_restores_import_checkpoints_and_reopens_same_source 1 import-continuation
+          group core::backup::recovery::tests 15 inventory
+          exit "$failed"
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:
