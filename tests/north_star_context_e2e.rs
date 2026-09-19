@@ -14,26 +14,66 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use ee::obs::test_log::{self, EventKind, TestEvent};
 use serde_json::Value as JsonValue;
 
 type TestResult = Result<(), String>;
 
+/// Stable id for this file's `ee.test_event.v1` stream (bd-2mpct bullet 8).
+const TEST_ID: &str = "north_star_context_e2e";
+
+/// WHY THE EMISSION HANGS OFF `ensure` RATHER THAN EACH SCENARIO.
+///
+/// Instrumenting seven scenarios by hand would emit evidence only where
+/// somebody remembered to add a call, and the assertions that go unrecorded
+/// are exactly the ones nobody was thinking about. Wrapping the file's own
+/// `ensure` means EVERY assertion in the file -- including the four seeding
+/// helpers -- appears in the stream, and a future assertion is instrumented by
+/// construction rather than by diligence.
+///
+/// `log_event` returns immediately when no log path is configured
+/// (src/obs/test_log.rs), so this is inert unless a run asks for it: no
+/// behaviour change, no output, no cost on the default path.
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
+    let message = message.into();
     if condition {
+        test_log::assert_ok(TEST_ID, message.as_str());
         Ok(())
     } else {
-        Err(message.into())
+        // The label carries the full failure text, which for the tightened
+        // assertions below includes the actual stdout. expected/actual record
+        // the predicate's shape so a consumer can count outcomes without
+        // parsing prose.
+        test_log::assert_fail(TEST_ID, message.as_str(), true, false);
+        Err(message)
     }
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     let _serial_guard = lock_real_ee_serial();
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let started = Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
         .output()
-        .map_err(|e| format!("failed to run ee {}: {e}", args.join(" ")))
+        .map_err(|e| format!("failed to run ee {}: {e}", args.join(" ")))?;
+    // CommandEnd carries the exit code, duration and I/O HASHES rather than
+    // the bytes -- `hash_bytes` exists so a stream stays small and never
+    // carries content. The argv is recorded because "which command produced
+    // this" is the first question a reader of the stream has.
+    test_log::log_event(
+        TestEvent::new(TEST_ID, EventKind::CommandEnd)
+            .with_field("argv", args.join(" "))
+            .with_field("exit_code", output.status.code().unwrap_or(-1))
+            .with_field("duration_ms", started.elapsed().as_millis() as u64)
+            .with_field("stdout_hash", test_log::hash_bytes(&output.stdout))
+            .with_field(
+                "stderr_excerpt",
+                test_log::excerpt_stderr(&output.stderr, 512),
+            ),
+    );
+    Ok(output)
 }
 
 /// File-local serialization gate for every real-binary spawn below.
@@ -58,14 +98,40 @@ fn lock_real_ee_serial() -> MutexGuard<'static, ()> {
 /// model path) in degradation scenarios.
 fn run_ee_with_env(args: &[&str], envs: &[(&str, &str)]) -> Result<Output, String> {
     let _serial_guard = lock_real_ee_serial();
+    let started = Instant::now();
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
     command.args(args);
     for (key, value) in envs {
         command.env(key, value);
     }
-    command
+    let output = command
         .output()
-        .map_err(|e| format!("failed to run ee {}: {e}", args.join(" ")))
+        .map_err(|e| format!("failed to run ee {}: {e}", args.join(" ")))?;
+    // THIS IS THE SECOND SPAWN PATH AND IT MUST EMIT TOO. Instrumenting only
+    // `run_ee` would have left the degradation scenarios silent -- and those
+    // are the runs whose evidence matters most, because their env overrides
+    // ARE the experiment. `env` is recorded for exactly that reason: a
+    // CommandEnd that does not say the model path was broken cannot
+    // distinguish a faulted run from a healthy one.
+    test_log::log_event(
+        TestEvent::new(TEST_ID, EventKind::CommandEnd)
+            .with_field("argv", args.join(" "))
+            .with_field(
+                "env",
+                envs.iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+            .with_field("exit_code", output.status.code().unwrap_or(-1))
+            .with_field("duration_ms", started.elapsed().as_millis() as u64)
+            .with_field("stdout_hash", test_log::hash_bytes(&output.stdout))
+            .with_field(
+                "stderr_excerpt",
+                test_log::excerpt_stderr(&output.stderr, 512),
+            ),
+    );
+    Ok(output)
 }
 
 fn parse_json_stdout(output: &Output, ctx: &str) -> Result<JsonValue, String> {
