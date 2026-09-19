@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - scripts/delivery/lifecycle-recovery-20260919.patch.xz.b64
+      - scripts/delivery/maintenance-recovery-20260919.patch.xz.b64
       - .github/workflows/lifecycle-recovery-20260919.yml
   workflow_dispatch:
 permissions:
@@ -58,7 +59,15 @@ jobs:
           else
             grep -Fq 'self.lifecycle.verify_connection(db)' src/core/backup_history_recovery.rs
           fi
-          files=(src/core/backup_history_recovery.rs src/core/backup_lifecycle_recovery.rs src/core/backup_lifecycle_recovery_tests.rs)
+          base64 --decode scripts/delivery/maintenance-recovery-20260919.patch.xz.b64 | xz --decompress > "$RUNNER_TEMP/maintenance.patch"
+          echo "b96ed34ad7d6602cd57ff3fc552a0670e541e17c114c9ce63239390f654b5f58  $RUNNER_TEMP/maintenance.patch" | sha256sum --check
+          if ! test -f src/core/backup_maintenance_recovery.rs; then
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/maintenance.patch"
+            git apply "$RUNNER_TEMP/maintenance.patch"
+          else
+            grep -Fq 'self.maintenance.verify_connection(db)' src/core/backup_history_recovery.rs
+          fi
+          files=(src/core/backup_history_recovery.rs src/core/backup_lifecycle_recovery.rs src/core/backup_lifecycle_recovery_tests.rs src/core/backup_maintenance_recovery.rs src/core/backup_maintenance_recovery_tests.rs)
           rustfmt --edition 2024 --config skip_children=true "${files[@]}"
           tar -czf "$RUNNER_TEMP/lifecycle-tested-source.tar.gz" "${files[@]}"
           verify() {
@@ -66,7 +75,10 @@ jobs:
             cargo test --locked --lib core::backup::recovery::history::lifecycle::tests -- --test-threads=2 > "$RUNNER_TEMP/lifecycle-tests.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/lifecycle-tests.log"; return 1; }
             tail -n 100 "$RUNNER_TEMP/lifecycle-tests.log"
             grep -Fq 'test result: ok. 12 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/lifecycle-tests.log"
-            for filter in default_backup_restores_curation_history_and_applies_review default_backup_restores_procedures_and_live_retirement; do
+            cargo test --locked --lib core::backup::recovery::history::maintenance::tests -- --test-threads=2 > "$RUNNER_TEMP/lifecycle-maintenance.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/lifecycle-maintenance.log"; return 1; }
+            tail -n 100 "$RUNNER_TEMP/lifecycle-maintenance.log"
+            grep -Fq 'test result: ok. 10 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/lifecycle-maintenance.log"
+            for filter in default_backup_restores_curation_history_and_applies_review default_backup_restores_procedures_and_live_retirement default_backup_restores_maintenance_and_live_consumers; do
               cargo test --locked --lib "core::backup::tests::$filter" -- --exact > "$RUNNER_TEMP/lifecycle-$filter.log" 2>&1 || { tail -n 120 "$RUNNER_TEMP/lifecycle-$filter.log"; return 1; }
               tail -n 50 "$RUNNER_TEMP/lifecycle-$filter.log"
               grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/lifecycle-$filter.log"
@@ -78,7 +90,7 @@ jobs:
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'fix(backup): preserve curation authority and procedure lifecycle through recovery' -m 'Compare authenticated typed curation proposals, TTL policies, procedures and event provenance before and after derived rebuilding. Admit only explicit redaction-review transitions, preserve retirement and applied/rejected decisions, and reject same-count corruption without publishing a partial store. All-target compilation, twelve adversarial lifecycle tests and both existing public recovery continuations passed before this commit.'
+            git commit -m 'fix(backup): preserve maintenance constraints and reflection replay state' -m 'Bind all seven maintenance history families to exact typed rows before and after derived rebuilding. Preserve sentinel predicates, consumed reflection challenges, tripwire halt state and check history, situation routing, debt assessments and promoted recipes. All-target compilation, twenty-two adversarial recovery tests and three public recovery continuations passed before this commit.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
