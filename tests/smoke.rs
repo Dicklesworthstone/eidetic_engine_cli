@@ -7588,7 +7588,7 @@ fn memory_temporal_links_and_graph_outputs_compose() -> TestResult {
     //
     // What must still hold is what the assertion was named for: STAGED
     // SUGGESTIONS CREATE NOTHING. So every pre-existing link must be one ADR
-    // 0051 itself made -- a co_tag auto-link -- and any other relation appearing
+    // 0051 itself made -- a `related`/`auto` link -- and anything else appearing
     // here would mean something durably wrote a link that should only ever have
     // been suggested.
     //
@@ -7597,9 +7597,15 @@ fn memory_temporal_links_and_graph_outputs_compose() -> TestResult {
     // `expired` carrying identical tag sets, so pinning that number would encode
     // a derived constant nobody could later tell was deliberate -- the exact
     // fixture shape this repair exists to remove.
+    // THE SIGNATURE IS `related`/`auto`, NOT `co_tag`. src/core/memory.rs:5541
+    // says it exactly: ADR 0051 persists "the strongest co-tag neighbors as
+    // audited `related` links". `co_tag` is the relation a staged SUGGESTION
+    // carries, not the relation of the durable link -- so a `co_tag` row
+    // appearing here is precisely the defect this assertion exists to catch: a
+    // suggestion that became durable.
     let unexpected_baseline_links = links_before
         .iter()
-        .filter(|link| link.relation != "co_tag")
+        .filter(|link| !(link.relation == "related" && link.source == "auto"))
         .map(|link| {
             format!(
                 "{} relation={} source={}",
@@ -7611,8 +7617,8 @@ fn memory_temporal_links_and_graph_outputs_compose() -> TestResult {
         unexpected_baseline_links.is_empty(),
         format!(
             "staged suggestions and dry-run autolink candidates must not mutate memory_links; \
-             only ADR 0051 co_tag auto-links may exist at this point, found {} other link(s): \
-             {unexpected_baseline_links:?}",
+             only ADR 0051 auto-links (relation=related, source=auto) may exist at this point, \
+             found {} other link(s): {unexpected_baseline_links:?}",
             unexpected_baseline_links.len()
         ),
     )?;
