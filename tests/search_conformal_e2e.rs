@@ -8,6 +8,10 @@
 #[path = "support/test_tracing.rs"]
 mod test_tracing;
 
+#[cfg(feature = "lexical-bm25")]
+#[path = "support/revision_search_cli.rs"]
+mod revision_cli;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

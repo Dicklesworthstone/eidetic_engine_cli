@@ -13,6 +13,8 @@ on:
       - src/core/search_revision_admission_tests.rs
       - src/core/search_diagnostic_snapshot.rs
       - src/core/backup_revision_recovery_tests.rs
+      - tests/search_conformal_e2e.rs
+      - tests/support/revision_search_cli.rs
       - .github/workflows/recovery-headship-admission-20260919.yml
   workflow_dispatch:
 permissions:
@@ -84,6 +86,14 @@ jobs:
           run_group ordinary-import 'core::jsonl_import::tests::' 61
           run_group backup-publication 'backup_revision_recovery_' 2
           exit "$failed"
+      - name: Execute real CLI revision search and context acceptance
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          cargo test --locked --test search_conformal_e2e -- --test-threads=2 > "$RUNNER_TEMP/recovery-cli.log" 2>&1 || status=$?
+          tail -n 120 "$RUNNER_TEMP/recovery-cli.log"
+          test "$status" -eq 0
+          grep -Fq 'test result: ok. 3 passed; 0 failed;' "$RUNNER_TEMP/recovery-cli.log"
       - name: Check all targets
         if: ${{ !cancelled() }}
         run: |
@@ -102,7 +112,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           status=0
-          rustfmt --edition 2024 --config skip_children=true --check src/core/jsonl_import.rs src/core/jsonl_recovery.rs src/core/jsonl_revisions.rs src/core/jsonl_recovery_regression_tests.rs src/core/jsonl_revision_heads_tests.rs src/core/search_rule_admission.rs src/core/search_revision_admission.rs src/core/search_revision_admission_tests.rs src/core/search_diagnostic_snapshot.rs src/core/backup_revision_recovery_tests.rs > "$RUNNER_TEMP/recovery-fmt.log" 2>&1 || status=$?
+          rustfmt --edition 2024 --config skip_children=true --check src/core/jsonl_import.rs src/core/jsonl_recovery.rs src/core/jsonl_revisions.rs src/core/jsonl_recovery_regression_tests.rs src/core/jsonl_revision_heads_tests.rs src/core/search_rule_admission.rs src/core/search_revision_admission.rs src/core/search_revision_admission_tests.rs src/core/search_diagnostic_snapshot.rs src/core/backup_revision_recovery_tests.rs tests/search_conformal_e2e.rs tests/support/revision_search_cli.rs > "$RUNNER_TEMP/recovery-fmt.log" 2>&1 || status=$?
           cat "$RUNNER_TEMP/recovery-fmt.log"
           exit "$status"
       - uses: actions/upload-artifact@v4
@@ -112,4 +122,5 @@ jobs:
           path: |
             ${{ runner.temp }}/recovery-*.log
             ${{ runner.temp }}/recovery-*.patch
+            target/tmp/revision-search-cli
           retention-days: 7
