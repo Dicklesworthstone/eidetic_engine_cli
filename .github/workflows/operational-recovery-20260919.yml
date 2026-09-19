@@ -1,0 +1,131 @@
+name: Preserve operational memory across recovery
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/operational-recovery-20260919.patch.xz.b64
+      - .github/workflows/operational-recovery-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: operational-recovery-delivery
+  cancel-in-progress: false
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.publish.outputs.source }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - name: Integrate journal, task, artifact and audit recovery
+        id: publish
+        run: |
+          set -euo pipefail
+          export RUSTUP_TOOLCHAIN=nightly-2026-08-31
+          base=$(git rev-parse HEAD)
+          base64 --decode scripts/delivery/operational-recovery-20260919.patch.xz.b64 | xz --decompress > "$RUNNER_TEMP/operational.patch"
+          echo "076c363d9c44b87430a0532a36ed792a819beaa6d2743d53b53b8cfb6f91f104  $RUNNER_TEMP/operational.patch" | sha256sum --check
+          if ! test -f src/core/backup_operational_recovery.rs; then
+            test "$(git rev-parse HEAD:src/core/backup_history_recovery.rs)" = f3659b19d2c959c94850847beee9597975ecfbc1
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/operational.patch"
+            git apply "$RUNNER_TEMP/operational.patch"
+          else
+            grep -Fq 'self.operational.verify_connection(db)' src/core/backup_history_recovery.rs
+          fi
+          files=(src/core/backup_history_recovery.rs src/core/backup_operational_recovery.rs src/core/backup_operational_recovery_tests.rs)
+          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+          git diff --check
+          git add -- "${files[@]}"
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'fix(backup): preserve journals, task outcomes, artifact evidence and source audits' -m 'Retain admitted typed work and artifact rows through both recovery fences. Preserve consumed journals, risk classifications, failed jobs and task context; normalize only interrupted jobs. Check every original audit row while permitting new restore audits. Include nine real-store tests spanning both fences and repeated recovery. Patch integrity and formatting passed; compilation and runtime validation are reported separately.'
+            for attempt in 1 2 3 4; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 4
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${files[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+          fi
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > "$RUNNER_TEMP/operational-source-sha.log"
+          tar -czf "$RUNNER_TEMP/operational-source.tar.gz" "${files[@]}"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: operational-recovery-source
+          path: |
+            ${{ runner.temp }}/operational-source-sha.log
+            ${{ runner.temp }}/operational-source.tar.gz
+          retention-days: 7
+  verify:
+    needs: integrate
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.integrate.outputs.source }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: operational-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            operational-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recorded-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            contradiction-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Compile source and all test targets
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD | tee "$RUNNER_TEMP/operational-identity.log"
+          timeout 25m cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/operational-check.log"
+      - name: Execute both-boundary corruption and repeated restore tests
+        run: |
+          set -euo pipefail
+          timeout 30m cargo test --locked --lib core::backup::recovery::history::operational::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/operational-tests.log"
+          grep -Fq 'test result: ok. 9 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/operational-tests.log"
+          timeout 15m cargo test --locked --lib core::backup::recovery::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/operational-inventory.log"
+          grep -Fq 'test result: ok. 15 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/operational-inventory.log"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: operational-recovery-results
+          path: ${{ runner.temp }}/operational-*.log
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
