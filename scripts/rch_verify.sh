@@ -164,11 +164,31 @@ host_can_run_executable() {
     esac
 }
 
-RCH_MANIFEST_FIX_SIDECAR_BIN="/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5"
-RCH_E327_SIDECAR_BIN="/Users/jemanuel/.local/bin/rch-33720a8"
-RCH_MACOS_SOURCE_BIN="/Volumes/USBNVME16TB/temp_agent_space/rch-macos-target/debug/rch"
-DEFAULT_RCH_BIN="/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch"
-RCH_LOCAL_BIN="/Users/jemanuel/.local/bin/rch"
+# bd-reality-core-convergence-1azkt.18: "Cross-platform scripts converge
+# without machine-specific absolute paths." These five candidates hardcoded one
+# developer's home directory in the verification wrapper every agent runs.
+#
+# The chain below is resilient -- host_can_run_executable skips what does not
+# exist and it falls back to bare `rch` -- so this was never BROKEN elsewhere,
+# only wrong-by-name and silently degraded to the PATH lookup. Deriving from
+# ${HOME} is byte-identical on the machine these were written for and correct
+# on any other, so nothing about today's behaviour changes.
+#
+# Both expansions carry a default because this script runs under `set -u`, so a
+# bare ${HOME} would ABORT on a host that does not export it -- containers and
+# cron being the usual ones. Aborting here would be a worse portability failure
+# than the hardcoded paths were: these are the first lines that execute, and
+# the fallback below is the honest outcome anyway, since a nonexistent
+# candidate is skipped and the chain lands on `rch` from PATH.
+RCH_MANIFEST_FIX_SIDECAR_BIN="${HOME:-/nonexistent}/.local/bin/rch-manifestfix-20260605-5"
+RCH_E327_SIDECAR_BIN="${HOME:-/nonexistent}/.local/bin/rch-33720a8"
+# No portable derivation exists for this one: it names a specific external
+# volume, not a location under $HOME. Made overridable instead of rewritten,
+# so a host without that volume can point it somewhere real rather than
+# relying on the candidate simply failing.
+RCH_MACOS_SOURCE_BIN="${RCH_MACOS_SOURCE_BIN:-/Volumes/USBNVME16TB/temp_agent_space/rch-macos-target/debug/rch}"
+DEFAULT_RCH_BIN="${HOME:-/nonexistent}/projects/remote_compilation_helper/target-local/release/rch"
+RCH_LOCAL_BIN="${HOME:-/nonexistent}/.local/bin/rch"
 RCH_PATH_BIN="$(command -v rch 2>/dev/null || true)"
 if [ -z "${RCH_BIN:-}" ]; then
     # Prefer the currently installed client. Older sidecar clients are kept as
@@ -191,7 +211,15 @@ if [ -z "${RCH_BIN:-}" ]; then
     RCH_BIN="rch"
 fi
 PROJECT_ROOT="$PWD"
-DEFAULT_RCH_ALIAS_PROJECT_ROOT="/tmp/rch-users-jemanuel"
+# Same acceptance line. This default only needs to be unique per user, and
+# ${USER} is what the literal was spelling out by hand -- identical on the
+# machine it was written for. Still overridable via RCH_ALIAS_PROJECT_ROOT.
+#
+# `id -un` rather than a bare ${USER}: this runs under `set -u`, and USER is
+# routinely absent in containers, where LOGNAME usually is too. Falling back
+# through both to `id -un` keeps the path per-user everywhere instead of
+# aborting the script or collapsing every user onto one shared directory.
+DEFAULT_RCH_ALIAS_PROJECT_ROOT="/tmp/rch-users-${USER:-${LOGNAME:-$(id -un 2>/dev/null || echo unknown)}}"
 
 validate_env_override() {
     local item="${1:?environment override required}"
