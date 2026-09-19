@@ -211,8 +211,21 @@ fn closure_gate_status(lint_code: i32, guard_code: i32) -> Output {
         .arg(
             r#"
 set -uo pipefail
+# THIS PREAMBLE MIRRORS verify.sh'S CONSTANTS AND IS A DRIFT SURFACE.
+#
+# The harness extracts only the FUNCTION from verify.sh, so every constant the
+# function reads must be redeclared here. Under `set -u` a missing one kills
+# the function before it prints, and `closure_gate_code` then returns "" --
+# which is what a stale preamble looks like: not one test failing with a wrong
+# code, but EVERY test in this family failing with an empty one.
+#
+# That happened when CLOSURE_LINT_EMPTY_POPULATION_CODE was added to verify.sh
+# and not to this list: four passing tests went red at once. Loud, and easy to
+# misread as the change under test being wrong rather than the stub being
+# incomplete. If a whole family here returns "", check this list first.
 BEADS_LOCK_SKIP_CODE=75
 CLOSURE_LINT_STALE_BASELINE_CODE=3
+CLOSURE_LINT_EMPTY_POPULATION_CODE=4
 with_beads_read_locks() {
     case "$1" in
         *closure-lint.sh)             return "$LINT_CODE" ;;
@@ -399,6 +412,10 @@ fn closure_stage_through_run_stage(lint_code: i32, guard_code: i32) -> (String, 
 set -uo pipefail
 BEADS_LOCK_SKIP_CODE=75
 CLOSURE_LINT_STALE_BASELINE_CODE=3
+# Mirrors verify.sh, same drift surface as the preamble in
+# closure_gate_status: a constant missing here kills the extracted function
+# under `set -u` before it prints anything.
+CLOSURE_LINT_EMPTY_POPULATION_CODE=4
 STAGE_RESULTS=""
 STAGE_PASSED=0
 STAGE_SKIPPED_CONTENTION=0
