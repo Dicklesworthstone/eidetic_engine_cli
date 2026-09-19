@@ -405,7 +405,7 @@
     },
     "searchDocument": {
       "type": "object",
-      "required": ["docId", "score", "relevanceScore", "scoreKind", "scoreInterval", "coverageGuarantee", "calibrated", "source", "why", "provenance"],
+      "required": ["docId", "score", "relevanceScore", "scoreKind", "calibrationId", "scoreInterval", "coverageGuarantee", "calibrated", "source", "why", "provenance"],
       "additionalProperties": false,
       "properties": {
         "docId": {"type": "string"},

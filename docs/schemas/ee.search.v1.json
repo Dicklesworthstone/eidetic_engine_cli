@@ -41,7 +41,7 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["memoryId", "docId", "score", "relevanceScore", "scoreKind", "scoreInterval", "coverageGuarantee", "calibrated", "source", "why", "provenance"],
+            "required": ["memoryId", "docId", "score", "relevanceScore", "scoreKind", "calibrationId", "scoreInterval", "coverageGuarantee", "calibrated", "source", "why", "provenance"],
             "additionalProperties": false,
             "properties": {
               "memoryId": {"type": "string"},
@@ -49,6 +49,7 @@
               "score": {"type": "number"},
               "relevanceScore": {"type": "number", "minimum": 0, "maximum": 1},
               "scoreKind": {"type": "string", "enum": ["unit_normalized", "cosine_similarity", "rrf_fused", "reranked"]},
+              "calibrationId": {"type": ["string", "null"], "pattern": "^blake3:[0-9a-f]{64}$"},
               "scoreInterval": {
                 "type": "array",
                 "items": {"type": "number"},

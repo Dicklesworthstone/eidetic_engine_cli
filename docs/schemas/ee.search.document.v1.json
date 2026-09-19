@@ -9,6 +9,7 @@
     "score",
     "relevanceScore",
     "scoreKind",
+    "calibrationId",
     "scoreInterval",
     "coverageGuarantee",
     "calibrated",
@@ -44,6 +45,11 @@
         "reranked"
       ],
       "description": "Interpretation tag for score. Use relevanceScore for cross-source relevance. Lexical-only score is unit-normalized and its raw BM25 value remains in lexicalScore; cosine, RRF, and reranker scores retain their native ranking scale."
+    },
+    "calibrationId": {
+      "type": ["string", "null"],
+      "pattern": "^blake3:[0-9a-f]{64}$",
+      "description": "Stable identity of the exact score-calibration regime/evidence applied to this hit. Null only when calibration metadata is unavailable."
     },
     "scoreInterval": {
       "type": "array",

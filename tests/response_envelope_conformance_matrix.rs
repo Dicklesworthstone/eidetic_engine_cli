@@ -258,6 +258,7 @@ fn schema_cases() -> Result<Vec<SchemaCase>, String> {
                 "score": 0.91,
                 "relevanceScore": 0.91,
                 "scoreKind": "rrf_fused",
+                "calibrationId": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "scoreInterval": [0.72, 0.97],
                 "coverageGuarantee": 0.95,
                 "calibrated": true,
