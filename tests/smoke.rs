@@ -835,17 +835,30 @@ fn run_external_logged(
     })
 }
 
+/// Parse a logged external run's stdout as JSON, asserting success first.
+///
+/// THIS USED TO DROP THE EXIT CODE, and nothing about reading it said so.
+/// The old body captured both streams and interpolated both into the failure
+/// message, so it looked thorough; `status.code()` was simply absent. That is
+/// the trap worth remembering, because the next version of this mistake will
+/// also look complete: PRINTING BOTH STREAMS IS NOT THE SAME AS EXPLAINING A
+/// FAILURE.
+///
+/// What the missing datum cost. `ee` maps `Outcome::Cancelled` to exit 130 and
+/// emits nothing on either stream (src/core/outcome.rs), so a cancellation
+/// rendered here as "...; stdout: ; stderr: " -- indistinguishable from a
+/// command that rejected its input. Five rows in bd-hwye2 were unresolvable
+/// for exactly that reason and cost a fleet dispatch each to diagnose.
+///
+/// Now routed through [`ensure_command_success`], which prints the exit code
+/// alongside both streams. Do not inline a bare `status.success()` assertion
+/// here again; bd-wq41r gates that shape across tests/.
 #[cfg(unix)]
 fn parse_logged_external_json(
     run: &LoggedExternalRun,
     context: &str,
 ) -> Result<serde_json::Value, String> {
-    let stdout = String::from_utf8_lossy(&run.output.stdout);
-    let stderr = String::from_utf8_lossy(&run.output.stderr);
-    ensure(
-        run.output.status.success(),
-        format!("{context} should succeed; stdout: {stdout}; stderr: {stderr}"),
-    )?;
+    ensure_command_success(&run.output, context)?;
     ensure_clean_stderr(&run.output.stderr, context)?;
     serde_json::from_slice(&run.output.stdout)
         .map_err(|error| format!("{context} stdout must be JSON: {error}"))
@@ -935,14 +948,30 @@ fn ensure_command_success(output: &Output, context: &str) -> TestResult {
     )
 }
 
+/// Parse a logged `ee` run's stdout as JSON, asserting success first.
+///
+/// THIS USED TO DROP THE EXIT CODE, exactly as [`parse_logged_external_json`]
+/// did, and for the same invisible reason: it captured and printed both
+/// streams, which reads as thorough, while `status.code()` was absent. A
+/// cancellation (exit 130, both streams empty) was therefore indistinguishable
+/// from a rejection.
+///
+/// THE CHOKEPOINT PROPERTY CUTS BOTH WAYS, which is the part a future reader
+/// cannot recover from the code. Repairing this one function repaired all 37
+/// of its call sites at once -- and would equally have broken all 37 at once.
+/// The callers were enumerated BEFORE the change (37 here, 3 in
+/// `parse_logged_external_json`, across 5 test functions, none of them itself
+/// a wrapper), because grepping a helper's name counts the chokepoint rather
+/// than the population flowing through it.
+///
+/// The change was safe because it altered the failure LABEL and not the
+/// PREDICATE: same `status.success()` decision, richer text. A repair that
+/// tightens the predicate is a different risk and deserves the enumeration
+/// again.
 #[cfg(unix)]
 fn parse_logged_response(run: &LoggedEeRun, context: &str) -> Result<serde_json::Value, String> {
-    let stderr = String::from_utf8_lossy(&run.output.stderr);
     let stdout = String::from_utf8_lossy(&run.output.stdout);
-    ensure(
-        run.output.status.success(),
-        format!("{context} should succeed; stdout: {stdout}; stderr: {stderr}"),
-    )?;
+    ensure_command_success(&run.output, context)?;
     ensure_clean_stderr(&run.output.stderr, context)?;
     ensure_no_ansi(&stdout, context)?;
     let json: serde_json::Value = serde_json::from_slice(&run.output.stdout)

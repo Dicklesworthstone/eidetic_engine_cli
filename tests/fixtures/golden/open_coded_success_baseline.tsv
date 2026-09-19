@@ -23,7 +23,7 @@
 # Regenerate: UPDATE_GOLDEN=1 cargo test --test verification_drift_guard \
 #   open_coded_success_assertions_do_not_grow
 #
-# CURRENT: 369 rows (test functions), 571 sites (assertions).
+# CURRENT: 367 rows (test functions), 569 sites (assertions).
 
 agent_golden_baselines::agent_docs_flag_matches_golden	1
 agent_golden_baselines::agent_docs_recipes_topic_exposes_machine_readable_branches	1
@@ -351,8 +351,6 @@ smoke::mcp_validate_reports_invalid_schema_fixture	1
 smoke::memory_temporal_links_and_graph_outputs_compose	7
 smoke::model_status_and_list_json_report_registry_contracts	2
 smoke::pack_query_file_max_results_and_output_explain_are_observable	2
-smoke::parse_logged_external_json	1
-smoke::parse_logged_response	1
 smoke::perf_budget_check_profile_mismatch_degrades_but_stays_read_only	1
 smoke::perf_compare_json_success_is_read_only_and_stdout_only	1
 smoke::profile_config_plan_and_apply_json_are_stable_machine_data	3
