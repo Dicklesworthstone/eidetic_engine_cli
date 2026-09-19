@@ -433,17 +433,7 @@ pub fn orient_fast_content(options: &OrientFastContentOptions<'_>) -> OrientFast
         }
     };
 
-    let posture = if issues.is_empty() {
-        if recent.is_empty() && relevant.is_empty() {
-            "empty"
-        } else {
-            "ready"
-        }
-    } else if recent.is_empty() && relevant.is_empty() {
-        "unavailable"
-    } else {
-        "partial"
-    };
+    let posture = fast_content_posture(recent.is_empty(), relevant.is_empty(), &issues);
 
     OrientFastContentReport {
         schema: ORIENT_FAST_CONTENT_SCHEMA_V1,
@@ -458,6 +448,48 @@ pub fn orient_fast_content(options: &OrientFastContentOptions<'_>) -> OrientFast
         recent,
         relevant,
         issues,
+    }
+}
+
+/// Decide the fast-content posture (bd-ldtzi row 3).
+///
+/// `posture` reports content AND its quality: `ready` means content arrived
+/// with no caveats, `partial` means it arrived with some. That is the
+/// documented intent -- see the assertion messages at
+/// `src/core/orient.rs` (provenance-limited partial) and
+/// `src/cli/mod.rs` ("posture reflects missing provenance source") -- and this
+/// function preserves it unchanged.
+///
+/// What it fixes is the EMPTY-versus-UNAVAILABLE split. That split previously
+/// keyed on whether ANY issue had fired, which let a relevance-side problem
+/// answer a question only the recency provider can answer. The proof was an
+/// inversion across one minor version: on 0.14.2 a populated-but-starved store
+/// reported `empty` and a genuinely empty store reported `unavailable`; on
+/// 0.15.2 the two swapped, purely because a freshly seeded store now carries
+/// `search_index_stale`. The mapping had not changed; only which incidental
+/// issue happened to be present had.
+///
+/// Recency is the right discriminator because it is QUERY-INDEPENDENT and
+/// store-scoped: it asks "what is in this store", not "what matches this
+/// text". So a stale relevance index cannot make the recency provider unable
+/// to report that a store is empty, and `unavailable` now means what it says
+/// -- retrieval could not be performed -- rather than "something, somewhere,
+/// went wrong".
+fn fast_content_posture(
+    recent_empty: bool,
+    relevant_empty: bool,
+    issues: &[OrientFastContentIssue],
+) -> &'static str {
+    if recent_empty && relevant_empty {
+        if issues.iter().any(|issue| issue.component == "recent") {
+            "unavailable"
+        } else {
+            "empty"
+        }
+    } else if issues.is_empty() {
+        "ready"
+    } else {
+        "partial"
     }
 }
 
@@ -2176,6 +2208,84 @@ mod tests {
             .prefix("ee-orient-test.")
             .tempdir_in(canonical_temp_root)
             .map_err(|error| error.to_string())
+    }
+
+    /// bd-ldtzi row 3: only the recency provider can say a store is empty.
+    ///
+    /// The split between `empty` and `unavailable` used to key on whether ANY
+    /// issue had fired, which let a relevance-side problem answer a question
+    /// about the store. That produced an inversion across one minor version:
+    /// on 0.14.2 a populated-but-starved store reported `empty` and a
+    /// genuinely empty store reported `unavailable`; on 0.15.2 the two
+    /// swapped, because a freshly seeded store began carrying
+    /// `search_index_stale`. The mapping never changed -- only which
+    /// incidental issue was present.
+    ///
+    /// The `ready`/`partial` arms below are NOT part of that fix. They pin the
+    /// documented intent that posture reports content AND its quality, so a
+    /// later reader does not "simplify" it into a content-only field.
+    #[test]
+    fn fast_content_posture_asks_the_recency_provider_about_emptiness() -> TestResult {
+        let issue = |component: &'static str| super::OrientFastContentIssue {
+            component,
+            status: "unavailable",
+            code: "probe".to_owned(),
+            severity: "warning".to_owned(),
+            message: "probe".to_owned(),
+            repair: None,
+        };
+        let posture = super::fast_content_posture;
+
+        // THE FIX. Both sections empty and the only complaint is relevance-side:
+        // the store is empty, and a stale relevance index cannot say otherwise.
+        // This case returned "unavailable" before.
+        ensure_equal(
+            &posture(true, true, &[issue("relevant")]),
+            &"empty",
+            "a relevance-side issue must not decide store emptiness",
+        )?;
+        // The recency provider itself failed, so retrieval genuinely could not
+        // be performed.
+        ensure_equal(
+            &posture(true, true, &[issue("recent")]),
+            &"unavailable",
+            "a recency-provider failure is what unavailable means",
+        )?;
+        // Both components failing is still unavailable -- the recency failure
+        // is present, and order must not matter.
+        ensure_equal(
+            &posture(true, true, &[issue("relevant"), issue("recent")]),
+            &"unavailable",
+            "a recency failure anywhere in the list still counts",
+        )?;
+        // Nothing wrong, nothing found: an honestly empty store.
+        ensure_equal(
+            &posture(true, true, &[]),
+            &"empty",
+            "no issues and no content is an empty store",
+        )?;
+
+        // Preserved intent, not part of the fix. Without these arms the
+        // function could collapse to the empty/unavailable pair and still
+        // satisfy everything above.
+        ensure_equal(
+            &posture(false, false, &[]),
+            &"ready",
+            "content with no caveats is ready",
+        )?;
+        ensure_equal(
+            &posture(false, false, &[issue("relevant")]),
+            &"partial",
+            "content with a caveat stays partial -- posture reports quality too",
+        )?;
+        // One section empty is still content, so it follows the content arms
+        // rather than the emptiness arms. bd-hrrla covers the separate fact
+        // that nothing reports WHICH section is missing.
+        ensure_equal(
+            &posture(true, false, &[]),
+            &"ready",
+            "a populated relevance section is content",
+        )
     }
 
     #[test]
