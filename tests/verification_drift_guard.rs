@@ -309,6 +309,57 @@ fn a_stale_closure_lint_baseline_is_not_excusable_by_the_drift_guard() {
     );
 }
 
+/// An audit that read NOTHING must not be excusable either.
+///
+/// THE HOLE THIS CLOSES. closure-lint.sh's audit branch ended
+/// `[ -z "$BEAD_ROWS" ] && [ "$VIOLATION_COUNT" -eq 0 ]` -> write a "pass"
+/// report and exit 0. Audit mode reads the WHOLE ledger, which holds 233
+/// matching rows today, so zero means the read failed -- a missing
+/// .beads/issues.jsonl, a malformed line, or a filter that stopped matching.
+/// `relevant_closed_bead_rows` ends `2>/dev/null || true`, so all three of
+/// those collapse into the same empty result as a genuinely clean tree.
+///
+/// WHY A DISTINCT EXIT CODE AND NOT A MESSAGE. The drift guard decides by
+/// reading `.count` from the report, which is ZERO for an abstention. Routing
+/// it through the guard would excuse it every time and leave the arm inert --
+/// the linter would report "I read nothing" and the gate would answer
+/// "excused". That is the same reasoning the stale-baseline arm above records,
+/// and the reason 4 is handled beside 3 in verify.sh rather than falling
+/// through to the excuse path.
+///
+/// The contention case (75) was already covered when this was written; this
+/// one was not, which is how an empty-world hole survived in a gate while a
+/// newer gate was being built specifically to avoid one.
+#[test]
+fn an_empty_closure_lint_population_is_not_excusable_by_the_drift_guard() {
+    assert_eq!(
+        closure_gate_code(4, 0),
+        "4",
+        "an empty audit population must fail even when the drift guard passes"
+    );
+    assert_eq!(
+        closure_gate_code(4, 1),
+        "4",
+        "an empty audit population must fail when the drift guard fails too"
+    );
+    // The paired contrast, as on the stale-baseline arm: a plain violation is
+    // STILL excusable, so this is a new un-excusable class rather than the end
+    // of the excuse path.
+    assert_eq!(
+        closure_gate_code(1, 0),
+        "0",
+        "a tracked violation must still be excused by a passing drift guard"
+    );
+    // And an abstention must not be confused with contention: both are
+    // non-verdicts, but one is "blocked" and the other is "read nothing", and
+    // collapsing them is what made this invisible.
+    assert_ne!(
+        closure_gate_code(4, 0),
+        closure_gate_code(75, 0),
+        "an abstention and a contention must not share an exit code"
+    );
+}
+
 #[test]
 fn contended_closure_lint_is_reported_as_contention_not_as_a_pass() {
     let skip_code = "75";

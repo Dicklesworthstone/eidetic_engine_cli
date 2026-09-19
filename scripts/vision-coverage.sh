@@ -1001,6 +1001,20 @@ MISSING=$(printf "%s\n" "$REPORT_JSON" | jq -r '.surfaces.missing')
 
 if [ "$JSON_OUTPUT" = true ]; then
     echo "Report written to $REPORT_FILE"
+    # THE DENOMINATOR BESIDE THE COUNTS, because "Report written" is not a
+    # verdict. CI invokes this script with --json, so until this line existed
+    # the run that matters printed one sentence naming a filename and nothing
+    # about what was examined -- indistinguishable, from the log, from a run
+    # that examined nothing.
+    echo "vision-coverage: $TOTAL documented surfaces examined; stubbed $STUBBED, missing $MISSING, gap ${GAP}%"
+    if [ "$(printf "%s\n" "$REPORT_JSON" | jq -r '.stub_detector.population_empty')" = "true" ]; then
+        # The same sentence the human branch already carries. It was written
+        # for exactly this reading and was suppressed in the only invocation
+        # CI uses; moving it here costs nothing and is the difference between
+        # a structural zero and a clean bill of health (bd-wn8xh).
+        echo "  Stubbed: 0 — NOT A MEASUREMENT: $(printf "%s\n" "$REPORT_JSON" | jq -r '.stub_detector.scanned_file') declares no *_UNAVAILABLE_CODE constants,"
+        echo "         so the stub half of the gap is reporting on an empty population, not on an absence of stubs."
+    fi
 else
     echo "=== Vision Coverage Gate ==="
     echo "Documented surfaces: $TOTAL"

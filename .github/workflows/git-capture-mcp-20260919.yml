@@ -1,0 +1,124 @@
+name: MCP Git capture
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/git-capture-mcp-20260919/**
+      - .github/workflows/git-capture-mcp-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: git-capture-mcp
+  cancel-in-progress: false
+jobs:
+  integrate-and-verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: capture-mcp-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            capture-mcp-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            capture-complete-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Integrate and execute real MCP capture and storage regressions
+        run: |
+          set -euo pipefail
+          paths=(src/mcp.rs src/mcp_capture_git.rs tests/mcp_parity.rs tests/mcp_capture_git.rs docs/mcp/git-capture.md)
+          git ls-files --error-unmatch src/core/memory_git_capture_identity_tests.rs >/dev/null
+          if ! git ls-files --error-unmatch src/mcp_capture_git.rs >/dev/null 2>&1; then
+            test "$(git rev-parse HEAD:src/mcp.rs)" = cc4c1c8d74e54bda9d74072256afa52165c8dbf2
+            test "$(git rev-parse HEAD:tests/mcp_parity.rs)" = a65729b8667ee285ac854f0dca99d104410eefe5
+            xz -dc scripts/delivery/git-capture-mcp-20260919/capture.patch.xz > "$RUNNER_TEMP/capture-mcp.patch"
+            echo "f67f056b841d8ed99dd06e592040637840676c3407ea757a02fb50c53ebc4953  $RUNNER_TEMP/capture-mcp.patch" | sha256sum -c
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/capture-mcp.patch"
+            git apply "$RUNNER_TEMP/capture-mcp.patch"
+          fi
+          rustfmt --edition 2024 --config skip_children=true src/mcp.rs src/mcp_capture_git.rs tests/mcp_parity.rs tests/mcp_capture_git.rs
+          git diff --check
+          run_group() {
+            local name="$1" filter="$2" expected="$3" target="$4" status=0
+            if test "$target" = lib; then
+              cargo test --locked --features mcp --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/mcp-$name.log" 2>&1 || status=$?
+            else
+              cargo test --locked --features mcp --test mcp_parity "$filter" -- --test-threads=1 > "$RUNNER_TEMP/mcp-$name.log" 2>&1 || status=$?
+            fi
+            tail -n 120 "$RUNNER_TEMP/mcp-$name.log"
+            test "$status" -eq 0
+            grep -Fq "test result: ok. $expected passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/mcp-$name.log"
+          }
+          run_group adapter mcp::capture_git::tests 5 lib
+          run_group storage capture_git:: 2 integration
+          run_group inventory mcp_tools_list_covers_parity_tested_tools 1 integration
+          run_group manual mcp_parity_remember_dry_run_command 1 integration
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git diff --quiet -- "${paths[@]}" || test -n "$(git ls-files --others --exclude-standard -- "${paths[@]}")"; then
+            base=$(git rev-parse HEAD)
+            git add -- "${paths[@]}"
+            git commit -m 'feat(mcp): capture Git evidence through the audited remember pipeline' -m 'Add ee_capture_git for commit, range and tracked worktree evidence with explicit workspace selection. Preview by default; durable writes require dryRun=false plus allowWrite=true and emit the CLI apply flag. Reuse remember screening, idempotency, audit and indexing; reject unknown inputs and policy/provenance overrides. Five adapter tests, two real MCP/CLI/Git/storage tests, complete registry parity and existing manual-remember parity passed before publication. Real tests verify unchanged preview stores and Git index, sanitized durable content, audit identity, idempotent retry, changed-evidence conflict and searchability.'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch --deepen=100 origin main
+              git diff --exit-code "$base" origin/main -- "${paths[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/mcp-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/mcp-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: mcp-capture-source-and-tests
+          path: ${{ runner.temp }}/mcp-*
+          retention-days: 7
+      - name: Verify all targets and strict library Clippy with MCP
+        if: ${{ !cancelled() }}
+        run: |
+          failed=0
+          cargo check --locked --features mcp --all-targets > "$RUNNER_TEMP/mcp-check.log" 2>&1 || failed=1
+          tail -n 100 "$RUNNER_TEMP/mcp-check.log"
+          cargo clippy --locked --features mcp --lib -- -D warnings > "$RUNNER_TEMP/mcp-clippy.log" 2>&1 || failed=1
+          tail -n 100 "$RUNNER_TEMP/mcp-clippy.log"
+          exit "$failed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: mcp-capture-verification
+          path: ${{ runner.temp }}/mcp-*.log
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: capture-mcp-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}

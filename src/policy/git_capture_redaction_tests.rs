@@ -17,7 +17,7 @@ fn git_capture_redaction_catches_every_supported_bearer_prefix_inside_labels() {
         assert!(report.redacted_reasons.contains(&reason));
         assert!(
             report.matches.iter().any(|matched| {
-                matched.pattern_id == reason && &raw[matched.start..matched.end] == token
+                matched.pattern_id == reason && raw[matched.start..matched.end] == token
             }),
             "original source offsets lost for {prefix}"
         );
@@ -56,7 +56,7 @@ fn git_capture_redaction_offsets_survive_unicode_and_earlier_replacements() {
         .matches
         .iter()
         .filter(|matched| {
-            matched.pattern_id == "github_token" && &raw[matched.start..matched.end] == token
+            matched.pattern_id == "github_token" && raw[matched.start..matched.end] == token
         })
         .count();
     assert_eq!(
@@ -95,7 +95,7 @@ fn git_capture_redaction_removes_whole_bearers_before_partial_pii_replacements()
     assert!(!report.content.contains(&"q".repeat(14)));
     assert!(report.content.contains("keep the incident context"));
     assert!(report.matches.iter().any(|matched| {
-        matched.pattern_id == "github_token" && &raw[matched.start..matched.end] == token
+        matched.pattern_id == "github_token" && raw[matched.start..matched.end] == token
     }));
 }
 

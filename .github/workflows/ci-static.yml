@@ -69,6 +69,16 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
+      # Self-test BEFORE the audit, for the reason the pinned-definition steps
+      # below already give: if the failure arms have stopped working, the audit
+      # is a clean answer from a broken instrument. Both of these self-tests
+      # existed and were invoked ONLY by scripts/verify.sh (:1260 and :1334),
+      # so inside THIS job -- the one most people read -- these gates ran their
+      # audit with their failure arms unexercised. They were never unguarded;
+      # their guard ran somewhere else, and that distinction was invisible here.
+      - name: Forbidden dependency guard --self-test
+        run: ./scripts/check-forbidden-deps.sh --self-test
+
       - name: Forbidden dependency audit
         run: ./scripts/check-forbidden-deps.sh
 
@@ -85,6 +95,9 @@ jobs:
 
       - name: MCP lib unit-test guard --self-test
         run: ./scripts/mcp_lib_tests.sh --self-test
+
+      - name: Contract drift radar guard --self-test
+        run: ./scripts/contract-drift-radar.sh --self-test
 
       - name: Contract drift radar
         run: ./scripts/contract-drift-radar.sh
