@@ -2159,6 +2159,14 @@ const OPEN_CODED_BASELINE: &str = "tests/fixtures/golden/open_coded_success_base
 // made 3258fd6ce born-red under `cargo clippy --all-targets -- -D warnings`
 // (dead_code). Kept as a comment because the reasoning is why the allowlist is
 // absent; a reader who does not find one should not conclude it was forgotten.
+//
+// THE NAME ABOVE IS PROSE, NOT CODE. This sentence is the only place it still
+// appears, so `grep SUCCESS_ASSERTION_HELPERS` returns a hit forever and
+// CANNOT tell you whether the constant is declared. Only the compiler can:
+// `cargo clippy --all-targets -- -D warnings` reported it and now does not.
+// A name-grep standing in for a declaration check is the same substitution
+// this gate exists to catch, so it should not be how its own removal is
+// verified.
 
 /// The one file excluded from the inventory: this one.
 ///
