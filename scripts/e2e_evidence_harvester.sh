@@ -87,10 +87,19 @@ step "harvest apply -> audited writes; explicit NOT overridden (bd-1n0np.2.4/2.5
 if ee_lists_outcome_sub harvest; then
     applied="$(ee_json outcome harvest --workspace "$WS" --apply --json)"
     assert_jq "$applied" '.success == true' "outcome harvest --apply succeeds"
+    # Direct comparison, not `// 0` (bd-o8e1n): an ABSENT explicitOverrides
+    # defaulted to 0 and passed. The count must be PRESENT and zero -- a
+    # missing field is not evidence that nothing was overridden.
+    #
+    # THESE COMMENTS SIT ABOVE THE CALL, NOT INSIDE IT. a320f3a1f placed them
+    # between the backslash continuation and the filter. A `\` joins the next
+    # physical line, and a `#` then comments out the remainder of that JOINED
+    # logical line -- so assert_jq received ONE argument (the payload, no filter,
+    # no label) and the filter ran as a shell command: "command not found".
+    # `bash -n` reported the file clean throughout, because it is valid shell;
+    # it simply was not the program anybody intended. Never put a comment
+    # between a continuation and its argument.
     assert_jq "$applied" \
-        # Direct comparison, not `// 0` (bd-o8e1n): an ABSENT explicitOverrides
-        # defaulted to 0 and passed. The count must be PRESENT and zero -- a
-        # missing field is not evidence that nothing was overridden.
         '.data.explicitOverrides == 0' \
         "derived feedback never overrides explicit feedback"
 else
