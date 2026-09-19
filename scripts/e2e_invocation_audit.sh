@@ -125,11 +125,47 @@ e2e_orphans() {
         # registered epics and report them as orphans, which is a false
         # positive of exactly the size that would get this gate disabled.
         needle="${base##*/}"
-        if ! rg -l "^[^#]*$(printf '%s' "$needle" | sed 's/\./\\./g')" "$root" \
+        # TWO MORE SPELLINGS OF "A MENTION STANDING IN FOR AN INVOCATION",
+        # found 2026-09-19 by reconciling this audit against an independent
+        # closure walk. They disagreed on exactly six scripts, and the audit
+        # was wrong on all six -- in the direction that HIDES orphans.
+        #
+        # (a) TEST FIXTURES ARE DATA, NOT INVOKERS. Five suites were "invoked"
+        #     solely by tests/fixtures/contracts/dueling_wizards_verify_wiring.json
+        #     and tests/fixtures/failure_modes/*.json -- files that DESCRIBE
+        #     wiring, including wiring that does not exist. A fixture asserting
+        #     "this script is wired" was accepted as proof that it is.
+        #     Narrowing from tests/fixtures/e2e_invocation/** to tests/fixtures/**
+        #     orphans exactly those five and nothing else: the only .sh under
+        #     fixtures names scripts/lib/e2e_logger.sh, a library outside this
+        #     population that has 11 other referrers.
+        #
+        # (b) THE COMMENT RULE ONLY KNEW '#'. `^[^#]*` rejects a shell comment
+        #     but a `//` comment contains no '#', so a Rust line counted:
+        #         src/core/search.rs:23188
+        #         // exercised by scripts/e2e_rerank.sh, not unit tests.
+        #     A sentence explaining that a script PROVIDES the coverage was
+        #     read as the coverage. tests/*.rs must keep counting -- 32 suites
+        #     are genuinely driven from there -- so the file cannot be excluded
+        #     the way docs/ was; only its comment lines can.
+        #
+        # (c) THE GLOBS ARE `**/`-PREFIXED BECAUSE THE SELF-TEST WAS TESTING A
+        #     DIFFERENT PREDICATE THAN PRODUCTION. A ripgrep --glob containing
+        #     '/' anchors to the CWD, not to the search root. In production
+        #     root IS the cwd, so `!tests/fixtures/e2e_invocation/**` worked;
+        #     in --self-test root is a temp dir, so the same glob matched
+        #     nothing and the fixture arm below passed against an exclusion
+        #     that was silently inert. `!**/tests/fixtures/**` matches under
+        #     both roots. The docs arm never surfaced this because `!**/*.md`
+        #     caught its fixture regardless of whether `!docs/**` applied.
+        if ! rg --no-heading -N "^[^#]*$(printf '%s' "$needle" | sed 's/\./\\./g')" "$root" \
             --glob '!target' --glob '!.git' --glob "!scripts/$base" \
-            --glob '!tests/fixtures/e2e_invocation/**' \
-            --glob '!**/*.md' --glob '!docs/**' \
-            >/dev/null 2>&1; then
+            --glob '!**/tests/fixtures/**' \
+            --glob '!**/*.md' --glob '!**/docs/**' 2>/dev/null \
+            | awk 'BEGIN { found = 0 }
+                   { body = $0; sub(/^[^:]*:/, "", body)
+                     if (body !~ /^[[:space:]]*\/\//) { found = 1 } }
+                   END { exit(found ? 0 : 1) }'; then
             printf '%s\n' "$base"
         fi
     done < <(e2e_audit_paths "$script_dir")
@@ -246,6 +282,48 @@ if [[ "${1:-}" == "--self-test" ]]; then
         failures=$((failures + 1))
     fi
 
+    # A FIXTURE IS DATA. A JSON file under tests/fixtures/ that NAMES a script
+    # -- even in a field called "script" -- describes wiring rather than
+    # performing it, and five real suites passed this gate on exactly that.
+    mkdir -p "$tmp/fixture/tests/fixtures/contracts"
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/fixture/scripts/e2e_fixtured.sh"
+    printf '{ "stages": [ { "script": "scripts/e2e_fixtured.sh" } ] }\n' \
+        >"$tmp/fixture/tests/fixtures/contracts/wiring.json"
+    got_fix="$(e2e_orphans "$tmp/fixture" | sort -u | tr '\n' ' ')"
+    if [[ "$got_fix" == *"e2e_fixtured.sh"* ]]; then
+        echo "ok   - a script named only in a tests/fixtures JSON is still an orphan"
+    else
+        echo "FAIL - a fixture mention counted as invocation, got '$got_fix'"
+        failures=$((failures + 1))
+    fi
+    if [[ "$got_fix" != *"e2e_wired.sh"* ]]; then
+        echo "ok   - excluding fixtures did not break the Rust-driven case"
+    else
+        echo "FAIL - excluding fixtures broke detection of a real reference"
+        failures=$((failures + 1))
+    fi
+
+    # A '//' COMMENT IS STILL A COMMENT. The original rule rejected '#' only,
+    # so a Rust doc line naming a script counted as running it. tests/*.rs has
+    # to keep counting, which is what the paired arm below protects: the
+    # distinction is the COMMENT, not the file type.
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/fixture/scripts/e2e_slashcommented.sh"
+    printf 'fn note() {\n    // exercised by scripts/e2e_slashcommented.sh, not here.\n}\n' \
+        >"$tmp/fixture/tests/commented.rs"
+    got_slash="$(e2e_orphans "$tmp/fixture" | sort -u | tr '\n' ' ')"
+    if [[ "$got_slash" == *"e2e_slashcommented.sh"* ]]; then
+        echo "ok   - a script named only in a // comment is still an orphan"
+    else
+        echo "FAIL - a // comment counted as invocation, got '$got_slash'"
+        failures=$((failures + 1))
+    fi
+    if [[ "$got_slash" != *"e2e_wired.sh"* ]]; then
+        echo "ok   - rejecting // comments did not break the Rust-driven case"
+    else
+        echo "FAIL - rejecting // comments broke a real tests/*.rs reference"
+        failures=$((failures + 1))
+    fi
+
     # scripts/e2e_overhaul/ is in the population too (bd-1cn5o), and its
     # entries are identified by path while the SEARCH still uses the basename.
     # Both halves need an arm, because getting either one wrong is silent:
@@ -349,7 +427,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
         echo "ok   - rejects a retired entry with an empty field"
     fi
 
-    echo "self-test: $((13 - failures))/13 passed"
+    echo "self-test: $((17 - failures))/17 passed"
     [[ "$failures" -eq 0 ]] || exit 2
     exit 0
 fi

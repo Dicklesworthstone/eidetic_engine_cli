@@ -129,3 +129,35 @@ e2e_overhaul/sx7_adaptive_budget.sh
 e2e_overhaul/tiered_recall.sh
 e2e_overhaul/verification_reuse.sh
 e2e_overhaul/workspace_git_snapshot_read_only.sh
+
+# ---------------------------------------------------------------------------
+# Added 2026-09-19. THESE ARE NOT NEW ORPHANS. They were orphans all along and
+# the audit could not see them, because two spellings of "a mention standing in
+# for an invocation" still counted as invocation:
+#
+#   TEST FIXTURES ARE DATA. A JSON file that NAMES a script describes wiring
+#   rather than performing it. cusum_maintenance.sh was reached only through a
+#   fixture field literally called "invocation" -- a declaration of a thing
+#   accepted as the thing.
+#
+#   A '//' COMMENT IS STILL A COMMENT. The rule rejected '#' only, so a Rust
+#   doc line counted. e2e_rerank.sh was reached only by
+#   src/core/search.rs:23188, "// exercised by scripts/e2e_rerank.sh, not unit
+#   tests." -- a sentence saying a script provides the coverage, read as the
+#   coverage.
+#
+# Baselined rather than wired for the reason at the top of this file: wiring
+# nine suites at once would wedge the build. They are accepted debt, and the
+# audit's shrink-only arm means this block can only get smaller.
+#
+# Reachable solely via tests/fixtures/*.json:
+e2e_anchors_freshness.sh
+e2e_br_concurrent_race.sh
+e2e_contradiction.sh
+e2e_error_recall.sh
+e2e_gap_honesty.sh
+e2e_overhaul/cusum_maintenance.sh
+e2e_overhaul/swarm_fixture.sh
+# Reachable solely via a '//' comment:
+e2e_rerank.sh
+e2e_overhaul/mesh_tailscale_smoke.sh
