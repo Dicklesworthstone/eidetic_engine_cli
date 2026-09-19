@@ -5,7 +5,7 @@
 
 #![allow(clippy::expect_used)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -2134,4 +2134,384 @@ fn the_drift_guard_never_defaults_a_failed_probe_to_zero() {
          so the guard fails instead:\n{}",
         offenders.join("\n")
     );
+}
+
+/// Where the grandfathered inventory of open-coded success assertions lives.
+const OPEN_CODED_BASELINE: &str = "tests/fixtures/golden/open_coded_success_baseline.tsv";
+
+/// Enclosing functions where `ensure(x.status.success(), ..)` is the CORRECT shape.
+///
+/// `ensure_command_success` is the chokepoint this gate exists to push work
+/// toward: it prints the exit code, stdout and stderr. Each test binary needs
+/// its own copy because they are separate compilation units and cannot share
+/// one (usr002 and usr003 each received a copy in 43a96043c), so a new copy
+/// must not be reported as a new offender -- otherwise the gate would fire on
+/// the exact pattern it is promoting.
+///
+/// Deliberately NOT allowlisted: `parse_logged_response` and
+/// `parse_logged_external_json`. They surface stdout and stderr but drop the
+/// EXIT CODE, so they are the same defect centralized rather than fixed. They
+/// sit in the baseline as grandfathered, and repairing those two functions
+/// would repair every one of their callers at once -- the highest-leverage
+/// follow-up available here.
+const SUCCESS_ASSERTION_HELPERS: &[&str] = &["ensure_command_success"];
+
+/// The one file excluded from the inventory: this one.
+///
+/// It necessarily contains specimens of the pattern it hunts -- in the failure
+/// message that teaches the right shape, and in the fixture that proves the
+/// scanner fires. Counting those would make the gate report on its own test
+/// data and red whenever someone improved its wording.
+///
+/// MEASURED before excluding it, because "it only contains specimens" is an
+/// assumption that decays: all six matches here are specimens (two doc
+/// comments, one assertion message, three fixture lines) and none is a real
+/// assertion. This file guards with `assert!`, not `ensure()`. If that ever
+/// changes, this exclusion starts hiding real sites.
+const OPEN_CODED_SELF_EXCLUSION: &str = "verification_drift_guard";
+
+/// Inventory the open-coded command-success assertions in one directory.
+///
+/// WHAT COUNTS. `ensure(<expr>.status.success(), <label>)`, in both the
+/// multi-line and single-line spellings. Such an assertion reports only THAT a
+/// command failed and discards what would say why. The five rows repaired in
+/// c91baece8 and 43a96043c each lost a different half of the evidence -- one
+/// surface kept the exit code and dropped stderr, another kept stderr and
+/// dropped the exit code, a third kept neither -- so no cross-surface
+/// hypothesis about their shared cause could even be tested.
+///
+/// WHAT DOES NOT COUNT, and why each exclusion is principled rather than
+/// convenient:
+///   - `ensure(!x.status.success(), ..)` asserts FAILURE. That is a different
+///     and legitimate shape; a label there is describing an expected failure,
+///     not discarding a diagnostic.
+///   - `if`/`let`/`while`/`match` on `.status.success()` is control flow, not
+///     an assertion, and has no failure message to carry anything.
+///   - Functions in [`SUCCESS_ASSERTION_HELPERS`] are the chokepoints.
+///
+/// KEY SHAPE: `<file stem>::<enclosing fn>`, counted. Per enclosing function
+/// rather than per file is deliberate -- a per-file count cannot show a
+/// compensating change, and this repo has already read "37 -> 36, within
+/// spread" as noise when it hid two failures out and one in.
+///
+/// WHAT THIS CANNOT SEE, written down because a gate whose limits are unstated
+/// gets trusted past them: it cannot detect one open-coded assertion REPLACING
+/// another inside the SAME function. The count is unchanged and the swap is
+/// invisible. This stops the population from GROWING. That is the entire claim.
+fn scan_open_coded_success_sites(dir: &Path) -> BTreeMap<String, usize> {
+    const NEEDLE: &str = ".status.success(),";
+    let mut sites: BTreeMap<String, usize> = BTreeMap::new();
+    let mut files: Vec<PathBuf> = match fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+            .collect(),
+        Err(_) => return sites,
+    };
+    files.sort();
+
+    for path in files {
+        let Ok(body) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("<unknown>")
+            .to_string();
+        if stem == OPEN_CODED_SELF_EXCLUSION {
+            continue;
+        }
+        let lines: Vec<&str> = body.split('\n').collect();
+        let mut enclosing = "<file scope>".to_string();
+
+        for (index, raw) in lines.iter().enumerate() {
+            // Track the innermost top-level `fn`. These files declare their
+            // test functions at column zero, so this is exact rather than a
+            // heuristic about indentation.
+            let trimmed_start = raw.trim_start();
+            if raw.starts_with("fn ") || raw.starts_with("pub fn ") {
+                if let Some(rest) = trimmed_start
+                    .strip_prefix("pub fn ")
+                    .or_else(|| trimmed_start.strip_prefix("fn "))
+                {
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if !name.is_empty() {
+                        enclosing = name;
+                    }
+                }
+            }
+
+            let line = raw.trim();
+            // A specimen quoted in prose is not a site. Doc comments and
+            // ordinary comments describe the pattern constantly -- including
+            // in the helper that fixes it -- and counting them would report
+            // documentation as debt.
+            if line.starts_with("//") {
+                continue;
+            }
+            if !line.contains(NEEDLE) || line.starts_with('!') || line.contains("ensure(!") {
+                continue;
+            }
+            // Multi-line: the assertion's condition sits alone on this line and
+            // `ensure(` opened on the previous one. Single-line: both on this one.
+            let multi =
+                line.ends_with(NEEDLE) && index > 0 && lines[index - 1].trim().ends_with("ensure(");
+            let single = line.contains("ensure(") && line.contains(NEEDLE);
+            if !(multi || single) {
+                continue;
+            }
+            if SUCCESS_ASSERTION_HELPERS.contains(&enclosing.as_str()) {
+                continue;
+            }
+            *sites.entry(format!("{stem}::{enclosing}")).or_insert(0) += 1;
+        }
+    }
+    sites
+}
+
+/// The baseline's explanatory header.
+///
+/// Emitted by [`render_open_coded_baseline`] rather than hand-written into the
+/// file, because a header that regeneration deletes is a header that survives
+/// exactly until the first person uses the documented regeneration command.
+const OPEN_CODED_BASELINE_HEADER: &str = "\
+# OPEN-CODED SUCCESS-ASSERTION BASELINE (bd-wq41r) -- generated, do not hand-edit.
+#
+# WHAT A ROW IS. One row per TEST FUNCTION containing at least one open-coded
+# `ensure(<expr>.status.success(), <label>)`, with how many it contains.
+# ROWS ARE FUNCTIONS. THE SUM OF THE COUNTS IS SITES. They are different units,
+# and a reader who re-derives one while quoting the other gets a third number.
+# A function holding four such assertions is ONE row and FOUR sites.
+#
+# RELATIONSHIP TO EARLIER FIGURES, recorded so nobody derives a fourth:
+#   174  RETIRED. Published 2026-09-19T12:50Z over THREE files only and built
+#        on three miscounts -- a `grep -c` that counted a definition line, a
+#        `grep -v` that matched nothing, and a substring anchored to labels
+#        ending in `should succeed\"`.
+#   573  an intermediate census over all of tests/*.rs, taken before comment
+#        lines and this gate's own specimens were excluded.
+#   156  the three-file subset of the current total (smoke 136, usr002 10,
+#        usr003 10) -- what 174 was trying and failing to measure.
+#
+# GRANDFATHERED, NOT APPROVED. Every row is a site that reports THAT a command
+# failed and discards the exit code, stdout and stderr that would say why. This
+# file forbids the NEXT one; it does not bless these.
+#
+# Regenerate: UPDATE_GOLDEN=1 cargo test --test verification_drift_guard \\
+#   open_coded_success_assertions_do_not_grow
+";
+
+/// Render an inventory as the baseline file's exact on-disk form.
+fn render_open_coded_baseline(sites: &BTreeMap<String, usize>) -> String {
+    let mut out = String::from(OPEN_CODED_BASELINE_HEADER);
+    out.push_str(&format!(
+        "#\n# CURRENT: {} rows (test functions), {} sites (assertions).\n\n",
+        sites.len(),
+        sites.values().sum::<usize>()
+    ));
+    for (key, count) in sites {
+        out.push_str(&format!("{key}\t{count}\n"));
+    }
+    out
+}
+
+fn parse_open_coded_baseline(text: &str) -> BTreeMap<String, usize> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .filter_map(|line| {
+            let (key, count) = line.split_once('\t')?;
+            Some((key.to_string(), count.trim().parse::<usize>().ok()?))
+        })
+        .collect()
+}
+
+/// The gate: the open-coded population may shrink, never grow.
+///
+/// This is bd-wq41r's deletion condition made executable. The 571 existing
+/// sites are grandfathered; what this forbids is site 572. That converts an
+/// unbounded manual sweep into a bounded frontier -- the backlog decays as
+/// ordinary work touches it, and nobody has to schedule 571 edits.
+///
+/// Removals are reported too, not just additions. A baseline that silently
+/// keeps stale entries stops describing the tree, and the decay this gate is
+/// supposed to make visible would become invisible instead.
+#[test]
+fn open_coded_success_assertions_do_not_grow() {
+    let tests_dir = project_root().join("tests");
+    let found = scan_open_coded_success_sites(&tests_dir);
+    let baseline_path = project_root().join(OPEN_CODED_BASELINE);
+
+    if std::env::var("UPDATE_GOLDEN").is_ok() {
+        fs::write(&baseline_path, render_open_coded_baseline(&found))
+            .expect("write open-coded baseline");
+        return;
+    }
+
+    let recorded =
+        parse_open_coded_baseline(&fs::read_to_string(&baseline_path).unwrap_or_else(|error| {
+            panic!("missing {OPEN_CODED_BASELINE}: {error}; regenerate with UPDATE_GOLDEN=1")
+        }));
+
+    // A RATCHET READS A BROKEN SCANNER AS SUCCESS. This is the empty-world
+    // trap inverted, and inverted is the dangerous direction: `all()` over an
+    // empty set is merely vacuously true, but here an enumeration that
+    // collapses to nothing renders as several hundred REMOVALS -- and removals
+    // are improvement. A scanner broken by a refactor would not look like a
+    // broken gate; it would look like someone repaired the whole tree
+    // overnight, and the baseline would then be regenerated to match it.
+    //
+    // So refuse to grade a collapse, as its own failure rather than a pass.
+    let found_total: usize = found.values().sum();
+    let recorded_total: usize = recorded.values().sum();
+    assert!(
+        !(found_total == 0 && recorded_total > 0),
+        "the scanner found ZERO open-coded sites while the baseline records \
+         {recorded_total} across {} keys. That is not a repaired tree, it is a \
+         broken enumeration -- the likeliest cause is a change to the detected \
+         spelling or to the tests/ layout. REFUSING TO GRADE. Fix the scanner; \
+         do not regenerate the baseline.",
+        recorded.len()
+    );
+    assert!(
+        found_total * 2 >= recorded_total,
+        "the scanner found {found_total} open-coded sites against a baseline of \
+         {recorded_total} -- a collapse of more than half in one step. A ratchet \
+         reads that as improvement, which is exactly how a broken scanner gets \
+         ratified into the baseline. REFUSING TO GRADE.\n\
+         If the tree really was repaired this much, regenerate deliberately with \
+         UPDATE_GOLDEN=1 and say so in the commit message; this gate will not \
+         infer it for you."
+    );
+
+    // PRINT THE HITS, never a count. A bare "572 > 571" tells the next reader
+    // that something grew and nothing about where to look.
+    let mut grew: Vec<String> = Vec::new();
+    let mut shrank: Vec<String> = Vec::new();
+    for (key, count) in &found {
+        let was = recorded.get(key).copied().unwrap_or(0);
+        if *count > was {
+            grew.push(format!("  {key}: {was} -> {count}"));
+        } else if *count < was {
+            shrank.push(format!("  {key}: {was} -> {count}"));
+        }
+    }
+    for (key, was) in &recorded {
+        if !found.contains_key(key) {
+            shrank.push(format!("  {key}: {was} -> 0 (gone)"));
+        }
+    }
+
+    assert!(
+        grew.is_empty(),
+        "new open-coded `ensure(x.status.success(), ..)` assertion(s) under tests/.\n\
+         Such an assertion reports THAT a command failed and discards the exit \
+         code, stdout and stderr that would say why -- see bd-2bdos and bd-hwye2, \
+         where five rows cost a fleet dispatch each to diagnose.\n\
+         Use `ensure_command_success(&output, \"context\")` instead, which prints \
+         all three. If the new site is a legitimate assertion of FAILURE, spell \
+         it `ensure(!x.status.success(), ..)`.\n\
+         Grew:\n{}\n\
+         (bd-wq41r. Existing sites are grandfathered in {OPEN_CODED_BASELINE}.)",
+        grew.join("\n")
+    );
+
+    assert!(
+        shrank.is_empty(),
+        "open-coded assertion sites were REPAIRED but the baseline still lists \
+         them. That is good news the gate cannot accept silently: a stale \
+         baseline stops describing the tree and hides the decay this gate \
+         exists to make visible.\n\
+         Regenerate with `UPDATE_GOLDEN=1 cargo test --test \
+         verification_drift_guard open_coded_success_assertions_do_not_grow`.\n\
+         Shrank:\n{}",
+        shrank.join("\n")
+    );
+}
+
+/// Prove the gate can fail before trusting it to pass.
+///
+/// A gate whose failing arm has never fired is an unvalidated instrument, and
+/// a clean reading from one of those is the least trustworthy reading there
+/// is. This fires the scanner at a known positive and a known negative in a
+/// fixture directory, so a refactor that quietly stops matching is caught by
+/// the ADDITION arm going silent rather than by someone noticing years later.
+#[test]
+fn the_open_coded_success_gate_can_actually_fail() {
+    let dir = std::env::temp_dir().join(format!(
+        "ee_open_coded_gate_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    fs::create_dir_all(&dir).expect("create fixture dir");
+    let fixture = dir.join("subject.rs");
+    fs::write(
+        &fixture,
+        r#"
+fn offending_multiline() -> TestResult {
+    ensure(
+        output.status.success(),
+        format!("context should succeed; stderr: {stderr}"),
+    )?;
+}
+
+fn offending_singleline() -> TestResult {
+    ensure(context.output.status.success(), "context should succeed")?;
+}
+
+fn legitimate_failure_assertion() -> TestResult {
+    ensure(!output.status.success(), "perf compare should fail")?;
+}
+
+fn control_flow_is_not_an_assertion() -> TestResult {
+    let first = if output.status.success() { "a" } else { "b" };
+}
+
+fn already_repaired() -> TestResult {
+    ensure_command_success(&output, "context")?;
+}
+
+fn ensure_command_success(output: &Output, context: &str) -> TestResult {
+    ensure(
+        output.status.success(),
+        format!("{context}: expected success, got exit {:?}", output.status.code()),
+    )
+}
+"#,
+    )
+    .expect("write fixture");
+
+    let found = scan_open_coded_success_sites(&dir);
+    let _ = fs::remove_file(&fixture);
+    let _ = fs::remove_dir(&dir);
+
+    // KNOWN POSITIVES: both spellings must be caught.
+    assert_eq!(
+        found.get("subject::offending_multiline"),
+        Some(&1),
+        "the multi-line spelling must be detected; found: {found:?}"
+    );
+    assert_eq!(
+        found.get("subject::offending_singleline"),
+        Some(&1),
+        "the single-line spelling must be detected; found: {found:?}"
+    );
+
+    // KNOWN NEGATIVES: each exclusion must hold, or the gate reports offenders
+    // it has no business reporting and gets switched off.
+    for exempt in [
+        "subject::legitimate_failure_assertion",
+        "subject::control_flow_is_not_an_assertion",
+        "subject::already_repaired",
+        "subject::ensure_command_success",
+    ] {
+        assert!(
+            !found.contains_key(exempt),
+            "{exempt} must not be reported; found: {found:?}"
+        );
+    }
 }
