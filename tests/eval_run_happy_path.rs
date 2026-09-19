@@ -21,6 +21,17 @@ const EXPECTED_FIXTURE_IDS: &[&str] = &[
 
 // Independent workload oracle: deleting an expectation from a source fixture
 // must fail even if the evaluator faithfully executes the remaining queries.
+//
+// ITS VALUE DEPENDS ON THE TWO DECLARATIONS MOVING FOR INDEPENDENT REASONS. If
+// every fixture edit reflexively drags this list along, the oracle degrades
+// into a formality that always agrees and catches nothing -- which is how a
+// guard dies without anyone deleting it.
+//
+// So when this disagrees with a fixture, that red is INFORMATION. Establish why
+// the fixture changed and whether the change was justified on its own evidence
+// BEFORE touching this list. Updating it is sometimes correct (see 543cf14ef,
+// where four declared queries could never retrieve against a non-stemming index
+// and were re-anchored); updating it reflexively never is.
 const RETRIEVAL_WORKLOADS: &[(&str, &[&str])] = &[
     (
         "ask_v1",
