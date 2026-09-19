@@ -3625,6 +3625,84 @@ fn synthetic_remote_transcript_extracts_worker_id() -> TestResult {
     Ok(())
 }
 
+/// bd-0v23w face 3: the receipt must bind {proof digest -> worker}.
+///
+/// The oracle writes its content-addressed capsule on the worker and cannot
+/// name the host it ran on; `rch` names the host client-side. Both halves
+/// reach the transcript this wrapper captures, so the wrapper is the only
+/// participant that can record the binding. Before this, the digest survived
+/// only inside `stdout_tail` -- prose, truncated to `RCH_VERIFY_TAIL_BYTES`.
+///
+/// The three cases below are the ones that were previously indistinguishable:
+/// a capsule bound to its worker, a run that produced none, and the artifact
+/// this bead was filed for -- a capsule whose digest is BLAKE3 of nothing.
+#[test]
+fn synthetic_transcript_binds_oracle_proof_digest_to_worker() -> TestResult {
+    let worker_line = "[RCH] remote worker-a (12.3s)";
+    let real_digest = "9f2b7c1d4e5a6b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e";
+    let empty_digest = "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262";
+
+    let evidence = |transcript: &str| -> Result<Value, String> {
+        let (status, stdout, stderr) = run_script_with_env(
+            &["--", "cargo", "test", "--test", "rch_verify_contract"],
+            &[
+                ("RCH_VERIFY_FAKE_OUTPUT", transcript),
+                ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ],
+        )?;
+        if !status.success() {
+            return Err(format!(
+                "fake transcript run failed with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                status.code()
+            ));
+        }
+        let report: Value =
+            serde_json::from_str(&stdout).map_err(|error| format!("parse transcript: {error}"))?;
+        report
+            .get("oracle_evidence")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .ok_or_else(|| format!("receipt carried no oracle_evidence object: {report}"))
+    };
+
+    // A capsule and a worker in one transcript: the binding is the point.
+    let bound = evidence(&format!(
+        "{worker_line}\nRaceAbsent: no divergence\nevidence: /proof/{real_digest}.ee-test-event.jsonl\n"
+    ))?;
+    if bound["status"] != "recorded"
+        || bound["proof_digest"] != real_digest
+        || bound["worker_id"] != "worker-a"
+        || bound["digest_is_empty_content"] != false
+        || bound["observed_count"] != 1
+    {
+        return Err(format!("capsule was not bound to its worker: {bound}"));
+    }
+
+    // The negative arm. Without it, a field that is always "recorded" would
+    // pass the assertion above and mean nothing.
+    let unbound = evidence(&format!("{worker_line}\ntest result: ok. 1 passed\n"))?;
+    if unbound["status"] != "not_observed"
+        || !unbound["proof_digest"].is_null()
+        || unbound["observed_count"] != 0
+    {
+        return Err(format!(
+            "a transcript with no capsule must not claim one: {unbound}"
+        ));
+    }
+
+    // The incident: content-addressed, and the content is nothing.
+    let hollow = evidence(&format!(
+        "{worker_line}\nInfraError: gitCommit=<absent>\nevidence: /proof/{empty_digest}.ee-test-event.jsonl\n"
+    ))?;
+    if hollow["digest_is_empty_content"] != true || hollow["proof_digest"] != empty_digest {
+        return Err(format!(
+            "BLAKE3 of the empty string was not flagged as empty content: {hollow}"
+        ));
+    }
+
+    Ok(())
+}
+
 #[test]
 fn successful_test_name_does_not_trigger_active_project_exclusion() -> TestResult {
     let (status, stdout, stderr) = run_script_with_env(
