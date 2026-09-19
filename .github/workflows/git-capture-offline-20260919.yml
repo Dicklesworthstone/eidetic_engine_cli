@@ -1,0 +1,120 @@
+name: Local-only Git capture
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/delivery/git-capture-offline-20260919/**
+      - .github/workflows/git-capture-offline-20260919.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: git-capture-offline
+  cancel-in-progress: false
+jobs:
+  integrate-and-verify:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: capture-offline-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            capture-offline-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            capture-complete-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Enforce local-only evidence and exercise real partial clones
+        run: |
+          set -euo pipefail
+          paths=(src/core/memory_git_capture_repo.rs src/core/memory_git_capture_repo_tests.rs)
+          if ! grep -Fq -- '"--no-lazy-fetch"' src/core/memory_git_capture_repo.rs; then
+            xz -dc scripts/delivery/git-capture-offline-20260919/offline.patch.xz > "$RUNNER_TEMP/offline.patch"
+            echo "630e84e3f5a8b2ff538028dbac6bb8f7317fb2478372f74e23c201a16b797484  $RUNNER_TEMP/offline.patch" | sha256sum -c
+            # The policy lint hunk landed independently before this integration;
+            # preserve that concurrent change instead of applying it twice.
+            git apply --check --whitespace=error-all --exclude=src/policy/git_capture_redaction_tests.rs "$RUNNER_TEMP/offline.patch"
+            git apply --exclude=src/policy/git_capture_redaction_tests.rs "$RUNNER_TEMP/offline.patch"
+          fi
+          rustfmt --edition 2024 --config skip_children=true "${paths[@]}"
+          git diff --check
+          run_group() {
+            local name="$1" filter="$2" expected="$3" status=0
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/offline-$name.log" 2>&1 || status=$?
+            tail -n 100 "$RUNNER_TEMP/offline-$name.log"
+            test "$status" -eq 0
+            grep -Fq "test result: ok. $expected passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/offline-$name.log"
+          }
+          run_group repository core::memory::git_capture_repo::tests 17
+          run_group identity core::memory::git_capture_identity_tests 7
+          run_group security core::memory::git_capture_security_tests 11
+          run_group policy policy::git_capture_redaction_tests 7
+          run_group existing core::memory::tests::remember_git_capture 4
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git diff --quiet -- "${paths[@]}"; then
+            base=$(git rev-parse HEAD)
+            git add -- "${paths[@]}"
+            git commit -m 'fix(capture): never fetch missing Git evidence during local previews' -m 'Disable lazy promisor fetching with an explicit Git option and disable terminal credential prompts. Missing local blobs now refuse rather than contacting a remote and writing Git objects; locally hydrated partial clones remain usable offline. Real filtered-clone negatives cover commit, range and worktree modes, with a positive lazy-fetch control and unchanged object/index checks. All 46 capture regressions passed before publication. Preserve independently landed lint fixes.'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch --deepen=100 origin main
+              git diff --exit-code "$base" origin/main -- "${paths[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/offline-source-sha.log"
+          git archive HEAD | gzip > "$RUNNER_TEMP/offline-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: offline-capture-source-and-tests
+          path: ${{ runner.temp }}/offline-*
+          retention-days: 7
+      - name: Check all targets and strict Clippy
+        if: ${{ !cancelled() }}
+        run: |
+          failed=0
+          cargo check --locked --all-targets > "$RUNNER_TEMP/offline-check.log" 2>&1 || failed=1
+          tail -n 100 "$RUNNER_TEMP/offline-check.log"
+          cargo clippy --locked --all-targets -- -D warnings > "$RUNNER_TEMP/offline-clippy.log" 2>&1 || failed=1
+          tail -n 100 "$RUNNER_TEMP/offline-clippy.log"
+          exit "$failed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: offline-capture-verification
+          path: ${{ runner.temp }}/offline-*.log
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: capture-offline-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}

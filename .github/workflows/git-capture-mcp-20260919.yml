@@ -59,6 +59,7 @@ jobs:
             git apply --check --whitespace=error-all "$RUNNER_TEMP/capture-mcp.patch"
             git apply "$RUNNER_TEMP/capture-mcp.patch"
           fi
+          python3 scripts/delivery/git-capture-mcp-20260919/reconcile-search.py
           rustfmt --edition 2024 --config skip_children=true src/mcp.rs src/mcp_capture_git.rs tests/mcp_parity.rs tests/mcp_capture_git.rs
           git diff --check
           run_group() {
@@ -81,7 +82,7 @@ jobs:
           if ! git diff --quiet -- "${paths[@]}" || test -n "$(git ls-files --others --exclude-standard -- "${paths[@]}")"; then
             base=$(git rev-parse HEAD)
             git add -- "${paths[@]}"
-            git commit -m 'feat(mcp): capture Git evidence through the audited remember pipeline' -m 'Add ee_capture_git for commit, range and tracked worktree evidence with explicit workspace selection. Preview by default; durable writes require dryRun=false plus allowWrite=true and emit the CLI apply flag. Reuse remember screening, idempotency, audit and indexing; reject unknown inputs and policy/provenance overrides. Five adapter tests, two real MCP/CLI/Git/storage tests, complete registry parity and existing manual-remember parity passed before publication. Real tests verify unchanged preview stores and Git index, sanitized durable content, audit identity, idempotent retry, changed-evidence conflict and searchability.'
+            git commit -m 'feat(mcp): capture Git evidence through the audited remember pipeline' -m 'Add ee_capture_git for commit, range and tracked worktree evidence with explicit workspace selection. Preview by default; durable writes require dryRun=false plus allowWrite=true and emit the CLI apply flag. Reuse remember screening, idempotency, audit and indexing; reject unknown inputs and policy/provenance overrides. Five adapter tests, two real MCP/CLI/Git/storage tests, complete registry parity and existing manual-remember parity passed before publication. The first storage run already retrieved the memory but asserted an absent generic id; the corrected test requires both real memoryId and docId.'
             for attempt in 1 2 3; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 3
