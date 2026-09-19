@@ -87,9 +87,9 @@ impl Fixture {
         };
         let stdout = fs::read(&stdout_path).map_err(|e| e.to_string())?;
         let parsed = serde_json::from_slice::<Value>(&stdout);
-        let envelope_valid = parsed.as_ref().is_ok_and(|value| {
-            value["schema"] == "ee.response.v2" && value["success"] == true
-        });
+        let envelope_valid = parsed
+            .as_ref()
+            .is_ok_and(|value| value["schema"] == "ee.response.v2" && value["success"] == true);
         let event = json!({
             "test": "revision_search_cli",
             "command": args, "workspace": self.workspace,
@@ -103,7 +103,8 @@ impl Fixture {
         if timed_out || !status.success() || !envelope_valid {
             return Err(format!(
                 "ee {args:?}: status={status}, timeout={timed_out}, machine envelope={envelope_valid}; artifacts={}\nstdout={}\nstderr={}",
-                self.artifacts.display(), String::from_utf8_lossy(&stdout),
+                self.artifacts.display(),
+                String::from_utf8_lossy(&stdout),
                 fs::read_to_string(&stderr_path).map_err(|e| e.to_string())?,
             ));
         }
@@ -156,8 +157,7 @@ impl Fixture {
             None
         );
         assert_eq!(
-            db.get_memory_logical_id(&head)
-                .map_err(|e| e.to_string())?,
+            db.get_memory_logical_id(&head).map_err(|e| e.to_string())?,
             Some(prior.clone())
         );
         assert_eq!(
@@ -209,7 +209,12 @@ fn revised_advice_is_current_in_cli_search_diagnostics_and_read_only_packs() -> 
     ])?;
     assert_eq!(ids(&search, "/data/results", "id")?, vec![head.as_str()]);
     let diag = fixture.run(&[
-        "diag", "search", QUERY, "--all-arms", "--relevance-floor", "0",
+        "diag",
+        "search",
+        QUERY,
+        "--all-arms",
+        "--relevance-floor",
+        "0",
     ])?;
     assert_eq!(
         ids(&diag, "/data/final/results", "id")?,
@@ -229,7 +234,9 @@ fn revised_advice_is_current_in_cli_search_diagnostics_and_read_only_packs() -> 
         );
     }
     let db = DbConnection::open_file_read_only(&database).map_err(|e| e.to_string())?;
-    let pack_rows = db.count_table_rows("pack_records").map_err(|e| e.to_string())?;
+    let pack_rows = db
+        .count_table_rows("pack_records")
+        .map_err(|e| e.to_string())?;
     db.close().map_err(|e| e.to_string())?;
     let args = [
         "pack",
