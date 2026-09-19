@@ -210,8 +210,8 @@ fn backup_revision_recovery_preserves_history_expiry_and_published_index() -> Te
             ("2026-05-15T00:00:00Z", restored_prior.as_str()),
             ("2026-06-01T00:00:00Z", restored_head.as_str()),
         ] {
-            let search = crate::core::search::run_search_unaudited(
-                &crate::core::search::SearchOptions {
+            let search =
+                crate::core::search::run_search_unaudited(&crate::core::search::SearchOptions {
                     workspace_path: side_path.clone(),
                     database_path: Some(PathBuf::from(&result.restored_database_path)),
                     index_dir: None,
@@ -234,11 +234,14 @@ fn backup_revision_recovery_preserves_history_expiry_and_published_index() -> Te
                     strict_source_mode: true,
                     memory_scope: crate::models::MemoryScope::Workspace,
                     strict_scope: false,
-                },
-            )
-            .map_err(|e| e.to_string())?;
+                })
+                .map_err(|e| e.to_string())?;
             assert_eq!(
-                search.results.iter().map(|hit| hit.doc_id.as_str()).collect::<Vec<_>>(),
+                search
+                    .results
+                    .iter()
+                    .map(|hit| hit.doc_id.as_str())
+                    .collect::<Vec<_>>(),
                 vec![expected],
                 "{redaction:?} at {reference}: {:?}",
                 search.degraded,

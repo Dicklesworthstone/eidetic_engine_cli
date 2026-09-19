@@ -347,7 +347,11 @@ mod tests {
     fn revision_fixture() -> Result<(tempfile::TempDir, SearchOptions, DbConnection), String> {
         let (temp, options, db) = fixture()?;
         for (id, created, text) in [
-            (HIDDEN, "2026-05-01T00:00:00Z", "Original diagnostic evidence."),
+            (
+                HIDDEN,
+                "2026-05-01T00:00:00Z",
+                "Original diagnostic evidence.",
+            ),
             (VISIBLE, "2026-06-01T00:00:00Z", PHRASE),
         ] {
             let mut record = input(WORKSPACE, text);

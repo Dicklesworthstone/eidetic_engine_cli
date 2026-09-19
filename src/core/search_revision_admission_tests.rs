@@ -44,13 +44,18 @@ fn fixture() -> Result<(tempfile::TempDir, SearchOptions, DbConnection), String>
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let root = temp.path().canonicalize().map_err(|e| e.to_string())?;
     std::fs::create_dir(root.join(".ee")).map_err(|e| e.to_string())?;
-    std::fs::write(root.join(".ee/config.toml"), "[memory]\ninclude_global = false\n")
-        .map_err(|e| e.to_string())?;
+    std::fs::write(
+        root.join(".ee/config.toml"),
+        "[memory]\ninclude_global = false\n",
+    )
+    .map_err(|e| e.to_string())?;
     let database = root.join("revisions.db");
     let db = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
     db.migrate().map_err(|e| e.to_string())?;
     // The fixed IDs are canonical and are not merely prefix-shaped fixtures.
-    WORKSPACE.parse::<WorkspaceId>().map_err(|e| e.to_string())?;
+    WORKSPACE
+        .parse::<WorkspaceId>()
+        .map_err(|e| e.to_string())?;
     db.insert_workspace(
         WORKSPACE,
         &CreateWorkspaceInput {
@@ -60,18 +65,20 @@ fn fixture() -> Result<(tempfile::TempDir, SearchOptions, DbConnection), String>
     )
     .map_err(|e| e.to_string())?;
     for (id, created, content) in [
-        (PRIOR, "2026-05-01T00:00:00Z", "Original deployment procedure."),
-        (HEAD, "2026-06-01T00:00:00Z", "Corrected deployment procedure."),
+        (
+            PRIOR,
+            "2026-05-01T00:00:00Z",
+            "Original deployment procedure.",
+        ),
+        (
+            HEAD,
+            "2026-06-01T00:00:00Z",
+            "Corrected deployment procedure.",
+        ),
     ] {
         id.parse::<MemoryId>().map_err(|e| e.to_string())?;
-        db.insert_memory_with_timestamps(
-            id,
-            &memory(content, created),
-            created,
-            created,
-            PRIOR,
-        )
-        .map_err(|e| e.to_string())?;
+        db.insert_memory_with_timestamps(id, &memory(content, created), created, created, PRIOR)
+            .map_err(|e| e.to_string())?;
     }
     assert!(
         db.restore_imported_memory_supersession(PRIOR, "2026-06-01T00:00:00Z")
