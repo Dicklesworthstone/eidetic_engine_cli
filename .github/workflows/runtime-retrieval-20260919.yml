@@ -45,42 +45,82 @@ jobs:
             diagnostic-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             snapshot-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
             recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Apply inference recovery and verify real backend behavior
+      - name: Verify and publish substantive retrieval increments
         run: |
           set -euo pipefail
-          base=$(git rev-parse HEAD)
           delivery=scripts/delivery/runtime-retrieval-20260919
-          base64 --decode "$delivery/runtime-fallback.patch.xz.b64" | xz --decompress > "$RUNNER_TEMP/runtime.patch"
-          echo "3e7350431961278914f968c55f87c9dd8f17815e37f315d5d40941445672ed76  $RUNNER_TEMP/runtime.patch" | sha256sum --check
-          if ! test -f src/core/search_runtime_fallback.rs; then
-            git apply --check --whitespace=error-all "$RUNNER_TEMP/runtime.patch"
-            git apply "$RUNNER_TEMP/runtime.patch"
-          fi
-          rustfmt --edition 2024 --config skip_children=true src/core/search.rs src/core/search_runtime_fallback.rs
-          cargo check --locked --all-targets > "$RUNNER_TEMP/runtime-check.log" 2>&1 || { tail -n 120 "$RUNNER_TEMP/runtime-check.log"; exit 1; }
-          cargo test --locked --lib core::search::runtime_fallback::tests -- --test-threads=2 > "$RUNNER_TEMP/runtime-tests.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/runtime-tests.log"; exit 1; }
-          tail -n 100 "$RUNNER_TEMP/runtime-tests.log"
-          grep -Fq 'test result: ok. 7 passed; 0 failed;' "$RUNNER_TEMP/runtime-tests.log"
-          cargo test --locked --lib producer_identity_mismatch_requires_rebuild_then_retrieves_stored_memory -- --test-threads=1 > "$RUNNER_TEMP/runtime-identity.log" 2>&1 || { tail -n 120 "$RUNNER_TEMP/runtime-identity.log"; exit 1; }
-          grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/runtime-identity.log"
-          git diff --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- src/core/search.rs src/core/search_runtime_fallback.rs
-          if ! git diff --cached --quiet; then
-            git commit -m 'feat(search): recover runtime embedding failures through verified lexical retrieval' -m 'Observe inference availability errors without parsing or retaining private backend prose. Preserve producer identity and the complete embedder interface. Recover through the pinned canonical lexical generation for hybrid and semantic-only requests, including honest empty answers. Report actual source mode/backend, enforce strict-mode refusal and preserve cancellation/integrity failures. All-target compilation, seven focused runtime tests and the existing producer-identity regression passed before publication.'
-            for attempt in 1 2 3; do
-              if git push origin HEAD:main; then break; fi
-              test "$attempt" -lt 3
-              git fetch origin main
-              git diff --exit-code "$base" origin/main -- src/core/search.rs src/core/search_runtime_fallback.rs
-              git merge --no-edit origin/main
-              base=$(git rev-parse origin/main)
-              cargo check --locked --all-targets > "$RUNNER_TEMP/runtime-merge-check.log" 2>&1
-            done
+          verify() {
+            local part="$1" expected="$2"
+            cargo check --locked --all-targets > "$RUNNER_TEMP/runtime-$part-check.log" 2>&1 || { tail -n 120 "$RUNNER_TEMP/runtime-$part-check.log"; return 1; }
+            cargo test --locked --lib core::search::runtime_fallback::tests -- --test-threads=2 > "$RUNNER_TEMP/runtime-$part-tests.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/runtime-$part-tests.log"; return 1; }
+            tail -n 100 "$RUNNER_TEMP/runtime-$part-tests.log"
+            grep -Fq "test result: ok. $expected passed; 0 failed;" "$RUNNER_TEMP/runtime-$part-tests.log"
+          }
+          publish() {
+            local base="$1" part="$2"; shift 2
+            git diff --check
+            git add -- "$@"
+            if ! git diff --cached --quiet; then
+              if test "$part" = first; then
+                git commit -m 'feat(search): recover runtime embedding failures through verified lexical retrieval' -m 'Observe typed inference availability failures without retaining private backend prose. Preserve producer identity and embedder behavior. Recover hybrid and semantic-only requests through the pinned lexical generation, report actual mode/backend, refuse strict-mode fallback and preserve cancellation/integrity failures. All-target compilation and seven focused runtime tests passed before publication.'
+              else
+                git commit -m 'feat(search): align diagnostic recovery with live retrieval and strict source contracts' -m 'Carry execution mode and degradation through diagnostic retrieval, redact inference payloads and expose actual embedding use in performance output. Cover live and diagnostic search against persisted memory, lexical-positive/negative queries, unavailable recovery lanes and strict refusal. All-target compilation and ten runtime recovery tests passed before publication.'
+              fi
+              for attempt in 1 2 3; do
+                if git push origin HEAD:main; then break; fi
+                test "$attempt" -lt 3
+                git fetch origin main
+                git diff --exit-code "$base" origin/main -- "$@"
+                git merge --no-edit origin/main
+                base=$(git rev-parse origin/main)
+                cargo check --locked --all-targets > "$RUNNER_TEMP/runtime-$part-merge-check.log" 2>&1
+              done
+            fi
+            git rev-parse HEAD > "$RUNNER_TEMP/runtime-$part-source-sha.log"
+            git archive HEAD | gzip > "$RUNNER_TEMP/runtime-$part-source.tar.gz"
+          }
+          base64 --decode "$delivery/runtime-fallback.patch.xz.b64" | xz --decompress > "$RUNNER_TEMP/runtime-first.patch"
+          base64 --decode "$delivery/diagnostic-fallback.patch.xz.b64" | xz --decompress > "$RUNNER_TEMP/runtime-second.patch"
+          echo "3e7350431961278914f968c55f87c9dd8f17815e37f315d5d40941445672ed76  $RUNNER_TEMP/runtime-first.patch" | sha256sum --check
+          echo "c04f03eec8d369222f79aac6eb40fd049e86c3cd91a825d764db79ea5db88a80  $RUNNER_TEMP/runtime-second.patch" | sha256sum --check
+          if ! test -f src/core/search_runtime_fallback.rs; then
+            base=$(git rev-parse HEAD)
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/runtime-first.patch"
+            git apply "$RUNNER_TEMP/runtime-first.patch"
+            rustfmt --edition 2024 --config skip_children=true src/core/search.rs src/core/search_runtime_fallback.rs
+            verify first 7
+            publish "$base" first src/core/search.rs src/core/search_runtime_fallback.rs
           fi
-          git rev-parse HEAD > "$RUNNER_TEMP/runtime-source-sha.log"
-          git archive HEAD | gzip > "$RUNNER_TEMP/runtime-source.tar.gz"
+          if ! grep -Fq 'fn diagnostics_recover_the_same_hits_without_private_inference_errors' src/core/search_runtime_fallback.rs; then
+            base=$(git rev-parse HEAD)
+            python3 - <<'PY'
+          import os
+          from pathlib import Path
+          temp = Path(os.environ['RUNNER_TEMP'])
+          first = (temp / 'runtime-first.patch').read_text()
+          name = 'src/core/search_runtime_fallback.rs'
+          section = first.split(f'diff --git a/{name} b/{name}\n', 1)[1].split('diff --git ', 1)[0]
+          original = ''.join(line[1:] for line in section.splitlines(keepends=True) if line.startswith('+') and not line.startswith('+++'))
+          (temp / 'runtime-first-original.rs').write_text(original)
+          (temp / 'runtime-first-expected.rs').write_text(original)
+          PY
+            rustfmt --edition 2024 --config-path "$GITHUB_WORKSPACE/rustfmt.toml" --config skip_children=true "$RUNNER_TEMP/runtime-first-expected.rs"
+            cmp src/core/search_runtime_fallback.rs "$RUNNER_TEMP/runtime-first-expected.rs"
+            cp "$RUNNER_TEMP/runtime-first-original.rs" src/core/search_runtime_fallback.rs
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/runtime-second.patch"
+            git apply "$RUNNER_TEMP/runtime-second.patch"
+            rustfmt --edition 2024 --config skip_children=true src/core/search.rs src/core/search_runtime_fallback.rs
+            verify second 10
+            publish "$base" second src/core/search.rs src/core/search_runtime_fallback.rs docs/degraded_codes.md
+          else
+            verify current 10
+          fi
+          cargo test --locked --lib producer_identity_mismatch_requires_rebuild_then_retrieves_stored_memory -- --test-threads=1 > "$RUNNER_TEMP/runtime-identity.log" 2>&1 || { tail -n 120 "$RUNNER_TEMP/runtime-identity.log"; exit 1; }
+          grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/runtime-identity.log"
+          cargo test --locked --lib core::search::tests::diag_search -- --test-threads=2 > "$RUNNER_TEMP/runtime-diag-existing.log" 2>&1 || { tail -n 120 "$RUNNER_TEMP/runtime-diag-existing.log"; exit 1; }
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/runtime-diag-existing.log"
       - name: Clippy and formatting
         run: |
           set -euo pipefail
@@ -92,7 +132,7 @@ jobs:
           name: runtime-recovery-source-and-verification
           path: |
             ${{ runner.temp }}/runtime-*.log
-            ${{ runner.temp }}/runtime-source.tar.gz
+            ${{ runner.temp }}/runtime-*-source.tar.gz
           retention-days: 7
       - uses: actions/cache/save@v4
         if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
