@@ -1,0 +1,125 @@
+name: Typed memory recovery
+on:
+  push:
+    branches: [main]
+    paths: [scripts/delivery/typed-fields-transport.patch.xz.b64, .github/workflows/typed-memory-recovery.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: typed-memory-delivery
+  cancel-in-progress: false
+jobs:
+  integrate:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
+          components: rustfmt
+      - name: Integrate typed export and import
+        id: source
+        run: |
+          set -euo pipefail
+          base=$(git rev-parse HEAD)
+          base64 -d scripts/delivery/typed-fields-transport.patch.xz.b64 | xz -d > "$RUNNER_TEMP/typed.patch"
+          echo "14ea310de2820b97afbd4f3c55e71a70225b828af178f1d849d678518057dd23  $RUNNER_TEMP/typed.patch" | sha256sum -c
+          files=(src/models/jsonl.rs src/output/jsonl_export.rs src/core/backup.rs src/core/jsonl_import.rs src/output/jsonl_typed_fields.rs src/output/jsonl_typed_fields_tests.rs src/core/jsonl_typed_fields_tests.rs)
+          if ! test -f src/output/jsonl_typed_fields.rs; then
+            test "$(git rev-parse HEAD:src/models/jsonl.rs)" = e2fdba5d5dc5c4a53db74b300e53edffafcaa438
+            test "$(git rev-parse HEAD:src/output/jsonl_export.rs)" = 13ccb791bbdea4c68c8d221946720d2c076292cf
+            test "$(git rev-parse HEAD:src/core/backup.rs)" = e4c2e66227737eb5e2bedd400e408a197d7b2e74
+            test "$(git rev-parse HEAD:src/core/jsonl_import.rs)" = c0c0208939ec965c922db4817ed2fe60328e3c13
+            git apply --check --whitespace=error-all "$RUNNER_TEMP/typed.patch"
+            git apply "$RUNNER_TEMP/typed.patch"
+          fi
+          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+          git diff --check
+          git add -- "${files[@]}"
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'fix(backup): preserve typed memory fields through authenticated JSONL recovery' -m 'Add a backward-compatible optional typed_fields carrier. Capture it in the source snapshot, redact registry values without destroying lists or revisit timestamps, and bind it to the records MAC. Validate before destination writes, preserve historical tombstones and timestamps, reject typed-only duplicate conflicts, and map decision references with primary identities. Add ten export/import regressions. Formatting and patch checks passed; compilation and runtime are reported separately. bd-psjkr'
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" -lt 3
+              git fetch origin main
+              git diff --exit-code "$base" origin/main -- "${files[@]}"
+              git merge --no-edit origin/main
+              base=$(git rev-parse origin/main)
+            done
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > "$RUNNER_TEMP/typed-source-sha.log"
+          tar -czf "$RUNNER_TEMP/typed-source.tar.gz" "${files[@]}"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: typed-memory-source
+          path: |
+            ${{ runner.temp }}/typed-source-sha.log
+            ${{ runner.temp }}/typed-source.tar.gz
+          retention-days: 7
+  verify:
+    needs: integrate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.integrate.outputs.source }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-08-31
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: typed-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            typed-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            recorded-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Compile and exercise typed-field transport
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD | tee "$RUNNER_TEMP/typed-identity.log"
+          timeout 20m cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/typed-check.log"
+          timeout 20m cargo test --locked --lib core::jsonl_import::typed_fields_tests -- --test-threads=4 2>&1 | tee "$RUNNER_TEMP/typed-import.log"
+          grep -Fq 'test result: ok. 5 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/typed-import.log"
+          timeout 10m cargo test --locked --lib output::jsonl_export::typed_fields::tests -- --test-threads=4 2>&1 | tee "$RUNNER_TEMP/typed-export.log"
+          grep -Fq 'test result: ok. 5 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/typed-export.log"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: typed-memory-results
+          path: ${{ runner.temp }}/typed-*.log
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
