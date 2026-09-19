@@ -97,6 +97,25 @@ fn require_schema(json: &serde_json::Value, expected: &str, label: &str) -> Test
     Ok(())
 }
 
+/// IF YOU ARE RE-RUNNING THIS BECAUSE IT WENT RED, READ THIS FIRST.
+///
+/// This gate has failed with exit 130 on both hosts (bd-hwye2). 130 is
+/// `Outcome::Cancelled` (src/core/outcome.rs), not an external SIGINT, and its
+/// load-sensitive kinds -- Timeout, Deadline, PollQuota, CostBudget -- are all
+/// reached sooner on a busy worker.
+///
+/// A FAILURE THAT REQUIRES CONTENTION CANNOT BE CLEARED BY A QUIET RUN, AND A
+/// QUIET RUN IS EXACTLY WHAT A RE-TEST AFTER HOURS PRODUCES. A green here does
+/// not close the row; it establishes only that the test can pass, which was
+/// never in question. This test took 261.92s on an idle hz3 -- itself a
+/// plausible timeout subject -- and its sibling
+/// `walking_skeleton_durability_scenario` has been measured at 740s against a
+/// 60s budget.
+///
+/// Record the fleet state beside the verdict, or reproduce under load, or say
+/// the row DID NOT REPRODUCE -- which is a claim about your run, not about the
+/// defect. See docs/rch_verification.md, "A Green Re-Run Does Not Clear a
+/// Contention-Dependent Red".
 #[test]
 fn walking_skeleton_acceptance_gate() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir failed: {error}"))?;

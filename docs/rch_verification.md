@@ -67,6 +67,53 @@ the widened local topology above. The worker preflight remains fixed to
 `/dp -> /data/projects`, so `/data` is only the local alias root used by the
 dependency planner.
 
+## A Green Re-Run Does Not Clear a Contention-Dependent Red
+
+**A failure that requires contention cannot be cleared by a quiet run, and a
+quiet run is exactly what a re-test after hours produces.** If you are here
+because a red went green on a retry, that retry is not evidence unless you
+reproduced the conditions that produced the red.
+
+The trap is that the retry looks like the stronger test: it is more recent, it
+is the same command, and it passed. What changed is the thing nobody recorded —
+how many other jobs were on the worker.
+
+**Failures in this class, and how to recognise them.** They fail on load and
+pass alone, so the retry always exonerates them:
+
+- **Exit 130.** `Outcome::Cancelled` (`src/core/outcome.rs`), *not* an external
+  SIGINT. Its load-sensitive `CancelKind`s are `Timeout`, `Deadline`,
+  `PollQuota` and `CostBudget` — every one of which is reached sooner on a busy
+  worker.
+- **Elapsed-time assertions.** `"elapsed_ms 22587 exceeds upper bound 20000"`,
+  `"should complete in under 60s, took 740s"`. The bound is a constant; the
+  measurement is not.
+- **Index/queue readiness.** `Stale` where `Ready` was expected, "database
+  queue unavailable" — an async producer that had time on an idle fleet.
+
+**What to do instead of re-running.**
+
+1. **Record the fleet state with the verdict, not just the exit code.** A red
+   and a green that differ only in concurrency are the same measurement taken
+   twice under different conditions, and without that field nobody can tell.
+2. **Reproduce under load, or do not claim reproduction.** If you cannot create
+   contention, say the row DID NOT REPRODUCE — which is a statement about your
+   run, not about the defect.
+3. **Install the instrument instead of hunting the failure.** Make the failing
+   assertion print the exit code, stdout and stderr, then let the next natural
+   occurrence answer the question for free. A row that reproduces only under
+   load may cost several dispatches to catch and zero to diagnose once the
+   surface is honest. See bd-2bdos and bd-hwye2.
+4. **Never mark such a row fixed on a green retry alone.** A green on an idle
+   fleet is precisely the evidence a load-induced failure does not leave.
+
+**Worked example.** `walking_skeleton_acceptance_gate` was red with exit 130 on
+both hosts. After repairing its diagnostics it ran green on hz3 in 261.92 s.
+That did **not** close the row: 261.92 s is itself a plausible timeout subject,
+and its sibling `walking_skeleton_durability_scenario` has been measured at
+740 s against a 60 s budget. The green established that the test can pass, which
+was never in question.
+
 ## Cargo-Free Panic Helper Radar
 
 Before spending an RCH or CI Clippy slot on touched Rust tests or benches, run
