@@ -27,6 +27,8 @@ mod cass;
 mod lifecycle;
 #[path = "backup_maintenance_recovery.rs"]
 mod maintenance;
+#[path = "backup_operational_recovery.rs"]
+mod operational;
 #[path = "backup_pack_recovery.rs"]
 mod packs;
 #[path = "backup_publication_recovery.rs"]
@@ -121,6 +123,7 @@ impl Rows {
 pub(in crate::core::backup) struct HistoryExpectation {
     maintenance: maintenance::MaintenanceExpectation,
     workspace_id: String,
+    operational: operational::OperationalExpectation,
     learning: Rows,
     recorded: Rows,
     provenance: Rows,
@@ -147,6 +150,11 @@ impl HistoryExpectation {
                 workspace_id,
             )?,
             workspace_id: workspace_id.to_owned(),
+            operational: operational::OperationalExpectation::from_assets(
+                assets,
+                backup_id,
+                workspace_id,
+            )?,
             learning: Rows::default(),
             recorded: Rows::default(),
             provenance: Rows::default(),
@@ -527,6 +535,7 @@ impl HistoryExpectation {
             )?;
         }
         self.learning.verify(&actual, LEARNING_TABLES)?;
+        self.operational.verify_connection(db)?;
         self.verify_recorded_history(db)?;
         self.verify_provenance_history(db)?;
         self.packs.verify_connection(db)?;
