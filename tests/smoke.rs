@@ -7447,13 +7447,36 @@ fn memory_temporal_links_and_graph_outputs_compose() -> TestResult {
     let staged_suggestions = expired_json["data"]["suggested_links"]
         .as_array()
         .ok_or_else(|| "expired remember suggested_links must be an array".to_string())?;
+    // PRINT THE HITS. Three conjuncts under `.any()` collapsed to one boolean,
+    // so a failure could not distinguish "no suggestion was staged at all" --
+    // which src/core/memory.rs:5546's MIN_SCORE 0.75 gate can cause -- from "one
+    // was staged with a different target or evidence_count". Those are different
+    // defects with different repairs.
+    //
+    // PRE-REGISTERED AND SETTLED FROM SOURCE BEFORE RUNNING: this row is
+    // PRODUCT-CLASS, not environment-class. memory.rs:6636 computes
+    // `evidence_count = matched_tags.len()` and :6644 sets
+    // `source: "tag_cooccurrence"` -- pure tag-set intersection, with no
+    // embedder, no store lookup and no git anywhere in the path. Unlike the
+    // three environment axes behind this shard's other reds (the repo's own .ee
+    // store, the embedding model cache, and .git presence in a clean-overlay
+    // export), nothing here can differ between a dev Mac and a worker. So this
+    // shard's debt is only MOSTLY environmental, and the remaining rows need
+    // individual triage rather than one class fix.
+    let staged_rendered = serde_json::to_string(staged_suggestions)
+        .unwrap_or_else(|error| format!("<unserializable: {error}>"));
     ensure(
         staged_suggestions.iter().any(|suggestion| {
             suggestion["relation"].as_str() == Some("co_tag")
                 && suggestion["target_memory_id"].as_str() == Some(current_id.as_str())
                 && suggestion["evidence_count"].as_u64() == Some(4)
         }),
-        "remember should stage a deterministic co_tag suggestion without applying it",
+        format!(
+            "remember should stage a deterministic co_tag suggestion without applying it; \
+             expected relation=co_tag target={current_id} evidence_count=4; staged {} \
+             suggestion(s): {staged_rendered}",
+            staged_suggestions.len()
+        ),
     )?;
 
     let broad_only_candidates = generate_autolink_candidates(
