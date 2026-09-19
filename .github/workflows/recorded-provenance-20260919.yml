@@ -1,80 +1,22 @@
-name: Verify recorded and causal recovery boundaries
+name: Verify recorded and operational recovery boundaries
 on:
   push:
     branches: [main]
     paths:
-      - scripts/delivery/recorder-fixture-repair-20260919.patch
-      - src/core/backup_fault_injection_tests.rs
-      - .github/workflows/recorded-provenance-20260919.yml
+      - 'src/core/backup*.rs'
+      - 'src/db/**'
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 concurrency:
-  group: recorded-provenance-recovery-delivery
-  cancel-in-progress: true
+  group: recorded-provenance-recovery-verification-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  integrate:
-    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 15
-    permissions:
-      contents: write
-    outputs:
-      source: ${{ steps.publish.outputs.source }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: nightly-2026-08-31
-          components: rustfmt
-      - name: Repair test setup without relaxing recovery rejection
-        id: publish
-        run: |
-          set -euo pipefail
-          export RUSTUP_TOOLCHAIN=nightly-2026-08-31
-          base=$(git rev-parse HEAD)
-          patch=scripts/delivery/recorder-fixture-repair-20260919.patch
-          echo "9fff8e55f27edac18c4ff2b36c3c7a31580e0ea471024a01a815d4e5882aef89  $patch" | sha256sum --check
-          if ! grep -Fq 'recovery_faults::inject_history_corruption(&db, table, sql)' src/core/backup.rs; then
-            git apply --check --whitespace=error-all "$patch"
-            git apply "$patch"
-          fi
-          files=(src/core/backup.rs src/core/backup_fault_injection_tests.rs)
-          if test -f src/core/backup_operational_recovery_tests.rs; then
-            python3 - <<'PY'
-          from pathlib import Path
-          p = Path('src/core/backup_operational_recovery_tests.rs')
-          text = p.read_text()
-          old = 'db.execute_raw(sql).map_err(work_history_error)?;'
-          new = 'crate::core::backup::recovery_faults::inject_history_corruption(&db, table, sql)?;'
-          if new not in text:
-              assert text.count(old) == 1
-              p.write_text(text.replace(old, new))
-          PY
-            files+=(src/core/backup_operational_recovery_tests.rs)
-          fi
-          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
-          git diff --check
-          git add -- "${files[@]}"
-          if ! git diff --cached --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'test(backup): exercise recovery corruption below append-only guards' -m 'Keep the public rationale insertion outside an already-open fixture transaction. For recorder and audit corruption, prove the engine rejects the change, inject in a disposable test transaction, reinstate the exact compiled trigger and prove enforcement again. Retain all count, content, refusal, privacy and source-immutability assertions. Runtime results are reported separately.'
-            for attempt in 1 2 3 4; do
-              if git push origin HEAD:main; then break; fi
-              test "$attempt" -lt 4
-              git fetch origin main
-              git diff --exit-code "$base" origin/main -- "${files[@]}"
-              git merge --no-edit origin/main
-              base=$(git rev-parse origin/main)
-            done
-          fi
-          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   verify:
-    needs: integrate
     runs-on: ubuntu-latest
     timeout-minutes: 55
     env:
@@ -88,7 +30,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.integrate.outputs.source }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
         with:

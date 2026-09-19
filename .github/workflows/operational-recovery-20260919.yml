@@ -1,86 +1,10 @@
 name: Verify operational memory recovery
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'src/core/backup*.rs'
-      - 'src/db/**'
-      - Cargo.lock
-      - Cargo.toml
-      - rust-toolchain.toml
   workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: operational-recovery-verification-${{ github.ref }}
-  cancel-in-progress: false
 jobs:
   verify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 55
-    env:
-      RUSTUP_TOOLCHAIN: nightly-2026-08-31
-      CARGO_BUILD_JOBS: '2'
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      CARGO_TERM_COLOR: never
-      EE_EMBED_DOWNLOAD: 'off'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: nightly-2026-08-31
-      - uses: actions/cache/restore@v4
-        id: cache
-        with:
-          path: |
-            ~/.cargo/registry
-            target
-          key: operational-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: |
-            operational-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-            recorded-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-            lifecycle-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
-      - name: Compile source and all test targets
-        run: |
-          set -euo pipefail
-          git rev-parse HEAD | tee "$RUNNER_TEMP/operational-identity.log"
-          timeout 25m cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/operational-check.log"
-      - name: Exercise operational content, resumed imports and both publication boundaries
-        run: |
-          set -euo pipefail
-          failed=0
-          group() {
-            if ! timeout 25m cargo test --locked --lib "$1" -- --test-threads=4 2>&1 | tee "$RUNNER_TEMP/operational-$3.log"; then
-              echo "FAILED: $3" | tee -a "$RUNNER_TEMP/operational-summary.log"
-              failed=1
-              return
-            fi
-            if ! grep -Fq "test result: ok. $2 passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/operational-$3.log"; then
-              echo "INVALID TEST INVENTORY: $3" | tee -a "$RUNNER_TEMP/operational-summary.log"
-              failed=1
-            else
-              echo "PASS: $3 ($2 tests)" | tee -a "$RUNNER_TEMP/operational-summary.log"
-            fi
-          }
-          group core::backup::recovery::history::operational::tests 9 operational
-          group core::backup::recovery::history::imports::tests 7 imports
-          group core::backup::tests::default_backup_restores_import_checkpoints_and_reopens_same_source 1 resumption
-          group core::backup::recovery::tests 15 inventory
-          exit "$failed"
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() }}
-        with:
-          name: operational-recovery-results
-          path: ${{ runner.temp }}/operational-*.log
-          retention-days: 7
-      - uses: actions/cache/save@v4
-        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
-        with:
-          path: |
-            ~/.cargo/registry
-            target
-          key: ${{ steps.cache.outputs.cache-primary-key }}
+    uses: ./.github/workflows/recorded-provenance-20260919.yml
+    permissions:
+      contents: read
