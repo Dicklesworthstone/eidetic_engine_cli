@@ -1726,6 +1726,126 @@ mod tests {
     }
 
     #[test]
+    /// The phase fields are actually EMITTED, captured off the real trace
+    /// stream rather than inferred from the source. bd-ndzfg.4.
+    ///
+    /// Compiling the `trace_pack_l2` calls and passing the cache's unit tests
+    /// proves the code is reachable, not that a subscriber receives
+    /// `surface=pack_cache_l2` with the right phase. Those are different
+    /// claims, and for a telemetry clause the second is the one the acceptance
+    /// asks for.
+    ///
+    /// A CLI run was the obvious instrument and was the wrong one: `ee context`
+    /// on a fresh workspace exits 130 `cancelled (deadline)` before reaching
+    /// the cache, so the trace stream was silent for a reason that had nothing
+    /// to do with the fields. This captures in-process instead, using the
+    /// `CaptureLayer` pattern from `src/core/graph_telemetry.rs` so the
+    /// assertion reads the same event a subscriber would.
+    #[test]
+    fn phase_fields_reach_a_subscriber_on_the_real_cache_paths() -> TestResult {
+        use std::sync::{Arc, Mutex};
+        use tracing::subscriber::with_default;
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+        use tracing_subscriber::registry::Registry;
+
+        #[derive(Default, Clone)]
+        struct Capture {
+            events: Arc<Mutex<Vec<(String, String, String)>>>,
+        }
+        impl<S: tracing::Subscriber> Layer<S> for Capture {
+            fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+                let mut surface = String::new();
+                let mut phase = String::new();
+                let mut visitor = Visit {
+                    surface: &mut surface,
+                    phase: &mut phase,
+                };
+                event.record(&mut visitor);
+                self.events.lock().expect("capture lock").push((
+                    event.metadata().target().to_owned(),
+                    surface,
+                    phase,
+                ));
+            }
+        }
+        struct Visit<'a> {
+            surface: &'a mut String,
+            phase: &'a mut String,
+        }
+        impl tracing::field::Visit for Visit<'_> {
+            fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                match field.name() {
+                    "surface" => *self.surface = value.to_owned(),
+                    "phase" => *self.phase = value.to_owned(),
+                    _ => {}
+                }
+            }
+        }
+
+        let capture = Capture::default();
+        let events = capture.events.clone();
+        let subscriber = Registry::default()
+            .with(capture)
+            .with(tracing_subscriber::filter::LevelFilter::TRACE);
+
+        let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
+        let pack = json!({"hash": "blake3:trace", "items": [{"id": "mem_1"}]});
+        let mut outcome: TestResult = Ok(());
+        with_default(subscriber, || {
+            outcome = (|| -> TestResult {
+                // miss, then write, then hit: one call per phase under test.
+                cache
+                    .get_at("blake3:trace-key", 100)
+                    .map_err(|error| error.to_string())?;
+                cache
+                    .put_at("blake3:trace-key", &pack, 100)
+                    .map_err(|error| error.to_string())?;
+                cache
+                    .get_at("blake3:trace-key", 120)
+                    .map_err(|error| error.to_string())?;
+                cache
+                    .evict_best_effort_at(130)
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })();
+        });
+        outcome?;
+
+        let captured = events.lock().expect("capture lock").clone();
+
+        // EMPTY-WORLD GUARD. Zero captured events means the subscriber never
+        // saw anything, and every containment check below would pass
+        // vacuously by finding nothing to contradict it.
+        assert!(
+            !captured.is_empty(),
+            "capture layer received NO events at all; the harness is broken, \
+             not the instrumentation"
+        );
+
+        let ours: Vec<&(String, String, String)> = captured
+            .iter()
+            .filter(|(target, surface, _)| target == "ee::pack_l2" && surface == "pack_cache_l2")
+            .collect();
+        assert!(
+            !ours.is_empty(),
+            "no event carried target ee::pack_l2 with surface=pack_cache_l2; \
+             captured {} events in total",
+            captured.len()
+        );
+
+        for expected in ["lookup", "miss", "write", "hit", "evict"] {
+            assert!(
+                ours.iter().any(|(_, _, phase)| phase == expected),
+                "phase {expected:?} never reached the subscriber; observed phases: {:?}",
+                ours.iter().map(|(_, _, p)| p.as_str()).collect::<Vec<_>>()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn happy_path_roundtrip_returns_stored_pack_json() -> TestResult {
         let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
         let pack = json!({"hash": "blake3:test", "items": [{"id": "mem_1"}]});
