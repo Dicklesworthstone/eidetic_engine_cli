@@ -378,7 +378,11 @@ mod session_support_tests {
         let groups = support_groups(&spans, &sources);
         assert_eq!(groups.values().collect::<BTreeSet<_>>().len(), 1);
         assert_eq!(groups.len(), spans.len());
-        assert!(groups.keys().all(|id| spans.iter().any(|span| &span.memory_id == id)));
+        assert!(
+            groups
+                .keys()
+                .all(|id| spans.iter().any(|span| &span.memory_id == id))
+        );
         // Support analysis must not rewrite the public citation or lineage.
         assert_eq!(spans[1].provenance_uri, Some(format!("ee-mem://{parent}")));
         assert_eq!(sources["rule"].source_memory_ids, vec!["copy".to_owned()]);

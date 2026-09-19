@@ -213,9 +213,10 @@ fn public_evidence_body(value: &str) -> bool {
     // command-risk signals and their umbrella reason can be disregarded.
     !advisory_codes.is_empty()
         && !report.redacted_reasons.is_empty()
-        && report.redacted_reasons.iter().all(|reason| {
-            *reason == "instruction_like_content" || advisory_codes.contains(reason)
-        })
+        && report
+            .redacted_reasons
+            .iter()
+            .all(|reason| *reason == "instruction_like_content" || advisory_codes.contains(reason))
 }
 
 fn public_label(value: &str) -> String {
@@ -463,9 +464,7 @@ mod provenance_tests {
 
     #[test]
     fn decoded_pii_is_not_exempt_even_when_it_is_outside_the_authority() {
-        assert!(
-            public_provenance("https://example.test/users/reader%40example.test").is_none()
-        );
+        assert!(public_provenance("https://example.test/users/reader%40example.test").is_none());
     }
 
     #[test]
