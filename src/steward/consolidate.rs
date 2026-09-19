@@ -400,8 +400,10 @@ impl ConsolidationCoverage {
         candidate: &T,
     ) -> f64 {
         let previous = &selected[index];
-        let same_kind = previous.level() == candidate.level() && previous.kind() == candidate.kind();
-        let same_group = same_kind && previous.normalized_content() == candidate.normalized_content();
+        let same_kind =
+            previous.level() == candidate.level() && previous.kind() == candidate.kind();
+        let same_group =
+            same_kind && previous.normalized_content() == candidate.normalized_content();
         let groups = if same_group {
             self.groups
         } else {
@@ -462,7 +464,8 @@ fn sieve_stream_consolidation_candidates<T: ConsolidationProposal>(
         let mut best_replacement = None;
         let mut best_objective = consolidation_selection_objective(&selected);
         for index in 0..selected.len() {
-            let replacement_objective = coverage.replacement_objective(&selected, index, &candidate);
+            let replacement_objective =
+                coverage.replacement_objective(&selected, index, &candidate);
             if replacement_objective > best_objective {
                 best_objective = replacement_objective;
                 best_replacement = Some(index);
@@ -660,6 +663,55 @@ mod tests {
         Ok(())
     }
 
+    // Independent original planner: do not construct this oracle through the
+    // new grouping, stream or into_plan helpers. A shared mistake in source
+    // preference or payload materialization must not produce a vacuous pass.
+    fn original_materialized_plans(
+        workspace_id: &str,
+        memories: &[StoredMemory],
+    ) -> Vec<ConsolidationCandidatePlan> {
+        let mut groups = BTreeMap::<(String, String, String), Vec<&StoredMemory>>::new();
+        for memory in memories {
+            let normalized = normalize_memory_content_for_consolidation(&memory.content);
+            if !normalized.is_empty() {
+                groups
+                    .entry((memory.level.clone(), memory.kind.clone(), normalized))
+                    .or_default()
+                    .push(memory);
+            }
+        }
+        let mut candidates = Vec::new();
+        for ((level, kind, normalized), mut group) in groups {
+            group.sort_by(|left, right| compare_consolidation_memory_preference(left, right));
+            let Some(source) = group.first().copied() else {
+                continue;
+            };
+            for target in group.iter().skip(1) {
+                candidates.push(ConsolidationCandidatePlan {
+                    candidate_id: stable_consolidation_candidate_id(
+                        workspace_id,
+                        &source.id,
+                        &target.id,
+                    ),
+                    source_memory_id: source.id.clone(),
+                    target_memory_id: target.id.clone(),
+                    level: level.clone(),
+                    kind: kind.clone(),
+                    normalized_content: normalized.clone(),
+                    objective_score: consolidation_candidate_objective(source, target, group.len()),
+                    proposed_content: source.content.clone(),
+                    proposed_confidence: source.confidence.max(target.confidence),
+                    reason: format!(
+                        "Duplicate {level}/{kind} memory content normalized to {:?}; consolidate {} into {} via {CONSOLIDATION_SIEVE_ALGORITHM}.",
+                        normalized, target.id, source.id
+                    ),
+                });
+            }
+        }
+        candidates.sort_by(compare_consolidation_candidate_plan);
+        candidates
+    }
+
     // Retain the original materialized algorithm as a differential oracle.
     // A quality-only test would miss changed tie breaking or rounding.
     fn reference_selection(
@@ -702,7 +754,11 @@ mod tests {
                     candidate(
                         &format!("{index:04}"),
                         &format!("group-{}", (index * 7 + seed) % 11),
-                        if index % 3 == 0 { "episodic" } else { "procedural" },
+                        if index % 3 == 0 {
+                            "episodic"
+                        } else {
+                            "procedural"
+                        },
                         if index % 5 == 0 { "failure" } else { "rule" },
                         0.1 * ((index * 13 + seed) % 31) as f64,
                     )
@@ -847,12 +903,13 @@ mod tests {
         assert_eq!(format!("{selection:?}"), format!("{reordered:?}"));
         assert_eq!(
             before,
-            db.list_memories(&workspace, None, true).map_err(|error| error.to_string())?
+            db.list_memories(&workspace, None, true)
+                .map_err(|error| error.to_string())?
         );
 
         // Exercise the full ranked stream separately from the sieve. In each
-        // group, the source with highest confidence survives; the lowest-
-        // confidence target normally ranks first because it has greater gain.
+        // group, source preference chooses the survivor independently of the
+        // target ordering used by the lazy merge.
         let template = before.first().ok_or("missing stored fixture")?;
         let mut corpus = Vec::new();
         for group in 0..7 {
@@ -861,23 +918,29 @@ mod tests {
                 memory.id = format!("mem_{:026}", group * 100 + member + 100);
                 memory.content = format!("Distinct duplicate group {group}.");
                 memory.kind = if group % 2 == 0 { "rule" } else { "fact" }.to_owned();
-                memory.confidence = 0.9 - member as f32 * 0.03;
+                memory.level = if group % 2 == 0 {
+                    "procedural"
+                } else {
+                    "semantic"
+                }
+                .to_owned();
+                memory.confidence = if group == 3 {
+                    0.9
+                } else {
+                    0.9 - member as f32 * 0.03
+                };
                 memory.utility = (member % 3) as f32 * 0.1;
                 corpus.push(memory);
             }
         }
-        let grouped = prepare_consolidation_groups(&corpus);
-        let mut expected_stream = Vec::new();
-        for ((_, _, normalized), group) in &grouped {
-            let (&source, targets) = group.split_first().ok_or("empty duplicate group")?;
-            for &target in targets {
-                expected_stream.push(
-                    BorrowedConsolidationProposal::new(source, target, normalized, group.len())
-                        .into_plan(&workspace),
-                );
-            }
+        for (number, body) in [(9000, "Unique singleton."), (9001, "  \n\t")] {
+            let mut memory = template.clone();
+            memory.id = format!("mem_{number:026}");
+            memory.content = body.to_owned();
+            corpus.push(memory);
         }
-        expected_stream.sort_by(compare_consolidation_candidate_plan);
+        let grouped = prepare_consolidation_groups(&corpus);
+        let expected_stream = original_materialized_plans(&workspace, &corpus);
         let mut stream = ConsolidationCandidateStream::new(&grouped);
         assert_eq!(stream.frontier.len(), 7);
         for expected in &expected_stream {
@@ -905,7 +968,10 @@ mod tests {
         let reversed_stream: Vec<_> = ConsolidationCandidateStream::new(&reversed_groups)
             .map(|candidate| candidate.into_plan(&workspace))
             .collect();
-        assert_eq!(format!("{reversed_stream:?}"), format!("{expected_stream:?}"));
+        assert_eq!(
+            format!("{reversed_stream:?}"),
+            format!("{expected_stream:?}")
+        );
         Ok(())
     }
 }
