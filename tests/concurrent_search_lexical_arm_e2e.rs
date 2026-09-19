@@ -22,6 +22,10 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 
+#[cfg(all(unix, feature = "lexical-bm25"))]
+#[path = "snapshot_index_recovery_e2e.rs"]
+mod snapshot_index_recovery;
+
 type TestResult = Result<(), String>;
 
 const LEXICAL_LOSS_CODES: [&str; 3] = [
