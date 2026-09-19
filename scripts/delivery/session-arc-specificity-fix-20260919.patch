@@ -1,0 +1,15 @@
+--- a/src/curate/mod.rs
++++ b/src/curate/mod.rs
+@@ -7324,6 +7324,12 @@
+ 
+ fn looks_like_error_code(token: &str) -> bool {
+     let trimmed = trim_token(token).trim_end_matches(':');
++    // URI schemes and line locators are provenance, not error codes. In
++    // particular, a rejected `cass-session://#L3-4` must not regain evidence
++    // credit through the permissive hyphenated-code recognizer below.
++    if trimmed.contains("://") {
++        return false;
++    }
+     let upper = trimmed.to_ascii_uppercase();
+     if upper
+         .strip_prefix('E')

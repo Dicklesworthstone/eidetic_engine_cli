@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
     paths:
-      - scripts/delivery/session-arc-learning-20260919.patch.xz.b64
+      - scripts/delivery/session-arc-specificity-fix-20260919.patch
       - .github/workflows/session-arc-learning-20260919.yml
   workflow_dispatch:
 permissions:
@@ -28,28 +28,49 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
-      - name: Integrate production learning and regression tests
+      - name: Integrate preserved learning implementation and validation repair
         id: commit
         run: |
           set -euo pipefail
           base=$(git rev-parse HEAD)
-          base64 --decode scripts/delivery/session-arc-learning-20260919.patch.xz.b64 | xz --decompress > "$RUNNER_TEMP/session-arc.patch"
-          echo "dce2c38a045e17de3a92be4392e99ac767f734f43dcafc8b845462d888ca467d  $RUNNER_TEMP/session-arc.patch" | sha256sum --check
+          delivery=scripts/delivery/session-arc-20260919
+          decode() {
+            base64 --decode "$delivery/$1.patch.xz.b64" | xz --decompress > "$RUNNER_TEMP/$1.patch"
+            echo "$2  $RUNNER_TEMP/$1.patch" | sha256sum --check
+          }
+          decode session-arc da3b52063de184cb13c1fea828e31f844cd0e264dc17ad5b22d63b2c4b92433b
+          decode complete-loop 3a62787a4f27da037fd7c55a098ee08434ce488205cb71e5ed2b840815f9448c
+          echo "3ed003964db8915b91ecbbb1d66cc4ec0d2fea4a18ea933143d439c1aa60da61  $delivery/preview-contract.patch" | sha256sum --check
           if ! test -f src/core/curate_session_arc.rs; then
             test "$(git rev-parse HEAD:src/core/curate.rs)" = 6dbbefaae061e74ccea8328bf0d8f912a904ab2a
-            git apply --check --whitespace=error-all "$RUNNER_TEMP/session-arc.patch"
-            git apply "$RUNNER_TEMP/session-arc.patch"
+            test "$(git rev-parse HEAD:src/curate/mod.rs)" = 4c7ad95abe69627a929ee53612ddd9ac3653ab64
+            test "$(git rev-parse HEAD:scripts/e2e_capture.sh)" = 7b4e978553dbc7de0dfb9c28cc3a1944582e2875
+            test "$(git rev-parse HEAD:docs/schemas/ee.curate.show.v1.json)" = 1588bb2728153ec5a22e1c138a943505b518db91
+            test "$(git rev-parse HEAD:tests/docs_schemas_match_responses.rs)" = 59a1a98981b167101c0f77aba88ca2f7fc890930
+            for patch in "$RUNNER_TEMP/session-arc.patch" "$RUNNER_TEMP/complete-loop.patch" "$delivery/preview-contract.patch"; do
+              git apply --check --whitespace=error-all "$patch"
+              git apply "$patch"
+            done
           else
-            grep -Fq 'session_arc::link_applied_peer(' src/core/curate.rs
+            grep -Fq 'session_arc::persist_pair_link(' src/core/curate.rs
           fi
-          files=(src/core/curate.rs src/core/curate_session_arc.rs src/core/curate_session_arc_tests.rs)
-          rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+          fix=scripts/delivery/session-arc-specificity-fix-20260919.patch
+          echo "effe76169f84742562557b63302f51eaeba14e9aa427e40f7736b2b1b6650f28  $fix" | sha256sum --check
+          if ! grep -Fq 'URI schemes and line locators are provenance, not error codes.' src/curate/mod.rs; then
+            git apply --check --whitespace=error-all "$fix"
+            git apply "$fix"
+          fi
+          if ! grep -Fq 'path = "tests/session_arc_learning_cli.rs"' Cargo.toml; then
+            printf '\n[[test]]\nname = "session_arc_learning_cli"\npath = "tests/session_arc_learning_cli.rs"\n' >> Cargo.toml
+          fi
+          files=(Cargo.toml src/core/curate.rs src/core/curate_session_arc.rs src/core/curate_session_arc_tests.rs src/curate/mod.rs tests/session_arc_learning_cli.rs scripts/e2e_capture.sh docs/schemas/ee.curate.show.v1.json tests/docs_schemas_match_responses.rs)
+          rustfmt --edition 2024 --config skip_children=true src/core/curate.rs src/core/curate_session_arc.rs src/core/curate_session_arc_tests.rs src/curate/mod.rs tests/session_arc_learning_cli.rs tests/docs_schemas_match_responses.rs
           git diff --check
           git add -- "${files[@]}"
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(learn): complete independently reviewed failure-to-repair memory pairs' -m 'Mine ordered related failure and verified-repair spans across topic boundaries, retain complete pairs under limits, and persist proposals atomically. Permit only regenerated reciprocal proposals to share admitted evidence. Atomically link accepted rule and anti-pattern without reparenting evidence or auto-approving a peer. Add eleven real-store and signal regressions. Formatting passed; compilation and runtime checks are reported by the separate verification job. bd-2vq2z.9'
+            git commit -m 'feat(learn): integrate reviewed session-arc pairs and truthful application previews' -m 'Recover the preserved source-backed learning implementation, including same-window CASS arcs, explicit reciprocal acceptance, immutable shared evidence ownership, audited links, atomic review persistence, capture kind mapping and strict CLI preview schemas. Fix malformed provenance being credited as an error code rather than weakening the specificity regression. Include real-binary CLI acceptance tests. Patch validation and formatting passed; current-source compilation and runtime results are reported separately. bd-2vq2z.9'
             for attempt in 1 2 3 4; do
               if git push origin HEAD:main; then break; fi
               test "$attempt" -lt 4
@@ -103,15 +124,23 @@ jobs:
           set -euo pipefail
           git rev-parse HEAD | tee "$RUNNER_TEMP/session-arc-source.log"
           timeout 20m cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/session-arc-check.log"
-      - name: Execute paired learning and existing derivation regressions
+      - name: Execute learning, CLI and schema regressions
         run: |
           set -euo pipefail
-          timeout 20m cargo test --locked --lib core::curate::session_arc::tests -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/session-arc-tests.log"
-          grep -Fq 'test result: ok. 11 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/session-arc-tests.log"
-          for filter in review_session_candidates_link_failed_fixed_arc_pair review_session_candidates_do_not_invent_arc_without_later_resolution apply_curation_candidate_blocks_competing_create_derived_candidate_evidence_conflict apply_curation_candidate_rolls_back_create_derived_failures review_session_proposals_persist_bootstrap_as_create_derived_candidate; do
-            timeout 5m cargo test --locked --lib "core::curate::tests::$filter" -- --exact 2>&1 | tee "$RUNNER_TEMP/session-arc-$filter.log"
-            grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/session-arc-$filter.log"
-          done
+          run_group() {
+            local label=$1 filter=$2 count=$3
+            timeout 15m cargo test --locked --lib "$filter" -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/session-arc-$label.log"
+            grep -Eq "test result: ok\. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/session-arc-$label.log"
+          }
+          run_group learning core::curate::tests::session_arc_tests 13
+          run_group review core::curate::tests::review_session_ '[1-9][0-9]*'
+          run_group ownership core::curate::tests::apply_curation_candidate_blocks_competing_create_derived_candidate_evidence_conflict 1
+          run_group drift core::curate::tests::apply_curation_candidate_rejects_create_derived_evidence_attachment_drift 1
+          run_group specificity specificity_score_credits_valid_canonical_session_provenance_not_empty_schemes 1
+          timeout 15m cargo test --locked --test session_arc_learning_cli -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/session-arc-cli.log"
+          grep -Fq 'test result: ok. 2 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/session-arc-cli.log"
+          timeout 10m cargo test --locked --test integration_a_d docs_schemas_match_responses::curate_show_report_matches_schema -- --exact 2>&1 | tee "$RUNNER_TEMP/session-arc-schema.log"
+          grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/session-arc-schema.log"
           git diff --exit-code
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
