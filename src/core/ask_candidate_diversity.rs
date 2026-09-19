@@ -57,6 +57,10 @@ pub(super) fn preserve_independent_support<'a>(
         representatives.insert(key, entry);
         best.insert(entry);
         if best.len() > ranked.len() {
+            // Invariant: `best.insert(entry)` runs unconditionally two lines
+            // above, and the guard compares usizes, so `best.len()` is at least
+            // `ranked.len() + 1` and therefore at least one.
+            #[allow(clippy::expect_used)]
             let worst = best.pop_last().expect("over-budget selection is nonempty");
             representatives.remove(support_key(&worst.candidate.memory_id, &groups));
         }
