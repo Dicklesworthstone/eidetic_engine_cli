@@ -5954,11 +5954,7 @@ fn artifact_registry_registers_indexes_exports_and_supports_context() -> TestRes
         "--max-tokens",
         "1200",
     ])?;
-    let context_stderr = String::from_utf8_lossy(&context.stderr);
-    ensure(
-        context.status.success(),
-        format!("context should succeed; stderr: {context_stderr}"),
-    )?;
+    ensure_command_success(&context, "context")?;
     ensure(context.stderr.is_empty(), "context stderr clean")?;
     let context_json: serde_json::Value = serde_json::from_slice(&context.stdout)
         .map_err(|error| format!("context stdout must be JSON: {error}"))?;
@@ -6743,11 +6739,7 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
         "context",
         "prepare release",
     ])?;
-    let context_stderr = String::from_utf8_lossy(&context.stderr);
-    ensure(
-        context.status.success(),
-        format!("context should succeed; stderr: {context_stderr}"),
-    )?;
+    ensure_command_success(&context, "context")?;
     ensure(context.stderr.is_empty(), "context stderr clean")?;
     let context_json: serde_json::Value = serde_json::from_slice(&context.stdout)
         .map_err(|error| format!("context stdout must be JSON: {error}"))?;
@@ -6787,11 +6779,7 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
     )?;
     let pack_dossier_dir = pack_run.dossier_dir.clone();
     let pack = pack_run.output;
-    let pack_stderr = String::from_utf8_lossy(&pack.stderr);
-    ensure(
-        pack.status.success(),
-        format!("pack query-file should succeed; stderr: {pack_stderr}"),
-    )?;
+    ensure_command_success(&pack, "pack query-file")?;
     ensure(pack.stderr.is_empty(), "pack query-file stderr clean")?;
     let pack_json: serde_json::Value = serde_json::from_slice(&pack.stdout)
         .map_err(|error| format!("pack query-file stdout must be JSON: {error}"))?;
@@ -8461,11 +8449,7 @@ fn pack_query_file_max_results_and_output_explain_are_observable() -> TestResult
         query_file_arg.as_str(),
     ])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    ensure(
-        output.status.success(),
-        format!("pack query-file controls should succeed; stderr: {stderr}"),
-    )?;
+    ensure_command_success(&output, "pack query-file controls")?;
     ensure_clean_stderr(&output.stderr, "pack query-file controls stderr clean")?;
     ensure_no_ansi(&stdout, "pack query-file controls stdout")?;
 

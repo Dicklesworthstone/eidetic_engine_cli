@@ -30,6 +30,29 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     }
 }
 
+/// Assert a command exited successfully, surfacing the exit code AND both streams.
+///
+/// `ensure(out.status.success(), "context should succeed")` reports only that
+/// the step failed and discards every datum that would say why: the exit code,
+/// stdout, and stderr all go in the bin. That is how this file's context row
+/// became unresolvable -- the failure text was the bare literal, so it could
+/// not even be told apart from a cancellation.
+///
+/// Under `--json` the `ee.error.v2` envelope goes to stdout while stderr stays
+/// empty, so printing stderr alone renders "...; stderr: " and explains
+/// nothing. Print all three.
+fn ensure_command_success(output: &Output, context: &str) -> TestResult {
+    ensure(
+        output.status.success(),
+        format!(
+            "{context}: expected success, got exit {:?}; stdout: {:?}; stderr: {:?}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
@@ -442,7 +465,7 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
         None,
     )?;
     command_dossiers.push(context.dossier_dir.clone());
-    ensure(context.output.status.success(), "context should succeed")?;
+    ensure_command_success(&context.output, "context")?;
     assert_json_machine_stdout(&context.output, "context")?;
     let context_json = parse_json_stdout(&context.output, "context")?;
     let context_item_ids = context_json["data"]["pack"]["items"]

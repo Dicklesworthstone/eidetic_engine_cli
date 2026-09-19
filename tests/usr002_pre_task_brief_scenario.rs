@@ -21,6 +21,29 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     }
 }
 
+/// Assert a command exited successfully, surfacing the exit code AND both streams.
+///
+/// `ensure(out.status.success(), "context markdown should succeed")` reports
+/// only that the step failed and discards every datum that would say why: the
+/// exit code, stdout, and stderr all go in the bin. That is how this file's
+/// context row became unresolvable -- the failure text was the bare literal,
+/// so it could not even be told apart from a cancellation.
+///
+/// Under `--json` the `ee.error.v2` envelope goes to stdout while stderr stays
+/// empty, so printing stderr alone renders "...; stderr: " and explains
+/// nothing. Print all three.
+fn ensure_command_success(output: &Output, context: &str) -> TestResult {
+    ensure(
+        output.status.success(),
+        format!(
+            "{context}: expected success, got exit {:?}; stdout: {:?}; stderr: {:?}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
@@ -552,10 +575,7 @@ fn pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts(
         Some("tests/fixtures/golden/agent/context_pack.md.golden"),
     )?;
     command_dossiers.push(context_markdown.dossier_dir.clone());
-    ensure(
-        context_markdown.output.status.success(),
-        "context markdown should succeed",
-    )?;
+    ensure_command_success(&context_markdown.output, "context markdown")?;
     ensure(
         context_markdown.output.stderr.is_empty(),
         "context markdown should not emit stderr",
