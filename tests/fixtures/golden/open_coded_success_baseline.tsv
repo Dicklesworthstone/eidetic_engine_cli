@@ -20,6 +20,25 @@
 # failed and discards the exit code, stdout and stderr that would say why. This
 # file forbids the NEXT one; it does not bless these.
 #
+# WHAT THIS GATE CANNOT SEE -- read before trusting "the population cannot grow".
+# It matches ONE spelling, `ensure(<expr>.status.success(), ..)`. It is blind to
+# the exit-code-comparison spelling:
+#     ensure_equal(&init.status.code(), &Some(0), "init exit")
+#     if output.status.code() == Some(EXIT_SUCCESS) { .. }
+# 281 such sites exist across 42 files (advanced_e2e 61, why_conformance 50,
+# e2e_pack_determinism 21, ...), against the 569 this gate sees. That is not a
+# marginal tail: why_conformance's 50 are the rows bd-2bdos was filed for, so
+# THIS GATE DOES NOT POLICE THE SHAPE THAT MOTIVATED IT, and a new site in the
+# uncovered spelling passes silently.
+#
+# The cause is worth keeping: the scanner's pattern was derived from the five
+# rows already repaired, all of which happened to use `.status.success()`. THE
+# PATTERN CAME FROM THE SAMPLE, NOT THE POPULATION.
+#
+# Those 281 are UNCLASSIFIED, not condemned -- spelling is orthogonal to
+# diagnostic quality. `require_ok` used that spelling and printed two of three
+# streams; `ensure_equal(&x.status.code(), &Some(0), label)` prints none.
+#
 # Regenerate: UPDATE_GOLDEN=1 cargo test --test verification_drift_guard \
 #   open_coded_success_assertions_do_not_grow
 #
