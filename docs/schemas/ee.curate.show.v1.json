@@ -134,6 +134,72 @@
             }
           }
         },
+        "sharedEvidenceSpans": {
+          "type": "array",
+          "description": "Already owned sources reused only by the exact explicitly approved session-arc peer. These are not new attachments and retain ownerMemoryId.",
+          "items": {
+            "type": "object",
+            "required": [
+              "evidenceSpanId",
+              "contentHash",
+              "ownerMemoryId"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "evidenceSpanId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "contentHash": {
+                "type": "string",
+                "minLength": 1
+              },
+              "ownerMemoryId": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "plannedSessionArcLink": {
+          "type": "object",
+          "description": "Audited rule-to-anti-pattern relation planned only after the other proposal has been explicitly applied.",
+          "required": [
+            "linkId",
+            "srcMemoryId",
+            "dstMemoryId",
+            "relation",
+            "directed",
+            "arcId"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "linkId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "srcMemoryId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "dstMemoryId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "arcId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "relation": {
+              "type": "string",
+              "const": "related"
+            },
+            "directed": {
+              "type": "boolean",
+              "const": false
+            }
+          }
+        },
         "plannedSearchIndexJobId": {
           "type": "string"
         },

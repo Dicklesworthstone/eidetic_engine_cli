@@ -22,10 +22,10 @@ use ee::core::curate::{
     CurateCandidateAudit, CurateCandidateEvidenceSummary, CurateCandidateSource,
     CurateCandidateSummary, CurateCandidateValidation, CurateCandidatesFilter,
     CurateCandidatesReport, CurateShowPlannedApplication, CurateShowPlannedDerivedLink,
-    CurateShowPlannedEvidenceAttachment, CurateShowReport, CurateValidationIssue,
-    ProposeDerivedSourceRef, REFLECTION_PROPOSE_SCHEMA_V1,
-    REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1, ReflectionHmacKeyDiagnostic,
-    ReflectionProposeReport, ReflectionRequestDurableLedgerOutcome,
+    CurateShowPlannedEvidenceAttachment, CurateShowPlannedSessionArcLink, CurateShowReport,
+    CurateShowSharedEvidenceSpan, CurateValidationIssue, ProposeDerivedSourceRef,
+    REFLECTION_PROPOSE_SCHEMA_V1, REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1,
+    ReflectionHmacKeyDiagnostic, ReflectionProposeReport, ReflectionRequestDurableLedgerOutcome,
     ReflectionRequestLedgerDiagnostic, ReflectionRequestLedgerDiagnosticRecovery,
     ReflectionRequestLedgerDiagnosticsReport, ReflectionRequestLedgerExportHygieneReport,
     ReflectionRequestLedgerMigrationSafety, ReflectionRequestLedgerRetentionReport,
@@ -1999,6 +1999,8 @@ fn curate_show_report_matches_schema() -> TestResult {
             evidence_span_id: evidence_span_id.clone(),
             content_hash: hash('2'),
         }],
+        shared_evidence_spans: Vec::new(),
+        planned_session_arc_link: None,
         planned_search_index_job_id: Some("six_show000000000000000000bd0001".to_string()),
         audit_schema_preview: Some("ee.audit.derived_memory_created.v1".to_string()),
         errors: Vec::new(),
@@ -2076,6 +2078,65 @@ fn curate_show_report_matches_schema() -> TestResult {
             "plannedDerivedFromLinks must surface at least one link in this fixture".to_string(),
         );
     }
+    // Ordinary previews remain byte-shape compatible: new arc fields are absent.
+    assert!(
+        document
+            .pointer("/plannedApplication/sharedEvidenceSpans")
+            .is_none()
+    );
+    assert!(
+        document
+            .pointer("/plannedApplication/plannedSessionArcLink")
+            .is_none()
+    );
+    let mut paired = report;
+    let plan = paired
+        .planned_application
+        .as_mut()
+        .ok_or("missing fixture plan")?;
+    plan.planned_derived_from_links.clear();
+    plan.planned_evidence_attachments.clear();
+    plan.shared_evidence_spans
+        .push(CurateShowSharedEvidenceSpan {
+            evidence_span_id,
+            content_hash: hash('2'),
+            owner_memory_id: source_memory_id.clone(),
+        });
+    plan.planned_session_arc_link = Some(CurateShowPlannedSessionArcLink {
+        link_id: "mlink_session_arc_preview".to_owned(),
+        src_memory_id: created_memory_id,
+        dst_memory_id: source_memory_id.clone(),
+        relation: "related".to_owned(),
+        directed: false,
+        arc_id: "arc_session_preview".to_owned(),
+    });
+    let paired_document: Value = serde_json::from_str(&paired.data_json())
+        .map_err(|error| format!("paired curate show data_json must parse: {error}"))?;
+    validate_json_schema(&paired_document, &schema, &schema, "$")?;
+    ensure_json_str(
+        &paired_document,
+        "/plannedApplication/sharedEvidenceSpans/0/ownerMemoryId",
+        &source_memory_id,
+    )?;
+    ensure_json_str(
+        &paired_document,
+        "/plannedApplication/plannedSessionArcLink/relation",
+        "related",
+    )?;
+    ensure_json_bool(
+        &paired_document,
+        "/plannedApplication/plannedSessionArcLink/directed",
+        false,
+    )?;
+    let mut invalid = paired_document.clone();
+    invalid["plannedApplication"]["plannedSessionArcLink"]["directed"] = json!(true);
+    assert!(validate_json_schema(&invalid, &schema, &schema, "$").is_err());
+    let mut invalid = paired_document;
+    invalid["plannedApplication"]["sharedEvidenceSpans"][0]
+        .as_object_mut()
+        .ok_or("missing shared source")?
+        .remove("ownerMemoryId");
+    assert!(validate_json_schema(&invalid, &schema, &schema, "$").is_err());
     Ok(())
 }
 

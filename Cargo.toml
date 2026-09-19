@@ -595,3 +595,7 @@ unusual_byte_groupings = "allow"
 useless_conversion = "allow"
 vec_init_then_push = "allow"
 while_let_loop = "allow"
+
+[[test]]
+name = "session_arc_learning_cli"
+path = "tests/session_arc_learning_cli.rs"

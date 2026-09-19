@@ -61,6 +61,9 @@ use crate::models::{
 };
 use crate::search::HashEmbedder;
 
+#[path = "curate_session_arc.rs"]
+mod session_arc;
+
 /// Stable schema for `ee curate candidates` response data.
 pub const CURATE_CANDIDATES_SCHEMA_V1: &str = "ee.curate.candidates.v1";
 /// Stable schema for `ee curate validate` response data.
@@ -555,6 +558,11 @@ pub struct CurateShowPlannedApplication {
     pub created_memory: Option<CurateApplyMemoryState>,
     pub planned_derived_from_links: Vec<CurateShowPlannedDerivedLink>,
     pub planned_evidence_attachments: Vec<CurateShowPlannedEvidenceAttachment>,
+    /// Sources retain their first accepted owner; these are not new attachments.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub shared_evidence_spans: Vec<CurateShowSharedEvidenceSpan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planned_session_arc_link: Option<CurateShowPlannedSessionArcLink>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub planned_search_index_job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -589,6 +597,25 @@ pub struct CurateShowPlannedDerivedLink {
 pub struct CurateShowPlannedEvidenceAttachment {
     pub evidence_span_id: String,
     pub content_hash: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateShowSharedEvidenceSpan {
+    pub evidence_span_id: String,
+    pub content_hash: String,
+    pub owner_memory_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateShowPlannedSessionArcLink {
+    pub link_id: String,
+    pub src_memory_id: String,
+    pub dst_memory_id: String,
+    pub relation: String,
+    pub directed: bool,
+    pub arc_id: String,
 }
 
 /// Result of an explicit curation review lifecycle command.
@@ -2734,16 +2761,20 @@ pub fn review_session_proposals(
 
     let mut durable_mutation = false;
     if options.propose && !options.dry_run {
-        for candidate in &mut candidates {
-            candidate.persisted = persist_review_candidate(
-                &connection,
-                &prepared.workspace_id,
-                candidate,
-                Some(&session),
-                "session review",
-            )?;
-            durable_mutation |= candidate.persisted;
-        }
+        durable_mutation = persist_curation_transaction(&connection, "session review", || {
+            let mut persisted = false;
+            for candidate in &mut candidates {
+                candidate.persisted = persist_review_candidate(
+                    &connection,
+                    &prepared.workspace_id,
+                    candidate,
+                    Some(&session),
+                    "session review",
+                )?;
+                persisted |= candidate.persisted;
+            }
+            Ok(persisted)
+        })?;
     }
 
     let topic_count = candidates
@@ -3281,7 +3312,10 @@ fn build_review_session_candidates(
             .then_with(|| left.topic_key.cmp(&right.topic_key))
             .then_with(|| left.candidate_id.cmp(&right.candidate_id))
     });
-    candidates.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    session_arc::limit_complete_pairs(
+        &mut candidates,
+        usize::try_from(limit).unwrap_or(usize::MAX),
+    );
     candidates
 }
 
@@ -3472,7 +3506,7 @@ fn build_session_arc_candidates(
         grouped.entry(topic_key).or_default().push(span);
     }
 
-    let mut candidates = Vec::new();
+    let mut candidates = session_arc::inline_candidates(workspace_id, session, evidence_spans);
     for (topic_key, mut spans) in grouped {
         spans.sort_by(|left, right| {
             left.start_line
@@ -3504,8 +3538,9 @@ fn first_failed_to_fixed_arc<'a>(
             continue;
         }
         if let Some(failure_span) = failure
-            && session_arc_resolution_signal(&span.excerpt)
+            && session_arc::resolution_signal(&span.excerpt)
             && session_arc_span_order(failure_span, span).is_lt()
+            && failure_span.end_line < span.start_line
         {
             return Some((failure_span, *span));
         }
@@ -3527,16 +3562,32 @@ fn build_session_arc_candidate_pair(
         failure_span,
         resolution_span,
     );
-    let anti_pattern_content = format!(
+    let mut anti_pattern_content = format!(
         "Anti-pattern for `{topic_key}`: this session hit a failure after `{}`. The later fix was `{}`.",
         compact_excerpt(&failure_span.excerpt),
         compact_excerpt(&resolution_span.excerpt)
     );
-    let rule_content = format!(
+    let mut rule_content = format!(
         "Rule for `{topic_key}`: when `{}` appears, apply the later repair: `{}`.",
         compact_excerpt(&failure_span.excerpt),
         compact_excerpt(&resolution_span.excerpt)
     );
+    if failure_span.id == resolution_span.id {
+        // A complete imported window may describe policy rather than a command
+        // or file. Carry the observed risk, mitigation and exact source into
+        // the lesson instead of weakening specificity or inventing a command.
+        // Preserve the historical two-window candidate content/identity.
+        let observed = format!(
+            "Risk: {}\nMitigation: {}\nEvidence: {}",
+            compact_excerpt(&failure_span.excerpt),
+            compact_excerpt(&resolution_span.excerpt),
+            failure_span.canonical_provenance_uri(),
+        );
+        anti_pattern_content = format!("Anti-pattern for `{topic_key}`:\n{observed}");
+        rule_content = format!(
+            "Rule for `{topic_key}`: use the observed repair for this failure.\n{observed}"
+        );
+    }
     let anti_pattern_hash = content_hash_for_candidate(&anti_pattern_content);
     let rule_hash = content_hash_for_candidate(&rule_content);
     let anti_pattern_id = deterministic_curate_id(&[
@@ -3555,7 +3606,10 @@ fn build_session_arc_candidate_pair(
         "rule",
         rule_hash.as_str(),
     ]);
-    let source_ids = vec![failure_span.id.clone(), resolution_span.id.clone()];
+    let mut source_ids = vec![failure_span.id.clone()];
+    if resolution_span.id != failure_span.id {
+        source_ids.push(resolution_span.id.clone());
+    }
     let anti_metadata = session_arc_metadata(
         &arc_id,
         "anti_pattern",
@@ -3803,6 +3857,12 @@ fn capture_suggestion_from_review_candidate(
 }
 
 fn capture_suggestion_memory_kind(candidate: &ReviewSessionCandidate) -> String {
+    if candidate.candidate_kind == REVIEW_CANDIDATE_KIND_SESSION_ARC_ANTI_PATTERN {
+        return MemoryKind::AntiPattern.as_str().to_owned();
+    }
+    if candidate.candidate_kind == REVIEW_CANDIDATE_KIND_SESSION_ARC_RULE {
+        return MemoryKind::Rule.as_str().to_owned();
+    }
     if candidate.candidate_kind == REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY {
         return MemoryKind::Rule.as_str().to_owned();
     }
@@ -5520,9 +5580,33 @@ fn planned_application_from_decision(
             input
                 .evidence_refs
                 .iter()
+                .filter(|reference| {
+                    !input
+                        .session_arc_peer
+                        .as_ref()
+                        .is_some_and(|peer| peer.shared_evidence_ids.contains(&reference.id))
+                })
                 .map(|reference| CurateShowPlannedEvidenceAttachment {
                     evidence_span_id: reference.id.clone(),
                     content_hash: reference.content_hash.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let shared_evidence_spans = derived
+        .map(|input| {
+            input
+                .evidence_refs
+                .iter()
+                .filter_map(|reference| {
+                    let peer = input.session_arc_peer.as_ref()?;
+                    peer.shared_evidence_ids.contains(&reference.id).then(|| {
+                        CurateShowSharedEvidenceSpan {
+                            evidence_span_id: reference.id.clone(),
+                            content_hash: reference.content_hash.clone(),
+                            owner_memory_id: peer.memory.id.clone(),
+                        }
+                    })
                 })
                 .collect()
         })
@@ -5536,6 +5620,10 @@ fn planned_application_from_decision(
         created_memory: decision.application.created_memory.clone(),
         planned_derived_from_links: planned_links,
         planned_evidence_attachments: planned_attachments,
+        shared_evidence_spans,
+        planned_session_arc_link: derived.and_then(|input| {
+            session_arc::planned_pair_link(&input.memory_id, input.session_arc_peer.as_ref())
+        }),
         planned_search_index_job_id: derived.map(|input| input.index_job_id.clone()),
         audit_schema_preview: derived.map(|_| "ee.audit.derived_memory_created.v1".to_owned()),
         errors: decision.application.errors.clone(),
@@ -9884,6 +9972,8 @@ struct ApplyDerivedMemoryInput {
     memory: CreateMemoryInput,
     links: Vec<ApplyDerivedMemoryLinkInput>,
     evidence_refs: Vec<DerivationSourceRef>,
+    /// Preview only. Apply revalidates the peer inside the write transaction.
+    session_arc_peer: Option<session_arc::AppliedPeer>,
     index_job_id: String,
     index_job: CreateSearchIndexJobInput,
     audit_details: String,
@@ -10199,6 +10289,10 @@ fn validate_derivation_source_refs(
     source_refs: &[DerivationSourceRef],
     errors: &mut Vec<CurateValidationIssue>,
 ) {
+    if let Err(issue) = session_arc::applied_peer(connection, stored) {
+        errors.push(issue);
+        return;
+    }
     for source_ref in source_refs {
         match source_ref.kind {
             DerivationSourceKind::Memory => {
@@ -10348,11 +10442,15 @@ fn validate_evidence_derivation_source(
         ));
         return;
     }
-    if span
-        .memory_id
-        .as_deref()
-        .is_some_and(|memory_id| !memory_id.trim().is_empty())
-    {
+    if let Some(memory_id) = span.memory_id.as_deref().filter(|id| !id.trim().is_empty()) {
+        match session_arc::applied_peer(connection, stored) {
+            Ok(Some(peer)) if peer.memory.id == memory_id => return,
+            Err(issue) => {
+                errors.push(issue);
+                return;
+            }
+            _ => {}
+        }
         errors.push(validation_issue(
             "derived_source_evidence_already_linked",
             format!("Evidence source {} is already linked to a memory.", span.id),
@@ -11813,6 +11911,25 @@ fn evaluate_create_derived_candidate_for_apply(
             },
         })
         .collect::<Vec<_>>();
+    let arc_peer = match session_arc::applied_peer(connection, stored) {
+        Ok(peer) => peer,
+        Err(issue) => {
+            errors.push(issue);
+            return blocked_apply(
+                stored,
+                None,
+                errors,
+                warnings,
+                format!("ee curate validate {}", stored.id),
+            );
+        }
+    };
+    let shared_evidence_count = arc_peer.as_ref().map_or(0, |peer| {
+        evidence_refs
+            .iter()
+            .filter(|source| peer.shared_evidence_ids.contains(&source.id))
+            .count()
+    });
     let index_job_id = generate_memory_search_index_job_id(&memory_id);
     let audit_details = derived_memory_created_audit_details(
         stored,
@@ -11863,8 +11980,24 @@ fn evaluate_create_derived_candidate_for_apply(
         &mut changes,
         "attachedEvidenceSpanCount",
         None,
-        Some(evidence_refs.len().to_string()),
+        Some(
+            evidence_refs
+                .len()
+                .saturating_sub(shared_evidence_count)
+                .to_string(),
+        ),
     );
+    if shared_evidence_count > 0 {
+        push_apply_change(
+            &mut changes,
+            "sharedArcEvidenceSpanCount",
+            None,
+            Some(shared_evidence_count.to_string()),
+        );
+    }
+    if let Some(link) = session_arc::planned_pair_link(&memory_id, arc_peer.as_ref()) {
+        push_apply_change(&mut changes, "sessionArcLinkId", None, Some(link.link_id));
+    }
     push_apply_change(
         &mut changes,
         "searchIndexJobId",
@@ -11910,6 +12043,7 @@ fn evaluate_create_derived_candidate_for_apply(
             },
             links,
             evidence_refs,
+            session_arc_peer: arc_peer,
             index_job_id: index_job_id.clone(),
             index_job: CreateSearchIndexJobInput {
                 workspace_id: stored.workspace_id.clone(),
@@ -14983,6 +15117,8 @@ fn persist_create_derived_candidate_application_inner(
     }
 
     maybe_inject_create_derived_apply_failure(stored, "after_source_revalidation")?;
+    let arc_peer =
+        session_arc::applied_peer(connection, stored).map_err(session_arc::pair_domain_error)?;
     maybe_inject_create_derived_apply_failure(stored, "before_insert_memory")?;
     connection
         .insert_memory(&derived_create.memory_id, &derived_create.memory)
@@ -15012,6 +15148,12 @@ fn persist_create_derived_candidate_application_inner(
             EvidenceSpanMemoryAttachResult::Attached
             | EvidenceSpanMemoryAttachResult::AlreadyAttachedToRequestedMemory => {}
             EvidenceSpanMemoryAttachResult::AlreadyAttachedToDifferentMemory => {
+                if arc_peer
+                    .as_ref()
+                    .is_some_and(|peer| peer.shared_evidence_ids.contains(&evidence_ref.id))
+                {
+                    continue;
+                }
                 return Err(DomainError::Storage {
                     message: format!(
                         "Evidence source {} was attached to another memory during create-derived apply.",
@@ -15038,6 +15180,14 @@ fn persist_create_derived_candidate_application_inner(
         }
     }
     maybe_inject_create_derived_apply_failure(stored, "after_evidence_attachment")?;
+    session_arc::persist_pair_link(
+        connection,
+        stored,
+        derived_create,
+        arc_peer.as_ref(),
+        applied_at,
+        applied_by,
+    )?;
     maybe_inject_create_derived_apply_failure(stored, "before_insert_search_index_job")?;
     connection
         .insert_search_index_job(&derived_create.index_job_id, &derived_create.index_job)
@@ -16362,6 +16512,9 @@ fn curate_usage_error(message: String, repair: &str) -> DomainError {
 
 #[cfg(test)]
 mod tests {
+    mod session_arc_tests {
+        include!("curate_session_arc_tests.rs");
+    }
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::Path;

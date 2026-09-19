@@ -181,7 +181,7 @@ candidate_type_count() {
     printf '%s' "$json" | jq -r --arg pattern "$pattern" '
         [
             (.data.candidates // .data.items // .data.results // [])[]?
-            | select(((.type // .candidateType // .topicKey // .kind // .reason // "") | tostring | test($pattern; "i")))
+            | select(((.candidateKind // .kind // .type // .candidateType // "") | tostring | gsub("_"; "-") | test($pattern; "i")))
         ] | length
     ' 2>/dev/null || printf '%s\n' "0"
 }
@@ -793,18 +793,44 @@ if review_session_available; then
             "review session proposes anti-pattern plus rule pair" || true
         _harness_fail "bd-2vq2z.9 session-arc review must expose linked anti-pattern plus rule candidates"
     fi
+    assert_jq "$review_apply" '
+        [.data.candidates[] | select(.candidateKind == "session_arc_anti_pattern" or .candidateKind == "session_arc_rule")] as $pair
+        | ($pair | length) == 2
+          and ($pair[0].candidateId | type == "string" and length > 0)
+          and ($pair[1].candidateId | type == "string" and length > 0)
+          and $pair[0].candidateId != $pair[1].candidateId
+          and ($pair[0].sessionArc.arcId | type == "string" and length > 0)
+          and $pair[0].sessionArc.arcId == $pair[1].sessionArc.arcId
+          and $pair[0].sessionArc.linkedCandidateId == $pair[1].candidateId
+          and $pair[1].sessionArc.linkedCandidateId == $pair[0].candidateId
+    ' "session-arc proposals are one explicitly reciprocal failure/repair pair"
 
     if curate_apply_available; then
-        candidate_id="$(candidate_id_at "$review_apply" 0)"
-        assert_nonempty "$candidate_id" "review session returns candidate id for explicit accept"
-        if [ -n "$candidate_id" ] && [ "$candidate_id" != "null" ]; then
+        arc_memory_ids=()
+        for arc_kind in session_arc_rule session_arc_anti_pattern; do
+            candidate_id="$(printf '%s' "$review_apply" | jq -r --arg kind "$arc_kind" '.data.candidates[] | select(.candidateKind == $kind) | .candidateId' | head -n 1)"
+            assert_nonempty "$candidate_id" "review session returns $arc_kind candidate for explicit approval"
+            [ -n "$candidate_id" ] && [ "$candidate_id" != "null" ] || continue
+            validate_out="$(ee_json --workspace "$WS" curate validate "$candidate_id" --actor e2e_capture --json)"
+            assert_jq "$validate_out" '.success == true and .data.validation.decision == "approved"' \
+                "$arc_kind passes explicit source-backed validation"
             accept_out="$(ee_json --workspace "$WS" curate apply "$candidate_id" --actor e2e_capture --json)"
             assert_jq "$accept_out" '.schema == "ee.response.v2" and .success == true' \
-                "curate apply accepts the first review-session proposal"
+                "curate apply accepts the $arc_kind proposal"
             assert_jq "$accept_out" '
-                (.data.application.status // .data.status // "") | test("applied|accepted|created"; "i")
-            ' "accepted proposal is applied through curation"
-            assert_audit_mentions_capture "$WS" "review-session accept"
+                .data.application.status == "applied"
+                and (.data.application.createdMemoryId | type == "string" and length > 0)
+            ' "$arc_kind creates its own durable memory through curation"
+            arc_memory_ids+=("$(printf '%s' "$accept_out" | jq -r '.data.application.createdMemoryId // empty')")
+        done
+        if [ "${#arc_memory_ids[@]}" -eq 2 ] && [ -n "${arc_memory_ids[0]}" ] && [ -n "${arc_memory_ids[1]}" ]; then
+            assert_distinct "${arc_memory_ids[0]}" "${arc_memory_ids[1]}" "accepted pair has two distinct memory identities"
+            arc_links="$(ee_json --workspace "$WS" memory link "${arc_memory_ids[0]}" --relation related --json)"
+            assert_jq "$arc_links" '.success == true and ([.data.links[] | select(.source_memory_id == "'"${arc_memory_ids[0]}"'" and .target_memory_id == "'"${arc_memory_ids[1]}"'" and .relation == "related" and .directed == false)] | length == 1)' \
+                "accepting both lessons stores exactly one undirected rule-to-anti-pattern edge"
+            assert_audit_mentions_capture "$WS" "paired review-session accept"
+        else
+            _harness_fail "accepting both session-arc proposals must create two durable memory identities"
         fi
     else
         e2e_log_assert_eq "missing" "available" "curate apply route available" || true

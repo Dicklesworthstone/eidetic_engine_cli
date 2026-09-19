@@ -7324,6 +7324,12 @@ fn looks_like_file_path(token: &str) -> bool {
 
 fn looks_like_error_code(token: &str) -> bool {
     let trimmed = trim_token(token).trim_end_matches(':');
+    // URI schemes and line locators are provenance, not error codes. In
+    // particular, a rejected `cass-session://#L3-4` must not regain evidence
+    // credit through the permissive hyphenated-code recognizer below.
+    if trimmed.contains("://") {
+        return false;
+    }
     let upper = trimmed.to_ascii_uppercase();
     if upper
         .strip_prefix('E')
@@ -7369,7 +7375,9 @@ fn looks_like_branch_or_tag(token: &str) -> bool {
 
 fn looks_like_provenance_uri(token: &str) -> bool {
     let lower = token.to_ascii_lowercase();
-    lower.starts_with("cass:")
+    ((lower.starts_with("cass-session://") || lower.starts_with("ee-mem://"))
+        && token.parse::<crate::models::ProvenanceUri>().is_ok())
+        || lower.starts_with("cass:")
         || lower.starts_with("file:")
         || lower.starts_with("session:")
         || lower.starts_with("mem_")
@@ -9590,6 +9598,26 @@ mod tests {
         assert!(report.structural_signals.has_inline_command);
         assert!(report.structural_signals.has_branch_or_tag);
         assert!(report.structural_signals.has_provenance_uri);
+    }
+
+    #[test]
+    fn specificity_score_credits_valid_canonical_session_provenance_not_empty_schemes() {
+        let lesson = "Risk: storing silently bypasses explicit review.\nMitigation: require accept/reject commands.\nEvidence: ";
+        let valid = specificity_score(&format!("{lesson}cass-session://ses_observed#L3-4"));
+        assert!(valid.structural_signals.has_provenance_uri, "{valid:?}");
+        assert!(valid.passes_threshold, "{valid:?}");
+        for source in [
+            "cass-session://",
+            "cass-session://#L3-4",
+            "unsupported://unverified",
+        ] {
+            let invalid = specificity_score(&format!("{lesson}{source}"));
+            assert!(
+                !invalid.structural_signals.has_provenance_uri,
+                "{source}: {invalid:?}"
+            );
+            assert!(!invalid.passes_threshold, "{source}: {invalid:?}");
+        }
     }
 
     #[test]
